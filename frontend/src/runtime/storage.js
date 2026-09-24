@@ -2033,7 +2033,11 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
       await cachePut(path, value, kind, ct, nextVer(), version)
       return {
-        value: finalizeRead(await effectiveValue(path, value), kind, ct, path),
+        // A versioned online read is the compare-and-swap base. Never pair the
+        // server's ETag with a queued local overlay: that value was not accepted
+        // under this version and would make conflict recovery drop remote edits.
+        // Plain get()/subscriptions retain read-your-writes overlay semantics.
+        value: finalizeRead(value, kind, ct, path),
         version,
       }
     })

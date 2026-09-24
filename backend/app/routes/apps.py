@@ -45,7 +45,9 @@ from app.storage_io import (
   read_capped_body,
   rmtree_strict as _rmtree_strict,
 )
-from app.app_capabilities import diff_contracts
+from app.app_capabilities import (
+  contract_and_digest, contract_from_manifest, diff_contracts,
+)
 from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
@@ -822,6 +824,8 @@ async def install_app(
       source="store",
       reviewed_capability_digest=body.reviewed_capability_digest,
       reviewed_source_digest=body.reviewed_source_digest,
+      reviewed_app_id=body.update_app_id,
+      reviewed_upstream_commit=body.reviewed_upstream_commit,
     )
   app = result.app
   mode = result.mode
@@ -997,14 +1001,6 @@ def _diff_preview_trees(
     return proc.stdout.replace("a/old/", "a/").replace("b/new/", "b/")
   finally:
     shutil.rmtree(tmp_parent, ignore_errors=True)
-
-
-def _fetched_source_tree(fetched) -> dict[str, bytes]:
-  """The runtime source subset fetched by ``fetch_upstream_source``."""
-  tree = {"index.jsx": fetched.entry_bytes, **fetched.source_files}
-  if fetched.job_name and fetched.job_bytes is not None:
-    tree[fetched.job_name] = fetched.job_bytes
-  return tree
 
 
 def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
@@ -1199,40 +1195,42 @@ def _materialize_conflict_files(
     shutil.rmtree(tmp_parent, ignore_errors=True)
 
 
-def _fetched_differs_from_upstream(
-  repo: Path,
-  fetched_tree: dict[str, bytes],
-  cloned: bool,
-  non_source: frozenset[str],
-) -> bool:
-  """Whether the freshly-fetched upstream source differs from what the app
-  recorded on its `upstream` branch — the git-native update signal.
+def _recorded_update_source(
+  previous_tree: dict[str, bytes], candidate_tree: dict[str, bytes],
+) -> dict[str, bytes]:
+  """Project recorded Git history onto both old and new package sources.
 
-  Reads the pristine `upstream` tree via git cat-file (`read_ref_tree`), which
-  only reads objects — it never touches the index or working tree, so this is
-  safe to call on every store open. Any fetched file that is new (absent
-  upstream) or whose bytes changed means upstream moved, which catches a code
-  push that forgot to bump the version.
-
-  Removal is only inferable for a SYNTHETIC install: there the recorded upstream
-  tree is exactly the declared source set, so a source file present upstream but
-  gone from the fetch is a genuine removal. A CLONED (real-origin) repo's
-  upstream tree also holds repo-native non-source files (README, the manifest,
-  the repo's own .gitignore) that were never part of the fetched declared set,
-  so a raw set-diff there would false-flag every catalog app — only added and
-  changed content is compared for those.
+  Origin clones include repository-only files; HTTP imports record the package
+  sources directly. Taking the union of declared paths preserves deletions in
+  checks and previews without reporting README/workflow churn as an update.
   """
-  upstream_tree = app_git.read_ref_tree(repo, app_git.UPSTREAM_BRANCH)
-  for rel, data in fetched_tree.items():
-    if upstream_tree.get(rel) != data:
-      return True
-  if not cloned:
-    upstream_source = {
-      rel for rel in upstream_tree if rel not in non_source
-    }
-    if upstream_source - set(fetched_tree):
-      return True
-  return False
+  from app import install
+
+  paths = (
+    set(candidate_tree) | _recorded_runtime_paths(previous_tree)
+    if "mobius.json" in previous_tree
+    else set(previous_tree) - install._MERGED_NON_SOURCE
+  )
+  return {rel: data for rel, data in previous_tree.items() if rel in paths}
+
+
+async def _fetch_update_candidate(
+  repo: Path,
+  manifest_url: str,
+  *,
+  strict: bool,
+):
+  """Fetch one Git candidate; Store updates have no parallel HTTP transport."""
+  from app import install
+
+  if install._derive_repo_ref(manifest_url) is None or not app_git.has_origin(repo):
+    raise ValueError("app has no root Git update source")
+  return await asyncio.to_thread(
+    install.fetch_git_install_candidate,
+    repo,
+    manifest_url,
+    strict=strict,
+  )
 
 
 def _pending_update_state(repo: Path, upstream_commit: str) -> Literal[
@@ -1309,14 +1307,14 @@ async def update_check(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Read-only, git-native update detection for an installed app.
+  """Git-native update detection for an installed app.
 
   Content-compares the app's CURRENT upstream source (fetched the same way
   install does) against the pristine `upstream` branch the last install
   recorded, so a push that changed code WITHOUT bumping the version string
-  still surfaces as an update. Strictly read-only — no working-tree mutation,
-  no `record_upstream`, no DB write — which is what makes it safe to call on
-  every store open.
+  still surfaces as an update. The fetch updates only Git's candidate metadata
+  and object database: it never changes the working tree, ``main``,
+  ``upstream``, or the App row, so it is safe to call on every Store open.
 
   ``manifest_url`` is an optional live catalog candidate. Installed provenance
   remains immutable; when a candidate is supplied, its package identity must
@@ -1358,6 +1356,7 @@ async def update_check(
   installed_manifest_url = app.manifest_url
   source_dir = app.source_dir
   installed_source_revision = app.upstream_commit
+  installed_contract = app.capability_contract
 
   def _unknown() -> schemas.UpdateCheckOut:
     # Null is "we can't verify the source" — NOT an error. Do not manufacture
@@ -1439,70 +1438,67 @@ async def update_check(
     if manifest_url is not None
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
-  try:
-    # Discovery compares source, while preview/install still validate whether
-    # the complete manifest can be applied.
-    fetched = await install.fetch_upstream_source(
-      fetch_manifest_url, strict=False,
-    )
-  except HTTPException:
-    # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
-    # a store open never errors on a transient network failure.
-    return _unknown()
-  if manifest_url is not None:
-    try:
-      candidate_matches = _update_candidate_matches_installed(
-        installed_manifest_url, manifest_url, fetched.manifest,
-      )
-    except HTTPException:
-      # Candidate identity is discovery input, not an explicit install/update
-      # request. A malformed or cross-owner predecessor must degrade like any
-      # other unusable catalog candidate instead of breaking a store refresh.
-      return _unknown()
-    if not candidate_matches:
-      return _unknown()
-
-  # Build the fetched source tree the way install records it on `upstream`.
-  # The shared manifest contract makes index.jsx canonical for synthetic and
-  # cloned packages alike, so update comparison has one entry identity.
-  cloned = await asyncio.to_thread(app_git.has_origin, repo)
-  fetched_tree: dict[str, bytes] = {"index.jsx": fetched.entry_bytes}
-  fetched_tree.update(fetched.source_files)
-  if fetched.job_name and fetched.job_bytes is not None:
-    fetched_tree[fetched.job_name] = fetched.job_bytes
-  candidate_source_digest = install._source_review_digest(
-    manifest=fetched.manifest,
-    entry_bytes=fetched.entry_bytes,
-    bundled_job=fetched.job_bytes,
-    source_files=fetched.source_files,
-  )
-
-  # This final lock is the response's linearization fence. A concurrent install
-  # can advance `upstream` and create a receipt while the network fetch is in
-  # flight; revalidate receipt identity against the CURRENT locked ref before
-  # comparing bytes, otherwise this request could overwrite a newly-observed
-  # needs-resolution state with stale false/none. With no receipt, the compare
-  # reads that same locked upstream snapshot (ls-tree + cat-file only).
+  # This lock owns both FETCH_HEAD and the response's linearization point. A
+  # concurrent install cannot advance ``upstream`` or create a receipt between
+  # fetching the candidate and comparing it with the recorded baseline.
   async with fs_locks.source_dir_lock(str(repo)):
     try:
+      candidate = await _fetch_update_candidate(
+        repo,
+        fetch_manifest_url,
+        strict=False,
+      )
       pending, pending_state = await asyncio.to_thread(
         _current_pending_update,
       )
-    except (OSError, subprocess.SubprocessError):
+      if manifest_url is not None and not _update_candidate_matches_installed(
+        installed_manifest_url, manifest_url, candidate.manifest,
+      ):
+        return _unknown()
+      recorded_tree = await asyncio.to_thread(
+        app_git.read_ref_tree, repo, app_git.UPSTREAM_BRANCH,
+      )
+    except (
+      HTTPException, OSError, subprocess.SubprocessError, RuntimeError,
+      TypeError, ValueError,
+    ):
       return _unknown()
     if pending is not None:
       return _pending_result(pending, pending_state)
-    update_available = await asyncio.to_thread(
-      _fetched_differs_from_upstream,
-      repo, fetched_tree, cloned, install._MERGED_NON_SOURCE,
-    )
+    # One digest owns the complete declared package: manifest/capabilities,
+    # executable source, icon, static assets, and seeds. The one-time synthetic
+    # migration baseline has no manifest, so its first real-origin commit is
+    # intentionally offered once and then future checks compare exact packages.
+    if "mobius.json" in recorded_tree:
+      try:
+        _, recorded_digest = install.package_content_digest_from_tree(
+          recorded_tree,
+        )
+      except install.PackageContentError:
+        return _unknown()
+      update_available = recorded_digest != candidate.source_digest
+    else:
+      try:
+        capability_changes = diff_contracts(
+          installed_contract, contract_from_manifest(candidate.manifest),
+        )
+      except (AttributeError, KeyError, TypeError, ValueError, HTTPException):
+        return _unknown()
+      update_available = (
+        _recorded_update_source(recorded_tree, candidate.runtime_tree)
+        != candidate.runtime_tree
+        or any(
+          capability_changes[key]
+          for key in ("added", "removed", "changed")
+        )
+      )
 
   return schemas.UpdateCheckOut(
     update_available=update_available,
-    upstream_version=fetched.manifest.get("version"),
+    upstream_version=candidate.manifest.get("version"),
     local_version=local_version,
     installed_source_revision=installed_source_revision,
-    candidate_source_digest=candidate_source_digest,
+    candidate_source_digest=candidate.source_digest,
     checked_at=checked_at,
   )
 
@@ -1583,9 +1579,9 @@ async def update_candidate_preview(
 
   Unlike ``update-preview`` (which describes the upstream commit already
   recorded on the instance for conflict resolution), this endpoint fetches the
-  live manifest/source and diffs it against the pristine source from the last
-  successful install. It never advances refs, writes the working tree, or
-  changes the App row, so opening the App Store review is genuinely read-only.
+  live Git commit and diffs it against the pristine source from the last
+  successful install. It never advances managed refs, writes the working tree,
+  or changes the App row.
   """
   if principal.app_id is not None and principal.app_id != app_id:
     caller = (
@@ -1610,6 +1606,7 @@ async def update_candidate_preview(
   installed_manifest_url = app.manifest_url
   source_dir = app.source_dir
   upstream_commit = app.upstream_commit
+  installed_contract = app.capability_contract
   if not installed_manifest_url:
     raise HTTPException(400, "App has no update source.")
   repo = Path(source_dir)
@@ -1626,48 +1623,48 @@ async def update_candidate_preview(
     if manifest_url is not None
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
-  fetched = await install.fetch_upstream_source(fetch_manifest_url)
-  if manifest_url is not None and not _update_candidate_matches_installed(
-    installed_manifest_url, manifest_url, fetched.manifest,
-  ):
-    raise HTTPException(
-      409, "Requested update source does not match the installed app.",
-    )
-  candidate_tree = _fetched_source_tree(fetched)
-  source_digest = install._source_review_digest(
-    manifest=fetched.manifest,
-    entry_bytes=fetched.entry_bytes,
-    bundled_job=fetched.job_bytes,
-    source_files=fetched.source_files,
-  )
-
   async with fs_locks.source_dir_lock(str(repo)):
-    previous_tree = await asyncio.to_thread(
-      app_git.read_ref_tree, repo, app_git.UPSTREAM_BRANCH,
-    )
-    cloned = await asyncio.to_thread(app_git.has_origin, repo)
-  # Synthetic installs add one managed .gitignore that is not package source.
-  # For real-origin installs, restrict the comparison to the fetched runtime
-  # source set: the install UI reviews what Möbius actually compiles/executes,
-  # not repository-only README or workflow churn.
-  if cloned:
-    runtime_paths = set(candidate_tree) | _recorded_runtime_paths(previous_tree)
-    previous_source = {
-      rel: data for rel, data in previous_tree.items() if rel in runtime_paths
-    }
-  else:
-    previous_source = {
-      rel: data for rel, data in previous_tree.items() if rel != ".gitignore"
-    }
+    try:
+      candidate = await _fetch_update_candidate(
+        repo,
+        fetch_manifest_url,
+        strict=True,
+      )
+      if manifest_url is not None and not _update_candidate_matches_installed(
+        installed_manifest_url, manifest_url, candidate.manifest,
+      ):
+        raise HTTPException(
+          409, "Requested update source does not match the installed app.",
+        )
+      previous_tree = await asyncio.to_thread(
+        app_git.read_ref_tree, repo, app_git.UPSTREAM_BRANCH,
+      )
+    except HTTPException:
+      raise
+    except (
+      OSError, subprocess.SubprocessError, RuntimeError, TypeError, ValueError,
+    ) as exc:
+      raise HTTPException(
+        409, "This app does not have a usable Git update source.",
+      ) from exc
+  previous_source = _recorded_update_source(previous_tree, candidate.runtime_tree)
   upstream_diff = await asyncio.to_thread(
-    _diff_preview_trees, previous_source, candidate_tree,
+    _diff_preview_trees, previous_source, candidate.runtime_tree,
   )
+  contract, digest = contract_and_digest(candidate.manifest)
   return schemas.UpdateCandidatePreviewOut(
+    capability_preview=schemas.AppPreviewOut(
+      manifest=candidate.manifest,
+      capability_contract=contract,
+      capability_digest=digest,
+      installed_contract=installed_contract,
+      capability_diff=diff_contracts(installed_contract, contract),
+    ),
     app_id=app_id,
-    upstream_version=str(fetched.manifest.get("version") or "") or None,
-    upstream_commit=upstream_commit,
+    upstream_version=str(candidate.manifest.get("version") or "") or None,
+    upstream_commit=candidate.commit,
     upstream_diff=upstream_diff,
-    source_digest=source_digest,
+    source_digest=candidate.source_digest,
   )
 
 
@@ -2084,7 +2081,17 @@ async def _apply_update_resolution_policy(
   )
   if incorporated is True:
     return []
-  merge = await asyncio.to_thread(app_git.merge_upstream, source_dir)
+  merge_base_override = receipt.get("merge_base_override")
+  if merge_base_override is not None:
+    merge = await asyncio.to_thread(
+      app_git.merge_refs,
+      source_dir,
+      app_git.LOCAL_BRANCH,
+      app_git.UPSTREAM_BRANCH,
+      merge_base=merge_base_override,
+    )
+  else:
+    merge = await asyncio.to_thread(app_git.merge_upstream, source_dir)
   if merge.status != "conflict" or not merge.conflict_paths:
     raise HTTPException(
       status_code=409,
@@ -2099,7 +2106,7 @@ async def _apply_update_resolution_policy(
   conflict_paths = await asyncio.to_thread(
     app_git.start_conflict_merge,
     source_dir,
-    merge_base=merge.merge_base_oid,
+    merge_base=merge_base_override or merge.merge_base_oid,
     allow_unrelated_histories=merge.unrelated_histories,
   )
   if not conflict_paths:

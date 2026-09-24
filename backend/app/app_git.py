@@ -67,7 +67,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app import managed_paths
 
@@ -118,7 +118,7 @@ _EQUIVALENCE_LANDED_PREFIX = "refs/mobius/equivalences/landed"
 _REVIEWED_SOURCE_PREFIX = "refs/mobius/equivalences/reviewed-source"
 _EQUIVALENCE_VERSION = 1
 _REVIEWED_SOURCE_VERSION = 1
-_HEX_OID = re.compile(r"^[0-9a-f]{40,64}$")
+_HEX_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _DIFF_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _APP_MANIFEST_PUBLICATION_ADAPTER = "github_app_manifest_identity_v1"
 _APP_MANIFEST_PUBLICATION_PATH = "mobius.json"
@@ -2040,7 +2040,12 @@ def _landed_equivalent_changes(repo: Path) -> list[EquivalentChange]:
   return _equivalent_changes(repo, _EQUIVALENCE_LANDED_PREFIX)
 
 
-def fetch_origin_commit(source_dir: str | Path, commit_sha: str) -> str:
+def fetch_origin_commit(
+  source_dir: str | Path,
+  commit_sha: str,
+  *,
+  depth: int | None = None,
+) -> str:
   """Fetch one immutable origin commit without moving any local ref.
 
   Publication handoff verification needs GitHub's merge commit in the live app
@@ -2054,13 +2059,57 @@ def fetch_origin_commit(source_dir: str | Path, commit_sha: str) -> str:
     raise ValueError("invalid origin commit")
   if origin_url(repo) is None:
     raise RuntimeError("source repository has no origin")
-  _run(
-    repo,
-    "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-    "origin", requested,
-  )
+  fetch_args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"]
+  if depth is not None:
+    fetch_args.extend(("--depth", str(depth)))
+  _run(repo, *fetch_args, "origin", requested)
   fetched = _resolve_commit(repo, requested)
   if fetched != requested:
+    raise RuntimeError("origin returned a different commit")
+  return fetched
+
+
+def fetch_origin_ref(
+  source_dir: str | Path,
+  ref: str,
+  *,
+  depth: int = 1,
+) -> str:
+  """Fetch one named or immutable origin ref without moving managed branches.
+
+  Update discovery and review need one immutable candidate commit, but must not
+  advance ``main`` or ``upstream`` before the owner accepts it. ``FETCH_HEAD``
+  is intentionally transient Git metadata; callers hold the per-app source
+  lock while fetching and reading the returned object id.
+  """
+  repo = Path(source_dir)
+  requested = str(ref or "")
+  immutable = requested.lower() if _HEX_OID.fullmatch(requested.lower()) else None
+  if immutable is None:
+    if (
+      not requested
+      or requested.startswith("-")
+      or "\\" in requested
+      or "\n" in requested
+      or "\r" in requested
+    ):
+      raise ValueError("invalid origin ref")
+    valid = _run(
+      repo, "check-ref-format", "--branch", requested, check=False,
+      read_only=True,
+    )
+    if valid.returncode != 0:
+      raise ValueError("invalid origin ref")
+  if origin_url(repo) is None:
+    raise RuntimeError("source repository has no origin")
+  _run(
+    repo, "fetch", "--quiet", "--no-tags", "--depth", str(depth),
+    "origin", immutable or requested,
+  )
+  fetched = _resolve_commit(repo, "FETCH_HEAD")
+  if fetched is None:
+    raise RuntimeError("origin ref did not resolve to a commit")
+  if immutable is not None and fetched != immutable:
     raise RuntimeError("origin returned a different commit")
   return fetched
 
@@ -2352,6 +2401,30 @@ def restore_upstream_ref(source_dir: str | Path, expected_sha: str | None) -> bo
   return True
 
 
+def replace_upstream_ref(
+  source_dir: str | Path,
+  commit_sha: str,
+  *,
+  expected_sha: str | None = None,
+) -> None:
+  """Move the installer-owned upstream ref to one verified commit.
+
+  ``expected_sha`` makes legacy-history adoption a compare-and-swap: another
+  updater cannot replace the recorded baseline between its proof and this ref
+  move. The commit must already exist in the app repository.
+  """
+  repo = Path(source_dir)
+  commit = _resolve_commit(repo, commit_sha)
+  if commit is None:
+    raise ValueError("invalid upstream commit")
+  args = ["update-ref", f"refs/heads/{UPSTREAM_BRANCH}", commit]
+  if expected_sha is not None:
+    args.append(expected_sha)
+  moved = _run(repo, *args, check=False)
+  if moved.returncode != 0:
+    raise SourceTreeChanged("recorded upstream changed during update")
+
+
 def origin_url(source_dir: str | Path) -> str | None:
   """Return this app repo's configured ``origin`` URL, if available."""
   if not is_repo(source_dir):
@@ -2384,14 +2457,16 @@ def has_origin(source_dir: str | Path) -> bool:
 def clone_upstream(
   source_dir: str | Path, repo_url: str, ref: str, *, depth: int = 1,
 ) -> str:
-  """Clone a real upstream repo and check out local `main` at `origin/<ref>`.
+  """Clone a real upstream repo and check out local ``main`` at ``ref``.
 
   This is the REAL-origin install variant of `record_upstream`: instead of
   synthesizing an installer-owned `upstream` branch from fetched bytes, it keeps
-  the app repository's own origin and makes `origin/<ref>` the pristine
-  upstream. That remote-tracking commit is a real catalog commit an update can
-  fetch from and a local fix can be pushed against as a PR. Local edits then
-  commit onto `main`, so `git diff origin/<ref> main` is the user's delta.
+  the app repository's own origin and makes the resolved repository commit the
+  pristine upstream. Named refs use Git's ordinary clone path. Immutable
+  40/64-character commit ids are fetched directly because ``git clone
+  --branch`` does not accept an object id. Either way, the installed baseline
+  is a real catalog commit an update can fetch from and a local fix can be
+  pushed against as a PR. Local edits then commit onto ``main``.
 
   `source_dir` may already exist as an empty directory. The clone is built in a
   sibling temp directory first and moved into place after success, so a failed
@@ -2410,30 +2485,53 @@ def clone_upstream(
     prefix=f".{repo.name}.clone-", dir=clone_parent,
   ) as tmp:
     clone_dir = Path(tmp) / "repo"
-    cmd = [
-      "git",
-      "-c", f"user.name={_GIT_NAME}",
-      "-c", f"user.email={_GIT_EMAIL}",
-      # core.symlinks=false: check out any tracked symlink as a PLAIN FILE
-      # (the link text as content), never a real filesystem symlink. Catalog
-      # repos are untrusted content; a materialized symlink (e.g. `static` ->
-      # outside the app dir, or `index.jsx` -> /data/service-token.txt) would
-      # escape the containment the fetched-source path enforces via
-      # _assert_within — that guard is skipped for the cloned tree, so the
-      # non-symlink checkout is what keeps the clone inside its own dir.
-      "-c", "core.symlinks=false",
-      "clone", "-q",
-      "--depth", str(depth),
-      "--branch", ref,
-      repo_url,
-      str(clone_dir),
-    ]
-    subprocess.run(
-      cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-      check=True, env=_git_env(repo),
-    )
-    remote_ref = f"origin/{ref}"
-    _run(clone_dir, "rev-parse", "--verify", remote_ref)
+    immutable_ref = ref.lower() if _HEX_OID.fullmatch(ref.lower()) else None
+    if immutable_ref is not None:
+      # A pinned catalog URL should create the same real-origin repository as
+      # a branch install, not fall back to an unrelated synthetic history.
+      # Initialize first so the exact object can be fetched without asking
+      # clone's --branch parser to treat an oid as a branch name.
+      cmd = ["git", "init", "-q"]
+      if len(immutable_ref) == 64:
+        cmd.append("--object-format=sha256")
+      cmd.append(str(clone_dir))
+      subprocess.run(
+        cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+        check=True, env=_git_env(repo),
+      )
+      _run(clone_dir, "remote", "add", "origin", repo_url)
+      remote_ref = fetch_origin_commit(
+        clone_dir, immutable_ref, depth=depth,
+      )
+    else:
+      cmd = [
+        "git",
+        "-c", f"user.name={_GIT_NAME}",
+        "-c", f"user.email={_GIT_EMAIL}",
+        # core.symlinks=false: check out any tracked symlink as a PLAIN FILE
+        # (the link text as content), never a real filesystem symlink. Catalog
+        # repos are untrusted content; a materialized symlink (e.g. `static` ->
+        # outside the app dir, or `index.jsx` -> /data/service-token.txt) would
+        # escape the containment the fetched-source path enforces via
+        # _assert_within — that guard is skipped for the cloned tree, so the
+        # non-symlink checkout is what keeps the clone inside its own dir.
+        "-c", "core.symlinks=false",
+        "clone", "-q",
+        "--depth", str(depth),
+        "--branch", ref,
+        repo_url,
+        str(clone_dir),
+      ]
+      subprocess.run(
+        cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+        check=True, env=_git_env(repo),
+      )
+      remote_ref = f"origin/{ref}"
+      _run(clone_dir, "rev-parse", "--verify", remote_ref)
+    # Keep later checkouts under the same safety policy as clone's first
+    # checkout instead of relying on a process-local ``git -c`` forever. On
+    # the immutable path this is set BEFORE its first checkout.
+    _run(clone_dir, "config", "core.symlinks", "false")
     _run(clone_dir, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
     _run(clone_dir, "checkout", "-q", "-B", LOCAL_BRANCH, remote_ref)
     # Keep the app's OWN .gitignore committed (it travels upstream), but layer
@@ -2459,6 +2557,7 @@ def fetch_upstream(
   ref: str,
   *,
   trusted_origin_adoption: bool = False,
+  verify: Callable[[str], None] | None = None,
 ) -> FetchUpstreamResult:
   """Fetch `origin/<ref>` and advance local `upstream` to that real commit.
 
@@ -2481,10 +2580,6 @@ def fetch_upstream(
     The fetched commit and any trusted equal-tree adoption proof.
   """
   repo = Path(source_dir)
-  previous = _run(
-    repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
-  )
-  previous_sha = previous.stdout.strip() if previous.returncode == 0 else ""
   _run(repo, "fetch", "--depth", "1", "origin", ref)
   # A branch/tag fetch updates ``origin/<ref>``.  Fetching an immutable commit
   # oid does not create that remote-tracking name; Git records the exact fetched
@@ -2497,10 +2592,30 @@ def fetch_upstream(
     else f"origin/{ref}"
   )
   sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
-  # FETCH_HEAD is transient: the shallow-history repair below may itself fetch
-  # and replace it.  Resolve once, then use the immutable object id for every
-  # later comparison and ref move in this operation.
-  fetched_ref = sha
+  if verify is not None:
+    verify(sha)
+  return promote_upstream(
+    repo,
+    sha,
+    trusted_origin_adoption=trusted_origin_adoption,
+  )
+
+
+def promote_upstream(
+  source_dir: str | Path,
+  commit: str,
+  *,
+  trusted_origin_adoption: bool = False,
+) -> FetchUpstreamResult:
+  """Advance managed upstream to one already-fetched immutable commit."""
+  repo = Path(source_dir)
+  fetched_ref = _resolve_commit(repo, str(commit).lower())
+  if fetched_ref is None or fetched_ref != str(commit).lower():
+    raise RuntimeError("reviewed upstream commit is unavailable")
+  previous = _run(
+    repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
+  )
+  previous_sha = previous.stdout.strip() if previous.returncode == 0 else ""
   # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
   # relationship the installer actually needs (local main ↔ fetched tip), not
   # only on whether the remote SHA string changed.
@@ -2509,21 +2624,21 @@ def fetch_upstream(
     trusted_origin_adoption
     and ref_trees_equal(repo, LOCAL_BRANCH, fetched_ref)
   )
-  if previous_sha and previous_sha != sha:
+  if previous_sha and previous_sha != fetched_ref:
     related = _run(
-      repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
+      repo, "merge-base", "--is-ancestor", previous_sha, fetched_ref,
+      check=False,
     )
     if (
       related.returncode != 0
       and not equal_local_adoption
     ):
       raise RuntimeError(
-        f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
-        "falling back to manifest-source update"
+        f"reviewed commit is unrelated to recorded upstream {previous_sha}"
       )
   _run(repo, "branch", "-f", UPSTREAM_BRANCH, fetched_ref)
   return FetchUpstreamResult(
-    sha=sha,
+    sha=fetched_ref,
     allow_unrelated_histories=equal_local_adoption,
   )
 
@@ -3784,7 +3899,8 @@ def start_conflict_merge(
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _restore_shallow_history_if_needed(repo, local_branch, upstream_branch)
+  if merge_base is None:
+    _restore_shallow_history_if_needed(repo, local_branch, upstream_branch)
   local_sha = head_sha(repo, local_branch)
   upstream_sha = head_sha(repo, upstream_branch)
   if _run(repo, "status", "--porcelain").stdout.strip():

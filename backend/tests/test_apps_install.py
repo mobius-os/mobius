@@ -217,7 +217,7 @@ def test_validate_url_safe_blocks_ipv6_embedded_ipv4():
 def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_validation):
   """Happy path: install creates DB row, compiles JSX, populates
   source_dir, seeds storage, processes icon, returns mode=install."""
-  base = "https://raw.githubusercontent.com/x/app-test-news/main/"
+  base = "https://packages.test/x/app-test-news/main/"
   manifest = {
     **MANIFEST_NEWS,
     "theme_color": "#223344",
@@ -284,7 +284,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
 def test_install_fresh_service_app_syncs_aliases_during_activation(
   client, auth, db, bypass_url_validation,
 ):
-  base = "https://raw.githubusercontent.com/x/app-svc-alias/main/"
+  base = "https://packages.test/x/app-svc-alias/main/"
   manifest = {
     "id": "svc-alias",
     "name": "Svc Alias",
@@ -336,7 +336,7 @@ def test_install_static_site_assets_route_css_fonts_and_chunks(
   sibling static/media assets and missing app assets must stay a 404, never
   the Mobius shell HTML.
   """
-  base = "https://raw.githubusercontent.com/x/cuberun-lite/main/"
+  base = "https://packages.test/x/cuberun-lite/main/"
   manifest = {
     "id": "cuberun-lite",
     "name": "CubeRun Lite",
@@ -458,7 +458,7 @@ def test_static_site_asset_update_removes_old_manifest_owned_files(
   manifest survive because app/user code may keep its own static files in
   the same directory.
   """
-  base = "https://raw.githubusercontent.com/x/static-prune/main/"
+  base = "https://packages.test/x/static-prune/main/"
   manifest_v1 = {
     "id": "static-prune",
     "name": "Static Prune",
@@ -544,7 +544,7 @@ def test_install_on_demand_job_writes_script_without_cron(
   or emitting a cron-pending sentinel/warning. Regression: the write used to
   be gated on `schedule.default`, so an on-demand-only job (the LaTeX app's
   build.sh) was fetched but never landed and run-job 400'd."""
-  base = "https://raw.githubusercontent.com/x/app-test-build/main/"
+  base = "https://packages.test/x/app-test-build/main/"
   script = b"#!/bin/bash\necho build\n"
   responses = {
     base + "mobius.json": (200, json.dumps(MANIFEST_ONDEMAND).encode()),
@@ -1020,14 +1020,20 @@ def test_derive_repo_ref_only_root_manifest_single_segment_ref():
   ) is None
 
 
-@pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
-def test_commit_pinned_install_skips_branch_clone_and_uses_fetched_source(
-  commit,
-  client, auth, bypass_url_validation,
+def test_commit_pinned_install_clones_exact_reviewed_commit(
+  client, auth, tmp_path, bypass_url_validation,
 ):
-  """A raw commit ref cannot be cloned with --branch; keep the fallback."""
+  """A commit-pinned install is a real clone fixed to the reviewed commit."""
+  pinned_jsx = "export default function App() { return <div>pinned git</div> }"
+  work, bare, commit = _make_clone_fixture(
+    tmp_path, pinned_jsx, "export const cards = ['pinned']",
+  )
+  _push_clone_fixture(
+    work, bare,
+    "export default function App() { return <div>later tip</div> }",
+    "export const cards = ['later']",
+  )
   base = f"https://raw.githubusercontent.com/acme/pinned/{commit}/"
-  jsx = "export default function App() { return <div>pinned fetch</div> }"
   manifest = {
     "id": "pinned-fetch",
     "name": "Pinned Fetch",
@@ -1038,23 +1044,97 @@ def test_commit_pinned_install_skips_branch_clone_and_uses_fetched_source(
   }
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
-    base + "index.jsx": (200, jsx.encode()),
+    base + "index.jsx": (200, pinned_jsx.encode()),
   }
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
-  ), patch("app.install.app_git.clone_upstream") as clone:
+  ), patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), commit),
+  ):
     response = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
     })
 
   assert response.status_code == 201, response.text
-  clone.assert_not_called()
   source_dir = Path(get_settings().data_dir) / "apps" / "pinned-fetch"
-  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == jsx
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == pinned_jsx
   assert app_git.is_repo(source_dir)
-  assert not app_git.has_origin(source_dir)
+  assert app_git.origin_url(source_dir) == bare.as_uri()
+  assert app_git.head_sha(source_dir, "main") == commit
+  assert app_git.head_sha(source_dir, "upstream") == commit
 
+
+
+def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
+  client, auth, db, tmp_path, bypass_url_validation,
+):
+  """A transient clone failure must not permanently disconnect update history."""
+  base = "https://raw.githubusercontent.com/acme/required-git/main/"
+  manifest = {
+    "id": "required-git", "name": "Required Git", "version": "1.0.0",
+    "description": "Git lineage is required", "entry": "index.jsx",
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.clone_upstream", side_effect=RuntimeError("offline"),
+  ):
+    failed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert failed.status_code == 409, failed.text
+  assert failed.json()["detail"]["code"] == "git_install_unavailable"
+  assert db.query(models.App).filter_by(slug="required-git").first() is None
+  source_dir = Path(get_settings().data_dir) / "apps" / "required-git"
+  assert not source_dir.exists()
+
+  _, bare, commit = _make_clone_fixture(tmp_path, JSX, "export const cards = []")
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
+    retry = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert retry.status_code == 201, retry.text
+  assert app_git.origin_url(source_dir) == bare.as_uri()
+  assert app_git.head_sha(source_dir, "upstream") == commit
+
+
+def test_fresh_clone_cannot_replace_owner_reviewed_source(
+  client, auth, db, tmp_path, bypass_url_validation,
+):
+  from app import install
+  _, bare, commit = _make_clone_fixture(
+    tmp_path, JSX.replace("ok", "unreviewed change"), "export const cards = []",
+  )
+  base = "https://raw.githubusercontent.com/acme/reviewed/main/"
+  manifest = {
+    "id": "reviewed", "name": "Reviewed", "version": "1.0.0",
+    "description": "Reviewed source is binding", "entry": "index.jsx",
+  }
+  digest = install.package_content_digest(
+    manifest=manifest, entry_bytes=JSX.encode(), bundled_job=None, source_files={},
+    icon_processed=None, static_assets={}, seeds={},
+  )
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)), patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), commit),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json", "reviewed_source_digest": digest,
+    })
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "git_source_mismatch"
+  assert db.query(models.App).filter_by(slug="reviewed").first() is None
+  assert not (Path(get_settings().data_dir) / "apps" / "reviewed").exists()
 
 def test_update_dropping_schedule_unregisters_orphan_cron(
     client, auth, bypass_url_validation):
@@ -1330,7 +1410,7 @@ def test_install_inline_raw_base_may_omit_trailing_slash(
   surface; normalizing here prevents a future caller from fetching
   `mainindex.jsx` by accident.
   """
-  base = "https://raw.githubusercontent.com/x/app-inline-main"
+  base = "https://packages.test/x/app-inline-main"
   manifest = {**MANIFEST_NEWS, "id": "inline-noslash"}
   responses = {
     base + "/index.jsx": (200, JSX.encode()),
@@ -1391,7 +1471,7 @@ def test_install_rejects_non_repo_relative_manifest_asset_paths(
   manifest = {**MANIFEST_NEWS, "id": "bad-asset-path", **field_patch}
   r = client.post("/api/apps/install", headers=auth, json={
     "manifest": manifest,
-    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+    "raw_base": "https://packages.test/x/app/main/",
   })
   assert r.status_code == 400
   assert expected_field in r.json()["detail"]
@@ -1410,7 +1490,7 @@ def test_storage_seeds_inline_content_400_teaches_the_contract(client, auth):
   }
   r = client.post("/api/apps/install", headers=auth, json={
     "manifest": manifest,
-    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+    "raw_base": "https://packages.test/x/app/main/",
   })
   assert r.status_code == 400
   detail = r.json()["detail"]
@@ -1425,7 +1505,7 @@ def test_non_seed_path_rejection_omits_the_seed_hint(client, auth):
   manifest = {**MANIFEST_NEWS, "id": "bad-entry-path", "entry": "../index.jsx"}
   r = client.post("/api/apps/install", headers=auth, json={
     "manifest": manifest,
-    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+    "raw_base": "https://packages.test/x/app/main/",
   })
   assert r.status_code == 400
   detail = r.json()["detail"]
@@ -1827,7 +1907,7 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   assert user_app["manifest_url"] is None
 
   # 2. Store installs a manifest whose id is also "news".
-  base = "https://raw.githubusercontent.com/x/app-news/main/"
+  base = "https://packages.test/x/app-news/main/"
   manifest = {**MANIFEST_NEWS, "id": "news", "name": "News"}
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
@@ -1981,7 +2061,7 @@ def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
 
 
 def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
-  client, auth, db, bypass_url_validation,
+  client, auth, db, tmp_path, bypass_url_validation,
 ):
   """A proven local app stays unprivileged until its conflict is accepted."""
   from app import install
@@ -2017,10 +2097,24 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
   app_id = legacy["id"]
   repo = Path(legacy["source_dir"])
   (repo / "index.jsx").write_text(local, encoding="utf-8")
+  origin_work = tmp_path / "trusted-adoption-work"
+  origin_bare = tmp_path / "trusted-adoption.git"
+  subprocess.run(
+    ["git", "init", "-q", "-b", "main", str(origin_work)], check=True,
+  )
+  (origin_work / "mobius.json").write_text(
+    json.dumps(manifest), encoding="utf-8",
+  )
+  (origin_work / "index.jsx").write_text(incoming, encoding="utf-8")
+  _fixture_commit(origin_work, "published package")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(origin_work), str(origin_bare)],
+    check=True,
+  )
   subprocess.run(
     [
       "git", "-C", str(repo), "remote", "add", "origin",
-      "https://github.com/mobius-os/app-trusted-adoption.git",
+      origin_bare.as_uri(),
     ],
     check=True,
   )
@@ -2029,15 +2123,14 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
     raw_base + "index.jsx": (200, incoming.encode()),
   }
 
-  # The origin is an identity witness, not a live dependency of this test.
-  # Falling back to the fetched package mirrors an unavailable private/offline
-  # origin while preserving the same installer path.
+  # Identity remains the canonical catalog URL while the local bare remote
+  # supplies the exact Git commit without external network access.
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ), patch(
-    "app.install.app_git.fetch_upstream",
-    side_effect=RuntimeError("offline origin"),
+    "app.install.app_git.origin_url",
+    return_value="https://github.com/mobius-os/app-trusted-adoption.git",
   ):
     conflicted = client.post(
       "/api/apps/install",
@@ -2049,6 +2142,10 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
   assert conflicted.json()["mode"] == "conflict"
   assert conflicted.json()["id"] == app_id
   assert (repo / "index.jsx").read_text(encoding="utf-8") == local
+  app_git._run(
+    repo, "remote", "set-url", "origin",
+    "https://github.com/mobius-os/app-trusted-adoption.git",
+  )
   db.expire_all()
   row = db.query(models.App).filter(models.App.id == app_id).one()
   assert row.manifest_url is None
@@ -2063,6 +2160,7 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
   assert selected.status_code == 200, selected.text
   assert (repo / ".git" / "MERGE_HEAD").is_file()
   (repo / "index.jsx").write_text(resolved, encoding="utf-8")
+  (repo / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
 
   reviewed = client.post(
     "/api/apps/resolve-update/review",
@@ -2349,7 +2447,7 @@ def test_install_same_manifest_twice_updates(
 ):
   """Re-installing the same manifest_url updates the existing row
   in place (mode='update', same id) — identity now keyed on URL."""
-  base = "https://raw.githubusercontent.com/x/app-same/main/"
+  base = "https://packages.test/x/app-same/main/"
   manifest = {**MANIFEST_NEWS, "id": "same-manifest"}
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
@@ -2457,7 +2555,7 @@ def test_install_accepts_opaque_app_frame_with_manage_apps(
   db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
-  base = "https://raw.githubusercontent.com/x/app-installable/main/"
+  base = "https://packages.test/x/app-installable/main/"
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(_install_responses(base)),
@@ -2762,10 +2860,10 @@ def test_pending_update_receipt_upgrades_schema_one_on_policy_choice(tmp_path):
   assert upgraded["reviewed_tree_oid"] is None
 
 
-def test_flag_on_install_creates_repo_and_records_upstream(
+def test_git_install_creates_repo_and_records_upstream(
   client, auth, bypass_url_validation,
 ):
-  """Flag ON: a fresh install inits the per-app repo and stamps the
+  """a fresh install inits the per-app repo and stamps the
   upstream commit + jsx sha on the App row."""
   base = "https://on.test/repo/"
   r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "on-install"}, JSX)
@@ -2785,10 +2883,10 @@ def test_flag_on_install_creates_repo_and_records_upstream(
     db.close()
 
 
-def test_flag_on_clean_update_carries_local_edits_forward(
+def test_git_clean_update_carries_local_edits_forward(
   client, auth, bypass_url_validation,
 ):
-  """Flag ON: a local edit to one region + an upstream edit to a DISJOINT
+  """a local edit to one region + an upstream edit to a DISJOINT
   region merges cleanly — the served source contains BOTH changes."""
   base = "https://on2.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-clean"}
@@ -2891,7 +2989,7 @@ def test_clean_update_preserves_local_job_script_edit(
   assert "<<<<<<<" not in served
 
 
-def test_flag_on_repeated_updates_to_same_region_stay_clean(
+def test_git_repeated_updates_to_same_region_stay_clean(
   client, auth, bypass_url_validation,
 ):
   """A clean merge must advance the merge base so the NEXT update only
@@ -2937,7 +3035,7 @@ def test_flag_on_repeated_updates_to_same_region_stay_clean(
   assert "<<<<<<<" not in merged
 
 
-def test_flag_on_clean_update_advances_merge_base(
+def test_git_clean_update_advances_merge_base(
   client, auth, bypass_url_validation,
 ):
   """After a clean update the local branch records upstream as an
@@ -2971,10 +3069,10 @@ def test_flag_on_clean_update_advances_merge_base(
   )
 
 
-def test_flag_on_clean_update_without_local_edits_is_fast_forward(
+def test_git_clean_update_without_local_edits_is_fast_forward(
   client, auth, bypass_url_validation,
 ):
-  """Flag ON: when local main still matches the previous upstream, a
+  """when local main still matches the previous upstream, a
   clean update reports fast_forward for the seamless store path."""
   base = "https://on-fast.test/repo/"
   m = {
@@ -3006,7 +3104,7 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   assert "ORIGINAL FOOTER" not in served
 
 
-def test_flag_on_consecutive_no_edit_updates_advance_base(
+def test_git_consecutive_no_edit_updates_advance_base(
   client, auth, bypass_url_validation,
 ):
   """Successive no-local-edit updates must each carry the new upstream
@@ -3063,7 +3161,7 @@ def test_flag_on_consecutive_no_edit_updates_advance_base(
   )
 
 
-def test_flag_on_static_asset_update_leaves_clean_app_repo(
+def test_git_static_asset_update_leaves_clean_app_repo(
   client, auth, bypass_url_validation,
 ):
   """Static asset rollback snapshots must never land in per-app git.
@@ -3189,7 +3287,7 @@ def test_app_store_update_recognizes_squashed_local_contribution(
   assert not app_git.ref_exists(source, landed)
 
 
-def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
+def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   client, auth, bypass_url_validation,
 ):
   """A local edit + an upstream edit to the SAME region conflicts. The endpoint
@@ -3864,7 +3962,7 @@ def test_exact_upstream_policy_replaces_complete_tracked_source_tree(
   assert finalized.json()["app"]["id"] == app_id
 
 
-def test_flag_on_conflict_does_not_apply_upstream_capabilities(
+def test_git_conflict_does_not_apply_upstream_capabilities(
   client, auth, bypass_url_validation,
 ):
   """A conflicting update keeps serving the OLD code, so it must NOT jump the
@@ -4116,8 +4214,8 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
     base + "fetch.sh": (200, b""),
   }
   with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
+    "app.routes.apps._fetch_update_candidate",
+    return_value=_git_candidate(next_manifest, jsx_v2),
   ):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
@@ -4154,15 +4252,30 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert row["version"] == "1.0.0"
 
 
-def test_update_candidate_preview_uses_selected_same_repository_ref(
-  client, auth, db, bypass_url_validation,
+def test_update_candidate_preview_applies_the_reviewed_commit_without_refetch(
+  client, auth, db, tmp_path, bypass_url_validation,
 ):
-  """An explicit review may move a pin within the same GitHub repository."""
+  """Apply uses the reviewed Git commit even when its branch moves later."""
   from app import models
 
-  base = "https://candidate-selected.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "selected-candidate"}
-  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  base = "https://raw.githubusercontent.com/hamzamerzic/app-selected/main/"
+  manifest = {
+    "id": "selected-candidate",
+    "name": "Selected candidate",
+    "version": "1.0.0",
+    "description": "One reviewed Git commit",
+    "entry": "index.jsx",
+  }
+  work, bare, _ = _make_clone_fixture(tmp_path, JSX_MULTI, "")
+  (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  _fixture_commit(work, "manifest")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, JSX_MULTI, "", bare,
+  )
   assert installed.status_code == 201, installed.text
   app_id = installed.json()["id"]
 
@@ -4175,23 +4288,21 @@ def test_update_candidate_preview_uses_selected_same_repository_ref(
   row.manifest_url = pinned_identity
   db.commit()
 
-  selected_url = (
-    "https://raw.githubusercontent.com/hamzamerzic/"
-    "app-selected/main/mobius.json"
-  )
-  next_manifest = {**manifest, "version": "2.0.0"}
-  incoming = JSX_MULTI.replace("ORIGINAL FOOTER", "SELECTED REF FOOTER")
-  responses = {
-    selected_url: (200, json.dumps(next_manifest).encode()),
-    selected_url.rsplit("/", 1)[0] + "/index.jsx": (200, incoming.encode()),
-    selected_url.rsplit("/", 1)[0] + "/icon.png": (200, _png_bytes()),
-    selected_url.rsplit("/", 1)[0] + "/prompt.md": (200, b"v2 prompt"),
-    selected_url.rsplit("/", 1)[0] + "/fetch.sh": (200, b""),
+  selected_url = base + "mobius.json"
+  next_manifest = {
+    **manifest,
+    "version": "2.0.0",
+    "permissions": {"manage_apps": True},
   }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
-  ):
+  incoming = JSX_MULTI.replace("ORIGINAL FOOTER", "SELECTED REF FOOTER")
+  (work / "mobius.json").write_text(json.dumps(next_manifest), encoding="utf-8")
+  (work / "index.jsx").write_text(incoming, encoding="utf-8")
+  reviewed_commit = _fixture_commit(work, "v2")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  with patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview",
       headers=auth,
@@ -4201,20 +4312,68 @@ def test_update_candidate_preview_uses_selected_same_repository_ref(
   assert preview.status_code == 200, preview.text
   payload = preview.json()
   assert payload["upstream_version"] == "2.0.0"
+  assert payload["upstream_commit"] == reviewed_commit
+  assert "data.manage_apps" in payload["capability_preview"]["capability_diff"]["added"]
   assert "SELECTED REF FOOTER" in payload["upstream_diff"]
   assert "ORIGINAL FOOTER" in payload["upstream_diff"]
 
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
-  ):
+  from fastapi import HTTPException
+  from app import install
+  with pytest.raises(HTTPException) as caught:
+    asyncio.run(install.install_from_manifest(
+      db,
+      manifest_url=None,
+      manifest=next_manifest,
+      raw_base=base,
+      source="store",
+      expected_app_id=app_id,
+      expected_upstream_commit=payload["upstream_commit"],
+      expected_candidate_digest="0" * 64,
+    ))
+  assert caught.value.status_code == 409
+  assert caught.value.detail["code"] == "pending_update_changed"
+
+  (work / "mobius.json").write_text(
+    json.dumps({**manifest, "version": "3.0.0"}), encoding="utf-8",
+  )
+  (work / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL FOOTER", "UNREVIEWED FOOTER"), encoding="utf-8",
+  )
+  _fixture_commit(work, "v3")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  with patch("app.install.httpx.AsyncClient") as http_client:
     applied = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": selected_url,
       "reviewed_source_digest": payload["source_digest"],
+      "update_app_id": app_id,
+      "reviewed_upstream_commit": payload["upstream_commit"],
     })
   assert applied.status_code == 201, applied.text
+  http_client.assert_not_called()
   assert applied.json()["id"] == app_id
   assert applied.json()["version"] == "2.0.0"
+  source_dir = Path(get_settings().data_dir) / "apps" / manifest["id"]
+  assert "SELECTED REF FOOTER" in (source_dir / "index.jsx").read_text()
+  assert "UNREVIEWED FOOTER" not in (source_dir / "index.jsx").read_text()
+
+
+def test_missing_reviewed_git_commit_is_a_stale_update(
+  client, auth, bypass_url_validation,
+):
+  app = create_local_app(client, auth, name="Missing reviewed commit")
+  rejected = client.post("/api/apps/install", headers=auth, json={
+    "manifest_url": (
+      "https://raw.githubusercontent.com/acme/missing-reviewed/main/mobius.json"
+    ),
+    "reviewed_source_digest": "0" * 64,
+    "update_app_id": app["id"],
+    "reviewed_upstream_commit": "f" * 40,
+  })
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "update_changed"
 
 
 def test_update_candidate_preview_rejects_a_different_catalog_app(
@@ -4246,8 +4405,8 @@ def test_update_candidate_preview_rejects_a_different_catalog_app(
     other_url.rsplit("/", 1)[0] + "/fetch.sh": (200, b""),
   }
   with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
+    "app.routes.apps._fetch_update_candidate",
+    return_value=_git_candidate(manifest, JSX),
   ):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview",
@@ -4257,45 +4416,6 @@ def test_update_candidate_preview_rejects_a_different_catalog_app(
   assert preview.status_code == 409, preview.text
   assert "does not match" in preview.json()["detail"]
 
-
-def test_deferred_replay_reports_changed_candidate_as_structured_recovery(
-  db, bypass_url_validation,
-):
-  """Explicit replay distinguishes a stale receipt from a compile failure."""
-  from fastapi import HTTPException
-  from app import install
-
-  base = "https://pending-candidate.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "pending-candidate"}
-  responses = {
-    base + "index.jsx": (200, JSX.encode()),
-    base + "icon.png": (200, _png_bytes()),
-    base + "prompt.md": (200, PROMPT.encode()),
-    base + "fetch.sh": (200, b"#!/bin/sh\n"),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
-  ), pytest.raises(HTTPException) as caught:
-    asyncio.run(install.install_from_manifest(
-      db,
-      manifest_url=None,
-      manifest=manifest,
-      raw_base=base,
-      source="store",
-      expected_app_id=42,
-      expected_upstream_commit="upstream-sha",
-      expected_candidate_digest="0" * 64,
-    ))
-
-  assert caught.value.status_code == 409
-  assert caught.value.detail == {
-    "code": "pending_update_changed",
-    "message": (
-      "The pending update changed upstream. "
-      "Review the latest update and start again."
-    ),
-  }
 
 
 def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
@@ -5499,10 +5619,10 @@ def test_clone_update_conflict_keeps_served_old_source(
     db.close()
 
 
-def test_clone_update_fetch_failure_falls_back_to_record_upstream(
+def test_clone_update_fetch_failure_preserves_installed_git_revision(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """If origin fetch fails, cloned apps use the existing HTTP-fetched path."""
+  """A failed origin fetch never creates a parallel synthetic update."""
   base = "https://raw.githubusercontent.com/acme/clone-fallback/main/"
   manifest = {
     "id": "clone-fallback",
@@ -5531,23 +5651,118 @@ def test_clone_update_fetch_failure_falls_back_to_record_upstream(
       index_v2, cards_v2, bare, include_source_file=True,
     )
 
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "fast_forward"
+  assert r2.status_code == 409, r2.text
+  assert r2.json()["detail"]["code"] == "git_update_unavailable"
   src = Path(get_settings().data_dir) / "apps" / "clone-fallback"
-  assert (src / "index.jsx").read_text() == index_v2
-  assert (src / "cards.js").read_text() == cards_v2
+  assert (src / "index.jsx").read_text() == CLONE_INDEX_V1
+  assert (src / "cards.js").read_text() == CLONE_CARDS_V1
 
 
-def test_synthetic_app_with_accidental_origin_restores_ref_and_updates(
+@pytest.mark.parametrize("drift_kind", ["source", "permissions"])
+def test_real_git_review_drift_does_not_advance_installed_upstream(
+  client, auth, db, tmp_path, bypass_url_validation, drift_kind,
+):
+  """The immutable Git package must match every byte reviewed over HTTP."""
+  from app import install
+
+  base = f"https://raw.githubusercontent.com/acme/review-drift-{drift_kind}/main/"
+  manifest_v1 = {
+    "id": f"review-drift-{drift_kind}",
+    "name": "Review Drift",
+    "version": "1.0.0",
+    "description": "Git review drift",
+    "entry": "index.jsx",
+    "permissions": {"manage_apps": False},
+  }
+  work = tmp_path / f"drift-{drift_kind}-work"
+  bare = tmp_path / f"drift-{drift_kind}.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+  (work / "mobius.json").write_text(json.dumps(manifest_v1), encoding="utf-8")
+  (work / "index.jsx").write_text(JSX_MULTI, encoding="utf-8")
+  first = _fixture_commit(work, "v1")
+  subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+
+  def responses(manifest, source):
+    return {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, source.encode()),
+    }
+
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses(manifest_v1, JSX_MULTI)),
+  ):
+    installed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert installed.status_code == 201, installed.text
+
+  source_dir = Path(get_settings().data_dir) / "apps" / manifest_v1["id"]
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "TITLE_LOCAL")
+  (source_dir / "index.jsx").write_text(local, encoding="utf-8")
+  reviewed_manifest = {
+    **manifest_v1,
+    "version": "2.0.0",
+    "permissions": {"manage_apps": True},
+  }
+  git_manifest = (
+    reviewed_manifest if drift_kind == "source" else {
+      **reviewed_manifest,
+      "permissions": {"manage_apps": False},
+    }
+  )
+  git_source = (
+    JSX_MULTI.replace("ORIGINAL TITLE", "TITLE_GIT_DRIFT")
+    if drift_kind == "source" else JSX_MULTI
+  )
+  (work / "mobius.json").write_text(json.dumps(git_manifest), encoding="utf-8")
+  (work / "index.jsx").write_text(git_source, encoding="utf-8")
+  _fixture_commit(work, "drift")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  reviewed_digest = install.package_content_digest(
+    manifest=reviewed_manifest,
+    entry_bytes=JSX_MULTI.encode(),
+    bundled_job=None,
+    source_files={},
+    icon_processed=None,
+    static_assets={},
+    seeds={},
+  )
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses(reviewed_manifest, JSX_MULTI)),
+  ):
+    rejected = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+      "reviewed_source_digest": reviewed_digest,
+    })
+
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "git_source_mismatch"
+  assert app_git.head_sha(source_dir, "upstream") == first
+  assert (source_dir / "index.jsx").read_text() == local
+  row = db.query(models.App).populate_existing().filter_by(
+    id=installed.json()["id"],
+  ).one()
+  assert row.version == "1.0.0"
+
+
+def test_untrusted_synthetic_origin_fails_without_rewriting_history(
   client, auth, tmp_path, bypass_url_validation,
 ):
   """An older synthetic-history app may have picked up an origin remote later.
 
-  If a failed cloned-update attempt also moved its installer-owned upstream ref
-  onto that unrelated origin history, the next update must trust the DB-recorded
-  upstream commit, restore the ref, and fall back to the manifest-fetched source
-  path instead of crashing with "refusing to merge unrelated histories".
+  If a failed cloned-update attempt moved its installer-owned upstream ref onto
+  unrelated origin history, the next update restores the DB-recorded baseline
+  and stops. It must not manufacture another synthetic upstream from downloaded
+  files now that the app declares a Git origin.
   """
   base = "https://synthetic-origin.test/repo/"
   manifest = {
@@ -5618,18 +5833,11 @@ def test_synthetic_app_with_accidental_origin_restores_ref_and_updates(
       "manifest_url": base + "mobius.json",
     })
 
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["version"] == "2.0.0"
-  assert (src / "index.jsx").read_text() == index_v2
-  assert (src / "cards.js").read_text() == cards_v2
-  assert "REAL_REPO" not in (src / "index.jsx").read_text()
-  new_upstream = app_git.head_sha(src, app_git.UPSTREAM_BRANCH)
-  assert new_upstream != real_head
-  assert app_git._run(
-    src, "merge-base", "--is-ancestor", db_upstream, new_upstream,
-    check=False,
-  ).returncode == 0
+  assert r2.status_code == 409, r2.text
+  assert r2.json()["detail"]["code"] == "git_source_mismatch"
+  assert (src / "index.jsx").read_text() == index_v1
+  assert (src / "cards.js").read_text() == cards_v1
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == db_upstream
 
 
 def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
@@ -5686,6 +5894,9 @@ def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
   # that complete tree in the real origin so this exercises the same exact-tree
   # proof used to repair an installed catalog app's lineage.
   (work / ".gitignore").write_bytes((src / ".gitignore").read_bytes())
+  (work / "mobius.json").write_text(
+    json.dumps({**manifest, "version": "2.0.0"}), encoding="utf-8",
+  )
   real_head = _fixture_commit(work, "match managed app tree")
   subprocess.run(
     ["git", "-C", str(work), "push", "-q", str(bare), "main"],
@@ -5720,6 +5931,7 @@ def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
   assert updated.json()["mode"] == "update"
   assert (src / "index.jsx").read_text() == index_v2
   assert (src / "cards.js").read_text() == cards_v2
+  assert json.loads((src / "mobius.json").read_text())["version"] == "2.0.0"
   assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == real_head
   assert real_head != synthetic_upstream
   assert app_git._run(
@@ -6118,14 +6330,46 @@ def _check_responses(base, manifest, jsx, sources=None, job=b""):
   return responses
 
 
+def _git_candidate(manifest, jsx, sources=None, job=b"#!/bin/sh\n"):
+  """One immutable Git package projection returned by the route helper."""
+  from types import SimpleNamespace
+  from app import install
+
+  source_files = {
+    rel: data if isinstance(data, bytes) else data.encode()
+    for rel, data in (sources or {}).items()
+  }
+  tree = {"index.jsx": jsx.encode(), **source_files}
+  bundled_job = None
+  schedule = manifest.get("schedule") if isinstance(manifest, dict) else None
+  if isinstance(schedule, dict) and schedule.get("job"):
+    bundled_job = job
+    tree[schedule["job"]] = job
+  digest = install.package_content_digest(
+    manifest=manifest,
+    entry_bytes=jsx.encode(),
+    icon_processed=None,
+    bundled_job=bundled_job,
+    static_assets={},
+    source_files=source_files,
+    seeds={},
+  )
+  return SimpleNamespace(
+    manifest=manifest,
+    runtime_tree=tree,
+    commit="f" * 40,
+    source_digest=digest,
+  )
+
+
 def _update_check(
-  client, headers, base, app_id, manifest, jsx, sources=None, job=b"",
+  client, headers, base, app_id, manifest, jsx, sources=None,
+  job=b"#!/bin/sh\n",
   candidate_manifest_url=None,
 ):
-  responses = _check_responses(base, manifest, jsx, sources=sources, job=job)
   with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
+    "app.routes.apps._fetch_update_candidate",
+    return_value=_git_candidate(manifest, jsx, sources=sources, job=job),
   ):
     return client.get(
       f"/api/apps/{app_id}/update-check",
@@ -6135,6 +6379,97 @@ def _update_check(
         if candidate_manifest_url else None
       ),
     )
+
+
+
+
+
+def test_known_origin_check_never_falls_back_to_http(tmp_path):
+  """An origin outage cannot silently change the source being reviewed."""
+  from app.routes.apps import _fetch_update_candidate
+  app_git.ensure_repo(tmp_path)
+  app_git._run(tmp_path, "remote", "add", "origin", "https://github.com/acme/source.git")
+  with patch("app.install.fetch_git_install_candidate", side_effect=RuntimeError("offline")), patch(
+    "app.install.fetch_upstream_source", new_callable=AsyncMock,
+  ) as http_import:
+    with pytest.raises(RuntimeError, match="offline"):
+      asyncio.run(_fetch_update_candidate(
+        tmp_path, "https://raw.githubusercontent.com/acme/source/main/mobius.json", strict=True,
+      ))
+  http_import.assert_not_called()
+
+
+@pytest.mark.parametrize("cloned", [False, True])
+def test_recorded_update_source_keeps_deletions_without_repository_noise(cloned):
+  from app.routes.apps import _recorded_update_source
+  previous = {"index.jsx": b"entry", "removed.js": b"old", ".gitignore": b"rules"}
+  if cloned:
+    previous.update({
+      "mobius.json": json.dumps({"source_files": ["removed.js"]}).encode(),
+      "README.md": b"not executable source",
+    })
+  incoming = {"index.jsx": b"entry"}
+  recorded = _recorded_update_source(previous, incoming)
+  assert recorded == {"index.jsx": b"entry", "removed.js": b"old"}
+  assert recorded != incoming
+
+def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
+  tmp_path,
+):
+  from app.install import fetch_git_install_candidate
+
+  work = tmp_path / "candidate-work"
+  bare = tmp_path / "candidate.git"
+  installed = tmp_path / "installed"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+  manifest = {
+    "id": "git-candidate",
+    "name": "Git Candidate",
+    "version": "1.0.0",
+    "description": "One-commit package",
+    "entry": "index.jsx",
+    "source_files": ["cards.js"],
+    "schedule": {"job": "fetch.sh"},
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  (work / "index.jsx").write_text(JSX, encoding="utf-8")
+  (work / "cards.js").write_text("export const cards = ['v1']", encoding="utf-8")
+  (work / "fetch.sh").write_text("#!/bin/sh\necho v1\n", encoding="utf-8")
+  first = _fixture_commit(work, "v1")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(work), str(bare)], check=True,
+  )
+  assert app_git.clone_upstream(installed, bare.as_uri(), "main") == first
+
+  manifest["version"] = "2.0.0"
+  (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  (work / "index.jsx").write_text(
+    JSX.replace("ok", "from one git commit"), encoding="utf-8",
+  )
+  (work / "cards.js").write_text("export const cards = ['v2']", encoding="utf-8")
+  (work / "fetch.sh").write_text("#!/bin/sh\necho v2\n", encoding="utf-8")
+  second = _fixture_commit(work, "v2")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"], check=True,
+  )
+
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ):
+    candidate = fetch_git_install_candidate(
+      installed, "https://example.invalid/mobius.json", strict=True,
+    )
+
+  assert candidate.commit == second
+  assert candidate.manifest["version"] == "2.0.0"
+  assert candidate.runtime_tree == {
+    "index.jsx": JSX.replace("ok", "from one git commit").encode(),
+    "cards.js": b"export const cards = ['v2']",
+    "fetch.sh": b"#!/bin/sh\necho v2\n",
+  }
+  assert app_git.head_sha(installed, "main") == first
+  assert app_git.head_sha(installed, "upstream") == first
 
 
 def test_update_check_unchanged_upstream_is_false(
@@ -6172,7 +6507,9 @@ def test_update_check_uses_identity_matched_live_candidate_for_pinned_install(
     "https://raw.githubusercontent.com/mobius-os/app-pinned/main/"
   )
   manifest_v1 = {**MANIFEST_NEWS, "id": "uc-pinned", "version": "1.0.0"}
-  installed = _install_v1(client, auth, pinned_base, manifest_v1, JSX)
+  # Model a migrated local baseline; clone correctness has its own real-Git test.
+  with patch("app.install._derive_repo_ref", return_value=None):
+    installed = _install_v1(client, auth, pinned_base, manifest_v1, JSX)
   assert installed.status_code == 201, installed.text
 
   manifest_v2 = {**manifest_v1, "version": "2.0.0"}
@@ -6200,7 +6537,9 @@ def test_update_check_ignores_candidate_from_different_package(
   )
   other_base = "https://raw.githubusercontent.com/mobius-os/app-other/main/"
   manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
-  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
+  # Model a migrated local baseline; clone correctness has its own real-Git test.
+  with patch("app.install._derive_repo_ref", return_value=None):
+    installed = _install_v1(client, auth, pinned_base, manifest, JSX)
   assert installed.status_code == 201, installed.text
 
   response = _update_check(
@@ -6227,7 +6566,9 @@ def test_update_check_degrades_cross_owner_predecessor_to_unknown(
   )
   live_base = "https://raw.githubusercontent.com/mobius-os/app-renamed/main/"
   manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
-  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
+  # Model a migrated local baseline; clone correctness has its own real-Git test.
+  with patch("app.install._derive_repo_ref", return_value=None):
+    installed = _install_v1(client, auth, pinned_base, manifest, JSX)
   assert installed.status_code == 201, installed.text
 
   candidate = {
@@ -6279,7 +6620,7 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   upstream_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   manifest_v2 = {**manifest_v1, "version": "2.0.0"}
 
-  async def advance_during_fetch(_manifest_url, *, strict=True):
+  async def advance_during_fetch(_repo, _manifest_url, *, strict=True):
     current_upstream = app_git.record_upstream(
       repo,
       {"index.jsx": upstream_v2.encode()},
@@ -6295,16 +6636,10 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
       capability_digest="test-capability-digest",
       candidate_digest="0" * 64,
     )
-    return install.FetchedUpstream(
-      manifest=manifest_v2,
-      entry_bytes=upstream_v2.encode(),
-      source_files={},
-      job_name=None,
-      job_bytes=None,
-    )
+    return _git_candidate(manifest_v2, upstream_v2)
 
   monkeypatch.setattr(
-    "app.install.fetch_upstream_source", advance_during_fetch,
+    "app.routes.apps._fetch_update_candidate", advance_during_fetch,
   )
   res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
   assert res.status_code == 200, res.text
@@ -6348,10 +6683,15 @@ def test_update_check_ignores_invalid_preview_metadata_but_install_rejects_it(
   assert changed.status_code == 200, changed.text
   assert changed.json()["update_available"] is True
 
+  from fastapi import HTTPException
+
   responses = _check_responses(base, bad_preview_manifest, JSX)
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.routes.apps._fetch_update_candidate",
+    side_effect=HTTPException(400, "previews[0].source is required"),
   ):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
@@ -6412,8 +6752,10 @@ def test_update_check_malformed_candidate_degrades_to_unknown(
   installed = _install_v1(client, auth, base, manifest, JSX)
   assert installed.status_code == 201, installed.text
   candidate = {**manifest, **invalid} if isinstance(invalid, dict) else invalid
-  fetch = AsyncMock(return_value=json.dumps(candidate).encode())
-  with patch("app.install._http_get", fetch):
+  with patch(
+    "app.routes.apps._fetch_update_candidate",
+    side_effect=ValueError(f"invalid candidate: {candidate!r}"),
+  ):
     response = client.get(
       f"/api/apps/{installed.json()['id']}/update-check",
       headers=auth,
@@ -6422,7 +6764,6 @@ def test_update_check_malformed_candidate_degrades_to_unknown(
   assert response.status_code == 200, response.text
   assert response.json()["update_available"] is None
   assert response.json()["upstream_version"] is None
-  assert fetch.await_count == 1
 
 
 def test_discovery_retains_source_byte_budget(bypass_url_validation, monkeypatch):
@@ -6597,11 +6938,10 @@ def test_update_check_network_failure_degrades_to_null(
   assert r1.status_code == 201, r1.text
   app_id = r1.json()["id"]
 
-  # Empty response map → every fetch 404s → fetch_upstream_source raises →
-  # the route swallows it and returns unknown rather than erroring.
+  # A failed Git fetch degrades to unknown rather than breaking Store refresh.
   with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client({}),
+    "app.routes.apps._fetch_update_candidate",
+    side_effect=RuntimeError("synthetic origin outage"),
   ):
     res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
   assert res.status_code == 200, res.text
@@ -6623,14 +6963,16 @@ def test_update_check_releases_db_connection_before_remote_fetch(
 
   baseline = checked_out_connections()
 
-  async def _slow_remote_fetch(_url, *, strict=True):
+  async def _slow_remote_fetch(_repo, _url, *, strict=True):
     assert checked_out_connections() <= baseline, (
       "update-check kept its request DB connection checked out while "
       "starting remote work"
     )
     raise HTTPException(status_code=502, detail="synthetic upstream outage")
 
-  with patch("app.install.fetch_upstream_source", new=_slow_remote_fetch):
+  with patch(
+    "app.routes.apps._fetch_update_candidate", new=_slow_remote_fetch,
+  ):
     res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
 
   assert res.status_code == 200, res.text
@@ -6702,7 +7044,7 @@ def test_static_only_store_reinstall_publishes_a_distinct_runtime(client, auth, 
   """Generated assets have their own publication identity, not the source SHA."""
   from app.applied_app_runtime import runtime_root
 
-  base = "https://raw.githubusercontent.com/x/runtime-static/main/"
+  base = "https://packages.test/x/runtime-static/main/"
   manifest = {
     "id": "runtime-static", "name": "Runtime static", "version": "1.0.0",
     "description": "Generated assets", "entry": "index.jsx", "permissions": {},
@@ -6738,7 +7080,7 @@ def test_static_only_store_reinstall_publishes_a_distinct_runtime(client, auth, 
 def test_ordinary_store_source_apply_preserves_package_assets_and_runtime_manifest(client, auth, db, bypass_url_validation):
   from app.applied_app_runtime import runtime_root
 
-  base = "https://raw.githubusercontent.com/x/runtime-store-apply/main/"
+  base = "https://packages.test/x/runtime-store-apply/main/"
   manifest = {
     "id": "runtime-store-apply", "name": "Runtime store apply", "version": "1.0.0",
     "description": "Generated assets", "entry": "index.jsx", "permissions": {},

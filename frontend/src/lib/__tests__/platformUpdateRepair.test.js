@@ -15,7 +15,7 @@ for (const deployment of ['railway', 'self_hosted']) {
 }
 
 test('routine activation and stale reviews stay with their UI actions', () => {
-  for (const level of ['live', 'server_restart', 'dependency_sync', 'image_rebuild']) {
+  for (const level of ['live', 'server_restart', 'image_rebuild']) {
     assert.equal(platformUpdateRepairReason({ preview: { activation: { level, required_actions: level === 'live' ? [] : [level] }, blocking_paths: [] } }), null)
   }
   for (const errorCode of [
