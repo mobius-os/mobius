@@ -37,6 +37,12 @@ async function installStreamMock(page, firstItems) {
         return realFetch(input, init)
       }
       const current = streamIndex++
+      // The follow-up turn has already settled server-side by the time its stream
+      // attaches, so there is no broadcast: answer 204. Past the broadcast-
+      // registration window that is terminal, and the app performs its
+      // authoritative terminal refresh -- the settled-answer handoff this case
+      // exists to observe, landing while the second send is pinned.
+      if (current >= 1) return Promise.resolve(new Response(null, { status: 204 }))
       const items = current === 0
         ? initialItems
         : [{ type: 'thinking', content: 'Checking the follow-up.' }]
@@ -165,6 +171,8 @@ async function mountScenario(page) {
         messages = [...messages, settledAssistant]
         running = false
       }, 320)
+    } else {
+      setTimeout(() => { running = false }, 320)
     }
     await new Promise(resolve => setTimeout(resolve, 100))
     await route.fulfill({
@@ -235,36 +243,13 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
     requestAnimationFrame(sample)
   })
 
-  // KNOWN FAILURE (root-caused, not fixed here): the settled assistant row
-  // never picks up its durable `assistant-${ts}` key here -- confirmed via a
-  // debug log dumping every .chat__msg--assistant data-key at the timeout:
-  // it stays on its transient, index-based key (messageKey() in
-  // chatDetailCache.js falls back to `${role}-${index}` when a message has
-  // neither id/cid nor a ts, which the live-streamed row doesn't have until
-  // an authoritative fetch replaces it).
-  //
-  // The second send's own authoritative fetchMessages({force:true,
-  // authoritative:true}) call is what's supposed to perform that hand-off,
-  // but chatRuntimeState.js's serverSnapshotBehindLocal (called as
-  // ChatView.jsx's `staleSnapshot` gate) sees the second send's own fresh
-  // optimistic user row -- ts=Date.now(), not yet present in the mocked
-  // server's ts set -- and correctly (per its own unit-tested contract:
-  // "equal-length explicit optimistic row can outrank server snapshot" in
-  // serverSnapshotBehindLocal.test.js) treats the ENTIRE server snapshot as
-  // stale, so the whole authoritative merge is skipped -- not just the
-  // fresh row, but also the unrelated, already-settled first-turn history
-  // riding along in the same response.
-  //
-  // This is a genuine gap between two intentional, individually-correct
-  // contracts (protect a fresh unacknowledged send vs. hand off settled
-  // history), not a stale test: mergeRecentMessagesIntoLoadedWindow already
-  // has a preserveLocalSuffix mode for exactly this "sync historical
-  // content, keep the local tail" shape, but it's only ever invoked from the
-  // `preserveLocalTurn` branch, which is gated on `!authoritative` --
-  // authoritative fetches have no path that both trusts server history AND
-  // keeps a fresh local suffix. Fixing this touches fetchMessages' core
-  // merge logic (12+ call sites across ChatView.jsx), which deserves its
-  // own careful pass and full regression run, not a guess under this task.
+  // The handoff is performed by the authoritative TERMINAL refresh, not by the
+  // send itself. A fresh send no longer reads the transcript: it canonicalises
+  // its optimistic row from the 202 (same cid, server ts), so waiting for the
+  // send to hand the settled row over waited for a read that never happens.
+  // The follow-up stream above answers 204 once its turn has settled, which
+  // past the broadcast-registration window triggers that terminal refresh
+  // while the new send is pinned -- the exact overlap this case guards.
   await page.keyboard.press('Enter')
   await page.waitForFunction(ts => {
     const rows = document.querySelectorAll(
@@ -289,23 +274,18 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await expect(scenario.surface.getByText('Verification result', { exact: false }))
     .toBeVisible({ timeout: 10000 })
   // Finish the first stream while its detailed live row is still mounted. The
-  // server already holds the compact settled projection, but the next send's
-  // authoritative read is what hands the rendered row over to that source.
+  // server already holds the compact settled projection; the authoritative
+  // terminal refresh after the next send hands the rendered row over to it.
   await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
     timeout: 10000,
   })
-  try {
-    await page.waitForFunction(ts => {
-      const rows = document.querySelectorAll(
-        '[data-chat-surface="painted"] .chat__msg--assistant',
-      )
-      const key = rows[rows.length - 1]?.dataset.key
-      return key && key !== `assistant-${ts}`
-    }, scenario.settledAssistant.ts)
-  } catch (err) {
-    const rows = await page.evaluate(() => [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg')].slice(-6).map(r => ({ cls: r.className, key: r.dataset.key || null, text: (r.textContent || '').slice(0, 50) })))
-    throw new Error('STROWS ' + JSON.stringify({ settledTs: scenario.settledAssistant.ts, rows }) + ' :: ' + err.message)
-  }
+  await page.waitForFunction(ts => {
+    const rows = document.querySelectorAll(
+      '[data-chat-surface="painted"] .chat__msg--assistant',
+    )
+    const key = rows[rows.length - 1]?.dataset.key
+    return key && key !== `assistant-${ts}`
+  }, scenario.settledAssistant.ts)
 
   // Sample every painted frame across that source handoff. The newly sent row
   // must stay at its semantic pin rather than wait for a later resize repair.

@@ -38,19 +38,6 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
-  // Settle delivery readiness deterministically. connectivityStore marks the
-  // composer delivery-ready only once /api/ready reports ready:true with a
-  // boot_id, and a send made before that probe lands is QUEUED (a
-  // .queued__row) instead of started (a .chat__msg--user). The composer can be
-  // enabled before the real round trip settles, so every send in this file
-  // raced it -- the question-card case lost that race and waited for a user row
-  // that was sitting in the queue. Same fix as stream-reconnect and
-  // send-viewport-stability; nothing in this file exercises readiness itself.
-  await page.route(/\/api\/ready$/, route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ ready: true, boot_id: 'frontend-spec-boot' }),
-  }))
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -105,6 +92,21 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
 // (the app-canvas and steer-queued specs both hit this class). Block it so
 // the mocks stay authoritative for the whole test.
 test.use({ serviceWorkers: 'block' })
+
+// Settle delivery readiness deterministically for EVERY case in this file.
+// connectivityStore marks the composer delivery-ready only once /api/ready
+// reports ready:true with a boot_id, and a send made before that probe lands is
+// QUEUED locally (.queued__row, "Queued to send") instead of started. The
+// composer can be enabled before the real round trip settles, so every send
+// here raced it. This lives in a hook rather than setup() because several
+// cases navigate on their own; nothing in this file exercises readiness itself.
+test.beforeEach(async ({ page }) => {
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ready: true, boot_id: 'frontend-spec-boot' }),
+  }))
+})
 
 test.describe('Input behavior', () => {
   test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {

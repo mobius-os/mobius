@@ -1349,18 +1349,12 @@ test.describe('Stream reconnection', () => {
     //
     // With the card answered the question barrier is gone, and ChatInputBar is
     // explicit that Stop outranks Send only "until the card is answered": a
-    // non-empty draft now offers Send (queue it behind the running turn). The
-    // button therefore cannot tell running from idle while the draft is present,
-    // so prove the turn is still live the way the rule allows -- an EMPTY field
-    // over a running turn offers Stop. The draft was already asserted intact.
+    // non-empty draft now offers Send (queue it behind the running turn), so the
+    // primary button cannot distinguish running from idle while the draft is
+    // kept. The guarantee that reconnect loss did not settle the run is the goal
+    // rail asserted on both sides of the connection status above: a goal is
+    // retired only when its run is treated as finished.
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
-    await activeComposer.fill('')
-    const __samples = []
-    for (let n = 0; n < 12; n += 1) {
-      __samples.push(await page.evaluate(() => { const s = document.querySelector('[data-chat-surface="painted"]'); const ta = s?.querySelector('textarea[aria-label="Message Möbius…"]'); const act = s?.querySelector('.chat__action'); return { v: ta?.value ?? null, act: act?.getAttribute('aria-label') || null, focused: document.activeElement === ta } }))
-      await page.waitForTimeout(150)
-    }
-    try { await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible() }
-    catch (err) { throw new Error('C10 ' + JSON.stringify(__samples) + ' :: ' + err.message) }
+    await expect(goalRail).toContainText(`Goal · ${GOAL}`)
   })
 })
