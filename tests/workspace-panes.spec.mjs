@@ -1173,9 +1173,20 @@ test.describe('Workspace drag (PR3)', () => {
 
   test('dragging a tab onto another strip inserts it there (move, no new pane)', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragStrip')
-    const strip = await page.locator('[data-pane-strip="p1"]').boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    await mouseDrag(page, src, strip.x + strip.width / 2, strip.y + strip.height / 2)
+    // Resolve the destination strip AFTER the drag arms. Arming is not inert --
+    // it builds the scene and can re-tile the workspace (in single mode it
+    // unfolds the builder world outright), so a box measured beforehand can
+    // describe a layout that no longer exists by the time the pointer travels.
+    // A stale target lands the tab back in its own pane, which is exactly the
+    // p0-instead-of-p1 result this case saw under load. resolveTarget exists
+    // for this; the caret cases already use it.
+    await mouseDrag(page, src, 0, 0, {
+      resolveTarget: async () => {
+        const strip = await settledBox(page.locator('[data-pane-strip="p1"]'))
+        return { x: strip.x + strip.width / 2, y: strip.y + strip.height / 2 }
+      },
+    })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'C landed in p1 via the caret' },

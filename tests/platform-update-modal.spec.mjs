@@ -622,7 +622,11 @@ test('a failed container result survives reopening Settings without an unsolicit
   updates = await openSettings(page)
   await expect(updates.getByText(error)).not.toBeVisible()
   await expect(updates.getByRole('alert')).toHaveCount(0)
-  await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toBeEnabled()
+  // A failed container result IS a repair state, so UpdateRepairAction owns the
+  // single action slot and offers 'Ask Möbius' rather than 'Finish update'. The
+  // guarantee that matters is unchanged: the owner is left with an enabled next
+  // step, reached without anything having announced itself.
+  await expect(updates.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeEnabled()
   expect(state.unexpectedMutations).toEqual([])
 })
 

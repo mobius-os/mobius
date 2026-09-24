@@ -66,6 +66,17 @@ function CrashRecovery({ context, canAskAgent, diagnostic, headingRef, onRefresh
   )
 }
 
+// A sandboxed frame without allow-same-origin keeps navigator.serviceWorker
+// PRESENT while making its getter throw, so a bare read turns a crash this
+// boundary is handling into a second, uncatchable page error. Recovery simply
+// has no worker to consult there.
+function safeServiceWorker() {
+  try {
+    return typeof navigator !== 'undefined' ? navigator.serviceWorker : null
+  } catch {
+    return null
+  }
+}
 export default class ErrorBoundary extends Component {
   state = {
     error: null,
@@ -115,7 +126,7 @@ export default class ErrorBoundary extends Component {
   // generation through the SW handoff, reloading via applyRecoveryReload.
   // Resolves true when a newer generation was found and a reload was initiated.
   recoverReload = (context) => reloadIfGenerationStale({
-    serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
+    serviceWorker: safeServiceWorker(),
     reload: () => this.applyRecoveryReload(context),
   })
 
