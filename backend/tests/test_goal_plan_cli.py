@@ -165,15 +165,22 @@ def test_checkpoint_needs_only_the_next_action(cli, monkeypatch):
   assert body["next_action"] == "Finish a" and body["checkpoint"]
 
 
-def test_missing_goal_refusal_names_the_way_back(cli, monkeypatch):
+def test_server_refusals_print_their_message(cli, monkeypatch):
   import io
   from urllib.error import HTTPError
 
   def refuse(request, timeout):
-    body = io.BytesIO(json.dumps({"detail": "This chat has no active Goal to plan."}).encode())
+    body = io.BytesIO(json.dumps({"detail": "goal plan changed; fetch it and retry"}).encode())
     raise HTTPError(request.full_url, 409, "Conflict", {}, body)
 
   monkeypatch.setattr(cli, "_settings", lambda: ("http://mobius.test", "token", "chat"))
   monkeypatch.setattr(cli, "urlopen", refuse)
-  with pytest.raises(SystemExit, match=r"\(409\): .*Promote first, or run `list` then `resume ID`"):
+  with pytest.raises(SystemExit, match=r"\(409\): goal plan changed"):
     cli._request("GET", "/api/chats/chat/goal-plan")
+
+
+def test_writing_without_a_goal_names_the_way_back(cli, monkeypatch):
+  monkeypatch.setattr(cli, "_request", lambda method, path, body=None: {"goal": None, "plan": None})
+  monkeypatch.setattr(sys, "argv", ["goal_plan.py", "update", "a", "--status", "completed"])
+  with pytest.raises(SystemExit, match=r"Promote first, or run `list` then `resume ID`"):
+    cli.main()

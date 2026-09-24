@@ -45,8 +45,6 @@ def _request(method: str, path: str, body=None):
       detail = json.loads(raw).get("detail", raw)
     except json.JSONDecodeError:
       detail = raw
-    if detail == "This chat has no active Goal to plan.":
-      detail += " Promote first, or run `list` then `resume ID`."
     raise SystemExit(f"goal-plan request failed ({exc.code}): {detail}") from exc
   except URLError as exc:
     raise SystemExit(f"goal-plan request failed: {exc.reason}") from exc
@@ -58,7 +56,7 @@ def _attach_for_write(chat_id: str) -> dict:
   goal = (payload or {}).get("goal") if isinstance(payload, dict) else None
   goal_id = goal.get("id") if isinstance(goal, dict) else None
   if not goal_id:
-    raise SystemExit("No Goal record; resume the original Goal before updating it.")
+    raise SystemExit("No Goal to update. Promote first, or run `list` then `resume ID`.")
   _request(
     "POST", f"/api/chats/{chat_id}/goal/resume", {"goal_id": goal_id},
   )
@@ -169,8 +167,8 @@ def main() -> int:
     "--status",
     choices=("pending", "running", "completed", "blocked", "failed", "cancelled"),
   )
-  update_parser.add_argument("--note")
-  update_parser.add_argument("--result")
+  update_parser.add_argument("--note", help="up to 500 characters")
+  update_parser.add_argument("--result", help="up to 500 characters")
   update_parser.add_argument("--progress", type=_progress, metavar="CURRENT/TOTAL")
   update_parser.add_argument("--start", metavar="TASK_ID", help="then mark this task running")
   update_parser.add_argument("--next-action", help="then leave a handoff checkpoint")

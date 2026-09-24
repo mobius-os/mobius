@@ -44,7 +44,8 @@ python3 /data/platform/backend/scripts/goal_plan.py update inspect --status comp
 `--start` finishes one task and starts the next in one call. Each write prints
 the revision and the running and ready tasks, so it needs no `show`.
 
-Tasks are `id|title|dependencies`. Work deepest leaves. Children inherit ancestor
+Tasks are `id|title|dependencies`. Statuses are pending, running, completed,
+blocked, failed, and cancelled; notes and results hold up to 500 characters. Work deepest leaves. Children inherit ancestor
 dependencies and make a parent **Ready to verify**, not complete. Verify upward;
 cancelled prerequisites are settled. Plans may change; outcomes may not.
 
