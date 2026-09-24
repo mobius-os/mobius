@@ -678,8 +678,11 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
       state and state.identity and state.identity.digest == recorded.digest
       and state.identity.executables < recorded.executables
     ):
+      missing = sorted(recorded.executables - state.identity.executables)
+      # Logged so the next occurrence leaves a timestamp to trace its cause.
+      log.warning("skill %s lost launcher execute bits %s; restoring", name, missing)
       try:
-        for rel in recorded.executables - state.identity.executables:
+        for rel in missing:
           os.chmod(target / rel, 0o775)
         repaired.append(str(name))
       except OSError:
