@@ -76,43 +76,22 @@ export function isOwnerUserMessage(message) {
     && !isContinuationMessage(message)
 }
 
-/** Read the durable marker for owner rows delivered in one provider turn. */
-export function ownerMessageBatchPosition(messages, index) {
-  const message = Array.isArray(messages) ? messages[index] : null
-  if (!isOwnerUserMessage(message)) return null
-  const batch = message.provider_batch
-  if (
-    !batch
-    || typeof batch.id !== 'string'
-    || !batch.id
-    || !Number.isInteger(batch.index)
-    || !Number.isInteger(batch.count)
-    || batch.count < 2
-    || batch.index < 0
-    || batch.index >= batch.count
-  ) return null
-  return {
-    id: batch.id,
-    count: batch.count,
-    first: batch.index === 0,
-  }
-}
-
-/** Return one complete, contiguous provider batch or null for an ordinary row. */
+/** The complete, contiguous batch of owner rows that reached the provider as
+ * one input, or null for an ordinary row or an incomplete marker. */
 export function ownerMessageBatch(messages, index) {
-  const position = ownerMessageBatchPosition(messages, index)
-  if (!position) return null
-  const start = index - messages[index].provider_batch.index
-  const end = start + position.count - 1
+  const batch = messages[index]?.provider_batch
+  if (!isOwnerUserMessage(messages[index]) || !batch?.id
+      || !Number.isInteger(batch.index) || !(batch.count > 1)) return null
+  const start = index - batch.index
+  const end = start + batch.count - 1
   if (start < 0 || end >= messages.length) return null
-  const members = messages.slice(start, end + 1)
-  const complete = members.every((member, memberIndex) => (
+  const complete = messages.slice(start, end + 1).every((member, i) => (
     isOwnerUserMessage(member)
-    && member.provider_batch?.id === position.id
-    && member.provider_batch?.index === memberIndex
-    && member.provider_batch?.count === position.count
+    && member.provider_batch?.id === batch.id
+    && member.provider_batch?.index === i
+    && member.provider_batch?.count === batch.count
   ))
-  return complete ? { ...position, start, end, members } : null
+  return complete ? { start, end, first: batch.index === 0 } : null
 }
 
 /** One provider submission is one visible owner message, even when the

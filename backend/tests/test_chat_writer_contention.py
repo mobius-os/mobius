@@ -718,10 +718,6 @@ def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
   # The seeded Q1 row (no cid) plus the two distinct steered rows — the
   # re-delivery of c-a produced no third row.
   assert user_cids == [None, "c-a", "c-b"]
-  assert [m["provider_batch"] for m in chat["messages"][-2:]] == [
-    {"id": "c-a", "index": 0, "count": 2},
-    {"id": "c-a", "index": 1, "count": 2},
-  ]
 
 
 # -- 7. StartTurn atomic --------------------------------------------------

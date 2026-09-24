@@ -6098,18 +6098,18 @@ def _pending_messages_for_transcript(
   pending: list[dict],
   existing: list[dict],
 ) -> list[dict]:
-  """Return separate visible rows with an exact shared-turn marker."""
+  """Return separate visible transcript rows for promoted pending messages."""
   from app.continuations import continuation_reason
   from app.run_state import GOAL_HANDOFF_REASON
 
   stored: list[dict] = []
   used = list(existing)
-  visible_pending = [
-    pending_msg
-    for pending_msg in pending
-    if continuation_reason(pending_msg) != GOAL_HANDOFF_REASON
-  ]
-  for pending_msg in visible_pending:
+  for pending_msg in pending:
+    if continuation_reason(pending_msg) == GOAL_HANDOFF_REASON:
+      # This is a scheduler control carried by the one existing FIFO, not
+      # owner speech. Its provider prompt is ephemeral and its identity lives
+      # on the admitted ChatRun; the transcript records only actual messages.
+      continue
     msg = dict(pending_msg)
     msg["role"] = "user"
     msg.pop("queued", None)
@@ -6129,26 +6129,18 @@ def _pending_messages_for_transcript(
 
 
 def _stamp_provider_batch(messages: list[dict]) -> None:
-  """Mark separate visible rows that shared one provider delivery.
+  """Mark visible rows that reached the provider as one combined input.
 
-  Queued next-turn promotion and in-turn steering both preserve the owner's
-  individual messages in the transcript while sending one combined provider
-  input. The marker is durable delivery truth used by the shell to present
-  those rows as one divided bubble; keeping it here prevents the two delivery
-  paths from drifting again.
+  Both queued-turn promotion and in-turn steering call this, so the shell can
+  render the rows as one message without the two paths drifting apart. Every
+  row already carries a cid; the first one names the batch.
   """
-  for msg in messages:
-    msg.pop("provider_batch", None)
-  if len(messages) < 2:
-    return
-  batch_id = ensure_user_cid(messages[0])
   for index, msg in enumerate(messages):
-    ensure_user_cid(msg)
-    msg["provider_batch"] = {
-      "id": batch_id,
-      "index": index,
-      "count": len(messages),
-    }
+    msg.pop("provider_batch", None)
+    if len(messages) > 1:
+      msg["provider_batch"] = {
+        "id": messages[0]["cid"], "index": index, "count": len(messages),
+      }
 
 
 def _commit_or_rollback(db) -> bool:

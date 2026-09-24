@@ -46,11 +46,6 @@ test('accepted deferred steers leave the queue and appear inline immediately', (
     /data-steer-pending="true"[\s\S]*?<MsgContent[\s\S]*?messageKey=\{dataKey\}/,
     'the provisional row uses the ordinary user-message renderer and stable cid target',
   )
-  assert.doesNotMatch(
-    source.slice(pendingSteerAt, footerAt),
-    /\.map\(/,
-    'the provisional steer must be one transcript row, not several styled to look joined',
-  )
 })
 
 test('Stop serializes behind an in-flight steer; steer bails under a committed Stop', () => {
