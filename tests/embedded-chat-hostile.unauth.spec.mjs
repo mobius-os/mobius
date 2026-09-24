@@ -16,7 +16,7 @@ test('external hostile framer gets only an inert document without a grant', asyn
   const chatApiRequests = []
   const pageErrors = []
   const diagnostics = []
-  page.on('pageerror', error => pageErrors.push(error.message))
+  page.on('pageerror', error => pageErrors.push(error.message + ' @@STACK@@ ' + (error.stack || 'no-stack')))
   page.on('console', message => {
     if (message.type() === 'error') diagnostics.push(message.text())
   })
