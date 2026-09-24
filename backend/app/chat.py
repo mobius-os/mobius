@@ -4098,7 +4098,7 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission. A plan advance that leaves a runnable task, or a
+  # provider admission. A plan advance that leaves runnable work, or a
   # committed owner steer, permits one rollover; the successor must earn
   # another before continuing again.
   # Otherwise the saved-question owner keeps the Goal exact and durable while
@@ -4124,26 +4124,16 @@ async def _complete_turn(
       and not sink.owner_steer_committed
     ):
       question_id = f"goal-handoff-{sink.run_token}"
-      titles = terminal_handoff.blocked_on
-      blocked_on = "; ".join(title[:160] for title in titles[:3])
-      if len(titles) > 3:
-        blocked_on += f"; and {len(titles) - 3} more"
       await sink.publish_question({
         "type": "question",
         "question_id": question_id,
         "response_mode": "continuation",
         "questions": [{
           "id": "goal_next_step",
-          "header": (
-            "Goal is blocked" if blocked_on else "Goal needs reconciliation"
-          ),
+          "header": "Goal needs reconciliation",
           "question": (
-            f"No saved step can run until this is resolved: {blocked_on}. "
-            "Nothing is set to resume the Goal. What should happen next?"
-            if blocked_on else
-            "The turn ended without updating the saved plan or handing off "
-            "this Goal. Automatic continuation is paused. What should happen "
-            "next?"
+            "The turn ended without handing off this Goal, so automatic "
+            "continuation is paused. What should happen next?"
           ),
           "options": [
             {

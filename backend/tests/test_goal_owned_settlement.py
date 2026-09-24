@@ -403,7 +403,7 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   assert card["type"] == "question"
   assert card["response_mode"] == "continuation"
   assert card["questions"][0]["header"] == "Goal needs reconciliation"
-  assert "without updating the saved plan" in card["questions"][0]["question"]
+  assert "without handing off this Goal" in card["questions"][0]["question"]
   assert db.get(models.ChatRun, continuation_run).status == "interrupted"
 
 
@@ -666,24 +666,24 @@ async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
   assert scheduled == []
 
 
-BLOCKED_ON_OWNER = {"version": 1, "tasks": [
-  {"id": "build", "title": "Build", "status": "completed", "depends_on": []},
-  {"id": "publish", "title": "Publish the reviewed update",
-   "status": "blocked", "depends_on": ["build"]},
-  {"id": "verify", "title": "Verify hosted checks", "status": "pending",
-   "depends_on": ["publish"]},
-]}
-BLOCKED_BESIDE_READY = {"version": 1, "tasks": [
-  {"id": "publish", "title": "Publish", "status": "blocked", "depends_on": []},
-  {"id": "docs", "title": "Write docs", "status": "pending", "depends_on": []},
-]}
+@pytest.mark.asyncio
+async def test_plan_with_nothing_runnable_hands_off_instead_of_a_no_op_turn(
+  db, chat, monkeypatch,
+):
+  """Recording a blocker advances the plan but leaves nothing to run.
 
-
-async def _end_clean_turn(db, chat, monkeypatch, *, owner_card=None):
-  from app import chat as chat_mod
+  The ending turn parks on the owner card at once instead of starting a paid
+  automatic turn that can only restate the blocker.
+  """
+  from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
 
+  _add_goal_run(db, chat, plan={"version": 1, "tasks": [
+    {"id": "publish", "title": "Publish", "status": "blocked", "depends_on": []},
+    {"id": "verify", "title": "Verify", "status": "pending",
+     "depends_on": ["publish"]},
+  ]})
   scheduled = []
   monkeypatch.setattr(
     chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
@@ -693,8 +693,6 @@ async def _end_clean_turn(db, chat, monkeypatch, *, owner_card=None):
   sink = ChatEventSink(broadcast, chat.id, run_token="goal-run")
   sink.publish({"type": "text", "content": "Blocked until the owner acts."})
   try:
-    if owner_card is not None:
-      await sink.publish_question(owner_card)
     disposition = await chat_mod._complete_turn(
       bc=broadcast, sink=sink, db=db, chat_id=chat.id, run_gen=None,
       provider_id="codex", cost_usd=0, close_browser=False,
@@ -702,115 +700,32 @@ async def _end_clean_turn(db, chat, monkeypatch, *, owner_card=None):
   finally:
     remove_broadcast(chat.id)
   db.expire_all()
-  return disposition, scheduled
-
-
-@pytest.mark.asyncio
-async def test_plan_with_nothing_runnable_hands_off_instead_of_a_no_op_turn(
-  db, chat, monkeypatch,
-):
-  """Recording a blocker advances the plan but leaves nothing a successor can run.
-
-  Without its own handoff, the ending turn gets the owner card immediately
-  rather than a paid automatic turn that can only restate the blocker.
-  """
-  from app import chat_queue
-
-  _add_goal_run(db, chat, plan=BLOCKED_ON_OWNER)
-
-  disposition, scheduled = await _end_clean_turn(db, chat, monkeypatch)
 
   assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
   assert scheduled == []
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_question_id == "goal-handoff-goal-run"
-  question = saved.messages[-1]["blocks"][-1]["questions"][0]
-  assert question["header"] == "Goal is blocked"
-  assert "Publish the reviewed update" in question["question"]
-  assert "Verify hosted checks" not in question["question"]
-
-
-@pytest.mark.asyncio
-async def test_blocked_task_beside_runnable_work_still_continues(
-  db, chat, monkeypatch,
-):
-  from app import chat_queue
-
-  _add_goal_run(db, chat, plan=BLOCKED_BESIDE_READY)
-
-  disposition, scheduled = await _end_clean_turn(db, chat, monkeypatch)
-
-  assert disposition is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
-  assert len(scheduled) == 1
-
-
-@pytest.mark.asyncio
-async def test_blocked_goal_with_its_own_owner_card_gets_no_platform_card(
-  db, chat, monkeypatch,
-):
-  """The agent's exact approval card is the handoff; nothing is added."""
-  from app import chat_queue
-
-  _add_goal_run(db, chat, plan=BLOCKED_ON_OWNER)
-  approval = {
-    "type": "question", "question_id": "approve-update",
-    "response_mode": "continuation",
-    "questions": [{"id": "q", "question": "Update the PR?", "options": []}],
-  }
-
-  disposition, scheduled = await _end_clean_turn(
-    db, chat, monkeypatch, owner_card=approval,
-  )
-
-  assert scheduled == []
-  assert disposition is not chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
-  saved = db.get(models.Chat, chat.id)
-  assert saved.pending_question_id == "approve-update"
-  assert not any(
-    block.get("question_id", "").startswith("goal-handoff-")
-    for message in saved.messages for block in message.get("blocks") or []
-  )
 
 
 def _task(task_id, status, depends_on=(), parent_id=None):
-  task = {"id": task_id, "title": task_id.title(), "status": status,
-          "depends_on": list(depends_on)}
-  if parent_id:
-    task["parent_id"] = parent_id
-  return task
+  return {"id": task_id, "title": task_id, "status": status,
+          "depends_on": list(depends_on), "parent_id": parent_id}
 
 
-@pytest.mark.parametrize(("tasks", "blocked_on"), [
-  ([_task("gate", "blocked"), _task("next", "running")], ()),
+@pytest.mark.parametrize(("tasks", "automatic"), [
+  ([_task("gate", "blocked"), _task("next", "pending", ["gate"])], False),
+  ([_task("broken", "failed"), _task("next", "pending", ["broken"])], False),
+  ([_task("gate", "blocked"), _task("other", "pending")], True),
+  ([_task("gate", "blocked"), _task("next", "running")], True),
   ([_task("gate", "blocked"), _task("parent", "pending"),
-    _task("child", "completed", parent_id="parent")], ()),
-  ([_task("done", "completed"), _task("next", "pending", ["done"])], ()),
-  ([_task("done", "completed")], ()),
-  ([_task("broken", "failed"), _task("next", "pending", ["broken"])],
-   ("Broken",)),
-  ([_task("gate", "blocked"), _task("broken", "failed")], ("Gate", "Broken")),
-], ids=["running", "ready-to-verify", "ready", "completable", "failed", "both"])
-def test_only_a_plan_with_nothing_runnable_withholds_rollover(
-  db, chat, tasks, blocked_on,
-):
+    _task("child", "completed", parent_id="parent")], True),
+  ([_task("done", "completed")], True),
+], ids=["blocked", "failed", "ready", "running", "ready-to-verify",
+        "completable"])
+def test_rollover_needs_something_a_successor_can_run(db, chat, tasks, automatic):
   from app.goal_plans import goal_terminal_handoff
 
   _add_goal_run(db, chat, plan={"version": 1, "tasks": tasks})
 
   handoff = goal_terminal_handoff(db, chat.id, "goal-run")
-
-  assert handoff.blocked_on == blocked_on
-  assert handoff.automatic_allowed is (not blocked_on)
-
-
-@pytest.mark.asyncio
-async def test_long_blocker_list_stays_short_on_the_card(db, chat, monkeypatch):
-  tasks = [_task(f"gate{i}", "blocked") for i in range(6)]
-  _add_goal_run(db, chat, plan={"version": 1, "tasks": tasks})
-
-  await _end_clean_turn(db, chat, monkeypatch)
-
-  question = db.get(models.Chat, chat.id).messages[-1]["blocks"][-1]
-  text = question["questions"][0]["question"]
-  assert "Gate2" in text and "Gate3" not in text
-  assert "and 3 more" in text
+  assert handoff.automatic_allowed is automatic

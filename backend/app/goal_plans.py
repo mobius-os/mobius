@@ -576,35 +576,21 @@ def goal_handoff_owner_kind(
   return None
 
 
+def _has_runnable_work(plan: dict[str, Any] | None) -> bool:
+  """Whether a successor could start, verify, or complete something."""
+  return plan is None or plan["summary"]["can_complete"] or any(
+    task["ready"] or task["ready_to_verify"] or task.get("status") == "running"
+    for task in plan["tasks"]
+  )
+
+
 @dataclass(frozen=True)
 class GoalTerminalHandoff:
-  """An ownerless unfinished Goal and its plan-owned next move.
-
-  ``blocked_on`` names the blocked or failed tasks when the saved plan has
-  nothing a successor could start; the owner card then says what it is
-  waiting on instead of reporting missing progress.
-  """
+  """An ownerless unfinished Goal and its plan-owned next move."""
 
   goal_id: str
   automatic_allowed: bool
   plan_revision: int
-  blocked_on: tuple[str, ...] = ()
-
-
-def _blocked_on(plan: dict[str, Any] | None) -> tuple[str, ...]:
-  """Titles of the blockers when no plan task can run or be verified."""
-  if plan is None or plan["summary"]["can_complete"]:
-    return ()
-  tasks = plan["tasks"]
-  if any(
-    task["ready"] or task["ready_to_verify"] or task.get("status") == "running"
-    for task in tasks
-  ):
-    return ()
-  return tuple(
-    task["title"] for task in tasks
-    if task.get("status") in {"blocked", "failed"}
-  )
 
 
 def goal_terminal_handoff(
@@ -619,12 +605,10 @@ def goal_terminal_handoff(
 
   A provider turn cannot authorize its own successor merely because the Goal
   remains unfinished. Another turn is automatic only after the durable plan
-  advances beyond the exact revision captured at admission and still has a
-  task a successor could start. Recording a blocker advances the plan but
-  leaves nothing to run, so it hands off to the owner at once rather than
-  spending a turn that can only restate the blocker. Otherwise the terminal
-  path saves an owner question instead of starting an unbounded chain of
-  clean, no-progress turns.
+  advances beyond the exact revision captured at admission and leaves a task
+  a successor could run; recording a blocker alone is not progress. Otherwise
+  the terminal path saves an owner question instead of starting an unbounded
+  chain of clean, no-progress turns.
   """
   if not ending_run_token:
     return None
@@ -646,17 +630,15 @@ def goal_terminal_handoff(
   admitted_revision = run.goal_plan_revision_at_admission
   plan = serialize_plan(db, run, goal) if goal.plan_json is not None else None
   plan_corrupt = goal.plan_json is not None and plan is None
-  blocked_on = _blocked_on(plan)
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
       not plan_corrupt
-      and not blocked_on
+      and _has_runnable_work(plan)
       and isinstance(admitted_revision, int)
       and current_revision > admitted_revision
     ),
     plan_revision=current_revision,
-    blocked_on=blocked_on,
   )
 
 

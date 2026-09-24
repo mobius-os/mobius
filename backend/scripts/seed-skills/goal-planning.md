@@ -55,7 +55,8 @@ Before ending unfinished, create exactly one owning interaction: for an observab
 condition, read `waiting.md` and declare a durable Wait; for owner action, use the
 saved question tool, which keeps the Goal marked **Waiting for you**. Restart uses
 its dedicated card. A button in an app or the Changes panel is not a handoff,
-and a `blocked` task only records the gate.
+and a `blocked` task only records the gate: when only the owner can unblock it
+(an approval, a choice, or a change of scope), put exactly that on the card.
 
 With no gate, keep working. Terminal settlement continues the exact Goal only
 when its saved plan advanced during the admitted turn and still has runnable
