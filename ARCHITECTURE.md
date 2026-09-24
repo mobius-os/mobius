@@ -1746,8 +1746,5 @@ cover it deterministically.
 
 ## See also
 
-- **Proposed platform and app update contract:** `UPDATE-ARCHITECTURE.md`.
-  It is explicitly a target design; this file remains the as-built map until
-  that migration ships.
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

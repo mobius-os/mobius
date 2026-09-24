@@ -19,7 +19,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const actionRef = useRef(null)
   const restoreFocus = useRef(false)
   const level = platformActivationLevel(platform)
-  const restartNeeded = ['server_restart', 'dependency_sync'].includes(level)
+  const restartNeeded = level === 'server_restart'
   const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
   const conflict = platform?.state === 'conflict'
   const available = platform?.available || platform?.newer_updates_available

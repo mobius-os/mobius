@@ -672,19 +672,31 @@ def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
     _git("merge", "--abort", repo=repo, check=False)
 
 
-def _write_reconcile_pre(sha: str) -> None:
-  _atomic_write_text(RECONCILE_PRE_FLAG, sha + "\n")
+def _write_reconcile_pre(pre: str, tip: str | None = None) -> None:
+  """Record the only branch transition boot recovery may reverse."""
+  _atomic_write_text(
+    RECONCILE_PRE_FLAG,
+    json.dumps({"pre": pre, "tip": tip}, separators=(",", ":")) + "\n",
+  )
 
 
 def _clear_reconcile_pre() -> None:
   RECONCILE_PRE_FLAG.unlink(missing_ok=True)
 
 
-def _read_reconcile_pre() -> str | None:
+def _read_reconcile_pre() -> tuple[str | None, str | None]:
   if not RECONCILE_PRE_FLAG.exists():
-    return None
-  sha = RECONCILE_PRE_FLAG.read_text().strip()
-  return sha or None
+    return None, None
+  raw = RECONCILE_PRE_FLAG.read_text().strip()
+  try:
+    value = json.loads(raw)
+  except json.JSONDecodeError:
+    # Legacy markers recorded only PRE. They can clean a tree still at PRE,
+    # but cannot prove ownership of any later branch tip.
+    return raw or None, None
+  if not isinstance(value, dict):
+    return None, None
+  return value.get("pre") or None, value.get("tip") or None
 
 
 def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
@@ -700,14 +712,21 @@ def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
   if not (repo / ".git").exists():
     return "boot_guard[skipped] no_git"
   local = _local_branch(repo)
-  pre = _read_reconcile_pre()
+  pre, tip = _read_reconcile_pre()
   interrupted = _reconcile_in_progress(repo)
   _abort_interrupted(repo)
   if pre and _rev(repo, pre):
-    _reset_hard_to(repo, local, pre)
+    current = _rev(repo, local)
+    restored = False
+    if current == tip:
+      restored = _restore_candidate(repo, local, tip, pre)
+    elif current == pre:
+      _reset_hard_to(repo, local, pre)
+      restored = True
     _clear_reconcile_pre()
     _restore_working_edits(repo, local)
-    return f"boot_guard[reset] pre={_short(pre)}"
+    state = "reset" if restored else "preserved"
+    return f"boot_guard[{state}] pre={_short(pre)}"
   if interrupted:
     _git("checkout", "-q", local, repo=repo, check=False)
     _git("reset", "--hard", local, repo=repo, check=False)
@@ -771,9 +790,14 @@ def _activate_candidate(repo: Path, local: str, pre_sha: str, tip: str) -> None:
   The update refuses if another writer moved the local branch after
   ``pre_sha``; only after that succeeds does the checked-out tree follow.
   """
+  _write_reconcile_pre(pre_sha, tip)
   _git("update-ref", f"refs/heads/{local}", tip, pre_sha, repo=repo)
-  _git("checkout", "-q", local, repo=repo, check=False)
-  _git("reset", "--hard", tip, repo=repo)
+  try:
+    _git("checkout", "-q", local, repo=repo)
+    _git("reset", "--hard", tip, repo=repo)
+  except Exception:
+    _restore_candidate(repo, local, tip, pre_sha)
+    raise
 
 
 def _restore_working_edits(repo: Path, local: str) -> bool:
@@ -810,6 +834,24 @@ def _reset_hard_to(repo: Path, local: str, sha: str) -> None:
   updating the working tree. Used to serve OLD after a conflict/rollback."""
   _git("checkout", "-q", local, repo=repo, check=False)
   _git("reset", "--hard", sha, repo=repo, check=False)
+
+
+def _restore_candidate(repo: Path, local: str, tip: str, pre: str) -> bool:
+  """Roll back only the exact candidate this update published.
+
+  A failed compare-and-swap means another writer owns the branch now. Never
+  reset that writer's commit or working tree.
+  """
+  moved = _git(
+    "update-ref", f"refs/heads/{local}", pre, tip,
+    repo=repo, check=False,
+  )
+  if moved.returncode != 0:
+    return False
+  _git("checkout", "-q", local, repo=repo, check=False)
+  if _rev(repo, local) == pre:
+    _git("reset", "--hard", pre, repo=repo, check=False)
+  return True
 
 
 def _set_upstream(repo: Path, target: str) -> None:
@@ -1931,7 +1973,14 @@ def _roll_back_failed_frontend_build(
   """
   _abort_interrupted(repo)
   if res.pre_sha:
-    _reset_hard_to(repo, _local_branch(repo), res.pre_sha)
+    if not _restore_candidate(
+      repo, _local_branch(repo), res.new_sha or "", res.pre_sha,
+    ):
+      return replace(
+        res,
+        status="error",
+        error="rollback_ref_changed: a newer writer owns the served branch",
+      )
   if previous_upstream_sha:
     _set_upstream(repo, previous_upstream_sha)
   else:
@@ -2114,7 +2163,8 @@ def _reconcile_pass(
     )
   except Exception as exc:  # unexpected git failure — never serve a half-tree
     _abort_interrupted(repo)
-    _reset_hard_to(repo, local, pre)
+    if _rev(repo, local) == pre:
+      _reset_hard_to(repo, local, pre)
     # Nothing here is actionable by a resolver, and any earlier flag belonged
     # to an attempt this pass already superseded: leave the served tree at PRE
     # with no stale conflict/rollback state to mislead the next status read.
@@ -2126,10 +2176,15 @@ def _reconcile_pass(
 
 
 def _roll_back_update(
-  repo: Path, local: str, pre: str, target: str, message: str, error: str,
+  repo: Path, local: str, pre: str, tip: str, target: str,
+  message: str, error: str,
 ) -> ReconcileResult:
   """Serve the previous source after a rejected candidate."""
-  _reset_hard_to(repo, local, pre)
+  if not _restore_candidate(repo, local, tip, pre):
+    return ReconcileResult.unchanged(
+      "error", pre, target,
+      error="rollback_ref_changed: a newer writer owns the served branch",
+    )
   _write_rolled_back_flag(target, message)
   CONFLICT_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
@@ -2177,7 +2232,7 @@ def _finalize_update(
     ok, err = _import_probe(repo)
     if not ok:
       return _roll_back_update(
-        repo, local, pre, target, err, err,
+        repo, local, pre, tip, target, err, err,
       )
 
   # Success: main now carries the update plus all local edits. Advance the

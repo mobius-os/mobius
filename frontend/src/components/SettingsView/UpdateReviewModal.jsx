@@ -95,7 +95,7 @@ export default function UpdateReviewModal({
   const nothingToApply = !!preview && actionable === false && !hasResult
   const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed system update…'
     : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
-  const needsRestart = ['server_restart', 'dependency_sync'].includes(activation?.level)
+  const needsRestart = activation?.level === 'server_restart'
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
