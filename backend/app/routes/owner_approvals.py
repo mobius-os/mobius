@@ -217,11 +217,9 @@ async def save_owner_question(
   question_id = str(uuid5(NAMESPACE_URL, json.dumps(
     [chat_id, principal.run_id, identity_payload if identity_payload is not None else payload], sort_keys=True,
   )))
-  # Every saved option gets a stable identity so every answer path (the owner's
-  # tap, another authenticated agent, a quiet close) names the exact choice
-  # instead of inferring it from label text. A platform-derived identity, such
-  # as Restart's action-bound option, is kept. Already-saved cards are never
-  # rewritten; only new cards are normalized here.
+  # Every answer path (owner tap, another agent, a quiet close) names an exact
+  # saved option rather than inferring it from label text. Platform-derived
+  # identities such as Restart's action-bound option are kept.
   payload = deepcopy(payload)
   for question in payload.get("questions", []):
     for index, option in enumerate(question.get("options", [])):

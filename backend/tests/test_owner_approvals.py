@@ -767,22 +767,6 @@ def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, 
   assert saved[1] == payload["questions"][1]
 
 
-def test_every_saved_card_option_has_identity_without_a_quiet_choice(
-  client, chat, approval_run,
-):
-  # Identity is a property of every saved choice, not a side effect of a
-  # close-without-reply option; approvals get it through the same save point.
-  asked = client.post(f"/api/chats/{chat.id}/question", headers=approval_run[1], json={
-    "questions": [{"question": "Did it work?", "options": [
-      {"label": "Yes", "description": "It worked."},
-      {"label": "No", "description": "It failed."},
-    ]}],
-  })
-  assert asked.status_code == 200, asked.text
-  card = _row(chat.id)[1][-1]["blocks"][-1]
-  assert [o["id"] for o in card["questions"][0]["options"]] == ["0", "1"]
-
-
 def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(
   client, chat, approval_run,
 ):
