@@ -316,26 +316,41 @@ def test_oversized_candidates_do_not_starve_later_valid_file(
   assert gf._inbox_names(data_dir, "chat") == ["z-valid.pdf"]
 
 
-def test_rejected_capture_keeps_inbox_and_removes_frozen_copy(
+def test_full_chat_does_not_recopy_queued_files_on_later_turns(
   db, chat, monkeypatch,
 ):
   settings = get_settings()
   inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
   (inbox / "report.pdf").write_bytes(b"report")
-  monkeypatch.setattr(gf, "MAX_RECORDED_ROWS_PER_CHAT", 0)
+  _write_row(db, chat, name="existing.pdf", path="existing.pdf")
+  monkeypatch.setattr(gf, "MAX_RECORDED_ROWS_PER_CHAT", 1)
+  freeze_calls = 0
+  original_freeze = gf._freeze_file
 
-  asyncio.run(gf.publish_inbox_files(
-    _sink(chat), data_dir=settings.data_dir, chat_id=chat.id,
-  ))
+  def counted_freeze(*args, **kwargs):
+    nonlocal freeze_calls
+    freeze_calls += 1
+    return original_freeze(*args, **kwargs)
+
+  monkeypatch.setattr(gf, "_freeze_file", counted_freeze)
+
+  for _ in range(2):
+    asyncio.run(gf.publish_inbox_files(
+      _sink(chat), data_dir=settings.data_dir, chat_id=chat.id,
+    ))
 
   assert (inbox / "report.pdf").read_bytes() == b"report"
   stored = gf._chat_root(settings.data_dir, chat.id) / "files"
   assert not stored.exists() or list(stored.iterdir()) == []
-  assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 0
+  assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 1
+  assert freeze_calls == 0
 
 
 def test_publish_failure_keeps_inbox_and_frozen_copy(chat):
   class FailingSink:
+    async def generated_file_capacity(self):
+      return 1
+
     async def publish_generated_file(self, _event):
       raise RuntimeError("writer unavailable")
 
@@ -355,6 +370,9 @@ def test_publish_failure_keeps_inbox_and_frozen_copy(chat):
 
 def test_uncertain_publish_keeps_inbox_and_frozen_copy(chat):
   class UncertainSink:
+    async def generated_file_capacity(self):
+      return 1
+
     async def publish_generated_file(self, _event):
       return gf.PUBLICATION_UNCERTAIN
 
@@ -485,9 +503,9 @@ def test_generated_file_timeout_preserves_late_writer_commit(
   sink.assistant_blocks.append({"type": "text", "content": "Done"})
 
   async def capacity_available():
-    return True
+    return 1
 
-  sink.can_publish_generated_files = capacity_available
+  sink.generated_file_capacity = capacity_available
 
   async def scenario():
     monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.01)

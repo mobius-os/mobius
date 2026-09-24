@@ -149,6 +149,9 @@ async def _run_turn(
 async def test_claude_collects_fast_generated_file_at_turn_end(monkeypatch, tmp_path):
   """Turn-owned inbox capture does not depend on provider tool-hook timing."""
   class _GeneratedFileBus(_ChatBus):
+    async def generated_file_capacity(self):
+      return 1
+
     async def publish_generated_file(self, event):
       self.events.append(event)
       return event["name"]

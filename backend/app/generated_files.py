@@ -294,10 +294,10 @@ def open_stored_file(
 
 async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
   """Freeze, persist, and consume the next batch of completed deliverables."""
-  capacity_check = getattr(sink, "can_publish_generated_files", None)
-  if callable(capacity_check) and not await capacity_check():
+  capacity = await sink.generated_file_capacity()
+  if capacity <= 0:
     return
-  names = await asyncio.to_thread(_inbox_names, data_dir, chat_id)
+  names = (await asyncio.to_thread(_inbox_names, data_dir, chat_id))[:capacity]
   for name in names:
     captured = await asyncio.to_thread(_freeze_file, data_dir, chat_id, name)
     if captured is None:

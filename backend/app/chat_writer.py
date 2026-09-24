@@ -458,7 +458,7 @@ class RecordGeneratedFile(_Command):
 
 @dataclass
 class CheckGeneratedFileCapacity(_Command):
-  """Read the serialized per-chat row cap before copying another batch."""
+  """Return the serialized number of file rows still available to one chat."""
 
   chat_id: str = ""
 
@@ -2013,9 +2013,10 @@ class ChatWriterActor:
     if isinstance(cmd, CheckGeneratedFileCapacity):
       from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
       from app.models import GeneratedFile
-      return db.query(GeneratedFile).filter(
+      recorded = db.query(GeneratedFile.name).filter(
         GeneratedFile.chat_id == cmd.chat_id,
-      ).count() < MAX_RECORDED_ROWS_PER_CHAT
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).count()
+      return max(0, MAX_RECORDED_ROWS_PER_CHAT - recorded)
     if isinstance(cmd, ResolveGeneratedFilePublication):
       from app.models import GeneratedFile
       row = db.query(GeneratedFile).filter(

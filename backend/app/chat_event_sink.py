@@ -981,12 +981,12 @@ class ChatEventSink:
           )
       self._uncertain_generated_files.pop(path, None)
 
-  async def can_publish_generated_files(self) -> bool:
-    """Return whether another file can fit without performing a disk copy."""
+  async def generated_file_capacity(self) -> int:
+    """Return how many files can fit before performing any disk copies."""
     if not self.chat_id:
-      return False
+      return 0
     try:
-      return bool(await _await_ack(get_writer().submit(
+      return int(await _await_ack(get_writer().submit(
         CheckGeneratedFileCapacity(chat_id=self.chat_id),
       )))
     except Exception:
@@ -994,7 +994,7 @@ class ChatEventSink:
         "generated-file capacity check failed chat_id=%s",
         self.chat_id, exc_info=True,
       )
-      return False
+      return 0
 
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
