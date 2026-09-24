@@ -1,9 +1,9 @@
 """Provider-plan usage snapshots for Settings and the chat brain.
 
-Reads are the common case. The one mutation here is redeeming a banked Codex
-rate-limit reset, which rides the same official Codex app-server client the
-usage read uses (`account/rateLimitResetCredit/consume`), never a hand-rolled
-HTTP call to an undocumented backend.
+Reads are the common case. Mutations are deliberately narrow: Codex reset
+redemption rides its official app-server client, while Claude's guarded
+extra-usage and limit-reset controls mirror private routes used by Claude Code.
+Every irreversible reset claim is revalidated against a fresh provider offer.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import asyncio
 import copy
 import concurrent.futures as _cf
 import functools
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -27,10 +29,22 @@ import httpx
 
 from app import providers
 from app.runtime_identity import broker_request
+from app.storage_io import atomic_write
 
 log = logging.getLogger(__name__)
 
-_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_EXTRA_USAGE_URL = (
+  "https://api.anthropic.com/api/oauth/organizations/"
+  "{organization_uuid}/overage_spend_limit"
+)
+_CLAUDE_RESET_USAGE_URL = (
+  "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+)
+_CLAUDE_RESET_URL = (
+  "https://api.anthropic.com/api/organizations/"
+  "{organization_uuid}/reset_rate_limits"
+)
+_CLAUDE_RESET_PROGRAM = "cedar_ember"
 _PROVIDER_TIMEOUT_SECONDS = 12.0
 _PROVIDER_USAGE_FRESH_SECONDS = 2.0
 _PROVIDER_USAGE_STALE_SECONDS = 10 * 60.0
@@ -56,6 +70,11 @@ class _CachedProviderUsage:
 
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
 _provider_usage_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_claude_reset_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+class ClaudeResetOfferChanged(RuntimeError):
+  """The confirmed Claude reset no longer matches the provider's offer."""
 
 _CLAUDE_WINDOW_LABELS = {
   "five_hour": "5-hour",
@@ -138,6 +157,11 @@ def _reset_iso(raw: Any) -> str | None:
   return parsed.astimezone(UTC).isoformat()
 
 
+def _reset_expired(raw: Any) -> bool:
+  expiry = _reset_iso(raw)
+  return expiry is not None and datetime.fromisoformat(expiry) <= datetime.now(UTC)
+
+
 def _humanize_window_id(window_id: str) -> str:
   return window_id.replace("_", " ").strip().title()
 
@@ -203,6 +227,7 @@ def normalize_claude_usage(
     "enabled": extra_enabled,
     "available": extra_available,
     "used_percent": extra_used,
+    "manageable": isinstance(raw_extra.get("is_enabled"), bool),
   }
   return {
     "state": "ready" if windows else "unavailable",
@@ -210,6 +235,77 @@ def normalize_claude_usage(
     "windows": windows,
     "credit_balance": None,
     "extra_usage": extra_usage,
+    "reset_credits": _claude_reset_credits(source.get("cedar_ember")),
+  }
+
+
+def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
+  """Normalize Claude Code's private ``cedar_ember`` reset offer.
+
+  The provider chooses the next grant and reports whether it is usable now.
+  Möbius never guesses eligibility from the visible usage percentages: only a
+  currently selected, provider-marked usable grant becomes redeemable.
+  """
+  if not isinstance(summary, dict) or not isinstance(summary.get("eligible"), bool):
+    return None
+  raw_grants = summary.get("grants")
+  credits_complete = isinstance(raw_grants, list)
+  raw_grants = raw_grants if credits_complete else []
+  grants: list[dict[str, Any]] = []
+  total = 0
+  for raw in raw_grants:
+    if not isinstance(raw, dict):
+      credits_complete = False
+      continue
+    grant_id = raw.get("id")
+    resets_left = raw.get("resets_left")
+    if (
+      not isinstance(grant_id, str)
+      or not grant_id
+      or isinstance(resets_left, bool)
+      or not isinstance(resets_left, int)
+      or resets_left < 0
+    ):
+      credits_complete = False
+      continue
+    total += resets_left
+    grants.append({
+      "id": grant_id,
+      "title": raw.get("label") if isinstance(raw.get("label"), str) else None,
+      "resets_left": resets_left,
+      "expires_at": _reset_iso(raw.get("ends_at")),
+      "usable_now": raw.get("usable_now") is True,
+      "use_requires_limit": raw.get("use_requires_limit") is not False,
+      "paused": raw.get("paused") is True,
+      "clears": [
+        value for value in raw.get("clears", [])
+        if isinstance(value, str)
+      ] if isinstance(raw.get("clears"), list) else [],
+    })
+  next_id = summary.get("next_grant_id")
+  selected = next((grant for grant in grants if grant["id"] == next_id), None)
+  redeemable = bool(
+    summary.get("eligible") is True
+    and selected is not None
+    and selected["resets_left"] > 0
+    and selected["usable_now"] is True
+    and selected["paused"] is False
+    and not _reset_expired(selected["expires_at"])
+  )
+  return {
+    "available_count": total,
+    "credits": grants,
+    "credits_complete": credits_complete,
+    "eligible": summary.get("eligible") is True,
+    "ineligible_reason": (
+      summary.get("ineligible_reason")
+      if isinstance(summary.get("ineligible_reason"), str) else None
+    ),
+    "at_limit": summary.get("at_limit") is True,
+    "next_credit_id": selected["id"] if selected is not None else None,
+    "redeemable": redeemable,
+    "weekly_resets_at": _reset_iso(summary.get("weekly_resets_at")),
+    "cooldown_until": _reset_iso(summary.get("cooldown_until")),
   }
 
 
@@ -435,12 +531,358 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
+    response = await client.get(_CLAUDE_RESET_USAGE_URL, headers=headers)
     response.raise_for_status()
     return normalize_claude_usage(
       response.json(),
       subscription_type=subscription_type,
     )
+
+
+async def set_claude_extra_usage(
+  data_dir: str,
+  *,
+  enabled: bool,
+) -> dict[str, Any]:
+  """Toggle an already-provisioned Claude extra-usage allowance.
+
+  Claude Code 2.1.273 uses this exact route for its reversible overage
+  switch. First-time setup is deliberately excluded because it also chooses
+  a spend limit and payment method, which remain provider-owned.
+  """
+  token = await providers.claude_access_token(data_dir)
+  organization_uuid = providers.claude_organization_uuid(data_dir)
+  headers = {
+    "Authorization": f"Bearer {token}",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+    "Content-Type": "application/json",
+  }
+  async with httpx.AsyncClient(timeout=12.0) as client:
+    response = await client.put(
+      _CLAUDE_EXTRA_USAGE_URL.format(
+        organization_uuid=organization_uuid,
+      ),
+      headers=headers,
+      json={"is_enabled": enabled},
+    )
+    response.raise_for_status()
+  _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+  return await read_provider_usage("claude", data_dir)
+
+
+def _claude_reset_intent_path(data_dir: str, organization_uuid: str) -> Path:
+  account = hashlib.sha256(organization_uuid.encode("utf-8")).hexdigest()[:32]
+  return (
+    Path(data_dir) / ".provider-usage" / "claude-reset-intents"
+    / f"{account}.json"
+  )
+
+
+def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
+  try:
+    source = json.loads(path.read_text(encoding="utf-8"))
+  except FileNotFoundError:
+    return None
+  except (OSError, ValueError):
+    return {"invalid": True}
+  if not isinstance(source, dict) or source.get("version") != 1:
+    return {"invalid": True}
+  request_id = source.get("request_id")
+  credit_id = source.get("credit_id")
+  resets_left_before = source.get("resets_left_before")
+  last_result = source.get("last_result")
+  if (
+    not isinstance(request_id, str)
+    or not request_id
+    or not isinstance(credit_id, str)
+    or not credit_id
+    or isinstance(resets_left_before, bool)
+    or not isinstance(resets_left_before, int)
+    or resets_left_before <= 0
+    or (
+      last_result is not None
+      and (
+        not isinstance(last_result, dict)
+        or last_result.get("outcome") not in {"reset", "already_used", "cooldown"}
+      )
+    )
+  ):
+    return {"invalid": True}
+  return {
+    "version": 1,
+    "request_id": request_id,
+    "credit_id": credit_id,
+    "resets_left_before": resets_left_before,
+    "last_result": last_result,
+  }
+
+
+def _write_claude_reset_intent(
+  path: Path,
+  *,
+  request_id: str,
+  credit_id: str,
+  resets_left_before: int,
+  last_result: dict[str, Any] | None = None,
+) -> None:
+  atomic_write(
+    path,
+    json.dumps({
+      "version": 1,
+      "request_id": request_id,
+      "credit_id": credit_id,
+      "resets_left_before": resets_left_before,
+      "last_result": last_result,
+    }, sort_keys=True) + "\n",
+    mode=0o600,
+  )
+
+
+def _clear_claude_reset_intent(path: Path) -> None:
+  with suppress(FileNotFoundError):
+    path.unlink()
+
+
+def _claude_reset_offer_superseded(snapshot: Any, credit_id: str) -> bool:
+  """Return whether a fresh provider snapshot retired the pending offer."""
+  if not _claude_reset_offers_complete(snapshot):
+    return False
+  summary = snapshot["reset_credits"]
+  credits = summary["credits"]
+  next_credit_id = summary.get("next_credit_id")
+  if isinstance(next_credit_id, str) and next_credit_id != credit_id:
+    return True
+  credit = next((
+    item for item in credits
+    if isinstance(item, dict) and item.get("id") == credit_id
+  ), None)
+  if credit is None:
+    return True
+  return _reset_expired(credit.get("expires_at"))
+
+
+def _claude_reset_offers_complete(snapshot: Any) -> bool:
+  """Return whether absence from this snapshot is provider evidence."""
+  if not isinstance(snapshot, dict):
+    return False
+  summary = snapshot.get("reset_credits")
+  if not isinstance(summary, dict):
+    return False
+  credits = summary.get("credits")
+  if not isinstance(credits, list):
+    return False
+  # Hand-built internal snapshots predate this marker; a concrete list was
+  # already their completeness witness. Normalized provider data marks a
+  # malformed or missing grants field explicitly instead of coercing it into
+  # an authoritative empty catalogue.
+  return summary.get("credits_complete", True) is True
+
+
+def _claude_reset_offer(
+  snapshot: Any,
+  credit_id: str,
+  *,
+  require_redeemable: bool,
+) -> int | None:
+  if not isinstance(snapshot, dict):
+    return None
+  summary = snapshot.get("reset_credits")
+  if not isinstance(summary, dict):
+    return None
+  if require_redeemable and (
+    summary.get("redeemable") is not True
+    or summary.get("next_credit_id") != credit_id
+  ):
+    return None
+  credits = summary.get("credits")
+  if not isinstance(credits, list):
+    return None
+  for credit in credits:
+    if not isinstance(credit, dict) or credit.get("id") != credit_id:
+      continue
+    if require_redeemable and _reset_expired(credit.get("expires_at")):
+      return None
+    resets_left = credit.get("resets_left")
+    if (
+      not isinstance(resets_left, bool)
+      and isinstance(resets_left, int)
+      and resets_left >= 0
+    ):
+      return resets_left
+  return None
+
+
+def _unknown_claude_reset() -> dict[str, Any]:
+  return {
+    "outcome": "unknown",
+    "reason": "pending_reconciliation",
+    "resets_left": None,
+    "cleared": [],
+    "weekly_resets_at": None,
+    "pending": True,
+  }
+
+
+def _claude_reset_result(payload: Any) -> dict[str, Any] | None:
+  source = payload if isinstance(payload, dict) else {}
+  outcome = source.get("result")
+  allowed = {
+    "reset", "already_used", "not_limited", "cooldown", "ineligible",
+    "unavailable",
+  }
+  if outcome not in allowed:
+    return None
+  return {
+    "outcome": outcome,
+    "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
+    "resets_left": (
+      source.get("resets_left")
+      if (
+        not isinstance(source.get("resets_left"), bool)
+        and isinstance(source.get("resets_left"), int)
+      ) else None
+    ),
+    "cleared": [
+      value for value in source.get("cleared", []) if isinstance(value, str)
+    ] if isinstance(source.get("cleared"), list) else [],
+    "weekly_resets_at": _reset_iso(source.get("weekly_resets_at")),
+  }
+
+
+async def redeem_claude_reset(
+  data_dir: str,
+  *,
+  credit_id: str,
+  expected_resets_left: int,
+) -> dict[str, Any]:
+  """Validate and redeem one Claude reset as a durable account operation.
+
+  The intent is persisted before the private provider request. An ambiguous
+  response therefore leaves one stable request id to reconcile or replay,
+  rather than allowing a retry to become a second irreversible claim.
+  """
+  organization_uuid = providers.claude_organization_uuid(data_dir)
+  account_key = (str(Path(data_dir).resolve()), organization_uuid)
+  intent_path = _claude_reset_intent_path(data_dir, organization_uuid)
+  lock = _claude_reset_locks.setdefault(account_key, asyncio.Lock())
+  async with lock:
+    intent = _load_claude_reset_intent(intent_path)
+    if intent is not None and intent.get("invalid") is True:
+      return _unknown_claude_reset()
+
+    current = await read_provider_usage("claude", data_dir, force_refresh=True)
+    replaying = intent is not None
+    if intent is not None:
+      if not _claude_reset_offers_complete(current):
+        return intent["last_result"] or _unknown_claude_reset()
+      pending_credit_id = intent["credit_id"]
+      before = intent["resets_left_before"]
+      now = _claude_reset_offer(
+        current, pending_credit_id, require_redeemable=False,
+      )
+      last_result = intent["last_result"]
+      if last_result is not None and now is not None and now < before:
+        _clear_claude_reset_intent(intent_path)
+        return {**last_result, "reconciled": True}
+      if last_result is None and now is not None and now < before:
+        _clear_claude_reset_intent(intent_path)
+        return {
+          "outcome": "reset",
+          "reason": "reconciled_after_interruption",
+          "resets_left": now,
+          "cleared": [],
+          "weekly_resets_at": None,
+          "reconciled": True,
+        }
+      if _claude_reset_offer_superseded(current, pending_credit_id):
+        _clear_claude_reset_intent(intent_path)
+        intent = None
+        replaying = False
+      elif credit_id != pending_credit_id:
+        return _unknown_claude_reset()
+      elif last_result is not None:
+        return last_result
+      else:
+        request_id = intent["request_id"]
+        claim_credit_id = pending_credit_id
+
+    if intent is None:
+      resets_left = _claude_reset_offer(
+        current, credit_id, require_redeemable=True,
+      )
+      if resets_left is None or resets_left != expected_resets_left:
+        raise ClaudeResetOfferChanged(
+          "Claude's reset offer changed before it could be claimed"
+        )
+      token = await providers.claude_access_token(data_dir)
+      request_id = str(uuid.uuid4())
+      claim_credit_id = credit_id
+      _write_claude_reset_intent(
+        intent_path,
+        request_id=request_id,
+        credit_id=claim_credit_id,
+        resets_left_before=resets_left,
+      )
+
+    # Token retrieval is side-effect free. Do it after a pending intent has
+    # been selected so retries can never mint a replacement request id.
+    if replaying:
+      token = await providers.claude_access_token(data_dir)
+    headers = {
+      "Authorization": f"Bearer {token}",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+      "Content-Type": "application/json",
+    }
+    try:
+      async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.post(
+          _CLAUDE_RESET_URL.format(organization_uuid=organization_uuid),
+          headers=headers,
+          json={
+            "program": _CLAUDE_RESET_PROGRAM,
+            "grant_id": claim_credit_id,
+            "request_id": request_id,
+          },
+        )
+        response.raise_for_status()
+        result = _claude_reset_result(response.json())
+    except httpx.HTTPStatusError:
+      # A response status after a submitted claim is not proof that Claude
+      # spent nothing. In particular, a replay of a committed request may be
+      # rejected while the usage snapshot still shows the old count. Keep the
+      # same request id until provider usage proves whether it was consumed.
+      return _unknown_claude_reset()
+    except (httpx.RequestError, ValueError):
+      return _unknown_claude_reset()
+
+    if result is None:
+      return _unknown_claude_reset()
+    outcome = result["outcome"]
+    if outcome == "reset" or (
+      replaying and outcome in {"already_used", "cooldown"}
+    ):
+      # A confirmed or replay-confirmed claim can precede Claude's usage
+      # snapshot. Keep its receipt until the provider advances the grant or
+      # count; elapsed time alone can never authorize a second spend.
+      _write_claude_reset_intent(
+        intent_path,
+        request_id=request_id,
+        credit_id=claim_credit_id,
+        resets_left_before=(
+          intent["resets_left_before"] if intent is not None else resets_left
+        ),
+        last_result=result,
+      )
+    elif outcome == "unavailable":
+      return _unknown_claude_reset()
+    else:
+      # These outcomes are definitive no-ops: no reset was spent by this
+      # request, so the same offer may be evaluated again from fresh state.
+      _clear_claude_reset_intent(intent_path)
+    _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+    return result
 
 
 def _codex_plan_type(account_response: Any) -> Any:
@@ -732,6 +1174,8 @@ def configured_plan_labels(data_dir: str) -> dict[str, str]:
 async def read_provider_usage(
   provider_id: str,
   data_dir: str,
+  *,
+  force_refresh: bool = False,
 ) -> dict[str, Any]:
   """Return one coalesced provider usage observation with bounded fallback.
 
@@ -741,14 +1185,18 @@ async def read_provider_usage(
   past either the stale bound or a provider reset.
   """
   key = _cache_key(provider_id, data_dir)
-  cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+  cached = None if force_refresh else _cached_usage(
+    key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
+  )
   if cached is not None:
     return cached
 
   lock = _provider_usage_locks.setdefault(key, asyncio.Lock())
   async with lock:
     # Another request may have refreshed while this one waited.
-    cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+    cached = None if force_refresh else _cached_usage(
+      key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
+    )
     if cached is not None:
       return cached
 
@@ -772,7 +1220,8 @@ async def read_provider_usage(
     prior = _provider_usage_cache.get(key)
     now = time.monotonic()
     if (
-      prior is not None
+      not force_refresh
+      and prior is not None
       and prior.snapshot.get("state") == "ready"
       and now - prior.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
       and _snapshot_resets_are_current(prior.snapshot)

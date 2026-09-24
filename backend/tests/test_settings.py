@@ -52,6 +52,7 @@ def test_boot_removes_stale_global_auto_resume_setting():
   with TestClient(app):
     pass
 
+  assert app.state.runtime_supervisors is None
   assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
 
 
@@ -443,7 +444,9 @@ def test_set_background_agents_persists_only_current_provider_rows(client, auth)
   assert merged["skills_enabled"] is True
   assert merged["background_agents"] == {"providers": rows}
   resolved = client.get("/api/settings", headers=auth).json()["background_agents"]
-  assert resolved["providers"] == rows
+  # Saved choices survive removal, but a connector without an accepted app
+  # declaration is not offered to background agents.
+  assert resolved["providers"] == rows[:2]
   assert resolved["primary"]["provider"] == "claude"
   assert resolved["fallback"]["provider"] == "codex"
 
@@ -721,26 +724,20 @@ def test_model_registry_returns_known_models_on_discovery_failure(
     lambda _data_dir: "Möbius account is not linked",
   )
 
-  async def discovery_fails(_provider_id, _data_dir):
+  async def discovery_fails(_data_dir):
     raise RuntimeError("offline")
 
-  monkeypatch.setattr(providers, "_fetch_provider_models", discovery_fails)
+  for provider in providers.PROVIDERS.values():
+    monkeypatch.setattr(provider, "fetch_models", discovery_fails)
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
   body = res.json()
-  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  assert set(body["providers"]) == {"claude", "codex"}
   claude_ids = [m["id"] for m in body["providers"]["claude"]]
   assert claude_ids == KNOWN_MODELS["claude"]
   codex_ids = [m["id"] for m in body["providers"]["codex"]]
   assert codex_ids == KNOWN_MODELS["codex"]
-  mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
-  assert mobius_ids == KNOWN_MODELS["mobius"]
-  assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
   assert by_id["claude-opus-4-8"]["label"] == "claude-opus-4-8"
@@ -1178,3 +1175,96 @@ def test_redeem_reset_requires_explicit_confirmation(client, auth, monkeypatch):
   )
   assert r2.status_code == 400
   assert called is False
+
+
+def test_claude_reset_rechecks_exact_offer_before_redeeming(
+  client, auth, monkeypatch,
+):
+  from app.routes import settings as settings_route
+
+  calls = []
+
+  async def redeem(_data_dir, *, credit_id, expected_resets_left):
+    calls.append(("redeem", credit_id, expected_resets_left))
+    if credit_id == "grant-old":
+      raise settings_route.provider_usage.ClaudeResetOfferChanged()
+    return {"outcome": "reset"}
+
+  monkeypatch.setattr(settings_route.provider_usage, "redeem_claude_reset", redeem)
+
+  unconfirmed = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-next", "expected_resets_left": 2},
+    headers=auth,
+  )
+  stale = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-old", "expected_resets_left": 2, "confirm": True},
+    headers=auth,
+  )
+  accepted = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-next", "expected_resets_left": 2, "confirm": True},
+    headers=auth,
+  )
+
+  assert unconfirmed.status_code == 400
+  assert stale.status_code == 409
+  assert accepted.status_code == 200
+  assert accepted.json() == {"outcome": "reset"}
+  assert calls == [
+    ("redeem", "grant-old", 2),
+    ("redeem", "grant-next", 2),
+  ]
+
+def test_claude_extra_usage_requires_confirmation_and_current_state(
+  client, auth, monkeypatch,
+):
+  from app.routes import settings as settings_route
+
+  calls = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    calls.append(("read", force_refresh))
+    return {
+      "state": "ready",
+      "extra_usage": {
+        "enabled": False,
+        "manageable": True,
+      },
+    }
+
+  async def update(_data_dir, *, enabled):
+    calls.append(enabled)
+    return {
+      "state": "ready",
+      "extra_usage": {
+        "enabled": enabled,
+        "manageable": True,
+      },
+    }
+
+  monkeypatch.setattr(settings_route.provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(settings_route.provider_usage, "set_claude_extra_usage", update)
+
+  unconfirmed = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": False},
+    headers=auth,
+  )
+  stale = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": True, "confirm": True},
+    headers=auth,
+  )
+  changed = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": False, "confirm": True},
+    headers=auth,
+  )
+
+  assert unconfirmed.status_code == 400
+  assert stale.status_code == 409
+  assert changed.status_code == 200
+  assert changed.json()["extra_usage"]["enabled"] is True
+  assert calls == [("read", True), ("read", True), True]

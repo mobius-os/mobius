@@ -40,6 +40,65 @@ def test_installer_applies_only_bundle_target_through_shared_owner(monkeypatch, 
   assert calls[2][1]["target_sha"] == target
   assert calls[2][1]["current_sha"] == "b" * 40
   assert calls[2][1]["plan_id"] == "review"
+  assert calls[2][1]["allow_image_activation"] is True
+
+
+def test_installer_blocks_python_dependency_source_before_apply(monkeypatch):
+  target = "a" * 40
+  monkeypatch.setattr(
+    "sys.argv",
+    [str(SCRIPT), "--bundle", "/tmp/image.bundle", "--target", target],
+  )
+  monkeypatch.setattr(platform_update, "_reconcile_flock", nullcontext)
+  monkeypatch.setattr(platform_update, "_git", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(
+    platform_update,
+    "platform_update_preview",
+    lambda *_args, **_kwargs: {
+      "plan_id": "review",
+      "current_sha": "b" * 40,
+      "incoming_activation": {"reasons": [{"code": "python_dependencies"}]},
+    },
+  )
+
+  async def forbidden(*_args, **_kwargs):
+    pytest.fail("Python-dependent source must not be applied in the old image")
+
+  monkeypatch.setattr(platform_update, "apply_platform_update", forbidden)
+
+  assert load_installer().main() == 2
+
+
+def test_installer_does_not_treat_old_python_drift_as_an_incoming_change(
+  monkeypatch,
+):
+  target = "a" * 40
+  monkeypatch.setattr(
+    "sys.argv",
+    [str(SCRIPT), "--bundle", "/tmp/image.bundle", "--target", target],
+  )
+  monkeypatch.setattr(platform_update, "_reconcile_flock", nullcontext)
+  monkeypatch.setattr(platform_update, "_git", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(
+    platform_update,
+    "platform_update_preview",
+    lambda *_args, **_kwargs: {
+      "plan_id": "review",
+      "current_sha": "b" * 40,
+      "activation": {"reasons": [{"code": "python_dependencies"}]},
+      "incoming_activation": {"reasons": []},
+    },
+  )
+
+  async def apply(_db, **_plan):
+    return {"state": "activation_needed"}
+
+  monkeypatch.setattr(platform_update, "apply_platform_update", apply)
+  monkeypatch.setattr(
+    database, "SessionLocal", lambda: nullcontext(SimpleNamespace()),
+  )
+
+  assert load_installer().main() == 0
 
 
 def test_host_installs_preflighted_image_source_before_cutover_without_moving_fetch():

@@ -136,14 +136,16 @@ Review the exact changed paths and use the smallest matching action:
 
 1. List the exact paths changed for the current task and whether a later owner
    action has already activated them.
-2. Map every path through the table above. If none still requires a server
-   restart, do not offer one. Never substitute a restart for hot reload, app
-   apply, shell rebuild, live dependency install, or container rebuild.
+2. Map every path through the table above. Do not propose an unnecessary
+   restart for routine activation or substitute one for hot reload, app apply,
+   shell rebuild, live dependency install, or container rebuild. An explicit
+   partner request may still create a Restart card without pending changes.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
-4. In the question, name the exact change that remains inactive and why only a
-   server restart can activate it. For a constitution-only change, default to
-   leaving it pending unless the partner needs the rule in new sessions now.
+4. For activation, name the exact change that remains inactive and why only a
+   restart can activate it. If no change is pending, say so. For a
+   constitution-only change, default to leaving it pending unless the partner
+   needs the rule in new sessions now.
 
 ---
 
@@ -158,8 +160,10 @@ never be forwarded to an external URL. `mapi /api/apps/` is exactly:
 curl -s "$API_BASE_URL/api/apps/" -H "Authorization: Bearer $AGENT_TOKEN"
 ```
 
-Everything else passes straight through to curl, so curl recipes translate by
-dropping the base URL and the auth header:
+Supported safe curl options pass through, so ordinary recipes translate by
+dropping the base URL and the auth header. Options that can retarget the
+authenticated request—such as redirects, proxies, curl config files, alternate
+destinations, or replacement Host headers—are refused:
 
 ```bash
 mapi /api/apps/ | python3 -m json.tool
@@ -230,22 +234,21 @@ the write-surface contract.
    compile every changed Python file, and run focused tests.
 2. Commit only the exact paths you own with `PM_COMMIT_ROOT=/data/platform
    pm-commit --from <starting-sha> '<what and why>' -- <paths>`.
-3. Run the activation preflight. Only if it proves that the settled backend
-   change is not live, explain that the restart interrupts every active agent
-   turn, name the current number of running turns when known, warn that service
-   may be unavailable for tens of seconds, then call Möbius's
-   `request_restart` tool as the final action. Approval of the task, a broad
-   “go ahead” or “fix it,” or delegation of the complete backend-fix loop does
-   not approve a restart.
+3. Run the activation preflight. For routine activation, ask only when the
+   settled backend change is not live; an explicit partner request may create
+   the card without a pending change. Explain that the restart interrupts active
+   turns and may make service unavailable for tens of seconds, then call
+   `request_restart` as the final action.
 
    `request_restart` takes no action arguments. The platform derives the exact
    committed, restart-loadable source and saves its own card with one exact
    **Restart now** action plus a written-response path. Its receipt confirms
-   only that the card was saved, not approval: end the turn with no further
-   text or tools. The owner's **Restart now** click is dispatched by the
-   platform without waking an agent to forge an answer or issue a shell
-   command. A written response continues the conversation without granting
-   restart authority. Do not use `request_approval` or Codex's
+   only that the card was saved: end the turn with no further text or tools.
+   Any authenticated participant that can read the card may answer it, just as
+   with ordinary Q&A. A **Restart now** selection is dispatched by the platform;
+   the answering agent never issues or replays a shell command. A written
+   response continues the conversation without restarting. Do not use
+   `request_approval` or Codex's
    `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
@@ -265,8 +268,8 @@ the write-surface contract.
    Restart-card chat independently; each resumed agent verifies whether its
    changes loaded. Unrelated waits and queued work keep their existing
    barriers. An uncertain outcome needs fresh,
-   specific approval rather than an automatic retry. A scheduled/background
-   agent cannot ask live, so it leaves activation pending for the partner.
+   specific selection rather than an automatic retry. A scheduled/background
+   agent cannot open a live card, but may answer an existing one it can access.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery if the interface
    itself is unavailable.

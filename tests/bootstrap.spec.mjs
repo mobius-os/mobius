@@ -40,6 +40,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/bootstrap.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -177,6 +178,9 @@ async function routeShell(page, {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
+  // The created chat is explicitly Claude-backed. Keep its composer quota
+  // deterministic without changing the bootstrap POST/list contract.
+  await installMockProviderUsage(page)
 
   return created
 }

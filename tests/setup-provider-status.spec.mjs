@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -12,6 +13,7 @@ test('Codex copies the code before the owner separately opens ChatGPT and stays 
   })
 
   let authenticationComplete = false
+  await installMockProviderUsage(page)
   await page.route(/\/api\/auth\/providers\/status$/, route => (
     authenticationComplete
       ? route.fulfill({

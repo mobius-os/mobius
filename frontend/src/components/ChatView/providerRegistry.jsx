@@ -122,3 +122,24 @@ export const PROVIDER_INFO = {
 // subscriptions. This order is shared by the chat picker, Manage models, and
 // background-agent defaults so those surfaces cannot drift.
 export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
+
+/** Built-ins keep their familiar order; accepted app providers follow it. */
+export function providerOrderFor(registry) {
+  return [
+    ...PROVIDER_ORDER,
+    ...Object.keys(registry || {}).filter(id => !PROVIDER_ORDER.includes(id)),
+  ]
+}
+
+export function providerInfoFor(id, status) {
+  if (PROVIDER_INFO[id]) return PROVIDER_INFO[id]
+  const label = status?.[id]?.name || id
+  return {
+    id,
+    label,
+    Logo: () => <span aria-hidden="true">{label.charAt(0).toUpperCase()}</span>,
+    efforts: ['low', 'medium', 'high'].map(value => ({
+      value, label: value.charAt(0).toUpperCase() + value.slice(1),
+    })),
+  }
+}

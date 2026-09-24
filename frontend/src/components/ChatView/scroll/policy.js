@@ -11,6 +11,8 @@ import {
 } from './geometry.js'
 
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
+const NESTED_SCROLL_EPSILON_PX = 0.5
+const NESTED_SCROLL_SELECTOR = '[data-chat-scroll-region], .chat__scroll'
 export const FOLLOW_STICK_BAND_PX = 70
 export const HISTORY_PREFETCH_MIN_PX = 240
 export const HISTORY_PREFETCH_VIEWPORTS = 4
@@ -145,7 +147,7 @@ export function readerInputEscapeDirection(
   type,
   { deltaY = 0, key = '', shiftKey = false } = {},
 ) {
-  if (type === 'wheel') {
+  if (type === 'wheel' || type === 'touchmove') {
     if (deltaY < 0) return 'up'
     if (deltaY > 0) return 'down'
     return null
@@ -356,7 +358,8 @@ export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
 /** Only keys whose default action can move the chat begin reader ownership.
  * Text entry and activating controls inside a message must not freeze layout
  * until the no-scroll dead-man expires. */
-export function readerInputMayScroll(type, key = '') {
+export function readerInputMayScroll(type, key = '', ctrlKey = false) {
+  if (type === 'wheel' && ctrlKey) return false
   if (type !== 'keydown') return true
   return [
     'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', 'Tab', ' ',
@@ -392,18 +395,29 @@ export function nestedReaderTargetOwnsInput({
 
   if (!['wheel', 'pointermove', 'touchmove'].includes(type)
       || !['up', 'down'].includes(direction)) return false
-  const nested = target?.closest?.('[data-chat-scroll-region], .chat__scroll')
-  if (!nested || nested === scrollEl) return false
+  const range = nestedScrollRange(target, scrollEl)
+  if (!range) return false
+  const { scrollTop, maxScrollTop } = range
+  return direction === 'up'
+    ? scrollTop > NESTED_SCROLL_EPSILON_PX
+    : scrollTop < maxScrollTop - NESTED_SCROLL_EPSILON_PX
+}
+
+
+/** Resolve the one marked nested vertical scroller under an input target.
+ * Input ownership and WebKit's explicit edge handoff share this geometry so
+ * they cannot disagree about which surface can still consume a gesture. */
+export function nestedScrollRange(target, scrollEl) {
+  const nested = target?.closest?.(NESTED_SCROLL_SELECTOR)
+  if (!nested || nested === scrollEl || !scrollEl?.contains?.(nested)) return null
 
   const scrollTop = Number(nested.scrollTop)
   const scrollHeight = Number(nested.scrollHeight)
   const clientHeight = Number(nested.clientHeight)
-  if (![scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) return false
+  if (![scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) return null
   const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
-  if (maxScrollTop <= 0.5) return false
-  return direction === 'up'
-    ? scrollTop > 0.5
-    : scrollTop < maxScrollTop - 0.5
+  if (maxScrollTop <= NESTED_SCROLL_EPSILON_PX) return null
+  return { nested, scrollTop, maxScrollTop, clientHeight }
 }
 
 

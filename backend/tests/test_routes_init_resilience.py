@@ -283,6 +283,29 @@ def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   assert lifespan_ready.is_set()
 
 
+def test_restart_receipt_failure_does_not_abort_lifespan(monkeypatch):
+  from app import bootstrap as bootstrap_mod
+  from app import startup as startup_mod
+  from app.main import app as main_app
+
+  async def skip_external_bootstrap(_db):
+    return None
+
+  monkeypatch.setattr(
+    bootstrap_mod,
+    "ensure_bootstrap_apps_installed",
+    skip_external_bootstrap,
+  )
+  monkeypatch.setattr(
+    startup_mod,
+    "_capture_platform_activation_snapshot",
+    lambda _context: (_ for _ in ()).throw(RuntimeError("receipt unavailable")),
+  )
+
+  with TestClient(main_app) as client:
+    assert client.get("/api/health").status_code == 200
+
+
 def test_lifespan_does_not_shadow_module_session_factory():
   """A late local import must not break earlier startup migrations.
 

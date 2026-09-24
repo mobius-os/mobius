@@ -422,9 +422,10 @@ async def attach_unfinished_goal(
     )))
   if isinstance(result, GoalPromotionRejected):
     raise HTTPException(status_code=409, detail="Goal cannot attach: " + result.reason)
-  broadcast = get_broadcast(chat_id)
-  if broadcast is not None and broadcast.running:
-    broadcast.publish({"type":"goal_activated", **result})
+  if result["state"] == "promoted":
+    broadcast = get_broadcast(chat_id)
+    if broadcast is not None and broadcast.running:
+      broadcast.publish({"type":"goal_activated", **result})
   return result
 
 

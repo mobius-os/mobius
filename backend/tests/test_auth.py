@@ -671,6 +671,7 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   client, auth,
 ):
   from app import models
+  from app.config import get_settings
   from app.database import SessionLocal
 
   absent = client.get("/api/auth/providers/status", headers=auth).json()
@@ -679,13 +680,38 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   app = create_local_app(
     client, auth, name="Möbius · You", description="Account",
   )
+  from app import providers
   with SessionLocal() as session:
     row = session.query(models.App).filter(models.App.id == app["id"]).one()
     row.slug = "identity"
+    row.capability_contract = {"model_provider": {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
+      "models": [{"id": "inkling", "label": "Evolve"}],
+    }}
     session.commit()
+  providers.sync_app_model_providers(get_settings().data_dir, force=True)
 
   installed = client.get("/api/auth/providers/status", headers=auth).json()
   assert installed["mobius"]["available"] is True
+
+  disabled = client.patch(
+    "/api/auth/providers/mobius/enabled",
+    headers=auth,
+    json={"enabled": False},
+  )
+  assert disabled.status_code == 200, disabled.text
+  hidden = client.get("/api/auth/providers/status", headers=auth).json()
+  assert hidden["mobius"]["available"] is False
+  assert hidden["mobius"]["configured"] is False
+  assert hidden["mobius"]["authenticated"] is False
+  assert hidden["claude"] == installed["claude"]
+  assert hidden["codex"] == installed["codex"]
+  assert client.patch(
+    "/api/auth/providers/mobius/enabled",
+    headers=auth,
+    json={"enabled": True},
+  ).status_code == 200
 
 
 def test_providers_status_hides_mobius_trial_from_app_principals(
@@ -695,6 +721,7 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   the endpoint for model-picker availability, so they must see the same
   provider fields without the owner's credit units and grant expiries."""
   from app import models
+  from app.config import get_settings
   from app.database import SessionLocal
   from app.providers import MobiusProvider
 
@@ -702,23 +729,30 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   app = create_local_app(
     client, auth, name="Möbius · You", description="Account",
   )
+  from app import providers
   with SessionLocal() as session:
     row = session.query(models.App).filter(models.App.id == app["id"]).one()
     row.slug = "identity"
+    row.capability_contract = {"model_provider": {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
+      "models": [{"id": "inkling", "label": "Evolve"}],
+    }}
     session.commit()
+  providers.sync_app_model_providers(get_settings().data_dir, force=True)
 
   # Fake a linked subscription carrying a real trial balance.
   balance = {
     "spendable_units": 500,
     "grants": [{"amount": 500, "expires_at": "2026-12-31"}],
   }
-  monkeypatch.setattr(MobiusProvider, "check_auth", lambda self, data_dir: None)
+  monkeypatch.setattr(providers.PROVIDERS["mobius"], "check_auth", lambda data_dir: None)
   monkeypatch.setattr(MobiusProvider, "trial_status", lambda self: balance)
 
   # The owner sees the trial balance.
   owner_body = client.get("/api/auth/providers/status", headers=auth).json()
   assert owner_body["mobius"]["available"] is True
-  assert owner_body["mobius"]["trial"] == balance
+  assert owner_body["mobius"].get("trial") == balance, owner_body["mobius"]
 
   # An app-scoped principal gets availability but never the balance.
   from app.auth import create_access_token
@@ -866,27 +900,20 @@ def test_providers_status_rejects_non_utf8_claude_credentials(
 
 
 def test_providers_models_returns_known_models_on_missing_creds(
-  client, auth, monkeypatch,
+  client, auth,
 ):
   """Without real Anthropic / Codex credentials the underlying
   `list_models` falls back to KNOWN_MODELS — exercise that path and
   pin the response shape mini-apps depend on (id + name, plus a
   tier on Claude rows)."""
-  from app import providers
-  from app.providers import DEFAULT_VISIBLE_MODELS, KNOWN_MODELS, invalidate_model_cache
-  real_fetch = providers._fetch_provider_models
-
-  async def missing_credentials_fetch(provider_id, data_dir):
-    if provider_id == "mobius":
-      raise RuntimeError("Möbius broker unavailable")
-    return await real_fetch(provider_id, data_dir)
-
-  monkeypatch.setattr(providers, "_fetch_provider_models", missing_credentials_fetch)
+  from app.providers import DEFAULT_VISIBLE_MODELS, KNOWN_MODELS, invalidate_model_cache, sync_app_model_providers
+  from app.config import get_settings
+  sync_app_model_providers(get_settings().data_dir, force=True)
   invalidate_model_cache()
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  assert set(body) == {"claude", "codex", "mobius"}
+  assert set(body) == {"claude", "codex"}
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5-1",
@@ -899,14 +926,6 @@ def test_providers_models_returns_known_models_on_missing_creds(
   ]
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
-  assert [m["id"] for m in body["mobius"]] == [
-    "spark", "inkling", "reflect", "flow", "prism",
-  ]
-  assert [m["name"] for m in body["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
@@ -916,11 +935,6 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for row in body["codex"]:
     assert "tier" not in row
     assert "id" in row and "name" in row
-  assert [m["name"] for m in body["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
   # `available` / `provider` from the shell-facing /api/models response
   # are NOT leaked through; mini-apps see only id + name (+ tier).
   for rows in body.values():

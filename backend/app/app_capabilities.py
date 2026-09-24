@@ -573,6 +573,10 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "public": normalize_public_access(manifest),
   }
   service = manifest.get("service")
+  if isinstance(manifest.get("model_provider"), dict):
+    # Freeze the reviewed declaration; editable source is never consulted by
+    # the model picker or a running agent.
+    contract["model_provider"] = deepcopy(manifest["model_provider"])
   if isinstance(service, dict):
     accepted_service = {
       "id": service.get("id", manifest.get("id")),
@@ -746,6 +750,37 @@ def contract_and_digest(manifest: dict[str, Any]) -> tuple[dict[str, Any], str]:
   return contract, capability_digest(contract)
 
 
+def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:
+  """Project historical receipts onto today's closed-default semantics.
+
+  Older accepted contracts omit capabilities that did not exist at the time.
+  Omission has always meant no grant; it must compare equal to the explicit
+  ``false``/empty representation emitted by the current schema.  This is a
+  comparison projection only: stored receipts and their review digests remain
+  immutable evidence of what the owner accepted.
+  """
+  normalized = deepcopy(contract)
+  normalized.pop("schema", None)
+
+  public = normalized.get("public")
+  if isinstance(public, dict) and "storage" in public:
+    public["storage"] = storage_grant(public.get("storage"))
+
+  def prune_closed(value: Any) -> Any:
+    if isinstance(value, dict):
+      kept = {
+        key: child
+        for key, item in value.items()
+        if (child := prune_closed(item)) is not None
+      }
+      return kept or None
+    if value is False or value is None or value == []:
+      return None
+    return value
+
+  return prune_closed(normalized) or {}
+
+
 def diff_contracts(
   installed: dict[str, Any] | None,
   candidate: dict[str, Any],
@@ -770,8 +805,8 @@ def diff_contracts(
       return {prefix: value}
     return {prefix: value}
 
-  before = leaves(installed)
-  after = leaves(candidate)
+  before = leaves(_semantic_contract(installed))
+  after = leaves(_semantic_contract(candidate))
   added = sorted(k for k in after.keys() - before.keys())
   removed = sorted(k for k in before.keys() - after.keys())
   changed = sorted(k for k in before.keys() & after.keys() if before[k] != after[k])

@@ -49,8 +49,8 @@ class ApprovalRequest(BaseModel):
 
 class QuestionSpec(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-  id: str = Field(min_length=1, max_length=80)
-  header: str = Field(min_length=1, max_length=80)
+  id: str | None = Field(default=None, min_length=1, max_length=80)
+  header: str | None = Field(default=None, min_length=1, max_length=80)
   question: str = Field(min_length=1, max_length=2000)
   options: list[ApprovalOption] = Field(default_factory=list, max_length=3)
 
@@ -68,11 +68,25 @@ class QuestionRequest(BaseModel):
 
   @model_validator(mode="after")
   def distinct_questions(self):
-    if len({q.id for q in self.questions}) != len(self.questions):
+    ids = [q.id or f"question-{index}" for index, q in enumerate(self.questions, 1)]
+    if len(set(ids)) != len(ids):
       raise ValueError("question ids must be distinct")
     if len({q.question for q in self.questions}) != len(self.questions):
       raise ValueError("question prompts must be distinct")
     return self
+
+  def canonical_payload(self) -> dict:
+    grouped = len(self.questions) > 1
+    return {"questions": [
+      {
+        **question.model_dump(exclude_none=True),
+        "id": question.id or f"question-{index}",
+        "header": question.header or (
+          f"Question {index}" if grouped else "Your choice"
+        ),
+      }
+      for index, question in enumerate(self.questions, 1)
+    ]}
 
 
 class RestartRequest(BaseModel):
@@ -88,7 +102,7 @@ async def request_question(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  return await save_owner_question(chat_id, body.model_dump(exclude_none=True), principal, db)
+  return await save_owner_question(chat_id, body.canonical_payload(), principal, db)
 
 
 @router.post("/{chat_id}/approval", dependencies=[Depends(reject_cross_site)])

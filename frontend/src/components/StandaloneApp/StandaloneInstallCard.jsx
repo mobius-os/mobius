@@ -7,6 +7,7 @@ import {
   subscribeInstallPrompt,
 } from '../../lib/installPrompt.js'
 import {
+  androidBrowserIntentHref,
   detectInstallPlatform,
   installCopyForPlatform,
 } from '../../utils/installPlatform.js'
@@ -68,6 +69,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   const [warmingUp, setWarmingUp] = useState(
     () => warmupCapable && installState === 'manual',
   )
+  const [installFeedback, setInstallFeedback] = useState('')
   const dialogRef = useRef(null)
   const primaryRef = useRef(null)
   const closeRef = useRef(null)
@@ -114,6 +116,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   }
 
   async function install() {
+    setInstallFeedback('')
     if (installObserved) {
       close('installed')
       return
@@ -125,6 +128,12 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
       return
     }
     const result = await requestInstall()
+    if (result.outcome === 'fallback-ready') {
+      setInstallFeedback(
+        'The newer installer was unavailable. Tap Install again to use the browser’s regular prompt.',
+      )
+      return
+    }
     if (result.outcome !== 'accepted') revealInstructions()
   }
 
@@ -220,7 +229,8 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               // Home Screen here produces the app, and the arrow points down
               // at the real Share button in Safari's toolbar.
               <p className="standalone-install__steps" role="status">
-                Tap the <strong>Share</strong> button below, then choose{' '}
+                Tap <strong>Share</strong> (open the browser menu first if
+                Share is hidden), then choose{' '}
                 <strong>Add to Home Screen</strong>.
               </p>
             ) : (
@@ -231,6 +241,22 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
             ))}
             {platform.ios && showInstructions && (
               <span className="standalone-install__arrow" aria-hidden="true">↓</span>
+            )}
+            {installFeedback && (
+              <p className="standalone-install__feedback" role="status">
+                {installFeedback}
+              </p>
+            )}
+            {showInstructions && platform.inAppBrowser && platform.android && (
+              <div className="standalone-install__actions">
+                <a
+                  ref={primaryRef}
+                  className="standalone-install__primary standalone-install__browser-link"
+                  href={androidBrowserIntentHref(window.location.href)}
+                >
+                  Open in your browser
+                </a>
+              </div>
             )}
             {showAction && (
               <div className="standalone-install__actions">

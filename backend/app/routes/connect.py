@@ -8,8 +8,8 @@ reconnect can resume control without repeating work.
 
 Protocol v4 rotates its event stream before common hosting response caps while
 keeping command execution alive, and carries literal scripts as structured data.
-Older runners are rejected at the transport boundary; their saved host record
-remains visible to the owner with an in-place update command.
+Wire-incompatible runners are rejected at the transport boundary. Compatible
+older releases remain connected and expose an in-place update command.
 
   POST /api/connect/pair    {code}          -> {host_id, token}   (one-time)
   GET  /api/connect/stream  (host bearer)   -> SSE stream of {exec} commands
@@ -59,7 +59,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app import connect_outbound, models
+from app import connect_outbound, connect_runner, models
 from app.config import get_settings
 from app.deps import (
   get_owner_or_app_with_connect_manage,
@@ -88,7 +88,8 @@ _DEFAULT_EXEC_TIMEOUT = 60
 _MAX_EXEC_STREAM = 60_000
 _DISCONNECT_COMMAND = "python3 ~/.mobius-connect/runner.py --uninstall"
 _DISCONNECT_ACK_TIMEOUT = 4
-_RUNNER_PROTOCOL_VERSION = 4
+_RUNNER_PROTOCOL_VERSION = connect_runner.RUNNER_PROTOCOL_VERSION
+_RUNNER_RELEASE = connect_runner.RUNNER_RELEASE
 # Railway permits active HTTP responses for 15 minutes. Rotate current-runner
 # streams well inside that bound; the host-owned command continues separately.
 _STREAM_ROTATION_SECONDS = 10 * 60
@@ -571,7 +572,22 @@ def _install_command(base: str, code: str) -> str:
 
 
 def _update_command(base: str) -> str:
-  return f'curl -fsSL "{base}/api/connect/runner" | python3 - --install'
+  # The target can be paired with several Möbius instances. Pin both the
+  # download and the install source to the instance whose Connect UI generated
+  # this command; otherwise the runner's saved first connection may silently
+  # supply a different (older) release.
+  return (
+    f'curl -fsSL "{base}/api/connect/runner" '
+    f'| python3 - --url "{base}" --install'
+  )
+
+
+def _reported_runner_release(value: object) -> int | None:
+  try:
+    release = int(str(value))
+  except (TypeError, ValueError):
+    return None
+  return release if release >= 0 else None
 
 
 def _public_host(host: dict) -> dict:
@@ -586,11 +602,14 @@ def _public_host(host: dict) -> dict:
   runner_transport = (
     "sse" if ch is not None else host.get("runner_transport")
   )
+  runner_release = _reported_runner_release(host.get("runner_release"))
   paired = bool(host.get("token_sha256"))
   runner_update_available = bool(
     paired and (
       int(runner_protocol or 0) != _RUNNER_PROTOCOL_VERSION
       or runner_transport != "sse"
+      or runner_release is None
+      or runner_release < _RUNNER_RELEASE
     )
   )
   return {
@@ -601,6 +620,7 @@ def _public_host(host: dict) -> dict:
     "busy": active_public is not None,
     "active_command": active_public,
     "runner_protocol": runner_protocol,
+    "runner_release": runner_release,
     "runner_update_available": runner_update_available,
     "update_command": (
       _update_command(_base_url()) if runner_update_available else None
@@ -732,6 +752,7 @@ async def create_host(
     "last_seen": None,
     "platform": None,
     "runner_protocol": None,
+    "runner_release": None,
     "runner_transport": None,
     "active_command": None,
     "last_command": None,
@@ -1092,23 +1113,25 @@ async def stream(request: Request) -> StreamingResponse:
     protocol_version = int(request.query_params.get("protocol") or 0)
   except ValueError:
     protocol_version = 0
+  runner_release = _reported_runner_release(
+    request.query_params.get("release"),
+  )
+  # Persist transport compatibility and implementation release independently.
+  # A protocol-compatible legacy runner may stay connected while Connect still
+  # offers the owner the current implementation.
+  host["runner_protocol"] = protocol_version or None
+  host["runner_release"] = runner_release
+  host["runner_transport"] = "sse"
+  plat = request.query_params.get("platform")
+  if plat:
+    host["platform"] = plat[:80]
+  _save_host(host)
   if protocol_version != _RUNNER_PROTOCOL_VERSION:
-    host["runner_protocol"] = protocol_version or None
-    host["runner_transport"] = "sse"
-    _save_host(host)
     raise HTTPException(
       status_code=426,
       detail="This Connect runner is no longer supported. Update it in Connect.",
     )
-  # The runner reports its OS on connect so the app can label the machine.
-  plat = request.query_params.get("platform")
-  if plat:
-    host["platform"] = plat[:80]
-    _save_host(host)
   ch = _Channel()
-  host["runner_protocol"] = protocol_version
-  host["runner_transport"] = "sse"
-  _save_host(host)
   # A reconnecting runner replaces any stale channel.
   _replace_channel(host_id, ch)
   _touch(host_id)

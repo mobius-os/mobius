@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { carrierMessages, projectPeerTimeline, peerRecordTool, peerTime } from '../peerTimeline.js'
+import {
+  carrierMessages,
+  foldAssistantActivityFragments,
+  mergeProjectedPeerActivity,
+  peerRecordTool,
+  peerTime,
+  projectPeerTimeline,
+} from '../peerTimeline.js'
 const note = (id, ts, extras = {}) => ({ id, created_at: ts, sender_chat_id: 'peer', recipient_chat_id: 'chat', sender_name: 'Other agent', body: 'A decision-changing note', kind: 'finding', ...extras })
 const carrier = (notes, extras = {}) => ({ role: 'user', hidden: true, kind: 'peer_message', ts: 2000, steered: true, content: `<agent_coordination>\n${JSON.stringify({ messages: notes })}\n</agent_coordination>`, ...extras })
 
@@ -89,10 +96,62 @@ test('consecutive hidden deliveries keep their order when joining the same tool 
   assert.deepEqual(folded.messages[3].blocks.slice(0, 2).map(block => block.tool_use_id), ['peer-first', 'peer-second'])
 })
 
-test('a suppressed active mirror cannot swallow incoming activity', async () => {
+test('an active mirror absorbs incoming activity so it shares the live tool stretch', async () => {
   const { foldPeerActivity } = await import('../peerTimeline.js')
   const messages = [{ role: 'assistant', ts: 1000, blocks: [{ type: 'tool', tool: 'Bash' }] }]
-  const folded = foldPeerActivity(messages, projectPeerTimeline(messages, [note('live', 2000)], 'chat'), 'chat', 0)
-  assert.equal(folded.slots.get(1)[0].id, 'live')
-  assert.equal(folded.messages[0].blocks.length, 1)
+  const folded = foldPeerActivity(messages, projectPeerTimeline(messages, [note('live', 2000)], 'chat'), 'chat')
+  assert.equal(folded.slots.size, 0)
+  assert.equal(folded.messages[0].blocks.length, 2)
+  assert.equal(folded.messages[0].blocks[1].tool_use_id, 'peer-live')
+})
+
+test('projected peer rows join a newer live payload once without replacing it', () => {
+  const bash = { type: 'tool', tool: 'Bash', tool_use_id: 'bash' }
+  const later = { type: 'thinking', thinking_id: 'later' }
+  const peer = { type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-note' }
+  assert.deepEqual(
+    mergeProjectedPeerActivity([bash, later], [peer, bash], [bash]),
+    [peer, bash, later],
+  )
+  assert.deepEqual(
+    mergeProjectedPeerActivity([peer, bash, later], [peer, bash], [bash]),
+    [peer, bash, later],
+  )
+})
+
+test('saved fragments of one assistant turn share an uninterrupted activity tail', () => {
+  const activity = id => ({ type: 'activity', activity_id: id, entries: [] })
+  const messages = [
+    { id: 'run', role: 'assistant', blocks: [{ type: 'text', content: 'Intro' }, activity('one')] },
+    { role: 'user', hidden: true, blocks: [] },
+    { id: 'run:assistant:1', role: 'assistant', blocks: [
+      { type: 'text', content: '' }, activity('two'),
+    ] },
+    { role: 'user', hidden: true, blocks: [] },
+    { id: 'run:assistant:2', role: 'assistant', blocks: [activity('three'), { type: 'error', content: 'Paused' }] },
+  ]
+  const positions = new Map([['run:assistant:2', [{
+    id: 'inside-third',
+    display_position: { assistant_message_id: 'run:assistant:2', block_index: 0 },
+  }]]])
+  const folded = foldAssistantActivityFragments(messages, new Map(), -1, positions)
+  const output = folded.messages
+  assert.deepEqual(output[0].blocks.map(block => block.activity_id || block.type), [
+    'text', 'one', 'two', 'three',
+  ])
+  assert.equal(output[2].hidden, true)
+  assert.deepEqual(output[4].blocks.map(block => block.type), ['error'])
+  assert.equal(folded.positions.get('run')[0].display_position.assistant_message_id, 'run')
+  assert.equal(folded.positions.has('run:assistant:2'), false)
+  assert.deepEqual(messages[0].blocks.map(block => block.activity_id || block.type), ['text', 'one'])
+})
+
+test('the active assistant fragment remains owned by the live surface', () => {
+  const messages = [
+    { id: 'run', role: 'assistant', blocks: [{ type: 'tool', tool: 'Bash' }] },
+    { id: 'run:assistant:1', role: 'assistant', blocks: [{ type: 'tool', tool: 'Edit' }] },
+  ]
+  const { messages: output } = foldAssistantActivityFragments(messages, new Map(), 1)
+  assert.equal(output[0].blocks.length, 1)
+  assert.equal(output[1].hidden, undefined)
 })

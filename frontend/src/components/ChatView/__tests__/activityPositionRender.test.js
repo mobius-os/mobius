@@ -9,8 +9,9 @@ globalThis.window = { location: { origin: 'http://localhost', href: 'http://loca
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: Active } = await vite.ssrLoadModule('/src/components/ChatView/ActiveAssistantSurface.jsx')
 const { default: Message } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
-const { PeerTimelineLoadError } = await vite.ssrLoadModule('/src/components/ChatView/PeerTimeline.jsx')
+const { PeerTimelineLoadError, PeerTimelineRows } = await vite.ssrLoadModule('/src/components/ChatView/PeerTimeline.jsx')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
+const { _resetDisclosureStateForTests, persistDisclosureOpen } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
 after(() => vite.close())
 const note = { id: 'incoming', sender_chat_id: 'peer', sender_name: 'Colleague', body: 'New information', created_at: 2000, display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 } }
 const context = { tools: new Map([['peer-incoming', [note]]]), positions: new Map([['answer', [note]]]) }
@@ -52,6 +53,54 @@ test('busy-parent helper result renders once at the same recorded frontier', () 
   assert.ok(html.indexOf('Earlier') < html.indexOf('Helper finished · Review'))
   assert.ok(html.indexOf('Helper finished · Review') < html.indexOf('Later response'))
   assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
+})
+
+test('multiple helper completions join one surrounding activity disclosure', () => {
+  const blocks = [
+    { type: 'tool', tool: 'Bash', tool_use_id: 'command', status: 'done' },
+    { type: 'thinking', thinking_id: 'thought', content: 'Reviewing', duration_ms: 1000 },
+    { type: 'tool', tool: 'Edit', tool_use_id: 'edit', status: 'done' },
+  ]
+  const helper = (id, task, blockIndex) => ({
+    id: `delegation:${id}:completed`, activityId: `delegation:${id}:completed`,
+    type: 'helper_result', status: 'completed', task_key: task,
+    body: `${task} outcome`, consumption: 'incorporated', created_at: 2000,
+    display_position: { assistant_message_id: 'activity-answer', block_index: blockIndex },
+  })
+  const results = [helper('first', 'First review', 1), helper('second', 'Second review', 2)]
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'activity-answer:activity:command', true)
+  const html = render(Message, {
+    msg: { id: 'activity-answer', role: 'assistant', blocks },
+    chatId: 'chat', messageKey: 'activity-answer',
+  }, {
+    tools: new Map(), positions: new Map([['activity-answer', results]]),
+  })
+
+  assert.equal((html.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
+  assert.match(html, /Ran a command, exchanged messages, edited code/)
+  assert.match(html, /Helper finished · First review/)
+  assert.match(html, /Helper finished · Second review/)
+})
+
+test('later peer messages share one high-level exchange and list each message inside', () => {
+  const notes = [
+    { ...note, id: 'one', sender_name: 'Review agent', body: 'First finding', type: 'peer_message' },
+    { ...note, id: 'two', sender_name: 'Build agent', body: 'Second finding', type: 'peer_message' },
+  ]
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'peer-messages:one,two:activity:peer-one', true)
+  persistDisclosureOpen('chat', 'peer-messages:one,two:tool:peer-one', true)
+  persistDisclosureOpen('chat', 'peer-messages:one,two:tool:peer-two', true)
+  const html = render(PeerTimelineRows, { notes, chatId: 'chat' }, {
+    tools: new Map(), positions: new Map(),
+  })
+  assert.equal((html.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
+  assert.match(html, /Exchanged messages/)
+  assert.match(html, /Received from Review agent/)
+  assert.match(html, /Received from Build agent/)
+  assert.match(html, /First finding/)
+  assert.match(html, /Second finding/)
 })
 
 test('activity load errors stay quiet while restart recovery is active', () => {

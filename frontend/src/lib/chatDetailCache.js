@@ -205,6 +205,7 @@ export function chatDetailCacheValue(data = {}) {
       provider: data.provider || 'claude',
       session_id: data.session_id || null,
       created_by_app_id: data.created_by_app_id ?? null,
+      provider_switch_locked: data.provider_switch_locked === true,
       agent_settings_json: data.agent_settings_json || null,
       effective: data.effective_agent_settings || {},
       has_assistant_turns: !!data.has_assistant_turns,

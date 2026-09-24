@@ -9,6 +9,8 @@ appears to time out is a leak and must be investigated.
 import asyncio
 from uuid import uuid4
 
+import pytest
+
 from app import questions
 from app.pending_questions import PendingQuestion
 
@@ -179,3 +181,84 @@ def test_no_timeout_sla_future_outlives_register_window():
     questions.cancel("chat-h")
 
   asyncio.run(go())
+
+
+def test_saved_answer_requires_every_question_exactly_once():
+  card = {
+    "questions": [
+      {"id": "first", "question": "First?", "options": []},
+      {"id": "second", "question": "Second?", "options": []},
+    ],
+  }
+
+  with pytest.raises(questions.AnswerConflict):
+    questions.validate_saved_answer(card, {"First?": "Yes"}, None)
+  questions.validate_saved_answer(
+    card,
+    {"First?": "Yes", "second": "No"},
+    None,
+  )
+
+
+def test_saved_answer_rejects_cross_question_id_prompt_collision():
+  card = {
+    "questions": [
+      {"id": "shared", "question": "First?", "options": []},
+      {"id": "second", "question": "shared", "options": []},
+    ],
+  }
+
+  with pytest.raises(questions.AnswerConflict):
+    questions.validate_saved_answer(
+      card,
+      {"shared": "Yes", "second": "No"},
+      None,
+    )
+
+
+def test_saved_answer_rejects_duplicate_question_ids():
+  card = {
+    "questions": [
+      {"id": "same", "question": "First?", "options": []},
+      {"id": "same", "question": "Second?", "options": []},
+    ],
+  }
+
+  with pytest.raises(questions.AnswerConflict):
+    questions.validate_saved_answer(card, {"Second?": "No"}, None)
+
+
+def test_saved_answer_rejects_duplicate_question_prompts():
+  card = {
+    "questions": [
+      {"id": "first", "question": "Same?", "options": []},
+      {"id": "second", "question": "Same?", "options": []},
+    ],
+  }
+
+  with pytest.raises(questions.AnswerConflict):
+    questions.validate_saved_answer(
+      card,
+      {"first": "Yes", "second": "No"},
+      None,
+    )
+
+
+def test_saved_answer_rejects_duplicate_selected_option_ids():
+  card = {
+    "questions": [{
+      "id": "choice",
+      "question": "Choose?",
+      "options": [
+        {"id": "same", "label": "First"},
+        {"id": "same", "label": "Second"},
+      ],
+    }],
+  }
+
+  with pytest.raises(questions.AnswerConflict):
+    questions.validate_saved_answer(
+      card,
+      {"Choose?": "First"},
+      {"choice": ["same"]},
+    )

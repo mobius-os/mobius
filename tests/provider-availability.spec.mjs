@@ -5,6 +5,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -12,6 +13,10 @@ attachCleanup()
 test.use({ serviceWorkers: 'block' })
 
 async function mockPickerData(page, { providerStatus, providers }) {
+  // Provider status and usage are one readiness boundary in the shell. Keep
+  // the usage read deterministic even when this spec intentionally supplies
+  // its own provider-status matrix.
+  await installMockProviderUsage(page)
   await page.route(/\/api\/auth\/providers\/status$/, route => route.fulfill({
     status: 200,
     contentType: 'application/json',

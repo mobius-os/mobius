@@ -3,6 +3,7 @@
    for the user (own messages), flush left for the assistant — via the
    `role` modifier class. */
 import MessageCopyButton from './MessageCopyButton.jsx'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
 
 export default function MessageMetaRow({
@@ -22,10 +23,7 @@ export default function MessageMetaRow({
     >
       {timestamp && (
         <time className="chat__ts">
-          {new Date(timestamp).toLocaleString([], {
-            month: 'short', day: 'numeric',
-            hour: '2-digit', minute: '2-digit',
-          })}
+          {formatDateTime(timestamp)}
         </time>
       )}
       {copyText && <MessageCopyButton text={copyText} />}

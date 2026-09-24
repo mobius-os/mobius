@@ -519,7 +519,7 @@ export default function ComposerPopover({
               disclosureIcon={<ChevronDown width={15} height={15} aria-hidden="true" />}
             />
           )}
-          {chatInfo && chatId && (
+          {chatReady && chatInfo && chatId && (
             <div className="composer-popover__section composer-popover__section--picker">
               <ChatSettingsPanel
                 chatId={chatId}

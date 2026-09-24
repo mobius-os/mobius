@@ -128,8 +128,84 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   assert frontend_started is True
   assert "connect-outbound" in supervisors._tasks
   assert set(supervisors._tasks) == before
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_start_failed",
+  )
   await supervisors.stop()
   assert supervisors._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_database_readiness_requires_live_supervisor_tasks(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def start_one():
+    supervisors._spawn("writer-supervisor", resident())
+
+  monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_one)
+  await supervisors.start_database_services()
+
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_start_failed",
+  )
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_optional_supervisor_exit_does_not_fail_core_readiness(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def short_lived():
+    return None
+
+  async def start_required_and_optional():
+    for name in (
+      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
+      "writer-supervisor",
+    ):
+      supervisors._spawn(name, resident())
+    supervisors._spawn("optional-retention", short_lived())
+
+  monkeypatch.setattr(
+    supervisors, "_start_chat_supervisors", start_required_and_optional,
+  )
+  await supervisors.start_database_services()
+
+  assert supervisors.database_service_readiness() == (True, "")
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_required_supervisor_exit_fails_core_readiness(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def start_required():
+    for name in (
+      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
+      "writer-supervisor",
+    ):
+      supervisors._spawn(name, resident())
+
+  monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_required)
+  await supervisors.start_database_services()
+  supervisors._tasks["writer-supervisor"].cancel()
+  await asyncio.gather(
+    supervisors._tasks["writer-supervisor"], return_exceptions=True,
+  )
+
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_stopped",
+  )
+  await supervisors.stop()
 
 
 @pytest.mark.asyncio
@@ -157,9 +233,9 @@ async def test_reset_park_subscription_exists_only_while_its_task_runs(
   assert broadcast.subscribers == []
 
   await asyncio.sleep(0)
-  # Reset-park recovery and exact scratch-release hints each own one bounded
-  # subscription for the lifetime of their supervisor task.
-  assert len(broadcast.subscribers) == 2
+  # Reset-park recovery, typed wait wakeups, and exact scratch-release hints
+  # each own one bounded subscription for their supervisor task's lifetime.
+  assert len(broadcast.subscribers) == 3
 
   await supervisors.stop()
   assert broadcast.subscribers == []
@@ -199,6 +275,73 @@ async def test_restart_backlog_gets_prompt_followup_without_turn_completion(
     await asyncio.sleep(0)
 
   assert sweep_authorizations == ["accepted-restart", "accepted-restart"]
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_ready_boot_event_immediately_rechecks_restart_waits(monkeypatch):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  swept = asyncio.Event()
+  calls = 0
+
+  async def counted_sweep(*_args, **_kwargs):
+    nonlocal calls
+    calls += 1
+    if calls >= 2:
+      swept.set()
+    return chat_module.ContinuationSweepResult()
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", counted_sweep)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  await asyncio.sleep(0)
+  assert calls == 1
+
+  broadcast.publish({"type": "platform_boot_ready"})
+  await asyncio.wait_for(swept.wait(), timeout=1)
+
+  assert calls == 2
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_ready_boot_event_immediately_rechecks_typed_activation_waits(
+  monkeypatch,
+):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.chat_waits as waits_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  forced = asyncio.Event()
+
+  async def no_reset_parks(*_args, **_kwargs):
+    return chat_module.ContinuationSweepResult()
+
+  async def sweep_waits(*, force_kind=None):
+    if force_kind == "platform_activation":
+      forced.set()
+    return 0
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_reset_parks)
+  monkeypatch.setattr(waits_module, "sweep_due_waits", sweep_waits)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  await asyncio.sleep(0)
+  broadcast.publish({"type": "platform_boot_ready"})
+
+  await asyncio.wait_for(forced.wait(), timeout=1)
   await supervisors.stop()
 
 

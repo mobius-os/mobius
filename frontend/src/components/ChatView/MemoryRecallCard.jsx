@@ -99,7 +99,14 @@ export default function MemoryRecallCard({
 
             {model.status === 'hit' && model.notes.length > 0 && (
               <div className="chat__memory-section chat__memory-results">
-                <span className="chat__memory-kicker">Results</span>
+                <span className="chat__memory-kicker">
+                  Results
+                </span>
+                {model.detail && (
+                  <p className="chat__memory-state">
+                    {model.detail}
+                  </p>
+                )}
                 <ul className="chat__memory-list">
                   {model.notes.map(note => (
                     <li key={note.key}>
@@ -136,7 +143,16 @@ export default function MemoryRecallCard({
               <div className="chat__memory-section">
                 <span className="chat__memory-kicker">Results</span>
                 <p className="chat__memory-state">
-                  Nothing relevant is recorded yet.
+                  {model.detail || 'Nothing relevant is recorded yet.'}
+                </p>
+              </div>
+            )}
+
+            {model.warning && (
+              <div className="chat__memory-section">
+                <span className="chat__memory-kicker">Notice</span>
+                <p className="chat__memory-state chat__memory-state--failed">
+                  {model.warning}
                 </p>
               </div>
             )}

@@ -11,7 +11,7 @@ import UpdateRepairAction from './UpdateRepairAction.jsx'
 import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import './PlatformUpdates.css'
 
-export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
+export default function PlatformUpdates({ active, refreshToken, onOpenChat, inertBoundaryRef }) {
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
   const { platform, cachedPlatform, rebuild, version, phase, busy } = update
   const [review, setReview] = useState(null)
@@ -76,7 +76,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       </div>
       {confirmRestart ? (
         <div className="platform-updates__confirmation" role="group" aria-label="Confirm restart">
-          <p>Restarting briefly interrupts active chats across Möbius. The page will reconnect automatically. This does not replace the container.</p>
+          <p>Restarting briefly pauses active chats. This page will reconnect automatically.</p>
           <div className="platform-updates__actions">
             <button ref={actionRef} className="settings__btn settings__btn--sm" onClick={update.restart} disabled={busy}>
               {busy ? 'Restarting…' : 'Restart now'}
@@ -117,7 +117,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
       {activeRebuild && rebuild.status_unavailable && (
-        <p className="platform-updates__description">Reconnecting to the update controller. Your update continues outside this page.</p>
+        <p className="platform-updates__description">Reconnecting to Möbius. The update is still running.</p>
       )}
       {update.reconnecting && (
         <p className="platform-updates__description" role="status">{update.slow
@@ -128,6 +128,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       {!review && !repairReason && update.error && <Alert color="danger" variant="soft" description={update.error} />}
       {review && (
         <UpdateReviewModal intent={review} platform={platform} rebuild={rebuild} onClose={closeReview}
+          restoreFocusRef={actionRef} inertBoundaryRef={inertBoundaryRef}
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
           onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}

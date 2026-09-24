@@ -21,12 +21,15 @@ reconcile is cleaned up on the next pass; and a merge-shaped legacy history is
 left untouched with an explicit normalization error.
 """
 
+import asyncio
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import stat
 import textwrap
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -851,15 +854,10 @@ def test_continue_runs_the_same_post_replay_gates_as_apply(
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
   _advance_origin(origin, edits={
     "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
-    "backend/requirements.lock": "pkg==2\n",
     "frontend/package-lock.json": "new-locked-frontend-deps\n",
     "frontend/src/App.jsx": "export default 'upstream'\n",
   })
   gates, rebuilt = [], []
-  monkeypatch.setattr(
-    pu, "_sync_python_dependencies",
-    lambda repo: gates.append("python") or (True, ""),
-  )
   monkeypatch.setattr(
     pu, "_sync_frontend_dependencies",
     lambda repo: gates.append("frontend") or (True, ""),
@@ -881,9 +879,40 @@ def test_continue_runs_the_same_post_replay_gates_as_apply(
 
   # The same gates, in the same order, as an owner Apply: the frontend deps
   # land before the build so it never compiles against stale node_modules.
-  assert gates == ["python", "frontend", "build"]
+  assert gates == ["frontend", "build"]
   assert rebuilt == [_served_sha(platform)]
   assert not (platform / "frontend" / ".source-build-signature").exists()
+
+
+def test_continue_refuses_new_python_dependencies_before_source_moves(
+  clone_env,
+):
+  origin, platform = clone_env
+  served = _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace(
+      "LINE_A = 1", "LINE_A = 'LOCAL'",
+    ),
+  })
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace(
+      "LINE_A = 1", "LINE_A = 'UPSTREAM'",
+    ),
+    "backend/requirements.lock": "new-package==1\n",
+  })
+  res = pu.reconcile_clone(platform)
+  assert res.status == "conflict"
+  worktree = Path(res.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'BOTH'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+
+  with pytest.raises(pu.PlatformUpdateError, match="image_rebuild_required"):
+    pu.continue_platform_overlay_update(platform)
+
+  assert _served_sha(platform) == served
+  assert pu.CONFLICT_FLAG.exists()
+  assert worktree.exists()
 
 
 def test_continue_rolls_back_a_candidate_that_fails_a_gate(clone_env, monkeypatch):
@@ -892,10 +921,11 @@ def test_continue_rolls_back_a_candidate_that_fails_a_gate(clone_env, monkeypatc
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
   _advance_origin(origin, edits={
     "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
-    "backend/requirements.lock": "pkg==2\n",
+    "frontend/package-lock.json": "new-locked-frontend-deps\n",
+    "frontend/src/App.jsx": "export default 'upstream'\n",
   })
   monkeypatch.setattr(
-    pu, "_sync_python_dependencies", lambda repo: (False, "pip exploded"),
+    pu, "_sync_frontend_dependencies", lambda repo: (False, "npm exploded"),
   )
   res = pu.reconcile_clone(platform)
   worktree = Path(res.overlay["worktree"])
@@ -907,7 +937,7 @@ def test_continue_rolls_back_a_candidate_that_fails_a_gate(clone_env, monkeypatc
   assert pu.continue_platform_overlay_update(platform) == "rolled_back"
 
   assert _served_sha(platform) == pre
-  assert "pip exploded" in pu._read_rolled_back_flag()["error"]
+  assert "npm exploded" in pu._read_rolled_back_flag()["error"]
   assert not pu.CONFLICT_FLAG.exists()
 
 
@@ -1118,6 +1148,7 @@ def test_status_up_to_date_on_fresh_clone(clone_env):
 def test_check_for_updates_fetches_then_reports_available(clone_env):
   origin, platform = clone_env
   before = _served_sha(platform)
+  installed = pu.recorded_upstream_sha(platform)
   # A deploy advances origin AFTER the clone's last fetch. platform_status is
   # fetch-free, so it still reads the stale remote-tracking ref: "up to date".
   _advance_origin(origin, edits={"backend/app/main.py":
@@ -1129,8 +1160,45 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   status = pu.check_for_updates(platform)
   assert status["available"] is True
   assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
+  assert status["checked_target_sha"] == _git(
+    origin.parent / "origin-work", "rev-parse", "main",
+  ).stdout.strip()
+  assert status["installed_release_sha"] == installed
+  assert status["recorded_upstream_sha"] == installed
+  # This field is deliberately about releases stacked behind a conflict, not
+  # ordinary update availability. ``available`` is the ordinary signal.
+  assert status["newer_updates_available"] is False
   # A check only advances remote-tracking refs — the served tree is NOT mutated.
   assert _served_sha(platform) == before
+
+
+def test_check_route_distinguishes_fetched_target_from_installed_release(
+  clone_env, client, auth, monkeypatch,
+):
+  origin, platform = clone_env
+  installed = pu.recorded_upstream_sha(platform)
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 78")})
+  original_check = pu.check_for_updates
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "self_hosted",
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.check_for_updates",
+    lambda: original_check(platform),
+  )
+
+  response = client.post("/api/platform/check", headers=auth)
+
+  assert response.status_code == 200
+  status = response.json()
+  assert status["available"] is True
+  assert status["checked_target_sha"] == target
+  assert status["installed_release_sha"] == installed
+  assert status["recorded_upstream_sha"] == installed
+  assert status["newer_updates_available"] is False
+  assert _served_sha(platform) == installed
 
 
 def test_check_for_updates_offline_is_explicit_error(clone_env):
@@ -1636,6 +1704,36 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   assert flag["merge_base"] is None
 
 
+@pytest.mark.asyncio
+async def test_platform_conflict_resolver_preserves_background_choice_effort(
+  monkeypatch, db, owner_token,
+):
+  async def fake_start(**kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_chat_choice",
+    lambda data_dir, session: {
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
+    },
+  )
+  monkeypatch.setattr(
+    "app.chat_start.start_programmatic_chat_turn", fake_start,
+  )
+  monkeypatch.setattr("app.push.notify_owner", lambda *args, **kwargs: None)
+
+  result = await pu.spawn_platform_conflict_chat(
+    db, ["backend/app/main.py"], "a" * 40,
+  )
+
+  from app import models
+  chat = db.get(models.Chat, result["chat_id"])
+  assert chat.provider == "codex"
+  assert chat.agent_settings_json["model"] == "gpt-5.5"
+  assert chat.agent_settings_json["effort"] == "xhigh"
+
+
 def test_platform_conflict_resolver_message_pins_reviewed_target():
   target = "a" * 40
 
@@ -1762,7 +1860,7 @@ def test_platform_update_uses_explicit_activation_levels(monkeypatch, deployment
   assert classify(["skill/core.md"])["level"] == \
     "server_restart"
   assert classify(["backend/requirements.txt"])["level"] == \
-    "dependency_sync"
+    "image_rebuild"
   assert classify(["backend/scripts/entrypoint.sh"])["level"] == \
     "image_rebuild"
   assert classify(["Caddyfile"])["level"] == (
@@ -2009,6 +2107,7 @@ def test_explicit_ghcr_target_is_available_before_source_object_is_fetched(
 
   assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
   assert status["available"] is True
+  assert status["checked_target_sha"] == missing_release
   assert _served_sha(platform) != missing_release
 
 
@@ -2350,7 +2449,7 @@ def test_status_ignores_seed_repair_already_matching_running_image(
   assert status["activation"]["level"] == "live"
 
 
-def test_status_offers_in_place_restart_for_dependency_changes(
+def test_status_requires_an_image_for_python_dependency_changes(
   clone_env,
 ):
   _, platform = clone_env
@@ -2361,11 +2460,9 @@ def test_status_offers_in_place_restart_for_dependency_changes(
 
   status = pu.platform_status(platform)
 
-  # A Python dependency change is installed in place by Apply and then loaded by
-  # a restart — no image rebuild — so it is offered as an in-product restart.
-  assert status["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
-  assert status["needs_restart"] is True
-  assert status["activation"]["level"] == "dependency_sync"
+  assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  assert status["needs_restart"] is False
+  assert status["activation"]["level"] == "image_rebuild"
 
 
 def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env, monkeypatch):
@@ -2524,10 +2621,7 @@ def test_skipped_release_still_carries_required_topology_migration(
   assert preview["activation"]["level"] == "image_rebuild"
 
 
-def test_boot_retires_in_place_python_dependency_sync(clone_env, monkeypatch):
-  # Owner Apply installs the locked Python deps in place BEFORE writing this
-  # marker, so a fresh boot that loads the target already has them — retire like
-  # a restart, not preserved as unverified image work.
+def test_boot_preserves_python_dependency_image_work(clone_env, monkeypatch):
   _, platform = clone_env
   target = _served_sha(platform)
   pu.mark_activation_needed(
@@ -2537,56 +2631,7 @@ def test_boot_retires_in_place_python_dependency_sync(clone_env, monkeypatch):
 
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   assert "startup[installed]" in pu.reconcile_clone_sync()
-  # Every path retired (deps like a restart, code by the restart) -> no pending
-  # activation work at all.
-  assert pu._read_activation_marker() is None
-
-
-def test_apply_installs_python_dependencies_in_place(clone_env, monkeypatch):
-  origin, platform = clone_env
-  target = _advance_origin(
-    origin,
-    edits={"backend/requirements.lock": "new-locked-deps\n"},
-    msg="bump python deps",
-  )
-  pu._fetch(platform)
-
-  synced = {}
-
-  def fake_sync(repo):
-    synced["ran"] = True
-    return True, ""
-
-  monkeypatch.setattr(pu, "_sync_python_dependencies", fake_sync)
-
-  res = pu.reconcile_clone(platform, target_ref=target, fetch_remote=False)
-
-  assert res.status == "updated"
-  assert synced.get("ran") is True  # the in-place install ran during Apply
-  assert _served_sha(platform) == target
-
-
-def test_apply_rolls_back_when_dependency_install_fails(clone_env, monkeypatch):
-  origin, platform = clone_env
-  pre = pu._rev(platform, pu._local_branch(platform))
-  target = _advance_origin(
-    origin,
-    edits={"backend/requirements.lock": "new-locked-deps\n"},
-    msg="bump python deps",
-  )
-  pu._fetch(platform)
-
-  monkeypatch.setattr(
-    pu, "_sync_python_dependencies", lambda repo: (False, "boom"),
-  )
-
-  res = pu.reconcile_clone(platform, target_ref=target, fetch_remote=False)
-
-  # A dependency install failure is fail-closed: reset to the pre-reconcile
-  # commit and serve the old tree, exactly like a failed import probe.
-  assert res.status == "rolled_back"
-  assert "boom" in (res.error or "")
-  assert pu._rev(platform, pu._local_branch(platform)) == pre
+  assert pu._read_activation_marker()["paths"] == ["backend/requirements.lock"]
 
 
 @pytest.mark.asyncio
@@ -2839,6 +2884,63 @@ def test_update_progress_is_durable_across_worker_memory(clone_env):
     pu._UPDATE_PROGRESS.update(original)
 
 
+def test_next_reconcile_retires_progress_from_dead_process(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  plan_id = "a" * 64
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.BUILDING,
+      plan_id=plan_id,
+      target_sha=target,
+      active=True,
+    )
+
+    with pu._reconcile_flock():
+      pass
+
+    recovered = pu.platform_update_progress()
+    assert recovered["phase"] == pu.PlatformUpdatePhase.FAILED.value
+    assert recovered["active"] is False
+    assert recovered["error"] == (
+      "Möbius restarted before this update finished. Review the update again "
+      "before retrying."
+    )
+    assert recovered["plan_id"] == plan_id
+    assert recovered["target_sha"] == target
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
+@pytest.mark.asyncio
+async def test_live_apply_progress_survives_its_own_reconcile_lock(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  plan_id = "b" * 64
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.RECONCILING,
+      plan_id=plan_id,
+      target_sha=target,
+      active=True,
+    )
+
+    async with pu._APPLY_LOCK:
+      with pu._reconcile_flock():
+        pass
+
+    current = pu.platform_update_progress()
+    assert current["phase"] == pu.PlatformUpdatePhase.RECONCILING.value
+    assert current["active"] is True
+    assert current["error"] is None
+    assert current["plan_id"] == plan_id
+    assert current["target_sha"] == target
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
 # --- update preview: the read-only "review before Apply" surface ------------
 # platform_update_preview is fetch-free (it reads the origin/main left by the
 # last fetch), so each test fetches first to mirror the real order: Check
@@ -2868,8 +2970,8 @@ def test_update_preview_holds_reconcile_lock_for_consistent_snapshot(
   events = []
 
   @contextmanager
-  def observed_lock():
-    events.append("entered")
+  def observed_lock(*, blocking=True):
+    events.append(("entered", blocking))
     try:
       yield
     finally:
@@ -2879,7 +2981,7 @@ def test_update_preview_holds_reconcile_lock_for_consistent_snapshot(
 
   pu.platform_update_preview(platform)
 
-  assert events == ["entered", "exited"]
+  assert events == [("entered", False), "exited"]
 
 
 def test_update_preview_clean_fast_forward(clone_env):
@@ -2905,7 +3007,7 @@ def test_update_preview_clean_fast_forward(clone_env):
   assert preview["activation"]["level"] == "server_restart"
 
 
-def test_update_preview_shows_dependency_change_applies_in_place(clone_env):
+def test_update_preview_shows_dependency_change_needs_an_image(clone_env):
   origin, platform = clone_env
   _advance_origin(
     origin,
@@ -2916,10 +3018,172 @@ def test_update_preview_shows_dependency_change_applies_in_place(clone_env):
 
   preview = pu.platform_update_preview(platform)
 
-  assert preview["activation"]["level"] == "dependency_sync"
+  assert preview["activation"]["level"] == "image_rebuild"
   guidance = " ".join(preview["activation"]["guidance"])
-  assert "in place" in guidance
-  assert "rebuild the image" not in guidance
+  assert "Rebuild and replace" in guidance
+
+
+def test_update_preview_accepts_target_dependencies_already_in_running_image(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==2\n",
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert pu.target_python_inputs_baked_into_image(platform, target) is True
+  assert preview["activation"]["level"] == "live"
+  assert all(
+    reason["code"] != "python_dependencies"
+    for reason in preview["incoming_activation"]["reasons"]
+  )
+
+
+@pytest.mark.parametrize("provenance", ["missing", "malformed", "mismatch"])
+def test_target_dependency_proof_fails_closed_for_incomplete_provenance(
+  clone_env, monkeypatch, provenance,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+  lock_bytes = _git(
+    platform, "show", f"{target}:backend/requirements.lock",
+  ).stdout.encode()
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  if provenance == "missing":
+    image_inputs.pop("backend/requirements.txt")
+  elif provenance == "malformed":
+    image_inputs["backend/requirements.txt"] = "not-a-digest"
+  else:
+    image_inputs["backend/requirements.lock"] = hashlib.sha256(
+      lock_bytes + b"different",
+    ).hexdigest()
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert pu.target_python_inputs_baked_into_image(platform, target) is False
+  assert preview["activation"]["level"] == "image_rebuild"
+
+
+@pytest.mark.asyncio
+async def test_source_apply_refuses_image_owned_update_before_mutation(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"backend/requirements.lock": "new locked dependencies\n"},
+    msg="change Python dependencies",
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  with pytest.raises(pu.PlatformUpdateError, match="image_rebuild_required"):
+    await pu.apply_platform_update(
+      SimpleNamespace(),
+      **_apply_plan(before, target, platform),
+    )
+
+  assert _served_sha(platform) == before
+  assert preview["activation"]["level"] == "image_rebuild"
+
+
+@pytest.mark.asyncio
+async def test_source_apply_uses_target_dependency_proof_from_running_image(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==2\n",
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=base,
+    target_sha=target,
+    repo=platform,
+  )
+
+  assert _served_sha(platform) == target
+  assert result["state"] != "activation_needed"
+  assert all(
+    reason["code"] != "python_dependencies"
+    for reason in result["activation"]["reasons"]
+  )
+
+
+@pytest.mark.asyncio
+async def test_local_image_drift_does_not_block_unrelated_source_update(clone_env):
+  origin, platform = clone_env
+  current = _local_commit(
+    platform,
+    edits={"backend/requirements.lock": "owner-package==1\n"},
+  )
+  target = _advance_origin(
+    origin, edits={"docs/update-note.md": "safe source-only update\n"},
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+  result = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(current, target, platform),
+  )
+
+  assert preview["activation"]["level"] == "live"
+  # Applying unrelated source must not erase an existing image remainder.
+  assert result["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert pu._is_ancestor(platform, target, _served_sha(platform))
 
 
 def test_update_preview_excludes_local_edits(clone_env):
@@ -2940,8 +3204,8 @@ def test_update_preview_excludes_local_edits(clone_env):
   assert preview["conflict_paths"] == []
 
 
-def test_update_preview_predicts_overlay_conflict_without_mutating_live_clone(
-  clone_env,
+def test_update_preview_does_not_replay_local_overlay(
+  clone_env, monkeypatch,
 ):
   origin, platform = clone_env
   served = _local_commit(platform, edits={
@@ -2952,10 +3216,15 @@ def test_update_preview_predicts_overlay_conflict_without_mutating_live_clone(
   })
   pu._fetch(platform)
   worktrees_before = _git(platform, "worktree", "list", "--porcelain").stdout
+  monkeypatch.setattr(
+    pu.app_git,
+    "replay_overlay",
+    lambda *args, **kwargs: pytest.fail("Review must not replay local history"),
+  )
 
   preview = pu.platform_update_preview(platform)
 
-  assert preview["conflict_paths"] == ["backend/app/main.py"]
+  assert preview["conflict_paths"] == []
   assert _served_sha(platform) == served
   assert _git(platform, "status", "--porcelain").stdout == ""
   assert _git(platform, "worktree", "list", "--porcelain").stdout == worktrees_before
@@ -3071,6 +3340,148 @@ async def test_apply_installs_exact_preview_target_without_refetching_moving_ori
   # object without moving this clone's tracking ref or incurring another fetch.
   assert newer != reviewed
   assert pu._rev(platform, pu.DEFAULT_TARGET_REF) == reviewed
+
+
+@pytest.mark.asyncio
+async def test_cancelled_apply_finishes_its_admitted_transaction(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  reviewed = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 399")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+  reconcile = pu._reconcile_under_lock
+
+  def delayed_reconcile(*args, **kwargs):
+    worker_started.set()
+    assert release_worker.wait(timeout=5)
+    return reconcile(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", delayed_reconcile)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(worker_started.wait, 2)
+
+  applying.cancel()
+  await asyncio.sleep(0)
+  applying.cancel()
+  release_worker.set()
+  with pytest.raises(asyncio.CancelledError):
+    await applying
+
+  assert _served_sha(platform) == reviewed
+  progress = pu.platform_update_progress()
+  assert progress["active"] is False
+  assert progress["phase"] == pu.PlatformUpdatePhase.COMPLETE.value
+
+
+@pytest.mark.asyncio
+async def test_cancelled_apply_reports_cancellation_after_transaction_failure(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 401")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+
+  def fail_reconcile(*args, **kwargs):
+    worker_started.set()
+    assert release_worker.wait(timeout=5)
+    raise RuntimeError("reconcile failed after disconnect")
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", fail_reconcile)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(worker_started.wait, 2)
+
+  applying.cancel()
+  release_worker.set()
+  with pytest.raises(asyncio.CancelledError):
+    await applying
+
+  progress = pu.platform_update_progress()
+  assert progress["active"] is False
+  assert progress["phase"] == pu.PlatformUpdatePhase.FAILED.value
+  assert progress["error"] == "reconcile failed after disconnect"
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_cross_process_lock_through_final_progress(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 402")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  finalizing = threading.Event()
+  release_finalizing = threading.Event()
+
+  def delayed_hook_refresh(*_args, **_kwargs):
+    finalizing.set()
+    assert release_finalizing.wait(timeout=5)
+    return None
+
+  monkeypatch.setattr(pu, "_refresh_git_hooks", delayed_hook_refresh)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(finalizing.wait, 2)
+
+  with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+    with pu._reconcile_flock(blocking=False):
+      pass
+  progress = pu.platform_update_progress()
+  assert progress["active"] is True
+  assert progress["phase"] == pu.PlatformUpdatePhase.FINALIZING.value
+
+  release_finalizing.set()
+  result = await applying
+  assert result["state"] in {
+    pu.PlatformUpdateState.UP_TO_DATE.value,
+    pu.PlatformUpdateState.RESTART_NEEDED.value,
+    pu.PlatformUpdateState.ACTIVATION_NEEDED.value,
+  }
+  assert pu.platform_update_progress()["active"] is False
+
+
+def test_preview_reports_an_active_update_instead_of_waiting(clone_env):
+  _origin, platform = clone_env
+
+  with pu._reconcile_flock():
+    with pytest.raises(pu.PlatformUpdateError) as caught:
+      pu.platform_update_preview(platform)
+
+  assert str(caught.value) == "platform_update_in_progress"
 
 
 @pytest.mark.asyncio
@@ -3224,41 +3635,15 @@ def test_image_input_drift_feeds_the_activation_state(clone_env, monkeypatch, tm
   assert pu.image_input_drift(platform) == []
   assert pu.platform_status(platform)["activation"]["level"] == "live"
 
-  # A dependency bump is an in-place install; a Dockerfile change needs a new
-  # image. Both come from state, not from remembering which update did it.
+  # A dependency bump needs the same reviewed image boundary as Dockerfile.
   (platform / "backend" / "requirements.lock").write_text("a==2\n")
   assert pu.image_input_drift(platform) == ["backend/requirements.lock"]
-  assert pu.platform_status(platform)["activation"]["level"] == "dependency_sync"
+  assert pu.platform_status(platform)["activation"]["level"] == "image_rebuild"
   (platform / "Dockerfile").write_text("FROM python:3.13\n")
   assert pu.image_input_drift(platform) == [
     "Dockerfile", "backend/requirements.lock",
   ]
   assert pu.platform_status(platform)["activation"]["level"] == "image_rebuild"
-
-
-def test_live_install_drift_reports_only_what_the_image_lacks(tmp_path):
-  inventory = tmp_path / "inventory"
-  inventory.mkdir()
-  (inventory / "pip.txt").write_text("fastapi==0.1\nhttpx==2\n")
-  (inventory / "apt.txt").write_text("curl=8\ngit=2\n")
-  outputs = {
-    "pip": "fastapi==0.1\nhttpx==3\nrich==13\n",
-    "dpkg-query": "curl=8\ngit=2\nffmpeg=6\n",
-  }
-
-  def fake_run(command, **_kwargs):
-    key = "pip" if "pip" in command else "dpkg-query"
-    return SimpleNamespace(returncode=0, stdout=outputs[key])
-
-  assert pu.live_install_drift(inventory, run=fake_run) == {
-    "pip": ["httpx==3", "rich==13"],
-    "apt": ["ffmpeg=6"],
-  }
-  # No inventories (an older image): nothing is claimed.
-  assert pu.live_install_drift(tmp_path / "missing", run=fake_run) == {}
-  # A failing query is not reported as drift.
-  failing = lambda command, **_k: SimpleNamespace(returncode=1, stdout="")
-  assert pu.live_install_drift(inventory, run=failing) == {}
 
 
 def test_applied_image_update_has_a_finish_plan_without_new_source(clone_env):
@@ -3274,6 +3659,7 @@ def test_applied_image_update_has_a_finish_plan_without_new_source(clone_env):
   assert preview["operation"] == "finish"
   assert preview["files"] == []
   assert preview["activation"]["level"] == "image_rebuild"
+  assert preview["incoming_activation"]["level"] == "live"
   assert preview["plan_id"] == pu._update_plan_id(target, target, digest)
   reviewed = pu.reviewed_container_rebuild_plan(
     repo=platform, current_sha=target, target_sha=target,
@@ -3282,7 +3668,7 @@ def test_applied_image_update_has_a_finish_plan_without_new_source(clone_env):
   assert reviewed["activation"]["level"] == "image_rebuild"
 
 
-def test_new_source_review_carries_unfinished_image_activation(clone_env):
+def test_new_source_review_does_not_mix_in_unfinished_image_activation(clone_env):
   origin, platform = clone_env
   current = _served_sha(platform)
   pu.mark_activation_needed(current, ["Dockerfile"], upstream_sha=current, repo=platform)
@@ -3294,7 +3680,9 @@ def test_new_source_review_carries_unfinished_image_activation(clone_env):
   assert preview["available"] is True
   assert preview["operation"] == "update"
   assert preview["actionable"] is True
-  assert preview["activation"]["level"] == "image_rebuild"
+  assert preview["activation"]["level"] == "live"
+  assert preview["incoming_activation"]["level"] == "live"
+  assert pu.platform_status(platform)["activation"]["level"] == "image_rebuild"
 
 
 @pytest.mark.asyncio
@@ -3307,39 +3695,16 @@ async def test_finish_plan_does_not_reapply_source_or_dependencies(clone_env, mo
   def no_install(_repo):
     pytest.fail("A finish-only plan must not reinstall dependencies")
 
-  monkeypatch.setattr(pu, "_sync_python_dependencies", no_install)
   monkeypatch.setattr(pu, "_sync_frontend_dependencies", no_install)
   result = await pu.apply_platform_update(
     SimpleNamespace(), **_apply_plan(current, current, platform),
+    allow_image_activation=True,
   )
 
   assert preview["operation"] == "finish"
   assert result["activation"]["level"] == "image_rebuild"
   assert _served_sha(platform) == current
   assert result["merge_commit"] is None
-
-
-def test_successful_live_dependency_sync_survives_restart_not_new_container(
-  clone_env, monkeypatch,
-):
-  _, platform = clone_env
-  lock = platform / "backend/requirements.lock"
-  lock.write_text("old lock")
-  baked = platform_activation.image_input_hashes(platform)
-  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": baked})
-  lock.write_text("new lock")
-  with monkeypatch.context() as install:
-    install.setattr(pu.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0))
-    assert pu._sync_python_dependencies(platform) == (True, "")
-
-  assert pu.image_input_drift(platform) == []
-  # A fresh module/process reads the same container-local receipt.
-  assert pu._dependency_receipt()["backend/requirements.lock"] == hashlib.sha256(b"new lock").hexdigest()
-  lock.write_text("later edit")
-  assert pu.image_input_drift(platform) == ["backend/requirements.lock"]
-  lock.write_text("new lock")
-  pu.DEPENDENCY_RECEIPT_PATH.unlink()
-  assert pu.image_input_drift(platform) == ["backend/requirements.lock"]
 
 
 def test_image_input_drift_ignores_generated_files_but_keeps_local_source(
@@ -3390,72 +3755,22 @@ def test_image_input_drift_ignores_reclassified_baked_path_but_keeps_deletion(
   ]
 
 
-def test_failed_dependency_sync_invalidates_previous_success_receipt(
-  clone_env, monkeypatch,
-):
-  _, platform = clone_env
-  (platform / "backend/requirements.lock").write_text("lock")
-  pu._record_dependency_inputs(platform, pu._PYTHON_DEPENDENCY_INPUTS, installed=True)
-  with monkeypatch.context() as install:
-    install.setattr(pu.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-      returncode=1, stdout="", stderr="partial installation failed",
-    ))
-    assert pu._sync_python_dependencies(platform)[0] is False
-  assert pu._dependency_receipt()["backend/requirements.lock"] == ""
-  # Even if source matches the original image, a failed install is not proof
-  # that the runtime still matches: keep the dependency action visible.
-  baked = platform_activation.image_input_hashes(platform)
-  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": baked})
-  assert pu.image_input_drift(platform) == ["backend/requirements.lock"]
-
-
-def test_failed_import_restores_previous_declared_dependency_versions(
-  clone_env, monkeypatch,
-):
-  origin, platform = clone_env
-  initial = _advance_origin(origin, edits={"backend/requirements.lock": "old lock"})
-  _git(platform, "fetch", "origin")
-  _git(platform, "reset", "--hard", initial)
-  _git(platform, "branch", "-f", "upstream", initial)
-  target = _advance_origin(origin, edits={
-    "backend/requirements.lock": "new lock",
-    "backend/app/main.py": "raise RuntimeError('broken candidate')",
-  })
-  installs = []
-  monkeypatch.setattr(pu, "_sync_python_dependencies", lambda repo: (
-    installs.append((repo / "backend/requirements.lock").read_text()) or (True, "")
-  ))
-
-  result = pu.reconcile_clone(platform)
-
-  assert result.status == "rolled_back"
-  assert result.target_sha == target
-  assert _served_sha(platform) == initial
-  assert installs == ["new lock", "old lock"]
-  assert "dependency_restore_failed" not in result.error
-
-
 @pytest.mark.asyncio
-async def test_failed_frontend_build_restores_both_dependency_locks(
+async def test_failed_frontend_build_restores_its_dependency_lock(
   clone_env, monkeypatch,
 ):
   origin, platform = clone_env
   initial = _advance_origin(origin, edits={
-    "backend/requirements.lock": "old python",
     "frontend/package-lock.json": "old frontend",
   })
   _git(platform, "fetch", "origin")
   _git(platform, "reset", "--hard", initial)
   _git(platform, "branch", "-f", "upstream", initial)
   target = _advance_origin(origin, edits={
-    "backend/requirements.lock": "new python",
     "frontend/package-lock.json": "new frontend",
   })
   pu._fetch(platform)
   installs = []
-  monkeypatch.setattr(pu, "_sync_python_dependencies", lambda repo: (
-    installs.append((repo / "backend/requirements.lock").read_text()) or (True, "")
-  ))
   monkeypatch.setattr(pu, "_sync_frontend_dependencies", lambda repo: (
     installs.append((repo / "frontend/package-lock.json").read_text()) or (True, "")
   ))
@@ -3468,20 +3783,23 @@ async def test_failed_frontend_build_restores_both_dependency_locks(
   )
 
   assert result["state"] == "rolled_back"
-  assert installs == ["new python", "new frontend", "old python", "old frontend"]
+  assert installs == ["new frontend", "old frontend"]
   assert _served_sha(platform) == initial
 
 
-def test_dependency_restore_failure_is_visible_in_durable_rollback(
+def test_frontend_dependency_restore_failure_is_visible_in_durable_rollback(
   clone_env, monkeypatch,
 ):
   origin, platform = clone_env
-  initial = _advance_origin(origin, edits={"backend/requirements.lock": "old lock"})
+  initial = _advance_origin(origin, edits={"frontend/package-lock.json": "old lock"})
   _git(platform, "fetch", "origin")
   _git(platform, "reset", "--hard", initial)
   _git(platform, "branch", "-f", "upstream", initial)
-  _advance_origin(origin, edits={"backend/requirements.lock": "new lock"})
-  monkeypatch.setattr(pu, "_sync_python_dependencies", lambda repo: (False, "network unavailable"))
+  _advance_origin(origin, edits={
+    "frontend/package-lock.json": "new lock",
+    "frontend/src/App.jsx": "export default 'new'\n",
+  })
+  monkeypatch.setattr(pu, "_sync_frontend_dependencies", lambda repo: (False, "network unavailable"))
 
   result = pu.reconcile_clone(platform)
 
@@ -3563,7 +3881,7 @@ def test_startup_never_fetches_or_installs_a_newer_release(clone_env, monkeypatc
   def forbidden(*args, **kwargs):
     pytest.fail("Startup must not fetch, replay source, or install packages")
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
-  for name in ("_fetch", "_fetch_unshallow", "reconcile_clone", "_sync_python_dependencies", "_sync_frontend_dependencies"):
+  for name in ("_fetch", "_fetch_unshallow", "reconcile_clone", "_sync_frontend_dependencies"):
     monkeypatch.setattr(pu, name, forbidden)
   assert "startup[installed]" in pu.reconcile_clone_sync()
   assert _served_sha(platform) == local
@@ -3597,7 +3915,10 @@ def test_host_installer_replays_exact_bundled_release_and_preserves_local_edits(
   installed = _served_sha(platform)
   _local_commit(platform, edits={"local.txt": "owner commit"})
   (platform / "local.txt").write_text("owner working edit")
-  target = _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'reviewed'\n"})
+  target = _advance_origin(origin, edits={
+    "backend/app/foo.py": "VALUE = 'reviewed'\n",
+    "Dockerfile": "FROM reviewed-image\n",
+  })
   bundle = tmp_path / "image.bundle"
   _git(origin.parent / "origin-work", "bundle", "create", str(bundle), "HEAD")
   _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'later unreviewed'\n"})
@@ -3616,6 +3937,7 @@ def test_host_installer_replays_exact_bundled_release_and_preserves_local_edits(
   assert pu.recorded_upstream_sha(platform) == target
   assert pu._rev(platform, "origin/main") == installed
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'reviewed'\n"
+  assert (platform / "Dockerfile").read_text() == "FROM reviewed-image\n"
   assert (platform / "local.txt").read_text() == "owner working edit"
   assert _git(platform, "status", "--porcelain").stdout.strip() == "M local.txt"
 
@@ -3643,6 +3965,10 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
 
   assert preview["blocking_paths"] == paths
   assert reviewed["blockers"] == preview["blocking_paths"]
+  assert preview["blocking_diff"] is not None
+  assert "backend/scripts/seed-skills/cron.md" in preview["blocking_diff"]
+  assert "local instructions" in preview["blocking_diff"]
+  assert preview["blocking_diff_truncated"] is False
   assert preview["activation"]["deployment"] == deployment
   assert _served_sha(platform) == before
   assert _git(platform, "status", "--porcelain").stdout == before_status
@@ -3661,6 +3987,112 @@ def test_review_does_not_block_seed_changes_already_in_the_official_release(clon
 
   assert preview["activation"]["level"] == "image_rebuild"
   assert preview["blocking_paths"] == []
+  assert preview["blocking_diff"] is None
+  assert preview["blocking_diff_truncated"] is False
+
+
+def test_review_exposes_uncommitted_image_input_blocker(clone_env):
+  origin, platform = clone_env
+  dockerfile = platform / "Dockerfile"
+  dockerfile.write_text("FROM local-owner-image\n")
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM reviewed-official-image\n"},
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert preview["blocking_paths"] == ["Dockerfile"]
+  assert "local-owner-image" in preview["blocking_diff"]
+  assert "reviewed-official-image" in preview["blocking_diff"]
+
+
+def test_review_does_not_follow_uncommitted_image_input_symlink(clone_env):
+  origin, platform = clone_env
+  secret = platform.parent / "outside-secret"
+  secret.write_text("do-not-expose\n")
+  dockerfile = platform / "Dockerfile"
+  dockerfile.symlink_to(secret)
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM reviewed-official-image\n"},
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert preview["blocking_paths"] == ["Dockerfile"]
+  assert str(secret) in preview["blocking_diff"]
+  assert "do-not-expose" not in preview["blocking_diff"]
+
+
+def test_review_does_not_block_on_uncommitted_image_input_fifo(clone_env):
+  origin, platform = clone_env
+  _local_commit(platform, edits={"Dockerfile": "FROM local-owner-image\n"})
+  dockerfile = platform / "Dockerfile"
+  dockerfile.unlink()
+  os.mkfifo(dockerfile)
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM reviewed-official-image\n"},
+  )
+  pu._fetch(platform)
+
+  def stalled(_signum, _frame):
+    raise AssertionError("Review blocked while opening a local named pipe")
+
+  previous = signal.signal(signal.SIGALRM, stalled)
+  signal.alarm(5)
+  try:
+    preview = pu.platform_update_preview(platform, target_sha=target)
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+  assert preview["blocking_paths"] == ["Dockerfile"]
+  assert "reviewed-official-image" in preview["blocking_diff"]
+
+
+def test_review_describes_a_locally_deleted_image_input(clone_env):
+  origin, platform = clone_env
+  _local_commit(platform, edits={"Dockerfile": "FROM local-owner-image\n"})
+  (platform / "Dockerfile").unlink()
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM reviewed-official-image\n"},
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert preview["blocking_paths"] == ["Dockerfile"]
+  assert "local path is not present: Dockerfile" in preview["blocking_diff"]
+  assert "crosses a link" not in preview["blocking_diff"]
+
+
+def test_review_does_not_follow_image_input_ancestor_symlink(clone_env):
+  origin, platform = clone_env
+  path = "backend/runtime/private.py"
+  _local_commit(platform, edits={path: "VALUE = 'local'\n"})
+  runtime = platform / "backend" / "runtime"
+  for child in runtime.iterdir():
+    child.unlink()
+  runtime.rmdir()
+  outside = platform.parent / "outside-runtime"
+  outside.mkdir()
+  (outside / "private.py").write_text("outside-secret\n")
+  runtime.symlink_to(outside, target_is_directory=True)
+  target = _advance_origin(
+    origin, edits={path: "VALUE = 'reviewed'\n"},
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert path in preview["blocking_paths"]
+  assert "outside-secret" not in preview["blocking_diff"]
+  assert "crosses a link" in preview["blocking_diff"]
 
 
 def test_finish_review_exposes_local_image_blockers_too(clone_env):
@@ -3674,3 +4106,4 @@ def test_finish_review_exposes_local_image_blockers_too(clone_env):
 
   assert preview["operation"] == "finish"
   assert preview["blocking_paths"] == [path]
+  assert "preserve me" in preview["blocking_diff"]

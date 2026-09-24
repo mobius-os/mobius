@@ -80,6 +80,11 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a failed answer should retain its retryable draft')
 })
 
+test('question cards wrap long unbroken content within a mobile pane', () => {
+  assert.match(css, /\.qcard\s*\{[^}]*overflow-wrap:\s*anywhere/,
+    'long unbroken question and option text should not widen the card on mobile')
+})
+
 test('question card css has no stale styling hook', () => {
   assert.doesNotMatch(css, /\.qcard--stale\s*\{[\s\S]*?\}/,
     'stale question styling should not come back')

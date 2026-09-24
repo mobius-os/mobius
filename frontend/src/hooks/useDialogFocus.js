@@ -19,6 +19,30 @@ export function dialogFocusableElements(container) {
     .filter(element => !element.hidden && element.getClientRects().length > 0)
 }
 
+/**
+ * Find the branches that must be inert for a dialog with a local modality
+ * boundary. The boundary itself stays live so sibling panes outside it are
+ * never reached by the global modal contract.
+ */
+export function dialogSiblingElements(container, boundary = null) {
+  const siblings = []
+  const seen = new Set()
+  const body = typeof document !== 'undefined' ? document.body : null
+  let branch = container
+  while (branch?.parentElement) {
+    const parent = branch.parentElement
+    for (const element of parent.children) {
+      if (element !== branch && !seen.has(element)) {
+        seen.add(element)
+        siblings.push(element)
+      }
+    }
+    if (parent === boundary || (body && parent === body)) break
+    branch = parent
+  }
+  return siblings
+}
+
 function lockBodyScroll() {
   if (bodyScrollLockCount === 0) {
     bodyOverflowBeforeLock = document.body.style.overflow
@@ -45,6 +69,10 @@ export default function useDialogFocus({
   closeOnEscape = true,
   modal = true,
   lockScroll = modal,
+  // A local modal can block only its owning surface while leaving sibling
+  // panes interactive. It deliberately does not trap focus or claim a
+  // document-wide aria-modal barrier.
+  inertBoundaryRef,
 }) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
@@ -63,24 +91,21 @@ export default function useDialogFocus({
     if (lockScroll) lockBodyScroll()
 
     // Modal dialogs are rendered in place rather than through a body portal.
-    // Inert sibling branches all the way to body so shell controls behind the
-    // modal cannot remain keyboard- or assistive-technology reachable. A
-    // modeless panel deliberately leaves those branches interactive so an
-    // outside press can dismiss it without stealing the intended destination.
+    // A normal modal inerts sibling branches all the way to body. A local
+    // modal stops at its explicit boundary, so only the owning surface is
+    // blocked and sibling workspace panes remain interactive.
+    const boundary = inertBoundaryRef?.current
     const siblings = []
     if (modal) {
-      let branch = container
-      while (branch.parentElement) {
-        const parent = branch.parentElement
-        for (const element of parent.children) {
-          if (element !== branch && !siblings.some(entry => entry.element === element)) {
-            siblings.push({ element, inert: element.inert })
-            element.inert = true
-          }
-        }
-        if (parent === document.body) break
-        branch = parent
-      }
+      dialogSiblingElements(container).forEach(element => {
+        siblings.push({ element, inert: element.inert })
+        element.inert = true
+      })
+    } else if (boundary) {
+      dialogSiblingElements(container, boundary).forEach(element => {
+        siblings.push({ element, inert: element.inert })
+        element.inert = true
+      })
     }
 
     const focusInitial = () => {
@@ -101,7 +126,8 @@ export default function useDialogFocus({
       // nested/sibling dialogs can both close or both redirect focus from one
       // keypress even though inerting correctly hides the lower surface.
       if (dialogStack.at(-1) !== stackEntry) return
-      if (event.key === 'Escape' && closeOnEscapeRef.current) {
+      const eventIsInsideDialog = container.contains(event.target)
+      if (event.key === 'Escape' && closeOnEscapeRef.current && (modal || eventIsInsideDialog)) {
         event.preventDefault()
         onCloseRef.current?.()
         return
@@ -139,5 +165,5 @@ export default function useDialogFocus({
         previouslyFocused?.focus?.({ preventScroll: true })
       }
     }
-  }, [open, containerRef, initialFocusRef, restoreFocusRef, shouldRestoreFocus, lockScroll, modal])
+  }, [open, containerRef, initialFocusRef, restoreFocusRef, shouldRestoreFocus, lockScroll, modal, inertBoundaryRef])
 }

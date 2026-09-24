@@ -44,8 +44,13 @@ def send_notification(
 ):
   """Send a push notification to all owner subscriptions."""
   actions_list = (
-    [a.model_dump() for a in body.actions] if body.actions else None
+    [a.model_dump(exclude_none=True) for a in body.actions] if body.actions else None
   )
+  if any(a.action.startswith("recover_") for a in (body.actions or [])):
+    raise HTTPException(
+      status_code=403,
+      detail="Recovery actions are created by resource deletion endpoints.",
+    )
   # An app-scoped caller can't spoof the notification's source: force it to be
   # attributed to the app itself, so a mini-app can't masquerade as the system
   # or another app in a push (a phishing vector). Owner tokens keep full control.
@@ -136,6 +141,45 @@ def clear_notifications(
   )
   db.commit()
   return {"deleted": int(deleted)}
+
+
+@router.delete(
+  "/{notification_id}",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
+def dismiss_notification(
+  notification_id: str,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Delete one ordinary notification without removing an Undo receipt."""
+  notification = (
+    db.query(models.Notification)
+    .filter(
+      models.Notification.owner_id == owner.id,
+      models.Notification.id == notification_id,
+    )
+    .one_or_none()
+  )
+  if notification is None:
+    raise HTTPException(status_code=404, detail="Notification not found.")
+  actions = notification.actions if isinstance(notification.actions, list) else []
+  if any(
+    isinstance(action, dict)
+    and isinstance(action.get("action"), str)
+    and action["action"].startswith("recover_")
+    for action in actions
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="Undo notifications cannot be dismissed individually.",
+    )
+  db.delete(notification)
+  db.commit()
+  return {"deleted": 1}
 
 
 @router.get("")

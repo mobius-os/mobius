@@ -42,6 +42,19 @@ test('declared waits stay compact and disclose ownership, deadline, and cost', (
     'No model tokens while checking · one turn when it wakes')
 })
 
+test('waits without timestamps keep their ordinary fallback labels', () => {
+  const timer = waitPresentation({ kind: 'timer' })
+  assert.equal(timer.summary, 'resumes later')
+  assert.equal(timer.timeout, 'This chat wakes to investigate at not set')
+
+  const command = waitPresentation({ kind: 'command', interval_secs: 300 })
+  assert.equal(command.summary, 'every 5 minutes')
+  assert.equal(command.checker, 'Möbius · every 5 minutes')
+
+  const resource = resourcePausePresentation({ pause: { kind: 'memory' } })
+  assert.equal(resource.next, 'checks again automatically')
+})
+
 test('live parent work suppresses the helper handoff without erasing it', () => {
   const backgroundHelpers = { count: 1, items: [] }
   assert.equal(chatHasSelfResumingHandoff({ backgroundHelpers }), true)

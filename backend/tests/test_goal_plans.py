@@ -347,6 +347,53 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
     broadcast_mod.remove_broadcast(chat_id)
 
 
+def test_resuming_goal_publishes_activation_only_for_attachment_transition(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Active goal"}, headers=owner_auth,
+  ).json()["id"]
+  now = datetime.now(UTC).replace(tzinfo=None)
+  db.add_all([
+    make_goal_run(db,
+      id="previous-goal-run", root_run_id="previous-goal-run", chat_id=chat_id,
+      status="failed", provider="codex", goal_objective="Finish the work",
+      goal_id="active-goal", started_at=now - timedelta(minutes=1),
+    ),
+    make_goal_run(db,
+      id="active-run", root_run_id="active-run", chat_id=chat_id,
+      status="running", provider="codex", started_at=now,
+    ),
+  ])
+  db.commit()
+
+  broadcast = broadcast_mod.create_broadcast(chat_id)
+  try:
+    auth = _agent_run_auth(db, chat_id, "active-run")
+    resumed = client.post(
+      f"/api/chats/{chat_id}/goal/resume",
+      json={"goal_id": "active-goal"},
+      headers=auth,
+    )
+
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["state"] == "promoted"
+    assert [event["type"] for event in broadcast.event_log] == ["goal_activated"]
+
+    already_active = client.post(
+      f"/api/chats/{chat_id}/goal/resume",
+      json={"goal_id": "active-goal"},
+      headers=auth,
+    )
+
+    assert already_active.status_code == 200, already_active.text
+    assert already_active.json()["state"] == "active"
+    assert [event["type"] for event in broadcast.event_log] == ["goal_activated"]
+  finally:
+    broadcast_mod.remove_broadcast(chat_id)
+
+
 def test_goal_promotion_rejects_browser_wrong_chat_and_terminal_run_tokens(
   client, owner_token, db,
 ):
@@ -1407,6 +1454,204 @@ def test_completion_preflight_names_only_unfinished_required_work():
   assert helper._completion_blockers(plan) == [
     "Run final audit", "live-child",
   ]
+
+
+def test_goal_plan_write_attaches_presented_goal_and_refetches_revision(
+  monkeypatch, capsys,
+):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    if len(calls) == 1:
+      return {
+        "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+        "plan": {"revision": 4},
+      }
+    if len(calls) == 2:
+      return {"state": "promoted"}
+    if len(calls) == 3:
+      return {
+        "goal": {"id": "goal-1", "revision": 5, "status": "open"},
+        "plan": {"revision": 5},
+      }
+    return {
+      "plan": {
+        "revision": 6,
+        "summary": {"completed": 0, "total": 1},
+      },
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(
+    helper.sys, "argv",
+    ["goal-plan", "update", "review", "--status", "running"],
+  )
+
+  assert helper.main() == 0
+  assert calls == [
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    ("POST", "/api/chats/chat-1/goal/resume", {"goal_id": "goal-1"}),
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    (
+      "PATCH", "/api/chats/chat-1/goal-plan/tasks/review",
+      {"status": "running", "expected_revision": 5},
+    ),
+  ]
+  assert "Goal plan revision 6" in capsys.readouterr().out
+
+
+def test_goal_checkpoint_attaches_presented_goal_and_uses_refetched_revision(
+  monkeypatch,
+):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    if len(calls) == 1:
+      return {
+        "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+        "plan": {"revision": 4},
+      }
+    if len(calls) == 2:
+      return {"state": "promoted"}
+    if len(calls) == 3:
+      return {
+        "goal": {"id": "goal-1", "revision": 5, "status": "open"},
+        "plan": {"revision": 5},
+      }
+    return {"goal": {"id": "goal-1", "revision": 6, "status": "open"}}
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(
+    helper.sys, "argv",
+    [
+      "goal-plan", "checkpoint", "--summary", "Reviewed current state",
+      "--next-action", "Run verification",
+    ],
+  )
+
+  assert helper.main() == 0
+  assert calls == [
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    ("POST", "/api/chats/chat-1/goal/resume", {"goal_id": "goal-1"}),
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    (
+      "PATCH", "/api/chats/chat-1/goal",
+      {
+        "goal_id": "goal-1", "expected_revision": 5,
+        "checkpoint": "Reviewed current state",
+        "next_action": "Run verification",
+      },
+    ),
+  ]
+
+
+def test_goal_plan_read_does_not_attach_presented_goal(monkeypatch, capsys):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    return {
+      "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+      "plan": {"revision": 4, "tasks": []},
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(helper.sys, "argv", ["goal-plan", "show"])
+
+  assert helper.main() == 0
+  assert calls == [("GET", "/api/chats/chat-1/goal-plan", None)]
+  assert '"revision": 4' in capsys.readouterr().out
+
+
+def test_goal_plan_write_aborts_when_presented_goal_changes(monkeypatch):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    if len(calls) == 1:
+      return {
+        "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+        "plan": {"revision": 4},
+      }
+    if len(calls) == 2:
+      return {"state": "promoted"}
+    return {
+      "goal": {"id": "goal-2", "revision": 1, "status": "open"},
+      "plan": {"revision": 1},
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(
+    helper.sys, "argv",
+    ["goal-plan", "update", "review", "--status", "running"],
+  )
+
+  with pytest.raises(
+    SystemExit,
+    match="The presented Goal changed while this attempt attached to it.",
+  ):
+    helper.main()
+  assert calls == [
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    ("POST", "/api/chats/chat-1/goal/resume", {"goal_id": "goal-1"}),
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+  ]
+
+
+@pytest.mark.parametrize("task_status", ["pending", "completed"])
+def test_cli_completion_validates_and_records_outcome_without_preflight(
+  client, owner_token, db, monkeypatch, capsys, task_status,
+):
+  import sys
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  saved = client.put(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+    json={"expected_revision": 0, "tasks": [
+      {"id": "verify", "title": "Verify release", "status": task_status},
+    ]},
+  )
+  assert saved.status_code == 200, saved.text
+  agent_auth = _agent_run_auth(db, chat_id, "goal-root")
+  helper = _goal_plan_script()
+
+  def request(method, path, body=None):
+    response = client.request(method, path, json=body, headers=agent_auth)
+    if response.status_code >= 400:
+      raise SystemExit(response.json()["detail"])
+    return response.json()
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setattr(helper, "_settings", lambda: ("unused", "unused", chat_id))
+  monkeypatch.setattr(sys, "argv", ["goal_plan.py", "complete", "--result", "Verified release"])
+  if task_status == "pending":
+    with pytest.raises(SystemExit, match="unfinished tasks"):
+      helper.main()
+  else:
+    assert helper.main() == 0
+    assert '"status": "completed"' in capsys.readouterr().out
+  db.expire_all()
+  goal = db.get(models.ChatGoal, "goal-1")
+  assert goal.status == ("completed" if task_status == "completed" else "open")
+  assert goal.result == ("Verified release" if task_status == "completed" else None)
 
 
 def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(

@@ -721,6 +721,23 @@ def test_register_cron_refuses_real_subprocess_in_test_runtime(
   mock_run.assert_not_called()
 
 
+def test_register_cron_timeout_is_infrastructure_failure(tmp_path):
+  from app import app_cron
+
+  scaffold = tmp_path / "init-cron-scaffold.sh"
+  scaffold.write_text("#!/bin/sh\n")
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch(
+         "app.app_cron.subprocess.run",
+         side_effect=subprocess.TimeoutExpired([str(scaffold)], 30),
+       ), \
+       pytest.raises(app_cron.CronInfrastructureError):
+    app_cron.register_cron(
+      "memory", "0 5 * * *", tmp_path / "fetch.sh", 3,
+      scaffold=scaffold,
+    )
+
+
 def test_unregister_cron_refuses_real_subprocess_in_test_runtime(
   tmp_path, monkeypatch,
 ):
@@ -3693,6 +3710,13 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
     "app.routes.apps._start_conflict_resolver_turn",
     fake_start_turn,
   )
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_chat_choice",
+    lambda data_dir, db: {
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
+    },
+  )
   missing_policy = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat",
     headers=auth,
@@ -3709,6 +3733,15 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
   assert payload["chat_id"]
   assert payload["created"] is True
   assert payload["started"] is True
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    resolver = db.get(models.Chat, payload["chat_id"])
+    assert resolver.provider == "codex"
+    assert resolver.agent_settings_json["model"] == "gpt-5.5"
+    assert resolver.agent_settings_json["effort"] == "xhigh"
+  finally:
+    db.close()
 
   materialized = jsx_file.read_text()
   assert "<<<<<<<" in materialized and ">>>>>>>" in materialized

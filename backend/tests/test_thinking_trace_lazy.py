@@ -7,7 +7,6 @@ from app.chat import _ChatEventSink
 from app.chat_writer import Barrier, StashThinkingTrace, get_writer
 from app.events import THINKING_INLINE_THRESHOLD
 from app.routes.chats import THINKING_TRACE_PREVIEW_CHARS
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 class _Bus:
@@ -35,7 +34,7 @@ def test_thinking_stash_is_revision_monotonic(db):
 
 def test_sink_streams_thinking_live_and_defers_only_persistence(db):
     bus = _Bus()
-    sink = _ChatEventSink(bus, "trace-chat", run_token="rt", recall_binding=EMPTY_RECALL_BINDING)
+    sink = _ChatEventSink(bus, "trace-chat", run_token="rt")
     # Keep this unit test off the periodic transcript path; exercise the
     # snapshot/stash helper explicitly after checking the public events.
     sink._last_save = time.monotonic()
