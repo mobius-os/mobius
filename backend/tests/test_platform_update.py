@@ -1139,6 +1139,23 @@ def test_boot_guard_aborts_interrupted_merge_before_serving(clone_env):
   assert not pu.RECONCILE_PRE_FLAG.exists()
 
 
+def test_boot_guard_preserves_unknown_tip_from_legacy_marker(clone_env):
+  _origin, platform = clone_env
+  pre = _served_sha(platform)
+  advanced = _local_commit(
+    platform, edits={"concurrent.txt": "owned elsewhere\n"},
+    msg="unknown writer after legacy update",
+  )
+  pu.RECONCILE_PRE_FLAG.write_text(pre + "\n", encoding="utf-8")
+
+  summary = pu.boot_guard_clean_served_tree(platform)
+
+  assert summary.startswith("boot_guard[preserved]")
+  assert _served_sha(platform) == advanced
+  assert (platform / "concurrent.txt").read_text() == "owned elsewhere\n"
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
 def test_legacy_stale_rebase_aborted_on_next_pass(clone_env):
   origin, platform = clone_env
   pre = _local_commit(platform, edits={"backend/app/main.py":

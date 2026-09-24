@@ -717,13 +717,16 @@ def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
   _abort_interrupted(repo)
   if pre and _rev(repo, pre):
     current = _rev(repo, local)
+    restored = False
     if current == tip:
-      _restore_candidate(repo, local, tip, pre)
+      restored = _restore_candidate(repo, local, tip, pre)
     elif current == pre:
       _reset_hard_to(repo, local, pre)
+      restored = True
     _clear_reconcile_pre()
     _restore_working_edits(repo, local)
-    return f"boot_guard[reset] pre={_short(pre)}"
+    state = "reset" if restored else "preserved"
+    return f"boot_guard[{state}] pre={_short(pre)}"
   if interrupted:
     _git("checkout", "-q", local, repo=repo, check=False)
     _git("reset", "--hard", local, repo=repo, check=False)
