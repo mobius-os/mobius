@@ -3,15 +3,25 @@ import { tokenMatchesRuntime } from './token.js'
 
 const DB_NAME = 'mobius-outbox'
 const SIGNAL_DB_NAME = 'mobius-signals'
+const LIST_DB_NAME = 'mobius-listings'
 const STORE = 'ops'
 const SIGNAL_STORE = 'signals'
 // Read-through mirror of last-known server values, so get() works offline.
 // Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
 const CACHE_STORE = 'cache'
 const OUTCOME_STORE = 'write_outcomes'
+// Complete directory snapshots are kept separately from the per-path value
+// mirror. A value cache can only prove that one path was seen; it cannot prove
+// that every sibling was seen, which made a partial offline cache look like an
+// authoritative empty/partial directory to collection apps.
+const LIST_STORE = 'listings'
 const DB_VERSION = 3
 const SIGNAL_DB_VERSION = 1
+const LIST_DB_VERSION = 1
+const LIST_CACHE_WRITE_CONCURRENCY = 8
 const MAX_WRITE_OUTCOMES = 200
+const MAX_CONFLICT_CONTEXT_BYTES = 64 * 1024
+const CONFLICT_CONTEXT_BATCH_KIND = 'mobius-conflict-context-batch'
 const MAX_PENDING_SIGNALS = 500
 const MAX_PENDING_SIGNAL_BYTES = 2 * 1024 * 1024
 // The database is shared by every installed app. Per-app limits alone still
@@ -39,6 +49,29 @@ export function overlayPending(ops, path, fallback) {
   for (const op of ops) if (op.path === path) pending = op   // last (newest) wins
   if (pending) return pending.method === 'DELETE' ? null : pending.data
   return fallback
+}
+
+// The platform never interprets app-owned merge intent. It only preserves the
+// ordered opaque contexts when same-path writes are coalesced, so the app can
+// replay every offline mutation rather than only the final one. A single
+// context keeps its legacy shape; a batch is introduced only after a second
+// conditional write for the same path supersedes the first.
+export function conflictContextItems(context) {
+  if (
+    context && context.kind === CONFLICT_CONTEXT_BATCH_KIND
+    && context.version === 1 && Array.isArray(context.items)
+  ) return context.items.flatMap((item) => conflictContextItems(item))
+  return context == null ? [] : [context]
+}
+
+function combineConflictContexts(ops, next) {
+  if (next == null) return next
+  const previous = ops.flatMap((op) => conflictContextItems(op.conflictContext))
+  if (!previous.length) return next
+  const items = [...previous, ...conflictContextItems(next)]
+  const combined = { kind: CONFLICT_CONTEXT_BATCH_KIND, version: 1, items }
+  const encoded = JSON.stringify(combined)
+  return encoded.length <= MAX_CONFLICT_CONTEXT_BYTES ? combined : null
 }
 
 // Bound a fetch so a stalled offline request (Android: navigator.onLine reads a
@@ -129,12 +162,54 @@ function openSignalDb() {
   })
 }
 
+// Listing snapshots intentionally live in a separate version-1 database. A
+// schema bump on mobius-outbox would make an already-open cached runtime (still
+// requesting v3) fail to reopen its user-data outbox after a newer tab upgraded
+// it. The additive offline-list feature must never interrupt queued writes
+// during a rolling frontend update.
+function openListingDb() {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const req = indexedDB.open(LIST_DB_NAME, LIST_DB_VERSION)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(LIST_STORE)) {
+        db.createObjectStore(LIST_STORE, { keyPath: 'key' })
+      }
+    }
+    req.onsuccess = () => {
+      const db = req.result
+      if (settled) { try { db.close() } catch (e) {} return }
+      settled = true
+      db.onversionchange = () => { try { db.close() } catch (e) {} }
+      resolve(db)
+    }
+    req.onerror = () => { if (!settled) { settled = true; reject(req.error) } }
+    req.onblocked = () => {
+      if (!settled) { settled = true; reject(new Error('mobius-listings open blocked')) }
+    }
+  })
+}
+
 async function withSignalStore(mode, fn) {
   const db = await openSignalDb()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SIGNAL_STORE, mode)
     const box = {}
     fn(tx.objectStore(SIGNAL_STORE), box)
+    const done = () => { try { db.close() } catch (e) {} }
+    tx.oncomplete = () => { done(); resolve(box.value) }
+    tx.onerror = () => { done(); reject(tx.error) }
+    tx.onabort = () => { done(); reject(tx.error) }
+  })
+}
+
+async function withListingStore(mode, fn) {
+  const db = await openListingDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(LIST_STORE, mode)
+    const box = {}
+    fn(tx.objectStore(LIST_STORE), box)
     const done = () => { try { db.close() } catch (e) {} }
     tx.oncomplete = () => { done(); resolve(box.value) }
     tx.onerror = () => { done(); reject(tx.error) }
@@ -185,11 +260,16 @@ async function withStores(storeNames, mode, fn) {
 // PURE read-your-writes logic. `init()` is the only production caller.
 export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null }) {
   const hostGetToken = getToken
+  const listingRuntimeId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID() : Math.random().toString(36).slice(2)
+  let listingMutationSeq = 0
   getToken = async (options) => {
     const token = await hostGetToken(options)
     return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
   }
   const deadLetterListeners = new Set()
+  const conflictListeners = new Set()
+  const pendingBridgeConflicts = []
   const instanceKey = appInstanceId || 'legacy'
   const onlineNow = () => {
     try {
@@ -260,6 +340,9 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       writeId,
       method: op.method,
       kind: op.kind || 'json',
+      ifMatch: op.ifMatch || null,
+      ifNoneMatch: op.ifNoneMatch === true,
+      conflictContext: op.conflictContext ?? null,
       status: extra.status,
       version: extra.version,
       refusedValue: op.method === 'DELETE' ? null : op.data,
@@ -275,13 +358,22 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       const cursor = e.target.result
       if (cursor) {
         const v = cursor.value
-        if (belongsToInstance(v)) seen.push({ key: v.key, ts: v.ts || 0 })
+        if (belongsToInstance(v)) {
+          seen.push({ key: v.key, ts: v.ts || 0, state: v.state, consumed: v.consumed })
+        }
         cursor.continue()
         return
       }
       if (seen.length <= MAX_WRITE_OUTCOMES) return
       seen.sort((a, b) => a.ts - b.ts)
-      for (const old of seen.slice(0, seen.length - MAX_WRITE_OUTCOMES)) {
+      // Never age out work the app has not handled. Confirmed/superseded
+      // outcomes and explicitly consumed failures are only bookkeeping; an
+      // unconsumed conflict or rejection still owns the refused value and
+      // opaque recovery intent needed after a frame remount.
+      const disposable = seen.filter(({ state, consumed }) => (
+        consumed === true || state === 'confirmed' || state === 'superseded'
+      ))
+      for (const old of disposable.slice(0, seen.length - MAX_WRITE_OUTCOMES)) {
         store.delete(old.key)
       }
     }
@@ -312,6 +404,18 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     })
   }
 
+  async function acknowledgeConflict(writeId) {
+    if (typeof writeId !== 'string' || !writeId || writeId.length > 256) return false
+    if (bridgeCall) {
+      try { return await bridgeCall('ackConflict', [writeId]) === true }
+      catch { return false }
+    }
+    const outcome = await getWriteOutcome(writeId)
+    if (!belongsToInstance(outcome) || outcome.state !== 'conflict' || outcome.consumed) return false
+    await markOutcomeConsumed(outcome.key)
+    return true
+  }
+
   function dispatchDeadLetter(rec) {
     const payload = {
       path: rec.path,
@@ -319,6 +423,9 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       refusedValue: rec.refusedValue,
       writeId: rec.writeId,
       ts: rec.ts,
+      ifMatch: rec.ifMatch || null,
+      ifNoneMatch: rec.ifNoneMatch === true,
+      conflictContext: rec.conflictContext ?? null,
     }
     for (const cb of [...deadLetterListeners]) {
       try { cb(payload) } catch (e) {}
@@ -350,29 +457,116 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     return () => { deadLetterListeners.delete(cb) }
   }
 
-  // Drop every queued op for this app + path in one transaction, then run
-  // `after(store)` (if given) inside the SAME transaction. Used to enforce
-  // last-write-wins at path granularity: a newer write for a path
-  // supersedes any older queued write for it, so the stale op must not
-  // survive to be replayed on drain. Filtering happens in the cursor
-  // because the store is keyed by `seq` (FIFO), with `appId`/`path` as
-  // plain fields. Doing the purge and the follow-up add in one tx keeps
-  // the coalesce atomic — no window where the path has zero ops queued.
-  function purgePath(path, after) {
+  const conflictsInFlight = new Set()
+
+  async function deliverConflict(rec, listeners) {
+    const payload = {
+      path: rec.path,
+      status: rec.status,
+      refusedValue: rec.refusedValue,
+      writeId: rec.writeId,
+      ts: rec.ts,
+      ifMatch: rec.ifMatch || null,
+      ifNoneMatch: rec.ifNoneMatch === true,
+      conflictContext: rec.conflictContext ?? null,
+    }
+    const key = rec.key || outcomeKey(rec.writeId)
+    if (conflictsInFlight.has(key)) return false
+    if (bridgeCall && listeners.length === 0) {
+      pendingBridgeConflicts.push(payload)
+      if (pendingBridgeConflicts.length > MAX_WRITE_OUTCOMES) pendingBridgeConflicts.shift()
+      return false
+    }
+    conflictsInFlight.add(key)
+    try {
+      const results = await Promise.allSettled(listeners.map((cb) => Promise.resolve().then(() => cb(payload))))
+      // Observation is not recovery. A listener must affirm completion with a
+      // truthy result; an omitted return keeps the durable outcome available
+      // for replay just like an explicit false.
+      const handled = results.some((result) => result.status === 'fulfilled' && Boolean(result.value))
+      if (handled) await acknowledgeConflict(rec.writeId)
+      return handled
+    } finally {
+      conflictsInFlight.delete(key)
+    }
+  }
+
+  function dispatchConflict(rec) {
+    deliverConflict(rec, [...conflictListeners]).catch(() => {})
+  }
+
+  function replayConflicts(cb) {
+    const pending = bridgeCall
+      ? bridgeCall('listConflicts', [])
+      : listPendingConflicts()
+    Promise.resolve(pending).then((records) => {
+      for (const rec of records || []) deliverConflict(rec, [cb]).catch(() => {})
+    }).catch(() => {})
+  }
+
+  function listPendingConflicts() {
+    return withStore(OUTCOME_STORE, 'readonly', (store, box) => {
+      box.value = []
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result
+        if (!cursor) return
+        const rec = cursor.value
+        if (belongsToInstance(rec) && rec.state === 'conflict' && !rec.consumed) {
+          box.value.push(rec)
+        }
+        cursor.continue()
+      }
+    })
+  }
+
+  // A delayed conditional-write conflict belongs to the app: the runtime can
+  // report the refused value and authoritative path, but it cannot know whether
+  // a note needs a recovery copy, a set needs a three-way merge, or an intent
+  // should be replayed. Outcomes persist until an app listener consumes them.
+  function onConflict(cb) {
+    if (typeof cb !== 'function') return () => {}
+    conflictListeners.add(cb)
+    while (pendingBridgeConflicts.length) {
+      const payload = pendingBridgeConflicts.shift()
+      deliverConflict(payload, [cb]).catch(() => {})
+    }
+    replayConflicts(cb)
+    return () => { conflictListeners.delete(cb) }
+  }
+
+  // Replace every queued op for this app + path in one transaction. Conditional
+  // writes retain their ordered, opaque app conflict contexts in the newest op.
+  // If the combined context would exceed the public 64 KiB bound, keep the old
+  // operations and append the new one instead of silently discarding intent.
+  function replacePath(op) {
     return withStores([STORE, OUTCOME_STORE], 'readwrite', (stores, box) => {
       const store = stores[STORE]
       const outcomeStore = stores[OUTCOME_STORE]
+      const existing = []
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) {
-          if (after) after(store, box)
+          const combined = combineConflictContexts(existing, op.conflictContext)
+          const preserveExisting = op.conflictContext != null
+            && existing.some((queued) => queued.conflictContext != null)
+            && combined == null
+          if (!preserveExisting) {
+            for (const queued of existing) {
+              putOutcomeInStore(outcomeStore, outcomeFromOp(queued, 'superseded'))
+              store.delete(queued.seq)
+            }
+          }
+          const queued = {
+            ...op,
+            ...(combined == null ? {} : { conflictContext: combined }),
+            appId, appInstanceId, ts: Date.now(),
+          }
+          const r = store.add(queued)
+          r.onsuccess = () => { box.value = { ...queued, seq: r.result } }
           return
         }
         const v = cursor.value
-        if (belongsToInstance(v) && v.path === path) {
-          putOutcomeInStore(outcomeStore, outcomeFromOp(v, 'superseded'))
-          cursor.delete()
-        }
+        if (belongsToInstance(v) && v.path === op.path) existing.push(v)
         cursor.continue()
       }
     })
@@ -383,11 +577,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
   // when the queue drains. (FIFO ordering across DIFFERENT paths is
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
-    return purgePath(op.path, (store, box) => {
-      const queued = { ...op, appId, appInstanceId, ts: Date.now() }
-      const r = store.add(queued)
-      r.onsuccess = () => { box.value = { ...queued, seq: r.result } }
-    })
+    return replacePath(op)
   }
 
   function listOps() {
@@ -413,6 +603,124 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
   // distinguishes a cached null/404 (key exists, value null) from "never
   // fetched" (no key) — so offline we don't claim a value we never had.
   function cacheKey(path) { return appId + ':' + instanceKey + ':' + path }
+
+  function listingKey(prefix) { return appId + ':' + instanceKey + ':' + prefix }
+
+  function listingGet(prefix) {
+    return withListingStore('readonly', (store, box) => {
+      const request = store.get(listingKey(prefix))
+      request.onsuccess = () => { box.value = request.result || null }
+    })
+  }
+
+  // Persist only directory metadata here. JSON bodies returned by an
+  // includeContent listing enter the normal per-path value mirror below, so
+  // there remains one owner for read-your-writes and type checks.
+  function listingPut(prefix, entries, requestMarker, pendingOps = []) {
+    const snapshot = (entries || []).map((entry) => {
+      const clean = { ...entry }
+      delete clean.content
+      return clean
+    })
+    const pendingVers = new Set(pendingOps.map((op) => op.ver).filter(Boolean))
+    return withListingStore('readwrite', (store, box) => {
+      const key = listingKey(prefix)
+      const request = store.get(key)
+      request.onsuccess = () => {
+        const current = request.result
+        const byName = new Map(snapshot.map((entry) => [entry.name, entry]))
+        const retained = []
+        if (belongsToInstance(current) && Array.isArray(current.mutations)) {
+          for (const mutation of current.mutations) {
+            if (!mutation || typeof mutation.name !== 'string') continue
+            const concurrent = mutation.runtimeId === requestMarker.runtimeId
+              ? Number(mutation.seq) > requestMarker.seq
+              : Number(mutation.at) >= requestMarker.at
+            const pending = mutation.ver && pendingVers.has(mutation.ver)
+            if (!concurrent && !pending) continue
+            if (mutation.present) byName.set(mutation.name, mutation.entry)
+            else byName.delete(mutation.name)
+            retained.push(mutation)
+          }
+        }
+        const merged = [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+        store.put({
+          key, prefix, appId, appInstanceId,
+          entries: merged, complete: true, mutations: retained, updatedAt: Date.now(),
+        })
+        box.value = merged
+      }
+    })
+  }
+
+  // Keep every ancestor membership aligned with local writes. Mutation records
+  // are retained even when no complete snapshot exists, but such placeholders
+  // stay explicitly incomplete. A later server walk merges them atomically,
+  // so a delayed response cannot erase a create/delete that finished meanwhile.
+  function listingPatchAncestors(
+    path, present, kind = 'json', contentType = null, mutationVer = null,
+  ) {
+    const parts = String(path || '').split('/').filter(Boolean)
+    if (!parts.length) return Promise.resolve(false)
+    const mutationStamp = mutationVer ? {
+      runtimeId: listingRuntimeId,
+      seq: ++listingMutationSeq,
+      at: Date.now(),
+      ver: mutationVer,
+    } : null
+    const patches = []
+    for (let depth = parts.length - 1; depth >= 0; depth -= 1) {
+      const prefix = parts.slice(0, depth).join('/')
+      const name = parts[depth]
+      const isFile = depth === parts.length - 1
+      if (!present && !isFile) continue
+      patches.push({
+        prefix,
+        name,
+        present,
+        entry: isFile
+          ? {
+              name, path, type: 'file',
+              mime_type: contentType || (kind === 'json' ? 'application/json' : null),
+            }
+          : {
+              name,
+              path: parts.slice(0, depth + 1).join('/'),
+              type: 'directory',
+            },
+      })
+    }
+    return withListingStore('readwrite', (store, box) => {
+      box.value = false
+      for (const patch of patches) {
+        const key = listingKey(patch.prefix)
+        const request = store.get(key)
+        request.onsuccess = () => {
+          const current = request.result
+          const owned = belongsToInstance(current)
+          const entries = owned && Array.isArray(current.entries) ? [...current.entries] : []
+          const byName = new Map(entries.map((entry) => [entry.name, entry]))
+          if (patch.present) byName.set(patch.name, patch.entry)
+          else byName.delete(patch.name)
+          const mutations = owned && Array.isArray(current.mutations) ? [...current.mutations] : []
+          const nextMutations = mutationStamp
+            ? [
+                ...mutations.filter((mutation) => mutation.name !== patch.name),
+                { ...patch, ...mutationStamp },
+              ]
+            : mutations
+          store.put({
+            ...(owned ? current : {}), key, prefix: patch.prefix, appId, appInstanceId,
+            entries: [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+            complete: owned ? current.complete !== false : false,
+            mutations: nextMutations,
+            updatedAt: Date.now(),
+          })
+          box.value = true
+        }
+      }
+    })
+  }
 
   function cacheGet(path) {
     return withStore(CACHE_STORE, 'readonly', (store, box) => {
@@ -711,6 +1019,26 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
           const conflict = outcomeFromOp(op, 'conflict', { status: e.status })
           await recordWriteOutcome(conflict)
           await deleteOp(op.seq)
+          dispatchConflict(conflict)
+          // The optimistic mirror still contains a value the server refused.
+          // Restore the authoritative value only if this exact write still owns
+          // the mirror; a newer local write wins the nonce CAS. The refused
+          // value remains in the durable outcome for app-owned recovery.
+          if (onlineNow()) {
+            try {
+              const fresh = await fetchValue(op.path, op.kind || 'json')
+              const ct = fresh instanceof Blob ? fresh.type : null
+              const wrote = op.ver != null
+                ? await cacheCompareSet(op.path, op.ver, fresh, op.kind || 'json', ct)
+                : await cacheRepairLegacy(op.path, fresh, op.kind || 'json', ct)
+              if (wrote) {
+                await listingPatchAncestors(
+                  op.path, fresh !== null, op.kind || 'json', ct,
+                ).catch(() => {})
+                notify(op.path, fresh)
+              }
+            } catch (re) { /* best-effort reconciliation */ }
+          }
           continue
         }
         if (e && e.fatal) {
@@ -741,14 +1069,24 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
                 // clobber it; the one-tx ver-CAS can't (its own send later just
                 // deletes its op — never re-cachePuts — so clobbering loses it).
                 const wrote = await cacheCompareSet(op.path, op.ver, fresh, op.kind || 'json', ct)
-                if (wrote) notify(op.path, fresh)
+                if (wrote) {
+                  await listingPatchAncestors(
+                    op.path, fresh !== null, op.kind || 'json', ct,
+                  ).catch(() => {})
+                  notify(op.path, fresh)
+                }
               } else {
                 // LEGACY op (queued by a pre-ver runtime, drained once after the
                 // upgrade) — no nonce to CAS on. Repair atomically ONLY if the
                 // mirror is absent or still ver-less, so a newer VERSIONED write
                 // that landed during the fetch isn't clobbered.
                 const wrote = await cacheRepairLegacy(op.path, fresh, op.kind || 'json', ct)
-                if (wrote) notify(op.path, fresh)
+                if (wrote) {
+                  await listingPatchAncestors(
+                    op.path, fresh !== null, op.kind || 'json', ct,
+                  ).catch(() => {})
+                  notify(op.path, fresh)
+                }
               }
             } catch (re) { /* best-effort reconciliation */ }
           }
@@ -1128,19 +1466,21 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
   // each carrying a present=false tombstone once removed/404'd — NOT from a
   // cached listing blob, which is the design that WOULD resurrect deleted
   // children (see list() below).
-  function listCachePresent() {
+  function listCacheRecords() {
     return withStore(CACHE_STORE, 'readonly', (store, box) => {
       box.value = []
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) return
         const v = cursor.value
-        if (belongsToInstance(v) && v.present) {
+        if (belongsToInstance(v)) {
           box.value.push({
             path: v.path,
+            present: v.present === true,
             kind: v.kind,
             contentType: v.contentType,
             data: v.data,
+            ver: v.ver,
           })
         }
         cursor.continue()
@@ -1148,17 +1488,18 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     })
   }
 
-  // Enumerate the immediate children of a stored directory (the platform
-  // alternative to brute-force-probing filenames). Offline-capable: when the
-  // server is reachable its listing is authoritative; otherwise the listing is
-  // derived from the per-path read-through cache (tombstones excluded, so
-  // deletes don't resurrect). EITHER source is then overlaid with the outbox —
-  // a pending write shows, a pending delete drops — so list() is
-  // read-your-writes, the same contract get() exposes. Always returns an ARRAY
-  // (`[]` when empty/unknown), never null, since offline now has a real source.
-  // Offline-derived entries carry name/path/type (+ mime_type when known) but
-  // not size/modified_at, which only the server stat provides.
-  async function listInner(prefix, options = {}) {
+  async function listCachePresent() {
+    return (await listCacheRecords()).filter((record) => record.present)
+  }
+
+  // Enumerate the immediate children of a stored directory. A successful server
+  // walk is persisted as one COMPLETE last-known snapshot. Offline, that
+  // snapshot is the membership source and the per-path cache supplies bodies;
+  // without a snapshot we may still derive useful entries, but explicitly mark
+  // the result incomplete. This distinction prevents an app from treating
+  // "only the files this device happened to read" as an authoritative empty or
+  // partial collection.
+  async function listWithStatusInner(prefix, options = {}) {
     const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
     const base = norm ? norm + '/' : ''
     // The child name of `path` directly under `base`, or null if not under it.
@@ -1169,7 +1510,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     // Direct-children map keyed by child name. A server entry (rich metadata)
     // is never downgraded by a derived entry of the same name.
     const byName = new Map()
-    const addDerived = (path, meta) => {
+    const addDerived = (path, meta, allowNew = true) => {
       const rest = restUnder(path)
       if (!rest) return
       const slash = rest.indexOf('/')
@@ -1182,6 +1523,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
           }
           return
         }
+        if (!allowNew) return
         const mime = (meta && meta.contentType)
           || (meta && meta.kind === 'json' ? 'application/json' : null)
         const entry = { name: rest, path: base + rest, type: 'file', mime_type: mime }
@@ -1191,17 +1533,86 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         byName.set(rest, entry)
       } else {
         const dname = rest.slice(0, slash)
-        if (!byName.has(dname)) {
+        if (!byName.has(dname) && allowNew) {
           byName.set(dname, { name: dname, path: base + dname, type: 'directory' })
         }
       }
     }
 
+    // Remember exact cache nonces before the network walk. A same-path local
+    // mutation that lands while the response is in flight must keep ownership
+    // of its body; comparing nonces avoids an O(entries × outbox) scan and
+    // prevents the late response from overwriting that newer local value.
+    const requestMarker = {
+      runtimeId: listingRuntimeId,
+      seq: listingMutationSeq,
+      at: Date.now(),
+    }
+    const cacheVersionsAtStart = new Map(
+      (await listCacheRecords()).map((record) => [record.path, record.ver ?? null]),
+    )
     const server = await listServer(norm, options)
-    if (server) {
+    let complete = false
+    let source = 'derived'
+    let updatedAt = null
+    if (server !== null) {
       for (const e of server) byName.set(e.name, e)
+      complete = true
+      source = 'server'
+      updatedAt = Date.now()
+
+      // Store the complete membership before returning. includeContent bodies
+      // also enter the normal value mirror so an offline list can reconstruct
+      // the same records without duplicating value ownership in the snapshot.
+      // Cache persistence must never turn a successful online listing into an
+      // app-visible failure (private browsing/storage pressure can reject IDB).
+      const pendingOps = await listOps()
+      const stored = await listingPut(norm, server, requestMarker, pendingOps).catch(() => null)
+      if (stored) {
+        const authoritative = new Map(byName)
+        byName.clear()
+        for (const entry of stored) {
+          byName.set(entry.name, authoritative.get(entry.name) || entry)
+        }
+      }
+      const pendingPaths = new Set(pendingOps.map((op) => op.path))
+      const contentEntries = server.filter((entry) => (
+        Object.prototype.hasOwnProperty.call(entry, 'content')
+        && entry.type === 'file'
+        && !pendingPaths.has(entry.path)
+      ))
+      // A large collection can contain hundreds of records. Bound concurrent
+      // IDB transactions rather than opening one transaction per record at
+      // once; failures are best-effort because the online result is already
+      // authoritative and must still be returned.
+      for (let offset = 0; offset < contentEntries.length; offset += LIST_CACHE_WRITE_CONCURRENCY) {
+        const batch = contentEntries.slice(offset, offset + LIST_CACHE_WRITE_CONCURRENCY)
+        await Promise.all(batch.map(async (entry) => {
+          await withPathLock(entry.path, async () => {
+            if (pendingPaths.has(entry.path)) return
+            const current = await cacheGet(entry.path)
+            if ((current?.ver ?? null) !== (cacheVersionsAtStart.get(entry.path) ?? null)) return
+            await cachePut(
+              entry.path,
+              entry.content,
+              'json',
+              entry.mime_type || 'application/json',
+            )
+          }).catch(() => {})
+        }))
+      }
     } else {
-      for (const c of await listCachePresent()) addDerived(c.path, c)
+      const snapshot = await listingGet(norm)
+      if (snapshot && Array.isArray(snapshot.entries)) {
+        for (const entry of snapshot.entries) byName.set(entry.name, entry)
+        complete = snapshot.complete !== false
+        source = complete ? 'cache' : 'derived'
+        updatedAt = snapshot.updatedAt || null
+      }
+      // With a complete snapshot, cached values may enrich known members but
+      // cannot invent siblings which the authoritative walk did not contain.
+      // Without one, preserve the old useful partial fallback and label it.
+      for (const c of await listCachePresent()) addDerived(c.path, c, !complete)
     }
 
     // Overlay state-changing storage ops from the user-data outbox (those
@@ -1217,8 +1628,13 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       }
     }
 
-    return [...byName.values()].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    return {
+      entries: [...byName.values()].sort((a, b) =>
+        a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+      complete,
+      source,
+      updatedAt,
+    }
   }
 
   const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -1373,6 +1789,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         contentType,
         ...(opts.ifMatch ? { ifMatch: opts.ifMatch } : {}),
         ...(opts.ifNoneMatch === true ? { ifNoneMatch: true } : {}),
+        ...(opts.conflictContext === undefined ? {} : { conflictContext: opts.conflictContext }),
       }])
     }
     if (!onlineNow()) {
@@ -1420,6 +1837,19 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
   // the mirror never shows a value with no outbox op + no server write (a
   // "ghost") and never loses the previously-stored value.
   async function writeLocal(path, data, kind, contentType, opts = {}) {
+    let conflictContext = null
+    if (opts.conflictContext !== undefined) {
+      let encoded
+      try { encoded = JSON.stringify(opts.conflictContext) } catch {
+        throw new TypeError('mobius.storage: conflictContext must be JSON-serializable')
+      }
+      if (encoded === undefined || encoded.length > MAX_CONFLICT_CONTEXT_BYTES) {
+        throw new TypeError('mobius.storage: conflictContext exceeds the 64 KiB limit')
+      }
+      // Store the exact JSON value that was validated, not a caller-owned
+      // object that could be mutated while cache I/O is in flight.
+      conflictContext = JSON.parse(encoded)
+    }
     const prev = await cacheGet(path)
     const ver = nextVer()                 // same nonce on the mirror + the op, for the reconcile CAS
     await cachePut(path, data, kind, contentType, ver)
@@ -1434,11 +1864,13 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         ver,
         ifMatch: opts.ifMatch || null,
         ifNoneMatch: opts.ifNoneMatch === true,
+        conflictContext,
       })
     } catch (e) {
       try { await restoreCache(path, prev) } catch (_) {}
       throw e
     }
+    await listingPatchAncestors(path, true, kind, contentType, ver).catch(() => {})
     notify(path, data)
     return { path, writeId: ver, ver, seq: queued && queued.seq }
   }
@@ -1458,6 +1890,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       try { await restoreCache(path, prev) } catch (_) {}
       throw e
     }
+    await listingPatchAncestors(path, false, kind || 'json', null, ver).catch(() => {})
     notify(path, null)
     return { path, writeId: ver, ver, seq: queued && queued.seq }
   }
@@ -1520,12 +1953,14 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         const sent = await writeDirect(path, value, kind, contentType, {
           ifMatch: opts.ifMatch,
           ifNoneMatch: opts.ifNoneMatch,
+          conflictContext: opts.conflictContext,
         })
         return { direct: true, sent }
       }
       return writeLocal(path, value, kind, contentType, {
         ifMatch: opts.ifMatch,
         ifNoneMatch: opts.ifNoneMatch,
+        conflictContext: opts.conflictContext,
       })
     })
     throwIfAborted(opts.signal)
@@ -1598,7 +2033,11 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
         : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
       await cachePut(path, value, kind, ct, nextVer(), version)
       return {
-        value: finalizeRead(await effectiveValue(path, value), kind, ct, path),
+        // A versioned online read is the compare-and-swap base. Never pair the
+        // server's ETag with a queued local overlay: that value was not accepted
+        // under this version and would make conflict recovery drop remote edits.
+        // Plain get()/subscriptions retain read-your-writes overlay semantics.
+        value: finalizeRead(value, kind, ct, path),
         version,
       }
     })
@@ -1642,18 +2081,49 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     }
   }
 
+  async function listWithStatus(prefix, options = {}) {
+    if (await hasIndexedDb()) return listWithStatusInner(prefix, options)
+    if (bridgeCall) {
+      try {
+        return await bridgeCall('listWithStatus', [prefix, options])
+      } catch (error) {
+        // During a rolling shell update a freshly cached frame runtime can run
+        // briefly against the previous host allow-list. Preserve online reads
+        // through the old `list` RPC, but label their completeness unknown so
+        // apps never seed or erase collections from version skew.
+        if (error?.code !== 'storage_method_denied'
+            && !String(error?.message || '').includes('unavailable in the shell host')) throw error
+        return {
+          entries: await bridgeCall('list', [prefix, options]),
+          complete: false,
+          source: 'legacy',
+          updatedAt: null,
+        }
+      }
+    }
+    const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
+    const server = await listServer(norm, options)
+    if (server === null) {
+      return { entries: [], complete: false, source: 'derived', updatedAt: null }
+    }
+    return { entries: server, complete: true, source: 'server', updatedAt: Date.now() }
+  }
+
+  async function list(prefix, options = {}) {
+    return (await listWithStatus(prefix, options)).entries
+  }
+
   return {
     get, getText, getBlob,
     set, setText, setBlob,
     durableWrite,
     onDeadLetter,
+    onConflict,
+    conflictContextItems,
+    _ackConflict: acknowledgeConflict,
     remove,
-    async list(prefix, options = {}) {
-      if (await hasIndexedDb()) return listInner(prefix, options)
-      if (bridgeCall) return bridgeCall('list', [prefix, options])
-      const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
-      return (await listServer(norm, options)) || []
-    },
+    list,
+    listWithStatus,
     subscribe(path, cb) { return subscribeWith(path, cb, get, 'json') },
     subscribeText(path, cb) { return subscribeWith(path, cb, getText, 'text') },
     subscribeBlob(path, cb) { return subscribeWith(path, cb, getBlob, 'blob') },
@@ -1674,6 +2144,8 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     _drain: bridgeCall ? () => bridgeCall('drain', []) : drain,
     _notify: notify,
     _receiveDeadLetter: dispatchDeadLetter,
+    _receiveConflict: dispatchConflict,
+    _listConflicts: listPendingConflicts,
     _destroy() {
       for (const unsubscribe of [...bridgeUnsubscribers]) unsubscribe()
       for (const ev of ['online', 'focus', 'pageshow']) {
@@ -1686,6 +2158,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       }
       subscribers.clear()
       deadLetterListeners.clear()
+      conflictListeners.clear()
     },
   }
 }
@@ -1710,6 +2183,7 @@ export async function purgeAppRuntimeData(appId) {
       deleteMatching(stores[OUTCOME_STORE])
     }),
     withSignalStore('readwrite', (store) => { deleteMatching(store) }),
+    withListingStore('readwrite', (store) => { deleteMatching(store) }),
   ])
 }
 
@@ -1803,6 +2277,7 @@ export function createUseDocument(storage, reactProvider = null) {
     const initialValue = controller.initialValue
     const identity = opts.identity || defaultIdentity
     const customMerge = opts.merge
+    const makeConflictContext = opts.conflictContext
     const mode = opts.mode || 'cas'
     const maxRetries = opts.maxRetries == null ? 3 : opts.maxRetries
     const onError = opts.onError
@@ -1889,11 +2364,15 @@ export function createUseDocument(storage, reactProvider = null) {
             ? customMerge(base, mine, theirs == null ? initialValue : theirs)
             : defaultDocumentMerge(base, mine, theirs == null ? initialValue : theirs, identity)
           const reconciled = reconcileIdentity(mine, merged, identity)
+          const conflictContext = typeof makeConflictContext === 'function'
+            ? makeConflictContext({ base, mine, theirs, merged: reconciled, path })
+            : makeConflictContext
           try {
             const result = await storage.durableWrite(path, reconciled, {
               kind: 'json',
               ...(mode === 'cas' && version ? { ifMatch: version } : {}),
               ...(mode === 'cas' && !version ? { ifNoneMatch: true } : {}),
+              ...(conflictContext === undefined ? {} : { conflictContext }),
             })
             controller.base = reconciled
             controller.version = result.version || version || null
@@ -1917,7 +2396,7 @@ export function createUseDocument(storage, reactProvider = null) {
       const next = controller.chain.then(run, run)
       controller.chain = next.then(() => {}, () => {})
       return next
-    }, [path, initialValue, identity, customMerge, mode, maxRetries, controller, enabled, onError, setValue])
+    }, [path, initialValue, identity, customMerge, makeConflictContext, mode, maxRetries, controller, enabled, onError, setValue])
 
     const setDoc = React.useCallback((next) => update(() => next), [update])
 

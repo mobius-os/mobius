@@ -143,6 +143,45 @@ def clear_notifications(
   return {"deleted": int(deleted)}
 
 
+@router.delete(
+  "/{notification_id}",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
+def dismiss_notification(
+  notification_id: str,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Delete one ordinary notification without removing an Undo receipt."""
+  notification = (
+    db.query(models.Notification)
+    .filter(
+      models.Notification.owner_id == owner.id,
+      models.Notification.id == notification_id,
+    )
+    .one_or_none()
+  )
+  if notification is None:
+    raise HTTPException(status_code=404, detail="Notification not found.")
+  actions = notification.actions if isinstance(notification.actions, list) else []
+  if any(
+    isinstance(action, dict)
+    and isinstance(action.get("action"), str)
+    and action["action"].startswith("recover_")
+    for action in actions
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="Undo notifications cannot be dismissed individually.",
+    )
+  db.delete(notification)
+  db.commit()
+  return {"deleted": 1}
+
+
 @router.get("")
 def list_notifications(
   # Owner-only: the notification history is the owner's. App tokens have no

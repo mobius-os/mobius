@@ -67,13 +67,10 @@ export function platformUpdateStatusLabel(platform) {
   if (state === 'rolled_back') return 'Update needs repair'
   if (requiresAgentActivation(platform?.activation)) return 'Update needs help'
   if (activationLevel !== 'live' && available) return 'More updates available'
-  if (
-    activationLevel === 'server_restart'
-    || activationLevel === 'dependency_sync'
-  ) return 'Ready to restart'
-  if (activationLevel === 'proxy_reload') return 'Proxy reload required'
-  if (activationLevel === 'container_recreate') return 'Deployment required'
-  if (activationLevel === 'image_rebuild') return 'Image rebuild required'
+  if (activationLevel === 'server_restart') return 'Ready to restart'
+  if (activationLevel === 'proxy_reload') return 'Update needs help'
+  if (activationLevel === 'container_recreate') return 'Update needs help'
+  if (activationLevel === 'image_rebuild') return 'Ready to finish'
   if (activationLevel === 'host_maintenance') return 'Finish this update on your server'
   if (available) return 'New update available'
   return 'Up to date'
@@ -100,7 +97,7 @@ export function deploymentKindLabel(activation) {
 
 /** External actions remain independent even when a release also needs an image. */
 export function requiresAgentActivation(activation) {
-  const routine = new Set(['server_restart', 'dependency_sync', 'image_rebuild'])
+  const routine = new Set(['server_restart', 'image_rebuild'])
   return activation?.required_actions?.some(action => !routine.has(action)) || false
 }
 
@@ -114,7 +111,6 @@ export function platformActivationLabel(activation) {
   const labels = {
     live: 'Live refresh',
     server_restart: 'Server restart',
-    dependency_sync: 'Dependency update',
     proxy_reload: 'Proxy reload',
     container_recreate: 'Container recreation',
     image_rebuild: 'Image rebuild',

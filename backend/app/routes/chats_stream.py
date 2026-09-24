@@ -65,7 +65,6 @@ from app.deps import (
   get_current_owner, reject_cross_site,
   chat_embed_session_is_active, require_chat_embed_operation,
   is_owner_input_principal, require_nondelegated_owner_control,
-  require_owner_input_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -304,7 +303,8 @@ async def _append_to_pending(
     chat, db, AppendPending(
       chat_id=chat.id, run_token="",
       user_msg=_user_message_from_body(chat, body), answers=body.answers,
-      question_id=body.question_id, initiated_by_app_id=initiated_by_app_id,
+      selected_options=body.selected_options, question_id=body.question_id,
+      initiated_by_app_id=initiated_by_app_id,
       owner_authored=owner_authored,
       front=front, require_answer_match=require_answer_match,
     ),
@@ -460,6 +460,57 @@ def _user_message_from_body(
   if body.viewport:
     user_msg["viewport"] = body.viewport
   return user_msg
+
+
+def _confine_agent_card_answer(
+  body: schemas.SendMessage, card: dict,
+) -> schemas.SendMessage:
+  """Keep an agent card response from becoming an unrelated chat send.
+
+  A non-owner participant may answer the exact visible card, not attach an
+  arbitrary hidden message or upload to that authority. Rebuild any provider
+  continuation from the structured answers while retaining only the cid used
+  as the downstream queue identity.
+  """
+  answers = body.answers or {}
+  if not isinstance(card.get("platform_action"), dict):
+    try:
+      questions.validate_saved_answer(card, answers, body.selected_options)
+    except questions.AnswerConflict as exc:
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+  lines = []
+  for question, answer in answers.items():
+    rendered = (
+      answer if isinstance(answer, str)
+      else json.dumps(answer, ensure_ascii=False, sort_keys=True)
+    )
+    lines.append(f"- {question}: {rendered}")
+  return schemas.SendMessage(
+    content="\n".join(lines),
+    hidden=True,
+    cid=body.cid,
+    answers=body.answers,
+    selected_options=body.selected_options,
+    question_id=body.question_id,
+  )
+
+
+def _is_exact_agent_card_retry(
+  body: schemas.SendMessage, card: dict,
+) -> bool:
+  if (isinstance(card.get("platform_action"), dict)
+      or ("answers" not in card and "selected_options" not in card)):
+    return False
+  if (
+    card.get("answers") != body.answers
+    or (card.get("selected_options") or {}) != (body.selected_options or {})
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="This question already has a different answer.",
+    )
+  return True
 
 
 # The answer-merge logic lives in `chat_writer.apply_answers_to_last_
@@ -618,14 +669,40 @@ async def send_message(
   a chat they created (`created_by_app_id == app_id`) — the app-
   attributed contract (design §1). Foreign chats are 403; the runner /
   queue / SSE internals are reused unchanged for both actors. Delegated
-  execution bearers use the peer/delegation channels rather than forging an
-  owner-authored transcript row.
+  execution bearers use peer/delegation channels for ordinary messages, but
+  may answer a card they can read through this same route.
   """
   require_chat_embed_operation(principal, "chat:send")
-  require_nondelegated_owner_control(principal)
-  if body.answers:
-    require_owner_input_principal(principal)
+  # A card response uses the same authenticated chat access as rendering the
+  # card. Ordinary sends retain their existing owner/delegation boundary.
+  is_card_answer = bool(body.answers or body.selected_options)
+  if not is_card_answer:
+    require_nondelegated_owner_control(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  agent_exact_retry = False
+  if is_card_answer and not is_owner_input_principal(principal):
+    if not body.question_id:
+      raise HTTPException(
+        status_code=409,
+        detail="Agent card answers require an exact question_id.",
+      )
+    exact_card = questions.saved_question(chat, body.question_id)
+    if exact_card is None:
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+    exact_retry = "answers" in exact_card or "selected_options" in exact_card
+    if not exact_retry and not questions.accepts_saved_answer(
+      chat, body.question_id,
+    ):
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+    body = _confine_agent_card_answer(body, exact_card)
+    if exact_retry:
+      agent_exact_retry = _is_exact_agent_card_retry(body, exact_card)
 
   # A typed Restart card is a platform action, not a prose continuation. The
   # writer re-matches the exact card and option identity inside its mutation;
@@ -634,7 +711,6 @@ async def send_message(
   from app.platform_restart import restart_action_block
   restart_block = restart_action_block(chat, body.question_id)
   if restart_block is not None:
-    require_owner_input_principal(principal)
     selections = body.selected_options
     if not selections:
       feedback = list((body.answers or {}).values())
@@ -907,6 +983,10 @@ async def send_message(
         chat, body.question_id,
       )
       saved_card = questions.saved_question(chat, body.question_id)
+      if (is_card_answer and not is_owner_input_principal(principal)
+          and saved_card is not None):
+        body = _confine_agent_card_answer(body, saved_card)
+        agent_exact_retry = _is_exact_agent_card_retry(body, saved_card)
       try:
         quiet_answer = bool(saved_card and questions.closes_without_reply(
           saved_card, body.answers, body.selected_options,
@@ -946,6 +1026,11 @@ async def send_message(
           question_id=chat.pending_question_id)
         return JSONResponse(content={
           "status": "answered", "answer_turn": "none", "running": is_chat_running(chat_id),
+        })
+      if agent_exact_retry:
+        return JSONResponse(status_code=202, content={
+          "status": "answered", "answer_turn": "retry",
+          "running": is_chat_running(chat_id),
         })
       if continuation_card is not None and is_chat_running(chat_id):
         # A saved approval does not park a provider future. An immediate
@@ -996,6 +1081,7 @@ async def send_message(
             run_token=pending.run_token or "",
             question_id=(body.question_id or pending.question_id),
             answers=body.answers,
+            selected_options=body.selected_options,
           )
         )
         try:

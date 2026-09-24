@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import tempfile
 from collections import deque
 from types import SimpleNamespace
@@ -164,6 +165,39 @@ async def _run_turn(
     db=db,
     **kwargs,
   )
+
+
+@pytest.mark.asyncio
+async def test_claude_collects_fast_generated_file_at_turn_end(monkeypatch, tmp_path):
+  """Turn-owned inbox capture does not depend on provider tool-hook timing."""
+  class _GeneratedFileBus(_ChatBus):
+    async def generated_file_capacity(self):
+      return 1
+
+    async def publish_generated_file(self, event):
+      self.events.append(event)
+      return event["name"]
+
+  class _FastPdfClient(_FakeClient):
+    async def query(self, message):
+      self.queries.append(message)
+      output_dir = pathlib.Path(self.options.env["MOBIUS_GENERATED_DIR"])
+      (output_dir / "fast.pdf").write_bytes(b"%PDF-1.4")
+
+  _install_fake_client(monkeypatch, _FastPdfClient)
+  bus = _GeneratedFileBus()
+  await _run_turn("fast-generated-file", cwd=str(tmp_path), bc=bus)
+
+  [event] = [
+    item for item in bus.events if item.get("type") == "generated_file"
+  ]
+  assert event["name"] == "fast.pdf"
+  assert event["previewable"] is True
+  from app.config import get_settings
+  stored = claude_sdk_runner.generated_files.stored_dir(
+    get_settings().data_dir, "fast-generated-file",
+  )
+  assert (stored / event["path"]).read_bytes() == b"%PDF-1.4"
 
 
 @pytest.mark.asyncio
@@ -1596,9 +1630,10 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   # The Claude runner appends its provider-authored concise register on top of
   # the shared base (documented amendment to system_prompts.py's contract): the
   # shared base is preserved verbatim, with the register appended after it.
-  assert options.system_prompt == (
+  assert options.system_prompt.startswith(
     claude_sdk_runner._system_prompt_with_register("system")
   )
+  assert "$MOBIUS_GENERATED_DIR" in options.system_prompt
   assert options.system_prompt.startswith("system")
   assert "# Concise register" in options.system_prompt
   assert "# Execution lifetimes in Möbius" in options.system_prompt

@@ -14,9 +14,8 @@ from app.chat_event_sink import (
   register_active_sink,
   unregister_active_sink,
 )
-from app.chat_writer import Barrier, FinishRun, StartTurn, get_writer
+from app.chat_writer import AnswerQuestion, Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
-from app.memory_recall import EMPTY_RECALL_BINDING
 from app.routes import chats_stream
 
 
@@ -42,7 +41,7 @@ def approval_run(chat, db):
   )).result(timeout=5)
   bc = create_broadcast(chat.id)
   sink = ChatEventSink(bc, chat.id, run_token=run_id,
-                       recall_binding=EMPTY_RECALL_BINDING)
+                       )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
@@ -71,6 +70,26 @@ def _answer(client, chat, auth, qid):
     "content": f"- {PROMPT['question']}: Not now", "hidden": True,
     "answers": {PROMPT["question"]: "Not now"}, "question_id": qid,
   })
+
+
+def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
+  chat.messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "question", "question_id": "older", "questions": []},
+      {"type": "question", "question_id": "newer", "questions": []},
+    ],
+  }]
+  chat.pending_question_id = "newer"
+  db.commit()
+
+  get_writer().submit(AnswerQuestion(
+    chat_id=chat.id, question_id="older", answers={"Choice": "Yes"},
+  )).result(timeout=5)
+  db.expire_all()
+  refreshed = db.get(models.Chat, chat.id)
+  assert refreshed.pending_question_id == "newer"
+  assert refreshed.messages[0]["blocks"][0]["answers"] == {"Choice": "Yes"}
 
 
 def _finish(chat, sink):
@@ -328,7 +347,6 @@ def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
   )
   other_sink = ChatEventSink(
     create_broadcast(other.id), other.id, run_token=other_run.id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(other.id, other_sink)
   try:
@@ -557,14 +575,14 @@ def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):
     monkeypatch.setenv(name, "test-value")
   monkeypatch.setenv("API_BASE_URL", "http://testserver")
   monkeypatch.setattr(helper, "urlopen", lambda *a, **kw: io.BytesIO(b'{}'))
-  with pytest.raises(SystemExit, match="Invalid approval receipt"):
+  with pytest.raises(SystemExit, match="Invalid owner-input card receipt"):
     helper.request_approval(**PROMPT)
 
   def fail(*args, **kwargs):
     raise URLError("disconnected")
 
   monkeypatch.setattr(helper, "urlopen", fail)
-  with pytest.raises(SystemExit, match="No approval was granted"):
+  with pytest.raises(SystemExit, match="No answer or approval was granted"):
     helper.request_approval(**PROMPT)
 
 
@@ -588,7 +606,67 @@ def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
   monkeypatch.setattr(helper, "urlopen", reject)
   with pytest.raises(SystemExit, match="Owned by the integration chat") as exc:
     helper.request_approval(**PROMPT)
+  assert "owner-input card" in str(exc.value)
   assert "Fix the stated conflict" in str(exc.value)
+
+
+def test_question_helper_leaves_canonicalization_to_server(monkeypatch):
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  captured = []
+  monkeypatch.setattr(helper, "save_card", lambda kind, body: (
+    captured.append((kind, body)) or {"state": "waiting_for_owner"}
+  ))
+
+  helper.request_question([{
+    "question": "Which repair should I prepare?",
+    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
+  }])
+
+  assert captured == [("question", {"questions": [{
+    "question": "Which repair should I prepare?",
+    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
+  }]})]
+
+
+def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    raise HTTPError(
+      request.full_url, 422, "Unprocessable Content", {}, io.BytesIO(json.dumps({
+        "detail": [
+          {"loc": ["body", "questions", 0, "header"],
+           "msg": "Field required", "type": "missing",
+           "input": "must-not-appear"},
+          {"loc": ["body", "questions", 0, "options"],
+           "msg": "List should have at most 3 items", "type": "too_long"},
+          {"loc": ["body", "questions", 0, "sk-live-do-not-echo"],
+           "msg": "Extra inputs are not permitted", "type": "extra_forbidden"},
+        ],
+      }).encode()),
+    )
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit) as exc:
+    helper.request_question([{
+      "id": "choice", "header": "Direction", "question": "Which?",
+      "options": [],
+    }])
+  message = str(exc.value)
+  assert "questions[0].header: Field required" in message
+  assert "questions[0].options: List should have at most 3 items" in message
+  assert "questions[0].<field>: Extra inputs are not permitted" in message
+  assert "sk-live-do-not-echo" not in message
+  assert "must-not-appear" not in message
 
 
 def test_helper_preserves_structured_restart_rejection_detail(monkeypatch):
@@ -680,6 +758,59 @@ def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, 
   assert first.status_code == 200, first.text
   assert first.json() == again.json()
   assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == payload["questions"]
+
+
+def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(
+  client, chat, approval_run,
+):
+  payload = {"questions": [
+    {"question": "Which direction?"},
+    {"question": "When?", "options": []},
+  ]}
+  response = client.post(
+    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
+  )
+  assert response.status_code == 200, response.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [
+    {
+      "id": "question-1", "header": "Question 1",
+      "question": "Which direction?", "options": [],
+    },
+    {
+      "id": "question-2", "header": "Question 2",
+      "question": "When?", "options": [],
+    },
+  ]
+
+
+def test_saved_single_question_uses_neutral_default_heading(
+  client, chat, approval_run,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/question",
+    json={"questions": [{"question": "Which direction?"}]},
+    headers=approval_run[1],
+  )
+  assert response.status_code == 200, response.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [{
+    "id": "question-1", "header": "Your choice",
+    "question": "Which direction?", "options": [],
+  }]
+
+
+def test_question_defaults_cannot_collide_with_an_explicit_id(
+  client, chat, approval_run,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/question",
+    json={"questions": [
+      {"id": "question-2", "question": "First?"},
+      {"question": "Second?"},
+    ]},
+    headers=approval_run[1],
+  )
+  assert response.status_code == 422
+  assert "question ids must be distinct" in response.text
 
 
 def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypatch):

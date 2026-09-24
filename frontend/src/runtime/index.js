@@ -25,15 +25,20 @@
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
-//   window.mobius.storage.list(prefix, opts?)     -> entries[]  (offline-capable: cache+outbox overlay)
+//   window.mobius.storage.list(prefix, opts?)     -> entries[]  (best-known compatibility view)
 //     opts.includeContent adds `content` to small JSON file entries in the
 //     server's bounded listing response; exceptional entries remain metadata-only.
+//   window.mobius.storage.listWithStatus(prefix, opts?)
+//     -> {entries, complete, source, updatedAt}; complete=false means the
+//     offline result was derived from only the paths this device has seen.
 //   window.mobius.storage.subscribe(path, cb)     -> unsubscribe fn (cb(json value))
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
 //   window.mobius.storage.pendingCount()          -> Promise<number>
-//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   read + its server ETag, for compare-and-swap
+//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   online: authoritative server value + its ETag; offline: queued overlay + offline:true
 //   window.mobius.storage.durableWrite(path, data, opts?) -> {durability, path, writeId, version?}
+//   window.mobius.storage.onConflict(cb)             -> unsubscribe fn; app owns merge/recovery
+//   window.mobius.storage.conflictContextItems(value) -> ordered opaque intents retained through coalescing
 //   window.mobius.runtimeFeatures.idleDocument    -> true when null/empty useDocument paths are idle
 //     opts.ifMatch=version makes it a CONDITIONAL write; a 412 rejects with DurableWriteError{code:'conflict', retryable:true}.
 //     CAS a file with several writers (agent + cron + UI): getWithVersion -> merge -> durableWrite({ifMatch:version}); on a
@@ -67,10 +72,13 @@
 // privilege; an app may always talk to its own backend through scoped routes.
 //
 // Storage conflict policy: last-write-wins at the path granularity. The newest
-// PUT/DELETE for a path supersedes any earlier one — enforced by coalescing
+// PUT/DELETE for a path supersedes any earlier value — enforced by coalescing
 // those state operations in the outbox and routing all server writes through
 // the single outbox-lock-serialized drain, so a stale queued op can never replay
-// over a newer value. Signals are events rather than path state and explicitly
+// over a newer value. Opaque conflictContext intents from conditional writes are
+// retained in order inside the coalesced op; apps consume the ordered list via
+// conflictContextItems() and still own all domain merge policy. Signals are
+// events rather than path state and explicitly
 // do NOT coalesce. An app that needs per-record LWW stores one file per record
 // (…/items/<uuid>.json) so concurrent edits to different records don't
 // clobber each other. CRDTs are out of scope (overkill for single-owner
@@ -166,6 +174,7 @@ let _runtimeContext = null
 // preserve old locally-modified app bundles: an absent key simply means the app
 // should keep its legacy fallback.
 export const runtimeFeatures = Object.freeze({
+  authoritativeVersionedReads: true,
   idleDocument: true,
   projects: true,
 })
@@ -220,6 +229,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     DurableWriteError,
     durableWrite: storage.durableWrite,
     onDeadLetter: storage.onDeadLetter,
+    onConflict: storage.onConflict,
     runtimeFeatures,
     // useDocument is a React hook, so it must run on the APP's React instance.
     // The runtime is deliberately React-free (and headless-testable), and no
@@ -271,9 +281,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
 //   writes on read), and write-time eviction would drop hot entries — so the
 //   eviction policy is deliberately deferred (filed under .pm/083). Fine at
 //   personal-app scale; revisit if a blob-heavy app pressures the origin quota.
-// - list() is offline-capable (078): when the server is unreachable it derives
-//   direct children from the per-path read-through cache (present=false
-//   tombstones excluded, so a synced delete does NOT resurrect — the hazard a
-//   cached listing blob would have had), then overlays the outbox. Same
-//   online/offline contract get() has. Offline entries omit size/modified_at,
-//   which only the server stat provides.
+// - listWithStatus() persists complete server membership snapshots and overlays
+//   queued writes. Without a complete snapshot it returns useful derived paths
+//   with complete:false, so apps cannot mistake a partial cache for an empty
+//   collection. list() is the entries-only compatibility view.

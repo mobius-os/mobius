@@ -166,6 +166,9 @@ def capture_ready_boot_snapshot(
 
   snapshot = db.get(models.PlatformBootSnapshot, boot_id)
   if snapshot is not None:
+    if snapshot.service_ready:
+      from app.broadcast import get_system_broadcast
+      get_system_broadcast().publish({"type": "platform_boot_ready"})
     return snapshot
   snapshot = models.PlatformBootSnapshot(boot_id=boot_id)
   db.add(snapshot)
@@ -182,20 +185,28 @@ def capture_ready_boot_snapshot(
   # Boot evidence is tiny, but it is process-lifetime data. Keep a bounded
   # recent audit window; active waits only evaluate later snapshots and never
   # require replaying an old one.
-  stale_ids = [item[0] for item in (
-    db.query(models.PlatformBootSnapshot.boot_id)
-    .order_by(
-      models.PlatformBootSnapshot.captured_at.desc(),
-      models.PlatformBootSnapshot.boot_id.desc(),
-    )
-    .offset(32)
-    .all()
-  )]
-  if stale_ids:
-    db.query(models.PlatformBootSnapshot).filter(
-      models.PlatformBootSnapshot.boot_id.in_(stale_ids),
-    ).delete(synchronize_session=False)
-    db.commit()
+  try:
+    stale_ids = [item[0] for item in (
+      db.query(models.PlatformBootSnapshot.boot_id)
+      .order_by(
+        models.PlatformBootSnapshot.captured_at.desc(),
+        models.PlatformBootSnapshot.boot_id.desc(),
+      )
+      .offset(32)
+      .all()
+    )]
+    if stale_ids:
+      db.query(models.PlatformBootSnapshot).filter(
+        models.PlatformBootSnapshot.boot_id.in_(stale_ids),
+      ).delete(synchronize_session=False)
+      db.commit()
+  except Exception:
+    # Retention is housekeeping. The committed receipt remains authoritative.
+    db.rollback()
+
+  if service_ready:
+    from app.broadcast import get_system_broadcast
+    get_system_broadcast().publish({"type": "platform_boot_ready"})
 
   return snapshot
 

@@ -18,6 +18,8 @@ from sqlalchemy import create_engine, inspect, text
 
 from app.schema_migrations import run_migrations
 from app.manifest_contract import ManifestContractError, validate_manifest_offline
+from app.config import get_settings
+from test_app_fixtures import write_git_package
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -207,7 +209,17 @@ class TestInstallOfflineContract:
       base + "index.jsx": (200, JSX.encode()),
       base + "icon.png": (200, _png_bytes()),
     }
+    bare = write_git_package(
+      Path(get_settings().data_dir) / ".test-git-packages" / manifest["id"],
+      {
+        "mobius.json": json.dumps(manifest),
+        "index.jsx": JSX,
+        "icon.png": _png_bytes(),
+      },
+    )
     with patch(
+      "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+    ), patch(
       "app.install.httpx.AsyncClient",
       side_effect=_fake_async_client(responses),
     ):
@@ -283,7 +295,17 @@ class TestInstallOfflineContract:
       base + "index.jsx": (200, JSX.encode()),
       base + "icon.png": (200, _png_bytes()),
     }
+    bare = write_git_package(
+      Path(get_settings().data_dir) / ".test-git-packages" / manifest_v2["id"],
+      {
+        "mobius.json": json.dumps(manifest_v2),
+        "index.jsx": JSX,
+        "icon.png": _png_bytes(),
+      },
+    )
     with patch(
+      "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+    ), patch(
       "app.install.httpx.AsyncClient",
       side_effect=_fake_async_client(responses),
     ):

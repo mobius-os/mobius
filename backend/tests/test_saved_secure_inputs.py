@@ -1,7 +1,10 @@
 """Sealed owner pauses persist safely; an execution claim is never replayed."""
 import asyncio
+from copy import deepcopy
 from datetime import timedelta
+import importlib.util
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -11,7 +14,6 @@ from app.broadcast import create_broadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
 from app.chat_writer import Barrier, ClaimSecureInput, FinishRun, SettleSecureInput, StartTurn, get_writer
 from app.database import SessionLocal
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 @pytest.fixture
@@ -20,7 +22,7 @@ def sealed_run(chat, db):
   get_writer().submit(StartTurn(chat_id=chat.id, run_token=run_id,
     user_msg={"role": "user", "content": "Connect locally", "ts": 1})).result(timeout=5)
   bc = create_broadcast(chat.id)
-  sink = ChatEventSink(bc, chat.id, run_token=run_id, recall_binding=EMPTY_RECALL_BINDING)
+  sink = ChatEventSink(bc, chat.id, run_token=run_id)
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(chat_id=chat.id, owner_username=owner.username, token_epoch=owner.token_epoch,
@@ -86,23 +88,61 @@ def test_execution_claim_and_safe_outcome_are_idempotent(client, chat, sealed_ru
   assert messages[-1]["blocks"][-1]["answers"]["Status"] == "completed"
 
 
-def test_submit_runs_once_and_only_fixed_result_reaches_transcript(client, chat, auth, sealed_run, tmp_path, monkeypatch):
+def test_authenticated_agent_can_submit_visible_saved_secure_input(client, chat, auth, db, sealed_run, tmp_path, monkeypatch):
   qid = _create(client, chat, sealed_run, tmp_path)
+  owner = db.query(models.Owner).first()
+  answerer = client.post(
+    "/api/chats", json={"title": "Secure input answerer"}, headers=auth,
+  ).json()["id"]
+  token = auth_mod.create_agent_token(
+    chat_id=answerer, owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+  )
+  answerer_auth = {"Authorization": f"Bearer {token}"}
   seen = []
   async def consume(spec, values, chat_id):
     seen.append(dict(values))
     values.clear()
     return 0
   monkeypatch.setattr(saved_secure_inputs, "_run_consumer", consume)
-  response = client.post(f"/api/secure-inputs/{chat.id}/{qid}/submit", headers=auth, json={"fields": {"api_key": "never-record-this-value"}})
+  response = client.post(f"/api/secure-inputs/{chat.id}/{qid}/submit", headers=answerer_auth, json={"fields": {"api_key": "never-record-this-value"}})
   assert response.status_code == 200, response.text
   # TestClient processes an immediate consumer task before returning its loop.
   for _ in range(2):
-    response = client.post(f"/api/secure-inputs/{chat.id}/{qid}/submit", headers=auth, json={"fields": {"api_key": "never-record-this-value"}})
+    response = client.post(f"/api/secure-inputs/{chat.id}/{qid}/submit", headers=answerer_auth, json={"fields": {"api_key": "never-record-this-value"}})
     assert response.status_code == 200
   assert len(seen) == 1
   state = _state(chat.id, qid)
   assert "never-record-this-value" not in json.dumps(state)
+
+
+def test_submit_saved_helper_keeps_local_value_out_of_output(
+  tmp_path, monkeypatch, capsys,
+):
+  script = Path(__file__).parents[1] / "scripts/secure-input.py"
+  spec = importlib.util.spec_from_file_location("secure_input_submit", script)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  source = tmp_path / "value"
+  source.write_text("local-value\n", encoding="utf-8")
+  monkeypatch.setenv("API_BASE_URL", "http://localhost")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setattr("sys.argv", [
+    str(script), "submit-saved", "--chat-id", "source-chat",
+    "--request-id", "card-1", "--field-file", f"api_key={source}",
+  ])
+  seen = []
+  monkeypatch.setattr(
+    module, "_post",
+    lambda _url, payload, _token: (
+      seen.append(deepcopy(payload)) or 200,
+      {"status": "consuming"},
+    ),
+  )
+
+  assert module.main() == 0
+  assert seen == [{"fields": {"api_key": "local-value"}}]
+  assert "local-value" not in capsys.readouterr().out
 
 
 def test_generic_question_answer_cannot_bypass_sealed_execution(client, chat, auth, sealed_run, tmp_path):

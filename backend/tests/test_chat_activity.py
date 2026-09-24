@@ -294,13 +294,13 @@ def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
   from app.chat_activity import chat_activity_page
   from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
   from app.delegations import wake_parent_after_child_settled
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   parent_id = 'helper-position-parent'
   db.add(models.Chat(id=parent_id, messages=[]))
   _helper(db, suffix='position', parent_chat_id=parent_id,
           created_at=datetime(2026, 9, 9), notify=False)
   db.commit()
+  from app.memory_recall import EMPTY_RECALL_BINDING
   sink = ChatEventSink(ChatBroadcast(parent_id), chat_id=parent_id,
                        recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(parent_id, sink)

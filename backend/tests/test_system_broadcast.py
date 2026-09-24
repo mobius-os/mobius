@@ -39,6 +39,7 @@ from app.broadcast import (
 )
 from app.chat_writer import Barrier, StartTurn, get_writer
 from app.chat_transcript import materialized_messages
+from app.memory_recall import EMPTY_RECALL_BINDING
 from app.chat_event_sink import (
   ChatEventSink,
   active_sink_assistant_message_id,
@@ -49,7 +50,6 @@ from app.chat_event_sink import (
 )
 from app.deps import Principal
 from app.routes.notify import NotifyBody
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # --- Bug 3 / Candidate B: question save-before-broadcast --------------

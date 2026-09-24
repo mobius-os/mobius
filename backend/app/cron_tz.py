@@ -31,7 +31,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _DAILY_CRON_RE = re.compile(
-  r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*\s*$"
+  r"[ \t]*([0-9]{1,2})[ \t]+([0-9]{1,2})"
+  r"[ \t]+\*[ \t]+\*[ \t]+\*[ \t]*",
+  re.ASCII,
 )
 # Written by init-cron-scaffold.sh; parsed (never executed) from init-cron.sh.
 _DECL_TZ_RE = re.compile(r'^SCHEDULE_TZ="([A-Za-z0-9_+/-]+)"\s*$', re.M)
@@ -54,7 +56,7 @@ def valid_timezone(name: str) -> bool:
 
 def parse_daily_cron(expr: str) -> tuple[int, int] | None:
   """Returns (minute, hour) for a plain daily cron, else None."""
-  m = _DAILY_CRON_RE.match(expr or "")
+  m = _DAILY_CRON_RE.fullmatch(expr or "")
   if not m:
     return None
   minute, hour = int(m.group(1)), int(m.group(2))

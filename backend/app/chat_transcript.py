@@ -345,6 +345,8 @@ def _distinctive_activity(block: dict, binding: RecallBinding) -> bool:
     and block["skill"].strip()
   ):
     return True
+  if isinstance(block.get("app_activity"), dict):
+    return True
   # Consulting Memory is a beat worth seeing on its own, not shell housekeeping
   # folded into "ran commands". New blocks carry a marker from the event
   # funnel; older Codex blocks recover the same bounded marker from their exact
@@ -407,6 +409,8 @@ def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
   recall = recall_from_tool_block(block, binding)
   if recall is not None:
     tool["recall"] = recall
+  if isinstance(block.get("app_activity"), dict):
+    tool["app_activity"] = block["app_activity"]
   peer_message = bounded_peer_message(block.get("peer_message"))
   if peer_message is not None:
     tool["peer_message"] = peer_message
@@ -561,7 +565,9 @@ def compact_messages_for_detail(
         else None
       )
       distinctive = activity and (
-        bool(recovered_recall) or _distinctive_activity(block, binding)
+        bool(recovered_recall)
+        or isinstance(block.get("app_activity"), dict)
+        or _distinctive_activity(block, binding)
       )
       if activity and not distinctive:
         run.append((raw_index, block))

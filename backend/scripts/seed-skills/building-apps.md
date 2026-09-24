@@ -276,11 +276,47 @@ always-on default) and/or its `skills` file (the how-to) — never in `core.md`.
 A not-installed app then contributes nothing, and the owner can see which
 installed apps extend the prompt in the Skills app.
 
+### App-owned agent activity cards
+
+An app whose skill asks the agent to run one of its scripts can declare that
+command as an activity. This is presentation only: it grants no storage,
+network, or execution authority. The shell authenticates the app and command;
+the app owns all domain language and result links.
+
+```json
+"agent_activities": {
+  "lookup": {
+    "entry": "lookup.py",
+    "arguments": 2,
+    "running_label": "Searching"
+  }
+}
+```
+
+The entry must also appear in `source_files`. The agent must invoke it as one
+simple direct command (optionally through Python or `bash -lc`) with exactly the
+declared number of arguments. Shell composition is intentionally not
+recognized. On completion, print one compact JSON receipt as the final line:
+
+```text
+MOBIUS_APP_ACTIVITY_V1:{"activity_id":"lookup","status":"succeeded","label":"Found 2 notes","detail":"Complete catalogue.","resources":[{"label":"Quiet interfaces","summary":"Prefer calm UI.","intent":"note:quiet-interfaces"}]}
+```
+
+`status` is `succeeded`, `empty`, or `failed`; `label` is required. `detail`,
+`warning`, and up to 128 `resources` are optional. A resource needs `label` and
+may add `summary` plus an app-owned `intent`; the shell opens that intent only
+inside the authenticated declaring app. Extra receipt fields remain ordinary
+command output for the agent and are ignored by the shell, so a retrieval app
+can carry its own cursors, page metadata, and protocol without teaching the
+platform any of those concepts. Keep the receipt bounded and print it last.
+
 ---
 
 ## Storage — `window.mobius.storage` is the default
 
 Persist app data through `window.mobius.storage` — injected into EVERY mini-app before your module loads, so make it your DEFAULT (not raw `fetch`). It's a read-through wrapper over the storage API: reads are instant (local cache, revalidated in the background) and keep working offline (last-known value overlaid with pending writes — read-your-writes); writes made offline queue and auto-sync on reconnect. Raw `fetch('/api/storage/...')` inside an app has no offline queue/cache and silently drops offline writes.
+
+**Boundary:** Every app owns its data model. Offline support is a product choice, not a default requirement; choose it when it materially benefits the app's use case or preserves an existing product promise. Möbius supplies isolated cached storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. When offline behavior is part of the app's contract, the app chooses what to warm, whether partial data is safe, how conflicts reconcile, and its offline UI. Keep domain merge logic out of the platform.
 
 ```jsx
 // read: your data, or null if the path is absent (never written/removed/404).
@@ -296,14 +332,17 @@ const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (ca
 // subscribeText / subscribeBlob mirror subscribe() for those kinds.
 // reactive read: cb fires with the current value, then on every change/sync. Prefer this over re-reading.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
-// enumerate a directory's immediate children instead of probing filenames:
-// [{name,path,type,size,modified_at,mime_type}], [] when empty. Online results
-// are authoritative; offline results come from the read-through cache + outbox.
-const entries = await window.mobius.storage.list('items/')
+// When logic depends on complete membership, complete=false means this device
+// knows only a partial set; keep prior authoritative state and do not seed,
+// erase, or clean up from that result.
+const { entries, complete, source } = await window.mobius.storage.listWithStatus('items/')
+// list() remains a best-known entries-only compatibility view; collection logic
+// that depends on empty vs unavailable must use listWithStatus().
 // For a one-file-per-record JSON collection, batch small records with the list.
 // Entries outside the server's strict file/page byte bounds omit `content`, so
 // fall back to get(entry.path) only for those exceptional records.
-const records = await window.mobius.storage.list('items/', { includeContent: true })
+const { entries: records, complete: recordsComplete } =
+  await window.mobius.storage.listWithStatus('items/', { includeContent: true })
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
@@ -356,6 +395,8 @@ try {
 
 `durableWrite({ ifMatch: version })` sends the version as an `If-Match`; the server rejects a stale write with a `DurableWriteError` whose `code === 'conflict'` (`retryable: true`). The runtime does NOT loop for you — you own the merge, so re-read and retry on conflict. For a create-only write pass `{ ifNoneMatch: true }` (conflicts if the path already exists). If the data is naturally per-record, one file per record sidesteps contention entirely — reach for CAS only when writers genuinely share one file. (A React list document can let `window.mobius.createUseDocument(React)`'s `useDocument(path, {mode:'cas'})` do the read-merge-retry for you.)
 
+For conditional writes that can queue offline, pass a small JSON `conflictContext` describing the **mutation intent**, not merely the resulting whole document, and recover through `storage.onConflict(async conflict => ...)`. Several offline writes to the same path coalesce to the newest value, while the runtime preserves their opaque contexts in order. Always normalize with `storage.conflictContextItems(conflict.conflictContext)` and apply every returned intent to a fresh versioned read before the recovery write. The callback must resolve truthy only after that recovery is durable; returning `false` keeps the conflict for replay after an app-frame reload. The combined contexts remain bounded to 64 KiB; beyond that bound the runtime retains separate queued writes rather than silently dropping intent.
+
 **Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
 ### The `.json`-no-envelope trap (silent data loss)
@@ -368,7 +409,7 @@ For `.json` storage paths the body IS the document. The envelope form `{content:
 
 ### Enumerate, don't probe
 
-There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Use `storage.list('prefix/')` (inside an app) or `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (cron/agent). Returns `{entries:[{name,path,type,size,modified_at,mime_type}], next_cursor}` (immediate children only, `?limit=` ≤500, opaque `?cursor=`). Runtime `list()` falls back to its per-path cache plus pending writes offline. For JSON record collections, `storage.list(prefix, {includeContent:true})` / app-list `?include_content=true` adds parsed `content` to eligible small files in the same bounded response; entries that exceed the per-file or aggregate page budget stay metadata-only and should be fetched individually.
+There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Inside an app, use `storage.listWithStatus('prefix/')` when logic depends on knowing membership is complete: `complete:true` is a server or last-known complete membership snapshot with queued writes overlaid; `complete:false` is useful partial knowledge, never proof that the directory is empty. `storage.list()` returns the best-known entries array and is sufficient for non-authoritative display. Outside an app, use `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (immediate children, `?limit=` ≤500, opaque `?cursor=`). For JSON record collections, runtime `{includeContent:true}` or raw HTTP `?include_content=true` adds parsed small-file content within strict byte bounds; a complete listing does not guarantee every body is cached, so destructive work must also stop if any required `get()` is unavailable.
 
 ### Raw storage API (cron, agent, cross-app `shared/`, non-`.json` blobs)
 

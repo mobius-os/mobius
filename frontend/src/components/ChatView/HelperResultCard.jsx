@@ -3,6 +3,7 @@ import { useId, useRef } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { ArrowDown } from '@openai/apps-sdk-ui/components/Icon'
 import { peerTime } from './peerTimeline.js'
+import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
 
@@ -32,7 +33,7 @@ export default function HelperResultCard({ event, chatId, onInternalNav }) {
       }}>
       <span className="chat__tool-icon" data-tool-kind="agents" aria-hidden="true"><ArrowDown width={14} height={14} /></span>
       <span className="chat__tool-name" title={label}>{label}</span>
-      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
+      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={formatDateTime(date)}>{formatTime(date)}</time>}
     </button>
     <div ref={detailRef} id={detailId} className="chat__tool-detail chat__peer-detail" role="region"
       aria-labelledby={headerId} tabIndex={open ? 0 : undefined} hidden={!open}>
@@ -75,7 +76,7 @@ export function HelperResultGroupCard({ events, chatId, onInternalNav }) {
       }}>
       <span className="chat__tool-icon" data-tool-kind="agents" aria-hidden="true"><ArrowDown width={14} height={14} /></span>
       <span className="chat__tool-name" title={label}>{label}</span>
-      {last && <time className="chat__peer-time" dateTime={last.toISOString()} title={last.toLocaleString()}>{last.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
+      {last && <time className="chat__peer-time" dateTime={last.toISOString()} title={formatDateTime(last)}>{formatTime(last)}</time>}
     </button>
     <div ref={detailRef} id={detailId} className="chat__tool-detail chat__peer-detail chat__helper-result-group-detail" role="region"
       aria-labelledby={headerId} tabIndex={open ? 0 : undefined} hidden={!open}>

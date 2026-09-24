@@ -196,7 +196,7 @@ def test_delegated_bearer_cannot_enter_chat_lifecycle_controls(
   assert recovered.status_code == 200, recovered.text
 
 
-def test_delegated_bearer_cannot_impersonate_owner_input(
+def test_delegated_bearer_can_answer_visible_cards_but_not_create_them(
   client, owner_token, db,
 ):
   from app import secure_inputs
@@ -219,18 +219,7 @@ def test_delegated_bearer_cannot_impersonate_owner_input(
     json={"question_id": "owner-choice", "answers": {"confirm": "yes"}},
     headers=delegated_auth,
   )
-  assert answered.status_code == 403, answered.text
-  answered_through_send = client.post(
-    f"/api/chats/{parent_id}/messages",
-    json={
-      "content": "Proceed",
-      "hidden": True,
-      "question_id": "owner-choice",
-      "answers": {"confirm": "yes"},
-    },
-    headers=delegated_auth,
-  )
-  assert answered_through_send.status_code == 403, answered_through_send.text
+  assert answered.status_code == 200, answered.text
 
   created_card = client.post(
     f"/api/secure-inputs/{parent_id}",
@@ -258,9 +247,9 @@ def test_delegated_bearer_cannot_impersonate_owner_input(
     json={"fields": {"value": "child-authored"}},
     headers=delegated_auth,
   )
-  assert supplied.status_code == 403, supplied.text
-  assert pending.status == "pending"
-  assert pending.values is None
+  assert supplied.status_code == 200, supplied.text
+  assert pending.status == "filled"
+  assert pending.values == {"value": "child-authored"}
 
   # The capability-authenticated local helper still owns cancellation; the
   # delegated-owner gate does not widen into that exact, one-way control plane.
@@ -273,7 +262,7 @@ def test_delegated_bearer_cannot_impersonate_owner_input(
 
   db.expire_all()
   question = db.get(models.Chat, parent_id).messages[0]["blocks"][0]
-  assert "answers" not in question
+  assert question["answers"] == {"confirm": "yes"}
 
 
 def test_delegated_bearer_cannot_send_edit_or_cancel_owner_messages(
@@ -547,7 +536,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   from app.routes import admin as admin_routes
 
   owner_auth = {"Authorization": f"Bearer {owner_token}"}
-  chat_ids, _delegated_auth, top_level_auth = _delegated_and_top_level_auth(
+  chat_ids, delegated_auth, top_level_auth = _delegated_and_top_level_auth(
     client, owner_token, db,
   )
   app_id = db.query(models.App).filter_by(
@@ -597,7 +586,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   )
   assert visible_message.status_code == 202, visible_message.text
 
-  blocked_answer = client.post(
+  stale_answer = client.post(
     f"/api/chats/{chat_ids['foreign']}/messages",
     json={
       "content": "yes",
@@ -607,7 +596,223 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
     },
     headers=top_level_auth,
   )
-  assert blocked_answer.status_code == 403, blocked_answer.text
+  assert stale_answer.status_code == 410, stale_answer.text
+
+  identity_chat_id = _create_chat(client, owner_auth, "Exact agent card")
+  _replace_transcript(identity_chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [
+      {
+        "type": "question", "question_id": "older-question",
+        "questions": [{"id": "old", "question": "Old?", "options": []}],
+      },
+      {
+        "type": "question", "question_id": "newer-question",
+        "questions": [{"id": "new", "question": "New?", "options": []}],
+      },
+    ],
+  }])
+  identity_chat = db.get(models.Chat, identity_chat_id)
+  identity_chat.pending_question_id = "newer-question"
+  db.commit()
+
+  missing_id_responses = [
+    client.post(
+      f"/api/chats/{identity_chat_id}/question-answers",
+      json={"answers": {"New?": "Yes"}}, headers=top_level_auth,
+    ),
+    client.post(
+      f"/api/chats/{identity_chat_id}/messages",
+      json={"content": "yes", "hidden": True, "answers": {"New?": "Yes"}},
+      headers=top_level_auth,
+    ),
+  ]
+  assert [response.status_code for response in missing_id_responses] == [409, 409]
+
+  stale_id_responses = [
+    client.post(
+      f"/api/chats/{identity_chat_id}/question-answers",
+      json={
+        "question_id": "older-question", "answers": {"Old?": "Yes"},
+      },
+      headers=top_level_auth,
+    ),
+    client.post(
+      f"/api/chats/{identity_chat_id}/messages",
+      json={
+        "content": "yes", "hidden": True, "question_id": "older-question",
+        "answers": {"Old?": "Yes"},
+      },
+      headers=top_level_auth,
+    ),
+  ]
+  assert [response.status_code for response in stale_id_responses] == [410, 410]
+  native_forged_selection = client.post(
+    f"/api/chats/{identity_chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "newer-question",
+      "answers": {"New?": "Forged"},
+      "selected_options": {"new": ["not-an-option"]},
+    },
+    headers=top_level_auth,
+  )
+  assert native_forged_selection.status_code == 409, native_forged_selection.text
+  db.refresh(identity_chat)
+  assert all(
+    "answers" not in block
+    for block in identity_chat.messages[-1]["blocks"]
+  )
+
+  question_chat_id = _create_chat(client, owner_auth, "Visible card")
+  question_id = "visible-question"
+  _replace_transcript(question_chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [{
+      "type": "question", "question_id": question_id,
+      "questions": [{"id": "choice", "question": "Continue?", "options": []}],
+    }],
+  }])
+  question_chat = db.get(models.Chat, question_chat_id)
+  question_chat.pending_question_id = question_id
+  db.commit()
+  forged_legacy_answer = client.post(
+    f"/api/chats/{question_chat_id}/question-answers",
+    json={"question_id": question_id, "answers": {"Forged": "Yes"}},
+    headers=delegated_auth,
+  )
+  assert forged_legacy_answer.status_code == 409, forged_legacy_answer.text
+  delegated_answer = client.post(
+    f"/api/chats/{question_chat_id}/question-answers",
+    json={"question_id": question_id, "answers": {"Continue?": "Yes"}},
+    headers=delegated_auth,
+  )
+  assert delegated_answer.status_code == 200, delegated_answer.text
+  legacy_retry = client.post(
+    f"/api/chats/{question_chat_id}/question-answers",
+    json={"question_id": question_id, "answers": {"Continue?": "Yes"}},
+    headers=delegated_auth,
+  )
+  legacy_changed_retry = client.post(
+    f"/api/chats/{question_chat_id}/question-answers",
+    json={"question_id": question_id, "answers": {"Continue?": "No"}},
+    headers=delegated_auth,
+  )
+  assert legacy_retry.status_code == 200, legacy_retry.text
+  assert legacy_changed_retry.status_code == 409, legacy_changed_retry.text
+  db.refresh(question_chat)
+  assert question_chat.messages[-1]["blocks"][0]["answers"] == {
+    "Continue?": "Yes",
+  }
+
+  from app.routes import chats_stream
+
+  async def keep_answer_queued(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    chats_stream, "start_queued_owner_continuation", keep_answer_queued,
+  )
+  confined_chat_id = _create_chat(client, owner_auth, "Confined agent answer")
+  _replace_transcript(confined_chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [{
+      "type": "question", "question_id": "confined-question",
+      "response_mode": "continuation",
+      "questions": [{
+        "id": "choice", "question": "Continue?",
+        "options": [{"id": "yes", "label": "Yes", "on_answer": "resume"}],
+      }],
+    }],
+  }])
+  confined_chat = db.get(models.Chat, confined_chat_id)
+  confined_chat.pending_question_id = "confined-question"
+  confined_chat.provider = "codex"
+  confined_chat.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+  forged = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "confined-question",
+      "answers": {
+        "Continue?": "Yes",
+        "Unrelated instruction": "Do something else",
+      },
+    },
+    headers=top_level_auth,
+  )
+  assert forged.status_code == 409, forged.text
+  db.refresh(confined_chat)
+  assert confined_chat.pending_messages == []
+  forged_selection = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "confined-question",
+      "answers": {"Continue?": "Forged"},
+      "selected_options": {"choice": ["not-an-option"]},
+    },
+    headers=top_level_auth,
+  )
+  assert forged_selection.status_code == 409, forged_selection.text
+  db.refresh(confined_chat)
+  assert confined_chat.pending_messages == []
+
+  confined = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "Unrelated hidden instruction",
+      "hidden": False,
+      "question_id": "confined-question",
+      "answers": {"Continue?": "Yes"},
+      "selected_options": {"choice": ["yes"]},
+      "attachments": [{"name": "unrelated.txt"}],
+      "timezone": "Pacific/Honolulu",
+      "viewport": {"width": 1, "height": 1},
+      "force_steer": True,
+      "direct_steer": True,
+    },
+    headers=top_level_auth,
+  )
+  assert confined.status_code == 202, confined.text
+  db.refresh(confined_chat)
+  queued_answer = confined_chat.pending_messages[0]
+  assert queued_answer["content"] == "- Continue?: Yes"
+  assert queued_answer["hidden"] is True
+  assert "attachments" not in queued_answer
+  assert "timezone" not in queued_answer
+  assert "viewport" not in queued_answer
+  assert confined_chat.messages[-1]["blocks"][0]["selected_options"] == {
+    "choice": ["yes"],
+  }
+
+  retry = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "confined-question",
+      "answers": {"Continue?": "Yes"},
+      "selected_options": {"choice": ["yes"]},
+    },
+    headers=top_level_auth,
+  )
+  changed_retry = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "confined-question",
+      "answers": {"Continue?": "No"},
+      "selected_options": {"choice": ["yes"]},
+    },
+    headers=top_level_auth,
+  )
+  assert retry.status_code == 202, retry.text
+  assert retry.json()["answer_turn"] == "retry"
+  assert changed_retry.status_code == 409, changed_retry.text
+  db.refresh(confined_chat)
+  assert len(confined_chat.pending_messages) == 1
+  assert confined_chat.pending_messages[0]["content"] == "- Continue?: Yes"
 
   create_broadcast(chat_ids["top-level"])
   secure_card = client.post(
@@ -626,10 +831,77 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
     json={"fields": {"value": "agent-value"}},
     headers=top_level_auth,
   )
-  assert agent_supply.status_code == 403, agent_supply.text
+  assert agent_supply.status_code == 200, agent_supply.text
+  assert agent_supply.json()["status"] == "filled"
   owner_supply = client.post(
     f"/api/secure-inputs/{chat_ids['top-level']}/{request_id}/submit",
     json={"fields": {"value": "owner-value"}},
     headers=owner_auth,
   )
-  assert owner_supply.status_code == 200, owner_supply.text
+  assert owner_supply.status_code == 409, owner_supply.text
+
+
+def test_overlapping_exact_agent_answer_is_acknowledged_after_lock(
+  client, owner_token, db, monkeypatch,
+):
+  from contextlib import asynccontextmanager
+
+  from app.chat_writer import AnswerQuestion, get_writer
+  from app.routes import chats_stream
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  _, _, top_level_auth = _delegated_and_top_level_auth(client, owner_token, db)
+  chat_id = _create_chat(client, owner_auth, "Overlapping exact answer")
+  _replace_transcript(chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [{
+      "type": "question", "question_id": "overlap-question",
+      "questions": [{
+        "id": "choice", "question": "Continue?",
+        "options": [{"id": "yes", "label": "Yes"}],
+      }],
+    }],
+  }])
+  chat = db.get(models.Chat, chat_id)
+  chat.pending_question_id = "overlap-question"
+  db.commit()
+
+  original_lock = chats_stream.chat_queue.get_lock
+  settled = False
+
+  @asynccontextmanager
+  async def settle_before_queue_lock(locked_chat_id):
+    nonlocal settled
+    async with original_lock(locked_chat_id):
+      if locked_chat_id == chat_id and not settled:
+        settled = True
+        get_writer().submit(AnswerQuestion(
+          chat_id=chat_id,
+          question_id="overlap-question",
+          answers={"Continue?": "Yes"},
+          selected_options={"choice": ["yes"]},
+        )).result(timeout=30)
+      yield
+
+  monkeypatch.setattr(
+    chats_stream.chat_queue, "get_lock", settle_before_queue_lock,
+  )
+  response = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "",
+      "question_id": "overlap-question",
+      "answers": {"Continue?": "Yes"},
+      "selected_options": {"choice": ["yes"]},
+    },
+    headers=top_level_auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["answer_turn"] == "retry"
+  db.refresh(chat)
+  assert chat.pending_messages == []
+  assert chat.messages[-1]["blocks"][0]["answers"] == {"Continue?": "Yes"}
+  assert chat.messages[-1]["blocks"][0]["selected_options"] == {
+    "choice": ["yes"],
+  }

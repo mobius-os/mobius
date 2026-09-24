@@ -6,8 +6,21 @@ from app import providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
 
 
-def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):
+def _provider():
   provider = providers.MobiusProvider()
+  provider.set_declaration(6, {
+    "name": "Möbius", "transport": "identity_broker",
+    "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
+    "models": [
+      {"id": "spark", "label": "Spark", "effort_levels": ["minimal", "low", "medium", "high", "max"], "context_window": 235930},
+      {"id": "inkling", "label": "Evolve", "effort_levels": ["minimal", "low", "medium", "high", "max"], "context_window": 900000},
+    ],
+  })
+  return provider
+
+
+def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):
+  provider = _provider()
   monkeypatch.setattr(provider, "_identity", lambda: {"linked": False})
   assert "Möbius · You" in provider.check_auth(str(tmp_path))
   monkeypatch.setattr(provider, "_identity", lambda: {"linked": True})
@@ -15,7 +28,7 @@ def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):
 
 
 def test_trial_provider_config_uses_only_local_broker_marker(tmp_path):
-  provider = providers.MobiusProvider()
+  provider = _provider()
   env = provider.build_env(
     {
       "OPENAI_API_KEY": "must-not-leak",
@@ -50,38 +63,28 @@ def test_subscription_route_reconnects_a_stalled_stream():
   assert "model_providers.mobius_trial.request_max_retries=2" in overrides
 
 
-def test_subscription_catalog_preserves_product_names_and_wire_ids():
-  payload = json.loads(providers.MobiusProvider._catalog_path().read_text())
-  assert [row["slug"] for row in payload["models"]] == [
-    "spark", "inkling", "reflect", "flow", "prism",
-  ]
-  assert "evolve" not in providers.KNOWN_MODELS["mobius"]
-  assert [row["display_name"] for row in payload["models"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
+def test_subscription_search_uses_codex_native_provider_endpoint():
+  overrides = providers.MobiusProvider().codex_config_overrides()
+  assert "model_providers.mobius_trial.supports_standalone_web_search=true" in overrides
+  assert "features.standalone_web_search=true" in overrides
+  assert "suppress_unstable_features_warning=true" in overrides
+  assert 'web_search="live"' in overrides
+  assert 'web_search="disabled"' not in overrides
+
+
+def test_subscription_catalog_comes_from_app_declaration(tmp_path, monkeypatch):
+  provider = _provider()
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  env = provider.build_env({}, str(tmp_path))
+  payload = json.loads((tmp_path / "cli-auth" / "mobius" / "catalog.json").read_text())
+  assert [row["slug"] for row in payload["models"]] == ["spark", "inkling"]
+  assert [row["display_name"] for row in payload["models"]] == ["Spark", "Evolve"]
   assert all(row["supports_parallel_tool_calls"] is False for row in payload["models"])
   assert all(row["support_verbosity"] is False for row in payload["models"])
-  assert providers.MODEL_LABELS["spark"] == "Spark (Qwen3.8 27B)"
-  assert providers.MODEL_LABELS["inkling"] == "Evolve"
-  assert providers.MODEL_LABELS["reflect"] == "Reflect (DeepSeek V4.1 Flash)"
-  assert providers.MODEL_LABELS["flow"] == "Flow (GLM 5.3 Flash)"
-  assert providers.MODEL_LABELS["prism"] == "Prism (Gemini 3.8 Flash)"
-  assert providers.DEFAULT_MODELS["mobius"] == "inkling"
+  assert providers.known_model_ids("mobius") == ["spark", "inkling"]
   assert providers.provider_runtime_kind("mobius") == "codex_sdk"
-  fallback = providers._fallback_models("mobius")
-  assert [row["id"] for row in fallback] == [
-    "spark", "inkling", "reflect", "flow", "prism",
-  ]
-  assert [row["label"] for row in fallback] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
-  assert [row["context_window"] for row in fallback] == [
-    235_930, 900_000, 943_718, 943_718, 943_718,
-  ]
+  assert [row["label"] for row in providers._fallback_models("mobius")] == ["Spark", "Evolve"]
+  assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "mobius")
 
 
 def test_saved_evolve_selection_keeps_inkling_id_for_atomic_provider_handoff():

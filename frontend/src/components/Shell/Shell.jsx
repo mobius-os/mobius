@@ -3099,6 +3099,8 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        // A saved question or secure-input request can be why the run ended;
+        // only its own clear event (or the next run starting) retires it.
         // Chat edits and their contribution ledger can both settle during an
         // agent turn. Completion is the shared freshness boundary even when
         // the chat card was hidden or unmounted while that work ran.
@@ -3123,7 +3125,6 @@ export default function Shell({ onInitialVisualReady }) {
             queryKey: ['projects', 'git', String(projectId)],
           })
         }
-        markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).

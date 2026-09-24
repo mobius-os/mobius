@@ -109,12 +109,10 @@ export function sourceFaviconDiscoveryUrl(url) {
   }
 }
 
-// What the chip actually reads. A title is only sometimes available: Claude's
-// WebSearch result carries title + snippet, but Codex's WebSearchThreadItem
-// exposes a URL only on its `openPage` / `findInPage` actions and never a
-// title. Falling back to the raw URL would print the whole link as the label
-// with its own host repeated beside it, so a title-less source reads as its
-// host instead.
+// What the chip actually reads. Both Claude and current Codex standalone
+// WebSearch results can carry a title and snippet; older Codex search actions
+// may expose only a URL. A title-less source reads as its host rather than a
+// long raw URL with the host repeated beside it.
 export function sourceLabel(source) {
   const title = typeof source?.title === 'string' ? source.title.trim() : ''
   if (title && title !== source?.url) return title

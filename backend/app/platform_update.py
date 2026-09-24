@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import fcntl
 import hashlib
 import json
@@ -249,6 +250,13 @@ class PlatformStatus(TypedDict):
   needs_restart: bool
   activation: PlatformActivationImpact
   current_build_sha: str | None
+  # Exact release this response compared with the served source. For a
+  # self-hosted check this is the freshly fetched origin/main; for a managed
+  # deployment it is the verified image release selected by the controller.
+  checked_target_sha: str | None
+  # Plain-language alias for the historical ``recorded_upstream_sha`` field.
+  # This is the last successfully reconciled release, not the latest fetch.
+  installed_release_sha: str | None
   recorded_upstream_sha: str | None
   # Latest fetched origin/main commit that is already contained in local main.
   # Unlike recorded_upstream_sha, this remains correct after a manual/agent
@@ -269,11 +277,11 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # True only while ``state == "conflict"`` and origin/main has advanced past the
-  # version this conflict is pinned to — i.e. more updates stacked up behind the
-  # one being resolved. Lets Settings offer "review all & resolve together" so a
-  # backlog is reviewed once and resolved once, instead of one resolve per
-  # release. Fetch-free like the rest of status: reflects the last fetch.
+  # Conflict-only backlog signal. This remains false outside ``state ==
+  # "conflict"`` even when ``available`` is true. While resolving a conflict it
+  # becomes true when origin/main advances past the pinned release, letting
+  # Settings offer one combined review+resolve instead of one per release.
+  # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
   rollback_error: str | None
@@ -305,11 +313,8 @@ class PlatformReviewedRebuild(TypedDict):
   image_digest: str | None
   local_base_sha: str
   activation: PlatformActivationImpact
+  incoming_activation: PlatformActivationImpact
   blockers: list[str]
-  # Packages installed live in this container that the running image does not
-  # carry (``pip``/``apt`` entries as ``name==version`` / ``name=version``).
-  # A replacement drops them; the owner decides whether that matters.
-  live_installs: dict[str, list[str]]
 
 
 class _ActivationMarker(TypedDict):
@@ -374,6 +379,9 @@ class PlatformUpdatePreview(TypedDict):
   # source revision and the immutable GHCR manifest, so a moving `main` tag can
   # never substitute different bytes after the owner reviews the diff.
   image_digest: str | None
+  # Activation introduced by this reviewed target alone. ``activation`` may
+  # also include unfinished work from an already-applied release.
+  incoming_activation: PlatformActivationImpact
   activation: PlatformActivationImpact
   total_commits: int
   commits_truncated: bool
@@ -385,6 +393,9 @@ class PlatformUpdatePreview(TypedDict):
   # The same preservation check used immediately before replacement. A preview
   # explains these blockers early; it never replaces the mutation's recheck.
   blocking_paths: list[str]
+  # Exact local image-owned behavior an official image would replace.
+  blocking_diff: str | None
+  blocking_diff_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -490,6 +501,32 @@ def _set_update_progress(
       UPDATE_PROGRESS_PATH,
       json.dumps(_UPDATE_PROGRESS, sort_keys=True),
     )
+
+
+def _finish_interrupted_update_progress() -> None:
+  """Retire an active record after its process died.
+
+  The caller has acquired the cross-process reconcile lock, proving that no
+  earlier reconciler still owns the transaction. The in-process Apply lock is
+  the one exception: its worker has just acquired this lock and is still live.
+  """
+  if _APPLY_LOCK.locked():
+    return
+  if not UPDATE_PROGRESS_PATH.exists():
+    return
+  progress = platform_update_progress()
+  if not progress["active"]:
+    return
+  _set_update_progress(
+    PlatformUpdatePhase.FAILED,
+    plan_id=progress["plan_id"],
+    target_sha=progress["target_sha"],
+    active=False,
+    error=(
+      "Möbius restarted before this update finished. Review the update again "
+      "before retrying."
+    ),
+  )
 
 
 def _update_plan_id(
@@ -635,19 +672,31 @@ def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
     _git("merge", "--abort", repo=repo, check=False)
 
 
-def _write_reconcile_pre(sha: str) -> None:
-  _atomic_write_text(RECONCILE_PRE_FLAG, sha + "\n")
+def _write_reconcile_pre(pre: str, tip: str | None = None) -> None:
+  """Record the only branch transition boot recovery may reverse."""
+  _atomic_write_text(
+    RECONCILE_PRE_FLAG,
+    json.dumps({"pre": pre, "tip": tip}, separators=(",", ":")) + "\n",
+  )
 
 
 def _clear_reconcile_pre() -> None:
   RECONCILE_PRE_FLAG.unlink(missing_ok=True)
 
 
-def _read_reconcile_pre() -> str | None:
+def _read_reconcile_pre() -> tuple[str | None, str | None]:
   if not RECONCILE_PRE_FLAG.exists():
-    return None
-  sha = RECONCILE_PRE_FLAG.read_text().strip()
-  return sha or None
+    return None, None
+  raw = RECONCILE_PRE_FLAG.read_text().strip()
+  try:
+    value = json.loads(raw)
+  except json.JSONDecodeError:
+    # Legacy markers recorded only PRE. They can clean a tree still at PRE,
+    # but cannot prove ownership of any later branch tip.
+    return raw or None, None
+  if not isinstance(value, dict):
+    return None, None
+  return value.get("pre") or None, value.get("tip") or None
 
 
 def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
@@ -663,14 +712,21 @@ def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
   if not (repo / ".git").exists():
     return "boot_guard[skipped] no_git"
   local = _local_branch(repo)
-  pre = _read_reconcile_pre()
+  pre, tip = _read_reconcile_pre()
   interrupted = _reconcile_in_progress(repo)
   _abort_interrupted(repo)
   if pre and _rev(repo, pre):
-    _reset_hard_to(repo, local, pre)
+    current = _rev(repo, local)
+    restored = False
+    if current == tip:
+      restored = _restore_candidate(repo, local, tip, pre)
+    elif current == pre:
+      _reset_hard_to(repo, local, pre)
+      restored = True
     _clear_reconcile_pre()
     _restore_working_edits(repo, local)
-    return f"boot_guard[reset] pre={_short(pre)}"
+    state = "reset" if restored else "preserved"
+    return f"boot_guard[{state}] pre={_short(pre)}"
   if interrupted:
     _git("checkout", "-q", local, repo=repo, check=False)
     _git("reset", "--hard", local, repo=repo, check=False)
@@ -734,9 +790,14 @@ def _activate_candidate(repo: Path, local: str, pre_sha: str, tip: str) -> None:
   The update refuses if another writer moved the local branch after
   ``pre_sha``; only after that succeeds does the checked-out tree follow.
   """
+  _write_reconcile_pre(pre_sha, tip)
   _git("update-ref", f"refs/heads/{local}", tip, pre_sha, repo=repo)
-  _git("checkout", "-q", local, repo=repo, check=False)
-  _git("reset", "--hard", tip, repo=repo)
+  try:
+    _git("checkout", "-q", local, repo=repo)
+    _git("reset", "--hard", tip, repo=repo)
+  except Exception:
+    _restore_candidate(repo, local, tip, pre_sha)
+    raise
 
 
 def _restore_working_edits(repo: Path, local: str) -> bool:
@@ -773,6 +834,24 @@ def _reset_hard_to(repo: Path, local: str, sha: str) -> None:
   updating the working tree. Used to serve OLD after a conflict/rollback."""
   _git("checkout", "-q", local, repo=repo, check=False)
   _git("reset", "--hard", sha, repo=repo, check=False)
+
+
+def _restore_candidate(repo: Path, local: str, tip: str, pre: str) -> bool:
+  """Roll back only the exact candidate this update published.
+
+  A failed compare-and-swap means another writer owns the branch now. Never
+  reset that writer's commit or working tree.
+  """
+  moved = _git(
+    "update-ref", f"refs/heads/{local}", pre, tip,
+    repo=repo, check=False,
+  )
+  if moved.returncode != 0:
+    return False
+  _git("checkout", "-q", local, repo=repo, check=False)
+  if _rev(repo, local) == pre:
+    _git("reset", "--hard", pre, repo=repo, check=False)
+  return True
 
 
 def _set_upstream(repo: Path, target: str) -> None:
@@ -823,14 +902,19 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
 
 
 @contextlib.contextmanager
-def _reconcile_flock():
+def _reconcile_flock(*, blocking: bool = True):
   """Hold the cross-process reconcile lock (see :data:`RECONCILE_LOCK`). Released
   on context exit AND on process death (the fd closes), so a killed boot
   reconcile never leaves the lock held."""
   RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
   fd = os.open(str(RECONCILE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
   try:
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+      fcntl.flock(fd, flags)
+    except BlockingIOError as exc:
+      raise PlatformUpdateError("platform_update_in_progress") from exc
+    _finish_interrupted_update_progress()
     yield
   finally:
     try:
@@ -1139,6 +1223,7 @@ def container_replacement_blockers(
   # target) adds nothing here; the replacement controller independently fails
   # closed on unverifiable provenance.
   head = _rev(repo, _local_branch(repo)) if expected_sha else None
+  working_paths: set[str] = set()
   if head:
     # A reviewed target may be ahead of the applied tree. Diffing target to
     # head would mislabel the incoming official Dockerfile/runtime changes as
@@ -1152,6 +1237,23 @@ def container_replacement_blockers(
       pending.extend(
         line.strip() for line in drift.stdout.splitlines() if line.strip()
       )
+    working = _git(
+      "diff", "--name-only", "--no-renames", "HEAD", "--",
+      repo=repo, check=False,
+    )
+    if working.returncode == 0:
+      working_paths.update(
+        line.strip() for line in working.stdout.splitlines() if line.strip()
+      )
+    untracked = _git(
+      "ls-files", "--others", "--exclude-standard",
+      repo=repo, check=False,
+    )
+    if untracked.returncode == 0:
+      working_paths.update(
+        line.strip() for line in untracked.stdout.splitlines() if line.strip()
+      )
+    pending.extend(working_paths)
 
   image_pending: list[str] = []
   for path in sorted(set(pending)):
@@ -1184,7 +1286,9 @@ def container_replacement_blockers(
         marker_upstream,
         [path for path in image_pending if path in covered],
       ))
-    covered = exact_target_coverage | carried_marker_coverage
+    # A target/head match says nothing about uncommitted bytes. Preserve those
+    # paths as blockers until the owner commits, reverts, or reviews them.
+    covered = (exact_target_coverage | carried_marker_coverage) - working_paths
   return sorted(path for path in image_pending if path not in covered)
 
 
@@ -1208,9 +1312,11 @@ def reviewed_container_rebuild_plan(
     base = _git(
       "merge-base", current_sha, target_sha, repo=repo, check=False,
     ).stdout.strip() or current_sha
-    paths = [*_pending_activation_paths(repo),
-             *_activation_paths_between(repo, base, target_sha)]
-    activation = platform_activation.classify_activation(paths)
+    incoming_activation = _incoming_activation_impact(repo, base, target_sha)
+    activation = platform_activation.classify_activation([
+      *_pending_activation_paths(repo),
+      *_activation_paths_between(repo, base, target_sha),
+    ])
     blockers = container_replacement_blockers(
       target_sha, repo, local_change_base=base,
     )
@@ -1219,8 +1325,8 @@ def reviewed_container_rebuild_plan(
       image_digest=image_digest,
       local_base_sha=base,
       activation=activation,
+      incoming_activation=incoming_activation,
       blockers=blockers,
-      live_installs=live_install_drift(),
     )
 
 
@@ -1330,6 +1436,78 @@ def _activation_paths_between(
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+_PYTHON_DEPENDENCY_INPUTS = (
+  "backend/requirements.txt",
+  "backend/requirements.lock",
+)
+
+
+def target_python_inputs_baked_into_image(
+  repo: Path,
+  target_sha: str | None,
+) -> bool:
+  """Whether this process's image contains the target's Python inputs.
+
+  The served checkout can intentionally lag the image during an image-first
+  deployment. Compare immutable target objects with the hashes recorded by
+  that image instead of comparing either side with mutable working-tree bytes.
+  Missing provenance, target objects, or inputs fail closed.
+  """
+  if not target_sha or _rev(repo, target_sha) != target_sha:
+    return False
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return False
+  for path in _PYTHON_DEPENDENCY_INPUTS:
+    expected = baked.get(path)
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+      return False
+    try:
+      blob = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{target_sha}:{path}"],
+        capture_output=True,
+        check=False,
+        timeout=_GIT_TIMEOUT,
+        env=_scrubbed_git_env(repo),
+      )
+    except (OSError, subprocess.SubprocessError):
+      return False
+    if blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() != expected:
+      return False
+  return True
+
+
+def _incoming_activation_impact(
+  repo: Path,
+  before: str | None,
+  target_sha: str | None,
+) -> PlatformActivationImpact:
+  """Classify target work that is not already proven active in this image."""
+  paths = _activation_paths_between(repo, before, target_sha)
+  if target_python_inputs_baked_into_image(repo, target_sha):
+    paths = [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
+  return platform_activation.classify_activation(paths)
+
+
+def activation_changes_python_dependencies(
+  impact: PlatformActivationImpact,
+) -> bool:
+  """Whether one classified change set introduces Python package inputs."""
+  return any(
+    reason.get("code") == "python_dependencies"
+    for reason in impact.get("reasons", [])
+    if isinstance(reason, dict)
+  )
+
+
+def _changes_python_dependencies(
+  repo: Path, before: str | None, after: str | None,
+) -> bool:
+  return activation_changes_python_dependencies(
+    _incoming_activation_impact(repo, before, after),
+  )
+
+
 def _paths_already_active_in_image(
   repo: Path, paths: list[str],
 ) -> list[str]:
@@ -1436,68 +1614,13 @@ def image_input_drift(repo: Path = PLATFORM_REPO) -> list[str] | None:
     candidates &= {
       path for path in authored.stdout.split("\0") if path
     }
-  # Successful in-place installs replace the image baseline only for the
-  # exact dependency input bytes they installed. A later edit becomes pending
-  # again, while restarting the server does not resurrect completed work.
+  # Successful frontend installs replace the image baseline only for the exact
+  # lock bytes they installed. Python dependencies remain image-owned.
   installed = _dependency_receipt()
   return sorted(
     path for path in candidates
     if installed.get(path, baked.get(path)) != current.get(path)
   )
-
-
-def _inventory_drift(
-  baked_path: Path, current: list[str],
-) -> list[str] | None:
-  try:
-    baked = set(
-      line.strip() for line in baked_path.read_text(encoding="utf-8").splitlines()
-    )
-  except OSError:
-    return None
-  return sorted(
-    line.strip() for line in current
-    if line.strip() and line.strip() not in baked
-  )
-
-
-def live_install_drift(
-  inventory_dir: Path | None = None,
-  *,
-  run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> dict[str, list[str]]:
-  """Packages present in this container that its image did not install.
-
-  Agents may ``pip``/``apt`` install into the running container; that is the
-  cheap, restart-free path and it survives a process restart, but a container
-  replacement rebuilds from the image and silently drops it. The image bakes
-  its own ``pip freeze`` and ``dpkg-query`` inventories; anything the current
-  container has beyond them is what a replacement would lose. An image
-  without inventories reports nothing rather than guessing.
-  """
-  root = inventory_dir or Path(
-    os.environ.get("MOBIUS_IMAGE_INVENTORY_DIR", "/app/image-inventory"),
-  )
-  commands = {
-    "pip": [sys.executable or "python3", "-m", "pip", "freeze",
-            "--disable-pip-version-check"],
-    "apt": ["dpkg-query", "-W", "-f", "${Package}=${Version}\n"],
-  }
-  drift: dict[str, list[str]] = {}
-  for kind, command in commands.items():
-    baked_path = root / f"{kind}.txt"
-    if not baked_path.is_file():
-      continue
-    try:
-      proc = run(command, capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError):
-      continue
-    if proc.returncode != 0:
-      continue
-    extras = _inventory_drift(baked_path, proc.stdout.splitlines())
-    if extras:
-      drift[kind] = extras
-  return drift
 
 
 def _platform_activation_impact(
@@ -1538,7 +1661,6 @@ def _complete_boot_activation(repo: Path) -> None:
     if level in {
       platform_activation.ActivationLevel.LIVE.value,
       platform_activation.ActivationLevel.SERVER_RESTART.value,
-      platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
     }:
       continue
     if (
@@ -1558,10 +1680,9 @@ def _complete_boot_activation(repo: Path) -> None:
   )
 
 
-# pip can be slow on a small self-hosted box fetching wheels; keep the bound
-# generous but finite so a wedged install still fails closed.
-_DEP_SYNC_TIMEOUT = 900
-_PYTHON_DEPENDENCY_INPUTS = ("backend/requirements.txt", "backend/requirements.lock")
+# npm can be slow on a small self-hosted box fetching packages; keep the bound
+# generous but finite so a wedged frontend install still fails closed.
+_FRONTEND_DEPENDENCY_TIMEOUT = 900
 _FRONTEND_DEPENDENCY_INPUTS = ("frontend/package.json", "frontend/package-lock.json")
 
 
@@ -1572,7 +1693,7 @@ def _dependency_receipt() -> dict[str, str]:
     return {}
   if not isinstance(receipt, dict):
     return {}
-  allowed = {*_PYTHON_DEPENDENCY_INPUTS, *_FRONTEND_DEPENDENCY_INPUTS}
+  allowed = set(_FRONTEND_DEPENDENCY_INPUTS)
   return {
     path: digest for path, digest in receipt.items()
     if path in allowed and isinstance(digest, str)
@@ -1593,43 +1714,9 @@ def _record_dependency_inputs(repo: Path, paths: tuple[str, ...], *, installed: 
   _atomic_write_text(DEPENDENCY_RECEIPT_PATH, json.dumps(receipt, sort_keys=True))
 
 
-def _sync_python_dependencies(repo: Path) -> tuple[bool, str]:
-  """Install the locked Python deps in place — the SAME command the image build
-  runs — so an owner Apply lands a dependency bump without a container rebuild.
-
-  Returns ``(ok, error_tail)`` and never raises for an operational failure.
-  """
-  lock = repo / "backend" / "requirements.lock"
-  if not lock.is_file():
-    return True, ""
-  try:
-    _record_dependency_inputs(repo, _PYTHON_DEPENDENCY_INPUTS, installed=False)
-    proc = subprocess.run(
-      [
-        sys.executable, "-m", "pip", "install", "--no-cache-dir",
-        "--require-hashes", "-r", "requirements.lock",
-      ],
-      cwd=str(repo / "backend"),
-      capture_output=True,
-      text=True,
-      timeout=_DEP_SYNC_TIMEOUT,
-    )
-  except (subprocess.TimeoutExpired, OSError) as exc:
-    return False, repr(exc)[-_ERROR_EXCERPT_CHARS:]
-  if proc.returncode != 0:
-    detail = (proc.stderr or proc.stdout or "pip install failed").strip()
-    return False, detail[-_ERROR_EXCERPT_CHARS:]
-  try:
-    _record_dependency_inputs(repo, _PYTHON_DEPENDENCY_INPUTS, installed=True)
-  except OSError as exc:
-    return False, repr(exc)[-_ERROR_EXCERPT_CHARS:]
-  return True, ""
-
-
 def _sync_frontend_dependencies(repo: Path) -> tuple[bool, str]:
   """Install the locked frontend deps in place — the SAME command the image build
-  runs (``npm ci --ignore-scripts``) — the frontend twin of
-  :func:`_sync_python_dependencies`, run just before the frontend rebuild so
+  runs (``npm ci --ignore-scripts``), just before the frontend rebuild so
   the build sees the new ``node_modules``.
 
   Returns ``(ok, error_tail)`` and never raises for an operational failure.
@@ -1657,7 +1744,7 @@ def _sync_frontend_dependencies(repo: Path) -> tuple[bool, str]:
       cwd=str(frontend),
       capture_output=True,
       text=True,
-      timeout=_DEP_SYNC_TIMEOUT,
+      timeout=_FRONTEND_DEPENDENCY_TIMEOUT,
     )
   except (subprocess.TimeoutExpired, OSError) as exc:
     return False, repr(exc)[-_ERROR_EXCERPT_CHARS:]
@@ -1849,27 +1936,18 @@ def _rebuild_frontend(repo: Path, res: ReconcileResult) -> None:
 
 
 def _restore_update_dependencies(
-  repo: Path, *, python_changed: bool, frontend_changed: bool,
+  repo: Path, *, frontend_changed: bool,
 ) -> str:
-  """Restore the previous source's declared versions after an in-place failure.
-
-  This is not a container snapshot: pip may retain added packages. Never remove
-  packages outside the old lock, since they may be the owner's live installs.
-  Report a failed restoration durably rather than promising an intact runtime.
-  """
+  """Restore the previous frontend dependency tree after a failed build."""
   failures: list[str] = []
-  for changed, lock, sync in (
-    (python_changed, "backend/requirements.lock", _sync_python_dependencies),
-    (frontend_changed, "frontend/package-lock.json", _sync_frontend_dependencies),
-  ):
-    if not changed:
-      continue
+  if frontend_changed:
+    lock = "frontend/package-lock.json"
     if not (repo / lock).is_file():
       failures.append(f"{lock}: previous lock unavailable")
-      continue
-    ok, error = sync(repo)
-    if not ok:
-      failures.append(f"{lock}: {error}")
+    else:
+      ok, error = _sync_frontend_dependencies(repo)
+      if not ok:
+        failures.append(f"{lock}: {error}")
   if not failures:
     return ""
   return (
@@ -1884,7 +1962,6 @@ def _roll_back_failed_frontend_build(
   previous_upstream_sha: str | None,
   error: Exception,
   *,
-  python_changed: bool,
   frontend_changed: bool,
 ) -> ReconcileResult:
   """Restore the pre-Apply source generation when its frontend cannot build.
@@ -1896,7 +1973,14 @@ def _roll_back_failed_frontend_build(
   """
   _abort_interrupted(repo)
   if res.pre_sha:
-    _reset_hard_to(repo, _local_branch(repo), res.pre_sha)
+    if not _restore_candidate(
+      repo, _local_branch(repo), res.new_sha or "", res.pre_sha,
+    ):
+      return replace(
+        res,
+        status="error",
+        error="rollback_ref_changed: a newer writer owns the served branch",
+      )
   if previous_upstream_sha:
     _set_upstream(repo, previous_upstream_sha)
   else:
@@ -1907,7 +1991,7 @@ def _roll_back_failed_frontend_build(
   CONFLICT_FLAG.unlink(missing_ok=True)
   message = f"frontend_build_failed: {error!r}"[:_ERROR_EXCERPT_CHARS]
   restore_error = _restore_update_dependencies(
-    repo, python_changed=python_changed, frontend_changed=frontend_changed,
+    repo, frontend_changed=frontend_changed,
   )
   if restore_error:
     message += "\n" + restore_error
@@ -2079,7 +2163,8 @@ def _reconcile_pass(
     )
   except Exception as exc:  # unexpected git failure — never serve a half-tree
     _abort_interrupted(repo)
-    _reset_hard_to(repo, local, pre)
+    if _rev(repo, local) == pre:
+      _reset_hard_to(repo, local, pre)
     # Nothing here is actionable by a resolver, and any earlier flag belonged
     # to an attempt this pass already superseded: leave the served tree at PRE
     # with no stale conflict/rollback state to mislead the next status read.
@@ -2091,17 +2176,15 @@ def _reconcile_pass(
 
 
 def _roll_back_update(
-  repo: Path, local: str, pre: str, target: str, message: str, error: str,
-  *, restore_python: bool = False,
+  repo: Path, local: str, pre: str, tip: str, target: str,
+  message: str, error: str,
 ) -> ReconcileResult:
-  """Serve the previous source and restore dependencies changed by the attempt."""
-  _reset_hard_to(repo, local, pre)
-  restore_error = _restore_update_dependencies(
-    repo, python_changed=restore_python, frontend_changed=False,
-  )
-  if restore_error:
-    message += "\n" + restore_error
-    error += "\n" + restore_error
+  """Serve the previous source after a rejected candidate."""
+  if not _restore_candidate(repo, local, tip, pre):
+    return ReconcileResult.unchanged(
+      "error", pre, target,
+      error="rollback_ref_changed: a newer writer owns the served branch",
+    )
   _write_rolled_back_flag(target, message)
   CONFLICT_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
@@ -2131,23 +2214,11 @@ def _finalize_update(
   other failed update.
   """
   changed = _activation_paths_between(repo, pre, tip)
-  python_changed = any(path in _PYTHON_DEPENDENCY_INPUTS for path in changed)
   frontend_changed = any(path in _FRONTEND_DEPENDENCY_INPUTS for path in changed)
   touched_frontend = any(path.startswith("frontend/") for path in changed)
 
   _activate_candidate(repo, local, pre, tip)
   app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-
-  if python_changed:
-    if progress:
-      progress(PlatformUpdatePhase.BUILDING)
-    deps_ok, deps_err = _sync_python_dependencies(repo)
-    if not deps_ok:
-      return _roll_back_update(
-        repo, local, pre, target,
-        f"dependency_install_failed: {deps_err}", deps_err,
-        restore_python=True,
-      )
 
   # Post-reconcile import probe: a text-clean replay can still produce a tree
   # that fails to import (upstream dropped a module a local edit imports; a bad
@@ -2161,7 +2232,7 @@ def _finalize_update(
     ok, err = _import_probe(repo)
     if not ok:
       return _roll_back_update(
-        repo, local, pre, target, err, err, restore_python=python_changed,
+        repo, local, pre, tip, target, err, err,
       )
 
   # Success: main now carries the update plus all local edits. Advance the
@@ -2205,7 +2276,7 @@ def _finalize_update(
     )
     return _roll_back_failed_frontend_build(
       repo, result, previous_upstream_sha, exc,
-      python_changed=python_changed, frontend_changed=frontend_changed,
+      frontend_changed=frontend_changed,
     )
   return result
 
@@ -2435,6 +2506,11 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
           overlay=again,
         )
         return "conflict"
+      if _changes_python_dependencies(repo, carried.pre, replay.tip):
+        # A resolver may finish a textual overlap, but the old image still
+        # cannot validate source that imports its newly declared packages.
+        # Leave the parked candidate untouched for a reviewed image operation.
+        raise PlatformUpdateError("image_rebuild_required")
       _write_reconcile_pre(carried.pre)
       result = _finalize_update(
         repo, local, pre=carried.pre, tip=replay.tip, target=target,
@@ -2466,7 +2542,9 @@ def _reconcile_under_lock(
   plan_id: str | None = None,
   current_sha: str | None = None,
   image_digest: str | None = None,
+  allow_image_activation: bool = False,
   progress: Callable[[PlatformUpdatePhase], None] | None = None,
+  lock_already_held: bool = False,
 ) -> ReconcileResult:
   """Serialize source updates with startup recovery using RECONCILE_LOCK.
 
@@ -2474,7 +2552,8 @@ def _reconcile_under_lock(
   lock. The lock covers source, dependency installation, the frontend build
   and rollback; browser progress reads use the durable phase record.
   """
-  with _reconcile_flock():
+  guard = contextlib.nullcontext() if lock_already_held else _reconcile_flock()
+  with guard:
     if plan_id is not None:
       if current_sha is None:
         raise PlatformUpdateError("update_plan_invalid")
@@ -2485,6 +2564,18 @@ def _reconcile_under_lock(
         target_sha=target_ref,
         image_digest=image_digest,
       )
+      if not allow_image_activation:
+        base = _git(
+          "merge-base", current_sha, target_ref, repo=repo, check=False,
+        ).stdout.strip() or current_sha
+        # Existing local image drift is an independent remainder. It must not
+        # turn an unrelated source-only update into an agent-only dead end.
+        # Refuse only when the reviewed incoming release itself needs an image.
+        impact = _incoming_activation_impact(repo, base, target_ref)
+        if platform_activation.ActivationLevel.IMAGE_REBUILD.value in (
+          impact["required_actions"]
+        ):
+          raise PlatformUpdateError("image_rebuild_required")
     result = reconcile_clone(
       repo,
       target_ref=target_ref,
@@ -2573,11 +2664,7 @@ def _state_for_activation(
   impact: PlatformActivationImpact,
 ) -> PlatformUpdateState:
   level = impact["level"]
-  if level in {
-    platform_activation.ActivationLevel.SERVER_RESTART.value,
-    # Deps were installed in place during Apply; only the restart remains.
-    platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
-  }:
+  if level == platform_activation.ActivationLevel.SERVER_RESTART.value:
     return PlatformUpdateState.RESTART_NEEDED
   if level == platform_activation.ActivationLevel.LIVE.value:
     return PlatformUpdateState.UP_TO_DATE
@@ -2625,13 +2712,17 @@ def platform_status(
     rollback = None
   activation = _platform_activation_impact(repo)
   activation_state = _state_for_activation(activation)
-  restart_needed = activation["level"] in {
-    platform_activation.ActivationLevel.SERVER_RESTART.value,
-    platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
-  }
+  restart_needed = (
+    activation["level"]
+    == platform_activation.ActivationLevel.SERVER_RESTART.value
+  )
   target = _rev(repo, target_sha or DEFAULT_TARGET_REF)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")
+  # Managed deployments may select a verified image release whose Git object
+  # is not present in the persistent checkout yet. Preserve that exact selected
+  # identity; self-hosted refs use the locally resolved commit.
+  checked_target_sha = target_sha or target
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else (
     upstream_sha if upstream_sha and _is_ancestor(repo, upstream_sha, local) else None
@@ -2657,6 +2748,8 @@ def platform_status(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
       current_build_sha=image_sha,
+      checked_target_sha=checked_target_sha,
+      installed_release_sha=upstream_sha,
       recorded_upstream_sha=upstream_sha,
       contained_upstream_sha=contained_upstream_sha,
       contained_upstream_committed_at=contained_upstream_committed_at,
@@ -2690,7 +2783,10 @@ def platform_status(
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
     activation=activation,
-    current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
+    current_build_sha=image_sha,
+    checked_target_sha=checked_target_sha,
+    installed_release_sha=upstream_sha,
+    recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     contained_upstream_committed_at=contained_upstream_committed_at,
     current_build_committed_at=current_build_committed_at,
@@ -2762,14 +2858,17 @@ def empty_platform_update_preview(
   image_digest: str | None = None,
 ) -> PlatformUpdatePreview:
   """A verified preview carrying no incoming changes or activation work."""
+  incoming_activation = platform_activation.classify_activation([])
   return PlatformUpdatePreview(
     state=PlatformUpdateState.UP_TO_DATE.value, available=False,
     actionable=False, operation="none",
     current_sha=current_sha, target_sha=target_sha, plan_id=None,
     image_digest=image_digest,
-    activation=platform_activation.classify_activation([]),
+    activation=incoming_activation,
+    incoming_activation=incoming_activation,
     total_commits=0, commits_truncated=False,
-    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
+    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
+    blocking_paths=[], blocking_diff=None, blocking_diff_truncated=False,
   )
 
 
@@ -2861,36 +2960,96 @@ def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]
   return (text or None), False
 
 
-def _preview_overlay_conflict_paths(
-  repo: Path, local: str, target: str,
-) -> list[str]:
-  """Predict the exact linear-overlay conflict Apply would encounter.
+def _preview_blocking_diff(
+  repo: Path, target: str, paths: list[str],
+) -> tuple[str | None, bool]:
+  """Explain the local image-owned behavior a replacement would remove."""
+  if not paths:
+    return None, False
+  chunks: list[str] = []
+  for path in paths:
+    reviewed = _git(
+      "show", f"{target}:{path}", repo=repo, check=False,
+    )
+    reviewed_text = reviewed.stdout if reviewed.returncode == 0 else ""
+    local_text = _read_worktree_path_without_links(repo, path)
+    delta = "".join(difflib.unified_diff(
+      reviewed_text.splitlines(keepends=True),
+      local_text.splitlines(keepends=True),
+      fromfile=f"reviewed/{path}",
+      tofile=f"local/{path}",
+    ))
+    if delta and not delta.endswith("\n"):
+      delta += "\n"
+    chunks.append(delta)
+  text = "".join(chunks)
+  if len(text) > MAX_PREVIEW_DIFF_CHARS:
+    return text[:MAX_PREVIEW_DIFF_CHARS], True
+  return (text or None), False
 
-  The preview runs the same equivalence filtering and commit-by-commit replay
-  as :func:`_apply_overlay`, but in a disposable detached worktree.  It never
-  moves a served ref, parks a resolver worktree, or writes an update flag.
-  Cleanup is unconditional so repeatedly opening the review cannot accumulate
-  candidate checkouts.
+
+def _read_worktree_path_without_links(repo: Path, relative: str) -> str:
+  """Read one regular worktree file without following any path symlink.
+
+  Blocker previews are owner-visible and can be copied into a repair chat, so
+  a working-tree link must never turn this read into disclosure of a host or
+  owner-data file outside the checkout. Directory descriptors pin every path
+  component and ``O_NOFOLLOW`` closes the final-component swap race.
   """
-  commits = app_git.overlay_commits(repo, target, local)
-  skip = app_git.landed_overlay_commits(repo, commits, target)
-  with tempfile.TemporaryDirectory(prefix="mobius-platform-preview-") as root:
-    worktree = Path(root) / "candidate"
-    try:
-      replay = app_git.replay_overlay(
-        repo, commits=commits, onto=target, worktree=worktree, skip=skip,
+  parts = Path(relative).parts
+  if (
+    not parts or relative.startswith("/")
+    or any(part in {"", ".", ".."} for part in parts)
+  ):
+    return ""
+  opened: list[int] = []
+  try:
+    current = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
+    opened.append(current)
+    for part in parts[:-1]:
+      current = os.open(
+        part,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=current,
       )
-      if replay.status != "conflict" or replay.conflict is None:
-        return []
-      # Match _park_replay: show both the first replay boundary and any
-      # endpoint conflict a resolver would need to reconcile afterwards.
+      opened.append(current)
+    try:
+      leaf = os.open(
+        parts[-1],
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=current,
+      )
+    except FileNotFoundError:
+      return f"(local path is not present: {relative})\n"
+    except OSError:
       try:
-        net_paths = set(app_git.merge_refs(repo, local, target).conflict_paths)
-      except (OSError, subprocess.SubprocessError, RuntimeError):
-        net_paths = set()
-      return sorted(net_paths | set(replay.conflict.get("paths") or []))
-    finally:
-      app_git.remove_overlay_worktree(repo, worktree)
+        # Git represents a symlink by its destination string. Reading that
+        # string through the pinned parent descriptor remains no-follow.
+        return os.readlink(parts[-1], dir_fd=current)
+      except FileNotFoundError:
+        return f"(local path is not present: {relative})\n"
+      except OSError:
+        return f"(local path was not read because it crosses a link: {relative})\n"
+    opened.append(leaf)
+    if not stat.S_ISREG(os.fstat(leaf).st_mode):
+      return ""
+    chunks: list[bytes] = []
+    remaining = MAX_PREVIEW_DIFF_CHARS + 1
+    while remaining > 0:
+      chunk = os.read(leaf, min(65536, remaining))
+      if not chunk:
+        break
+      chunks.append(chunk)
+      remaining -= len(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+  except FileNotFoundError:
+    return f"(local path is not present: {relative})\n"
+  except OSError:
+    return f"(local path was not read because it crosses a link: {relative})\n"
+  finally:
+    for descriptor in reversed(opened):
+      with contextlib.suppress(OSError):
+        os.close(descriptor)
 
 
 def platform_update_preview(
@@ -2906,8 +3065,9 @@ def platform_update_preview(
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
-  base — local edits are excluded from the public diff, while a disposable
-  replay predicts whether preserving them will conflict before Apply.
+  base; local edits are excluded from the public diff. Review never reconciles
+  local history. Apply owns that work once and reports a real conflict if one
+  exists, rather than making every review replay the full local overlay.
   Availability is the same ancestry check :func:`platform_status` uses; an
   already-applied target can still have actionable activation work.
   Missing source or target provenance is an explicit error on both deployments;
@@ -2916,7 +3076,7 @@ def platform_update_preview(
   # a writable /data recovery surface; existing clones are checked under lock.
   if not (repo / ".git").exists():
     raise PlatformUpdateError("platform_repo_missing")
-  with _reconcile_flock():
+  with _reconcile_flock(blocking=False):
     preview = _platform_update_preview_unlocked(
       repo,
       target_sha=target_sha,
@@ -2929,6 +3089,11 @@ def platform_update_preview(
       ).stdout.strip() or current
       preview["blocking_paths"] = container_replacement_blockers(
         target, repo, local_change_base=base,
+      )
+      preview["blocking_diff"], preview["blocking_diff_truncated"] = (
+        _preview_blocking_diff(
+          repo, target, preview["blocking_paths"],
+        )
       )
     return preview
 
@@ -2975,6 +3140,7 @@ def _platform_update_preview_unlocked(
   if not base:
     # No shared base and no local tip to diff against — surface availability
     # without a diff rather than raising.
+    incoming_activation = platform_activation.classify_activation(["backend/app"])
     return PlatformUpdatePreview(
       state=PlatformUpdateState.AVAILABLE.value, available=True,
       actionable=True, operation="update",
@@ -2983,17 +3149,20 @@ def _platform_update_preview_unlocked(
         _update_plan_id(local_sha, target, image_digest) if local_sha else None
       ),
       image_digest=image_digest,
-      activation=platform_activation.classify_activation(["backend/app"]),
+      activation=incoming_activation,
+      incoming_activation=incoming_activation,
       total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
+      blocking_diff=None, blocking_diff_truncated=False,
     )
   diff, truncated = _preview_diff(repo, base, target)
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
-  predicted_conflicts = _preview_overlay_conflict_paths(repo, local, target)
-  activation_paths = [*_pending_activation_paths(repo),
-                      *_activation_paths_between(repo, base, target)]
+  # Review this incoming release on its own. Existing activation drift remains
+  # visible in status after Apply, but must not turn an unrelated source update
+  # into an image replacement or agent-only dead end.
+  incoming_activation = _incoming_activation_impact(repo, base, target)
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     actionable=True, operation="update",
@@ -3002,16 +3171,17 @@ def _platform_update_preview_unlocked(
       _update_plan_id(local_sha, target, image_digest) if local_sha else None
     ),
     image_digest=image_digest,
-    activation=platform_activation.classify_activation(activation_paths),
+    activation=incoming_activation,
+    incoming_activation=incoming_activation,
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=sorted(
-      set(conflict.get("paths") or []) | set(predicted_conflicts)
-    ),
+    conflict_paths=sorted(set(conflict.get("paths") or [])),
     blocking_paths=[],
+    blocking_diff=None,
+    blocking_diff_truncated=False,
   )
 
 
@@ -3023,6 +3193,56 @@ async def apply_platform_update(
   target_sha: str,
   image_digest: str | None = None,
   repo: Path = PLATFORM_REPO,
+  allow_image_activation: bool = False,
+) -> PlatformApplyResult:
+  """Complete an admitted Apply transaction even if its HTTP client leaves.
+
+  Cancellation before this request acquires the update lock cancels it without
+  mutation. Once admitted, the reconcile and its durable terminal status are
+  one operation: a disconnected client may stop waiting, but cannot leave
+  source published with progress still marked active.
+  """
+  started = asyncio.Event()
+  task = asyncio.create_task(_apply_platform_update_guarded(
+    db,
+    plan_id=plan_id,
+    current_sha=current_sha,
+    target_sha=target_sha,
+    image_digest=image_digest,
+    repo=repo,
+    allow_image_activation=allow_image_activation,
+    started=started,
+  ))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    if not started.is_set():
+      task.cancel()
+    while not task.done():
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
+    if started.is_set():
+      try:
+        task.result()
+      except Exception:
+        log.exception("platform Apply failed after its client disconnected")
+    raise
+
+
+async def _apply_platform_update_guarded(
+  db: Session,
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+  repo: Path = PLATFORM_REPO,
+  allow_image_activation: bool = False,
+  started: asyncio.Event,
 ) -> PlatformApplyResult:
   """Owner-triggered reconcile with an explicit activation remainder.
 
@@ -3032,6 +3252,29 @@ async def apply_platform_update(
   plane.
   """
   async with _APPLY_LOCK:
+    started.set()
+    return await asyncio.to_thread(
+      _apply_platform_update_sync,
+      plan_id=plan_id,
+      current_sha=current_sha,
+      target_sha=target_sha,
+      image_digest=image_digest,
+      repo=repo,
+      allow_image_activation=allow_image_activation,
+    )
+
+
+def _apply_platform_update_sync(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None,
+  repo: Path,
+  allow_image_activation: bool,
+) -> PlatformApplyResult:
+  """Own reconcile through terminal progress under one cross-process lock."""
+  with _reconcile_flock():
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
       plan_id=plan_id,
@@ -3048,15 +3291,16 @@ async def apply_platform_update(
       )
 
     try:
-      existing_conflict = await asyncio.to_thread(_read_conflict_flag) or {}
-      res = await asyncio.to_thread(
-        _reconcile_under_lock,
+      existing_conflict = _read_conflict_flag() or {}
+      res = _reconcile_under_lock(
         repo,
         target_ref=target_sha,
         plan_id=plan_id,
         current_sha=current_sha,
         image_digest=image_digest,
+        allow_image_activation=allow_image_activation,
         progress=publish_progress,
+        lock_already_held=True,
       )
       chat_id: str | None = None
 
@@ -3076,9 +3320,7 @@ async def apply_platform_update(
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
-        hook_refresh = await asyncio.to_thread(
-          _refresh_git_hooks, repo, res.hook_source_sha,
-        )
+        hook_refresh = _refresh_git_hooks(repo, res.hook_source_sha)
         if hook_refresh:
           log.warning("git hook refresh failed after platform update: %s", hook_refresh)
         # Compare what this process imported to the new head, not only the
