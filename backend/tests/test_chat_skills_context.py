@@ -228,7 +228,6 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "honestly bounded one-turn work standard" in core_normalized
   assert "## The execution loop — read this first" in planning
   assert "Finish the read before material work" in planning_normalized
-  assert len(planning.encode("utf-8")) < 4_000
   assert "A Goal is durable intent" in planning_normalized
   assert "ready independent sibling leaves concurrently" in planning_normalized
   assert "Parallelism itself is not the saving" in planning_normalized

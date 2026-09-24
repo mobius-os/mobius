@@ -14,6 +14,7 @@ older releases remain connected and expose an in-place update command.
   POST /api/connect/pair    {code}          -> {host_id, token}   (one-time)
   GET  /api/connect/stream  (host bearer)   -> SSE stream of {exec} commands
   POST /api/connect/state   (host bearer)   -> {request_id, state=started}
+  POST /api/connect/output  (host bearer)   -> live output chunks
   POST /api/connect/result  (host bearer)   -> {request_id, stdout, ...}
   POST /api/connect/disconnect (host bearer) -> revoke this runner
 
@@ -28,15 +29,24 @@ Owner/app surface:
   GET    /api/connect/hosts/{id}/pairing  re-show/refresh the install command
   DELETE /api/connect/hosts/{id}          remove a host
   POST   /api/connect/hosts/{id}/exec     run a command on that host
+  GET    /api/connect/hosts/{id}/commands running + recently finished commands
+  GET    /api/connect/hosts/{id}/commands/{request_id}/output
+                                             long-poll that command's output
   POST   /api/connect/hosts/{id}/commands/{request_id}/cancel
                                              stop that exact command
   GET    /api/connect/runner              download the runner script
 
 Live sockets and waiting callers are in-process — safe because the backend runs
 a single uvicorn worker, the same assumption broadcast.py already relies on.
-The active command and most recent result are also written into the host's
-registry record, so transport loss or a backend restart cannot duplicate work.
-Ordinary exec requests never queue behind one another.
+Active commands and recent results are also written into the host's registry
+record, so transport loss or a backend restart cannot duplicate work. Live
+output is in-memory only; after a backend restart the final result still
+carries the head and tail of each stream.
+
+Runners that announce the "parallel" capability run any number of commands at
+once, each with its own id, time limit, output, and cancellation. Other
+runners stay single-flight: extra work is refused as busy. Nothing ever waits
+in a hidden queue. Capabilities, not release numbers, decide this.
 """
 
 from __future__ import annotations
@@ -80,8 +90,11 @@ _PAIRING_TTL_SECONDS = 15 * 60
 # SSE heartbeat cadence; also the granularity at which we notice a dropped
 # runner connection.
 _HEARTBEAT_SECONDS = 15
-# Default ceiling for a single remote command.
+# Default time limit for a single remote command. Callers may ask for any
+# length up to a year: a long command stays visible, streamable, and stoppable
+# for its whole life.
 _DEFAULT_EXEC_TIMEOUT = 60
+_MAX_EXEC_TIMEOUT = 365 * 24 * 60 * 60
 # Keep each returned stream bounded so one remote command cannot flood the
 # caller's context. Preserve both ends because diagnostics commonly put the
 # error at the tail after a large body.
@@ -96,6 +109,14 @@ _STREAM_ROTATION_SECONDS = 10 * 60
 _START_ACK_TIMEOUT = 10
 _RESULT_GRACE_SECONDS = 15
 _RESULT_RETENTION_SECONDS = 15 * 60
+_RUNNER_CAPABILITIES = frozenset(connect_runner.RUNNER_CAPABILITIES)
+# Live output kept per command for readers that attach late. This is a memory
+# bound, not a result limit: readers following along receive every chunk, and
+# the final result independently carries each stream's head and tail.
+_MAX_LIVE_OUTPUT_CHARS = 2_000_000
+# Longest single output long-poll. Stays well inside proxy idle-request cuts.
+_MAX_OUTPUT_WAIT_SECONDS = 25
+_COMMAND_LABEL_CHARS = 120
 
 
 # --------------------------------------------------------------------------- #
@@ -208,8 +229,71 @@ class _Channel:
     self.connected_at = _now()
 
 
+class _OutputLog:
+  """One command's live output, addressed by the runner's chunk sequence.
+
+  Delivery is idempotent: a retried chunk whose sequence is already present is
+  ignored. Sequences missing because of runner-side drops, trimming, or a
+  backend restart stay visible to readers as jumps in the sequence.
+  """
+
+  def __init__(self) -> None:
+    self.chunks: list[dict] = []
+    self.end_seq = 0
+    self.chars = 0
+    self._changed = asyncio.Event()
+
+  def append(self, chunks: list[dict]) -> None:
+    added = False
+    for chunk in sorted(chunks, key=lambda item: item["seq"]):
+      seq = chunk["seq"]
+      if seq < self.end_seq:
+        continue
+      self.chunks.append(chunk)
+      self.chars += len(chunk["text"])
+      self.end_seq = seq + 1
+      added = True
+    while self.chars > _MAX_LIVE_OUTPUT_CHARS and len(self.chunks) > 1:
+      self.chars -= len(self.chunks.pop(0)["text"])
+    if added:
+      self.notify()
+
+  def read(self, after: int) -> dict:
+    """Chunks from `after` on. A reader detects missing output by comparing
+    each chunk's sequence with the one it expected."""
+    return {
+      "chunks": [chunk for chunk in self.chunks if chunk["seq"] >= after],
+      "next": max(after, self.end_seq),
+    }
+
+  def notify(self) -> None:
+    self._changed.set()
+    self._changed = asyncio.Event()
+
+  async def wait_for_change(self, timeout: float) -> None:
+    changed = self._changed
+    try:
+      await asyncio.wait_for(changed.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+      pass
+
+
+def _command_label(cmd: str | None, script: str | None) -> str | None:
+  """A short in-memory description; command text is never persisted."""
+  lines = [
+    line.strip() for line in (cmd if cmd is not None else script or "").splitlines()
+    if line.strip()
+  ]
+  if not lines:
+    return None
+  label = lines[0] + (" …" if len(lines) > 1 else "")
+  if len(label) > _COMMAND_LABEL_CHARS:
+    label = label[:_COMMAND_LABEL_CHARS - 1] + "…"
+  return label
+
+
 class _ActiveCommand:
-  """The one command owned by a paired host across transport reconnects."""
+  """One command owned by a paired host across transport reconnects."""
 
   def __init__(
     self,
@@ -244,6 +328,8 @@ class _ActiveCommand:
     if started_at is not None:
       self.started.set()
     self.result: asyncio.Future = loop.create_future()
+    self.output = _OutputLog()
+    self.label = _command_label(cmd, script)
 
   @classmethod
   def from_record(cls, record: dict) -> _ActiveCommand:
@@ -307,85 +393,95 @@ class _ActiveCommand:
     return event
 
 
-def _active_public(command: _ActiveCommand | None) -> dict | None:
-  if command is None:
-    return None
+def _active_public(command: _ActiveCommand) -> dict:
   return {
     "id": command.request_id,
     "state": command.state,
     "created_at": command.created_at,
     "started_at": command.started_at,
     "timeout": command.timeout,
+    "label": command.label,
   }
 
 
-def _persist_command(host_id: str, command: _ActiveCommand | None) -> None:
+def _host_commands(host_id: str) -> dict[str, _ActiveCommand]:
+  """The host's active commands, restored from its record after a restart."""
+  commands = _commands.get(host_id)
+  if commands is not None:
+    return commands
+  commands = {}
+  host = _load_host(host_id)
+  if host is not None:
+    records = list(host.get("active_commands") or [])
+    # Records written before parallel commands held a single active command.
+    legacy = host.get("active_command")
+    if isinstance(legacy, dict):
+      records.append(legacy)
+    for record in records:
+      if isinstance(record, dict) and record.get("id"):
+        command = _ActiveCommand.from_record(record)
+        commands[command.request_id] = command
+  _commands[host_id] = commands
+  return commands
+
+
+def _find_command(host_id: str, request_id: str) -> _ActiveCommand | None:
+  return _host_commands(host_id).get(request_id)
+
+
+def _persist_commands(host_id: str) -> None:
   host = _load_host(host_id)
   if host is None:
     return
-  host["active_command"] = command.record() if command is not None else None
+  host["active_commands"] = [
+    command.record() for command in _host_commands(host_id).values()
+  ]
+  host.pop("active_command", None)
   _save_host(host)
 
 
-def _restore_command(host_id: str) -> _ActiveCommand | None:
-  command = _commands.get(host_id)
-  if command is not None:
-    return command
-  host = _load_host(host_id)
-  record = host.get("active_command") if host is not None else None
-  if not isinstance(record, dict) or not record.get("id"):
-    return None
-  command = _ActiveCommand.from_record(record)
-  _commands[host_id] = command
-  return command
-
-
-def _ensure_command(host_id: str) -> _ActiveCommand | None:
-  return _restore_command(host_id)
-
-
 def _mark_command_started(host_id: str, request_id: str) -> bool:
-  command = _ensure_command(host_id)
-  if command is None or command.request_id != request_id:
+  command = _find_command(host_id, request_id)
+  if command is None:
     return False
   if command.started_at is None:
     command.started_at = _now()
     command.started.set()
   if command.state != "canceling":
     command.state = "running"
-  _persist_command(host_id, command)
+  _persist_commands(host_id)
   return True
 
 
 def _finish_command(host_id: str, request_id: str, result: dict) -> bool:
-  command = _restore_command(host_id)
-  if command is None or command.request_id != request_id:
+  command = _host_commands(host_id).pop(request_id, None)
+  if command is None:
     return False
   public_result = _format_result(request_id, result)
   if not command.result.done():
     command.result.set_result(public_result)
-  _commands.pop(host_id, None)
+  finished_at = _now()
+  output_seq = result.get("output_seq")
+  _finished_output.setdefault(host_id, {})[request_id] = command.output
   host = _load_host(host_id)
   if host is not None:
-    finished_at = _now()
-    host["active_command"] = None
-    host["last_command"] = {
-      "id": request_id,
+    host["active_commands"] = [
+      active.record() for active in _host_commands(host_id).values()
+    ]
+    host.pop("active_command", None)
+    recent = host.get("recent_commands")
+    if not isinstance(recent, dict):
+      recent = {}
+    recent[request_id] = {
       "fingerprint": command.fingerprint,
       "finished_at": finished_at,
+      "output_seq": output_seq,
       "result": public_result,
     }
+    host["recent_commands"] = recent
+    host.pop("last_command", None)
     _save_host(host)
-    try:
-      asyncio.get_running_loop().call_later(
-        _RESULT_RETENTION_SECONDS + 1,
-        _expire_last_command,
-        host_id,
-        request_id,
-        finished_at,
-      )
-    except RuntimeError:
-      pass
+  command.output.notify()
   return True
 
 
@@ -415,20 +511,33 @@ async def _request_command_cancel(
     return False
   if command.state != "canceling":
     command.state = "canceling"
-    _persist_command(host_id, command)
+    _persist_commands(host_id)
   if ch is not None:
     await ch.queue.put({"type": "cancel", "request_id": command.request_id})
   return True
 
 
 _channels: dict[str, _Channel] = {}
-_commands: dict[str, _ActiveCommand] = {}
+_commands: dict[str, dict[str, _ActiveCommand]] = {}
+# Output logs of finished commands, retained with their results so a caller
+# that attaches late still sees what the command printed.
+_finished_output: dict[str, dict[str, _OutputLog]] = {}
+_host_id_by_token_hash: dict[str, str] = {}
+
+
+def _runner_capabilities(host: dict | None) -> set[str]:
+  raw = (host or {}).get("runner_capabilities")
+  return set(raw) & _RUNNER_CAPABILITIES if isinstance(raw, list) else set()
+
+
+def _runs_in_parallel(host: dict | None) -> bool:
+  return "parallel" in _runner_capabilities(host)
 
 
 def _touch(host_id: str) -> None:
   host = _load_host(host_id)
   if host is not None:
-    _prune_last_command(host)
+    _prune_recent_commands(host)
     host["last_seen"] = _now()
     _save_host(host)
 
@@ -442,9 +551,19 @@ def _auth_host(request: Request) -> dict:
     raise HTTPException(status_code=401, detail="Missing host token.")
   token = header[7:].strip()
   wanted = _hash(token)
+  # Live output makes runner requests frequent. Remember which record a token
+  # opened, but always re-read and re-compare it so revocation takes effect.
+  cached = _host_id_by_token_hash.get(wanted)
+  if cached is not None:
+    host = _load_host(cached)
+    stored = (host or {}).get("token_sha256")
+    if stored and secrets.compare_digest(stored, wanted):
+      return host
+    _host_id_by_token_hash.pop(wanted, None)
   for host in _list_hosts():
     stored = host.get("token_sha256")
     if stored and secrets.compare_digest(stored, wanted):
+      _host_id_by_token_hash[wanted] = host["id"]
       return host
   raise HTTPException(status_code=401, detail="Unknown or revoked host token.")
 
@@ -473,6 +592,18 @@ class ResultBody(BaseModel):
   timed_out: bool = False
   outcome: str | None = Field(default=None, max_length=16)
   truncated: bool = False
+  output_seq: int | None = Field(default=None, ge=0)
+
+
+class OutputChunk(BaseModel):
+  seq: int = Field(ge=0)
+  stream: str = Field(pattern=r"^(stdout|stderr)$")
+  text: str = Field(max_length=1024 * 1024)
+
+
+class OutputBody(BaseModel):
+  request_id: str = Field(min_length=1, max_length=64)
+  chunks: list[OutputChunk] = Field(max_length=4096)
 
 
 class ExecBody(BaseModel):
@@ -480,10 +611,15 @@ class ExecBody(BaseModel):
   script: str | None = Field(default=None, min_length=1, max_length=64 * 1024)
   shell: str | None = Field(default=None, min_length=1, max_length=4096)
   cwd: str | None = Field(default=None, max_length=4096)
-  timeout: int = Field(default=_DEFAULT_EXEC_TIMEOUT, ge=1, le=3600)
+  # One year is a validity bound, not a working limit: it keeps deadline
+  # arithmetic finite on both sides.
+  timeout: int = Field(default=_DEFAULT_EXEC_TIMEOUT, ge=1, le=_MAX_EXEC_TIMEOUT)
   request_id: str | None = Field(
     default=None, min_length=16, max_length=64, pattern=r"^[a-f0-9]+$",
   )
+  # Return as soon as the machine starts the command; read its output and
+  # result from the output endpoint. Otherwise wait for the final result.
+  stream: bool = False
 
   @model_validator(mode="after")
   def validate_work(self) -> ExecBody:
@@ -593,8 +729,13 @@ def _reported_runner_release(value: object) -> int | None:
 def _public_host(host: dict) -> dict:
   """Registry view safe to hand to the owner/app (no token hash)."""
   ch = _channels.get(host["id"])
-  _prune_last_command(host)
-  active_public = _active_public(_ensure_command(host["id"]))
+  _prune_recent_commands(host)
+  active = [
+    _active_public(command)
+    for command in sorted(
+      _host_commands(host["id"]).values(), key=lambda item: item.created_at,
+    )
+  ]
   runner_protocol = (
     _RUNNER_PROTOCOL_VERSION if ch is not None
     else host.get("runner_protocol")
@@ -604,12 +745,14 @@ def _public_host(host: dict) -> dict:
   )
   runner_release = _reported_runner_release(host.get("runner_release"))
   paired = bool(host.get("token_sha256"))
+  managed_by_mobius = host.get("runner_managed") == "mobius"
   runner_update_available = bool(
     paired and (
       int(runner_protocol or 0) != _RUNNER_PROTOCOL_VERSION
       or runner_transport != "sse"
       or runner_release is None
       or runner_release < _RUNNER_RELEASE
+      or not _RUNNER_CAPABILITIES <= _runner_capabilities(host)
     )
   )
   return {
@@ -617,14 +760,19 @@ def _public_host(host: dict) -> dict:
     "name": host.get("name") or "Machine",
     "paired": paired,
     "online": ch is not None,
-    "busy": active_public is not None,
-    "active_command": active_public,
+    "busy": bool(active),
+    "active_commands": active,
+    # Older Connect app releases read one command; they can still stop it.
+    "active_command": active[0] if active else None,
+    "parallel_commands": _runs_in_parallel(host),
     "runner_protocol": runner_protocol,
     "runner_release": runner_release,
     "runner_update_available": runner_update_available,
     "update_command": (
-      _update_command(_base_url()) if runner_update_available else None
+      _update_command(_base_url())
+      if runner_update_available and not managed_by_mobius else None
     ),
+    "runner_managed": host.get("runner_managed"),
     "last_seen": host.get("last_seen"),
     "created_at": host.get("created_at"),
     "platform": host.get("platform"),
@@ -632,32 +780,37 @@ def _public_host(host: dict) -> dict:
   }
 
 
-def _prune_last_command(host: dict) -> None:
-  last = host.get("last_command")
-  if not isinstance(last, dict):
-    return
-  finished_at = float(last.get("finished_at") or 0)
-  if _now() - finished_at <= _RESULT_RETENTION_SECONDS:
-    return
-  host["last_command"] = None
-  _save_host(host)
+def _prune_recent_commands(host: dict) -> None:
+  """Expire finished commands past retention; the only expiry path."""
+  recent = host.get("recent_commands")
+  recent = dict(recent) if isinstance(recent, dict) else {}
+  # A record written before parallel commands kept one finished command.
+  changed = "last_command" in host
+  legacy = host.pop("last_command", None)
+  if isinstance(legacy, dict) and legacy.get("id"):
+    recent.setdefault(str(legacy["id"]), {
+      key: legacy.get(key) for key in ("fingerprint", "finished_at", "result")
+    })
+  cutoff = _now() - _RESULT_RETENTION_SECONDS
+  kept = {
+    request_id: entry for request_id, entry in recent.items()
+    if isinstance(entry, dict) and float(entry.get("finished_at") or 0) >= cutoff
+  }
+  if kept != host.get("recent_commands"):
+    host["recent_commands"] = kept
+    changed = True
+  logs = _finished_output.get(host["id"])
+  if logs:
+    for request_id in [key for key in logs if key not in kept]:
+      logs.pop(request_id, None)
+  if changed:
+    _save_host(host)
 
 
-def _expire_last_command(
-  host_id: str,
-  request_id: str,
-  finished_at: float,
-) -> None:
-  host = _load_host(host_id)
-  last = host.get("last_command") if host is not None else None
-  if not isinstance(last, dict):
-    return
-  if last.get("id") != request_id or last.get("finished_at") != finished_at:
-    return
-  if _now() - finished_at < _RESULT_RETENTION_SECONDS:
-    return
-  host["last_command"] = None
-  _save_host(host)
+def _recent_command(host: dict, request_id: str) -> dict | None:
+  recent = host.get("recent_commands")
+  entry = recent.get(request_id) if isinstance(recent, dict) else None
+  return entry if isinstance(entry, dict) else None
 
 
 def _forget_host(host_id: str) -> None:
@@ -666,9 +819,11 @@ def _forget_host(host_id: str) -> None:
     for fut in ch.control_pending.values():
       if not fut.done():
         fut.cancel()
-  command = _commands.pop(host_id, None)
-  if command is not None and not command.result.done():
-    command.result.cancel()
+  for command in (_commands.pop(host_id, None) or {}).values():
+    if not command.result.done():
+      command.result.cancel()
+    command.output.notify()
+  _finished_output.pop(host_id, None)
   _host_path(host_id).unlink(missing_ok=True)
 
 
@@ -754,8 +909,8 @@ async def create_host(
     "runner_protocol": None,
     "runner_release": None,
     "runner_transport": None,
-    "active_command": None,
-    "last_command": None,
+    "active_commands": [],
+    "recent_commands": {},
   }
   _save_host(host)
   base = _base_url()
@@ -853,6 +1008,10 @@ async def delete_host(
   return {"ok": True, "daemon": daemon}
 
 
+def _started_response(command: _ActiveCommand) -> dict:
+  return {"request_id": command.request_id, "state": command.state}
+
+
 @router.post("/hosts/{host_id}/exec")
 async def exec_on_host(
   host_id: str,
@@ -871,20 +1030,23 @@ async def exec_on_host(
     script=body.script,
     shell=body.shell,
   )
-  _prune_last_command(host)
-  last = host.get("last_command")
-  if isinstance(last, dict) and last.get("id") == request_id:
-    if last.get("fingerprint") != fingerprint:
+  _prune_recent_commands(host)
+  recent = _recent_command(host, request_id)
+  if recent is not None:
+    if recent.get("fingerprint") != fingerprint:
       raise HTTPException(
         status_code=409,
         detail="That request id already belongs to a different command.",
       )
-    result = last.get("result")
+    result = recent.get("result")
     if isinstance(result, dict):
+      if body.stream:
+        return {"request_id": request_id, "state": "finished"}
       return result
 
-  command = _ensure_command(host_id)
-  if command is not None and command.request_id == request_id:
+  commands = _host_commands(host_id)
+  command = commands.get(request_id)
+  if command is not None:
     if command.fingerprint != fingerprint:
       raise HTTPException(
         status_code=409,
@@ -892,13 +1054,17 @@ async def exec_on_host(
       )
     # A caller can safely retry after losing its own HTTP connection. It joins
     # the one host-owned command instead of dispatching the same work twice.
+    if body.stream:
+      return _started_response(command)
     return await _await_command_result(host_id, command)
-  if command is not None:
+  if commands and not _runs_in_parallel(host):
     raise HTTPException(
       status_code=409,
       detail=(
-        f"{host.get('name') or 'That machine'} is busy with another command. "
-        "Wait for it to finish or stop it in Connect."
+        f"{host.get('name') or 'That machine'} is busy with another command, "
+        "and its Connect runner runs one command at a time. Wait for it to "
+        "finish, stop it in Connect, or update the runner to run commands "
+        "in parallel."
       ),
     )
   if ch is None:
@@ -918,8 +1084,8 @@ async def exec_on_host(
     not_after=not_after,
     fingerprint=fingerprint,
   )
-  _commands[host_id] = command
-  _persist_command(host_id, command)
+  commands[request_id] = command
+  _persist_commands(host_id)
   await ch.queue.put(command.event())
   try:
     try:
@@ -939,12 +1105,95 @@ async def exec_on_host(
         detail="The machine did not start the command before it expired.",
       )
     # Execution time belongs to the runner and begins only after its start ack.
+    if body.stream:
+      return _started_response(command)
     return await _await_command_result(host_id, command)
   except asyncio.CancelledError:
     # HTTP caller lifetime and command lifetime are deliberately independent.
     # `mach` sends an explicit cancel request on Ctrl-C; an edge timeout or
     # backend shutdown must not silently kill remote work.
     raise
+
+
+@router.get("/hosts/{host_id}/commands")
+async def list_host_commands(
+  host_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  host = _load_host(host_id)
+  if host is None:
+    raise HTTPException(status_code=404, detail="No such host.")
+  _prune_recent_commands(host)
+  running = [
+    _active_public(command)
+    for command in sorted(
+      _host_commands(host_id).values(), key=lambda item: item.created_at,
+    )
+  ]
+  recent = []
+  for request_id, entry in (host.get("recent_commands") or {}).items():
+    result = entry.get("result") or {}
+    recent.append({
+      "id": request_id,
+      "finished_at": entry.get("finished_at"),
+      "outcome": result.get("outcome"),
+      "exit_code": result.get("exit_code"),
+    })
+  recent.sort(key=lambda item: item.get("finished_at") or 0, reverse=True)
+  return {"running": running, "recent": recent}
+
+
+@router.get("/hosts/{host_id}/commands/{request_id}/output")
+async def read_command_output(
+  host_id: str,
+  request_id: str,
+  after: int = 0,
+  wait: float = 0,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  """Return output chunks from sequence `after`, waiting up to `wait` seconds.
+
+  The response is ready as soon as there is output past `after` or the
+  command has finished. A finished command also returns its final result.
+  """
+  host = _load_host(host_id)
+  if host is None:
+    raise HTTPException(status_code=404, detail="No such host.")
+  after = max(0, after)
+  deadline = _now() + max(0.0, min(float(wait), _MAX_OUTPUT_WAIT_SECONDS))
+  while True:
+    command = _find_command(host_id, request_id)
+    if command is not None:
+      view = command.output.read(after)
+      if view["chunks"] or _now() >= deadline:
+        return {
+          "request_id": request_id,
+          "state": command.state,
+          **view,
+          "result": None,
+          "output_seq": None,
+        }
+      await command.output.wait_for_change(
+        max(0.01, min(_HEARTBEAT_SECONDS, deadline - _now())),
+      )
+      continue
+    host = _load_host(host_id)
+    if host is not None:
+      _prune_recent_commands(host)
+    entry = _recent_command(host, request_id) if host is not None else None
+    if entry is None:
+      raise HTTPException(
+        status_code=404,
+        detail="Connect has no running or recent command with that id.",
+      )
+    log = _finished_output.get(host_id, {}).get(request_id) or _OutputLog()
+    return {
+      "request_id": request_id,
+      "state": "finished",
+      **log.read(after),
+      "result": entry.get("result"),
+      "output_seq": entry.get("output_seq"),
+    }
 
 
 @router.post("/hosts/{host_id}/commands/{request_id}/cancel")
@@ -956,8 +1205,8 @@ async def cancel_host_command(
   host = _load_host(host_id)
   if host is None:
     raise HTTPException(status_code=404, detail="No such host.")
-  command = _ensure_command(host_id)
-  if command is None or command.request_id != request_id:
+  command = _find_command(host_id, request_id)
+  if command is None:
     raise HTTPException(status_code=404, detail="That command is no longer running.")
   if not await _request_command_cancel(host_id, command):
     raise HTTPException(
@@ -1031,6 +1280,7 @@ def _runner_result(host_id: str, body: ResultBody) -> None:
     "timed_out": body.timed_out,
     "outcome": outcome,
     "truncated": body.truncated,
+    "output_seq": body.output_seq,
   })
 
 
@@ -1039,43 +1289,39 @@ async def _reconcile_runner(
   ch: _Channel,
   hello: dict,
 ) -> None:
-  """Join one runner's local state to the durable host-owned command."""
-  runner_active = str(hello.get("active_request_id") or "")
+  """Join one runner's local state to the durable host-owned commands."""
+  runner_active = {
+    str(item) for item in (hello.get("active_request_ids") or []) if item
+  }
   pending_ids = {
     str(item) for item in (hello.get("pending_result_ids") or []) if item
   }
-  command = _ensure_command(host_id)
-  if command is None:
-    if runner_active:
-      await ch.queue.put({"type": "cancel", "request_id": runner_active})
-    return
-
-  if command.request_id == runner_active:
-    _mark_command_started(host_id, command.request_id)
-    if command.state == "canceling":
-      await ch.queue.put({"type": "cancel", "request_id": command.request_id})
-    return
-  if command.request_id in pending_ids:
-    # The result follows the hello on this connection. Keeping the command here
-    # lets that late result resolve a waiting or retried caller exactly once.
-    return
-  if command.state == "dispatching" and (
-    command.not_after is None or _now() <= command.not_after
-  ):
-    await ch.queue.put(command.event())
-    return
-
-  # The backend remembered running work that this restarted runner no longer
-  # owns. Clear it honestly rather than either duplicating it or blocking the
-  # host forever.
-  _finish_command(host_id, command.request_id, {
-    "stdout": "",
-    "stderr": "runner restarted before the command result was reported",
-    "exit_code": 125,
-    "outcome": "lost",
-  })
-  if runner_active:
-    await ch.queue.put({"type": "cancel", "request_id": runner_active})
+  for command in list(_host_commands(host_id).values()):
+    if command.request_id in runner_active:
+      _mark_command_started(host_id, command.request_id)
+      if command.state == "canceling":
+        await ch.queue.put({"type": "cancel", "request_id": command.request_id})
+      continue
+    if command.request_id in pending_ids:
+      # The result follows the hello on this connection. Keeping the command
+      # here lets that late result resolve a waiting or retried caller once.
+      continue
+    if command.state == "dispatching" and (
+      command.not_after is None or _now() <= command.not_after
+    ):
+      await ch.queue.put(command.event())
+      continue
+    # The backend remembered running work that this restarted runner no longer
+    # owns. Clear it honestly rather than either duplicating it or blocking.
+    _finish_command(host_id, command.request_id, {
+      "stdout": "",
+      "stderr": "runner restarted before the command result was reported",
+      "exit_code": 125,
+      "outcome": "lost",
+    })
+  # Work the runner still runs but Möbius no longer tracks has no caller left.
+  for request_id in sorted(runner_active - set(_host_commands(host_id))):
+    await ch.queue.put({"type": "cancel", "request_id": request_id})
 
 
 # --------------------------------------------------------------------------- #
@@ -1121,7 +1367,15 @@ async def stream(request: Request) -> StreamingResponse:
   # offers the owner the current implementation.
   host["runner_protocol"] = protocol_version or None
   host["runner_release"] = runner_release
+  host["runner_capabilities"] = sorted(
+    set(request.query_params.getlist("capability")) & _RUNNER_CAPABILITIES
+  )
   host["runner_transport"] = "sse"
+  # A runner supervised by another Möbius is updated by that Möbius when it
+  # relaunches the runner, never by the service install command.
+  host["runner_managed"] = (
+    "mobius" if request.query_params.get("managed") == "mobius" else None
+  )
   plat = request.query_params.get("platform")
   if plat:
     host["platform"] = plat[:80]
@@ -1135,8 +1389,11 @@ async def stream(request: Request) -> StreamingResponse:
   # A reconnecting runner replaces any stale channel.
   _replace_channel(host_id, ch)
   _touch(host_id)
+  # Runners that stream output wait for this before sending any; older runners
+  # ignore event types they do not know.
+  await ch.queue.put({"type": "hello", "live_output": True})
   await _reconcile_runner(host_id, ch, {
-    "active_request_id": request.query_params.get("active_request_id"),
+    "active_request_ids": request.query_params.getlist("active_request_id"),
     "pending_result_ids": request.query_params.getlist("pending_result_id"),
   })
 
@@ -1176,6 +1433,16 @@ async def stream(request: Request) -> StreamingResponse:
     media_type="text/event-stream",
     headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
   )
+
+
+@router.post("/output")
+async def command_output(body: OutputBody, request: Request) -> dict:
+  host = _auth_host(request)
+  command = _find_command(host["id"], body.request_id)
+  if command is None:
+    raise HTTPException(status_code=409, detail="That command is no longer active.")
+  command.output.append([chunk.model_dump() for chunk in body.chunks])
+  return {"ok": True, "next": command.output.end_seq}
 
 
 @router.post("/result")

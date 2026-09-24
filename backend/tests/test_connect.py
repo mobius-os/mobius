@@ -28,10 +28,12 @@ from app.schema_migrations import run_migrations, schema_migration_history
 def _clear_connect_channels():
   connect_routes._channels.clear()
   connect_routes._commands.clear()
+  connect_routes._host_id_by_token_hash.clear()
   connect_routes._pair_limiter.reset()
   yield
   connect_routes._channels.clear()
   connect_routes._commands.clear()
+  connect_routes._host_id_by_token_hash.clear()
   connect_routes._pair_limiter.reset()
 
 
@@ -260,6 +262,7 @@ def test_outbound_reconcile_records_exits_and_relaunches_orphans(
     connect_outbound, "_launch",
     lambda profile_id, *args: launched.append((profile_id, args)),
   )
+  monkeypatch.setattr(connect_outbound, "_download_relaunch_runners", dict)
 
   connect_outbound._reconcile_once()
 
@@ -275,6 +278,188 @@ def test_outbound_reconcile_records_exits_and_relaunches_orphans(
   # found alive by pid, or one that already exited on its own, is left alone.
   assert launched == [(orphan, ())]
   assert set(owned) == {running}
+
+
+def test_outbound_relaunch_installs_the_connected_mobius_current_runner(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "7" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"old release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  downloads = []
+  monkeypatch.setattr(
+    connect_outbound, "_download_runner",
+    lambda base_url: downloads.append(base_url) or b"current release",
+  )
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append(runner.read_bytes()),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert downloads == ["https://friend.example"]
+  # The refreshed runner is in place before the process starts.
+  assert launched == [b"current release"]
+  assert stat.S_IMODE(runner.stat().st_mode) == 0o700
+
+
+def test_outbound_relaunch_keeps_the_saved_runner_when_unreachable(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "8" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"saved release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+
+  def unreachable(_base_url):
+    raise connect_outbound.OutboundConnectError("offline")
+
+  monkeypatch.setattr(connect_outbound, "_download_runner", unreachable)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append(runner.read_bytes()),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert launched == [b"saved release"]
+
+
+def test_outbound_runner_download_never_holds_the_supervisor_lock(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "a" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  held = []
+
+  def download(_base_url):
+    # An unreachable Möbius must not stall pairing or revocation.
+    held.append(connect_outbound._lock._is_owned())
+    raise connect_outbound.OutboundConnectError("slow and then offline")
+
+  monkeypatch.setattr(connect_outbound, "_download_runner", download)
+  monkeypatch.setattr(connect_outbound, "_launch", lambda profile_id, *a: None)
+
+  connect_outbound._reconcile_once()
+
+  assert held == [False]
+
+
+def test_outbound_relaunch_survives_a_failed_runner_write(tmp_path, monkeypatch):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "b" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"saved release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"new")
+
+  def disk_full(*_args, **_kwargs):
+    raise OSError("no space left on device")
+
+  monkeypatch.setattr(connect_outbound, "atomic_write", disk_full)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch", lambda profile_id, *a: launched.append(profile_id),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert launched == [profile_id]
+  assert runner.read_bytes() == b"saved release"
+
+
+def test_supervised_runner_announces_its_supervisor(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: tmp_path)
+  env = connect_outbound._runner_env("o_" + "9" * 16)
+  assert env[connect_runner.SUPERVISOR_ENV] == "mobius"
+
+  opened = []
+
+  class Stream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  monkeypatch.setenv(connect_runner.SUPERVISOR_ENV, "mobius")
+  monkeypatch.setattr(
+    connect_runner, "_open_url",
+    lambda request, **kwargs: opened.append(request.full_url) or Stream(),
+  )
+  monkeypatch.setattr(connect_runner, "_remove_connection", lambda url, host_id: 1)
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+  connect_runner._serve_connection(
+    {"url": "https://friend.example", "host_id": "h_f", "token": "t"},
+  )
+  assert "&managed=mobius" in opened[0]
+
+
+@pytest.mark.asyncio
+async def test_mobius_supervised_runner_is_not_offered_an_install_command(
+  client, auth,
+):
+  pairing, runner_token = _paired_host(client, auth)
+
+  async def receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+  request = Request({
+    "type": "http",
+    "method": "GET",
+    "path": "/api/connect/stream",
+    "query_string": (
+      f"protocol=4&release={connect_runner.RUNNER_RELEASE - 1}"
+      "&platform=Linux&managed=mobius"
+    ).encode(),
+    "headers": [(b"authorization", f"Bearer {runner_token}".encode())],
+  }, receive)
+  response = await connect_routes.stream(request)
+  public = connect_routes._public_host(connect_routes._load_host(pairing["id"]))
+
+  # Still outdated, but its supervising Möbius updates it on relaunch; the
+  # service installer would add a second, unsupervised runner.
+  assert public["runner_update_available"] is True
+  assert public["runner_managed"] == "mobius"
+  assert public["update_command"] is None
+
+  assert await response.body_iterator.__anext__() == ": connected\n\n"
+  connect_routes._channels[pairing["id"]].closed.set()
+  with pytest.raises(StopAsyncIteration):
+    await response.body_iterator.__anext__()
 
 
 @pytest.mark.asyncio
@@ -929,6 +1114,7 @@ def test_compatible_runner_release_controls_update_offer(
   host["runner_protocol"] = connect_runner.RUNNER_PROTOCOL_VERSION
   host["runner_transport"] = "sse"
   host["runner_release"] = runner_release
+  host["runner_capabilities"] = list(connect_runner.RUNNER_CAPABILITIES)
   connect_routes._save_host(host)
 
   public = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
@@ -1023,7 +1209,8 @@ async def test_current_stream_rotates_without_losing_running_command(
     "path": "/api/connect/stream",
     "query_string": (
       f"protocol=4&release={connect_runner.RUNNER_RELEASE}"
-      f"&platform=TestOS%201&active_request_id={request_id}"
+      f"&platform=TestOS%201&capability=parallel&capability=live_output"
+      f"&active_request_id={request_id}"
     ).encode(),
     "headers": [
       (b"authorization", f"Bearer {runner_token}".encode()),
@@ -1032,6 +1219,7 @@ async def test_current_stream_rotates_without_losing_running_command(
   response = await connect_routes.stream(request)
   current = connect_routes._channels[pairing["id"]]
   assert current is not first
+  assert current.queue.get_nowait() == {"type": "hello", "live_output": True}
   assert current.queue.empty()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_protocol"] == 4
@@ -1044,7 +1232,7 @@ async def test_current_stream_rotates_without_losing_running_command(
     await response.body_iterator.__anext__()
 
   assert pairing["id"] not in connect_routes._channels
-  assert connect_routes._ensure_command(pairing["id"]).request_id == request_id
+  assert connect_routes._find_command(pairing["id"], request_id) is not None
   assert not caller.done()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_transport"] == "sse"
@@ -1079,7 +1267,7 @@ async def test_reconnect_keeps_one_command_and_returns_its_result(client, auth):
   second = connect_routes._Channel()
   connect_routes._replace_channel(pairing["id"], second)
   await connect_routes._reconcile_runner(pairing["id"], second, {
-    "active_request_id": request_id, "pending_result_ids": [],
+    "active_request_ids": [request_id], "pending_result_ids": [],
   })
   assert second.queue.empty()
   connect_routes._runner_result(pairing["id"], connect_routes.ResultBody(
@@ -1148,7 +1336,7 @@ async def test_exec_correlates_the_runner_result(client, auth):
     "timed_out": False,
     "canceled": False,
   }
-  assert connect_routes._ensure_command(pairing["id"]) is None
+  assert connect_routes._host_commands(pairing["id"]) == {}
 
 
 @pytest.mark.asyncio
@@ -1178,12 +1366,12 @@ async def test_protocol_four_carries_a_literal_script_separately(
   assert event["shell"] == "bash"
   assert event["cwd"] == "/srv/app"
   assert "cmd" not in event
-  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  [persisted] = connect_routes._load_host(pairing["id"])["active_commands"]
   assert persisted["script"] == script
   assert persisted["shell"] == "bash"
 
   connect_routes._mark_command_started(pairing["id"], request_id)
-  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  [persisted] = connect_routes._load_host(pairing["id"])["active_commands"]
   assert "script" not in persisted
   assert "shell" not in persisted
   connect_routes._finish_command(pairing["id"], request_id, {
@@ -1215,21 +1403,21 @@ async def test_persisted_running_command_accepts_result_after_runtime_restart(
     started_at=time.time(),
     state="running",
   )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
-  record = connect_routes._load_host(pairing["id"])["active_command"]
+  connect_routes._host_commands(pairing["id"])[request_id] = command
+  connect_routes._persist_commands(pairing["id"])
+  [record] = connect_routes._load_host(pairing["id"])["active_commands"]
   assert "cmd" not in record
 
   # A backend restart drops futures and sockets, but the host record survives.
   connect_routes._commands.clear()
+  connect_routes._host_id_by_token_hash.clear()
   channel = connect_routes._Channel()
   await connect_routes._reconcile_runner(pairing["id"], channel, {
-    "active_request_id": None,
+    "active_request_ids": [],
     "pending_result_ids": [request_id],
   })
   assert channel.queue.empty()
-  restored = connect_routes._ensure_command(pairing["id"])
-  assert restored.request_id == request_id
+  assert connect_routes._find_command(pairing["id"], request_id) is not None
 
   connect_routes._runner_result(pairing["id"], connect_routes.ResultBody(
     request_id=request_id,
@@ -1237,19 +1425,16 @@ async def test_persisted_running_command_accepts_result_after_runtime_restart(
     exit_code=0,
     outcome="completed",
   ))
-  assert connect_routes._ensure_command(pairing["id"]) is None
-  last = connect_routes._load_host(pairing["id"])["last_command"]
-  assert last["id"] == request_id
+  assert connect_routes._host_commands(pairing["id"]) == {}
+  last = connect_routes._load_host(pairing["id"])["recent_commands"][request_id]
   assert last["result"]["stdout"] == "finished after restart"
   monkeypatch.setattr(
     connect_routes,
     "_now",
     lambda: last["finished_at"] + connect_routes._RESULT_RETENTION_SECONDS + 1,
   )
-  connect_routes._expire_last_command(
-    pairing["id"], request_id, last["finished_at"],
-  )
-  assert connect_routes._load_host(pairing["id"])["last_command"] is None
+  connect_routes._prune_recent_commands(connect_routes._load_host(pairing["id"]))
+  assert connect_routes._load_host(pairing["id"])["recent_commands"] == {}
 
 
 @pytest.mark.asyncio
@@ -1265,8 +1450,8 @@ async def test_offline_cancel_is_delivered_when_current_runner_reconnects(
   command = connect_routes._ActiveCommand(
     request_id, 30, started_at=time.time(), state="running",
   )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
+  connect_routes._host_commands(pairing["id"])[request_id] = command
+  connect_routes._persist_commands(pairing["id"])
 
   response = await connect_routes.cancel_host_command(
     pairing["id"], request_id, _owner=object(),
@@ -1274,7 +1459,7 @@ async def test_offline_cancel_is_delivered_when_current_runner_reconnects(
   assert response["state"] == "canceling"
   channel = connect_routes._Channel()
   await connect_routes._reconcile_runner(pairing["id"], channel, {
-    "active_request_id": request_id,
+    "active_request_ids": [request_id],
     "pending_result_ids": [],
   })
   assert await channel.queue.get() == {
@@ -1385,14 +1570,14 @@ async def test_cancel_keeps_host_busy_until_runner_confirms_exit(client, auth):
   assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
     "type": "cancel", "request_id": request_id,
   }
-  assert connect_routes._ensure_command(pairing["id"]).state == "canceling"
+  assert connect_routes._find_command(pairing["id"], request_id).state == "canceling"
 
   connect_routes._finish_command(pairing["id"], request_id, {
     "stdout": "", "stderr": "command canceled", "exit_code": 130,
     "outcome": "canceled",
   })
   assert (await running)["canceled"] is True
-  assert connect_routes._ensure_command(pairing["id"]) is None
+  assert connect_routes._host_commands(pairing["id"]) == {}
 
 
 @pytest.mark.asyncio
@@ -1406,8 +1591,8 @@ async def test_current_runner_keeps_retryable_result_after_server_timeout(
   command = connect_routes._ActiveCommand(
     request_id, 1, started_at=time.time() - 2, state="running",
   )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
+  connect_routes._host_commands(pairing["id"])[request_id] = command
+  connect_routes._persist_commands(pairing["id"])
 
   with pytest.raises(connect_routes.HTTPException) as raised:
     await connect_routes._await_command_result(pairing["id"], command)
@@ -1416,12 +1601,13 @@ async def test_current_runner_keeps_retryable_result_after_server_timeout(
   assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
     "type": "cancel", "request_id": request_id,
   }
-  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  [persisted] = connect_routes._load_host(pairing["id"])["active_commands"]
   assert persisted["state"] == "canceling"
 
   # Current runners retry terminal results after reconnect, so a long
   # transport loss must not be mistaken for a permanently lost result.
   connect_routes._commands.clear()
+  connect_routes._host_id_by_token_hash.clear()
   monkeypatch.setattr(connect_routes, "_now", lambda: time.time() + 3600)
   assert connect_routes._public_host(
     connect_routes._load_host(pairing["id"]),
@@ -1433,10 +1619,10 @@ async def test_current_runner_keeps_retryable_result_after_server_timeout(
     timed_out=True,
     outcome="timed_out",
   ))
-  assert connect_routes._ensure_command(pairing["id"]) is None
+  assert connect_routes._host_commands(pairing["id"]) == {}
   assert connect_routes._load_host(
     pairing["id"],
-  )["last_command"]["result"]["outcome"] == "timed_out"
+  )["recent_commands"][request_id]["result"]["outcome"] == "timed_out"
 
 
 @pytest.mark.asyncio
@@ -1467,10 +1653,10 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
     "type": "cancel", "request_id": request_id,
   }
-  assert connect_routes._ensure_command(pairing["id"]) is None
+  assert connect_routes._host_commands(pairing["id"]) == {}
   assert connect_routes._load_host(
     pairing["id"],
-  )["last_command"]["result"]["outcome"] == "expired"
+  )["recent_commands"][request_id]["result"]["outcome"] == "expired"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
@@ -1745,7 +1931,7 @@ def test_runner_refuses_expired_command_without_spawning(
   messages = list(runner.outbox)
   assert messages[-1]["outcome"] == "expired"
   assert messages[-1]["exit_code"] == 124
-  assert runner.active is None
+  assert runner.active == {}
 
 
 def test_runner_retries_a_result_until_ordinary_https_succeeds(monkeypatch):
@@ -1762,8 +1948,8 @@ def test_runner_retries_a_result_until_ordinary_https_succeeds(monkeypatch):
   request_id = "4" * 16
   runner._post_result(request_id, "ready", "", 0, "completed")
 
-  active_id, pending_ids = runner.snapshot()
-  assert active_id is None
+  active_ids, pending_ids = runner.snapshot()
+  assert active_ids == []
   assert pending_ids == [request_id]
   assert len(runner.pending_messages()) == 1
 
@@ -1780,15 +1966,15 @@ def test_runner_finishes_into_pending_result_atomically(monkeypatch):
     "reason": None,
     "timeout": 30,
   }
-  runner.active = record
+  runner.active[record["request_id"]] = record
   monkeypatch.setattr(runner, "flush_pending_results", lambda: False)
 
   runner._post_result(
     record["request_id"], "done", "", 0, "completed", record=record,
   )
 
-  active_id, pending_ids = runner.snapshot()
-  assert active_id is None
+  active_ids, pending_ids = runner.snapshot()
+  assert active_ids == []
   assert pending_ids == [record["request_id"]]
 
 
@@ -1814,58 +2000,42 @@ def test_runner_ignores_duplicate_delivery_of_an_accepted_request(monkeypatch):
   runner.start(event)
 
   assert spawned == [("do it once", None)]
-  assert runner.active["request_id"] == event["request_id"]
+  assert list(runner.active) == [event["request_id"]]
   assert runner.pending_messages() == []
 
 
-def test_runner_refuses_parallel_commands_from_different_connections(monkeypatch):
-  gate = threading.Lock()
-  first = connect_runner._CommandRunner("https://a.test", "ta", gate)
-  second = connect_runner._CommandRunner("https://b.test", "tb", gate)
+def test_runner_runs_commands_in_parallel_without_queueing(monkeypatch):
+  runner = connect_runner._CommandRunner("https://a.test", "ta")
   spawned = []
-  posted = []
   monkeypatch.setattr(
     connect_runner,
     "_spawn_command",
     lambda cmd, cwd: spawned.append((cmd, cwd)) or object(),
   )
-  monkeypatch.setattr(
-    connect_runner,
-    "_post",
-    lambda _url, payload, token=None: posted.append((payload, token)),
-  )
-  monkeypatch.setattr(first, "_post_started", lambda _request_id: None)
-  monkeypatch.setattr(second, "_post_started", lambda _request_id: None)
+  monkeypatch.setattr(runner, "_post_started", lambda _request_id: None)
   monkeypatch.setattr(threading.Thread, "start", lambda self: None)
 
-  first.start({
-    "request_id": "1" * 16,
-    "cmd": "first",
-    "timeout": 30,
-    "not_after": time.time() + 10,
-  })
-  second.start({
-    "request_id": "2" * 16,
-    "cmd": "second",
-    "timeout": 30,
-    "not_after": time.time() + 10,
-  })
+  for request_id, cmd in (("1" * 16, "first"), ("2" * 16, "second")):
+    runner.start({
+      "request_id": request_id,
+      "cmd": cmd,
+      "timeout": 30,
+      "not_after": time.time() + 10,
+    })
 
-  assert spawned == [("first", None)]
-  assert second.active is None
-  assert posted[-1][0]["outcome"] == "expired"
+  # Both start at once; neither waits behind the other.
+  assert spawned == [("first", None), ("second", None)]
+  assert runner.snapshot() == (["1" * 16, "2" * 16], [])
+  assert runner.pending_messages() == []
 
-  record = first.active
-  first._post_result(
-    record["request_id"], "done", "", 0, "completed", record=record,
+  # Cancelling one exact command leaves the other running.
+  first = runner.active["1" * 16]
+  monkeypatch.setattr(
+    connect_runner, "_terminate_process_tree", lambda _proc: None,
   )
-  second.start({
-    "request_id": "3" * 16,
-    "cmd": "third",
-    "timeout": 30,
-    "not_after": time.time() + 10,
-  })
-  assert spawned == [("first", None), ("third", None)]
+  assert runner.cancel("1" * 16) is True
+  assert first["reason"] == "canceled"
+  assert runner.active["2" * 16]["reason"] is None
 
 
 def test_runner_keeps_literal_script_off_the_process_command_line(monkeypatch):
@@ -1891,7 +2061,7 @@ def test_runner_keeps_literal_script_off_the_process_command_line(monkeypatch):
   })
 
   assert spawned == [(None, "/srv/app", script, "bash")]
-  assert runner.active["input"] == script
+  assert runner.active["e" * 16]["input"] == script
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell contract")
@@ -1901,11 +2071,11 @@ def test_runner_executes_literal_posix_script_through_stdin():
     None, None, script=script, shell="sh",
   )
 
-  stdout, stderr = proc.communicate(input=script, timeout=2)
+  stdout, stderr = proc.communicate(input=script.encode(), timeout=2)
 
   assert proc.args == ["sh"]
-  assert stdout == "<$literal>\n<two>\n"
-  assert stderr == ""
+  assert stdout == b"<$literal>\n<two>\n"
+  assert stderr == b""
   assert proc.returncode == 0
 
 
@@ -1964,7 +2134,7 @@ def test_runner_rechecks_expiry_after_start_ack_before_spawning(monkeypatch):
   messages = list(runner.outbox)
   assert [message["type"] for message in messages] == ["result"]
   assert messages[-1]["outcome"] == "expired"
-  assert runner.active is None
+  assert runner.active == {}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX cancellation timing")
@@ -1998,7 +2168,7 @@ def test_runner_cancel_stops_process_tree_and_reports_once(monkeypatch):
   assert results[0]["outcome"] == "canceled"
   assert results[0]["exit_code"] == 130
   assert time.monotonic() - started < 3
-  assert runner.active is None
+  assert runner.active == {}
 
 
 def test_runner_systemd_update_restarts_the_existing_service(
@@ -2568,4 +2738,4 @@ def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
   # B's worker was signalled to stop when it left the config.
   b_thread = created[1]
   assert b_thread.name == "mobius-connect-h_b"
-  assert b_thread.args[2].is_set()
+  assert b_thread.args[1].is_set()
