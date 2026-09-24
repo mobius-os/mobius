@@ -45,6 +45,8 @@ def _request(method: str, path: str, body=None):
       detail = json.loads(raw).get("detail", raw)
     except json.JSONDecodeError:
       detail = raw
+    if detail == "This chat has no active Goal to plan.":
+      detail += " Promote first, or run `list` then `resume ID`."
     raise SystemExit(f"goal-plan request failed ({exc.code}): {detail}") from exc
   except URLError as exc:
     raise SystemExit(f"goal-plan request failed: {exc.reason}") from exc
@@ -154,8 +156,10 @@ def main() -> int:
   set_parser.add_argument(
     "--tasks-json", help="JSON array alternative to repeated --task",
   )
-  checkpoint_parser = sub.add_parser("checkpoint", help="save progress and next action")
-  checkpoint_parser.add_argument("--summary", required=True)
+  checkpoint_parser = sub.add_parser(
+    "checkpoint", help="leave the next attempt its next step before a handoff",
+  )
+  checkpoint_parser.add_argument("--summary", default="Plan saved.")
   checkpoint_parser.add_argument("--next-action", required=True)
   complete_parser = sub.add_parser("complete", help="validate and record the verified outcome; no preflight required")
   complete_parser.add_argument("--result", required=True)
@@ -168,6 +172,8 @@ def main() -> int:
   update_parser.add_argument("--note")
   update_parser.add_argument("--result")
   update_parser.add_argument("--progress", type=_progress, metavar="CURRENT/TOTAL")
+  update_parser.add_argument("--start", metavar="TASK_ID", help="then mark this task running")
+  update_parser.add_argument("--next-action", help="then leave a handoff checkpoint")
   args = parser.parse_args()
 
   _, _, chat_id = _settings()
@@ -278,6 +284,20 @@ def main() -> int:
       "PATCH", f"/api/chats/{chat_id}/goal-plan/tasks/{args.task_id}",
       changes,
     )
+    # Each follow-up write uses the revision the previous one returned.
+    if args.start:
+      result = _request(
+        "PATCH", f"/api/chats/{chat_id}/goal-plan/tasks/{args.start}",
+        {"status": "running",
+         "expected_revision": result["plan"]["revision"]},
+      )
+    if args.next_action:
+      receipt = _request("PATCH", f"/api/chats/{chat_id}/goal", {
+        "goal_id": payload["goal"]["id"],
+        "expected_revision": result["plan"]["revision"],
+        "checkpoint": "Plan saved.", "next_action": args.next_action,
+      })
+      result["plan"]["revision"] = receipt["revision"]
   plan = (result or {}).get("plan")
   summary = (plan or {}).get("summary", {})
   print(
