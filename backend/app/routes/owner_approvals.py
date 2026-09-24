@@ -49,8 +49,8 @@ class ApprovalRequest(BaseModel):
 
 class QuestionSpec(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-  id: str = Field(min_length=1, max_length=80)
-  header: str = Field(min_length=1, max_length=80)
+  id: str | None = Field(default=None, min_length=1, max_length=80)
+  header: str | None = Field(default=None, min_length=1, max_length=80)
   question: str = Field(min_length=1, max_length=2000)
   options: list[ApprovalOption] = Field(default_factory=list, max_length=3)
 
@@ -68,11 +68,25 @@ class QuestionRequest(BaseModel):
 
   @model_validator(mode="after")
   def distinct_questions(self):
-    if len({q.id for q in self.questions}) != len(self.questions):
+    ids = [q.id or f"question-{index}" for index, q in enumerate(self.questions, 1)]
+    if len(set(ids)) != len(ids):
       raise ValueError("question ids must be distinct")
     if len({q.question for q in self.questions}) != len(self.questions):
       raise ValueError("question prompts must be distinct")
     return self
+
+  def canonical_payload(self) -> dict:
+    grouped = len(self.questions) > 1
+    return {"questions": [
+      {
+        **question.model_dump(exclude_none=True),
+        "id": question.id or f"question-{index}",
+        "header": question.header or (
+          f"Question {index}" if grouped else "Your choice"
+        ),
+      }
+      for index, question in enumerate(self.questions, 1)
+    ]}
 
 
 class RestartRequest(BaseModel):
@@ -88,7 +102,7 @@ async def request_question(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  return await save_owner_question(chat_id, body.model_dump(exclude_none=True), principal, db)
+  return await save_owner_question(chat_id, body.canonical_payload(), principal, db)
 
 
 @router.post("/{chat_id}/approval", dependencies=[Depends(reject_cross_site)])
@@ -313,13 +327,15 @@ def _receipt(
     "state": state,
     "question_id": question_id,
     "next_action": (
-      "End this turn now without further text or tools. This receipt is not "
+      "The turn is over: the card was saved and the response is cut here, so "
+      "nothing further can be delivered. This receipt is not "
       "approval and not an answer. The platform handles an eventual Restart "
       "now choice and resumes this work after a later ready boot; the agent "
       "then verifies whether its changes loaded. Do not issue or replay a "
       "restart command."
       if platform_restart else
-      "End this turn now without further text or tools. This receipt is not approval and not an answer. The owner's answer "
+      "The turn is over: the card was saved and the response is cut here, so nothing "
+      "further can be delivered. This receipt is not approval and not an answer. The owner's answer "
       "is saved and normally resumes the chat; explicit close choices need no reply. Do not poll or "
       "wait on a process, and do not perform the proposed action yet."
     ),

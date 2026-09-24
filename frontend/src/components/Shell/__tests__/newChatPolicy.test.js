@@ -172,8 +172,8 @@ test('a provisional Send becomes one durable handoff and retries on proven recov
     /handleProvisionalNewChatSubmit[\s\S]*await settingsSaveTailRef\.current[\s\S]*onNewChatSubmit\?\.\(input\)/,
     'the canonical composer owns provisional Send and waits for any settings save')
   assert.match(chatViewSource,
-    /submissionBlocked=\{providerSwitching \|\| !!newChatSession\?\.submitted\}/,
-    'a verified queued snapshot cannot be submitted twice')
+    /submissionBlocked=\{[\s\S]*?!activationSettled[\s\S]*?providerSwitching[\s\S]*?!!newChatSession\?\.submitted[\s\S]*?\}/,
+    'an unsettled activation or verified queued snapshot cannot be submitted')
   assert.match(chatViewSource, /will send when Möbius reconnects/)
 
   assert.match(shellSource, /const recoveryGeneration = useRecoveryGeneration\(\)/)

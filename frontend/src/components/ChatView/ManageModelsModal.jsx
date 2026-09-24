@@ -1,9 +1,11 @@
 /**
  * ManageModelsModal — owner-level model-picker preferences editor.
  *
- * Opened from the "+ Manage models" affordance at the bottom of
- * ChatSettingsPanel. Lists every model in the live registry,
- * grouped by provider, with a per-row "show in picker" toggle.
+ * Opened from the "Configure" row in SettingsView's model section
+ * (setManageModelsOpen). ChatSettingsPanel only consumes the resulting
+ * picker-visibility prefs; it does not host the trigger. Lists every model
+ * in the live registry, grouped by provider, with a per-row "show in
+ * picker" toggle.
  *
  * Persistence shape:
  *   PATCH /api/owner/model-prefs

@@ -20,9 +20,6 @@ class ActivationLevel(str, Enum):
 
   LIVE = "live"
   SERVER_RESTART = "server_restart"
-  # In-place dependency install (pip) plus a server restart to load them. More
-  # than a bare restart, but still completable in-product — no image rebuild.
-  DEPENDENCY_SYNC = "dependency_sync"
   PROXY_RELOAD = "proxy_reload"
   CONTAINER_RECREATE = "container_recreate"
   IMAGE_REBUILD = "image_rebuild"
@@ -148,8 +145,8 @@ _RULES = (
   ),
   _Rule(
     "python_dependencies",
-    ActivationLevel.DEPENDENCY_SYNC,
-    "Python dependencies changed; Apply installs them in place, then restart.",
+    ActivationLevel.IMAGE_REBUILD,
+    "Python dependencies changed; use a reviewed replacement image.",
     exact=("backend/requirements.txt", "backend/requirements.lock"),
     dependency_fingerprint=True,
   ),
@@ -282,10 +279,7 @@ def backend_import_probe_required(paths: Iterable[str]) -> bool:
     rule = _rule_for_path(normalized)
     if (
       rule
-      and rule.level in (
-        ActivationLevel.SERVER_RESTART,
-        ActivationLevel.DEPENDENCY_SYNC,
-      )
+      and rule.level is ActivationLevel.SERVER_RESTART
       and normalized != "skill/core.md"
     ):
       return True
@@ -305,11 +299,6 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
     )
   if level is ActivationLevel.SERVER_RESTART:
     return "Restart Möbius after Apply so the running server loads the new source."
-  if level is ActivationLevel.DEPENDENCY_SYNC:
-    return (
-      "Apply installs the new Python dependencies in place, then restart to load "
-      "them — no image rebuild needed."
-    )
   if deployment == "railway":
     if level is ActivationLevel.CONTAINER_RECREATE:
       return (
@@ -409,7 +398,6 @@ def requires_agent_activation(impact: PlatformActivationImpact) -> bool:
   """Image replacement cannot apply external topology or proxy/controller work."""
   routine = {
     ActivationLevel.SERVER_RESTART.value,
-    ActivationLevel.DEPENDENCY_SYNC.value,
     ActivationLevel.IMAGE_REBUILD.value,
   }
   return any(action not in routine for action in impact["required_actions"])
@@ -449,8 +437,7 @@ def image_input_paths(root: Path) -> list[str]:
   """Every source path the container image bakes in, as it exists in ``root``.
 
   The dependency inputs plus the baked runtime/bootstrap tree: exactly the
-  paths whose change the classifier says needs a new image (or, for Python
-  requirements, an in-place install). Hashing them at build time and again at
+  paths whose change the classifier says needs a new image. Hashing them at build time and again at
   runtime answers "does the running image still match this source?" directly,
   instead of remembering which update touched what.
   """

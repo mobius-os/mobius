@@ -5,6 +5,7 @@ import copy
 
 import pytest
 
+from app import auth as auth_mod
 from app import chat as chat_mod, models, questions
 from app.chat_writer import AppendPending, PersistTranscript, get_writer
 from app.database import SessionLocal
@@ -13,12 +14,22 @@ from tests.test_owner_approvals import approval_run, _ask, _finish, _row, PROMPT
 
 
 QUIET = copy.deepcopy(PROMPT)
+QUIET.pop('work_key')
 QUIET['options'][0]['on_answer'] = 'close'
 
 
-def _quiet(client, chat, auth, qid, **changes):
+def _ask_quiet(client, chat, approval_run, prompt=None):
+  prompt = prompt or QUIET
+  body = {'questions': [{
+    'id': 'approval', 'header': 'Approval', **prompt,
+  }]}
+  return client.post(f'/api/chats/{chat.id}/question', headers=approval_run[1], json=body)
+
+
+def _quiet(client, chat, auth, qid, prompt=None, **changes):
+  prompt = prompt or QUIET
   body = {'content': '- Answer: Not now', 'hidden': True,
-          'question_id': qid, 'answers': {QUIET['question']: 'Not now'},
+          'question_id': qid, 'answers': {prompt['question']: 'Not now'},
           'selected_options': {'approval': ['0']}}
   body.update(changes)
   return client.post(f'/api/chats/{chat.id}/messages', headers=auth, json=body)
@@ -32,7 +43,7 @@ def _block(chat_id, qid):
 @pytest.mark.parametrize('idle', [False, True])
 def test_quiet_answer_saves_without_starting_or_queuing_a_turn(
     client, chat, auth, approval_run, monkeypatch, idle):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   if idle:
     _finish(chat, approval_run[0])
   before = _row(chat.id)[1]
@@ -52,11 +63,51 @@ def test_quiet_answer_saves_without_starting_or_queuing_a_turn(
   assert _quiet(client, chat, auth, qid).status_code == 200
 
 
+def test_quiet_typed_approval_keeps_active_work_claim_open(
+    client, chat, auth, approval_run):
+  approval_prompt = copy.deepcopy(PROMPT)
+  approval_prompt['options'][0]['on_answer'] = 'close'
+  qid = _ask(client, chat, approval_run, approval_prompt).json()['question_id']
+
+  response = _quiet(client, chat, auth, qid, prompt=approval_prompt)
+
+  assert response.status_code == 409, response.text
+  assert 'claim' in response.text.lower()
+  assert 'reply option' in response.text.lower()
+  assert _row(chat.id)[0] == qid and _row(chat.id)[2] == []
+  assert 'answers' not in _block(chat.id, qid)
+
+
+def test_authenticated_agent_quiet_retry_is_idempotent(
+    client, chat, approval_run, db):
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
+  owner = db.query(models.Owner).one()
+  agent_token = auth_mod.create_agent_token(
+    chat_id='answerer-chat', owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+  )
+  agent_auth = {'Authorization': f'Bearer {agent_token}'}
+
+  first = _quiet(client, chat, agent_auth, qid)
+  retry = _quiet(client, chat, agent_auth, qid)
+  changed = _quiet(
+    client, chat, agent_auth, qid,
+    answers={QUIET['question']: 'Different answer'},
+    selected_options={'approval': ['different']},
+  )
+
+  assert first.status_code == 200, first.text
+  assert retry.status_code == 200, retry.text
+  assert changed.status_code in (409, 410), changed.text
+  assert _block(chat.id, qid)['answer_turn'] == 'none'
+  assert _block(chat.id, qid)['answers'] == {QUIET['question']: 'Not now'}
+
+
 def test_quiet_retry_cannot_clear_newer_card(client, chat, auth, approval_run):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   assert _quiet(client, chat, auth, qid).status_code == 200
   other = {**QUIET, 'question': 'A different decision?'}
-  newer = _ask(client, chat, approval_run, other).json()['question_id']
+  newer = _ask_quiet(client, chat, approval_run, other).json()['question_id']
   assert newer != qid
   assert _quiet(client, chat, auth, qid).status_code == 200
   assert _row(chat.id)[0] == newer
@@ -64,7 +115,7 @@ def test_quiet_retry_cannot_clear_newer_card(client, chat, auth, approval_run):
 
 
 def test_same_text_without_explicit_selection_still_resumes(client, chat, auth, approval_run):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   response = _quiet(client, chat, auth, qid, selected_options=None)
   assert response.status_code == 202, response.text
   assert response.json()['answer_turn'] == 'queued'
@@ -76,7 +127,7 @@ def test_same_text_without_explicit_selection_still_resumes(client, chat, auth, 
     ({'wrong': ['0']}, 'Not now'), ({'approval': ['0', '0']}, 'Not now'),
     ({'approval': ['0']}, 'a custom answer')])
 def test_invalid_selection_keeps_card_open(client, chat, auth, approval_run, selection, answer):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   response = _quiet(client, chat, auth, qid, selected_options=selection,
                     answers={QUIET['question']: answer})
   assert response.status_code == 409, response.text
@@ -84,7 +135,7 @@ def test_invalid_selection_keeps_card_open(client, chat, auth, approval_run, sel
 
 
 def test_legacy_route_cannot_bypass_typed_card(client, chat, auth, approval_run):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   response = client.post(f'/api/chats/{chat.id}/question-answers', headers=auth,
       json={'question_id': qid, 'answers': {QUIET['question']: 'Not now'}})
   assert response.status_code == 409
@@ -98,7 +149,7 @@ def test_quiet_option_identity_minted_and_duplicate_labels_rejected(client, chat
   response = client.post(f'/api/chats/{chat.id}/question', headers=approval_run[1], json=prompt)
   assert response.status_code == 422
   assert _row(chat.id)[0] is None
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   assert [option['id'] for option in _block(chat.id, qid)['questions'][0]['options']] == ['0', '1']
 
 
@@ -115,7 +166,7 @@ def _goal(chat, approval_run, status='pending'):
 
 def test_quiet_answer_cannot_orphan_unfinished_goal(client, chat, auth, approval_run):
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   response = _quiet(client, chat, auth, qid)
   assert response.status_code == 409, response.text
   assert 'unfinished Goal' in response.text
@@ -125,7 +176,7 @@ def test_quiet_answer_cannot_orphan_unfinished_goal(client, chat, auth, approval
 
 def test_completed_plan_can_close_without_changing_goal(client, chat, auth, approval_run):
   _goal(chat, approval_run, 'completed')
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   assert _quiet(client, chat, auth, qid).status_code == 200
   with SessionLocal() as db:
     assert db.get(models.ChatGoal, approval_run[0].run_token).plan_json['tasks'][0]['status'] == 'completed'
@@ -135,7 +186,7 @@ def test_completed_plan_can_close_without_changing_goal(client, chat, auth, appr
 def test_only_exact_goal_monitor_allows_quiet_closure(client, chat, auth, approval_run, monkeypatch, same_goal):
   from app import delegations
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   monkeypatch.setattr(delegations, 'background_helper_goal_ids', lambda *_: {
       approval_run[0].run_token if same_goal else 'another-goal'})
   response = _quiet(client, chat, auth, qid)
@@ -155,7 +206,7 @@ def test_mixed_card_and_native_questions_keep_normal_continuation():
 @pytest.mark.parametrize('idle', [False, True])
 def test_quiet_answer_releases_only_preexisting_followup_via_normal_queue(
     client, chat, auth, approval_run, monkeypatch, idle):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   get_writer().submit(AppendPending(chat_id=chat.id,
       user_msg={'role': 'user', 'content': 'B: queued follow-up', 'cid': 'followup-b'})).result(timeout=5)
   before = _row(chat.id)[2]
@@ -177,7 +228,7 @@ def test_quiet_answer_releases_only_preexisting_followup_via_normal_queue(
 
 def test_ordinary_followup_does_not_own_unfinished_goal(client, chat, auth, approval_run):
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   get_writer().submit(AppendPending(chat_id=chat.id,
       user_msg={'role': 'user', 'content': 'B unrelated', 'cid': 'b'})).result(timeout=5)
   before = _row(chat.id)[2]
@@ -187,7 +238,7 @@ def test_ordinary_followup_does_not_own_unfinished_goal(client, chat, auth, appr
 
 def test_same_goal_continuation_owns_handoff(client, chat, auth, approval_run):
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   get_writer().submit(AppendPending(chat_id=chat.id, user_msg={
       'role': 'user', 'kind': 'continuation', 'content': 'Continue', 'cid': 'handoff',
       'continuation_reason': 'goal_handoff', 'goal_id': approval_run[0].run_token,
@@ -197,7 +248,7 @@ def test_same_goal_continuation_owns_handoff(client, chat, auth, approval_run):
 
 def test_failed_quiet_commit_keeps_card_open_for_identical_retry(
     client, chat, auth, approval_run, monkeypatch):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   writer = get_writer()
   original = writer._answer_question
   monkeypatch.setattr(writer, '_answer_question', lambda *_: (_ for _ in ()).throw(RuntimeError('test write failed')))
@@ -209,7 +260,7 @@ def test_failed_quiet_commit_keeps_card_open_for_identical_retry(
 
 
 def test_stale_live_snapshot_cannot_erase_quiet_receipt(client, chat, auth, approval_run):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   stale = copy.deepcopy(_row(chat.id)[1][-1])
   assert _quiet(client, chat, auth, qid).status_code == 200
   # A runner may have seen the answer text but not the durable disposition.
@@ -224,7 +275,7 @@ def test_stale_live_snapshot_cannot_erase_quiet_receipt(client, chat, auth, appr
 
 
 def test_legacy_unkeyed_answer_cannot_overwrite_quiet_receipt(client, chat, auth, approval_run):
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   assert _quiet(client, chat, auth, qid).status_code == 200
   response = client.post(f'/api/chats/{chat.id}/question-answers', headers=auth,
       json={'answers': {QUIET['question']: 'Rewrite decision'}})
@@ -236,7 +287,7 @@ def test_quiet_close_after_stop_does_not_revive_goal_or_release_queued_b(
     client, chat, auth, approval_run, monkeypatch):
   from app.chat_writer import FinishRun
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   get_writer().submit(AppendPending(chat_id=chat.id,
       user_msg={'role': 'user', 'content': 'B', 'cid': 'b'})).result(timeout=5)
   get_writer().submit(FinishRun(chat_id=chat.id, run_token=approval_run[0].run_token,
@@ -257,7 +308,7 @@ def test_latest_physical_goal_stop_not_original_author_owns_quiet_closure(
   from datetime import datetime, timedelta, UTC
   from app.chat_writer import FinishRun
   _goal(chat, approval_run)
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   root_id = approval_run[0].run_token
   get_writer().submit(FinishRun(chat_id=chat.id, run_token=root_id,
       terminal_status='completed')).result(timeout=5)
@@ -274,7 +325,7 @@ def test_legacy_actor_checks_latest_card_at_write_time(client, chat, approval_ru
   from app.chat_writer import AnswerQuestion
   from app.questions import AnswerConflict
   # The route's previous read cannot authorize the actor's unkeyed target.
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   with pytest.raises(AnswerConflict):
     get_writer().submit(AnswerQuestion(chat_id=chat.id, legacy_save_only=True,
         answers={QUIET['question']: 'Not now'})).result(timeout=5)
@@ -287,7 +338,7 @@ def test_stop_winning_quiet_admission_keeps_answer_unwritten(
   from contextlib import asynccontextmanager
   from app import chat_queue
   from app.chat_writer import FinishRun, await_ack
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   gate = chat_queue.get_transition_lock
 
   @asynccontextmanager

@@ -100,7 +100,12 @@ class RunPolicy:
       "the parent; the top-level parent owns any durable Möbius Wait. Do not "
       "inspect unrelated chats or Memory. Load only skills and connected tools "
       f"that are relevant to this bounded task. {required_skills}"
-      "Never read or write /data/cli-auth or /data/.secret-key. "
+      "Treat /data/cli-auth and /data/.secret-key as protected by default. "
+      "Access them only when this bounded task explicitly names the exact "
+      "owner-approved operation and the requested scope permits it; otherwise "
+      "return the missing approval or scope to the parent. Perform only that "
+      "operation, minimize the paths and bytes inspected, and do not reveal "
+      "stored secret values unless the exact approved purpose requires it. "
       f"Working directory: {self.cwd}. {scope_rule}"
     )
 

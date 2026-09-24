@@ -55,12 +55,11 @@ test('trial time remaining stays compact and is derived from the exact expiry', 
 })
 
 test('reset formatting distinguishes today from another day', () => {
-  const now = new Date(2026, 6, 30, 12, 0)
-  const today = formatUsageReset(new Date(2026, 6, 30, 17, 5), now)
-  const later = formatUsageReset(new Date(2026, 7, 3, 7, 0), now)
+  const today = formatUsageReset(new Date(2026, 6, 30, 17, 5))
+  const later = formatUsageReset(new Date(2026, 7, 3, 7, 0))
 
-  assert.equal(today, 'Resets 17:05')
-  assert.equal(later, 'Resets Mon 07:00')
+  assert.equal(today, 'Resets 30th Jul 2026, 17:05')
+  assert.equal(later, 'Resets 3rd Aug 2026, 07:00')
 })
 
 test('only four valid allowance windows are rendered', () => {
@@ -108,4 +107,19 @@ test('expanded usage shares aligned columns without tall cards', () => {
     providerCss,
     /\.provider-usage__window\s*\{[^}]*display:\s*contents;/s,
   )
+})
+
+test('Claude extra usage is a deliberate reversible account action', () => {
+  assert.match(usageView, /Extra usage \$\{enabled \? 'enabled' : 'disabled'\}/)
+  assert.match(usageView, /Enable' : 'Disable'\} paid extra usage\?/)
+  assert.match(usageView, /onToggle\(next, enabled\)/)
+  assert.match(settingsView, /api\.settings\.setClaudeExtraUsage\(enabled, expectedEnabled\)/)
+})
+
+test('Claude banked resets require a current provider offer and confirmation', () => {
+  assert.match(usageView, /provider === 'claude'/)
+  assert.match(usageView, /!resets\.redeemable/)
+  assert.match(usageView, /resets\.nextCreditResetsLeft \|\| null/)
+  assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId, expectedResetsLeft\)/)
+  assert.match(settingsView, /onRedeemClaudeReset=\{handleRedeemClaudeReset\}/)
 })

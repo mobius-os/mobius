@@ -1,18 +1,17 @@
 """Encrypted, app-scoped secret storage."""
 
-import base64
-import hashlib
 import os
 import re
 import tempfile
 from pathlib import Path
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models
+from app.app_secret_crypto import app_secret_fernet, decrypt_app_secret
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -56,16 +55,10 @@ def _secret_path(app_id: int, name: str) -> Path:
   return Path(get_settings().data_dir) / "app-secrets" / str(app_id) / name
 
 
-def _fernet() -> Fernet:
-  material = f"mobius-app-secret-v1:{get_settings().secret_key}".encode()
-  key = base64.urlsafe_b64encode(hashlib.sha256(material).digest())
-  return Fernet(key)
-
-
 def _write_secret(path: Path, value: str) -> None:
   path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
   os.chmod(path.parent, 0o700)
-  payload = _fernet().encrypt(value.encode())
+  payload = app_secret_fernet().encrypt(value.encode())
   fd, temporary = tempfile.mkstemp(
     dir=path.parent, prefix=f".{path.name}.", suffix=".tmp",
   )
@@ -172,7 +165,7 @@ async def get_secret(
     if not path.is_file():
       raise HTTPException(status_code=404, detail="Secret not found.")
     try:
-      value = _fernet().decrypt(path.read_bytes()).decode()
+      value = decrypt_app_secret(path)
     except (InvalidToken, OSError, UnicodeDecodeError):
       raise HTTPException(status_code=500, detail="Secret could not be read.")
   return Response(

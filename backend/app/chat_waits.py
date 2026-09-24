@@ -902,12 +902,14 @@ async def _deliver_resume(row_id: str) -> bool:
   return True
 
 
-async def sweep_due_waits() -> int:
+async def sweep_due_waits(*, force_kind: str | None = None) -> int:
   """One supervisor tick: check due armed waits, deliver met/expired resumes.
 
   Single-process by design (the supervisor loop is the only caller), so plain
   status guards are enough; the delivery latch still makes a crash redeliver
-  instead of losing a resume. Returns the number of resumes delivered.
+  instead of losing a resume. ``force_kind`` rechecks one typed product wait
+  immediately after its owning event instead of waiting for the polling
+  interval. Returns the number of resumes delivered.
   """
   from app.database import SessionLocal
 
@@ -915,13 +917,19 @@ async def sweep_due_waits() -> int:
   due_ids: list[str] = []
   undelivered_ids: list[str] = []
   with SessionLocal() as db:
+    armed_due = (
+      (models.ChatWait.status == "armed")
+      & (models.ChatWait.next_check_at <= now)
+    )
+    if force_kind:
+      armed_due = armed_due | (
+        (models.ChatWait.status == "armed")
+        & (models.ChatWait.kind == force_kind)
+      )
     rows = (
       db.query(models.ChatWait.id, models.ChatWait.status)
       .filter(
-        (
-          (models.ChatWait.status == "armed")
-          & (models.ChatWait.next_check_at <= now)
-        )
+        armed_due
         | (
           models.ChatWait.status.in_(("met", "expired", "failed"))
           & models.ChatWait.resume_delivered_at.is_(None)

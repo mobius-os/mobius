@@ -36,6 +36,14 @@ const REACT_SHIMMED_MODULES = [
 ]
 
 export async function resolve(specifier, context, nextResolve) {
+  // The SDK's published ESM assumes bundler-style extension resolution. Let
+  // rendered component tests use the same real icons as the Vite build.
+  if (
+    context.parentURL?.includes('/@openai/apps-sdk-ui/')
+    && specifier.startsWith('.')
+    && !/\.[a-z]+$/i.test(specifier)
+  ) return nextResolve(`${specifier}.js`, context)
+
   if (specifier.endsWith('.css')) {
     return { url: 'data:text/javascript,export default {}', shortCircuit: true }
   }

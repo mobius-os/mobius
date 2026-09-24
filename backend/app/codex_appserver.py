@@ -1,6 +1,6 @@
-"""Codex command-string helpers reused by the Codex SDK runner.
+"""Codex command-string helpers reused by codex_events.
 
-`codex_sdk_runner` reuses `_extract_bash_command` to render the Bash
+`codex_events` reuses `_extract_bash_command` to render the Bash
 command a `CommandExecutionThreadItem` carries (Codex wraps it in a
 `/bin/bash -lc '…'` shell invocation). This module keeps that helper
 side-effect-free so it stays trivially unit-testable.

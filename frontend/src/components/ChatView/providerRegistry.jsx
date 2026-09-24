@@ -64,10 +64,11 @@ function MobiusLogo() {
  *    orchestration. The CLI's `--effort` flag rejects "ultracode"
  *    (it only accepts the five enum values), so the runner maps it
  *    to `--effort xhigh` and arms the orchestration via the CLI's
- *    "ultracode" keyword trigger (see `claude_sdk_runner.py`). It is
- *    model-gated to ultracode-capable (Opus-tier) models and the
- *    keyword trigger no-ops gracefully on older CLIs / lesser models,
- *    leaving plain xhigh effort. Rendered as the rightmost (most
+ *    documented `ultracode` settings flag (see `claude_sdk_runner.py`,
+ *    which deliberately disables the older keyword trigger). It is
+ *    model-gated to ultracode-capable (Opus-tier) models and the flag
+ *    no-ops gracefully on older CLIs / lesser models, leaving plain
+ *    xhigh effort. Rendered as the rightmost (most
  *    capable) stop even though its raw effort is xhigh, not max.
  *
  *  Both are rendered as a horizontal stepper-slider in
@@ -111,7 +112,8 @@ export const PROVIDER_INFO = {
       { value: 'max', label: 'Max' },
       // Möbius tier (not an SDK EffortLevel) — see the PROVIDER_INFO
       // docstring above. The runner maps it to `--effort xhigh` plus the
-      // CLI ultracode keyword trigger (multi-agent Workflow orchestration).
+      // CLI's documented `ultracode` settings flag (multi-agent Workflow
+      // orchestration).
       { value: 'ultracode', label: 'Ultracode' },
     ],
   },
@@ -120,3 +122,24 @@ export const PROVIDER_INFO = {
 // subscriptions. This order is shared by the chat picker, Manage models, and
 // background-agent defaults so those surfaces cannot drift.
 export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
+
+/** Built-ins keep their familiar order; accepted app providers follow it. */
+export function providerOrderFor(registry) {
+  return [
+    ...PROVIDER_ORDER,
+    ...Object.keys(registry || {}).filter(id => !PROVIDER_ORDER.includes(id)),
+  ]
+}
+
+export function providerInfoFor(id, status) {
+  if (PROVIDER_INFO[id]) return PROVIDER_INFO[id]
+  const label = status?.[id]?.name || id
+  return {
+    id,
+    label,
+    Logo: () => <span aria-hidden="true">{label.charAt(0).toUpperCase()}</span>,
+    efforts: ['low', 'medium', 'high'].map(value => ({
+      value, label: value.charAt(0).toUpperCase() + value.slice(1),
+    })),
+  }
+}

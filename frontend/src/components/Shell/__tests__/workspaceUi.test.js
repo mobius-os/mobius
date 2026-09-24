@@ -929,6 +929,11 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     /ev\.type === 'chat_run_finished'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)/,
     'completion must refresh Changes even when its local card missed the active-to-idle transition',
   )
+  assert.doesNotMatch(
+    shell.slice(shell.indexOf("ev.type === 'chat_run_finished'"), shell.indexOf("ev.type === 'delegation_changed'")),
+    /markChatOwnerInput\(chatId, \{ kind: null, questionId: null \}\)/,
+    'run completion must not erase an owner-input request that is still pending',
+  )
   assert.match(
     shell,
     /ev\.type === 'delegation_changed'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)[\s\S]*?\['completed', 'failed', 'needs_review'\][\s\S]*?setAttentionChatIds/,
@@ -1206,8 +1211,8 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(settingsCss, /@container settings \(max-width: 620px\)/)
   assert.match(settingsCss, /@container settings \(max-width: 400px\)/)
   assert.doesNotMatch(settingsCss, /@media \(max-width: 620px\)/)
-  // The update-review modal stays a FIXED takeover (design: not reclassified to a pane).
-  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+  // The update review is modal, but its backdrop belongs to the Settings pane.
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*absolute/)
 })
 
 test('a manual platform reconcile refreshes the persistent Settings surface', () => {
@@ -1238,8 +1243,8 @@ test('shell generations advertise one explicit update without intercepting navig
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
-  // immersive), NOT dismissible dialogs layered over the workspace. Those stay
-  // fixed modals with their own dismiss and are out of the invariant's scope.
+  // immersive), NOT dismissible dialogs layered over the workspace. The update
+  // review remains modal while its backdrop is scoped to the Settings pane.
   const navSrc = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
   assert.match(navSrc, /DESTINATIONS, NOT DIALOGS/)
   const walkthrough = readFileSync(
@@ -1249,11 +1254,11 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )
   // First-use guidance is now a non-modal region layered over the live shell,
-  // with an explicit dismiss action; update review remains a fixed modal.
+  // with an explicit dismiss action; update review remains a pane-scoped modal.
   assert.match(walkthrough, /role="region"/)
   assert.match(walkthrough, /aria-label="Dismiss welcome"/)
   assert.doesNotMatch(walkthrough, /aria-modal="true"/)
-  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*absolute/)
 })
 
 test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {

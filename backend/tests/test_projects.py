@@ -1,8 +1,11 @@
 """First-class Project persistence, confinement, and legacy compatibility."""
 
+import asyncio
 import json
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -405,6 +408,134 @@ def test_concurrent_project_creation_retry_has_one_row_and_root(client, auth, db
   assert db.query(models.Chat).count() == 0
   row = db.query(models.Project).one()
   assert (Path(os.environ["DATA_DIR"]) / row.root_path).is_dir()
+
+
+def test_project_delete_fences_child_creation(client, auth, db, monkeypatch):
+  """A delete that owns the project gate cannot gain a new live child."""
+  import httpx
+  from app import chat_queue
+  from app.main import app as application
+
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Deleting", "template_id": "blank"},
+  ).json()
+  lifecycle_key = f"project-lifecycle:{project['id']}"
+  real_get_lock = chat_queue.get_transition_lock
+
+  async def race():
+    delete_holds_gate = asyncio.Event()
+    create_attempted_gate = asyncio.Event()
+    release_delete = asyncio.Event()
+    entrants = 0
+
+    @asynccontextmanager
+    async def observe_lock(key):
+      nonlocal entrants
+      if key == lifecycle_key:
+        entrants += 1
+        if entrants == 2:
+          create_attempted_gate.set()
+      async with real_get_lock(key):
+        if key == lifecycle_key and entrants == 1:
+          delete_holds_gate.set()
+          await release_delete.wait()
+        yield
+
+    monkeypatch.setattr(chat_queue, "get_transition_lock", observe_lock)
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=application), base_url="http://test",
+    ) as ac:
+      deleting = asyncio.create_task(ac.delete(
+        f"/api/projects/{project['id']}", headers=auth,
+      ))
+      await asyncio.wait_for(delete_holds_gate.wait(), 5)
+      creating = asyncio.create_task(ac.post(
+        f"/api/projects/{project['id']}/chats", headers=auth,
+        json={"title": "Too late", "recovery_request_id": "too-late"},
+      ))
+      try:
+        await asyncio.wait_for(create_attempted_gate.wait(), 5)
+        assert not creating.done()
+        release_delete.set()
+        deleted, created = await asyncio.wait_for(
+          asyncio.gather(deleting, creating), 5,
+        )
+        assert deleted.status_code == 204, deleted.text
+        assert created.status_code == 404, created.text
+      finally:
+        release_delete.set()
+        await asyncio.gather(deleting, creating, return_exceptions=True)
+
+  asyncio.run(race())
+  db.expire_all()
+  assert db.get(models.Project, project["id"]).deleted_at is not None
+  assert db.query(models.Chat).filter_by(project_id=project["id"]).count() == 0
+
+
+def test_project_child_create_and_delete_share_transition_gate(
+  client, auth, db, monkeypatch,
+):
+  """A child delete begun during creation settles after the created row."""
+  import httpx
+  from app import chat_queue
+  from app.main import app as application
+
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Child transition", "template_id": "blank"},
+  ).json()
+  request_id = "shared-child-transition"
+  chat_id = str(uuid.uuid5(uuid.UUID(project["id"]), request_id))
+  real_get_lock = chat_queue.get_transition_lock
+
+  async def race():
+    create_holds_gate = asyncio.Event()
+    delete_attempted_gate = asyncio.Event()
+    release_create = asyncio.Event()
+    entrants = 0
+
+    @asynccontextmanager
+    async def observe_lock(key):
+      nonlocal entrants
+      if key == chat_id:
+        entrants += 1
+        if entrants == 2:
+          delete_attempted_gate.set()
+      async with real_get_lock(key):
+        if key == chat_id and entrants == 1:
+          create_holds_gate.set()
+          await release_create.wait()
+        yield
+
+    monkeypatch.setattr(chat_queue, "get_transition_lock", observe_lock)
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=application), base_url="http://test",
+    ) as ac:
+      creating = asyncio.create_task(ac.post(
+        f"/api/projects/{project['id']}/chats", headers=auth,
+        json={"title": "Ordered child", "recovery_request_id": request_id},
+      ))
+      await asyncio.wait_for(create_holds_gate.wait(), 5)
+      deleting = asyncio.create_task(ac.delete(
+        f"/api/chats/{chat_id}", headers=auth,
+      ))
+      try:
+        await asyncio.wait_for(delete_attempted_gate.wait(), 5)
+        assert not deleting.done()
+        release_create.set()
+        created, deleted = await asyncio.wait_for(
+          asyncio.gather(creating, deleting), 5,
+        )
+        assert created.status_code == 201, created.text
+        assert deleted.status_code == 204, deleted.text
+      finally:
+        release_create.set()
+        await asyncio.gather(creating, deleting, return_exceptions=True)
+
+  asyncio.run(race())
+  db.expire_all()
+  assert db.get(models.Chat, chat_id).deleted_at is not None
 
 
 def test_each_project_chat_gets_context_and_can_be_deleted_independently(
@@ -1063,6 +1194,8 @@ def test_project_delete_and_recover_are_atomic_with_its_live_chats(
   assert db.get(models.Chat, second["id"]).deleted_at is not None
   assert db.get(models.ChatWait, first_wait.id).status == "cancelled"
   assert db.get(models.ChatWait, second_wait.id).status == "cancelled"
+  receipt = db.query(models.Notification).filter_by(title="Project deleted").one()
+  assert receipt.actions[0]["resource_id"] == str(project["id"])
 
   direct_chat_recovery = client.post(
     f"/api/chats/{first['id']}/recover", headers=auth,
@@ -1072,8 +1205,18 @@ def test_project_delete_and_recover_are_atomic_with_its_live_chats(
 
   recovered = client.post(
     f"/api/projects/{project['id']}/recover", headers=auth,
+    json={"notification_id": receipt.id},
   )
   assert recovered.status_code == 200
+  assert recovered.json()["completed_at"]
+  repeated = client.post(
+    f"/api/projects/{project['id']}/recover", headers=auth,
+    json={"notification_id": receipt.id},
+  )
+  assert repeated.status_code == 200
+  assert repeated.json()["completed_at"] == recovered.json()["completed_at"]
+  db.refresh(receipt)
+  assert receipt.actions[0]["completed_at"] == recovered.json()["completed_at"]
   db.expire_all()
   assert db.get(models.Project, project["id"]).deleted_at is None
   assert db.get(models.Chat, first["id"]).deleted_at is None

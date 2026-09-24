@@ -151,7 +151,11 @@ async def start_reviews(app_id: int, body: StartReviews,
       else:
         choice = resolve_round_choice(db)
         chat = models.Chat(id=str(uuid.uuid4()), title="Review selected contributions",
-                           provider=choice["provider"], agent_settings_json=choice)
+                           provider=choice["provider"],
+                           agent_settings_json={
+                             key: value for key, value in choice.items()
+                             if key != "provider"
+                           })
         db.add(chat)
         chat_id = chat.id
       row = models.ContributionReviewRun(id=str(uuid.uuid4()), app_id=app_id,

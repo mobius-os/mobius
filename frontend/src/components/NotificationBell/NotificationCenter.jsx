@@ -16,7 +16,13 @@ import NotificationBell from './NotificationBell.jsx'
 import useNotificationCenter from './useNotificationCenter.js'
 
 const NotificationCenter = forwardRef(function NotificationCenter(
-  { commands, onOpenTarget, updateAvailable = false, onUpdateNow },
+  {
+    commands,
+    onOpenTarget,
+    onRecoveryAction,
+    updateAvailable = false,
+    onUpdateNow,
+  },
   eventActionsRef,
 ) {
   const queryClient = useQueryClient()
@@ -26,7 +32,7 @@ const NotificationCenter = forwardRef(function NotificationCenter(
   const [updateNoticeSeen, setUpdateNoticeSeen] = useState(false)
   const {
     state: { open, unreadCount },
-    actions: { toggle, close, clearAll, reconcile, onCreated },
+    actions: { toggle, close, clearAll, dismiss, reconcile, onCreated },
     meta: { rootRef, bellRef },
   } = useNotificationCenter(queryClient)
   const updateNoticeActive = updateAvailable && typeof onUpdateNow === 'function'
@@ -113,6 +119,8 @@ const NotificationCenter = forwardRef(function NotificationCenter(
           active
           onOpenTarget={openTarget}
           onClearAll={clearAll}
+          onDismiss={dismiss}
+          onRecoveryAction={onRecoveryAction}
           updateAvailable={updateNoticeActive}
           onUpdateNow={applyUpdate}
           onUpdateLater={deferUpdate}

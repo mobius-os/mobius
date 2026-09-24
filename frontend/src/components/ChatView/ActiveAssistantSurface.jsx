@@ -3,10 +3,11 @@
 import { memo, useMemo } from 'react'
 import StreamingMessage from './StreamingMessage.jsx'
 import {
-  carryQuestionAnswers,
+  carryDurableBlockState,
   streamItemsToAssistantPayload,
 } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
+import { mergeProjectedPeerActivity } from './peerTimeline.js'
 
 
 /**
@@ -53,6 +54,11 @@ function ActiveAssistantSurface({
       source = activeMirrorMsg
     } else if (hasLivePayload) {
       const livePayload = streamItemsToAssistantPayload(streamItems, { finalize: false })
+      const blocksWithPeerActivity = mergeProjectedPeerActivity(
+        livePayload.blocks,
+        activeMirrorMsg?.blocks || [],
+        activitySourceBlocks || [],
+      )
       source = {
         ...(activeMirrorMsg || {}),
         role: 'assistant',
@@ -62,8 +68,8 @@ function ActiveAssistantSurface({
         // replay can be richer overall while still carrying the original blank
         // form of a question whose answer has already committed.
         ...livePayload,
-        blocks: carryQuestionAnswers(
-          livePayload.blocks,
+        blocks: carryDurableBlockState(
+          blocksWithPeerActivity,
           activeMirrorMsg?.blocks || [],
         ),
       }
@@ -75,6 +81,7 @@ function ActiveAssistantSurface({
     )
   }, [
     activeMirrorMsg,
+    activitySourceBlocks,
     hasLivePayload,
     isStreaming,
     sealedSteerAssistant,

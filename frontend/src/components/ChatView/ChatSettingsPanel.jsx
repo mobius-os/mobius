@@ -90,7 +90,7 @@ import {
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
-import { PROVIDER_INFO, PROVIDER_ORDER } from './providerRegistry.jsx'
+import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
 import './ChatSettingsPanel.css'
 
 /** Resolves the displayed model list for `providerId` from the live
@@ -279,7 +279,7 @@ export default function ChatSettingsPanel({
       sourceProvider: provider || 'claude',
       model,
       provider: nextProvider,
-      efforts: modelEfforts(PROVIDER_INFO[nextProvider].efforts, { id: model }),
+      efforts: modelEfforts(providerInfoFor(nextProvider, providerStatusQuery.data).efforts, { id: model }),
       switchId,
     }
     beginProviderSwitch(chatId, request)
@@ -334,7 +334,7 @@ export default function ChatSettingsPanel({
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider, settingsSaveTailRef])
+  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, settingsSaveTailRef])
 
   const handleEffortChange = useCallback((value) => {
     // Remember this effort under the active provider so a later
@@ -505,20 +505,24 @@ export default function ChatSettingsPanel({
     && draftModel !== effective?.model
   )
 
-  const hiddenIds = prefs?.hidden_ids || []
+  const hiddenIds = useMemo(() => prefs?.hidden_ids || [], [prefs?.hidden_ids])
+  const providerOrder = useMemo(() => providerOrderFor(registry), [registry])
   const selectedProvider = pendingSwitch?.provider ?? draftProvider
   const selectedModel = pendingSwitch?.model ?? draftModel
   const autoResumeSwitchId = chatId
     ? `chat-settings-auto-resume-${chatId}`
     : undefined
-  const appProviderLocked = chat?.created_by_app_id != null
+  // Owner-visible chats (shown in Recents) can switch provider like any chat;
+  // only hidden background/subagent chats stay pinned. The backend computes this
+  // from drawer visibility (`visible_in_owner_drawer`) and also enforces it.
+  const appProviderLocked = chat?.provider_switch_locked === true
 
   // Build the per-provider displayed-models list once per render. The backend
   // registry owns both live discovery and its offline fallback; keeping a
   // second frontend catalog would let the two drift.
   const displayedByProvider = useMemo(() => {
     const out = {}
-    for (const pid of PROVIDER_ORDER) {
+    for (const pid of providerOrder) {
       const live = registry?.[pid]
       const source = Array.isArray(live) ? live : []
       const selectedHere = selectedProvider === pid
@@ -527,10 +531,10 @@ export default function ChatSettingsPanel({
       out[pid] = resolveDisplayedModels(source, hiddenIds, selectedHere)
     }
     return out
-  }, [registry, hiddenIds, selectedModel, selectedProvider, draftModel, draftProvider])
+  }, [registry, providerOrder, hiddenIds, selectedModel, selectedProvider, draftModel, draftProvider])
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
-  const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
+  const currentProviderLabel = providerInfoFor(draftProvider, providerStatusQuery.data).label
   const allowanceUsageLabel = providerUsage?.allowanceSummary
     || providerUsage?.allowanceLabel
     || 'Usage'
@@ -615,8 +619,8 @@ export default function ChatSettingsPanel({
           <div className="csp__availability-warning" role="status">
             <span>
               {availability.configuredProviders.size > 0
-                ? `${currentProviderLabel} isn’t connected. Choose a connected provider or reconnect it in Settings.`
-                : `${currentProviderLabel} isn’t connected. Connect a provider in Settings.`}
+                ? `${currentProviderLabel} isn’t connected. ${draftProvider.startsWith('app-') ? 'Open its app to connect it, or choose a connected provider.' : 'Choose a connected provider or reconnect it in Settings.'}`
+                : `${currentProviderLabel} isn’t connected. ${draftProvider.startsWith('app-') ? 'Open its app to connect it.' : 'Connect a provider in Settings.'}`}
             </span>
           </div>
       )}
@@ -625,8 +629,8 @@ export default function ChatSettingsPanel({
           Choose a model before sending your message.
         </div>
       )}
-      {dataReady && PROVIDER_ORDER.map(pid => {
-        const info = PROVIDER_INFO[pid]
+      {dataReady && providerOrder.map(pid => {
+        const info = providerInfoFor(pid, providerStatusQuery.data)
         const providerConfigured = availability.configuredProviders.has(pid)
         const models = visibleProviderModels(
           pid,
@@ -754,7 +758,7 @@ export default function ChatSettingsPanel({
           )}
           {switchBusy && (
             <p className="csp__note">
-              Preparing this chat for {PROVIDER_INFO[pendingSwitch?.provider]?.label || 'the new provider'}…
+              Preparing this chat for {providerInfoFor(pendingSwitch?.provider, providerStatusQuery.data).label || 'the new provider'}…
             </p>
           )}
           {codexSwitchWarning && (

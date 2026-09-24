@@ -40,7 +40,6 @@ from app import providers
 log = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = providers.DEFAULT_PROVIDER
-_PROVIDERS = providers.PROVIDER_NAMES
 
 
 def _clean_choice(raw: dict | None, *, default_provider: str | None = None,
@@ -56,9 +55,9 @@ def _clean_choice(raw: dict | None, *, default_provider: str | None = None,
   if raw.get("enabled") is False:
     return None
   provider = raw.get("provider")
-  if provider not in _PROVIDERS:
-    provider = default_provider if default_provider in _PROVIDERS else None
-  if provider not in _PROVIDERS:
+  if provider not in providers.PROVIDERS:
+    provider = default_provider if default_provider in providers.PROVIDERS else None
+  if provider not in providers.PROVIDERS:
     return None
   model = raw.get("model")
   model = model.strip() if isinstance(model, str) and model.strip() else None
@@ -127,6 +126,7 @@ def resolve_background_agents(data_dir: str, override: dict | None = None) -> di
   deliberately knows no app's name or settings format. ``fallback`` is None
   when there is no distinct second agent.
   """
+  providers.sync_app_model_providers(data_dir)
   declared = override if isinstance(override, dict) else {}
 
   choices = _system_choices(data_dir)
@@ -148,3 +148,71 @@ def resolve_background_agents(data_dir: str, override: dict | None = None) -> di
   if _same_choice(primary, fallback):
     fallback = None
   return {"primary": primary, "fallback": fallback}
+
+
+def resolve_background_provider(
+  data_dir: str, db, *, prefer_provider: str | None = None,
+) -> dict:
+  """Pick the provider for unattended / app-initiated agent work.
+
+  Walks the owner's ordered background-agents list (``_system_choices``) and
+  returns the first choice whose provider is connected AND currently within
+  quota (``provider_availability.provider_within_quota``). If none qualify, it
+  falls back to the first connected entry, else the first entry — the owner's
+  stated rule: try each in order, and if none have quota use the first anyway
+  (it will hit its limit, which is acceptable).
+
+  ``prefer_provider`` (e.g. the chat's current provider on a reused autopilot
+  chat) leads the walk when it is present in the list and within quota, so a
+  transient quota flip does not needlessly fragment a running conversation onto
+  a different provider.
+
+  Returns a full ``{provider, model, effort}`` choice; model/effort may be None
+  (the SDK then uses its own default). This is the single quota-aware resolver
+  every unattended provider selection routes through, replacing the older
+  primary-only pick that never actually failed over on a usage limit.
+  """
+  from app.provider_availability import provider_within_quota
+
+  choices = _system_choices(data_dir)
+  if prefer_provider:
+    for index, choice in enumerate(choices):
+      if choice["provider"] == prefer_provider and index != 0:
+        choices = [choice] + [c for c in choices if c is not choice]
+        break
+
+  def connected(choice: dict) -> bool:
+    return providers.PROVIDERS[choice["provider"]].check_auth(data_dir) is None
+
+  for choice in choices:
+    if connected(choice) and provider_within_quota(db, choice["provider"]):
+      return choice
+  for choice in choices:
+    if connected(choice):
+      return choice
+  return choices[0]
+
+
+def resolve_background_chat_choice(
+  data_dir: str, db, *, prefer_provider: str | None = None,
+) -> dict:
+  """Return one complete provider + frozen chat-settings choice.
+
+  Background chat creators must persist the provider, model, and effort from
+  the same resolved choice.  Returning those values as one card keeps callers
+  from selecting a fallback provider while accidentally snapshotting the
+  interactive model/effort (or dropping the background effort altogether).
+  """
+  choice = resolve_background_provider(
+    data_dir, db, prefer_provider=prefer_provider,
+  )
+  provider = str(choice["provider"])
+  # A background choice with no pinned model means the provider's background
+  # default, not the interactive model currently stored in owner settings.
+  model = choice.get("model") or providers.DEFAULT_BACKGROUND_MODELS.get(provider)
+  selection = providers.snapshot_chat_agent_settings(
+    data_dir, provider, model=model, effort=choice.get("effort"),
+  )
+  if selection is None:
+    raise RuntimeError("Background provider resolved no explicit model")
+  return {"provider": provider, "agent_settings": selection}

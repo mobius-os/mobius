@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Reject backend source that would make a planned restart select recovery mode.
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "$ROOT/backend"
+MOBIUS_PLATFORM_DIR="$ROOT" \
+  env -u PYTHONPATH \
+      -u GIT_DIR \
+      -u GIT_WORK_TREE \
+      -u GIT_INDEX_FILE \
+      -u GIT_OBJECT_DIRECTORY \
+      -u GIT_COMMON_DIR \
+      -u GIT_NAMESPACE \
+      -u MOBIUS_SSO_CLIENT_SECRET \
+      -u MOBIUS_COMPUTE_INSTANCE_TOKEN \
+      -u MOBIUS_IDENTITY_BOOTSTRAP \
+      python3 -c \
+        'from app.restart_util import validate_restart_source; validate_restart_source()'

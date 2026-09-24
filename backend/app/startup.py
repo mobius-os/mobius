@@ -16,6 +16,7 @@ from typing import Awaitable, Callable, Protocol
 
 from app.database import SessionLocal
 from app.memory_observability import record_memory_checkpoint
+from app.storage_io import atomic_write
 
 
 class StartupState(Protocol):
@@ -497,16 +498,15 @@ def _reconcile_app_cron(context: StartupContext) -> None:
   from app.routes.app_schedules import reconcile_app_cron_supervision
 
   with SessionLocal() as db:
-    count, warnings = reconcile_app_cron_supervision(db)
+    count, warnings, infrastructure_ready = reconcile_app_cron_supervision(db)
   if count:
     context.logger.info("supervised %d app cron schedule(s)", count)
   for warning in warnings:
     context.logger.warning("app cron supervision skipped: %s", warning)
-  if warnings:
-    return
-  ready = Path(context.settings.data_dir) / "run" / "app-cron-supervision-ready"
-  ready.parent.mkdir(parents=True, exist_ok=True)
-  ready.write_text(f"{context.boot_id}\n", encoding="utf-8")
+  if infrastructure_ready:
+    ready = Path(context.settings.data_dir) / "run" / "app-cron-supervision-ready"
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(ready, f"{context.boot_id}\n")
 
 
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
@@ -625,9 +625,5 @@ DATABASE_STARTUP_TASKS = (
     "route diagnostics to chat log",
     _route_diagnostics_to_chat_log,
     checkpoint="startup_app_source_ready",
-  ),
-  StartupTask(
-    "capture platform activation snapshot",
-    _capture_platform_activation_snapshot,
   ),
 )

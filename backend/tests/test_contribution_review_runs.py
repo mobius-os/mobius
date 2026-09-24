@@ -302,7 +302,9 @@ def test_start_idempotency_reuses_exact_chat_and_does_not_regrant_mode(setup, mo
 def test_start_persists_selection_before_task_admission(setup, monkeypatch):
   db, row, principal = setup
   monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
-  monkeypatch.setattr(routes, "resolve_round_choice", lambda db: {"provider": "codex", "model": "gpt-5"})
+  monkeypatch.setattr(routes, "resolve_round_choice", lambda db: {
+    "provider": "codex", "model": "gpt-5", "effort": "xhigh",
+  })
   called = []
   async def start(**kwargs):
     created = db.query(models.ContributionReviewRun).filter_by(request_id="brand-new").one()
@@ -316,6 +318,11 @@ def test_start_persists_selection_before_task_admission(setup, monkeypatch):
   result = asyncio.run(routes.start_reviews(1, body, db, principal))
   assert result["run"]["mode"] == "review"
   assert len(called) == 1
+  created = db.get(models.Chat, result["run"]["chat_id"])
+  assert created.provider == "codex"
+  assert created.agent_settings_json == {
+    "model": "gpt-5", "effort": "xhigh",
+  }
 
 
 def test_concurrent_outcome_cas_cannot_claim_second_public_action(setup):

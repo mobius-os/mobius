@@ -711,6 +711,33 @@ class ChatSessionLink(Base):
   last_seen_at = Column(DateTime, default=lambda: now_naive_utc())
 
 
+class ProviderAvailability(Base):
+  """Per-provider quota/availability signal for background provider selection.
+
+  One row per provider. ``limited_until`` (naive UTC, matching
+  ``ChatRun.parked_until``) is set when a turn on that provider parks on a
+  usage/rate limit, using the provider's parsed reset time; the provider is
+  "within quota" again once ``now >= limited_until``.
+  ``unavailable_reason`` records which limit parked it (``usage_limit`` /
+  ``rate_limit``) for observability.
+
+  Written ONLY inside the ``chat_writer`` actor (``_park_run`` sets it; an
+  explicit provider-success acknowledgement clears an older signal) so the
+  single serialized writer owns it; read by
+  ``background_agents.resolve_background_provider``.
+
+  ``create_all`` builds this table on the next boot — a new table needs no ALTER
+  migration.
+  """
+
+  __tablename__ = "provider_availability"
+
+  provider = Column(String(32), primary_key=True)
+  limited_until = Column(DateTime, nullable=True, default=None)
+  unavailable_reason = Column(String(32), nullable=True, default=None)
+  updated_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
 class AgentLifecycleEvent(Base):
   """Append-only normalized lifecycle milestones for spawned helpers.
 
@@ -1206,7 +1233,7 @@ class Project(Base):
   project_type = Column(String(128), nullable=False, default="blank")
   root_path = Column(String(1024), nullable=False, unique=True)
   # Rolling-upgrade compatibility for projects created by the original
-  # one-primary-chat implementation. Migration 0014 moves that relationship
+  # one-primary-chat implementation. Migration 0021 moves that relationship
   # to Chat.project_id and clears this pointer. New projects leave it NULL.
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=True, unique=True, index=True,
@@ -1698,6 +1725,28 @@ class ToolOutput(Base):
   # unique within the chat, which is all the composite PK needs.
   tool_use_id = Column(String(128), primary_key=True)
   output = Column(CompressedToolOutputText(), nullable=False, default="")
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class GeneratedFile(Base):
+  """Metadata for one immutable agent-created deliverable.
+
+  ``name`` is the chat-scoped display/download key. ``path`` is an opaque
+  filename relative to that chat's managed deliverable store, never a provider
+  working path. Rows are inserted through the chat writer after the bytes have
+  been frozen, so an overwritten inbox file cannot mutate an older transcript
+  download.
+  """
+
+  __tablename__ = "generated_files"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  name = Column(String(255), primary_key=True)
+  path = Column(String(128), nullable=False)
+  size = Column(Integer, nullable=False)
+  mime_type = Column(String(128), nullable=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 

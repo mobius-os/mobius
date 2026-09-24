@@ -18,11 +18,15 @@ from app.broadcast import get_broadcast
 from app.chat_logging import get_logger as _get_logger
 from app.chat_writer import (
   AppendSteeredUserMessage,
+  CheckGeneratedFileCapacity,
   Finalize,
   PersistError,
   PersistTranscript,
+  PersistTranscriptBarrier,
   QuestionCommit,
   RecordAgentLifecycle,
+  RecordGeneratedFile,
+  ResolveGeneratedFilePublication,
   StashThinkingTrace,
   StashToolOutput,
   await_ack as _await_ack,
@@ -43,15 +47,18 @@ from app.events import (
   undo_question_scrub,
 )
 from app.config import agent_scratch_root
-from app.memory_recall import (
-  RECALL_SEARCHING,
-  RecallBinding,
-  background_dispatch_from_result,
-  background_recall_path,
-  defer_recall_to_task,
-  recall_from_command,
-  settle_recall,
-  settle_recall_from_task_output,
+from app.generated_files import PUBLICATION_UNCERTAIN, _settle_capture
+from app.agent_activity import (
+  EMPTY_AGENT_ACTIVITY_BINDING,
+  MAX_RESULT_SCAN_CHARS,
+  AgentActivityBinding,
+  activity_from_command,
+  activity_from_result,
+  activity_from_task_output,
+  activity_without_receipt,
+  background_dispatch,
+  background_output_path,
+  defer_activity,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -336,16 +343,14 @@ class ChatEventSink:
     chat_id: str,
     run_token: str | None = None,
     *,
-    recall_binding: RecallBinding,
+    agent_activity_binding: AgentActivityBinding = EMPTY_AGENT_ACTIVITY_BINDING,
     on_question_checkpoint: Callable[[], Awaitable[None]] | None = None,
   ):
     self.bc = bc
     self.chat_id = chat_id
-    # Which app's recall receipts this turn will honor, resolved ONCE by the
-    # caller while its session is live. Required rather than defaulted: a sink
-    # that silently fell back to "no provider" would drop every citation for
-    # the turn and look identical to "the agent never looked".
-    self._recall_binding = recall_binding
+    # Exact manifest-declared app commands this turn may decorate. Resolve once
+    # while the caller's DB session is live; provider turns can run for hours.
+    self._agent_activity_binding = agent_activity_binding
     # Active Goals may span many physical turns. A durably persisted question
     # is their safe mid-operation summary boundary: the card is already
     # recoverable, while an answer has not yet advanced the transcript. The
@@ -373,6 +378,14 @@ class ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
+    # Generated-file publication briefly waits for the writer to choose a
+    # collision-free display name. Ordinary provider events may still arrive
+    # in that window. Keep reducing/broadcasting them, but defer snapshots
+    # until the final file entry can be merged without exposing a placeholder.
+    self._generated_file_lock = asyncio.Lock()
+    self._generated_file_pending = False
+    self._generated_file_revision = 0
+    self._uncertain_generated_files: dict[str, dict] = {}
     # The last error message published via publish() during this turn, or None.
     # Used by finalize(): a turn that errors before accumulating any content
     # (auth failure, connect timeout) leaves assistant_blocks empty, so the
@@ -391,7 +404,13 @@ class ChatEventSink:
     # the next snapshot (or the terminal finalize) appends the continuation as
     # a fresh assistant message.
     self._steering = False
+    # Fresh owner input authorizes one return to unfinished Goal work.
+    self.owner_steer_committed = False
     self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
+    # Some providers stream command output but omit the final aggregate. Keep
+    # only the bounded raw tail needed by protocol receipts; presentation
+    # carving and persisted tool output remain independent.
+    self._app_output_tails: dict[str, str] = {}
 
   def _start_side_task(
     self,
@@ -554,84 +573,98 @@ class ChatEventSink:
 
     ack.add_done_callback(_log_if_failed)
 
-  def _memory_recall_for_tool(self, tool_use_id) -> dict | None:
-    """Return the input-time Memory marker for this tool, if there is one.
-
-    Read-only by design: resolving the block is a question, not the place to
-    adopt a legacy id (`process_event` still owns that a moment later). Only a
-    tool whose COMMAND named memory_search may go on to cite notes, so output
-    text alone can never mint a citation.
-    """
+  def _app_activity_for_tool(self, tool_use_id) -> dict | None:
+    """Return the command-authenticated app marker for this tool."""
     for blk in reversed(self.assistant_blocks):
       if blk.get("type") != "tool":
         continue
       if tool_use_id:
         if blk.get("tool_use_id") == tool_use_id:
-          recall = blk.get("recall")
-          return recall if isinstance(recall, dict) else None
+          activity = blk.get("app_activity")
+          return activity if isinstance(activity, dict) else None
         continue
       # Legacy events without an id: the newest still-open tool is the only
       # safe candidate, matching `_tool_block_for_event`'s fallback.
       if blk.get("status") != "done":
-        recall = blk.get("recall")
-        return recall if isinstance(recall, dict) else None
+        activity = blk.get("app_activity")
+        return activity if isinstance(activity, dict) else None
     return None
 
-  def _tool_was_memory_recall(self, tool_use_id) -> bool:
-    return self._memory_recall_for_tool(tool_use_id) is not None
-
-  def _stamp_memory_recall(self, event: ChatEvent) -> None:
-    """Name a Memory-app recall on the event, in two lifecycle phases.
-
-    The documented simple command identifies the lookup, so the live turn can
-    say it is remembering while the search runs. Only the final output event
-    settles it from the Memory app's structured result; streaming deltas cannot
-    prematurely claim success, emptiness, or failure.
-    """
+  def _stamp_app_activity(
+    self, event: ChatEvent, *, result_content: object = None,
+  ) -> None:
+    """Attach one generic app-owned activity across the tool lifecycle."""
     if event.get("type") in ("tool_start", "tool_input"):
       if event.get("type") == "tool_start" and event.get("tool") != "Bash":
         return
       # Both a tool_start AND a tool_input can arrive for one tool call on the
       # Claude runner. Stamp the command-derived marker exactly once per block:
-      # if the block for this tool_use_id already carries a recall marker, leave
+      # if the block for this tool_use_id already carries an activity marker, leave
       # it settled and skip. (Codex has no tool_input; Claude's tool_start input
       # is empty, so in practice only one phase produces a marker — this keeps a
       # future runner that populates both from double-stamping.)
-      if self._tool_was_memory_recall(event.get("tool_use_id")):
+      if self._app_activity_for_tool(event.get("tool_use_id")) is not None:
         return
-      recall = recall_from_command(event.get("input"), self._recall_binding)
-      if recall is not None:
-        event["recall"] = recall
-      return
-    pending = self._memory_recall_for_tool(event.get("tool_use_id"))
-    if event.get("output_complete") and pending is not None:
-      dispatch = background_dispatch_from_result(event.get("content"))
-      if dispatch is not None and event.get("output_exit_code") in (None, 0):
-        # A `run_in_background` Bash call: the placeholder is not Memory's
-        # answer. The task_done for this id (or finalize) settles it.
-        event["recall"] = defer_recall_to_task(pending, dispatch)
-        return
-      event["recall"] = settle_recall(
-        pending, event.get("content"), event.get("output_exit_code"),
+      activity = activity_from_command(
+        event.get("input"), self._agent_activity_binding,
       )
+      if activity is not None:
+        event["app_activity"] = activity
+      return
+    pending = self._app_activity_for_tool(event.get("tool_use_id"))
+    if event.get("output_complete") and pending is not None:
+      content = (
+        event.get("content")
+        if result_content is None
+        else result_content
+      )
+      dispatch = background_dispatch(content)
+      if dispatch is not None and event.get("output_exit_code") in (None, 0):
+        event["app_activity"] = defer_activity(pending, dispatch)
+        return
+      if (
+        event.get("output_exit_code") in (None, 0)
+        and (not isinstance(content, str) or not content.strip())
+      ):
+        # Codex can deliver a command result to the model while omitting the
+        # terminal aggregate. Prefer any transcript-facing streamed tail:
+        # App receipts print last, so the streamed tail is sufficient without
+        # accumulating unbounded command output in a second buffer.
+        blk = _tool_block_for_event(
+          self.assistant_blocks, event.get("tool_use_id"),
+        )
+        streamed = blk.get("output") if isinstance(blk, dict) else None
+        if isinstance(streamed, str) and streamed.strip():
+          content = streamed
+      if (
+        event.get("output_exit_code") in (None, 0)
+        and (not isinstance(content, str) or not content.strip())
+      ):
+        event["app_activity"] = activity_without_receipt(pending)
+      else:
+        event["app_activity"] = activity_from_result(
+          pending, content, event.get("output_exit_code"),
+        )
 
-  def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
-    """Tool blocks whose Memory lookup is still waiting on a background task."""
+  def _deferred_app_activity_blocks(
+    self, task_id: str | None = None,
+  ) -> list[dict]:
+    """Tool blocks whose app activity is waiting on a background task."""
     found = []
     for blk in self.assistant_blocks:
       if blk.get("type") != "tool":
         continue
-      recall = blk.get("recall")
-      if not isinstance(recall, dict) or recall.get("status") != RECALL_SEARCHING:
+      activity = blk.get("app_activity")
+      if not isinstance(activity, dict) or activity.get("status") != "running":
         continue
-      if not isinstance(recall.get("task_id"), str):
+      if not isinstance(activity.get("task_id"), str):
         continue
-      if task_id is not None and recall["task_id"] != task_id:
+      if task_id is not None and activity["task_id"] != task_id:
         continue
       found.append(blk)
     return found
 
-  def _settle_deferred_recall(
+  def _settle_deferred_app_activity(
     self, pending: dict, task_status: object,
   ) -> dict:
     """Read the background task's captured output and settle the lookup.
@@ -639,7 +672,7 @@ class ChatEventSink:
     Only this chat's own scratch task file is honored; an unreadable or
     still-empty file is a failed lookup, never a silent success.
     """
-    path = background_recall_path(
+    path = background_output_path(
       pending, str(agent_scratch_root() / str(self.chat_id)),
     )
     text = None
@@ -648,25 +681,21 @@ class ChatEventSink:
         with open(path, "rb") as handle:
           handle.seek(0, 2)
           size = handle.tell()
-          handle.seek(max(0, size - 262_144))
+          handle.seek(max(0, size - MAX_RESULT_SCAN_CHARS))
           text = handle.read().decode("utf-8", "replace")
       except OSError:
         text = None
-    return settle_recall_from_task_output(pending, text, task_status)
+    return activity_from_task_output(pending, text, task_status)
 
-  def _stamp_deferred_recall_done(self, event: ChatEvent) -> None:
-    """On a background task's terminal event, settle the lookup it owned.
-
-    The task_done routes to its block by task_id, so process_event copies the
-    stamped recall onto the same block the placeholder deferred from.
-    """
+  def _stamp_deferred_app_activity_done(self, event: ChatEvent) -> None:
+    """Settle an app activity from its background task's terminal event."""
     task_id = event.get("task_id")
     if task_id is None:
       return
-    blocks = self._deferred_recall_blocks(str(task_id))
+    blocks = self._deferred_app_activity_blocks(str(task_id))
     if blocks:
-      event["recall"] = self._settle_deferred_recall(
-        blocks[0]["recall"], event.get("status"),
+      event["app_activity"] = self._settle_deferred_app_activity(
+        blocks[0]["app_activity"], event.get("status"),
       )
 
   def _peer_message_for_tool(self, tool_use_id) -> dict | None:
@@ -799,6 +828,174 @@ class ChatEventSink:
       )
     )
 
+  async def publish_generated_file(self, event: dict) -> str | object | None:
+    """Atomically save a detected download and its transcript association.
+
+    `RecordGeneratedFile` may suffix a repeated display name. A unique private
+    placeholder lets the writer choose that name and commit both the metadata
+    row and complete live transcript snapshot in one transaction. Only then do
+    we expose the final key on SSE and let the caller consume the inbox source.
+    """
+    public_event = {
+      key: value for key, value in event.items() if not key.startswith("_")
+    }
+    name = public_event.get("name")
+    path = public_event.get("path")
+    if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+      return None
+    if not self.chat_id:
+      return None
+    async with self._generated_file_lock:
+      if self._uncertain_generated_files:
+        return PUBLICATION_UNCERTAIN
+      placeholder = f"__pending_generated_{uuid.uuid4().hex}"
+      provisional_blocks = copy.deepcopy(self.assistant_blocks)
+      provisional = dict(public_event)
+      provisional["name"] = placeholder
+      if not process_event(provisional, provisional_blocks):
+        return None
+      snapshot, stashes = self._deferred_snapshot(provisional_blocks)
+      self._generated_file_pending = True
+      try:
+        ack = get_writer().submit(
+          RecordGeneratedFile(
+            chat_id=self.chat_id,
+            name=name,
+            path=path,
+            size=public_event.get("size") or 0,
+            mime_type=public_event.get("mime_type") or "application/octet-stream",
+            snapshot=snapshot,
+            placeholder=placeholder,
+            thinking_stashes=stashes,
+          )
+        )
+        try:
+          final_name = await _await_ack(ack)
+        except asyncio.TimeoutError:
+          _get_logger().warning(
+            "generated-file atomic commit timed out chat_id=%s name=%s",
+            self.chat_id, name, exc_info=True,
+          )
+          self._uncertain_generated_files[path] = {
+            "event": copy.deepcopy(public_event),
+            "data_dir": event.get("_capture_data_dir"),
+            "captured": {
+              "name": name,
+              "path": path,
+              "_source_identity": event.get("_source_identity"),
+            },
+          }
+          return PUBLICATION_UNCERTAIN
+        except Exception:
+          _get_logger().warning(
+            "generated-file atomic commit failed chat_id=%s name=%s",
+            self.chat_id, name, exc_info=True,
+          )
+          final_name = None
+
+        if isinstance(final_name, str) and final_name:
+          public_event["name"] = final_name
+          process_event(public_event, self.assistant_blocks)
+          self._generated_file_revision += 1
+        else:
+          final_name = None
+
+        # Events reduced while the writer chose a collision-free name were
+        # deliberately not snapshotted: they would omit the file or persist a
+        # private placeholder. Commit the merged state, and repeat if another
+        # event landed while that barrier itself was in flight.
+        while self.assistant_blocks and (
+          final_name is not None or self._generated_file_revision
+        ):
+          revision = self._generated_file_revision
+          merged_snapshot, merged_stashes = self._deferred_snapshot(
+            self.assistant_blocks,
+          )
+          try:
+            await _await_ack(get_writer().submit(
+              PersistTranscriptBarrier(
+                chat_id=self.chat_id,
+                run_token=self.run_token or "",
+                snapshot=merged_snapshot,
+                thinking_stashes=merged_stashes,
+              )
+            ))
+          except Exception:
+            _get_logger().warning(
+              "generated-file transcript barrier failed chat_id=%s name=%s",
+              self.chat_id, name, exc_info=True,
+            )
+            break
+          self._last_save = time.monotonic()
+          if self._generated_file_revision == revision:
+            break
+      finally:
+        self._generated_file_pending = False
+
+      if final_name is None:
+        return None
+      self._publish_activity_frontier()
+      try:
+        self.bc.publish(public_event)
+      except Exception:
+        _get_logger().warning(
+          "generated-file live broadcast failed chat_id=%s name=%s",
+          self.chat_id, final_name, exc_info=True,
+        )
+      return final_name
+
+  async def _resolve_uncertain_generated_files(self) -> None:
+    """Merge every late file commit before a terminal snapshot can replace it."""
+    for path, pending in list(self._uncertain_generated_files.items()):
+      final_name = await _await_ack(get_writer().submit(
+        ResolveGeneratedFilePublication(chat_id=self.chat_id, path=path),
+      ))
+      data_dir = pending.get("data_dir")
+      captured = pending.get("captured")
+      if (
+        not isinstance(data_dir, str) or not data_dir
+        or not isinstance(captured, dict)
+      ):
+        raise RuntimeError("late generated-file commit lost settlement evidence")
+      if isinstance(final_name, str) and final_name:
+        committed = copy.deepcopy(pending["event"])
+        committed["name"] = final_name
+        if process_event(committed, self.assistant_blocks):
+          self._generated_file_revision += 1
+          self._publish_activity_frontier()
+          try:
+            self.bc.publish(committed)
+          except Exception:
+            _get_logger().warning(
+              "late generated-file broadcast failed chat_id=%s name=%s",
+              self.chat_id, final_name, exc_info=True,
+            )
+      accepted = isinstance(final_name, str) and bool(final_name)
+      if not await asyncio.to_thread(
+        _settle_capture,
+        data_dir,
+        self.chat_id,
+        captured,
+        accepted=accepted,
+      ):
+        raise RuntimeError("late generated-file commit could not settle capture")
+      self._uncertain_generated_files.pop(path, None)
+
+  async def generated_file_capacity(self) -> int:
+    """Return how many files can fit before performing any disk copies."""
+    if not self.chat_id:
+      return 0
+    try:
+      return int(await _await_ack(get_writer().submit(
+        CheckGeneratedFileCapacity(chat_id=self.chat_id),
+      )))
+    except Exception:
+      _get_logger().warning(
+        "generated-file capacity check failed chat_id=%s",
+        self.chat_id, exc_info=True,
+      )
+      return 0
+
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
 
@@ -850,10 +1047,18 @@ class ChatEventSink:
     broadcast barrier can't be bypassed. Returns True (the bool is
     vestigial now that no commit runs inline; kept so the runner's
     call-site contract is unchanged).
+
+    Generated files have their own atomic metadata/transcript barrier and may
+    not enter this ordinary broadcast-before-save path.
     """
     event_type = event.get("type")
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
+    )
+    assert event_type != "generated_file", (
+      "generated_file events must go through publish_generated_file(), "
+      "not publish() — see its docstring for the save-before-broadcast "
+      "reason"
     )
 
     # Edit diffs have the same inline-vs-full split as large tool output, but
@@ -868,9 +1073,9 @@ class ChatEventSink:
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
     #
-    # Reduce first so a large JSON envelope is parsed only once. The app prints
-    # its bounded structured Memory result last, so the carved tail still
-    # contains the line that settles a recognized lookup.
+    # Protocol-owned receipts are parsed from the saved full result rather than
+    # the carved presentation. Generic reduction establishes a missing exit
+    # code first, so a failed command cannot mint successful protocol state.
     output_reduced = False
     owner_card_receipt_id = None
     if event_type == "tool_output":
@@ -878,6 +1083,18 @@ class ChatEventSink:
       # but the marked envelope must not enter Möbius's live UI, transcript, or
       # chat-side logs. Normal sealed execution never emits these markers.
       event["content"] = redact_reveal_markers(event.get("content"))
+      full_tool_output = event.get("content")
+      tool_use_id = event.get("tool_use_id")
+      pending_activity = self._app_activity_for_tool(tool_use_id)
+      if isinstance(tool_use_id, str) and pending_activity is not None:
+        chunk = full_tool_output if isinstance(full_tool_output, str) else ""
+        if event.get("output_complete") is True:
+          streamed = self._app_output_tails.pop(tool_use_id, "")
+          full_tool_output = (streamed + chunk)[-MAX_RESULT_SCAN_CHARS:]
+        elif chunk:
+          self._app_output_tails[tool_use_id] = (
+            self._app_output_tails.get(tool_use_id, "") + chunk
+          )[-MAX_RESULT_SCAN_CHARS:]
       # Settle a peer-network exchange from the FULL result JSON before it can be
       # carved by reduction (the envelope is one object, not a tail-safe line).
       self._stamp_peer_message(event)
@@ -898,13 +1115,14 @@ class ChatEventSink:
             owner_card_receipt_id = _owner_card_receipt_id(blk.get("output"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
-        exit_code = tool_output_exit_code(event.get("content"))
+        exit_code = tool_output_exit_code(full_tool_output)
         if exit_code is not None:
           event["output_exit_code"] = exit_code
-    if event_type in ("tool_start", "tool_input", "tool_output"):
-      self._stamp_memory_recall(event)
+      self._stamp_app_activity(event, result_content=full_tool_output)
+    if event_type in ("tool_start", "tool_input"):
+      self._stamp_app_activity(event)
     if event_type == "task_done":
-      self._stamp_deferred_recall_done(event)
+      self._stamp_deferred_app_activity_done(event)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_peer_message(event)
     if event_type == "thinking":
@@ -918,7 +1136,7 @@ class ChatEventSink:
     # the card (the clean post-receipt finish boundary above).
     owner_card_receipt_matches = (
       owner_card_receipt_id is not None
-      and self._has_continuation_card(owner_card_receipt_id)
+      and self.has_continuation_card(owner_card_receipt_id)
     )
     if owner_card_receipt_matches:
       event["owner_card_question_id"] = owner_card_receipt_id
@@ -940,8 +1158,12 @@ class ChatEventSink:
     # before A1 is sealed and the steered user row is appended. The split's
     # own transcript writes carry the durable state across this window; once
     # it completes the next snapshot appends the continuation cleanly.
+    if accumulated:
+      self._generated_file_revision += 1
     needs_save = accumulated and self.chat_id and self.run_token and (
       not self._steering
+    ) and (
+      not self._generated_file_pending and not self._uncertain_generated_files
     ) and (
       event_type in self._IMMEDIATE_SAVE_TYPES
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
@@ -993,7 +1215,9 @@ class ChatEventSink:
     if owner_card_receipt_matches:
       # A completed provider event is the first universal boundary at which the
       # result is no longer in flight. It covers MCP and command-backed helpers
-      # alike, without a timer or a second transport callback.
+      # alike, without a timer or a second transport callback. Claude's root
+      # turns have normally already ended themselves at the card (its runner's
+      # PostToolUse hook), in which case this is a no-op claim.
       self._request_finish_turn_after_owner_card(owner_card_receipt_id)
     return True
 
@@ -1025,12 +1249,19 @@ class ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
+    # A timed-out RecordGeneratedFile may still be ahead of us in the same
+    # FIFO writer. Resolve it before Finalize can replace its atomic live
+    # snapshot with this sink's file-less in-memory state. If the writer is
+    # still unavailable, let the terminal barrier fail closed instead.
+    await self._resolve_uncertain_generated_files()
     await self._flush_lifecycle()
-    # A lookup deferred to a background task whose task_done never reached us
+    # An app activity deferred to a background task whose task_done never reached us
     # (turn stopped, provider suppressed the terminal frame) must not persist
     # as searching forever: settle it from the file if the task did finish.
-    for blk in self._deferred_recall_blocks():
-      blk["recall"] = self._settle_deferred_recall(blk["recall"], None)
+    for blk in self._deferred_app_activity_blocks():
+      blk["app_activity"] = self._settle_deferred_app_activity(
+        blk["app_activity"], None,
+      )
     if not blocks_have_renderable_content(self.assistant_blocks):
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.
@@ -1189,13 +1420,10 @@ class ChatEventSink:
     stored_result = await self.split_for_steer(
       user_msgs, consume_pending_cids,
     )
-    stored_messages = (
-      stored_result.get("stored_messages")
-      if isinstance(stored_result, dict)
-      else None
+    stored_messages = stored_result["stored_messages"]
+    self.owner_steer_committed |= bool(
+      stored_result.get("owner_steer_committed", False)
     )
-    if not isinstance(stored_messages, list) or not stored_messages:
-      stored_messages = user_msgs
     try:
       self.bc.publish(steered_into_turn_event(
         stored_messages,
@@ -1299,9 +1527,12 @@ class ChatEventSink:
     self._publish_activity_frontier()
     self.bc.publish(event)
     # A continuation card is terminal, but this save path is still inside the
-    # provider's tool call. Interrupting here rejects that in-flight call before
-    # its successful receipt reaches the provider. `publish()` ends the turn
-    # only when the provider later emits the matching completed tool result.
+    # provider's tool call: ending the turn here would reject that in-flight
+    # call before its successful receipt reaches the tool. The turn ends at the
+    # next boundary instead — for Claude in the PostToolUse hook that sees the
+    # receipt, otherwise in `publish()` on the matching completed tool result.
+    # Committing the card here is what makes `has_continuation_card` true by
+    # the time either boundary asks.
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
@@ -1315,6 +1546,10 @@ class ChatEventSink:
   def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
     """Claim the clean card end synchronously, then signal it asynchronously.
 
+    The provider-neutral card-end signal. A runner that already ended its own
+    turn at the card (Claude's root agents do, before the receipt ever reaches
+    the model) reports the end already owned and nothing more happens here.
+
     Validate the exact continuation card against this sink's live transcript
     before touching a runner. The provider's ownership marker must be set in
     this same callback: its terminal event can already be queued behind the
@@ -1323,7 +1558,7 @@ class ChatEventSink:
     interrupt runs as a side task. Native provider questions have no
     continuation marker and are never cut here.
     """
-    if not self._has_continuation_card(question_id):
+    if not self.has_continuation_card(question_id):
       raise ValueError("Continuation owner-input card is not current for this turn.")
     from app.runner_registry import registry
     for handle in registry.get_handles(self.chat_id):
@@ -1347,7 +1582,13 @@ class ChatEventSink:
           warn=True,
         )
 
-  def _has_continuation_card(self, question_id: str) -> bool:
+  def has_continuation_card(self, question_id: str) -> bool:
+    """Whether this turn saved exactly this continuation owner-input card.
+
+    Claude's card-end hook asks before it refuses to continue the agent loop,
+    so an arbitrary receipt-shaped tool result — an old card re-printed, a
+    child agent's receipt quoted in a Task summary — can never end a turn.
+    """
     return any(
       block.get("type") == "question"
       and block.get("question_id") == question_id

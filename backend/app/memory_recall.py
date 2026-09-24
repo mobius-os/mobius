@@ -9,7 +9,7 @@ from "it never looked".
 
 Detection is deliberately two-phase and keyed off the tool's own lifecycle:
 
-* ``recall_from_command`` accepts only the simple absolute invocation of a
+* ``recall_from_command`` accepts only a documented simple invocation of a
   BOUND provider path (see ``app.memory_provider``). It deliberately rejects
   shell composition rather than trying to partially parse Bash.
 * ``recall_from_result`` reads the Memory app's bounded structured result line
@@ -33,8 +33,10 @@ from pathlib import PurePosixPath
 # Recall metadata rides inline on the SSE event, the persisted tool block, and
 # the compacted activity summary — the same budget the web-source citations
 # live within. Memory transports full selected nodes in ordinary tool output;
-# its final receipt carries only bounded path/title metadata. These ceilings
+# its final receipt carries only bounded page/path/title metadata. These ceilings
 # keep a malformed or hostile stdout from inflating every transcript read.
+# V1 history used one non-pageable twelve-note receipt. Keep that exact bound
+# forever rather than retroactively changing durable transcripts.
 MAX_RECALL_NOTES = 12
 MAX_RECALL_QUERY_CHARS = 600
 MAX_RECALL_TITLE_CHARS = 120
@@ -45,7 +47,6 @@ MAX_RECALL_PATH_CHARS = 256
 # means the database never materializes an old Memory search's complete note
 # bodies merely to read the small structured receipt printed at the end.
 MAX_RECALL_RESULT_SCAN_CHARS = 262_144
-_MAX_SECTION_LINES_SCANNED = 256
 
 RECALL_SEARCHING = "searching"
 RECALL_HIT = "hit"
@@ -81,12 +82,9 @@ class RecallBinding:
   def is_empty(self) -> bool:
     return not self.by_path
 
-  def app_slug_for(self, token: str) -> str | None:
-    return self.by_path.get(token)
-
   @classmethod
   def of(cls, pairs: Iterable[tuple[str, str]]) -> "RecallBinding":
-    """Build from (absolute script path, app slug) pairs; first entry wins.
+    """Build from (path, slug) tuples; first entry wins.
 
     Pure: ``tool_names`` is derived with ``PurePosixPath`` and never stats the
     filesystem, so the protocol module stays stdlib-only and independently
@@ -110,12 +108,9 @@ EMPTY_RECALL_BINDING = RecallBinding(by_path={}, tool_names=())
 
 # `MOBIUS_MEMORY_RESULT_V1:` is embedded in durable ToolOutput bytes that the
 # read path re-parses on every chat load. Renaming it would retroactively break
-# history — that is partner DATA, and exactly the compatibility exception the
-# design principles carve out, not laziness. An app-neutral prefix is what a
-# protocol v2 is for; shipping one now would be machinery no problem has earned.
-_RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
+# history. V2 extends that durable protocol without changing old transcripts.
 _RESULT_RE = re.compile(
-  rf"^{re.escape(_RESULT_PREFIX)}(?P<payload>\{{.*\}})[ \t]*$",
+  r"^MOBIUS_MEMORY_RESULT_V(?P<version>[12]):(?P<payload>\{.*\})[ \t]*$",
   re.MULTILINE,
 )
 
@@ -213,36 +208,37 @@ def _unwrap_login_shell(tokens: list[str]) -> list[str] | None:
 def _recall_invocation(
   tokens: list[str], binding: RecallBinding,
 ) -> tuple[str, str] | None:
-  """Return the app slug and question for the documented Memory command.
+  """Return app slug and optional query for Memory's one public entry point.
 
-  Exact arity is a security boundary, not mere tidiness: ``shlex`` treats a
-  newline as whitespace, so accepting arbitrary trailing tokens would also
-  accept a second shell command whose output could forge the structured result
-  line. The supported command is env assignments + Python flags + script +
-  query + chat id, and then it must end.
+  Exact arity is a security boundary: discovery uses query + chat id, while
+  the app-owned expansion protocol uses four arguments. Trailing shell tokens
+  are rejected rather than partially parsed.
   """
   index = 0
   while index < len(tokens) and _ENV_ASSIGN_RE.match(tokens[index]):
     index += 1
   if index >= len(tokens):
     return None
-  head = tokens[index]
-  direct = binding.app_slug_for(head)
-  if direct is not None:
-    return (
-      (direct, tokens[index + 1]) if len(tokens) == index + 3 else None
-    )
-  if not _INTERPRETER_RE.match(head):
+
+  def bound(script_index: int) -> tuple[str, str] | None:
+    slug = binding.by_path.get(tokens[script_index])
+    if slug is None:
+      return None
+    if len(tokens) == script_index + 3:
+      return slug, tokens[script_index + 1]
+    if len(tokens) == script_index + 5:
+      return slug, ""
+    return None
+
+  if tokens[index] in binding.by_path:
+    return bound(index)
+  if not _INTERPRETER_RE.match(tokens[index]):
     return None
   for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
     if token.startswith("-"):
       continue
-    slug = binding.app_slug_for(token)
-    if slug is not None and len(tokens) == script_index + 3:
-      return slug, tokens[script_index + 1]
-    return None
+    return bound(script_index)
   return None
-
 
 def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   """Return a pending recall marker when this command RUNS a memory lookup.
@@ -253,7 +249,7 @@ def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   summary, an empty binding — and, deliberately, for any command that merely
   names the script.
   """
-  if not isinstance(command, str) or not command:
+  if not isinstance(command, str) or not command or "\n" in command or "\r" in command:
     return None
   if len(command) > _MAX_COMMAND_SCAN_CHARS:
     return None
@@ -278,37 +274,14 @@ def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   }
 
 
-def recall_from_result(text: object, exit_code: object = None) -> dict:
-  """Validate a known Memory command's final structured result."""
-  if isinstance(exit_code, bool):
-    exit_code = None
-  if isinstance(exit_code, int) and exit_code != 0:
-    return {"status": RECALL_FAILED}
-  if not isinstance(text, str) or not text.strip():
-    return {"status": RECALL_FAILED}
-
-  body = text[-MAX_RECALL_RESULT_SCAN_CHARS:]
-  matches = list(_RESULT_RE.finditer(body))
-  if not matches:
-    return {"status": RECALL_FAILED}
-  try:
-    payload = json.loads(matches[-1].group("payload"))
-  except (TypeError, ValueError, json.JSONDecodeError):
-    return {"status": RECALL_FAILED}
-  if not isinstance(payload, dict):
-    return {"status": RECALL_FAILED}
-
-  status = payload.get("status")
-  if status == RECALL_FAILED:
-    return {"status": RECALL_FAILED}
-  if status == RECALL_EMPTY:
-    return {"status": RECALL_EMPTY}
-  if status != RECALL_HIT or not isinstance(payload.get("notes"), list):
-    return {"status": RECALL_FAILED}
-
+def _receipt_notes(
+  raw_notes: object, *, limit: int | None = None,
+) -> list[dict[str, str]]:
+  if not isinstance(raw_notes, list):
+    return []
   notes: list[dict[str, str]] = []
   seen: set[str] = set()
-  for raw_note in payload["notes"][:_MAX_SECTION_LINES_SCANNED]:
+  for raw_note in raw_notes:
     if not isinstance(raw_note, dict):
       continue
     path = _safe_path(raw_note.get("path"))
@@ -325,8 +298,69 @@ def recall_from_result(text: object, exit_code: object = None) -> dict:
     if excerpt:
       note["excerpt"] = excerpt
     notes.append(note)
-    if len(notes) >= MAX_RECALL_NOTES:
+    if limit is not None and len(notes) >= limit:
       break
+  return notes
+
+
+def _v2_result(payload: dict) -> dict:
+  """Validate app-owned display copy and links, not Memory's protocol."""
+  status = payload.get("status")
+  if status == RECALL_FAILED:
+    return {"status": RECALL_FAILED}
+  if status not in (RECALL_HIT, RECALL_EMPTY):
+    return {"status": RECALL_FAILED}
+  raw_display = payload.get("display")
+  if not isinstance(raw_display, dict):
+    return {"status": RECALL_FAILED}
+  display = {
+    key: cleaned
+    for key, limit in (("label", 160), ("detail", 300), ("warning", 300))
+    if (cleaned := _clean(raw_display.get(key), limit))
+  }
+  if "label" not in display:
+    return {"status": RECALL_FAILED}
+  result = {"status": status, "display": display}
+  if status == RECALL_EMPTY:
+    return result
+  notes = _receipt_notes(payload.get("notes"))
+  if not notes:
+    return {"status": RECALL_FAILED}
+  result["notes"] = notes
+  return result
+
+def recall_from_result(text: object, exit_code: object = None) -> dict:
+  """Validate a known Memory command's final structured result."""
+  if isinstance(exit_code, bool):
+    exit_code = None
+  if isinstance(exit_code, int) and exit_code != 0:
+    return {"status": RECALL_FAILED}
+  if not isinstance(text, str) or not text.strip():
+    return {"status": RECALL_FAILED}
+
+  body = text[-MAX_RECALL_RESULT_SCAN_CHARS:]
+  matches = list(_RESULT_RE.finditer(body))
+  if not matches:
+    return {"status": RECALL_FAILED}
+  match = matches[-1]
+  try:
+    payload = json.loads(match.group("payload"))
+  except (TypeError, ValueError, json.JSONDecodeError):
+    return {"status": RECALL_FAILED}
+  if not isinstance(payload, dict):
+    return {"status": RECALL_FAILED}
+  if match.group("version") == "2":
+    return _v2_result(payload)
+
+  status = payload.get("status")
+  if status == RECALL_FAILED:
+    return {"status": RECALL_FAILED}
+  if status == RECALL_EMPTY:
+    return {"status": RECALL_EMPTY}
+  if status != RECALL_HIT or not isinstance(payload.get("notes"), list):
+    return {"status": RECALL_FAILED}
+
+  notes = _receipt_notes(payload["notes"], limit=MAX_RECALL_NOTES)
   return (
     {"status": RECALL_HIT, "notes": notes}
     if notes else {"status": RECALL_FAILED}
@@ -356,81 +390,6 @@ def settle_recall(
 ) -> dict:
   """Settle one command-identified lookup and retain its product context."""
   return _with_pending_context(pending, recall_from_result(text, exit_code))
-
-
-# Claude Code answers a `run_in_background` Bash call with this fixed
-# placeholder instead of the command's stdout; the real output lands in the
-# named file and a task_done follows. The lookup is still in flight at that
-# moment, so the placeholder must never be read as Memory's (missing) result.
-_BACKGROUND_DISPATCH_RE = re.compile(
-  r"\ACommand running in background with ID: (?P<task_id>[A-Za-z0-9_-]{1,64})\."
-  r" Output is being written to: (?P<path>/[^\s]+?\.output)\."
-)
-_TASK_OUTPUT_TRAILER_RE = re.compile(r"\[exited with code (?P<code>-?\d+)\]\s*\Z")
-
-
-def background_dispatch_from_result(text: object) -> dict | None:
-  """Return ``{"task_id", "output_path"}`` when ``text`` is the background placeholder."""
-  if not isinstance(text, str) or len(text) > _MAX_COMMAND_SCAN_CHARS:
-    return None
-  match = _BACKGROUND_DISPATCH_RE.match(text.strip())
-  if not match:
-    return None
-  task_id = match.group("task_id")
-  path = match.group("path")
-  if PurePosixPath(path).name != f"{task_id}.output":
-    return None
-  return {"task_id": task_id, "output_path": path}
-
-
-def defer_recall_to_task(pending: object, dispatch: dict) -> dict:
-  """Keep a lookup `searching` while its background task owns the result."""
-  deferred = {"status": RECALL_SEARCHING, **dispatch}
-  return _with_pending_context(pending, deferred)
-
-
-def background_recall_path(pending: object, scratch_root: object) -> str | None:
-  """The task output file a deferred lookup may be settled from, or None.
-
-  The path was quoted back from tool output, so it is honored only when it is
-  this chat's own scratch task file. Anything else settles as failed rather
-  than reading an arbitrary file.
-  """
-  if not isinstance(pending, dict) or not isinstance(scratch_root, str):
-    return None
-  task_id = pending.get("task_id")
-  path = pending.get("output_path")
-  if not isinstance(task_id, str) or not isinstance(path, str):
-    return None
-  root = PurePosixPath(scratch_root)
-  candidate = PurePosixPath(path)
-  if not candidate.is_absolute() or ".." in candidate.parts:
-    return None
-  if candidate.name != f"{task_id}.output" or candidate.parent.name != "tasks":
-    return None
-  if not candidate.is_relative_to(root):
-    return None
-  return str(candidate)
-
-
-def settle_recall_from_task_output(
-  pending: object, text: object, task_status: object = None,
-) -> dict:
-  """Settle a deferred lookup from its background task's captured output.
-
-  Claude Code appends ``[exited with code N]`` to the file; that trailer is the
-  command's own exit status. Without it, a task that did not end ``done`` is
-  a failure and a completed one is judged on the structured result line.
-  """
-  exit_code: int | None = None
-  if isinstance(text, str):
-    trailer = _TASK_OUTPUT_TRAILER_RE.search(text[-64:])
-    if trailer:
-      exit_code = int(trailer.group("code"))
-  if exit_code is None and isinstance(task_status, str):
-    if task_status not in ("done", "completed"):
-      exit_code = 1
-  return settle_recall(pending, text, exit_code)
 
 
 def recall_from_tool_block(

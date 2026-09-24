@@ -13,7 +13,7 @@ and returns the generated name to its parent server process. So a prompt-
 injected chat can't make the subagent write outside the note or exfiltrate
 anything.
 
-Usage: chat_note.py <chat_id> [--active-goal-checkpoint]
+Usage: chat_note.py <chat_id> [--sync-title|--active-goal-checkpoint]
 Exit 0 ok (or nothing-to-do) · 2 bad args · 3 summarizer failed (one-line
 reason on stderr). Best-effort: never raises into the caller — a failed note
 must never break or slow the turn that triggered it, but the failure exit lets

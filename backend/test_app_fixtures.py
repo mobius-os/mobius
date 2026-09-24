@@ -2,8 +2,10 @@
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
+from app import app_git
 from app.config import get_settings
 
 
@@ -51,6 +53,57 @@ def write_local_source(
   manifest.update(manifest_extra or {})
   (root / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
   return root
+
+
+def write_git_package(root: str | Path, files: dict[str, str | bytes]) -> Path:
+  """Write and publish one deterministic local Git package for route tests."""
+  root = Path(root)
+  work = root / "work"
+  bare = root / "origin.git"
+  if not (work / ".git").is_dir():
+    work.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+      ["git", "init", "-q", "-b", "main", str(work)], check=True,
+      env=app_git._git_env(work),
+    )
+  tracked = subprocess.run(
+    ["git", "-C", str(work), "ls-files"], capture_output=True, text=True,
+    check=True, env=app_git._git_env(work),
+  ).stdout.splitlines()
+  for relative in set(tracked) - set(files):
+    (work / relative).unlink(missing_ok=True)
+  for relative, body in files.items():
+    path = work / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body if isinstance(body, bytes) else body.encode())
+  subprocess.run(
+    ["git", "-C", str(work), "add", "-A", "."], check=True,
+    env=app_git._git_env(work),
+  )
+  changed = subprocess.run(
+    ["git", "-C", str(work), "diff", "--cached", "--quiet"],
+    env=app_git._git_env(work),
+  ).returncode != 0
+  if changed:
+    subprocess.run(
+      [
+        "git", "-c", "user.name=Test", "-c",
+        "user.email=test@example.invalid", "-C", str(work),
+        "commit", "-q", "-m", "package",
+      ],
+      check=True, env=app_git._git_env(work),
+    )
+  if not bare.exists():
+    subprocess.run(
+      ["git", "clone", "-q", "--bare", str(work), str(bare)],
+      check=True, env=app_git._git_env(work),
+    )
+  elif changed:
+    subprocess.run(
+      ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+      check=True, env=app_git._git_env(work),
+    )
+  return bare
 
 
 def create_local_app(

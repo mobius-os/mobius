@@ -1,6 +1,7 @@
 .qcard {
   box-sizing: border-box;
   width: min(100%, 640px);
+  overflow-wrap: anywhere;
   margin: 10px auto;
   padding: 16px;
   border-radius: 14px;

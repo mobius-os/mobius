@@ -257,6 +257,11 @@ def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
     ["git", "-C", str(fixture), "rev-parse", "HEAD"],
     capture_output=True, text=True, check=True, env=app_git._git_env(fixture),
   ).stdout.strip()
+  hex_branch = "a" * 48
+  subprocess.run(
+    ["git", "-C", str(fixture), "branch", hex_branch],
+    check=True, env=app_git._git_env(fixture),
+  )
   subprocess.run(
     ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
     check=True,
@@ -291,6 +296,80 @@ def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
   assert (source_dir / ".gitignore").read_text(encoding="utf-8") == (
     "# app-owned ignore\ntmp-output/\n"
   )
+
+  # Hex-only branch names between SHA-1 and SHA-256 lengths remain named refs,
+  # not malformed immutable commit ids.
+  hex_branch_source = tmp_path / "hex-branch-source"
+  assert app_git.clone_upstream(
+    hex_branch_source, bare.as_uri(), hex_branch,
+  ) == fixture_head
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_clone_upstream_accepts_an_immutable_commit_ref(
+  tmp_path, object_format,
+):
+  """A pinned install keeps real Git ancestry instead of synthesizing it."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(
+    ["git", "init", "-q", f"--object-format={object_format}",
+     "-b", "main", str(fixture)],
+    check=True,
+  )
+  env = app_git._git_env(fixture)
+  (fixture / "index.jsx").write_text("export default () => 'base'\n")
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "add", "."], check=True, env=env,
+  )
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "commit", "-q", "-m", "base"],
+    check=True, env=env,
+  )
+  (fixture / "index.jsx").write_text("export default () => 'pinned'\n")
+  (fixture / "link").symlink_to("/data/service-token.txt")
+  for args in (["add", "."], ["commit", "-q", "-m", "pinned"]):
+    subprocess.run(
+      ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+       "-C", str(fixture), *args], check=True, env=env,
+    )
+  pinned_sha = app_git.head_sha(fixture, "HEAD")
+
+  # Keep a newer default-branch tip in the remote. The install must still use
+  # the reviewed immutable commit rather than whatever main points at today.
+  (fixture / "index.jsx").write_text("export default () => 'newer'\n")
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "commit", "-qam", "newer"],
+    check=True, env=env,
+  )
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=env,
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  returned = app_git.clone_upstream(source_dir, bare.as_uri(), pinned_sha)
+
+  assert returned == pinned_sha
+  assert app_git.head_sha(source_dir, app_git.LOCAL_BRANCH) == pinned_sha
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == pinned_sha
+  assert app_git.origin_url(source_dir) == bare.as_uri()
+  assert (source_dir / "index.jsx").read_text() == "export default () => 'pinned'\n"
+  assert not (source_dir / "link").is_symlink()
+  assert (source_dir / "link").read_text().strip() == "/data/service-token.txt"
+  exclude = (source_dir / ".git" / "info" / "exclude").read_text()
+  assert "static/" in exclude and "init-cron.sh" in exclude
+  assert app_git._run(
+    source_dir, "rev-parse", "--is-shallow-repository",
+  ).stdout.strip() == "true"
+  assert app_git._run(
+    source_dir, "cat-file", "-e", f"{pinned_sha}^",
+    check=False,
+  ).returncode != 0
 
 
 def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path):

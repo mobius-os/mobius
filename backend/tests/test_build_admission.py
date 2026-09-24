@@ -13,13 +13,8 @@ import pytest
 
 from app.build_admission import (
   BuildLeaseUnavailable,
-  VITE_BUILD_MIN_HEADROOM_BYTES,
-  ViteBuildDeferred,
   build_lease,
   build_lease_async,
-  require_vite_build_admission,
-  vite_build_admitted,
-  wait_for_vite_build_admission,
 )
 
 
@@ -93,44 +88,6 @@ def test_no_reachable_runtime_directory_admits_every_build(
       pass
 
 
-def _memory(*, working_set: int, limit: int | None) -> dict:
-  return {
-    "available": True,
-    "working_set_bytes": working_set,
-    "limit_bytes": limit,
-    "pressure": {
-      "some": {"avg60": 0.0},
-      "full": {"avg60": 0.0},
-    },
-  }
-
-
-def test_vite_admission_needs_absolute_headroom_even_at_a_normal_ratio():
-  one_gib = 1024 * 1024 * 1024
-  just_below = _memory(
-    working_set=one_gib - VITE_BUILD_MIN_HEADROOM_BYTES + 1,
-    limit=one_gib,
-  )
-
-  assert vite_build_admitted(just_below) is False
-  with pytest.raises(ViteBuildDeferred, match="511 MiB cgroup headroom"):
-    require_vite_build_admission(just_below)
-
-  at_reserve = _memory(
-    working_set=one_gib - VITE_BUILD_MIN_HEADROOM_BYTES,
-    limit=one_gib,
-  )
-  assert vite_build_admitted(at_reserve) is True
-  require_vite_build_admission(at_reserve)
-
-
-def test_vite_admission_fails_open_without_a_finite_cgroup_limit():
-  unknown = _memory(working_set=128 * 1024 * 1024, limit=None)
-
-  assert vite_build_admitted(unknown) is True
-  require_vite_build_admission(unknown)
-
-
 def test_frontend_node_entrypoint_uses_the_python_lease_without_nesting(
   tmp_path,
 ):
@@ -196,48 +153,3 @@ def test_all_frontend_native_build_entrypoints_enter_admission():
     source = (scripts / name).read_text(encoding="utf-8")
     assert "from './build-admission.mjs'" in source
     assert "enterBuildAdmission(" in source
-
-
-def test_refusal_names_psi_not_headroom_when_psi_trips():
-  """The message must name the tripped condition. A fixed headroom template
-  once produced "5260 MiB headroom; 512 MiB is required" during a PSI spike."""
-  one_gib = 1024 * 1024 * 1024
-  psi_spike = _memory(working_set=128 * 1024 * 1024, limit=one_gib)
-  psi_spike["pressure"] = {"some": {"avg60": 2.0}, "full": {"avg60": 0.0}}
-
-  assert vite_build_admitted(psi_spike) is False
-  with pytest.raises(ViteBuildDeferred) as exc:
-    require_vite_build_admission(psi_spike)
-  message = str(exc.value)
-  assert "PSI some avg60 2.0" in message
-  assert "headroom" not in message
-
-
-def test_refusal_names_footprint_ratio_when_ratio_trips():
-  one_gib = 1024 * 1024 * 1024
-  hot = _memory(working_set=int(one_gib * 0.8), limit=one_gib)
-
-  with pytest.raises(ViteBuildDeferred) as exc:
-    require_vite_build_admission(hot)
-  assert "unreclaimable footprint is 80% of the limit" in str(exc.value)
-
-
-def test_wait_returns_when_pressure_clears(monkeypatch):
-  checks = iter([False, False, True])
-  monkeypatch.setattr(
-    "app.build_admission.vite_build_admitted", lambda: next(checks),
-  )
-  monkeypatch.setattr("app.build_admission.time.sleep", lambda _delay: None)
-
-  wait_for_vite_build_admission(1)
-
-
-def test_wait_raises_the_existing_precise_refusal_at_timeout(monkeypatch):
-  monkeypatch.setattr("app.build_admission.vite_build_admitted", lambda: False)
-
-  def refuse():
-    raise ViteBuildDeferred("Vite build deferred: still constrained")
-
-  monkeypatch.setattr("app.build_admission.require_vite_build_admission", refuse)
-  with pytest.raises(ViteBuildDeferred, match="Vite build deferred"):
-    wait_for_vite_build_admission(0)

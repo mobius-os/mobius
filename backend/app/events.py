@@ -72,6 +72,7 @@ EventType = Literal[
   "tool_sources",
   "tool_end",
   "skill_loaded",
+  "generated_file",
   "task_start",
   "task_progress",
   "task_done",
@@ -725,11 +726,12 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
           break
     if target is None:
       return False
-    # A background Memory lookup settles on its task's terminal event: the
-    # sink stamps the recall onto the task_done, and it lands on the same tool
-    # block the placeholder result deferred from.
+    # A manifest-declared app command may run as a background task. The sink
+    # stamps its bounded receipt on task_done and it lands on the parent tool.
     if event_type == "task_done" and isinstance(event.get("recall"), dict):
       target["recall"] = event["recall"]
+    if event_type == "task_done" and isinstance(event.get("app_activity"), dict):
+      target["app_activity"] = event["app_activity"]
     subagent = target.setdefault("subagent", {})
     entry = subagent.setdefault(task_key, {
       "description": "",
@@ -759,7 +761,7 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
 
 _TOOL_EVENT_TYPES = frozenset({
   "tool_start", "tool_input", "tool_output", "tool_sources", "tool_end",
-  "skill_loaded",
+  "skill_loaded", "generated_file",
 })
 
 
@@ -783,6 +785,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if isinstance(event.get("app_activity"), dict):
+      block["app_activity"] = event["app_activity"]
     if isinstance(event.get("peer_message"), dict):
       block["peer_message"] = event["peer_message"]
     if isinstance(event.get("edit_preview"), dict):
@@ -802,6 +806,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # that authorizes the later output phase to cite notes.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("app_activity"), dict):
+        blk["app_activity"] = event["app_activity"]
       if isinstance(event.get("peer_message"), dict):
         blk["peer_message"] = event["peer_message"]
       if isinstance(event.get("edit_preview"), dict):
@@ -857,6 +863,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # carving the sink performed before parsing.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("app_activity"), dict):
+        blk["app_activity"] = event["app_activity"]
       # Settle a peer-network exchange from "sending"/"reading" to what was
       # actually said/received (see chat_event_sink._stamp_peer_message).
       if isinstance(event.get("peer_message"), dict):
@@ -945,6 +953,32 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       "output": "",
       "status": "done",
     })
+    return True
+
+  if event_type == "generated_file":
+    # Deliverables belong to the completed assistant turn, not to a guessed
+    # provider tool. A dedicated block keeps the transcript contract identical
+    # across providers and lets the UI render one handoff after the final text.
+    name = event.get("name")
+    if not isinstance(name, str) or not name:
+      return False
+    entry = {
+      "name": name,
+      "size": event.get("size"),
+      "mime_type": event.get("mime_type"),
+      "previewable": event.get("previewable") is True,
+    }
+    target = next((
+      block for block in reversed(assistant_blocks)
+      if block.get("type") == "generated_files"
+    ), None)
+    if target is None:
+      assistant_blocks.append({"type": "generated_files", "files": [entry]})
+      return True
+    files = target.get("files") if isinstance(target.get("files"), list) else []
+    if any(file.get("name") == name for file in files):
+      return False
+    target["files"] = [*files, entry]
     return True
 
   return False

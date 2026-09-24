@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity
+from app import activity, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -93,6 +93,13 @@ from app.claude_events import (
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
+from app.owner_card_receipts import owner_card_receipt_id
+from app.platform_tools import (
+  APPROVAL_TOOL_NAME,
+  CONTROL_SERVER_NAME,
+  QUESTION_TOOL_NAME,
+  RESTART_TOOL_NAME,
+)
 from app.progress_lease import ProgressLease
 from app.process_groups import (
   isolated_process_group_id,
@@ -226,6 +233,18 @@ _CLAUDE_UNUSED_BUILTINS = (
   "DesignSync",
   "ReportFindings",
   "PushNotification",
+)
+
+# The tools through which a turn can save an owner-input card: the three
+# platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
+# helper fallbacks, which print the same receipt. Naming them keeps the card-end
+# hook from cutting on an unrelated tool that merely echoes receipt-shaped JSON
+# — notably a Task result quoting a child agent's card.
+_CLAUDE_OWNER_CARD_TOOLS = (
+  f"mcp__{CONTROL_SERVER_NAME}__{APPROVAL_TOOL_NAME}",
+  f"mcp__{CONTROL_SERVER_NAME}__{QUESTION_TOOL_NAME}",
+  f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
+  "Bash",
 )
 
 
@@ -477,12 +496,15 @@ class ActiveClaudeClient:
     # Never signal a retained PGID twice; the kernel can eventually reuse it
     # after the first hard stop.
     self._force_stop_started = False
-    # Who issued `client.interrupt()` this turn, set synchronously before the
-    # first await and sticky until the handle finishes: Claude wraps our own
+    # Who owns this turn's deliberate cut, set synchronously before the first
+    # await and sticky until the handle finishes: Claude wraps our own
     # interrupt and a provider abort in the same error-shaped terminal, so the
     # runner defuses `stop_reason == "interrupt"` only when an owner is set (an
     # unrequested abort stays a visible error), and only a "stop" owner keeps
     # the deliberate Stop's own pause note. Stop always wins over a steer.
+    # "steer" and "stop" cut with `client.interrupt()`; "card" normally cuts
+    # without one, from the PostToolUse hook that refuses to continue the agent
+    # loop after a saved owner card (see `claim_owner_card_end`).
     self._interrupt_owner: Literal["steer", "stop", "card"] | None = None
     # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
     # (both are already persisted to the transcript), so a single slot would
@@ -586,38 +608,54 @@ class ActiveClaudeClient:
       await self._client.interrupt()
     return True
 
-  def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
-    """End the turn after a continuation owner-input receipt is delivered.
+  def claim_owner_card_end(self) -> bool:
+    """Own this turn's end at the saved owner card, cutting no generation yet.
 
     A saved question / approval / secure-input card is the terminal action of
-    the turn: the owner's answer resumes the chat in a LATER turn, so the model
-    is instructed not to emit more text or tools after the card. That path
-    returns a receipt to the model (unlike native `AskUserQuestion`, which parks
-    in `can_use_tool`). The event sink calls this only when the SDK emits the
-    matching completed tool result, then this fires the same soft interrupt
-    `steer` uses to stop further generation at its source. Events already emitted
-    while the interrupt takes effect still drain through the sink and remain
-    visible and durable.
+    the turn: the owner's answer resumes the chat in a LATER turn, so nothing
+    said after the card could be delivered. The PostToolUse card-end hook calls
+    this while the card's tool result is still inside the CLI, then refuses to
+    continue the agent loop — so the next model request is never made and there
+    is no post-card generation to interrupt.
 
-    Claim ownership synchronously at the receipt boundary, before returning
-    the interrupt awaitable. This ordering is load-bearing: the SDK terminal
-    may already be queued behind the tool result and must see `card` ownership
-    even if the event loop has not yet run the interrupt task. Tagged
-    `card` so the terminal branch classifies the result as a clean completion —
-    no steer requery (`pending_steer` stays empty) and no resumable "Paused"
-    note; the chat's durable pending-question marker already owns resumption.
-    Defers to a Stop or steer that already owns this turn's interrupt so their
-    semantics win.
+    Tagged `card` so the terminal branch classifies the result as a clean
+    completion — no steer requery (`pending_steer` stays empty) and no resumable
+    "Paused" note; the chat's durable pending-question marker already owns
+    resumption. Returns False when a Stop or steer already owns the cut, so the
+    caller leaves the loop running and their semantics win.
     """
     if self._finished.done():
-      return None
+      return False
     if self._interrupt_owner is not None:
-      return None
+      return False
     self._interrupt_owner = "card"
-    # Collapse a steer that races the post-receipt drain window into this cut
-    # rather than firing a second interrupt (mirrors `steer`); the terminal
+    # A steer arriving in the drain window must not fire an interrupt against a
+    # turn the hook has already ended (mirrors `steer`'s collapse); the terminal
     # branch clears the flag.
     self._interrupt_in_flight = True
+    return True
+
+  def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
+    """Fallback cut for a card receipt the card-end hook could not observe.
+
+    `claim_owner_card_end` is the mechanism: PostToolUse ends the ROOT agent's
+    loop before the receipt reaches the model, so the normal path reaches here
+    already owned and returns None without interrupting. A native child agent's
+    card is the case the hook deliberately leaves open — cutting inside a
+    subagent's hook would end the child, not the turn, so the child's receipt
+    only reaches Möbius later, echoed inside its parent Task tool result. This
+    soft interrupt (the same one `steer` uses) still ends such a turn at its
+    source, accepting the historical race with generation already in flight.
+    Events emitted during that window still drain through the sink and remain
+    visible and durable.
+
+    Claim ownership synchronously, before returning the interrupt awaitable:
+    the SDK terminal may already be queued behind the tool result and must see
+    `card` ownership even if the event loop has not yet run the interrupt task.
+    Defers to a Stop or steer that already owns this turn's cut.
+    """
+    if not self.claim_owner_card_end():
+      return None
     return self._client.interrupt()
 
   async def interrupt(self) -> None:
@@ -665,13 +703,18 @@ class ActiveClaudeClient:
     return self._interrupt_owner == "stop"
 
   @property
-  def interrupt_issued(self) -> bool:
-    """Whether we (a steer or a Stop) issued `client.interrupt()` this turn."""
+  def turn_cut_owned(self) -> bool:
+    """Whether Möbius — not the provider — ended this turn deliberately.
+
+    True for a steer, a Stop, and a saved owner card, so the terminal branch
+    can tell our own ending apart from a provider abort. A card end normally
+    cuts through the PostToolUse hook rather than `client.interrupt()`.
+    """
     return self._interrupt_owner is not None
 
   @property
-  def owner_card_interrupt(self) -> bool:
-    """Whether this turn's interrupt is a continuation owner-input card end."""
+  def owner_card_end(self) -> bool:
+    """Whether a continuation owner-input card ended this turn."""
     return self._interrupt_owner == "card"
 
   async def stop(self, timeout: float = 2.0) -> bool:
@@ -1091,6 +1134,17 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # The handle for the client currently streaming this turn. Declared in the
+  # turn scope because the hooks below are built before `_run_once` constructs
+  # it, and the card-end hook must reach the live handle to own the turn's end.
+  active_client: ActiveClaudeClient | None = None
+  # Generated deliverables use a chat-private directory, so provenance does
+  # not depend on serializing unrelated chats that share cwd=/data.
+  from app.config import get_settings
+  generated_data_dir = get_settings().data_dir
+  generated_dir = generated_files.output_dir(
+    generated_data_dir, chat_id, create=True,
+  )
   # Progress lease: renewed as this turn emits SDK messages so a stalled model
   # stream (alive process, no progress) lapses and recovery can reclaim it.
   lease = ProgressLease(chat_id)
@@ -1098,6 +1152,7 @@ async def run_claude_sdk_turn(
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  base_env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -1267,6 +1322,50 @@ async def run_claude_sdk_turn(
       },
     }
 
+  # Fires after every root-agent tool result and ENDS THE TURN when that result
+  # is this turn's saved owner card. `continue_: False` refuses the next model
+  # request while the receipt is still inside the CLI, so the response is cut at
+  # the card and no post-card text can be generated — instead of racing an
+  # interrupt against generation the receipt already started. Möbius never
+  # filters what a provider does emit; this removes the cause, not the evidence.
+  #
+  # Observed terminal for the cut (SDK 0.2.153): subtype "success",
+  # is_error False, stop_reason "tool_use", terminal_reason "hook_stopped",
+  # result "". The `stopReason` string is not rendered anywhere and the session
+  # stays resumable, which is how the owner's answer continues the chat.
+  async def owner_card_end_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    if hook_input.get("tool_name") not in _CLAUDE_OWNER_CARD_TOOLS:
+      return {"continue_": True}
+    # `agent_id` is present only inside a Task-spawned child. Refusing to
+    # continue there would end the CHILD, not the owner's turn, so a child's
+    # card stays with the sink's `begin_finish_after_owner_card` fallback.
+    if hook_input.get("agent_id"):
+      return {"continue_": True}
+    question_id = owner_card_receipt_id(hook_input.get("tool_response"))
+    if question_id is None:
+      return {"continue_": True}
+    # Only the card this turn actually saved ends this turn: a tool that merely
+    # printed an old receipt has no matching continuation block here.
+    has_card = getattr(bc, "has_continuation_card", None)
+    if not callable(has_card) or not has_card(question_id):
+      return {"continue_": True}
+    if active_client is None or not active_client.claim_owner_card_end():
+      # A Stop or steer already owns this turn's cut; let their semantics run.
+      return {"continue_": True}
+    log.info(
+      "Claude turn ended at saved owner card chat_id=%s question_id=%s",
+      chat_id, question_id,
+    )
+    return {
+      "continue_": False,
+      "stopReason": "Saved owner card ends the turn.",
+    }
+
   # Per-chat model/effort overrides flow in via `agent_settings`
   # (merged in chat.py from global defaults + Chat.agent_settings_json).
   # Both are session-wide on the SDK but Möbius spawns one `query()`
@@ -1291,7 +1390,7 @@ async def run_claude_sdk_turn(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
   async def _run_once(model_override: str | None) -> RunnerResult:
-    nonlocal current_session_id, cost_usd
+    nonlocal current_session_id, cost_usd, active_client
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
     # can park until the STRUCTURED reset time rather than parsing the error
@@ -1322,7 +1421,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": _system_prompt_with_register(skill_text),
+      "system_prompt": (
+        _system_prompt_with_register(skill_text).rstrip()
+        + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
+      ),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
@@ -1350,6 +1452,7 @@ async def run_claude_sdk_turn(
         ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
+          HookMatcher(matcher=None, hooks=[owner_card_end_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
@@ -1539,24 +1642,26 @@ async def run_claude_sdk_turn(
             continue
           if (
             isinstance(sdk_msg, ResultMessage)
-            and active_client.interrupt_issued
+            and active_client.turn_cut_owned
             and (
               sdk_msg.stop_reason == "interrupt"
-              # A card receipt interrupts while its tool is the last action, so
-              # the CLI's terminal carries stop_reason `tool_use`/null (its
-              # own `[ede_diagnostic]` names exactly this), not `interrupt`. We
-              # initiated this cut, so classify it by our own ownership flag
-              # rather than the provider's stop_reason, or the raw "Execution
-              # interrupted." error leaks as a red block after the card.
-              or active_client.owner_card_interrupt
+              # A card end lands while the card's tool is the last action, so
+              # the CLI's terminal carries stop_reason `tool_use`/null (observed
+              # `terminal_reason: "hook_stopped"` for the PostToolUse cut, and
+              # its own `[ede_diagnostic]` for the fallback interrupt), never
+              # `interrupt`. We ended this turn, so classify it by our own
+              # ownership flag rather than the provider's stop_reason, or a raw
+              # "Execution interrupted." error leaks as a red block after the
+              # card.
+              or active_client.owner_card_end
             )
           ):
-            # Our own interrupt is not a failure (see `_interrupt_owner`). A
+            # Our own cut is not a failure (see `_interrupt_owner`). A
             # Stop writes its own pause note through the stop flow; a steer
             # whose interrupt raced turn-end (text already re-queried, nothing
             # left to requery) ends the turn here as a resumable "Paused".
             terminal["error"] = None
-            if active_client.owner_card_interrupt:
+            if active_client.owner_card_end:
               # A continuation owner-input card is the turn's NATURAL terminal:
               # the owner's saved answer resumes the chat, so this is a clean
               # completion — never a resumable "Paused" (which would auto-offer
@@ -1596,7 +1701,7 @@ async def run_claude_sdk_turn(
           if (
             session_id is not None            # a resume (non-first turn)
             and sdk_msg.stop_reason != "interrupt"  # a clean end, not our interrupt
-            and not active_client.owner_card_interrupt  # nor our card end (may be tool_use/null)
+            and not active_client.owner_card_end  # nor our card end (may be tool_use/null)
             and not active_client.interrupt_requested  # Stop is terminal
             and not terminal.get("error")     # clean terminal (is_error False)
             and terminal.get("api_error_status") != 429  # not a bare 429/park
@@ -1723,6 +1828,14 @@ async def run_claude_sdk_turn(
         "error": str(exc),
       }
     finally:
+      try:
+        await generated_files.publish_inbox_files(
+          bc,
+          data_dir=generated_data_dir,
+          chat_id=chat_id,
+        )
+      except Exception:
+        log.debug("generated-file turn capture failed", exc_info=True)
       # Durability catch-all: persist any steer that was buffered but never
       # sealed at a requery boundary — an exception/early return above, or a
       # hard Stop that cleared pending_steer. Runs before disconnect so the
@@ -1767,6 +1880,8 @@ async def run_claude_sdk_turn(
               exc_info=True,
             )
         active_client.mark_finished()
+        from app.file_cache import reclaim_provider_cache
+        await reclaim_provider_cache("claude")
         if deferred_cancel is not None:
           raise deferred_cancel
 

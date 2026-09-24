@@ -265,6 +265,18 @@ test('toolCallLabel names the concrete nested step in progressive and past tense
   )
 })
 
+test('app activity is distinctive and uses app-owned copy with host identity', () => {
+  const tool = {
+    type: 'tool', tool: 'Bash', status: 'done',
+    app_activity: {
+      status: 'succeeded', app_slug: 'brain', app_name: 'Brain',
+      activity_id: 'lookup', label: 'Found a relevant note',
+    },
+  }
+  assert.equal(effectiveToolName(tool), 'AppActivity')
+  assert.equal(toolCallLabel(tool), 'Brain: Found a relevant note')
+})
+
 test('failed Memory activity is honest and remains distinctive', () => {
   const failed = {
     type: 'tool', tool: 'Bash', status: 'done',
@@ -272,6 +284,28 @@ test('failed Memory activity is honest and remains distinctive', () => {
   }
   assert.equal(memoryRecallLabel(failed), 'Memory lookup failed')
   assert.equal(isDistinctiveActivityTool(failed), true)
+})
+
+test('Memory V2 labels use the app-owned display copy', () => {
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: {
+      label: 'Reused Memory search — 19 relevant notes',
+    } },
+  }), 'Reused Memory search — 19 relevant notes')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: { label: 'Read a Memory page' } },
+  }), 'Read a Memory page')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: {
+      label: 'Finished reading 2 notes from Memory',
+    } },
+  }), 'Finished reading 2 notes from Memory')
+  assert.equal(memoryRecallLabel({
+    status: 'running', recall: { status: 'searching', phase: 'read' },
+  }), 'Searching Memory')
 })
 
 

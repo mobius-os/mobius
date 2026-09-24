@@ -23,6 +23,7 @@
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import * as tabModel from '../frontend/src/components/Shell/tabModel.js'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -50,6 +51,7 @@ async function bootShell(page, viewport) {
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
   await mockIdleChatRuntime(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  await installMockProviderUsage(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.shell', { timeout: 10000 })
   // Dismiss the install prompt if it landed (keeps focus off the brand clean).
@@ -96,6 +98,9 @@ async function bootSeededWorkspace(page, viewport, ws) {
       }),
     })
   })
+  // Some mode exits materialize a provider-backed empty chat. Pin its quota
+  // boundary without changing the workspace geometry under test.
+  await installMockProviderUsage(page)
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {
     try { localStorage.setItem(key, raw) } catch { /* private mode */ }

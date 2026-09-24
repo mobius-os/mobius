@@ -4,6 +4,7 @@ import ProjectCreateMenu from './ProjectCreateMenu.jsx'
 import ProjectActions from './ProjectActions.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import './Projects.css'
 
 // The Projects launcher: one readable list plus the focused creation menu.
@@ -131,7 +132,7 @@ function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onDelete }) {
           <ProjectIdentityIcon project={project} size={36} />
           <span className="projects-collection__copy">
             <strong>{project.name}</strong>
-            <small>{project.template?.name || 'Project'}{project.updated_at && ` · ${new Date(project.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`}</small>
+            <small>{project.template?.name || 'Project'}{project.updated_at && ` · ${formatDateTime(project.updated_at)}`}</small>
           </span>
         </button>
       )}

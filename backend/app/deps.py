@@ -759,21 +759,27 @@ def get_current_owner_for_lifecycle_control(
   return owner
 
 
-def require_owner_input_principal(principal: Principal) -> None:
-  """Admit human owner input, including an exact server-verified chat embed."""
+def is_owner_input_principal(principal: Principal) -> bool:
+  """Whether this principal represents direct human/browser owner input."""
   if principal.scope == "chat_embed" and principal.delegation_id is None:
-    return
-  if (
+    return True
+  return not (
     principal.scope != "owner"
     or principal.app_id is not None
     or principal.chat_id is not None
     or principal.run_id is not None
     or principal.delegation_id is not None
-  ):
-    raise HTTPException(
-      status_code=403,
-      detail="Agent tokens cannot supply owner input.",
-    )
+  )
+
+
+def require_owner_input_principal(principal: Principal) -> None:
+  """Admit human owner input, including an exact server-verified chat embed."""
+  if is_owner_input_principal(principal):
+    return
+  raise HTTPException(
+    status_code=403,
+    detail="Agent tokens cannot supply owner input.",
+  )
 
 
 def get_current_owner_for_owner_input(

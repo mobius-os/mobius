@@ -23,7 +23,12 @@ from app.events import (
     process_event,
 )
 from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
-from app.memory_recall import EMPTY_RECALL_BINDING
+from app.agent_activity import (
+    EMPTY_AGENT_ACTIVITY_BINDING,
+    RESULT_PREFIX,
+    ActivityCommand,
+    AgentActivityBinding,
+)
 from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
     decode_tool_output,
@@ -97,7 +102,7 @@ def test_sink_stashes_full_edit_diff_and_keeps_private_text_off_wire(db):
     sink = ChatEventSink(
         bus,
         "chat-edit",
-        recall_binding=EMPTY_RECALL_BINDING,
+        agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
     )
     full = "diff --git a/a b/a\n" + ("+large line\n" * 2500)
     event = {
@@ -572,11 +577,11 @@ class _FakeBC:
         self.events.append(event)
 
 
-def _sink(chat_id="c-sink"):
+def _sink(chat_id="c-sink", agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING):
     from app.chat import _ChatEventSink
     return _ChatEventSink(
       _FakeBC(), chat_id, run_token="rt",
-      recall_binding=EMPTY_RECALL_BINDING,
+      agent_activity_binding=agent_activity_binding,
     )
 
 
@@ -659,6 +664,118 @@ def test_sink_parses_a_large_json_envelope_once(monkeypatch, db):
 
     assert calls == 1
     assert event["output_exit_code"] == 3
+
+
+def test_app_receipt_is_settled_before_generic_output_carving(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
+    ])
+    sink = _sink(agent_activity_binding=binding)
+    command = 'python3 /apps/brain/lookup.py "q" "c-sink"'
+    sink.publish({
+        "type": "tool_start", "tool": "Bash", "input": command,
+        "tool_use_id": "tu-app",
+    })
+    notes = [
+        {
+            "id": f"note-{index}",
+            "path": f"notes/note-{index}.md",
+            "title": f"Memory catalogue item {index} " + ("x" * 90),
+        }
+        for index in range(100)
+    ]
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup",
+        "status": "succeeded",
+        "label": "Found 100 relevant notes",
+        "resources": [
+            {"label": note["title"], "intent": f'note:{note["id"]}'}
+            for note in notes
+        ],
+    }, separators=(",", ":"))
+    assert len(receipt) > 8192
+    event = {
+        "type": "tool_output", "content": ("body\n" * 1000) + receipt,
+        "tool_use_id": "tu-app", "output_complete": True,
+        "output_exit_code": 0,
+    }
+
+    sink.publish(event)
+
+    assert event["output_truncated"] is True
+    activity = sink.assistant_blocks[-1]["app_activity"]
+    assert activity["status"] == "succeeded"
+    assert activity["label"] == "Found 100 relevant notes"
+    assert len(activity["resources"]) == 100
+
+
+def test_app_receipt_cannot_override_a_content_derived_nonzero_exit(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
+    ])
+    sink = _sink(agent_activity_binding=binding)
+    sink.publish({
+        "type": "tool_start", "tool": "Bash",
+        "input": 'python3 /apps/brain/lookup.py "q" "c-sink"',
+        "tool_use_id": "tu-app-failed",
+    })
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup", "status": "succeeded", "label": "Found one",
+    }, separators=(",", ":"))
+    event = {
+        "type": "tool_output",
+        "content": "Exit code 7\n" + receipt,
+        "tool_use_id": "tu-app-failed",
+        "output_complete": True,
+    }
+
+    sink.publish(event)
+
+    assert event["output_exit_code"] == 7
+    assert sink.assistant_blocks[-1]["app_activity"]["status"] == "failed"
+
+
+def test_streamed_app_receipt_survives_blank_or_final_chunk_completion(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
+    ])
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup", "status": "succeeded", "label": "Read a page",
+    }, separators=(",", ":"))
+    split = len(receipt) // 2
+    for terminal_chunk in ("", receipt[split:]):
+        sink = _sink(agent_activity_binding=binding)
+        sink.publish({
+            "type": "tool_start", "tool": "Bash",
+            "input": 'python3 /apps/brain/lookup.py "q" "c-sink"',
+            "tool_use_id": "tu-app-streamed",
+        })
+        for chunk in (
+            (receipt[:split], receipt[split:]) if not terminal_chunk
+            else (receipt[:split],)
+        ):
+            sink.publish({
+                "type": "tool_output", "content": chunk,
+                "tool_use_id": "tu-app-streamed",
+            })
+        sink.publish({
+            "type": "tool_output", "content": terminal_chunk,
+            "tool_use_id": "tu-app-streamed", "output_complete": True,
+            "output_exit_code": 0,
+        })
+
+        activity = sink.assistant_blocks[-1]["app_activity"]
+        assert activity["status"] == "succeeded"
+        assert activity["label"] == "Read a page"
 
 
 def test_sink_passes_through_small_output(db):

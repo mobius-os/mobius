@@ -1,14 +1,15 @@
 """Only an exact, never-admitted current run can cross provider entry."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app import models
 from tests.goal_fixtures import persist_goal_fixture
 from app.chat_writer import (
-  AcknowledgePeerContextDelivery,
+  AcknowledgeProviderSuccess,
   AdmitProviderExecution,
+  FinishRun,
   StartTurn,
   _PersistFailed,
   get_writer,
@@ -63,6 +64,93 @@ def test_admission_is_a_one_way_commit_before_provider_entry(chat, db):
     get_writer().submit(AdmitProviderExecution(chat_id=chat.id, run_token=token)).result(timeout=5)
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "failed", "stopped"])
+def test_terminal_finish_never_stands_in_for_provider_success(
+  chat, db, terminal_status,
+):
+  from app.models import ProviderAvailability
+
+  token = f"availability-{terminal_status}"
+  chat.provider = "claude"
+  db.commit()
+  _start(chat.id, token)
+  run = db.get(models.ChatRun, token)
+  run.started_at = datetime.now(UTC).replace(tzinfo=None)
+  db.add(ProviderAvailability(
+    provider="claude",
+    limited_until=run.started_at + timedelta(hours=1),
+    unavailable_reason="usage_limit",
+    updated_at=run.started_at - timedelta(minutes=1),
+  ))
+  db.commit()
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+
+  get_writer().submit(FinishRun(
+    chat_id=chat.id,
+    run_token=token,
+    terminal_status=terminal_status,
+  )).result(timeout=5)
+  db.expire_all()
+  assert db.get(ProviderAvailability, "claude") is not None
+
+
+def test_provider_success_ack_heals_older_provider_limit(chat, db):
+  from app.models import ProviderAvailability
+
+  token = "availability-provider-success"
+  chat.provider = "claude"
+  db.commit()
+  _start(chat.id, token)
+  run = db.get(models.ChatRun, token)
+  run.started_at = datetime.now(UTC).replace(tzinfo=None)
+  db.add(ProviderAvailability(
+    provider="claude",
+    limited_until=run.started_at + timedelta(hours=1),
+    unavailable_reason="usage_limit",
+    updated_at=run.started_at - timedelta(minutes=1),
+  ))
+  db.commit()
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+
+  get_writer().submit(AcknowledgeProviderSuccess(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+
+  db.expire_all()
+  assert db.get(ProviderAvailability, "claude") is None
+
+
+def test_older_success_cannot_clear_a_newer_overlapping_limit(chat, db):
+  from app.models import ProviderAvailability
+
+  token = "availability-newer-overlap"
+  chat.provider = "claude"
+  db.commit()
+  _start(chat.id, token)
+  run = db.get(models.ChatRun, token)
+  run.started_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
+  db.add(ProviderAvailability(
+    provider="claude",
+    limited_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+    unavailable_reason="usage_limit",
+    updated_at=run.started_at + timedelta(minutes=1),
+  ))
+  db.commit()
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+  get_writer().submit(AcknowledgeProviderSuccess(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+
+  db.expire_all()
+  assert db.get(ProviderAvailability, "claude") is not None
+
+
 def test_goal_admission_captures_the_current_plan_revision(chat, db):
   token = "goal-admission"
   _start(chat.id, token)
@@ -94,7 +182,7 @@ def test_peer_delivery_acknowledges_only_an_admitted_run(chat, db):
   token = "admission-peer-delivery"
   _start(chat.id, token)
   delivered_at = datetime.now(UTC).replace(tzinfo=None)
-  command = AcknowledgePeerContextDelivery(
+  command = AcknowledgeProviderSuccess(
     chat_id=chat.id,
     run_token=token,
     peer_message_through_created_at=delivered_at,
@@ -105,7 +193,7 @@ def test_peer_delivery_acknowledges_only_an_admitted_run(chat, db):
   get_writer().submit(AdmitProviderExecution(
     chat_id=chat.id, run_token=token,
   )).result(timeout=5)
-  get_writer().submit(AcknowledgePeerContextDelivery(
+  get_writer().submit(AcknowledgeProviderSuccess(
     chat_id=chat.id,
     run_token=token,
     peer_message_through_created_at=delivered_at,
@@ -129,7 +217,7 @@ def test_peer_delivery_rejects_incomplete_cursor(chat, db):
   )).result(timeout=5)
 
   with pytest.raises(_PersistFailed, match="cursor is incomplete"):
-    get_writer().submit(AcknowledgePeerContextDelivery(
+    get_writer().submit(AcknowledgeProviderSuccess(
       chat_id=chat.id,
       run_token=token,
       peer_message_through_id="peer-note-without-time",

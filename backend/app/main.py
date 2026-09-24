@@ -92,7 +92,7 @@ from app.routes import (
   public_storage_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
-  theme_router, uploads_router, platform_router,
+  theme_router, uploads_router, generated_files_router, platform_router,
   published_router,
   connect_router,
   projects_router,
@@ -286,12 +286,23 @@ async def lifespan(app):
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
   )
+  app.state.runtime_supervisors = supervisors
   await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
   if database_boot.serviceable:
     await supervisors.start_database_services()
     from app.saved_secure_inputs import recover_interrupted
     await recover_interrupted()
+    from app.startup import _capture_platform_activation_snapshot
+    try:
+      _capture_platform_activation_snapshot(startup_context)
+    except Exception as exc:
+      # A missing restart receipt must keep its wait unresolved, never invent
+      # success. It also must not take down an otherwise repairable server.
+      _log.error(
+        "platform restart receipt could not be recorded: %s", exc,
+        exc_info=True,
+      )
     record_memory_checkpoint("startup_ready")
   try:
     yield
@@ -309,6 +320,10 @@ async def lifespan(app):
     await stop_sealed_consumers()
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
+    # Do not leave a stopped owner published after lifespan exits. Re-entering
+    # the application must install a fresh supervisor set or observe none;
+    # otherwise a stale stopped set makes the healthy readiness probe fail.
+    app.state.runtime_supervisors = None
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -813,7 +828,7 @@ app.add_middleware(
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
-  expose_headers=["ETag"],
+  expose_headers=["ETag", "X-Recovery-Notification-Id"],
 )
 
 
@@ -916,6 +931,7 @@ app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
+app.include_router(generated_files_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
@@ -1020,7 +1036,14 @@ def service_readiness() -> dict:
     return {"ready": False, **degraded}
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
-  return {"ready": True} if is_ready else {"ready": False, "reason": reason}
+  if not is_ready:
+    return {"ready": False, "reason": reason}
+  supervisors = getattr(app.state, "runtime_supervisors", None)
+  if supervisors is not None:
+    is_ready, reason = supervisors.database_service_readiness()
+    if not is_ready:
+      return {"ready": False, "reason": reason}
+  return {"ready": True}
 
 
 @app.get("/api/ready")

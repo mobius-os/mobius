@@ -1,9 +1,10 @@
 """Typed, platform-owned Restart cards and post-restart continuation.
 
-Pressing **Restart now** always drains active work and restarts once; a restart
-simply reloads whatever backend source is currently present. There is no
-per-file source proof, no "is this restart still valid" gate, and no execution
-state machine — the owner asked for a restart, so Möbius restarts.
+Pressing **Restart now** drains active work and restarts once after the current
+editable backend passes the same import verdict the next boot will run. This is
+not a per-file source identity gate: it only prevents a planned restart from
+knowingly entering the baked recovery fallback. Once admitted, a restart
+reloads whatever valid backend source is currently present.
 
 What remains here is the *continuation*: after a restart, the interrupted chat
 resumes once a later boot becomes ready, so the agent can verify whether its
@@ -17,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from datetime import timedelta
 from typing import Literal
 
 from sqlalchemy import text
@@ -96,16 +98,29 @@ def activation_wait_verdict(
   ):
     return "failed", "The saved activation requirement is invalid."
 
-  ready_boot = (
+  approved_at = row.action_approved_at
+  confirmation_deadline = (
+    approved_at + timedelta(seconds=ACTIVATION_CONFIRM_DEADLINE_SECONDS)
+    if approved_at is not None else None
+  )
+  ready_boot_query = (
     db.query(models.PlatformBootSnapshot)
     .filter(models.PlatformBootSnapshot.captured_at >= row.created_at)
     .filter(
       models.PlatformBootSnapshot.boot_id != requirement["source_boot_id"],
     )
     .filter(models.PlatformBootSnapshot.service_ready.is_(True))
-    .order_by(models.PlatformBootSnapshot.captured_at.desc())
-    .first()
   )
+  # A manual redeploy long after the bounded restart window is recovery, not
+  # evidence that the requested restart worked. Only a timely ready boot may
+  # satisfy this activation wait.
+  if confirmation_deadline is not None:
+    ready_boot_query = ready_boot_query.filter(
+      models.PlatformBootSnapshot.captured_at <= confirmation_deadline,
+    )
+  ready_boot = ready_boot_query.order_by(
+    models.PlatformBootSnapshot.captured_at.desc(),
+  ).first()
   if ready_boot is not None:
     return "met", "A later ready Möbius boot was observed."
 
@@ -113,7 +128,6 @@ def activation_wait_verdict(
   # confirmed within the window, resume the agent to verify manually — a
   # degraded boot, a rolled-back update, or a restart that never dispatched
   # must never leave the agent waiting on a receipt that will not arrive.
-  approved_at = row.action_approved_at
   if (
     approved_at is not None
     and (now_naive_utc() - approved_at).total_seconds()
@@ -152,6 +166,9 @@ def capture_ready_boot_snapshot(
 
   snapshot = db.get(models.PlatformBootSnapshot, boot_id)
   if snapshot is not None:
+    if snapshot.service_ready:
+      from app.broadcast import get_system_broadcast
+      get_system_broadcast().publish({"type": "platform_boot_ready"})
     return snapshot
   snapshot = models.PlatformBootSnapshot(boot_id=boot_id)
   db.add(snapshot)
@@ -168,20 +185,28 @@ def capture_ready_boot_snapshot(
   # Boot evidence is tiny, but it is process-lifetime data. Keep a bounded
   # recent audit window; active waits only evaluate later snapshots and never
   # require replaying an old one.
-  stale_ids = [item[0] for item in (
-    db.query(models.PlatformBootSnapshot.boot_id)
-    .order_by(
-      models.PlatformBootSnapshot.captured_at.desc(),
-      models.PlatformBootSnapshot.boot_id.desc(),
-    )
-    .offset(32)
-    .all()
-  )]
-  if stale_ids:
-    db.query(models.PlatformBootSnapshot).filter(
-      models.PlatformBootSnapshot.boot_id.in_(stale_ids),
-    ).delete(synchronize_session=False)
-    db.commit()
+  try:
+    stale_ids = [item[0] for item in (
+      db.query(models.PlatformBootSnapshot.boot_id)
+      .order_by(
+        models.PlatformBootSnapshot.captured_at.desc(),
+        models.PlatformBootSnapshot.boot_id.desc(),
+      )
+      .offset(32)
+      .all()
+    )]
+    if stale_ids:
+      db.query(models.PlatformBootSnapshot).filter(
+        models.PlatformBootSnapshot.boot_id.in_(stale_ids),
+      ).delete(synchronize_session=False)
+      db.commit()
+  except Exception:
+    # Retention is housekeeping. The committed receipt remains authoritative.
+    db.rollback()
+
+  if service_ready:
+    from app.broadcast import get_system_broadcast
+    get_system_broadcast().publish({"type": "platform_boot_ready"})
 
   return snapshot
 

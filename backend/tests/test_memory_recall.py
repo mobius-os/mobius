@@ -16,7 +16,6 @@ from app.chat_transcript import (
   legacy_memory_recall_output_ids,
   project_legacy_memory_recalls,
 )
-from app.chat import _ChatEventSink
 from app.events import process_event
 from app.memory_recall import (
   EMPTY_RECALL_BINDING,
@@ -34,10 +33,16 @@ from app.memory_recall import (
 # The binding the live provider resolves to on this instance: Memory installed
 # at /data/apps/memory. Tests build it explicitly rather than importing the DB
 # resolver, so the protocol stays testable without a session.
-BINDING = RecallBinding.of([("/data/apps/memory/memory_search.py", "memory")])
+BINDING = RecallBinding.of([
+  ("/data/apps/memory/memory_search.py", "memory"),
+])
 
 
 MEMORY_CMD = 'python3 /data/apps/memory/memory_search.py "what does he prefer" "chat-1"'
+MEMORY_READ_CMD = (
+  'python3 /data/apps/memory/memory_search.py '
+  f'"{"a" * 64}" "all" "start" "chat-1"'
+)
 WRAPPED_MEMORY_CMD = (
   "/bin/bash -lc 'python3 /data/apps/memory/memory_search.py "
   '"what does he prefer" "$CHAT_ID"\''
@@ -54,6 +59,44 @@ EMPTY_OUTPUT = """No relevant memories.
 MOBIUS_MEMORY_RESULT_V1:{"status":"empty"}"""
 FAILED_OUTPUT = """Memory lookup failed.
 MOBIUS_MEMORY_RESULT_V1:{"status":"failed"}"""
+LOOKUP_ID = "a" * 64
+V2_CATALOG_OUTPUT = (
+  "Memory catalogue page\n"
+  "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+    "status": "hit",
+    "phase": "catalog",
+    "lookup_id": LOOKUP_ID,
+    "reused": True,
+    "discovery_complete": True,
+    "notes": [
+      {"id": "alpha", "path": "notes/alpha.md", "title": "Alpha",
+       "excerpt": "A concise catalogue description."},
+      {"id": "beta", "path": "notes/beta.md", "title": "Beta"},
+    ],
+    "page": {"candidate_count": 19, "complete": False,
+             "next_cursor": "catalog:2"},
+    "display": {
+      "label": "Reused Memory search — 19 relevant notes",
+      "detail": "Showing 2 of 19 relevant notes; more catalogue entries are available.",
+    },
+  }, separators=(",", ":"))
+)
+V2_READ_OUTPUT = (
+  "--- MEMORY NOTE alpha bytes 0:120/240 ---\ncontent\n"
+  "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+    "status": "hit",
+    "phase": "read",
+    "lookup_id": LOOKUP_ID,
+    "notes": [{"id": "alpha", "path": "notes/alpha.md", "title": "Alpha"}],
+    "page": {"requested_count": 1,
+             "fully_supplied_count": 0, "complete": False,
+             "next_cursor": "body:deadbeef:0:120"},
+    "display": {
+      "label": "Read a Memory page",
+      "detail": "This content continues on another page.",
+    },
+  }, separators=(",", ":"))
+)
 
 
 # --- identification -------------------------------------------------------
@@ -124,6 +167,14 @@ def test_codex_login_shell_wrapper_preserves_the_same_lookup_identity():
   }
 
 
+def test_the_documented_expansion_invocation_is_recognized_without_a_query():
+  assert recall_from_command(MEMORY_READ_CMD, BINDING) == {
+    "status": RECALL_SEARCHING,
+    "app_slug": "memory",
+  }
+  assert recall_from_command(MEMORY_READ_CMD + ' "extra"', BINDING) is None
+
+
 def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
   assert recall_from_command(
     'python3 /data/apps/memory/memory_search.py "q"'
@@ -159,6 +210,44 @@ def test_a_successful_lookup_cites_the_notes_it_opened():
   ]
   assert recall["notes"][0]["title"] == "Apps render in a sandboxed frame"
   assert recall["notes"][0]["excerpt"] == "Each mini-app runs isolated."
+
+
+def test_v2_catalogue_receipt_keeps_app_copy_and_safe_links():
+  recall = recall_from_result(V2_CATALOG_OUTPUT, 0)
+  assert recall == {
+    "status": RECALL_HIT,
+    "display": {
+      "label": "Reused Memory search — 19 relevant notes",
+      "detail": "Showing 2 of 19 relevant notes; more catalogue entries are available.",
+    },
+    "notes": [
+      {"id": "alpha", "path": "notes/alpha.md", "title": "Alpha",
+       "excerpt": "A concise catalogue description."},
+      {"id": "beta", "path": "notes/beta.md", "title": "Beta"},
+    ],
+  }
+
+
+def test_v2_body_receipt_is_parsed_without_reading_the_body_frame():
+  recall = recall_from_result(V2_READ_OUTPUT, 0)
+  assert recall["notes"][0]["id"] == "alpha"
+  assert recall["display"] == {
+    "label": "Read a Memory page",
+    "detail": "This content continues on another page.",
+  }
+
+
+def test_v2_receipt_rejects_missing_app_display_contract():
+  payload = json.loads(V2_CATALOG_OUTPUT.split("MOBIUS_MEMORY_RESULT_V2:", 1)[1])
+  payload.pop("display")
+  assert recall_from_result(
+    "MOBIUS_MEMORY_RESULT_V2:" + json.dumps(payload), 0,
+  ) == {"status": RECALL_FAILED}
+
+
+def test_latest_protocol_receipt_wins_across_versions():
+  assert "display" in recall_from_result(HIT_OUTPUT + "\n" + V2_CATALOG_OUTPUT, 0)
+  assert "display" not in recall_from_result(V2_CATALOG_OUTPUT + "\n" + HIT_OUTPUT, 0)
 
 
 def test_a_citation_keeps_the_graph_node_id_when_it_differs_from_the_file():
@@ -278,26 +367,6 @@ def test_codex_tool_start_carries_the_lookup_marker_without_tool_input():
   assert blocks[0]["recall"]["status"] == RECALL_HIT
 
 
-def test_the_claude_path_does_not_double_stamp_a_single_lookup():
-  # Simulate a runner that supplies the memory_search command on BOTH the
-  # tool_start and a following tool_input for the same tool_use_id. The block
-  # must be stamped once: the second phase sees the block already carries a
-  # recall marker and is skipped, so no duplicate/overwriting stamp occurs.
-  sink = object.__new__(_ChatEventSink)
-  sink.assistant_blocks = []
-  sink._recall_binding = BINDING
-  start = {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD,
-           "tool_use_id": "t1"}
-  sink._stamp_memory_recall(start)
-  process_event(start, sink.assistant_blocks)
-  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
-  follow = {"type": "tool_input", "tool_use_id": "t1", "input": MEMORY_CMD}
-  sink._stamp_memory_recall(follow)
-  assert "recall" not in follow
-  process_event(follow, sink.assistant_blocks)
-  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
-
-
 def test_partial_output_does_not_settle_the_lookup_before_completion():
   blocks: list = []
   process_event({
@@ -311,43 +380,6 @@ def test_partial_output_does_not_settle_the_lookup_before_completion():
     "recall": {"status": RECALL_HIT, "notes": [{"id": "a", "path": "notes/a.md"}]},
   }, blocks)
   assert blocks[0]["recall"]["status"] == RECALL_HIT
-
-
-def _sink_lifecycle(events):
-  sink = object.__new__(_ChatEventSink)
-  sink.assistant_blocks = []
-  sink._recall_binding = BINDING
-  for event in events:
-    sink._stamp_memory_recall(event)
-    process_event(event, sink.assistant_blocks)
-  return sink.assistant_blocks[0]["recall"]
-
-
-def test_claude_and_codex_lifecycles_settle_to_identical_recall_metadata():
-  final = {
-    "type": "tool_output", "tool_use_id": "t1", "content": HIT_OUTPUT,
-    "output_complete": True, "output_exit_code": 0,
-  }
-  codex = _sink_lifecycle([
-    {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD,
-     "tool_use_id": "t1"},
-    {"type": "tool_output", "tool_use_id": "t1", "content": "partial"},
-    dict(final),
-  ])
-  claude = _sink_lifecycle([
-    {"type": "tool_start", "tool": "Bash", "input": "",
-     "tool_use_id": "t1"},
-    {"type": "tool_input", "input": MEMORY_CMD, "tool_use_id": "t1"},
-    dict(final),
-  ])
-  assert codex == claude
-  assert codex["status"] == RECALL_HIT
-  assert codex["query"] == "what does he prefer"
-  assert codex["app_slug"] == "memory"
-  assert [note["id"] for note in codex["notes"]] == [
-    "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
-  ]
-  assert {note["app_slug"] for note in codex["notes"]} == {"memory"}
 
 
 def test_an_ordinary_command_gains_no_recall_field():
@@ -469,138 +501,3 @@ def test_a_real_legacy_process_error_remains_visible_without_stdout():
 def test_a_run_with_no_lookup_carries_no_recall_key():
   blocks = [(0, {"type": "tool", "tool": "Bash", "status": "done"})]
   assert "recall" not in _compact_activity_run(blocks, message_index=0, binding=BINDING)
-
-
-# --- a lookup run as a background task settles on its task_done --------------
-
-from app.memory_recall import (  # noqa: E402
-  background_dispatch_from_result,
-  background_recall_path,
-  defer_recall_to_task,
-  settle_recall_from_task_output,
-)
-
-BACKGROUND_PLACEHOLDER = (
-  "Command running in background with ID: bb6qfjun8. Output is being written "
-  "to: /data/agent-scratch/chat-1/claude-1000/-data/sess/tasks/bb6qfjun8.output. "
-  "You will be notified when it completes. To check interim output, use Read "
-  "on that file path."
-)
-
-
-def test_the_background_placeholder_is_recognized_and_bound_to_its_task():
-  assert background_dispatch_from_result(BACKGROUND_PLACEHOLDER) == {
-    "task_id": "bb6qfjun8",
-    "output_path": "/data/agent-scratch/chat-1/claude-1000/-data/sess/tasks/bb6qfjun8.output",
-  }
-  assert background_dispatch_from_result(HIT_OUTPUT) is None
-  assert background_dispatch_from_result("") is None
-  # The file must be named for the task it reports; anything else is not the
-  # host's placeholder.
-  assert background_dispatch_from_result(
-    BACKGROUND_PLACEHOLDER.replace("tasks/bb6qfjun8.output", "tasks/other.output"),
-  ) is None
-
-
-def test_the_placeholder_defers_the_lookup_instead_of_failing_it():
-  sink = object.__new__(_ChatEventSink)
-  sink.assistant_blocks = []
-  sink._recall_binding = BINDING
-  start = {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD,
-           "tool_use_id": "t1"}
-  sink._stamp_memory_recall(start)
-  process_event(start, sink.assistant_blocks)
-  out = {"type": "tool_output", "tool_use_id": "t1",
-         "content": BACKGROUND_PLACEHOLDER, "output_complete": True}
-  sink._stamp_memory_recall(out)
-  process_event(out, sink.assistant_blocks)
-  recall = sink.assistant_blocks[0]["recall"]
-  assert recall["status"] == RECALL_SEARCHING
-  assert recall["task_id"] == "bb6qfjun8"
-  assert recall["query"] == "what does he prefer"
-  assert recall["app_slug"] == "memory"
-
-
-def test_only_the_chats_own_scratch_task_file_may_settle_a_deferred_lookup():
-  pending = defer_recall_to_task({"app_slug": "memory"}, {
-    "task_id": "abc", "output_path": "/data/agent-scratch/chat-1/x/tasks/abc.output",
-  })
-  assert background_recall_path(pending, "/data/agent-scratch/chat-1") == (
-    "/data/agent-scratch/chat-1/x/tasks/abc.output"
-  )
-  assert background_recall_path(pending, "/data/agent-scratch/chat-2") is None
-  hostile = {**pending, "output_path": "/data/agent-scratch/chat-1/../chat-2/tasks/abc.output"}
-  assert background_recall_path(hostile, "/data/agent-scratch/chat-1") is None
-  wrong_name = {**pending, "output_path": "/data/agent-scratch/chat-1/x/tasks/zzz.output"}
-  assert background_recall_path(wrong_name, "/data/agent-scratch/chat-1") is None
-
-
-def test_task_output_settles_from_the_structured_line_and_exit_trailer():
-  pending = {"app_slug": "memory", "query": "q", "task_id": "abc"}
-  hit = settle_recall_from_task_output(pending, HIT_OUTPUT + "\n\n[exited with code 0]\n", "done")
-  assert hit["status"] == RECALL_HIT
-  assert hit["notes"][0]["app_slug"] == "memory"
-  crashed = settle_recall_from_task_output(pending, HIT_OUTPUT + "\n[exited with code 2]", "done")
-  assert crashed["status"] == RECALL_FAILED
-  # No trailer yet and the task did not finish cleanly: failed, not a hit.
-  killed = settle_recall_from_task_output(pending, HIT_OUTPUT, "killed")
-  assert killed["status"] == RECALL_FAILED
-  assert settle_recall_from_task_output(pending, None, "done")["status"] == RECALL_FAILED
-
-
-def test_task_done_settles_the_deferred_lookup_on_its_block(tmp_path, monkeypatch):
-  import app.chat_event_sink as sink_mod
-  monkeypatch.setattr(sink_mod, "agent_scratch_root", lambda: tmp_path)
-  task_dir = tmp_path / "chat-1" / "claude-1000" / "-data" / "sess" / "tasks"
-  task_dir.mkdir(parents=True)
-  (task_dir / "bb6qfjun8.output").write_text(HIT_OUTPUT + "\n\n[exited with code 0]\n")
-  placeholder = BACKGROUND_PLACEHOLDER.replace(
-    "/data/agent-scratch/chat-1", str(tmp_path / "chat-1"),
-  )
-
-  sink = object.__new__(_ChatEventSink)
-  sink.assistant_blocks = []
-  sink._recall_binding = BINDING
-  sink.chat_id = "chat-1"
-  events = [
-    {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD, "tool_use_id": "t1"},
-    {"type": "tool_output", "tool_use_id": "t1", "content": placeholder,
-     "output_complete": True},
-    {"type": "task_start", "task_id": "bb6qfjun8", "tool_use_id": "t1",
-     "description": "Memory lookup", "task_type": "local_bash"},
-  ]
-  for event in events:
-    sink._stamp_memory_recall(event)
-    process_event(event, sink.assistant_blocks)
-  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
-
-  done = {"type": "task_done", "task_id": "bb6qfjun8", "tool_use_id": None,
-          "status": "completed", "summary": "done"}
-  sink._stamp_deferred_recall_done(done)
-  process_event(done, sink.assistant_blocks)
-  recall = sink.assistant_blocks[0]["recall"]
-  assert recall["status"] == RECALL_HIT
-  assert recall["query"] == "what does he prefer"
-  assert [n["id"] for n in recall["notes"]] == [
-    "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
-  ]
-  assert done["recall"] == recall, "the live wire carries the same settled recall"
-
-
-def test_a_deferred_lookup_never_persists_as_searching_after_finalize(tmp_path, monkeypatch):
-  import app.chat_event_sink as sink_mod
-  monkeypatch.setattr(sink_mod, "agent_scratch_root", lambda: tmp_path)
-  sink = object.__new__(_ChatEventSink)
-  sink.assistant_blocks = [{
-    "type": "tool", "tool": "Bash", "status": "done", "tool_use_id": "t1",
-    "recall": {"status": RECALL_SEARCHING, "task_id": "zzz",
-               "output_path": str(tmp_path / "chat-1" / "tasks" / "zzz.output"),
-               "app_slug": "memory", "query": "q"},
-  }]
-  sink.chat_id = "chat-1"
-  # The task's file never appeared: the lookup is reported failed, not left
-  # spinning in the transcript.
-  for blk in sink._deferred_recall_blocks():
-    blk["recall"] = sink._settle_deferred_recall(blk["recall"], None)
-  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_FAILED
-  assert sink.assistant_blocks[0]["recall"]["query"] == "q"

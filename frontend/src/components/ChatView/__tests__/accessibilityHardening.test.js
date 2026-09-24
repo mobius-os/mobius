@@ -45,7 +45,6 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),
     read('../ManageModelsModal.jsx'),
-    read('../../SettingsView/UpdateReviewModal.jsx'),
     read('../markdown/ImageLightbox.jsx'),
     read('../AgentContextInspector.jsx'),
     read('../ChatSummaryViewer.jsx'),
@@ -58,10 +57,12 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   }
 
   const manageModels = dialogs[1]
-  const updateReview = dialogs[2]
   assert.match(manageModels, /ref=\{keepEditingRef\}/)
+  const updateReview = read('../../SettingsView/UpdateReviewModal.jsx')
   assert.match(updateReview, /const inFlight = applying \|\| rebuilding \|\| resolving/)
   assert.match(updateReview, /closeOnEscape: !inFlight/)
+  assert.match(updateReview, /modal: false, lockScroll: false/)
+  assert.match(updateReview, /aria-modal="false"/)
 })
 
 test('Chat Changes is a modeless panel whose outside press reaches its destination', () => {
@@ -153,6 +154,8 @@ test('message references are an accessible lazy disclosure with safe links', () 
   assert.match(msgContent, /sourceRef=\{msg\.source_ref\}/)
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
+  assert.doesNotMatch(source, /source\.snippet|chat__source-snippet|chat__source-rank/,
+    'the reference preview should show links only, not search-result prose')
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
   assert.match(source, /<SourceFavicon/,
     'expanded references should use the shared safe icon loader')
@@ -195,8 +198,8 @@ test('the Memory search is a collapsed disclosure with linked result summaries',
   assert.match(source, /onClick=\{event => openInternal\(/)
   assert.match(source, /event\.metaKey \|\| event\.ctrlKey \|\| event\.shiftKey \|\| event\.altKey/)
   assert.match(source, /Nothing relevant is recorded yet\./)
-  assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__memory-note\s*\{\s*min-height:\s*44px/s)
-  assert.match(css, /\.chat__memory-note:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
+  assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{[^}]*\.chat__memory-note,\s*\.chat__app-activity-resource\s*\{\s*min-height:\s*44px/s)
+  assert.match(css, /\.chat__memory-note:focus-visible,\s*\.chat__app-activity-resource:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
 })
 
 test('incidental message focus has no box while search and controls retain keyboard indicators', () => {

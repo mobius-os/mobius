@@ -1,4 +1,5 @@
 /* Pure display helpers for compact provider-plan usage snapshots. */
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
 export function formatPlanStatus(label) {
   const value = typeof label === 'string' ? label.trim() : ''
@@ -26,23 +27,11 @@ export function formatTrialTimeLeft(value, now = new Date()) {
   return `${Math.ceil(remainingMs / 86_400_000)}d left`
 }
 
-export function formatUsageReset(value, now = new Date()) {
+export function formatUsageReset(value) {
   if (!value) return ''
   const reset = new Date(value)
   if (Number.isNaN(reset.getTime())) return ''
-  const sameDay = (
-    reset.getFullYear() === now.getFullYear()
-    && reset.getMonth() === now.getMonth()
-    && reset.getDate() === now.getDate()
-  )
-  const time = new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).format(reset)
-  if (sameDay) return `Resets ${time}`
-  const day = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(reset)
-  return `Resets ${day} ${time}`
+  return `Resets ${formatDateTime(reset)}`
 }
 
 export function bankedResetCredits(snapshot) {
@@ -53,6 +42,30 @@ export function bankedResetCredits(snapshot) {
   if (!Number.isFinite(count) || count < 0) return null
   const credits = Array.isArray(summary.credits) ? summary.credits : []
   return { availableCount: count, credits }
+}
+
+export function claudeResetCredits(snapshot) {
+  const summary = snapshot?.reset_credits
+  if (!summary || typeof summary !== 'object') return null
+  const count = Number(summary.available_count)
+  if (!Number.isFinite(count) || count < 0) return null
+  const credits = Array.isArray(summary.credits) ? summary.credits : []
+  const nextCreditId = typeof summary.next_credit_id === 'string'
+    ? summary.next_credit_id
+    : null
+  const nextCredit = credits.find(credit => credit?.id === nextCreditId)
+  const nextCreditResetsLeft = Number(nextCredit?.resets_left)
+  return {
+    availableCount: count,
+    credits,
+    eligible: summary.eligible === true,
+    redeemable: summary.redeemable === true,
+    nextCreditId,
+    nextCreditResetsLeft: Number.isInteger(nextCreditResetsLeft)
+      && nextCreditResetsLeft > 0
+      ? nextCreditResetsLeft
+      : null,
+  }
 }
 
 export function soonestResetExpiry(credits) {
@@ -88,6 +101,30 @@ export function redeemOutcomeMessage(outcome) {
       return { tone: 'info', text: 'That reset was already redeemed.' }
     default:
       return { tone: 'error', text: 'Couldn’t redeem the reset. Try again shortly.' }
+  }
+}
+
+export function claudeRedeemOutcomeMessage(outcome) {
+  switch (outcome) {
+    case 'reset':
+      return { tone: 'success', text: 'Reset applied — Claude is checking your refreshed limits.' }
+    case 'already_used':
+      return { tone: 'info', text: 'That reset was already used — nothing else was spent.' }
+    case 'not_limited':
+      return { tone: 'info', text: 'Your limits are already clear — no reset was spent.' }
+    case 'cooldown':
+      return { tone: 'info', text: 'A Claude reset is already being applied.' }
+    case 'ineligible':
+    case 'unavailable':
+    case 'offer_changed':
+      return { tone: 'info', text: 'That reset is no longer available.' }
+    case 'unknown':
+      return {
+        tone: 'info',
+        text: 'Claude may have applied that reset. Möbius will reconcile it before another reset.',
+      }
+    default:
+      return { tone: 'error', text: 'Couldn’t redeem the Claude reset. Try again shortly.' }
   }
 }
 

@@ -24,6 +24,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-canvas.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -164,6 +165,9 @@ async function setupShellBasics(page) {
       body: '',
     })
   )
+  // A later route wins in Playwright. Keep app-opening chats from receiving
+  // the generic catch-all response instead of a valid quota snapshot.
+  await installMockProviderUsage(page)
 }
 
 

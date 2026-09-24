@@ -1,6 +1,9 @@
 /* A focused update decision with a scrollable explanation and persistent actions. */
 .urm__overlay {
-  position: fixed; inset: var(--shell-bar-height, 58px) 0 0;
+  /* Anchor the review to its Settings pane rather than the viewport. The
+     shell view is the positioned ancestor, so docked navigation and tiled
+     workspace panes are excluded from both centering and the backdrop. */
+  position: absolute; inset: 0;
   background: rgb(0 0 0 / 50%); display: flex; align-items: center; justify-content: center;
   z-index: 1000; padding: max(16px, env(safe-area-inset-bottom, 0px)) 16px; box-sizing: border-box;
 }

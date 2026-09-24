@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   bankedResetCredits,
+  claudeRedeemOutcomeMessage,
+  claudeResetCredits,
   providerAllowance,
   providerAllowanceSummary,
 } from '../../components/SettingsView/providerUsage.js'
@@ -106,6 +108,34 @@ test('banked reset count preserves an explicit zero while rejecting missing data
   })
   assert.deepEqual(bankedResetCredits({}), { availableCount: 0, credits: [] })
   assert.equal(bankedResetCredits(null), null)
+})
+
+test('Claude reset helper preserves the provider-selected redeemable grant', () => {
+  assert.deepEqual(claudeResetCredits({
+    reset_credits: {
+      available_count: 2,
+      credits: [{ id: 'grant-next', resets_left: 2 }],
+      eligible: true,
+      redeemable: true,
+      next_credit_id: 'grant-next',
+    },
+  }), {
+    availableCount: 2,
+    credits: [{ id: 'grant-next', resets_left: 2 }],
+    eligible: true,
+    redeemable: true,
+    nextCreditId: 'grant-next',
+    nextCreditResetsLeft: 2,
+  })
+  assert.equal(claudeResetCredits({}), null)
+  assert.deepEqual(claudeRedeemOutcomeMessage('not_limited'), {
+    tone: 'info',
+    text: 'Your limits are already clear — no reset was spent.',
+  })
+  assert.deepEqual(claudeRedeemOutcomeMessage('unknown'), {
+    tone: 'info',
+    text: 'Claude may have applied that reset. Möbius will reconcile it before another reset.',
+  })
 })
 
 

@@ -17,8 +17,8 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-pwa.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { applyApp, applySource, writeStaticAppFiles } from './app-source.mjs'
-import { FAILURE_GRACE_MS } from '../frontend/src/lib/connectivityStore.js'
+import { applyApp } from './app-source.mjs'
+import { FAILURE_GRACE_MS, PROBE_TIMEOUT_MS } from '../frontend/src/lib/connectivityStore.js'
 // Import the cache names rather than repeating them. They are deliberately
 // bumped whenever a cached response's policy changes, so a literal here turns
 // every future bump into an unrelated e2e failure 5 minutes into the run —
@@ -180,7 +180,6 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
 
   test('standalone first reopen serves an update applied while the app was closed', async ({ page, request, context }) => {
     const token = await ownerToken(page)
-    const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
     const firstMarker = `standalone revision one ${stamp}`
     const secondMarker = `standalone revision two ${stamp}`
@@ -237,22 +236,15 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       // The same authoritative response is now the offline fallback.
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
-      // An offline cold reopen is recognised by PROBING, not navigator.onLine:
-      // a document served from the service worker can report onLine=true while
-      // the network is down (connectivityStore documents exactly this). A failed
-      // probe only moves reachability to CHECKING, which still counts as online;
-      // it becomes OFFLINE after FAILURE_GRACE_MS, and only then does AppCanvas
-      // take its cached app token and boot the frame. CI's bundled Chromium
-      // takes that path: traced, the first failed probe landed ~5.0s before the
-      // app flipped offline, which is the default assertion budget to the
-      // millisecond. Budget for the grace window plus the boot after it.
       await expect(standaloneMarker()).toHaveText(secondMarker, {
-        timeout: FAILURE_GRACE_MS + 10_000,
+        // Cold offline boot must first finish the reachability owner's grace
+        // window before selecting the cached app-scoped session.
+        timeout: FAILURE_GRACE_MS + PROBE_TIMEOUT_MS + 5_000,
       })
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {
-        headers, failOnStatusCode: false,
+        headers: { Authorization: `Bearer ${token}` }, failOnStatusCode: false,
       })
     }
   })
@@ -388,39 +380,36 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
-    const { app, sourceDir } = await applyApp(request, token, {
-      slug: `opaque-static-sw-${stamp}`,
-      name: `Opaque static SW ${stamp}`,
-      description: 'Disposable controlled-service-worker fixture.',
-      jsxSource: 'export default function App(){return <main>fixture</main>}',
-    })
-    try {
-      // static/* is gitignored by design (app_git.py's managed .gitignore:
-      // manifest-installed static assets are install-managed, not edited
-      // source), so an ordinary /api/fs/write is invisible to every normal
-      // apply/commit path -- they all stage via plain `git add -A .`, which
-      // never touches a gitignored path. writeStaticAppFiles force-adds
-      // (`git add -f`, matching the one real precedent for this,
-      // backend/tests/test_app_assets_cache.py's `_write_static`) and
-      // commits directly, then applySource republishes the runtime from
-      // that updated HEAD.
-      writeStaticAppFiles(sourceDir, {
-        'index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
-        'child.deadbeef.js': `(async()=>{
+    // `static/` is accepted output and intentionally excluded from the source
+    // snapshot. Keep package inputs in an author-owned directory, then map
+    // their logical destinations through the manifest.
+    const staticFiles = {
+      'assets/index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
+      'assets/child.deadbeef.js': `(async()=>{
         let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
       })()`,
-        'hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+      'assets/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
         (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
       ]]></script><rect width="20" height="20" fill="red"/></svg>`,
-      })
-      const reapplied = await applySource(request, token, sourceDir)
-      expect(reapplied.response.ok()).toBeTruthy()
-
+    }
+    const { app } = await applyApp(request, token, {
+      slug: `opaque-static-sw-${stamp}`,
+      name: `Opaque static SW ${stamp}`,
+      description: 'Disposable controlled-service-worker fixture.',
+      jsxSource: 'export default function App(){return <main>fixture</main>}',
+      files: staticFiles,
+      manifest: {
+        static_assets: Object.fromEntries(Object.keys(staticFiles).map(path => [
+          path.slice('assets/'.length), path,
+        ])),
+      },
+    })
+    try {
       await page.evaluate(async () => {
         await navigator.serviceWorker.register('/sw.js')
         await navigator.serviceWorker.ready

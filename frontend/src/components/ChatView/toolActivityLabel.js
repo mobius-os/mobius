@@ -1,5 +1,6 @@
 import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
+import { appActivityLabel } from './appActivityCard.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -38,7 +39,8 @@ const ACTIVITY_LABELS = new Map([
   // the `recall` marker the backend stamps from the command — see
   // effectiveToolName. Uncountable, so it has no singular twin.
   ['MemoryRecall', 'Searching Memory'],
-  ['PeerMessage', 'Exchanging agent messages'],
+  ['AppActivity', 'Using an app'],
+  ['PeerMessage', 'Exchanging messages'],
 ])
 
 // Past-tense twins for SETTLED lines — "Ran commands", not a "Running
@@ -66,7 +68,8 @@ const PAST_LABELS = new Map([
   ['Skill', 'Used skills'],
   ['ViewImage', 'Viewed images'],
   ['MemoryRecall', 'Recalled from Memory'],
-  ['PeerMessage', 'Exchanged agent messages'],
+  ['AppActivity', 'Used an app'],
+  ['PeerMessage', 'Exchanged messages'],
 ])
 
 // Singular twins for a ONE-occurrence activity: a lone Bash reads "Ran a
@@ -110,6 +113,7 @@ const ACTIVITY_ICONS = new Map([
   ['Skill', 'skill'],
   ['ViewImage', 'image'],
   ['MemoryRecall', 'search'],
+  ['AppActivity', 'sparkle'],
   ['PeerMessage', 'agents'],
 ])
 
@@ -167,6 +171,7 @@ export function toolCallLabel(tool) {
   // implementation vocabulary, and the count is the fact worth reading at a
   // glance. "Nothing relevant" is stated explicitly, because a silent recall
   // is indistinguishable from never having looked.
+  if (name === 'AppActivity') return appActivityLabel(tool)
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
   if (name === 'PeerMessage') return peerMessageLabel(tool)
   if (name === 'Skill') {
@@ -209,6 +214,9 @@ const IMAGE_TOOL_NAMES = new Set([
 ])
 export function effectiveToolName(tool) {
   const name = tool?.tool
+  if (tool?.app_activity && typeof tool.app_activity === 'object') {
+    return 'AppActivity'
+  }
   // A Memory lookup is a Bash call the backend already identified from its
   // command (memory_recall.py, stamped on the one publish() funnel). Keying off
   // that stamp rather than re-matching the command here means one detection
@@ -242,7 +250,9 @@ export function effectiveToolName(tool) {
 // so scanning the transcript tells the story. Skill reads are housekeeping too:
 // effectiveToolName still gives them an honest label and expandable details,
 // while the ordinary activity stretch folds them beside reads and commands.
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
+const DISTINCTIVE_ACTIVITIES = new Set([
+  'ViewImage', 'MemoryRecall', 'AppActivity',
+])
 
 // The one-line story of a peer-network exchange: who the agent messaged or
 // heard from, and what kind of note it was. Provider-neutral — the same card
@@ -315,6 +325,9 @@ export function memoryRecallLabel(tool) {
   const recall = tool?.recall
   if (recall?.status === 'searching' || tool?.status === 'running') {
     return 'Searching Memory'
+  }
+  if (typeof recall?.display?.label === 'string' && recall.display.label.trim()) {
+    return recall.display.label.trim().slice(0, 160)
   }
   if (recall?.status === 'empty') return 'Searched Memory — nothing relevant'
   if (recall?.status === 'failed') return 'Memory lookup failed'

@@ -73,6 +73,19 @@ test('collapsed label — settled mixed stretch: past-tense sentence, tools only
   assert.equal(activityCollapsedLabel(entries, { live: false }), 'Read a file, edited code')
 })
 
+test('collapsed label — helper messages share the surrounding activity summary', () => {
+  const entries = [
+    e(tool({ tool: 'Bash', status: 'done' })),
+    e({ type: 'helper_result', id: 'first', status: 'completed' }),
+    e({ type: 'helper_result', id: 'second', status: 'completed' }),
+    e(tool({ tool: 'Edit', status: 'done' })),
+  ]
+  assert.equal(
+    activityCollapsedLabel(entries, { live: false }),
+    'Ran a command, exchanged messages, edited code',
+  )
+})
+
 test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw names kept', () => {
   assert.equal(
     toolGroupPastSummary([

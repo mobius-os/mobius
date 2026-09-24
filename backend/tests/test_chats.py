@@ -5,11 +5,13 @@ from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 import asyncio
 from datetime import UTC, datetime, timedelta
 import io
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from app import memory, models, questions
 from app.pending_questions import PendingQuestion
+from app.recovery_notifications import recovery_resource_generation
 from sqlalchemy import event
 
 
@@ -39,7 +41,7 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
 
 
 def test_delete_and_recover_publish_exact_projection_events(
-  client, auth, chat,
+  client, auth, chat, db,
 ):
   """Shells receive authoritative ids for both sides of the tombstone."""
   with patch("app.routes.chats.get_system_broadcast") as mock_get_sb:
@@ -47,14 +49,62 @@ def test_delete_and_recover_publish_exact_projection_events(
     mock_get_sb.return_value = fake_sb
 
     deleted = client.delete(f"/api/chats/{chat.id}", headers=auth)
-    recovered = client.post(f"/api/chats/{chat.id}/recover", headers=auth)
+    receipt = db.query(models.Notification).filter_by(
+      title="Chat deleted",
+    ).one()
+    db.refresh(chat)
+    assert receipt.actions == [{
+      "resource_generation": recovery_resource_generation(
+        "chat", chat.created_at,
+      ),
+      "deleted_at": chat.deleted_at.replace(tzinfo=UTC).isoformat(),
+      "expires_at": (chat.deleted_at + timedelta(days=7)).replace(tzinfo=UTC).isoformat(),
+      "action": "recover_chat",
+      "title": "Undo",
+      "resource_type": "chat",
+      "resource_id": str(chat.id),
+    }]
+    recovered = client.post(
+      f"/api/chats/{chat.id}/recover",
+      headers=auth,
+      json={"notification_id": receipt.id},
+    )
+    assert fake_sb.publish.call_args_list == [
+      (({"type": "chat_deleted", "chatId": str(chat.id)},), {}),
+      (({"type": "chat_recovered", "chatId": str(chat.id)},), {}),
+    ]
+    fake_sb.publish.reset_mock()
+    repeated = client.post(
+      f"/api/chats/{chat.id}/recover",
+      headers=auth,
+      json={"notification_id": receipt.id},
+    )
 
   assert deleted.status_code == 204, deleted.text
   assert recovered.status_code == 200, recovered.text
-  assert fake_sb.publish.call_args_list == [
-    (({"type": "chat_deleted", "chatId": str(chat.id)},), {}),
-    (({"type": "chat_recovered", "chatId": str(chat.id)},), {}),
-  ]
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["completed_at"] == recovered.json()["completed_at"]
+  db.refresh(receipt)
+  assert receipt.actions[0]["completed_at"] == recovered.json()["completed_at"]
+  # Receipt retries replay the projection, not the deletion or its receipt.
+  fake_sb.publish.assert_called_once_with({
+    "type": "chat_recovered", "chatId": str(chat.id),
+  })
+
+
+def test_delete_rolls_back_when_undo_receipt_cannot_be_staged(
+  client, auth, chat,
+):
+  with (
+    patch(
+      "app.routes.chats.stage_recovery_notification",
+      side_effect=RuntimeError("receipt failed"),
+    ),
+    pytest.raises(RuntimeError, match="receipt failed"),
+  ):
+    client.delete(f"/api/chats/{chat.id}", headers=auth)
+
+  assert client.get(f"/api/chats/{chat.id}", headers=auth).status_code == 200
 
 
 def test_delete_response_stays_authoritative_after_cleanup_failure(

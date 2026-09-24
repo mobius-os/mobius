@@ -44,12 +44,11 @@ def test_required_railway_migration_guidance_does_not_promise_an_image_rebuild()
 
 
 def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
-  # Python deps now apply in place (a rebuild is no longer forced), but they are
-  # still MORE than a bare restart. Baked-runtime inputs still require a new
-  # image. (Frontend deps now apply in place too — see the dedicated test.)
+  # Python deps and baked-runtime inputs require a reviewed image. Frontend
+  # deps remain safe to install in the served frontend workspace.
   expected = {
-    "backend/requirements.txt": "dependency_sync",
-    "backend/requirements.lock": "dependency_sync",
+    "backend/requirements.txt": "image_rebuild",
+    "backend/requirements.lock": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
     "backend/scripts/init_skills.py": "image_rebuild",
     "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
@@ -129,19 +128,18 @@ def test_dependency_fingerprint_comes_from_the_image_rules():
   })
 
 
-def test_python_dependencies_apply_in_place_not_via_rebuild():
+def test_python_dependencies_require_a_reviewed_image():
   impact = activation.classify_activation(
     ["backend/requirements.lock"], deployment="self_hosted",
   )
-  assert impact["level"] == "dependency_sync"
-  assert any("in place" in line for line in impact["guidance"])
+  assert impact["level"] == "image_rebuild"
+  assert any("Rebuild and replace" in line for line in impact["guidance"])
 
-  # A backend code change alongside a dep bump resolves to the dep-sync boundary
-  # (which already includes a restart), not a rebuild.
+  # Backend code alongside the dependency change cannot weaken that boundary.
   mixed = activation.classify_activation(
     ["backend/requirements.txt", "backend/app/main.py"], deployment="self_hosted",
   )
-  assert mixed["level"] == "dependency_sync"
+  assert mixed["level"] == "image_rebuild"
 
   # But a Dockerfile change in the same update still forces a rebuild.
   with_dockerfile = activation.classify_activation(
@@ -150,8 +148,8 @@ def test_python_dependencies_apply_in_place_not_via_rebuild():
   assert with_dockerfile["level"] == "image_rebuild"
 
 
-def test_dependency_sync_requires_an_import_probe():
-  assert activation.backend_import_probe_required(["backend/requirements.lock"])
+def test_image_owned_python_dependencies_do_not_probe_the_old_runtime():
+  assert not activation.backend_import_probe_required(["backend/requirements.lock"])
 
 
 def test_only_image_owned_bootstrap_scripts_require_a_rebuild():
@@ -277,10 +275,7 @@ def test_image_inputs_cover_dependency_and_baked_runtime_paths(tmp_path):
   # Every input is a path the classifier already treats as image-owned.
   for path in paths:
     level = activation.classify_activation([path])["level"]
-    assert level in {
-      activation.ActivationLevel.IMAGE_REBUILD.value,
-      activation.ActivationLevel.DEPENDENCY_SYNC.value,
-    }
+    assert level == activation.ActivationLevel.IMAGE_REBUILD.value
 
 
 def test_image_work_never_subsumes_independent_deployment_actions():
@@ -307,7 +302,7 @@ def test_image_work_never_subsumes_independent_deployment_actions():
     ordinary = activation.classify_activation(
       ['Dockerfile', 'backend/app/main.py', 'backend/requirements.lock'], deployment=deployment,
     )
-    assert set(ordinary['required_actions']) == {'image_rebuild', 'server_restart', 'dependency_sync'}
+    assert set(ordinary['required_actions']) == {'image_rebuild', 'server_restart'}
     assert not activation.requires_agent_activation(ordinary)
     assert activation.classify_activation([], deployment=deployment)['required_actions'] == []
 

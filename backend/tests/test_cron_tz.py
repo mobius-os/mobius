@@ -21,6 +21,8 @@ def test_parse_daily_cron_accepts_plain_daily():
   "0 24 * * *",      # invalid hour
   "60 5 * * *",      # invalid minute
   "0 5 * *",         # too few fields
+  "٠ ٥ * * *",       # Unicode digits rejected by the shell scaffold
+  "0 5 * * *\n",     # declaration must be one complete line
   "",
 ])
 def test_parse_daily_cron_rejects_non_daily(expr):

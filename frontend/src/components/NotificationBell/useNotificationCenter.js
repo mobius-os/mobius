@@ -25,8 +25,14 @@ export default function useNotificationCenter(queryClient) {
 
   const clearAll = useCallback(async () => {
     await api.notifications.clearAll()
-    queryClient.setQueryData(notificationQueries.list.key, [])
+    queryClient.setQueryData(notificationQueries.list.key, { pages: [[]], pageParams: [null] })
     queryClient.setQueryData(notificationQueries.unreadCount.key, 0)
+  }, [queryClient])
+
+  const dismiss = useCallback(async (notificationId) => {
+    await api.notifications.dismiss(notificationId)
+    await queryClient.resetQueries({ queryKey: notificationQueries.list.key })
+    notificationQueries.unreadCount.invalidate(queryClient)
   }, [queryClient])
 
   useEffect(() => {
@@ -65,7 +71,7 @@ export default function useNotificationCenter(queryClient) {
 
   return {
     state: { open, unreadCount },
-    actions: { toggle, close, clearAll, reconcile, onCreated },
+    actions: { toggle, close, clearAll, dismiss, reconcile, onCreated },
     meta: { rootRef, bellRef },
   }
 }

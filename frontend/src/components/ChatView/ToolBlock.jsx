@@ -16,6 +16,7 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
 import MemoryRecallCard from './MemoryRecallCard.jsx'
+import AppActivityCard from './AppActivityCard.jsx'
 import PeerMessageCard from './PeerMessageCard.jsx'
 import ToolImageResult from './ToolImageResult.jsx'
 import {
@@ -617,6 +618,16 @@ export default function ToolBlock({
   disclosureKey,
   onInternalNav,
 }) {
+  if (effectiveToolName(t) === 'AppActivity') {
+    return (
+      <AppActivityCard
+        t={t}
+        chatId={chatId}
+        disclosureKey={disclosureKey}
+        onInternalNav={onInternalNav}
+      />
+    )
+  }
   if (effectiveToolName(t) === 'MemoryRecall') {
     return (
       <MemoryRecallCard
@@ -634,6 +645,7 @@ export default function ToolBlock({
         t={t}
         chatId={chatId}
         disclosureKey={disclosureKey}
+        records={t.peer_records}
       />
     )
   }

@@ -5,6 +5,7 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { ArrowDown, ArrowUp } from '@openai/apps-sdk-ui/components/Icon'
 import { usePeerTimelineRecord } from './peerTimelineContext.js'
 import { peerTime } from './peerTimeline.js'
+import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
@@ -63,7 +64,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
       <span className="chat__tool-name" title={label}>
         {label}{live ? '…' : ''}
       </span>
-      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
+      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={formatDateTime(date)}>{formatTime(date)}</time>}
     </>
   )
 

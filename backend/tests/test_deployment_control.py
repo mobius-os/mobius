@@ -349,6 +349,98 @@ async def test_self_hosted_reviewed_rebuild_applies_then_queues_host_rebuild(
   assert calls[0][1]["target_sha"] == target
 
 
+@pytest.mark.asyncio
+async def test_cancelled_reviewed_rebuild_finishes_after_source_apply_starts(
+  monkeypatch,
+):
+  target = "b" * 40
+  _install_reviewed_image_plan(monkeypatch)
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  apply_started = asyncio.Event()
+  release_apply = asyncio.Event()
+  calls = []
+
+  async def fake_apply(db, **plan):
+    apply_started.set()
+    await release_apply.wait()
+    calls.append("apply")
+    return {
+      "state": dc.platform_update.PlatformUpdateState.ACTIVATION_NEEDED.value,
+      "merge_commit": target,
+    }
+
+  async def fake_request_rebuild(*, expected_sha, final_check):
+    final_check()
+    calls.append("rebuild")
+    return {"state": "queued", "expected_sha": expected_sha}
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", fake_request_rebuild)
+  request = asyncio.create_task(dc.request_reviewed_rebuild(
+    db=None,
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha=target,
+    image_digest=None,
+  ))
+  await asyncio.wait_for(apply_started.wait(), timeout=2)
+
+  request.cancel()
+  await asyncio.sleep(0)
+  request.cancel()
+  release_apply.set()
+  with pytest.raises(asyncio.CancelledError):
+    await request
+
+  assert calls == ["apply", "rebuild"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reviewed_rebuild_keeps_cancellation_when_apply_fails(
+  monkeypatch,
+):
+  _install_reviewed_image_plan(monkeypatch)
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  apply_started = asyncio.Event()
+  release_apply = asyncio.Event()
+
+  async def failing_apply(_db, **_plan):
+    apply_started.set()
+    await release_apply.wait()
+    raise RuntimeError("apply failed after disconnect")
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", failing_apply)
+  request = asyncio.create_task(dc.request_reviewed_rebuild(
+    db=None,
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha="b" * 40,
+    image_digest=None,
+  ))
+  await asyncio.wait_for(apply_started.wait(), timeout=2)
+
+  request.cancel()
+  await asyncio.sleep(0)
+  request.cancel()
+  release_apply.set()
+  with pytest.raises(asyncio.CancelledError):
+    await request
+
+
 _IDLE_HOST = {"supported": True, "state": "idle"}
 _UNCONFIGURED_HOST = {
   "supported": False,
@@ -1291,6 +1383,82 @@ async def test_mixed_activation_cannot_dispatch_replacement(monkeypatch, deploym
     await dc.request_reviewed_rebuild(db=None, plan_id='a'*64, current_sha='1'*40, target_sha='2'*40, image_digest=_TEST_DIGEST)
   assert error.value.code == 'external_activation_required'
   assert calls == (['apply'] if change_after_apply else [])
+
+
+@pytest.mark.asyncio
+async def test_python_dependency_replacement_stops_before_source_apply(monkeypatch):
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **_plan: {
+      "activation": dc.platform_activation.classify_activation(
+        ["backend/requirements.lock"], deployment="self_hosted",
+      ),
+      "blockers": [],
+    },
+  )
+
+  async def forbidden(*_args, **_kwargs):
+    pytest.fail("image-dependent source must not be applied in the old image")
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", forbidden)
+
+  with pytest.raises(dc.DeploymentControlError) as error:
+    await dc.request_reviewed_rebuild(
+      db=None, plan_id="a" * 64, current_sha="1" * 40,
+      target_sha="2" * 40, image_digest=None,
+    )
+
+  assert error.value.code == "external_activation_required"
+  assert "Python packages" in error.value.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incoming_paths", [[], ["Dockerfile"]])
+async def test_existing_python_drift_does_not_block_image_replacement(
+  monkeypatch, incoming_paths,
+):
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+  combined_paths = ["backend/requirements.lock", *incoming_paths]
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **_plan: {
+      "activation": dc.platform_activation.classify_activation(
+        combined_paths, deployment="self_hosted",
+      ),
+      "incoming_activation": dc.platform_activation.classify_activation(
+        incoming_paths, deployment="self_hosted",
+      ),
+      "blockers": [],
+    },
+  )
+
+  async def status():
+    return {"supported": True, "state": "idle"}
+
+  async def apply(_db, **_plan):
+    return {"state": "activation_needed", "merge_commit": "3" * 40}
+
+  async def replace(*, expected_sha, final_check):
+    final_check()
+    return {"state": "queued", "expected_sha": expected_sha}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", status)
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", apply)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", replace)
+
+  result = await dc.request_reviewed_rebuild(
+    db=None, plan_id="a" * 64, current_sha="1" * 40,
+    target_sha="2" * 40, image_digest=None,
+  )
+
+  assert result["state"] == "queued"
 
 
 @pytest.mark.asyncio

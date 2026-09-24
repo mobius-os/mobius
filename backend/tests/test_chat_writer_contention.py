@@ -1091,15 +1091,23 @@ def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
         "cid": "legacy-10",
         "_initiated_by_app_id": app_id,
       },
-      {"role": "user", "content": "also queued", "ts": 11, "cid": "legacy-11"},
+      {
+        "role": "user",
+        "content": "also queued",
+        "ts": 11,
+        "cid": "legacy-11",
+        "_owner_authored": True,
+      },
     ],
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
   assert result["promoted"]["content"] == "from app\nalso queued"
   assert result["promoted"]["_consumed_cids"] == ["legacy-10", "legacy-11"]
   assert "_initiated_by_app_id" not in result["promoted"]
+  assert "_owner_authored" not in result["promoted"]
   chat = _load_chat()
   assert "_initiated_by_app_id" not in chat["messages"][-1]
+  assert "_owner_authored" not in chat["messages"][-1]
   assert "_consumed_cids" not in chat["messages"][-1]
   run = _load_run("rt1")
   assert run["initiated_by_app_id"] == app_id
@@ -1389,6 +1397,47 @@ def test_answer_question_no_block_raises(actor):
   )
   with pytest.raises(Exception):
     _await(fut)
+
+
+def test_competing_exact_card_answers_cannot_overwrite_winner(actor):
+  """Agent route checks may race, so the serialized writer owns settlement."""
+  from app.questions import AnswerConflict
+
+  _seed_chat(
+    messages=[_question_msg("q-race")],
+    pending_question_id="q-race",
+  )
+  actor.pause_for_test()
+  first = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  retry = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  changed = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Blue"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  actor.resume_for_test()
+
+  assert _await(first) is True
+  assert _await(retry) is True
+  with pytest.raises(AnswerConflict):
+    _await(changed)
+  assert _load_chat()["messages"][-1]["blocks"][0]["answers"] == {
+    "q-race": "Red",
+  }
 
 
 def test_recovered_answer_retires_old_assistant_before_continuation(actor):

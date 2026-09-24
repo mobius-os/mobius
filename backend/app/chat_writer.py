@@ -50,6 +50,7 @@ import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,6 +88,29 @@ def _name_chat_from_first_message(chat: models.Chat, content: object) -> None:
   """Apply the first-message fallback without overriding an owner rename."""
   if not chat.title_locked:
     chat.title = first_message_title(content) or "New chat"
+
+
+def _unique_generated_file_name(
+  requested: str, existing: set[str], *, max_length: int,
+) -> str:
+  """Return a bounded display name, reserving room for collision markers."""
+  name = requested[:max_length]
+  if name not in existing:
+    return name
+
+  stem = Path(name).stem or "file"
+  suffix = Path(name).suffix
+  index = 1
+  while True:
+    marker = f"_{index}"
+    # Keep at least one stem character even when an agent supplies a suffix
+    # that nearly fills the database column.
+    kept_suffix = suffix[:max(0, max_length - len(marker) - 1)]
+    stem_length = max_length - len(marker) - len(kept_suffix)
+    candidate = f"{stem[:stem_length]}{marker}{kept_suffix}"
+    if candidate not in existing:
+      return candidate
+    index += 1
 
 
 # Bounded wait for a strict (commit-before-ack) writer-actor command.
@@ -189,6 +213,22 @@ class PersistTranscript(_Command):
 
 
 @dataclass
+class PersistTranscriptBarrier(_Command):
+  """Must-persist snapshot used to close a short in-process mutation barrier.
+
+  Unlike the ordinary coalescible stream snapshot, this command fences older
+  snapshots and acknowledges only after this complete state commits. It lets
+  a sink temporarily defer concurrent saves while an atomic side-table +
+  transcript operation resolves, without dropping the events themselves.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
 class Finalize(_Command):
   """Terminal full-snapshot write for a turn.  Never coalesces.
 
@@ -275,6 +315,7 @@ class AnswerQuestion(_Command):
   answers: dict = field(default_factory=dict)
   close_without_reply: bool = False
   legacy_save_only: bool = False
+  require_exact_card: bool = False
   selected_options: dict | None = None
 
 
@@ -351,12 +392,14 @@ class AdmitProviderExecution(_Command):
 
 
 @dataclass
-class AcknowledgePeerContextDelivery(_Command):
-  """Advance the peer inbox only after a provider call returns successfully.
+class AcknowledgeProviderSuccess(_Command):
+  """Commit the exact provider-success boundary for one admitted run.
 
   Provider admission is intentionally earlier: it prevents ambiguous replay
   of an execution attempt. It is not proof that the provider accepted the
-  prompt, so peer delivery has its own later, monotonic acknowledgement.
+  prompt. This later acknowledgement both heals an older provider-limit signal
+  and, when peer context was delivered, advances that delivery cursor in the
+  same writer-owned transaction.
   """
 
   chat_id: str = ""
@@ -413,6 +456,47 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class RecordGeneratedFile(_Command):
+  """Atomically record one deliverable and its live transcript association.
+
+  ``name`` is the row identity within the chat; the handler suffixes display
+  collisions so the download route's by-name lookup stays unambiguous. The
+  snapshot contains ``placeholder`` at the new file entry; the actor replaces
+  it with that final name and commits both records together before the sink
+  broadcasts or consumes the inbox source.
+  """
+
+  chat_id: str = ""
+  name: str = ""
+  path: str = ""
+  size: int = 0
+  mime_type: str = "application/octet-stream"
+  snapshot: dict = field(default_factory=dict)
+  placeholder: str = ""
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
+class CheckGeneratedFileCapacity(_Command):
+  """Return the serialized number of file rows still available to one chat."""
+
+  chat_id: str = ""
+
+
+@dataclass
+class ResolveGeneratedFilePublication(_Command):
+  """Resolve an ambiguously acknowledged file command by its immutable path.
+
+  Submitted after a timed-out ``RecordGeneratedFile``. FIFO ordering makes
+  this read observe that earlier command's terminal database outcome before a
+  sink is allowed to finalize a potentially file-less transcript.
+  """
+
+  chat_id: str = ""
+  path: str = ""
 
 
 @dataclass
@@ -818,8 +902,10 @@ class AppendPending(_Command):
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
   answers: dict | None = None
+  selected_options: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
+  owner_authored: bool = False
   front: bool = False
   require_answer_match: bool = False
 
@@ -916,10 +1002,11 @@ class CancelPending(_Command):
 
 @dataclass
 class UpdatePending(_Command):
-  """Replace one still-queued message's text without changing its identity.
+  """Replace one queued message's text without changing its identity.
 
   The stable `cid`, ordering `ts`, attachments, and queue position stay
-  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  untouched. A non-owner rewrite drops direct-owner authority. Returns
+  `{"updated", "pending"}`; `updated` is False when a
   racing promotion or cancellation already pulled the row from the queue, so
   the caller can tell a real edit from a no-op instead of assuming success.
   """
@@ -928,6 +1015,7 @@ class UpdatePending(_Command):
   run_token: str = ""
   cid: str = ""
   content: str = ""
+  owner_authored: bool = False
 
 
 @dataclass
@@ -1162,6 +1250,7 @@ class _TestPersist(_Command):
 # successful commit safe without a pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
+  PersistTranscriptBarrier,
   PersistError,
   QuestionCommit,
   SettleSecureInput,
@@ -1839,6 +1928,13 @@ class ChatWriterActor:
       return self._persist_live_message(
         db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
       )
+    if isinstance(cmd, PersistTranscriptBarrier):
+      result = self._persist_live_message(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
+      if result is not True:
+        raise _PersistFailed("PersistTranscriptBarrier did not persist")
+      return True
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
@@ -1928,13 +2024,29 @@ class ChatWriterActor:
       return self._record_run_metrics(db, cmd)
     if isinstance(cmd, AdmitProviderExecution):
       return self._admit_provider_execution(db, cmd)
-    if isinstance(cmd, AcknowledgePeerContextDelivery):
-      return self._acknowledge_peer_context_delivery(db, cmd)
+    if isinstance(cmd, AcknowledgeProviderSuccess):
+      return self._acknowledge_provider_success(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, RecordGeneratedFile):
+      return self._record_generated_file(db, cmd)
+    if isinstance(cmd, CheckGeneratedFileCapacity):
+      from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+      from app.models import GeneratedFile
+      recorded = db.query(GeneratedFile.name).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).count()
+      return max(0, MAX_RECORDED_ROWS_PER_CHAT - recorded)
+    if isinstance(cmd, ResolveGeneratedFilePublication):
+      from app.models import GeneratedFile
+      row = db.query(GeneratedFile).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+        GeneratedFile.path == cmd.path,
+      ).first()
+      return row.name if row is not None else None
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -2193,7 +2305,12 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("AnswerQuestion: chat not found or deleted")
     if cmd.legacy_save_only:
-      from app.questions import AnswerConflict, has_quiet_options
+      from app.questions import (
+        AnswerConflict,
+        accepts_saved_answer,
+        has_quiet_options,
+        validate_saved_answer,
+      )
       # Check the actual write target inside the actor: an unkeyed legacy
       # request must not bypass a card published after the route's read.
       candidates = list(chat.messages or [])
@@ -2206,7 +2323,20 @@ class ChatWriterActor:
                    and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
       if card and (has_quiet_options(card) or card.get("secure_input")):
         raise AnswerConflict("Use the question card to submit this answer.")
-    metadata = None
+      if cmd.require_exact_card:
+        if card is None:
+          raise AnswerConflict("This question is no longer open.")
+        if "answers" in card:
+          if card["answers"] == cmd.answers:
+            return True
+          raise AnswerConflict("This question already has a different answer.")
+        if not accepts_saved_answer(chat, cmd.question_id):
+          raise AnswerConflict("This question is no longer open.")
+        validate_saved_answer(card, cmd.answers, None)
+    metadata = (
+      {"selected_options": cmd.selected_options}
+      if cmd.selected_options is not None else None
+    )
     if cmd.close_without_reply:
       from app.questions import AnswerConflict, accepts_saved_answer, closes_without_reply, saved_question
       from app.goal_plans import require_quiet_answer_handoff
@@ -2229,11 +2359,12 @@ class ChatWriterActor:
       raise _PersistFailed("AnswerQuestion: no matching question block")
     # The question is answered — clear the durable open-question marker in the
     # same commit so every read surface unblocks atomically with the answer.
-    chat.pending_question_id = None
-    # Answering an interactive question is an owner action just like a visible
-    # send. Keep drawer recency separate from generic transcript writes, but do
-    # advance it here so a parked chat returns to the top as soon as the answer
-    # commits (including the same-turn answer-delivery path).
+    # A retained older card can be answered without orphaning a newer one.
+    if cmd.question_id is None or chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
+    # Keep drawer recency separate from generic transcript writes, but advance
+    # it when a participant answers so a parked chat returns to the top as soon
+    # as the answer commits (including the same-turn answer-delivery path).
     from datetime import UTC, datetime
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2319,6 +2450,16 @@ class ChatWriterActor:
         "Restart card: card is no longer accepting actions"
       )
 
+    if selected_restart:
+      # Keep the exact card open when the edited platform would fall back on
+      # the next boot.  The owner gets a retryable error while this healthy
+      # process remains available for repair; no drain or restart is started.
+      from app.restart_util import RestartSourceInvalid, validate_restart_source
+      try:
+        validate_restart_source()
+      except RestartSourceInvalid as exc:
+        raise RestartCardActionConflict(str(exc)) from exc
+
     now = now_naive_utc()
     dispatch = False
     if not selected_restart:
@@ -2357,7 +2498,8 @@ class ChatWriterActor:
             live_action["status"] = action["status"]
           chat.live_assistant = live
           break
-    chat.pending_question_id = None
+    if chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
     chat.activity_at = now
     if not _commit_or_rollback(db):
       raise _PersistFailed("Restart card resolution did not persist")
@@ -2471,17 +2613,20 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
 
-  def _acknowledge_peer_context_delivery(
-    self, db, cmd: AcknowledgePeerContextDelivery,
+  def _acknowledge_provider_success(
+    self, db, cmd: AcknowledgeProviderSuccess,
   ) -> None:
-    """Advance one exact run's peer boundary after provider success."""
+    """Heal availability and optionally advance peer delivery after success."""
     from app.models import ChatRun
 
     delivered_at = cmd.peer_message_through_created_at
     delivered_id = cmd.peer_message_through_id
-    if delivered_at is None or not delivered_id:
+    if (
+      (delivered_at is None) != (delivered_id is None)
+      or (delivered_id is not None and not delivered_id)
+    ):
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: peer-message cursor is incomplete"
+        "AcknowledgeProviderSuccess: peer-message cursor is incomplete"
       )
     run = db.query(ChatRun).filter(
       ChatRun.id == cmd.run_token,
@@ -2490,25 +2635,31 @@ class ChatWriterActor:
     ).first()
     if run is None:
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: admitted run not found"
+        "AcknowledgeProviderSuccess: admitted run not found"
       )
-    current = None
-    if (
-      run.peer_message_through_created_at is not None
-      and run.peer_message_through_id is not None
-    ):
-      current = (
-        run.peer_message_through_created_at,
-        str(run.peer_message_through_id),
-      )
-    candidate = (delivered_at, delivered_id)
-    if current is not None and candidate <= current:
-      return
-    run.peer_message_through_created_at = delivered_at
-    run.peer_message_through_id = delivered_id
-    run.peer_message_delivery_pending = False
+    if delivered_at is not None and delivered_id:
+      current = None
+      if (
+        run.peer_message_through_created_at is not None
+        and run.peer_message_through_id is not None
+      ):
+        current = (
+          run.peer_message_through_created_at,
+          str(run.peer_message_through_id),
+        )
+      candidate = (delivered_at, delivered_id)
+      if current is None or candidate > current:
+        run.peer_message_through_created_at = delivered_at
+        run.peer_message_through_id = delivered_id
+      run.peer_message_delivery_pending = False
+    from app.provider_availability import (
+      clear_provider_availability_after_success,
+    )
+    clear_provider_availability_after_success(
+      db, run.provider, run.started_at,
+    )
     if not _commit_or_rollback(db):
-      raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
+      raise _PersistFailed("AcknowledgeProviderSuccess did not persist")
 
   def _stage_activity_delivery_consumption(
     self, db, *, chat_id: str, run_token: str,
@@ -2656,6 +2807,74 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
     return True
+
+  def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> str | None:
+    """Persist one detected deliverable, keeping `name` unique within a chat.
+
+    The row and its transcript link are one transaction. A crash can therefore
+    leave, at worst, an unreferenced frozen byte copy for retention cleanup; it
+    cannot consume the inbox source after committing only half of the visible
+    download contract.
+    """
+    if (
+      not cmd.chat_id or not cmd.name or not cmd.path
+      or not cmd.placeholder or not isinstance(cmd.snapshot, dict)
+    ):
+      return None
+    from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+    from app.models import GeneratedFile
+
+    existing_names = {
+      row[0] for row in db.query(GeneratedFile.name).filter(
+      GeneratedFile.chat_id == cmd.chat_id,
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).all()
+    }
+    if len(existing_names) >= MAX_RECORDED_ROWS_PER_CHAT:
+      # Agent-driven, unlike uploads, so the row count has no natural
+      # ceiling. Stop recording rather than let one long chat grow the
+      # table (and this insert's own collision probing) without bound.
+      log.warning(
+        "generated-file cap reached for chat %s; not recording %s",
+        cmd.chat_id, cmd.name,
+      )
+      return None
+
+    name = _unique_generated_file_name(
+      cmd.name, existing_names, max_length=GeneratedFile.name.type.length,
+    )
+    snapshot = copy.deepcopy(cmd.snapshot)
+    replaced = False
+    for block in reversed(snapshot.get("blocks") or []):
+      if block.get("type") != "generated_files":
+        continue
+      for item in reversed(block.get("files") or []):
+        if item.get("name") == cmd.placeholder:
+          item["name"] = name
+          replaced = True
+          break
+      if replaced:
+        break
+    if not replaced:
+      raise _PersistFailed("RecordGeneratedFile placeholder missing from snapshot")
+
+    db.add(GeneratedFile(
+      chat_id=cmd.chat_id,
+      name=name,
+      path=cmd.path,
+      size=cmd.size,
+      mime_type=cmd.mime_type,
+    ))
+    if cmd.thinking_stashes:
+      self._stage_thinking_stashes(db, cmd.thinking_stashes)
+    persisted = update_live_assistant(
+      db, cmd.chat_id, snapshot, require_row=True, commit=False,
+    )
+    if persisted is not True:
+      db.rollback()
+      raise _PersistFailed("RecordGeneratedFile transcript association missing")
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGeneratedFile did not persist")
+    return name
 
   def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
     """Monotonic upsert for a deferred reasoning run.
@@ -3943,11 +4162,19 @@ class ChatWriterActor:
       )
       applied = True
     else:
-      applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+      metadata = (
+        {"selected_options": cmd.selected_options}
+        if cmd.selected_options is not None else None
+      )
+      applied = apply_answers_to_last_question(
+        chat, cmd.answers, cmd.question_id, metadata=metadata,
+      )
     if cmd.require_answer_match and not applied:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    if cmd.owner_authored:
+      new_msg["_owner_authored"] = True
     # Idempotent append: `cid` is untrusted client input, and a retried POST
     # (flaky network, double-tap) carries the SAME cid. If that cid already
     # names a durable row — queued OR already promoted into the transcript —
@@ -4057,8 +4284,10 @@ class ChatWriterActor:
       cid_of(m) for m in msgs if m.get("role") == "user"
     }
     stored_messages: list[dict] = []
+    owner_steer_committed = False
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      owner_authored = new_msg.pop("_owner_authored", False) is True
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
       # mid-turn steer after reload unless the committed Q2 row names the
@@ -4078,6 +4307,11 @@ class ChatWriterActor:
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
+      owner_steer_committed |= (
+        owner_authored
+        and new_msg.get("role") == "user"
+        and not new_msg.get("hidden")
+      )
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4091,6 +4325,7 @@ class ChatWriterActor:
     return {
       "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
+      "owner_steer_committed": owner_steer_committed,
       "pending": list(chat.pending_messages or []),
     }
 
@@ -4127,6 +4362,15 @@ class ChatWriterActor:
           "provider": chat.provider,
           "agent_settings_json": chat.agent_settings_json,
         }
+
+    # Visibility can change while the incoming provider synthesizes its
+    # briefing. Recheck at the writer-owned commit boundary so a chat that was
+    # hidden in the meantime never lands a provider mutation. Keep idempotent
+    # retries above this gate: an already-committed switch remains reportable
+    # even if the chat is hidden later.
+    from app.chat_visibility import provider_switch_allowed
+    if not provider_switch_allowed(chat):
+      return {"status": "conflict", "reason": "provider_pinned"}
 
     from app.run_state import has_running_run
     if chat.pending_messages or has_running_run(db, cmd.chat_id):
@@ -4348,6 +4592,7 @@ class ChatWriterActor:
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
+    agent_pending.pop("_owner_authored", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -4501,14 +4746,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
-    """Replace one still-queued message's text, preserving every other field.
+    """Replace one still-queued message's text and preserve its identity.
 
     Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
     row is still queued (True even for a no-op edit to identical text); the
     commit and `updated_at` bump happen only when the content actually changed,
     mirroring `_cancel_pending`. `updated` is False only when a racing promote
     or cancel already removed the row, so the caller can distinguish a real
-    edit from a message that has already left the queue.
+    edit from a message that has already left the queue. A non-owner editor
+    cannot carry the original owner's steering authority onto rewritten text.
     """
     from datetime import UTC, datetime
 
@@ -4527,7 +4773,12 @@ class ChatWriterActor:
         if message.get("content") == cmd.content:
           next_pending.append(message)
         else:
-          next_pending.append({**message, "content": cmd.content})
+          replacement = {**message, "content": cmd.content}
+          if cmd.owner_authored:
+            replacement["_owner_authored"] = True
+          else:
+            replacement.pop("_owner_authored", None)
+          next_pending.append(replacement)
           changed = True
       else:
         next_pending.append(message)
@@ -4982,6 +5233,16 @@ class ChatWriterActor:
           cmd.restart_nonce if cmd.park_reason == "restart" else None
         )
         parked = True
+        # Record the provider's reset time so background selection skips it
+        # until it recovers (the single serialized quota-signal write point).
+        if run.park_reason in ("usage_limit", "rate_limit"):
+          from app.provider_availability import mark_provider_limited
+          from app.models import Chat as _Chat
+          provider = run.provider
+          if not provider:
+            chat_row = db.get(_Chat, cmd.chat_id)
+            provider = chat_row.provider if chat_row else None
+          mark_provider_limited(db, provider, run.parked_until, run.park_reason)
       else:
         run.status = "completed"
         run.restart_nonce = None
@@ -5673,6 +5934,7 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    msg.pop("_owner_authored", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)
@@ -5922,7 +6184,12 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
 
 
 def update_live_assistant(
-  db, chat_id: str, message: dict, *, require_row: bool = False,
+  db,
+  chat_id: str,
+  message: dict,
+  *,
+  require_row: bool = False,
+  commit: bool = True,
 ) -> bool | None:
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
@@ -6022,7 +6289,7 @@ def update_live_assistant(
       .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
       .values(active_assistant_message_id=owner_id, updated_at=Chat.updated_at)
     )
-  return _commit_or_rollback(db)
+  return _commit_or_rollback(db) if commit else True
 
 
 def finalize_response_outcome(

@@ -38,10 +38,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app import generated_files
 from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
   install_approval_handler,
+  start_turn_for_handle,
 )
 
 from app.codex_events import (
@@ -257,12 +259,18 @@ async def _start_codex_turn(
     )),
     summary=summary,
   )
-  started = await thread._codex._client.turn_start(
+  started, subscription = await start_turn_for_handle(
+    thread._codex,
     thread.id,
     wire_input,
     params=params,
   )
-  return AsyncTurnHandle(thread._codex, thread.id, started.turn.id)
+  return AsyncTurnHandle(
+    thread._codex,
+    thread.id,
+    started.turn.id,
+    _subscription=subscription,
+  )
 
 
 def _codex_app_server_launch_args(
@@ -1496,6 +1504,14 @@ async def _run_codex_sdk_turn(
     resuming=session_id is not None,
   )
   sdk = _sdk_imports()
+  if data_dir is None:
+    from app.config import get_settings as _get_settings
+
+    data_dir = _get_settings().data_dir
+  runtime_data_dir = data_dir
+  generated_dir = generated_files.output_dir(
+    runtime_data_dir, chat_id, create=True,
+  )
   record_memory_checkpoint_once("codex_first_sdk_loaded", chat_id=chat_id)
   # chat.py always pre-merges the per-chat overrides on top of the
   # global file defaults; treat a missing dict as empty rather than
@@ -1558,21 +1574,22 @@ async def _run_codex_sdk_turn(
         base_instructions = skill.read_text(encoding="utf-8")
       except OSError:
         base_instructions = None
+  deliverable_instruction = generated_files.delivery_instruction(generated_dir)
+  base_instructions = (
+    f"{base_instructions.rstrip()}\n\n{deliverable_instruction}\n"
+    if base_instructions else deliverable_instruction + "\n"
+  )
 
   env = dict(base_env)
   env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
   # Derive the CODEX_HOME fallback from the configured data_dir rather than a
   # hardcoded /data literal (the only CODEX_HOME site that was not
   # DATA_DIR-derived — a relocated DATA_DIR would otherwise split provider
   # telemetry/auth). In practice CodexProvider.build_env already sets this; the
   # setdefault only matters when base_env omits it.
-  if data_dir is None:
-    from app.config import get_settings as _get_settings
-
-    data_dir = _get_settings().data_dir
-  runtime_data_dir = data_dir
   _ensure_codex_home(env, runtime_data_dir)
 
   # Remote MCP connections are materialized in chat.py while its DB session is
@@ -2340,6 +2357,14 @@ async def _run_codex_sdk_turn(
       "error": _codex_user_error(str(exc)),
     })
   finally:
+    try:
+      await generated_files.publish_inbox_files(
+        bc,
+        data_dir=runtime_data_dir,
+        chat_id=chat_id,
+      )
+    except Exception:
+      log.debug("generated-file turn capture failed", exc_info=True)
     if task_host_open and task_host_tool_use_id is not None:
       # A provider error/interrupt may skip terminal child notifications.
       # Close every still-live chip honestly before closing its Task host.
@@ -2486,6 +2511,8 @@ async def run_codex_sdk_turn(
     )
   finally:
     ownership.release()
+    from app.file_cache import reclaim_provider_cache
+    await reclaim_provider_cache("codex")
 
 
 async def steer_into_active_turn(

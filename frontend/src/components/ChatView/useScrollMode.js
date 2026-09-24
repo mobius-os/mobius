@@ -126,6 +126,7 @@ import {
   shouldPinSend,
   terminalLayoutAuthority,
 } from './scroll/policy.js'
+import { createNestedScrollHandoff } from './scroll/nestedScrollHandoff.js'
 import {
   _modeForPersistence,
   entryRestoreDecision,
@@ -1900,7 +1901,7 @@ export default function useScrollMode({
       )
       const activatesDisclosure = !!disclosureTarget
       if (!activatesDisclosure
-          && !readerInputMayScroll(event?.type, event?.key)) return
+          && !readerInputMayScroll(event?.type, event?.key, event?.ctrlKey)) return
       const inputDirection = readerInputEscapeDirection(event?.type, {
         deltaY: event?.deltaY,
         key: event?.key,
@@ -2095,7 +2096,10 @@ export default function useScrollMode({
     // reliably mark the lift. `touches.length` is the browser's own count of
     // fingers still on the surface, so a multi-touch episode ends exactly when
     // the last finger lifts.
+    let nestedScrollHandoff = null
     const onTouchContactChange = (event) => {
+      if (event.type === 'touchstart') nestedScrollHandoff?.onTouchStart(event)
+      else nestedScrollHandoff?.onTouchEnd(event)
       const count = event.touches ? event.touches.length : 0
       const wasActive = touchContactCountRef.current > 0
       touchContactCountRef.current = count
@@ -2163,9 +2167,24 @@ export default function useScrollMode({
     const onComposerPointerDown = (event) => runComposerTailIntent(event)
     composerEditRunRef.current = runComposerTailIntent
 
+    nestedScrollHandoff = createNestedScrollHandoff(scrollEl, {
+      // A crossing gesture belongs to the transcript even when the nested
+      // surface consumed part of it. Target the outer scroller so the ordinary
+      // ownership policy cannot mistake the remaining nested range for full
+      // ownership of the same gesture.
+      onHandoff: ({ delta, type }) => onUserInput({
+        type,
+        deltaY: delta,
+        target: scrollEl,
+      }),
+    })
+    const onWheelInput = (event) => {
+      if (!nestedScrollHandoff.onWheel(event)) onUserInput(event)
+    }
+
     scrollEl.addEventListener('pointerdown', onPointerDownInput, { passive: true })
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
-    scrollEl.addEventListener('wheel', onUserInput, { passive: true })
+    scrollEl.addEventListener('wheel', onWheelInput, { passive: false })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
     scrollEl.addEventListener(
       'click', onSyntheticDisclosureClick, { passive: true },
@@ -2177,6 +2196,7 @@ export default function useScrollMode({
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
     scrollEl.addEventListener('touchstart', onTouchContactChange, { passive: true })
+    scrollEl.addEventListener('touchmove', nestedScrollHandoff.onTouchMove, { passive: false })
     scrollEl.addEventListener('touchend', onTouchContactChange, { passive: true })
     scrollEl.addEventListener('touchcancel', onTouchContactChange, { passive: true })
     window.addEventListener('touchend', onWindowTouchContactEnd, { passive: true })
@@ -2314,7 +2334,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
-      scrollEl.removeEventListener('wheel', onUserInput)
+      scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
       scrollEl.removeEventListener('click', onSyntheticDisclosureClick)
       scrollEl.removeEventListener('focusin', onInlineEditorFocus)
@@ -2324,8 +2344,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       scrollEl.removeEventListener('touchstart', onTouchContactChange)
+      scrollEl.removeEventListener('touchmove', nestedScrollHandoff.onTouchMove)
       scrollEl.removeEventListener('touchend', onTouchContactChange)
       scrollEl.removeEventListener('touchcancel', onTouchContactChange)
+      nestedScrollHandoff.dispose()
       window.removeEventListener('touchend', onWindowTouchContactEnd)
       window.removeEventListener('touchcancel', onWindowTouchContactEnd)
       document.removeEventListener('visibilitychange', onVisibilityHiddenClearContact)
