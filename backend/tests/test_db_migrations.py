@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +83,106 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
   ]
+
+
+def test_git_app_source_migration_captures_files_and_attaches_catalog_origin(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "legacy-cards"
+  source_dir.mkdir(parents=True)
+  (source_dir / "settings.json").write_text("runtime", encoding="utf-8")
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'git-apps.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      name="Legacy Cards",
+      description="",
+      jsx_source="export default function App() { return <div>legacy</div> }",
+      compiled_path="",
+      slug="legacy-cards",
+      source_dir=str(source_dir),
+      # The installer persists the canonical identity key without the
+      # trailing mobius.json; migration must understand that stored shape.
+      manifest_url=(
+        "https://raw.githubusercontent.com/acme/app-cards/main"
+        "#manifest-id=legacy-cards"
+      ),
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  migrations._require_git_app_sources(eng)
+  first_head = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  migrations._require_git_app_sources(eng)
+
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8").endswith(
+    "<div>legacy</div> }"
+  )
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "upstream"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == first_head
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "remote", "get-url", "origin"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == "https://github.com/acme/app-cards.git"
+  tracked = subprocess.run(
+    ["git", "-C", str(source_dir), "ls-tree", "-r", "--name-only", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.splitlines()
+  assert "index.jsx" in tracked
+  assert "settings.json" not in tracked
+  with Session(eng) as session:
+    migrated = session.get(models.App, app_id)
+    assert migrated.source_commit == first_head
+    assert migrated.upstream_commit == first_head
+
+
+def test_git_app_source_migration_skips_one_damaged_repo(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  apps_dir = data_dir / "apps"
+  broken_dir = apps_dir / "broken"
+  healthy_dir = apps_dir / "healthy"
+  broken_dir.mkdir(parents=True)
+  healthy_dir.mkdir(parents=True)
+  subprocess.run(
+    ["git", "init", "-q", "-b", "other", str(broken_dir)], check=True,
+  )
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'damaged-git-app.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add_all([
+      models.App(
+        name="Broken", description="", jsx_source="broken", compiled_path="",
+        slug="broken", source_dir=str(broken_dir),
+      ),
+      models.App(
+        name="Healthy", description="", jsx_source="healthy", compiled_path="",
+        slug="healthy", source_dir=str(healthy_dir),
+      ),
+    ])
+    session.commit()
+
+  migrations._require_git_app_sources(eng)
+  migrations._require_git_app_sources(eng)
+
+  with Session(eng) as session:
+    broken = session.query(models.App).filter_by(slug="broken").one()
+    healthy = session.query(models.App).filter_by(slug="healthy").one()
+    assert broken.source_commit is None
+    assert broken.upstream_commit is None
+    assert healthy.source_commit
+    assert healthy.upstream_commit == healthy.source_commit
+
 
 
 def test_provider_admission_upgrade_preserves_legacy_uncertainty(tmp_path):
@@ -1627,6 +1728,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0062_chat_run_progress_lease",
     "0063_durable_goal_records",
     "0063_chat_run_continuation_control",
+    "0064_require_git_app_sources",
   ]
   assert second == first
 
