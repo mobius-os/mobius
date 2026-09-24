@@ -1113,6 +1113,50 @@ export default function useNavigation({
     settingsOpenRef.current = false
   }, [])
 
+  // A chat destination applied OUTSIDE navTo still owes the navigation the same
+  // Back-target navTo records. The draft-first New Chat mounts its presentation
+  // synchronously -- before the chat exists server-side -- so it cannot route
+  // through navTo (which applies its own destination), and it used to only
+  // close the drawer: that POPPED the sentinel the tap came from, left the
+  // current entry still labelled with the previous chat, and made Back fall
+  // off the shell document entirely. Record the history half of navTo here:
+  // retag the drawer sentinel (else push a nav entry) and stack the route being
+  // left. Call it BEFORE the destination is applied so snapshotRoute() is still
+  // the route being left. Returns false when there is nothing to record.
+  function recordChatNavigation(chatId, { paneId } = {}) {
+    if (chatId == null || String(chatId).trim() === '') return false
+    const ws = workspaceStateRef.current.ws
+    const targetPaneId = (typeof paneId === 'string' && ws.panes[paneId])
+      ? paneId
+      : ws.focusedPaneId
+    const previousRoute = snapshotRoute()
+    const nextRoute = navRoute('chat', String(chatId), null, targetPaneId)
+    if (sameRoute(previousRoute, nextRoute)) return false
+    cancelDrawerPreparation()
+    navigationEpochRef.current += 1
+    if (drawerPushedRef.current) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      const recoveredClose = closeTraversal?.recovered
+        && closeTraversal.entryId === navEntryId(history.state)
+      drawerPushedRef.current = false
+      currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
+      if (recoveredClose) {
+        closeTraversal.selectedRoute = nextRoute
+        closeTraversal.selectionChanged = true
+      } else {
+        drawerCloseTraversalRef.current = null
+      }
+    } else {
+      try {
+        pushShellEntry('nav', nextRoute)
+      } catch { /* history unavailable — leave the entry as-is */ }
+    }
+    navStackRef.current.push(previousRoute)
+    drawerClosePendingRef.current = false
+    drawerOpenRef.current = false
+    setDrawerVisible(false)
+    return true
+  }
   function navTo(view, opts = {}) {
     // A route change supersedes a drawer open that has not reached its painted
     // commit yet. Otherwise its queued callback can install a drawer sentinel
@@ -2244,6 +2288,7 @@ export default function useNavigation({
     openDrawer,
     closeDrawer,
     navTo,
+    recordChatNavigation,
     navigateBackward,
     navigateForward,
     tabRevealRevision,
