@@ -1363,8 +1363,7 @@ Consumers:
 
 Prompt snapshots remain immutable. Constitution changes apply to newly started
 sessions after activation; evaluation must not mistake an old session's prompt
-for the newly coached contract. The reproducible live-test ladder and resource
-accounting limits are in `scripts/CHAT-CONTINUITY-EVAL.md`.
+for the newly coached contract.
 
 Two agent mechanisms with similar names deliberately remain separate.
 `app.background_agents` resolves the owner’s primary/fallback ordering for
