@@ -62,7 +62,10 @@ def write_git_package(root: str | Path, files: dict[str, str | bytes]) -> Path:
   bare = root / "origin.git"
   if not (work / ".git").is_dir():
     work.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    subprocess.run(
+      ["git", "init", "-q", "-b", "main", str(work)], check=True,
+      env=app_git._git_env(work),
+    )
   tracked = subprocess.run(
     ["git", "-C", str(work), "ls-files"], capture_output=True, text=True,
     check=True, env=app_git._git_env(work),

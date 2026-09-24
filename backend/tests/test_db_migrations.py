@@ -144,6 +144,46 @@ def test_git_app_source_migration_captures_files_and_attaches_catalog_origin(
     assert migrated.upstream_commit == first_head
 
 
+def test_git_app_source_migration_skips_one_damaged_repo(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  apps_dir = data_dir / "apps"
+  broken_dir = apps_dir / "broken"
+  healthy_dir = apps_dir / "healthy"
+  broken_dir.mkdir(parents=True)
+  healthy_dir.mkdir(parents=True)
+  subprocess.run(
+    ["git", "init", "-q", "-b", "other", str(broken_dir)], check=True,
+  )
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'damaged-git-app.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add_all([
+      models.App(
+        name="Broken", description="", jsx_source="broken", compiled_path="",
+        slug="broken", source_dir=str(broken_dir),
+      ),
+      models.App(
+        name="Healthy", description="", jsx_source="healthy", compiled_path="",
+        slug="healthy", source_dir=str(healthy_dir),
+      ),
+    ])
+    session.commit()
+
+  migrations._require_git_app_sources(eng)
+  migrations._require_git_app_sources(eng)
+
+  with Session(eng) as session:
+    broken = session.query(models.App).filter_by(slug="broken").one()
+    healthy = session.query(models.App).filter_by(slug="healthy").one()
+    assert broken.source_commit is None
+    assert broken.upstream_commit is None
+    assert healthy.source_commit
+    assert healthy.upstream_commit == healthy.source_commit
+
+
 
 def test_provider_admission_upgrade_preserves_legacy_uncertainty(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'provider-admission.db'}")

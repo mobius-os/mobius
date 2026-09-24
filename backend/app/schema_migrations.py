@@ -4962,17 +4962,16 @@ def _require_git_app_sources(eng) -> None:
       "source_commit, upstream_commit FROM apps"
     )).mappings())
 
-  updates: list[tuple[int, str, str]] = []
-  for row in rows:
+  def migrate_row(row) -> tuple[int, str, str] | None:
     raw_source_dir = row["source_dir"]
     if not isinstance(raw_source_dir, str) or not raw_source_dir.strip():
-      continue
+      return None
     source_dir = Path(raw_source_dir).resolve()
     if source_dir.parent != apps_root or source_dir.name.isdigit():
       # Other migrations own legacy path repair.  This migration only adopts
       # source directories already inside the managed app root; an unrelated
       # or synthetic row must not prevent the rest of the database starting.
-      continue
+      return None
     source_dir.mkdir(parents=True, exist_ok=True)
     entry = source_dir / "index.jsx"
     if not entry.exists():
@@ -5029,7 +5028,18 @@ def _require_git_app_sources(eng) -> None:
       upstream_commit = local_commit
     else:
       upstream_commit = upstream.stdout.strip()
-    updates.append((int(row["id"]), local_commit, upstream_commit))
+    return int(row["id"]), local_commit, upstream_commit
+
+  updates: list[tuple[int, str, str]] = []
+  for row in rows:
+    try:
+      update = migrate_row(row)
+    except (OSError, subprocess.SubprocessError):
+      # One damaged legacy app must not prevent the database or other apps
+      # from upgrading. Its unchanged row remains eligible on the next boot.
+      continue
+    if update is not None:
+      updates.append(update)
 
   with eng.begin() as conn:
     for app_id, local_commit, upstream_commit in updates:

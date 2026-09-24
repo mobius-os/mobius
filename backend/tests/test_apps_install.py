@@ -4317,6 +4317,22 @@ def test_update_candidate_preview_applies_the_reviewed_commit_without_refetch(
   assert "SELECTED REF FOOTER" in payload["upstream_diff"]
   assert "ORIGINAL FOOTER" in payload["upstream_diff"]
 
+  from fastapi import HTTPException
+  from app import install
+  with pytest.raises(HTTPException) as caught:
+    asyncio.run(install.install_from_manifest(
+      db,
+      manifest_url=None,
+      manifest=next_manifest,
+      raw_base=base,
+      source="store",
+      expected_app_id=app_id,
+      expected_upstream_commit=payload["upstream_commit"],
+      expected_candidate_digest="0" * 64,
+    ))
+  assert caught.value.status_code == 409
+  assert caught.value.detail["code"] == "pending_update_changed"
+
   (work / "mobius.json").write_text(
     json.dumps({**manifest, "version": "3.0.0"}), encoding="utf-8",
   )
@@ -4342,6 +4358,22 @@ def test_update_candidate_preview_applies_the_reviewed_commit_without_refetch(
   source_dir = Path(get_settings().data_dir) / "apps" / manifest["id"]
   assert "SELECTED REF FOOTER" in (source_dir / "index.jsx").read_text()
   assert "UNREVIEWED FOOTER" not in (source_dir / "index.jsx").read_text()
+
+
+def test_missing_reviewed_git_commit_is_a_stale_update(
+  client, auth, bypass_url_validation,
+):
+  app = create_local_app(client, auth, name="Missing reviewed commit")
+  rejected = client.post("/api/apps/install", headers=auth, json={
+    "manifest_url": (
+      "https://raw.githubusercontent.com/acme/missing-reviewed/main/mobius.json"
+    ),
+    "reviewed_source_digest": "0" * 64,
+    "update_app_id": app["id"],
+    "reviewed_upstream_commit": "f" * 40,
+  })
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "update_changed"
 
 
 def test_update_candidate_preview_rejects_a_different_catalog_app(

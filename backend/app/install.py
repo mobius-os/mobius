@@ -3643,9 +3643,21 @@ async def install_from_manifest(
     reviewed_source_url = manifest_url or (
       _normalize_raw_base(raw_base or "") + "mobius.json"
     )
-    candidate_tree = await asyncio.to_thread(
-      app_git.read_ref_tree, reviewed_app.source_dir, reviewed_commit,
-    )
+    try:
+      candidate_tree = await asyncio.to_thread(
+        app_git.read_ref_tree, reviewed_app.source_dir, reviewed_commit,
+      )
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+      raise HTTPException(
+        409,
+        detail={
+          "code": "update_changed",
+          "message": (
+            "The reviewed Git update is no longer available. Refresh the "
+            "update and try again."
+          ),
+        },
+      ) from exc
     # Modern Store updates always carry the complete package in the selected
     # Git commit. Legacy URL-import conflict receipts predate that invariant;
     # replay those through their existing digest guard until the one-time
