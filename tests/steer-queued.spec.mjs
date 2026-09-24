@@ -482,6 +482,35 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let releaseStream
     const streamGate = new Promise(resolve => { releaseStream = resolve })
 
+    // The first turn's stream is held behind streamGate, so the runtime poll is
+    // the only authority on whether a turn is running. This was the one case in
+    // the file without the runtime mock its siblings carry: unmocked, the real
+    // backend answered running:false (the 202 below starts no real run), the app
+    // retired the "settled" turn, and Stop never appeared -- so neither queued
+    // row could be fast-forwarded. Mirror the sibling fixture: running flips only
+    // once the first message starts the turn (an unconditional true locks the
+    // composer before any send), and queued rows stay in pending_messages until
+    // the steer consumes them.
+    let turnRunning = false
+    let pendingMessagesSnapshot = []
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ running: turnRunning, runtime_revision: 0, pending_messages: pendingMessagesSnapshot }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          messages: [], total: 0, offset: 0,
+          running: turnRunning, runtime_revision: 0, pending_messages: pendingMessagesSnapshot,
+        }),
+      })
+    })
+
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
       let body = {}
@@ -489,6 +518,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
 
       if (body.force_steer) {
+        pendingMessagesSnapshot = []
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -496,6 +526,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        turnRunning = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -510,6 +541,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
       queueCount++
+      pendingMessagesSnapshot = [...pendingMessagesSnapshot, { role: 'user', content: body.content, ts, cid: body.cid }]
       // Echo pending_message (like the other fixtures in this file): without
       // it, ChatView treats the ack as an older-backend compatibility case
       // and calls fetchMessages({force:true}) — a REAL, unmocked GET against

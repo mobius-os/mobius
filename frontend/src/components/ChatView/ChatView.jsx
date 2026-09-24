@@ -1699,8 +1699,7 @@ export default function ChatView({
   const reconcileRuntimeState = useCallback(() => {
     const generation = fetchGenRef.current
     const current = runtimeReconcileRef.current
-    try { (window.__rtTrace = window.__rtTrace || []).push({ inst: __rtInstance.current, chatId: String(chatId), gen: generation, curGen: current?.generation ?? null, curChat: current?.chatId ?? null, reused: !!(current?.chatId === chatId && current.generation === generation), hidden: !!hiddenRef.current, t: Math.round(performance.now()), stack: (new Error().stack || '').split('
-').slice(2, 5).join(' | ') }) } catch { /* trace */ }
+    try { (window.__rtTrace = window.__rtTrace || []).push({ inst: __rtInstance.current, chatId: String(chatId), gen: generation, curGen: current?.generation ?? null, reused: !!(current?.chatId === chatId && current.generation === generation), hidden: !!hiddenRef.current, t: Math.round(performance.now()) }) } catch { /* trace */ }
     if (current?.chatId === chatId && current.generation === generation) {
       return current.promise
     }
