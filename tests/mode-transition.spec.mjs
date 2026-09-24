@@ -67,7 +67,34 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
-    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'x', title: 'Seeded', messages: [] }) })
+    // Echo the REQUESTED id and carry the chat-detail contract. This answered
+    // id:'x' for every chat and omitted every field the surface now reads, so a
+    // seeded tab could not settle into a real chat identity.
+    const requestedId = new URL(r.request().url()).pathname.split('/').pop()
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: requestedId,
+        title: 'Seeded',
+        messages: [],
+        total: 0,
+        offset: 0,
+        running: false,
+        pending_messages: [],
+        pending_question_id: null,
+        runtime_revision: 0,
+        session_id: null,
+        provider: 'codex',
+        created_by_app_id: null,
+        agent_settings_json: { model: 'gpt-5.6-sol' },
+        effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
+        has_assistant_turns: false,
+        auto_resume_on_limit: false,
+        auto_resume_on_restart: true,
+        updated_at: '2026-01-01T00:02:00Z',
+      }),
+    })
   })
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {
