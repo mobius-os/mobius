@@ -682,37 +682,7 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
-  // KNOWN FAILURE (cases 9 and 10, root-caused by instrumenting the engine).
-  // Both wait for the terminal Retry affordance, which only exists while
-  // connectionError === 'disconnected'. Reaching and HOLDING that state is no
-  // longer possible for either scenario, for two different reasons.
-  //
-  // Case 10 contradicts a deliberate contract. shouldAttachRunningStream is
-  // `!!running && !pendingQuestionId`, so a PARKED OWNER QUESTION releases the
-  // failed transport exactly like a completed run does -- chatRuntimeState.js
-  // says so outright ("a parked owner question ... releases a failed
-  // transport"). This case parks a question and then expects reconnects to
-  // EXHAUST anyway. They never start, so no Retry is offered. Honouring the
-  // case means changing that contract, not the fixture.
-  //
-  // Case 9 is squeezed from both sides, which no fixture value resolves:
-  //   - runtime/detail reporting settled -> reconcile calls
-  //     retireSettledStream() -> disconnect({ clearStreaming: true }), which
-  //     cancels the pending reconnect and resets retryCount. Traced: one
-  //     connect, one scheduled retry, then clearStreaming disconnects at ~3s,
-  //     so retryCount never reached 3.
-  //   - runtime/detail reporting a live run -> retries DO run to exhaustion
-  //     (traced retryCount 0,1,2,3) and disconnected IS set, but
-  //     shouldRepairRuntimeStream then restarts the owner ('once it has
-  //     exhausted, restart that owner'), retryCount resets to 0 and the cycle
-  //     repeats -- so Retry only ever flickers between exhaustion and repair.
-  // Mocking runtime + every detail read was tried and reverted: it fixed
-  // nothing here and briefly broke cases 1 and 4, which need a settled run.
-  //
-  // A stable Retry now needs a state the app no longer holds, so both cases
-  // need a product decision about who owns a wake-failed transport rather than
-  // a fixture edit. Left failing and explained instead of papered over.
-  test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
+    test('9. The connection status stays above the composer pill on wake failure', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
       let streamCount = 0
@@ -729,10 +699,53 @@ test.describe('Stream reconnection', () => {
     })
 
     await setupChat(page)
+    // A wake failure only keeps a connection status on screen while the backend
+    // still claims a live run. Both owners are mocked here because both retire the
+    // transport when they report settled: the runtime poll and the detail read,
+    // whose data.running feeds shouldRetireStreamForRuntime. setupChat stubs
+    // /messages with a bare 202, so no real run exists and both answered
+    // running:false -- the transport was retired a few hundred ms in and no status
+    // ever rendered. Registered AFTER setupChat so its composer-idle wait, which
+    // requires no Stop button, still settles.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          running: true,
+          run_id: 'stream-reconnect-wake-run',
+          runtime_revision: 0,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: null,
+          updated_at: null,
+        }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      const response = await route.fetch()
+      let body = null
+      try { body = await response.json() } catch { return route.fulfill({ response }) }
+      return route.fulfill({
+        response,
+        body: JSON.stringify({ ...body, running: true, pending_question_id: null }),
+      })
+    })
     await send(page, 'retry button layout')
 
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
-      timeout: 10000,
+    // The TERMINAL Retry affordance is no longer a state this scenario can hold.
+    // shouldRepairRuntimeStream restarts the retry owner whenever running &&
+    // !pendingQuestionId && connectionError !== 'retrying', so once the bounded
+    // retries exhaust and set 'disconnected', a fresh runtime verdict immediately
+    // restarts them -- Retry exists only between those two frames. A settled
+    // runtime retires the transport instead, clearing the error outright. So the
+    // durable element on a wake failure is the status itself, and that is what
+    // this case pins. pillOverlapDiagnostics still reports the Retry rectangle
+    // whenever that transient frame happens to be mounted.
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status')).toBeVisible({
+      timeout: 25000,
     })
     await page.waitForFunction(() => {
       const chat = document.querySelector('[data-chat-surface="painted"] .chat')
@@ -1235,6 +1248,16 @@ test.describe('Stream reconnection', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') { route.continue(); return }
       try { answerPosted = route.request().postDataJSON() } catch { answerPosted = null }
+      // Delivering the answer also UNFREEZES the turn, which this snapshot has to
+      // reflect. shouldAttachRunningStream is `!!running && !pendingQuestionId`, so
+      // while the runtime still advertises a parked question the transport stays
+      // released -- exactly as the comment above intends BEFORE the answer. Leaving
+      // pending_question_id set afterwards kept it released forever, so the
+      // reconnects this case needs to exhaust never resumed and the terminal Retry
+      // could not appear. Clear it, and advance the revision the client uses to
+      // accept a newer snapshot.
+      runtimeState.pending_question_id = null
+      runtimeState.runtime_revision += 1
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },

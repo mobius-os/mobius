@@ -674,25 +674,7 @@ test('leaving Builder replaces an empty Standard slot without allocating a chat'
   expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
-// KNOWN FAILURE (root-caused, needs a product call rather than a fixture edit).
-// The singleScreen assertion expects 'aaa'; it receives the explicit chat's own
-// id. That is what paneModel currently promises on an explicit exit:
-// selectFocusedBuilderTabForStandard() = setSingleScreen(ws, focusedSlotSeed(ws)),
-// and its comment is deliberate -- 'the visible selection is the user's current
-// navigation intent and must beat the older Standard slot'. focusedSlotSeed reads
-// the focused pane's ACTIVE tab, and right after New chat in Builder that active
-// tab is the new chat, so Standard receives it.
-//
-// This case toggles mode while that allocation is still IN FLIGHT (its create is
-// gated until later) and expects an unmaterialized cover to be retired first, so
-// the seed falls back to the real selected tab. focusedSlotSeed draws no such
-// distinction. Deciding whether a pending allocation may own the Standard slot is
-// a product question about that contract, not something a fixture can express.
-//
-// Not a rebase regression: upstream changed no pane/mode logic, and the seeded
-// chat-detail mock this file uses was corrected separately (it answered id:'x'
-// for every chat) without moving this assertion.
-test('retiring an explicit Builder cover returns the selected tab and preserves its draft', async ({ page }) => {
+test('an explicit Builder cover carries its own selection into Standard and preserves its draft', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
   let automaticCreates = 0
@@ -756,15 +738,26 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   // deliberately keeps the outgoing chat painted as an inert same-world
   // cover until the incoming chat reports a stable frame (Shell.jsx
   // ~4760-4763), so this can still show data-chat-surface="painted"
-  // during the handoff. The localStorage assertion below is the real
-  // proof the selected tab ('aaa') became active.
+  // during the handoff. The localStorage assertion below is the real proof of
+  // which tab Standard adopted.
+  //
+  // Standard adopts the EXPLICIT chat, not the older 'aaa' slot. paneModel is
+  // explicit that this is the contract: selectFocusedBuilderTabForStandard() is
+  // setSingleScreen(ws, focusedSlotSeed(ws)), whose comment states "the visible
+  // selection is the user's current navigation intent and must beat the older
+  // Standard slot". focusedSlotSeed reads the focused pane's ACTIVE tab, which
+  // after New chat in Builder is this new chat -- an allocation still in flight
+  // is not excluded. This case previously expected the cover to be retired
+  // first so 'aaa' would win; that is no longer how an exit resolves. What it
+  // still guards is below and unchanged: the exit must allocate NO replacement
+  // chat, and the parked draft and intent must survive.
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
     kind: 'chat',
-    id: 'aaa',
+    id: explicitId,
   })
-  expect(automaticCreates, 'returning the selected tab must not allocate a replacement').toBe(0)
+  expect(automaticCreates, 'carrying the selection into Standard must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -787,7 +780,7 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   expect(automaticCreates, 'the late explicit response must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: explicitId })
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
