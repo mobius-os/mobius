@@ -18,6 +18,7 @@ from app.chat_media import fix_forward_chat_media
 from app.chat_retention import purge_expired_chat_tombstones
 from app.config import get_settings
 from app.agent_activity import EMPTY_AGENT_ACTIVITY_BINDING
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _write_row(db, chat, *, name, path, size=11, mime_type="application/pdf"):
@@ -40,6 +41,7 @@ def _sink(chat):
   return ChatEventSink(
     ChatBroadcast(chat.id), chat.id, run_token="rt-generated",
     agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
+    recall_binding=EMPTY_RECALL_BINDING,
   )
 
 

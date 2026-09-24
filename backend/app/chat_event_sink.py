@@ -11,7 +11,7 @@ import copy
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Awaitable, Callable
+from typing import Awaitable
 
 from app.agent_lifecycle import normalize_chat_event
 from app.broadcast import get_broadcast
@@ -59,6 +59,17 @@ from app.agent_activity import (
   background_dispatch,
   background_output_path,
   defer_activity,
+)
+from app.memory_recall import (
+  MAX_RECALL_RESULT_SCAN_CHARS,
+  RECALL_SEARCHING,
+  RecallBinding,
+  background_dispatch_from_result,
+  background_recall_path,
+  defer_recall_to_task,
+  recall_from_command,
+  settle_recall,
+  settle_recall_from_task_output,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -343,20 +354,13 @@ class ChatEventSink:
     chat_id: str,
     run_token: str | None = None,
     *,
+    recall_binding: RecallBinding,
     agent_activity_binding: AgentActivityBinding = EMPTY_AGENT_ACTIVITY_BINDING,
-    on_question_checkpoint: Callable[[], Awaitable[None]] | None = None,
   ):
     self.bc = bc
     self.chat_id = chat_id
-    # Exact manifest-declared app commands this turn may decorate. Resolve once
-    # while the caller's DB session is live; provider turns can run for hours.
+    self._recall_binding = recall_binding
     self._agent_activity_binding = agent_activity_binding
-    # Active Goals may span many physical turns. A durably persisted question
-    # is their safe mid-operation summary boundary: the card is already
-    # recoverable, while an answer has not yet advanced the transcript. The
-    # caller owns summary policy; the sink only fires this optional hook after
-    # the QuestionCommit barrier and never waits on it before showing the card.
-    self._on_question_checkpoint = on_question_checkpoint
     self._side_tasks: set[asyncio.Task] = set()
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
@@ -572,6 +576,128 @@ class ChatEventSink:
         )
 
     ack.add_done_callback(_log_if_failed)
+
+  def _memory_recall_for_tool(self, tool_use_id) -> dict | None:
+    """Return the input-time Memory marker for this tool, if there is one.
+
+    Read-only by design: resolving the block is a question, not the place to
+    adopt a legacy id (`process_event` still owns that a moment later). Only a
+    tool whose COMMAND named memory_search may go on to cite notes, so output
+    text alone can never mint a citation.
+    """
+    for blk in reversed(self.assistant_blocks):
+      if blk.get("type") != "tool":
+        continue
+      if tool_use_id:
+        if blk.get("tool_use_id") == tool_use_id:
+          recall = blk.get("recall")
+          return recall if isinstance(recall, dict) else None
+        continue
+      # Legacy events without an id: the newest still-open tool is the only
+      # safe candidate, matching `_tool_block_for_event`'s fallback.
+      if blk.get("status") != "done":
+        recall = blk.get("recall")
+        return recall if isinstance(recall, dict) else None
+    return None
+
+  def _tool_was_memory_recall(self, tool_use_id) -> bool:
+    return self._memory_recall_for_tool(tool_use_id) is not None
+
+  def _stamp_memory_recall(
+    self, event: ChatEvent, *, result_content: object = None,
+  ) -> None:
+    """Name a Memory-app recall on the event, in two lifecycle phases.
+
+    The documented simple command identifies the lookup, so the live turn can
+    say it is remembering while the search runs. Only the final output event
+    settles it from the Memory app's structured result; streaming deltas cannot
+    prematurely claim success, emptiness, or failure.
+    """
+    if event.get("type") in ("tool_start", "tool_input"):
+      if event.get("type") == "tool_start" and event.get("tool") != "Bash":
+        return
+      # Both a tool_start AND a tool_input can arrive for one tool call on the
+      # Claude runner. Stamp the command-derived marker exactly once per block:
+      # if the block for this tool_use_id already carries a recall marker, leave
+      # it settled and skip. (Codex has no tool_input; Claude's tool_start input
+      # is empty, so in practice only one phase produces a marker — this keeps a
+      # future runner that populates both from double-stamping.)
+      if self._tool_was_memory_recall(event.get("tool_use_id")):
+        return
+      recall = recall_from_command(event.get("input"), self._recall_binding)
+      if recall is not None:
+        event["recall"] = recall
+      return
+    pending = self._memory_recall_for_tool(event.get("tool_use_id"))
+    if event.get("output_complete") and pending is not None:
+      content = (
+        event.get("content")
+        if result_content is None
+        else result_content
+      )
+      dispatch = background_dispatch_from_result(content)
+      if dispatch is not None and event.get("output_exit_code") in (None, 0):
+        # A `run_in_background` Bash call: the placeholder is not Memory's
+        # answer. The task_done for this id (or finalize) settles it.
+        event["recall"] = defer_recall_to_task(pending, dispatch)
+        return
+      event["recall"] = settle_recall(
+        pending, content, event.get("output_exit_code"),
+      )
+
+  def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
+    """Tool blocks whose Memory lookup is still waiting on a background task."""
+    found = []
+    for blk in self.assistant_blocks:
+      if blk.get("type") != "tool":
+        continue
+      recall = blk.get("recall")
+      if not isinstance(recall, dict) or recall.get("status") != RECALL_SEARCHING:
+        continue
+      if not isinstance(recall.get("task_id"), str):
+        continue
+      if task_id is not None and recall["task_id"] != task_id:
+        continue
+      found.append(blk)
+    return found
+
+  def _settle_deferred_recall(
+    self, pending: dict, task_status: object,
+  ) -> dict:
+    """Read the background task's captured output and settle the lookup.
+
+    Only this chat's own scratch task file is honored; an unreadable or
+    still-empty file is a failed lookup, never a silent success.
+    """
+    path = background_recall_path(
+      pending, str(agent_scratch_root() / str(self.chat_id)),
+    )
+    text = None
+    if path is not None:
+      try:
+        with open(path, "rb") as handle:
+          handle.seek(0, 2)
+          size = handle.tell()
+          handle.seek(max(0, size - MAX_RECALL_RESULT_SCAN_CHARS))
+          text = handle.read().decode("utf-8", "replace")
+      except OSError:
+        text = None
+    return settle_recall_from_task_output(pending, text, task_status)
+
+  def _stamp_deferred_recall_done(self, event: ChatEvent) -> None:
+    """On a background task's terminal event, settle the lookup it owned.
+
+    The task_done routes to its block by task_id, so process_event copies the
+    stamped recall onto the same block the placeholder deferred from.
+    """
+    task_id = event.get("task_id")
+    if task_id is None:
+      return
+    blocks = self._deferred_recall_blocks(str(task_id))
+    if blocks:
+      event["recall"] = self._settle_deferred_recall(
+        blocks[0]["recall"], event.get("status"),
+      )
 
   def _app_activity_for_tool(self, tool_use_id) -> dict | None:
     """Return the command-authenticated app marker for this tool."""
@@ -1086,7 +1212,10 @@ class ChatEventSink:
       full_tool_output = event.get("content")
       tool_use_id = event.get("tool_use_id")
       pending_activity = self._app_activity_for_tool(tool_use_id)
-      if isinstance(tool_use_id, str) and pending_activity is not None:
+      pending_recall = self._memory_recall_for_tool(tool_use_id)
+      if isinstance(tool_use_id, str) and (
+        pending_activity is not None or pending_recall is not None
+      ):
         chunk = full_tool_output if isinstance(full_tool_output, str) else ""
         if event.get("output_complete") is True:
           streamed = self._app_output_tails.pop(tool_use_id, "")
@@ -1118,10 +1247,13 @@ class ChatEventSink:
         exit_code = tool_output_exit_code(full_tool_output)
         if exit_code is not None:
           event["output_exit_code"] = exit_code
+      self._stamp_memory_recall(event, result_content=full_tool_output)
       self._stamp_app_activity(event, result_content=full_tool_output)
     if event_type in ("tool_start", "tool_input"):
+      self._stamp_memory_recall(event)
       self._stamp_app_activity(event)
     if event_type == "task_done":
+      self._stamp_deferred_recall_done(event)
       self._stamp_deferred_app_activity_done(event)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_peer_message(event)
@@ -1258,6 +1390,8 @@ class ChatEventSink:
     # An app activity deferred to a background task whose task_done never reached us
     # (turn stopped, provider suppressed the terminal frame) must not persist
     # as searching forever: settle it from the file if the task did finish.
+    for blk in self._deferred_recall_blocks():
+      blk["recall"] = self._settle_deferred_recall(blk["recall"], None)
     for blk in self._deferred_app_activity_blocks():
       blk["app_activity"] = self._settle_deferred_app_activity(
         blk["app_activity"], None,
@@ -1537,11 +1671,6 @@ class ChatEventSink:
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
-    if self._on_question_checkpoint is not None:
-      self._start_side_task(
-        self._on_question_checkpoint(),
-        failure_message="question checkpoint summary failed chat_id=%s",
-      )
 
   def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
     """Claim the clean card end synchronously, then signal it asynchronously.

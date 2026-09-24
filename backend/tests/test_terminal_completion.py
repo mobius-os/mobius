@@ -30,6 +30,7 @@ from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # -- shared harness ------------------------------------------------------
@@ -305,6 +306,37 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   # The chat was forgotten (generation dropped) after the clear.
   assert chat_mod.current_run_generation("t1") == 0
   assert not chat_mod.registry.is_alive("t1")
+
+
+def test_settled_turn_reclaims_caches_without_retired_summary_publisher(monkeypatch):
+  """Removing routine summaries must not remove upstream terminal cleanup."""
+  from app import allocator, file_cache
+
+  _seed_owner_and_creds()
+  _seed_chat(
+    "settled-reclaim",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], running="running", run_token="rt-settled-reclaim",
+  )
+  _patch_claude_runner(monkeypatch)
+  calls = []
+  monkeypatch.setattr(chat_mod.gc, "collect", lambda: calls.append("gc"))
+  monkeypatch.setattr(allocator, "trim_glibc", lambda: calls.append("trim"))
+  monkeypatch.setattr(
+    file_cache, "reclaim_settled_cache",
+    lambda data_dir, chat_id: calls.append((data_dir, chat_id)),
+  )
+
+  chat_mod.mark_starting("settled-reclaim")
+  _run_real_chat(
+    "settled-reclaim", run_token="rt-settled-reclaim",
+    run_gen=chat_mod.current_run_generation("settled-reclaim"),
+  )
+
+  assert "gc" in calls
+  assert "trim" in calls
+  assert any(item[1] == "settled-reclaim" for item in calls if isinstance(item, tuple))
+  assert not hasattr(chat_mod, "_ensure_chat_note")
 
 
 def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
@@ -736,7 +768,7 @@ def test_failed_question_commit_appended_scrub_by_identity(monkeypatch):
   identity-based scrub guards against."""
   _seed_chat("t5a", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5a")
-  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a")
+  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a", recall_binding=EMPTY_RECALL_BINDING)
   sink.publish({"type": "text", "content": "thinking"})
 
   # Latch the actor's QuestionCommit handler so it blocks INSIDE the commit
@@ -806,7 +838,7 @@ def test_failed_question_commit_coalesced_scrub_restores_fields(monkeypatch):
   deleted."""
   _seed_chat("t5b", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5b")
-  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b")
+  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b", recall_binding=EMPTY_RECALL_BINDING)
 
   # First, a SUCCESSFUL question commit so a question block with identity
   # "q1" already exists in assistant_blocks with its original payload.
@@ -1394,17 +1426,11 @@ def test_no_connected_agent_streams_and_persists_guidance(
   )
   _seed_run("rt-12", "t12")
 
-  note_modes = []
   settlement_order = []
 
   async def capture_wake(_chat_id):
     settlement_order.append("wake")
 
-  async def capture_note(_data_dir, _chat_id, *, deterministic=False):
-    settlement_order.append("note")
-    note_modes.append(deterministic)
-
-  monkeypatch.setattr(chat_mod, "_ensure_chat_note", capture_note)
   monkeypatch.setattr(
     "app.delegations.wake_parent_after_child_settled", capture_wake,
   )
@@ -1434,8 +1460,7 @@ def test_no_connected_agent_streams_and_persists_guidance(
     "total_tokens": 0,
     "usage_json": chat_mod._NO_AGENT_USAGE_METRICS,
   }
-  assert note_modes == [True]
-  assert settlement_order == ["wake", "note"]
+  assert settlement_order == ["wake"]
   assert not chat_mod.registry.is_alive("t12"), "registry released"
 
 
@@ -2243,7 +2268,7 @@ def test_stale_reclaim_bow_out_preserves_fresh_owners_broadcast_and_browser(
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a")
+  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a", recall_binding=EMPTY_RECALL_BINDING)
 
   # The FRESH owner already holds the active-broadcast pointer with its OWN
   # broadcast (a different object than this dying run's `bc`).
@@ -2307,7 +2332,7 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b")
+  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b", recall_binding=EMPTY_RECALL_BINDING)
 
   # NO fresh owner took over: the active-broadcast pointer is still THIS run's.
   bc_mod.set_active_broadcast(bc)

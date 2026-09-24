@@ -551,3 +551,22 @@ def test_advanced_app_skill_deletes_by_id_and_retains_recovery_receipt():
   assert "delete_app.py" in advanced
   assert "Exact-name lookup can return several apps" in advanced
   assert "returns the recovery receipt" in advanced
+
+
+def test_core_prompt_requires_agent_authored_current_continuity():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "No separate agent does it" in normalized
+  assert "**Name:**" in core and "**Summary:**" in core and "**Digest:**" in core
+  assert "without erasing earlier work" in normalized
+  assert "one–two paragraphs" in normalized
+  assert "no preliminary continuity read is needed" in normalized
+  assert "Skip acknowledgements, repetition and incidental suggestions" in normalized
+  assert "Choose fields independently" in normalized
+  assert "proposed versus accepted" in normalized
+  assert "A short success confirms the save" in normalized
+  assert "Original transcripts remain available" in normalized
+  assert 'expected_revision' not in core and 'checkpoint_id' not in core
+  assert "omitted fields stay unchanged" in core

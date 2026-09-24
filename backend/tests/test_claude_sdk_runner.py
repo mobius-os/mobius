@@ -108,6 +108,28 @@ class _FakeClient:
     yield _success_result()
 
 
+@pytest.mark.asyncio
+async def test_delivered_input_callback_follows_successful_query(monkeypatch):
+  clients = _install_fake_client(monkeypatch)
+  observed = []
+
+  async def delivered():
+    assert clients[0].queries == ["hello"]
+    observed.append("accepted")
+
+  await _run_turn("delivery-order", on_input_delivered=delivered)
+  assert observed == ["accepted"]
+
+  class _RejectQuery(_FakeClient):
+    async def query(self, message):
+      raise RuntimeError("not delivered")
+
+  _install_fake_client(monkeypatch, _RejectQuery)
+  observed.clear()
+  await _run_turn("delivery-rejected", on_input_delivered=delivered)
+  assert observed == []
+
+
 def _install_fake_client(monkeypatch, client_cls=_FakeClient) -> list:
   """Patch the runner's client class; returns the list of created clients."""
   clients: list = []
@@ -1454,6 +1476,24 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
   finally:
     db.close()
 
+
+
+def test_native_context_hook_death_is_logged_without_payload(monkeypatch, caplog):
+  from claude_agent_sdk.types import HookEventMessage
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield HookEventMessage(subtype="hook_response", hook_event_name="SessionStart", data={
+        "hook_event": "SessionStart", "outcome": "error", "exit_code": 1,
+        "stderr": "sensitive hook payload", "session_id": "phantom",
+      })
+      yield _success_result("sess-hook")
+
+  _install_fake_client(monkeypatch, _Client)
+  result = asyncio.run(_run_turn("claude-hook-death"))
+  assert "SessionStart context hook failed" in caplog.text
+  assert "sensitive hook payload" not in caplog.text
+  assert result["session_id"] == "sess-hook"
 
 def test_dispatch_text_delta_emits_text():
   bus = _Bus()

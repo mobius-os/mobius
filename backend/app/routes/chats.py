@@ -2092,9 +2092,9 @@ def get_chat_agent_context(
     _latest_compaction_brief,
     _read_skill_text,
   )
-  from app.compaction import load_cumulative_summary
   from app.providers import get_skill_origin
   from app.system_prompts import prompt_for_chat
+  from app.compaction import load_cumulative_summary
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -2109,8 +2109,18 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
-  chat_summary = load_cumulative_summary(data_dir, chat_id)
-  chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
+  continuity = db.get(models.ChatContinuity, chat_id)
+  chat_summary = (
+    continuity.current_summary if continuity is not None
+    else load_cumulative_summary(data_dir, chat_id)
+  )
+  if continuity is not None:
+    chat_summary_metadata = {
+      "description": chat.title,
+      "digest": continuity.current_summary,
+    }
+  else:
+    chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
   ordered_chat_ids = [
     row[0]
     for row in db.query(models.Chat.id).filter(
@@ -2118,11 +2128,14 @@ def get_chat_agent_context(
     ).order_by(
       func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
       models.Chat.id.desc(),
-    ).all()
+    ).limit(memory.RECENT_CHAT_NOTES).all()
   ]
   recent_chat_block = memory.build_memory_block(
     data_dir,
     ordered_chat_ids=ordered_chat_ids,
+    continuity_by_chat_id=memory.recent_continuity_metadata(
+      db, ordered_chat_ids,
+    ),
   )
   recent_chats = recent_chat_block.text or None
   return {
@@ -2549,11 +2562,11 @@ async def switch_chat_provider(
 ):
   """Have the incoming provider prepare and atomically commit a handoff.
 
-  The selected provider reads the detailed per-chat ``## Summary`` plus the
-  complete visible transcript and synthesizes its own compact starting context
-  in bounded disposable sessions. The writer then appends that context, changes
-  provider/settings, and clears the outgoing session in one transaction. Any
-  synthesis or contention failure leaves every durable field unchanged.
+  A structured checkpoint journal plus every transcript row not proven covered
+  becomes the portable handoff directly when it fits. Only oversized sources
+  use the incoming provider's guarded progressive synthesis. The writer then
+  appends that handoff, changes provider/settings, and clears the outgoing
+  session in one transaction.
   """
   from app.chat_queue import get_transition_lock
 
@@ -2572,7 +2585,8 @@ async def _compact_chat_locked(
     messages_fingerprint,
   )
   from app.compaction import (
-    CompactionError, load_cumulative_summary, summarize_chat,
+    CompactionError, build_portable_source, portable_source_fits,
+    summarize_chat,
   )
 
   chat = get_active_chat_or_404(db, chat_id)
@@ -2661,21 +2675,24 @@ async def _compact_chat_locked(
 
   messages = list(chat.messages or [])
   source_messages_hash = messages_fingerprint(messages)
-  source_summary = load_cumulative_summary(data_dir, chat_id)
+  source_summary = build_portable_source(db, data_dir, chat_id, messages)
   source_summary_hash = (
     hashlib.sha256(source_summary.encode("utf-8")).hexdigest()
     if source_summary is not None
     else None
   )
   try:
-    summary = await summarize_chat(
-      messages,
-      data_dir=data_dir,
-      provider_id=body.provider,
-      source_summary=source_summary,
-      model=settings_patch.get("model"),
-      effort=settings_patch.get("effort"),
-    )
+    if portable_source_fits(source_summary):
+      summary = source_summary
+    else:
+      summary = await summarize_chat(
+        [],
+        data_dir=data_dir,
+        provider_id=body.provider,
+        source_summary=source_summary,
+        model=settings_patch.get("model"),
+        effort=settings_patch.get("effort"),
+      )
   except CompactionError as exc:
     raise HTTPException(status_code=422, detail=str(exc))
   except Exception as exc:
@@ -2687,10 +2704,9 @@ async def _compact_chat_locked(
       detail="The incoming provider could not prepare the chat.",
     )
 
-  # The note is a separate file maintained after each settled turn. If it was
-  # rewritten while synthesis ran, retry from the fresh detailed source rather
-  # than committing a handoff the incoming provider derived from stale data.
-  latest_summary = load_cumulative_summary(data_dir, chat_id)
+  # Check the DB-authoritative journal as well as transcript source before
+  # committing a handoff prepared outside the writer actor.
+  latest_summary = build_portable_source(db, data_dir, chat_id, messages)
   latest_hash = (
     hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
     if latest_summary is not None
@@ -2793,7 +2809,7 @@ async def compact_chat(
     messages_fingerprint,
   )
   from app.compaction import (
-    CompactionError, load_cumulative_summary, summarize_chat,
+    CompactionError, build_portable_source, summarize_chat,
   )
 
   async with get_transition_lock(chat_id):
@@ -2819,16 +2835,16 @@ async def compact_chat(
     messages = list(chat.messages or [])
     data_dir = get_settings().data_dir
     try:
-      source_summary = load_cumulative_summary(data_dir, chat_id)
+      source_summary = build_portable_source(
+        db, data_dir, chat_id, messages,
+      )
       instructions = body.instructions if body is not None else None
-      # The published cumulative summary is best-effort and can lag the latest
-      # settled turn. Manual compaction retires the provider session, so always
-      # synthesize from the current transcript and use that summary only as an
-      # additional seed; copying it verbatim could drop the newest decisions
-      # from the fresh session that follows.
+      # Unlike an automatic provider handoff, explicit /compact asks to shrink
+      # context. Synthesize the already-complete portable source even when it
+      # would fit directly; custom owner guidance remains meaningful here.
       settings_obj = chat.agent_settings_json or {}
       summary = await summarize_chat(
-        messages,
+        [],
         data_dir=data_dir,
         provider_id=source_provider,
         source_summary=source_summary,

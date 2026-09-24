@@ -14,6 +14,7 @@ from app.broadcast import create_broadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
 from app.chat_writer import Barrier, ClaimSecureInput, FinishRun, SettleSecureInput, StartTurn, get_writer
 from app.database import SessionLocal
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def sealed_run(chat, db):
   get_writer().submit(StartTurn(chat_id=chat.id, run_token=run_id,
     user_msg={"role": "user", "content": "Connect locally", "ts": 1})).result(timeout=5)
   bc = create_broadcast(chat.id)
-  sink = ChatEventSink(bc, chat.id, run_token=run_id)
+  sink = ChatEventSink(bc, chat.id, run_token=run_id, recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(chat_id=chat.id, owner_username=owner.username, token_epoch=owner.token_epoch,
