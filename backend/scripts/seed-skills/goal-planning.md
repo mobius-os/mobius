@@ -13,40 +13,42 @@ record after interruption instead of replacing unfinished scope.
    isolation avoids repeated input. Parallelism itself is not the saving.
 3. Serialize dependencies, shared writes, plan revisions, and final integration.
 4. Add discoveries beneath their owner; preserve unfinished siblings.
-5. Work in-run; checkpoint before a handoff. After verifying the outcome, run
-   `goal_plan.py complete --result 'Verified evidence'`.
+5. Work in-run. After verifying the outcome, run `complete`.
 
 ## Route and promote
 
 Promote an observable outcome when durability helps across stages, turns,
 discovery, parallel work, long operations, or restart risk and work can begin
 now. This is judgment, not a keyword trigger. Recheck after owner choices,
-implementation approval, or expanded scope.
+implementation approval, or expanded scope. Use the first-class `promote_goal`
+tool. `goal_promote.py 'Outcome'` (same directory as `G`) is resilience, not an
+equivalent convenience path: use it only when the tool is absent or an
+attempted tool call returns a failure.
 
-Use the first-class `promote_goal` tool. The helper is resilience, not an
-equivalent convenience path: use it only when the tool is absent or an attempted
-tool call returns a failure:
+## Commands
 
-```bash
-python3 /data/platform/backend/scripts/goal_promote.py 'Outcome and completion condition'
-```
-
-## Plan and work
+`G` is `python3 /data/platform/backend/scripts/goal_plan.py`; type the full path
+(shell variables do not persist). This is the whole set; skip `--help`.
 
 ```bash
-python3 /data/platform/backend/scripts/goal_plan.py set \
- --task 'inspect|Inspect' --task 'build|Build|inspect' --task 'verify|Verify|build'
-python3 /data/platform/backend/scripts/goal_plan.py add child 'Check edge' --parent inspect
-python3 /data/platform/backend/scripts/goal_plan.py update inspect --status running
+G set --task 'a|Inspect' --task 'b|Build|a' --task 'c|Verify|b' --start a
+G update a --status completed --result 'evidence' --start b  # finish + start
+G update x y --status cancelled                              # several ids
+G update b --progress 2/5 --note 'text'
+G add a2 'Check edge' --parent a --depends-on b
+G update b --status completed --next-action 'Exact next step'  # handoff
+G context --task ID; G context; G show; G list; G resume ID; G stop
 ```
 
-Tasks are `id|title|dependencies`. Work deepest leaves. Children inherit ancestor
-dependencies and make a parent **Ready to verify**, not complete. Verify upward;
-cancelled prerequisites are settled. Plans may change; outcomes may not.
+Tasks are `id|title|deps`. Each write prints `Goal plan revision N: x/y
+complete. Running: … Ready: …`, so skip `show`. A stale-revision race is retried
+once; a refused multi-step write says what applied. `no active Goal to plan`
+means promote, or `list` then `resume ID`.
 
-`show` includes Goal status and the plan; settled tasks do not close the Goal.
-Before replacing a plan, `show` it and preserve results. Use `goal_plan.py list`,
-`show --goal-id ID`, and `goal_plan.py resume ID` for retained obligations.
+Statuses: pending, running, completed, blocked, failed, cancelled. Work deepest
+leaves. Children inherit ancestor dependencies and make a parent **Ready to
+verify**, not complete. Cancelled prerequisites are settled. Plans may change;
+outcomes may not. Before `set` on an existing plan, `show` it and keep results.
 Resume attaches an ordinary attempt; it cannot reopen closed work.
 
 ### Make every unfinished wait explicit
@@ -60,28 +62,22 @@ and a `blocked` task only records the gate: when only the owner can unblock it
 
 With no gate, keep working. Terminal settlement continues the exact Goal only
 when its saved plan advanced during the admitted turn and still has runnable
-work; otherwise it asks the owner. An unchanged plan is not progress.
+work; otherwise it asks the owner. An unchanged plan is not progress; any real
+plan change is, so do not checkpoint to record it. Only before a handoff, add
+`--next-action` to your last `update` (or `G checkpoint --next-action '…'`) to
+leave the next attempt its next step.
 
-Work in-run; turns are not a budget. Use `goal_plan.py context` for current focus
-or `context --task ID` for a branch. Running tasks select focus; the view includes
-parent requirements and dependencies. `show` reads the full plan. Do not end a
-run merely to refresh context or select the next task. Never end with “tell me
-when…”, prose status, a bare paused Goal, or a custom status card.
-
-Before an unfinished handoff:
-
-```bash
-python3 /data/platform/backend/scripts/goal_plan.py checkpoint \
- --summary 'Verified progress and remaining obligations' --next-action 'Exact next step'
-```
+Work in-run; turns are not a budget. Use `context --task ID` for a branch. Do not
+end a run merely to refresh context or select the next task. Never end with
+“tell me when…”, prose status, a bare paused Goal, or a custom status card.
 
 After verifying the original outcome:
 
 ```bash
-python3 /data/platform/backend/scripts/goal_plan.py complete --result 'Verified evidence'
+G complete --result 'Verified evidence'
 ```
 
-`complete` validates and records completion; no separate preflight is required.
+It validates and records completion; no separate preflight is required.
 `goal_plan.py check-complete` is an optional read-only task diagnostic, not
 completion. A green plan or ended attempt leaves the Goal open. After owner
-Stop, summarize and run `goal_plan.py stop` last.
+Stop, summarize and run `G stop` last.
