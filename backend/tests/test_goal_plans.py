@@ -1084,7 +1084,9 @@ def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
     json={"expected_revision": 2, "status": "completed"}, headers=auth,
   )
   assert not_done.status_code == 422
-  assert "repeated progress is full" in not_done.json()["detail"]
+  # The refusal names the exact one-call fix instead of a bare rejection.
+  assert "at 2/3 progress" in not_done.json()["detail"]
+  assert "--progress 3/3 --status completed" in not_done.json()["detail"]
 
   stale = client.patch(
     f"/api/chats/{chat_id}/goal-plan/tasks/repeat",

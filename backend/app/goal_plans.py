@@ -239,7 +239,10 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       and progress["current"] != progress["total"]
     ):
       raise GoalPlanError(
-        f"{task['id']} cannot complete before its repeated progress is full"
+        f"{task['id']} cannot complete at {progress['current']}/"
+        f"{progress['total']} progress; if every repetition is done, record "
+        f"it in the same update: --progress {progress['total']}/"
+        f"{progress['total']} --status completed"
       )
   return tasks
 
