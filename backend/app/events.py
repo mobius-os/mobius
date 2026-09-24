@@ -72,6 +72,7 @@ EventType = Literal[
   "tool_sources",
   "tool_end",
   "skill_loaded",
+  "generated_file",
   "task_start",
   "task_progress",
   "task_done",
@@ -760,7 +761,7 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
 
 _TOOL_EVENT_TYPES = frozenset({
   "tool_start", "tool_input", "tool_output", "tool_sources", "tool_end",
-  "skill_loaded",
+  "skill_loaded", "generated_file",
 })
 
 
@@ -952,6 +953,32 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       "output": "",
       "status": "done",
     })
+    return True
+
+  if event_type == "generated_file":
+    # Deliverables belong to the completed assistant turn, not to a guessed
+    # provider tool. A dedicated block keeps the transcript contract identical
+    # across providers and lets the UI render one handoff after the final text.
+    name = event.get("name")
+    if not isinstance(name, str) or not name:
+      return False
+    entry = {
+      "name": name,
+      "size": event.get("size"),
+      "mime_type": event.get("mime_type"),
+      "previewable": event.get("previewable") is True,
+    }
+    target = next((
+      block for block in reversed(assistant_blocks)
+      if block.get("type") == "generated_files"
+    ), None)
+    if target is None:
+      assistant_blocks.append({"type": "generated_files", "files": [entry]})
+      return True
+    files = target.get("files") if isinstance(target.get("files"), list) else []
+    if any(file.get("name") == name for file in files):
+      return False
+    target["files"] = [*files, entry]
     return True
 
   return False

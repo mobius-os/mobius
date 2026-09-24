@@ -581,6 +581,30 @@ export function attachToolOutput(prev, content, event = null) {
 }
 
 /**
+ * Applies a `generated_file` event to one provider-neutral turn block.
+ * Deliverables render after the answer, so coupling them to a guessed tool
+ * identity adds failure modes without changing the visible result.
+ */
+export function attachGeneratedFile(prev, event) {
+  const name = event?.name
+  if (!name) return prev
+  const entry = {
+    name,
+    size: event.size,
+    mime_type: event.mime_type,
+    previewable: event.previewable === true,
+  }
+  const i = prev.findLastIndex(it => it.type === 'generated_files')
+  if (i < 0) return [...prev, { type: 'generated_files', files: [entry] }]
+  const block = prev[i]
+  const existing = Array.isArray(block.files) ? block.files : []
+  if (existing.some(f => f.name === name)) return prev  // idempotent
+  const updated = [...prev]
+  updated[i] = { ...block, files: [...existing, entry] }
+  return updated
+}
+
+/**
  * Applies a `tool_sources` event to the search block that produced it.
  * Sources are small metadata, so they stay inline on the tool item.
  *
