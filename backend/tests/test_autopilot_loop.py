@@ -17,6 +17,7 @@ import json
 import shutil
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +110,10 @@ def _make_fakes(state):
     pre = _submit_preflight_response(args)
     if pre is not None:
       return pre
+    if args[:1] == ("push",) and "public_head" in state:
+      # The guarded push is the only point at which the fake public PR ref
+      # advances from its granted head to the reviewed update.
+      state["public_head"] = state["head"]
     head, diff_text = state["head"], state["diff_text"]
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("develop\n")
@@ -159,7 +164,7 @@ def _make_fakes(state):
         "head": {
           "repo": {"full_name": "octocat/app-demo-1"},
           "ref": _BRANCH,
-          "sha": state["head"],
+          "sha": state.get("public_head", state["head"]),
         },
         "base": {"ref": "main"},
       }))
@@ -171,7 +176,7 @@ def _make_fakes(state):
         return _cp(json.dumps([{
           "url": "https://github.com/mobius-os/app-demo/pull/42",
           "headRefName": _BRANCH,
-          "headRefOid": state["head"],
+          "headRefOid": state.get("public_head", state["head"]),
           "headRepositoryOwner": {"login": "octocat"},
         }]))
       return _cp("[]")
@@ -203,6 +208,30 @@ def _record_path(app_id, record_id):
   )
 
 
+def test_autopilot_followup_does_not_bypass_handoff_source_proof(monkeypatch):
+  from app.github_contributions import ContributionSubmitError
+
+  def missing_source(_record):
+    raise ContributionSubmitError(
+      "The durable source no longer proves this reviewed change.",
+      code="source_provenance_mismatch",
+    )
+
+  monkeypatch.setattr(
+    github_routes, "_assert_pending_equivalence_preflight", missing_source,
+  )
+  owner = SimpleNamespace(
+    assert_current=lambda: None,
+    replay_phase=lambda: "armed",
+  )
+  with pytest.raises(ContributionSubmitError, match="durable source"):
+    github_routes._assert_personal_publication_source(
+      {"plan": {"after_merge": {"app": "verified"}}},
+      owner,
+      allow_granted_followup=True,
+    )
+
+
 def _read(app_id, record_id):
   return json.loads(_record_path(app_id, record_id).read_text())
 
@@ -218,7 +247,8 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   _write_contribution(app_id, record_id, _record(record_id, repo), _DIFF1)
 
   state = {
-    "head": _HEAD1, "diff_text": _DIFF1, "fork_ready": False,
+    "head": _HEAD1, "public_head": _HEAD1,
+    "diff_text": _DIFF1, "fork_ready": False,
     "git_calls": [], "gh_calls": [],
   }
   _install_fakes(monkeypatch, state)
@@ -227,7 +257,7 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   _allow_synthetic_source_provenance(monkeypatch)
   monkeypatch.setattr(
     "app.github_contribution_git._authoritative_upstream_branch_sha",
-    lambda *_args, **_kwargs: state["head"],
+    lambda *_args, **_kwargs: state.get("public_head", state["head"]),
   )
   # No real agent turn — assert only claim/chat/mirror wiring.
   monkeypatch.setattr(autopilot, "spawn_round_turn", _fake_spawn)
@@ -242,7 +272,9 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
     github_routes, "_autopilot_live_target",
     lambda *a, **k: {
       "error": None,
-      "head_sha": state["head"],
+      # The agent's reviewed branch advances before the guarded push. The
+      # public PR remains at the grant's exact head until that push succeeds.
+      "head_sha": state["public_head"],
       "base_branch": "main",
       "base_sha": _BASE,
       "title": "Polish demo",
@@ -301,6 +333,19 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   _write_contribution(app_id, record_id, rec, _DIFF2)
   state["head"] = _HEAD2
   state["diff_text"] = _DIFF2
+  # Once a PR is public, an Autopilot follow-up is reviewed on its exact
+  # existing branch. The live platform checkout need not still contain the
+  # original contribution; that first-publication provenance guard must not
+  # reject an otherwise-valid granted fast-forward.
+  from app.github_contributions import ContributionSubmitError
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_pending_equivalence_preflight",
+    lambda _record: (_ for _ in ()).throw(ContributionSubmitError(
+      "The durable source no longer proves this reviewed change.",
+      code="source_provenance_mismatch",
+    )),
+  )
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/update",
     json={"run_id": run_id, "head_sha": _HEAD2,
@@ -602,7 +647,7 @@ def test_complete_update_receipt_survives_db_failure_and_new_round(
   monkeypatch.setattr(
     github_routes,
     "_assert_personal_publication_source",
-    lambda *_args: source_checks.append("checked"),
+    lambda *_args, **_kwargs: source_checks.append("checked"),
   )
 
   async def record_equivalence(*_args, **_kwargs):
@@ -709,7 +754,7 @@ def test_complete_update_receipt_survives_db_failure_and_new_round(
   else:
     state["public_head"] = _HEAD1
 
-    def reject_reverted_source(*_args):
+    def reject_reverted_source(*_args, **_kwargs):
       source_checks.append("rechecked")
       raise github_routes.ContributionSubmitError(
         "The installed source no longer proves this reset public head.",

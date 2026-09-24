@@ -32,6 +32,7 @@ import time
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -532,6 +533,7 @@ def _assert_personal_publication_source(
   record: dict,
   owner: _PersonalAttemptOwner,
   owner_reviewed_uninstalled: bool = False,
+  allow_granted_followup: bool = False,
 ) -> str:
   owner.assert_current()
   # A receipt proves the server's request, not GitHub's state. The eventual
@@ -559,14 +561,16 @@ def _assert_personal_publication_source(
     # bypass the source proof that protects the eventual local install.
     has_handoff = plan.get("after_merge") is not None
     if (
-      owner_reviewed_uninstalled
+      (owner_reviewed_uninstalled or allow_granted_followup)
       and not has_handoff
       and exc.code == "source_provenance_mismatch"
     ):
       # A live owner can approve an exact reviewed worktree from chat without
-      # first installing it. Keep malformed/missing provenance and app
-      # publication handoffs strict: only ordinary, truthfully linked reviews
-      # may omit the optional local-equivalence witness.
+      # first installing it. An existing-PR Autopilot grant also authorizes
+      # follow-up commits on that already-public, exactly-bound branch; requiring
+      # the whole contribution to remain in the unrelated live source checkout
+      # would reject legitimate follow-ups after the source moves on. Keep
+      # malformed/missing provenance and app-publication handoffs strict.
       return "owner_reviewed_uninstalled"
     raise
 
@@ -6144,11 +6148,19 @@ async def autopilot_update(
           str(live_target.get("head_sha") or ""),
           str(plan.get("head_sha") or ""),
         )
-        await asyncio.to_thread(
+        await asyncio.to_thread(partial(
           _assert_personal_publication_source,
           record,
           attempt_owner,
-        )
+          # The grant authorizes a follow-up only against the exact PR head
+          # it covered. A reset or unrelated public ref must still prove its
+          # source independently; otherwise source drift could mask a remote
+          # branch change rather than merely the original local commit moving.
+          allow_granted_followup=(
+            str(live_target.get("head_sha") or "")
+            == str(row.granted_head_sha or "")
+          ),
+        ))
         pr_url, number, record_patch = await asyncio.to_thread(
           _submit_prepared_pr, record, diff_path,
           direct_base_branch=str(live_target.get("base_branch") or ""),
