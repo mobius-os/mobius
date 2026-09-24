@@ -698,7 +698,10 @@ async def test_plan_with_nothing_runnable_hands_off_instead_of_a_no_op_turn(
   )
   monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
   broadcast = create_broadcast(chat.id)
-  sink = ChatEventSink(broadcast, chat.id, run_token="goal-run")
+  sink = ChatEventSink(
+    broadcast, chat.id, run_token="goal-run",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
   sink.publish({"type": "text", "content": "Blocked until the owner acts."})
   try:
     disposition = await chat_mod._complete_turn(
