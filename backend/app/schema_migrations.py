@@ -5290,6 +5290,9 @@ _SCHEMA_MIGRATIONS = (
   ("0059_app_service_aliases", _add_app_service_aliases),
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
+  # Retired: nothing maps chat_runs.progress_expires_at any more (turn
+  # liveness is the runner's own process/stream state). The column stays
+  # because the baked fallback platform can still map it.
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),

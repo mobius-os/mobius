@@ -805,106 +805,103 @@ def _success_result(
   )
 
 
+class _OneStreamClient(_FakeClient):
+  """Mimic the SDK: one message stream, `receive_response` stops per result.
+
+  `ClaudeSDKClient.receive_response` is a view over the single connection
+  stream that returns after each ResultMessage; calling it again keeps reading
+  where it left off. Subclasses define `_messages()`.
+  """
+
+  def __init__(self, options):
+    super().__init__(options)
+    self._stream = iter(self._messages())
+    self.read: list[object] = []
+
+  def _messages(self) -> list:
+    return [_success_result()]
+
+  async def receive_response(self):
+    for message in self._stream:
+      self.read.append(message)
+      yield message
+      if isinstance(message, ResultMessage):
+        return
+
+  async def receive_messages(self):
+    raise AssertionError("a turn reads its whole stream through one loop")
+    yield  # pragma: no cover - keep this an async generator
+
+
+def _task_started(task_id: str, spawn: str, session: str):
+  return TaskStartedMessage(
+    subtype="task_started", data={}, task_id=task_id,
+    description="inspect the implementation", uuid=f"start-{task_id}",
+    session_id=session, tool_use_id=spawn, task_type="local_agent",
+  )
+
+
+def _task_done(task_id: str, spawn: str, session: str):
+  return TaskNotificationMessage(
+    subtype="task_notification", data={}, task_id=task_id,
+    status="completed", output_file=f"/tmp/{task_id}",
+    summary="inspection complete", uuid=f"done-{task_id}",
+    session_id=session, tool_use_id=spawn,
+  )
+
+
+def _child_frames(spawn: str) -> list:
+  # Native child-sidechain frames share the connection but do not own the root
+  # chat row. Only their Task lifecycle and the parent synthesis are visible.
+  return [
+    StreamEvent(
+      uuid="child-delta-1", session_id="child-session",
+      parent_tool_use_id=spawn,
+      event={
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "text_delta", "text": "Child raw report."},
+      },
+    ),
+    AssistantMessage(
+      content=[TextBlock(text="Child raw report.")], model="claude-sonnet",
+      parent_tool_use_id=spawn, session_id="child-session",
+    ),
+  ]
+
+
+async def _ignore_session_persistence(*_args):
+  return None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("settles_before_result", [False, True])
-async def test_native_agent_completion_is_drained_through_parent_followup(
+async def test_native_helper_followup_is_read_through_the_same_turn_loop(
   monkeypatch, settles_before_result,
 ):
-  """Claude's parent follow-up survives either task/result ordering."""
+  """The parent's post-helper continuation stays inside the one turn loop.
 
-  async def _ignore_session_persistence(*_args):
-    return None
+  A turn whose native helper outlives the spawning result is still running:
+  the same loop keeps reading until Claude's own follow-up result, in either
+  task/result ordering. There is no second reader and no silence deadline.
+  """
+  helper = [
+    *_child_frames("spawn-1"),
+    _task_done("agent-1", "spawn-1", "sess-native"),
+  ]
 
-  class _Client(_FakeClient):
-    def __init__(self, options):
-      super().__init__(options)
-      self.drained: list[object] = []
-
-    async def receive_response(self):
-      yield TaskStartedMessage(
-        subtype="task_started",
-        data={},
-        task_id="agent-1",
-        description="inspect the implementation",
-        uuid="task-start-1",
-        session_id="sess-native",
-        tool_use_id="spawn-1",
-        task_type="local_agent",
-      )
-      if settles_before_result:
-        yield StreamEvent(
-          uuid="child-delta-1",
-          session_id="child-session",
-          parent_tool_use_id="spawn-1",
-          event={
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "Child raw report."},
-          },
-        )
-        yield AssistantMessage(
-          content=[TextBlock(text="Child raw report.")],
-          model="claude-sonnet",
-          parent_tool_use_id="spawn-1",
-          session_id="child-session",
-        )
-        yield TaskNotificationMessage(
-          subtype="task_notification",
-          data={},
-          task_id="agent-1",
-          status="completed",
-          output_file="/tmp/agent-1",
-          summary="inspection complete",
-          uuid="task-done-1",
-          session_id="sess-native",
-          tool_use_id="spawn-1",
-        )
-      yield _success_result("sess-native", cost=0.01)
-
-    async def receive_messages(self):
-      messages = [] if settles_before_result else [
-        # Native child-sidechain frames share the connection but do not own
-        # the root chat row. Only their Task lifecycle and the later parent
-        # synthesis should be visible.
-        StreamEvent(
-          uuid="child-delta-1",
-          session_id="child-session",
-          parent_tool_use_id="spawn-1",
-          event={
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "Child raw report."},
-          },
-        ),
-        AssistantMessage(
-          content=[TextBlock(text="Child raw report.")],
-          model="claude-sonnet",
-          parent_tool_use_id="spawn-1",
-          session_id="child-session",
-        ),
-        TaskNotificationMessage(
-          subtype="task_notification",
-          data={},
-          task_id="agent-1",
-          status="completed",
-          output_file="/tmp/agent-1",
-          summary="inspection complete",
-          uuid="task-done-1",
-          session_id="sess-native",
-          tool_use_id="spawn-1",
-        ),
-      ]
-      messages.extend([
+  class _Client(_OneStreamClient):
+    def _messages(self):
+      return [
+        _task_started("agent-1", "spawn-1", "sess-native"),
+        *(helper if settles_before_result else []),
+        _success_result("sess-native", cost=0.01),
+        *([] if settles_before_result else helper),
         AssistantMessage(
           content=[TextBlock(text="Parent synthesized the native result.")],
-          model="claude-sonnet",
-          session_id="sess-native",
+          model="claude-sonnet", session_id="sess-native",
         ),
         _success_result("sess-native", cost=0.03),
-      ])
-      for message in messages:
-        self.drained.append(message)
-        yield message
+      ]
 
   clients = _install_fake_client(monkeypatch, _Client)
   monkeypatch.setattr(
@@ -917,9 +914,8 @@ async def test_native_agent_completion_is_drained_through_parent_followup(
   )
 
   assert result["cost_usd"] == 0.03
-  assert len(clients[0].drained) == (
-    2 if settles_before_result else 5
-  )
+  assert not result.get("error")
+  assert len(clients[0].read) == len(clients[0]._messages())
   event_types = [event["type"] for event in bus.events]
   assert event_types.index("task_done") < event_types.index("text_final")
   text_final = next(
@@ -937,44 +933,23 @@ async def test_native_agent_completion_already_synthesized_uses_current_result(
 ):
   """A root response after task completion is already the parent follow-up."""
 
-  async def _ignore_session_persistence(*_args):
-    return None
+  class _Client(_OneStreamClient):
+    def _messages(self):
+      return [
+        _task_started("agent-covered", "spawn-covered", "sess-covered"),
+        _task_done("agent-covered", "spawn-covered", "sess-covered"),
+        AssistantMessage(
+          content=[TextBlock(text="Parent already synthesized the result.")],
+          model="claude-sonnet", session_id="sess-covered",
+        ),
+        _success_result("sess-covered", cost=0.02),
+        AssistantMessage(
+          content=[TextBlock(text="A later turn this one must not read.")],
+          model="claude-sonnet", session_id="sess-covered",
+        ),
+      ]
 
-  class _Client(_FakeClient):
-    async def receive_response(self):
-      yield TaskStartedMessage(
-        subtype="task_started",
-        data={},
-        task_id="agent-covered",
-        description="inspect the implementation",
-        uuid="task-start-covered",
-        session_id="sess-covered",
-        tool_use_id="spawn-covered",
-        task_type="local_agent",
-      )
-      yield TaskNotificationMessage(
-        subtype="task_notification",
-        data={},
-        task_id="agent-covered",
-        status="completed",
-        output_file="/tmp/agent-covered",
-        summary="inspection complete",
-        uuid="task-done-covered",
-        session_id="sess-covered",
-        tool_use_id="spawn-covered",
-      )
-      yield AssistantMessage(
-        content=[TextBlock(text="Parent already synthesized the result.")],
-        model="claude-sonnet",
-        session_id="sess-covered",
-      )
-      yield _success_result("sess-covered", cost=0.02)
-
-    async def receive_messages(self):
-      raise AssertionError("an already-synthesized result must not drain")
-      yield  # pragma: no cover - keep this an async generator
-
-  _install_fake_client(monkeypatch, _Client)
+  clients = _install_fake_client(monkeypatch, _Client)
   monkeypatch.setattr(
     claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
   )
@@ -986,9 +961,96 @@ async def test_native_agent_completion_already_synthesized_uses_current_result(
   )
 
   assert result["cost_usd"] == 0.02
+  assert len(clients[0].read) == 4
   assert next(
     event for event in bus.events if event["type"] == "text_final"
   )["content"] == "Parent already synthesized the result."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["stream_ends", "stream_raises"])
+async def test_helper_phase_ending_early_is_visible_and_keeps_spend(
+  monkeypatch, ending,
+):
+  """A provider that dies mid-helper is reported, never settled as clean.
+
+  The reply before the helper phase is already saved and paid for, so its
+  cost and usage survive; only the helper's report back is lost.
+  """
+
+  class _Client(_OneStreamClient):
+    def _messages(self):
+      return [
+        _task_started("agent-lost", "spawn-lost", "sess-lost"),
+        _success_result("sess-lost", cost=0.01),
+      ]
+
+    async def receive_response(self):
+      async for message in super().receive_response():
+        yield message
+      if ending == "stream_raises" and len(self.read) == 2:
+        raise RuntimeError("CLI connection lost")
+
+  _install_fake_client(monkeypatch, _Client)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+
+  result = await _run_turn(
+    "native-helper-stream-lost", bc=_Bus(), prompt="delegate", cwd="/data",
+  )
+
+  if ending == "stream_ends":
+    assert result["error"] == claude_sdk_runner._HELPER_REPORT_LOST
+  else:
+    assert result["error"] == "CLI connection lost"
+  assert result["cost_usd"] == 0.01
+  assert result["usage"] == {"input_tokens": 3, "output_tokens": 4}
+
+
+@pytest.mark.asyncio
+async def test_stop_during_helper_phase_ends_the_turn_without_the_followup(
+  monkeypatch,
+):
+  """Stop while a helper runs ends the turn at Claude's interrupt result."""
+  stops: list[asyncio.Task] = []
+
+  class _Client(_OneStreamClient):
+    def _messages(self):
+      return [
+        _task_started("agent-stop", "spawn-stop", "sess-stop"),
+        _success_result("sess-stop", cost=0.01),
+        _interrupt_result(),
+        AssistantMessage(
+          content=[TextBlock(text="A follow-up Stop must not wait for.")],
+          model="claude-sonnet", session_id="sess-stop",
+        ),
+      ]
+
+    async def receive_response(self):
+      if self.read:
+        handle = registry.get_handle("helper-stop", RunnerKind.CLAUDE_SDK)
+        stops.append(asyncio.create_task(handle.interrupt()))
+        while not self.interrupts:
+          await asyncio.sleep(0)
+      async for message in super().receive_response():
+        yield message
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+
+  result = await _run_turn(
+    "helper-stop", bc=_Bus(), prompt="delegate", cwd="/data",
+  )
+  for stop in stops:
+    await stop
+
+  assert result["terminal_status"] == "interrupted"
+  assert not result.get("error")
+  assert clients[0].interrupts == 1
+  assert len(clients[0].read) == 3
 
 
 def test_native_continuation_defers_only_a_result_not_seen_while_active():
