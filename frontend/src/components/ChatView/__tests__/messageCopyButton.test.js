@@ -1,46 +1,12 @@
-/* One-tap message copy: messageCopyText owns what "copy this message" means,
- * MessageCopyButton is a plain tap target on the shared clipboard helper, and
- * MessageMetaRow keeps copy beside the timestamp behind the row's existing
- * tap-to-reveal interaction. Native long-press selection must stay untouched
- * (chatUiPolish.test locks the no-interception side). */
+/* Error-card copy retains its shared helper; message metadata offers only timestamps.
+ * Native long-press selection must stay untouched. */
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { messageCopyText } from '../messageCopy.js'
 
 const copyButton = readFileSync(new URL('../MessageCopyButton.jsx', import.meta.url), 'utf8')
 const metaRow = readFileSync(new URL('../MessageMetaRow.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-
-test('messageCopyText joins prose blocks and skips activity chrome', () => {
-  const msg = {
-    role: 'assistant',
-    blocks: [
-      { type: 'thinking', content: 'private reasoning' },
-      { type: 'text', content: 'First paragraph.' },
-      { type: 'tool', name: 'Bash', output: 'noise' },
-      { type: 'text', content: 'Second paragraph.' },
-      { type: 'question', questions: [] },
-    ],
-  }
-  assert.equal(messageCopyText(msg), 'First paragraph.\n\nSecond paragraph.')
-})
-
-test('messageCopyText strips hidden augmentation from user messages', () => {
-  const msg = {
-    role: 'user',
-    content: 'hello <agent_experience>injected</agent_experience> world',
-  }
-  assert.equal(messageCopyText(msg), 'hello\n\nworld')
-})
-
-test('messageCopyText falls back to plain content; system rows copy nothing', () => {
-  assert.equal(messageCopyText({ role: 'assistant', content: 'plain' }), 'plain')
-  assert.equal(messageCopyText({ role: 'assistant', kind: 'compaction', content: 'x' }), '')
-  assert.equal(messageCopyText({ role: 'assistant', kind: 'auto_continuation', content: 'x' }), '')
-  assert.equal(messageCopyText({ role: 'assistant', kind: 'continuation', content: 'x' }), '')
-  assert.equal(messageCopyText({ role: 'assistant', blocks: [{ type: 'tool' }] }), '')
-})
 
 test('the copy button is a plain tap target on the shared clipboard helper', () => {
   assert.match(copyButton, /copyPlainText/,
@@ -51,18 +17,15 @@ test('the copy button is a plain tap target on the shared clipboard helper', () 
     'the copy affordance must never intercept press/hold — native selection stays intact')
 })
 
-test('only owner messages offer copy actions', () => {
-  assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(msg\) : ''/)
+test('message rows no longer calculate whole-message copy payloads', () => {
+  assert.doesNotMatch(chatView, /messageCopyText|copyText=/)
   assert.doesNotMatch(chatView, /speechText=|speechKey=|speechChatId=/)
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('copy follows the timestamp inside one tap-revealed metadata row', () => {
-  assert.ok(
-    metaRow.indexOf('<time className="chat__ts">')
-      < metaRow.indexOf('<MessageCopyButton text={copyText} />'),
-    'copy must render immediately after the timestamp',
-  )
+test('tap-revealed metadata contains the timestamp but no copy action', () => {
+  assert.match(metaRow, /<time className="chat__ts">/)
+  assert.doesNotMatch(metaRow, /MessageCopyButton|copyText/)
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')

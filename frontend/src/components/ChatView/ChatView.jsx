@@ -104,7 +104,6 @@ import {
 import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
-import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
 import { isResourcePause } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
@@ -5980,8 +5979,7 @@ export default function ChatView({
             // pin target mid-swap). data-ts stays for the revealed metadata row.
             const ownerUserMessage = isOwnerUserMessage(msg)
             const userCid = ownerUserMessage ? cidOf(msg) : null
-            const copyText = ownerUserMessage ? messageCopyText(msg) : ''
-            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
+            const hasMessageMeta = Boolean(ownerUserMessage && msg.ts)
             return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
@@ -6032,7 +6030,6 @@ export default function ChatView({
               />
               <MessageMetaRow
                 timestamp={ownerUserMessage ? msg.ts : null}
-                copyText={copyText}
                 visible={visibleMessageMetaKey === dataKey}
               />
             </li>
@@ -6123,7 +6120,6 @@ export default function ChatView({
           {pendingQueue.steerReservedMessages.map((msg, i) => {
             const cid = cidOf(msg)
             const dataKey = `steer-pending-${cid || i}`
-            const copyText = messageCopyText(msg)
             return (
               <li
                 key={cid || dataKey}
@@ -6133,7 +6129,7 @@ export default function ChatView({
                 data-cid={cid || undefined}
                 data-ts={msg.ts ? String(msg.ts) : undefined}
                 data-steer-pending="true"
-                onClick={copyText
+                onClick={msg.ts
                   ? event => showMessageMeta(event, dataKey)
                   : undefined}
               >
@@ -6144,7 +6140,6 @@ export default function ChatView({
                 />
                 <MessageMetaRow
                   timestamp={msg.ts || null}
-                  copyText={copyText}
                   visible={visibleMessageMetaKey === dataKey}
                 />
               </li>

@@ -1,15 +1,11 @@
-/* MessageMetaRow keeps an owner's message timestamp and copy action in one
-   revealable row. */
-import MessageCopyButton from './MessageCopyButton.jsx'
+/* MessageMetaRow reveals an owner message timestamp without adding copy controls. */
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
-
 
 export default function MessageMetaRow({
   timestamp,
-  copyText,
   visible,
 }) {
-  if (!timestamp && !copyText) return null
+  if (!timestamp) return null
 
   return (
     <div
@@ -21,7 +17,6 @@ export default function MessageMetaRow({
           {formatDateTime(timestamp)}
         </time>
       )}
-      {copyText && <MessageCopyButton text={copyText} />}
     </div>
   )
 }
