@@ -40,13 +40,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus, { useDeliveryReady, useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useDeliveryReady } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
-  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -455,7 +454,6 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
-  const reachabilityPhase = useReachabilityPhase()
   const deliveryReady = useDeliveryReady()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
