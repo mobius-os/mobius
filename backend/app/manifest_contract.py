@@ -59,6 +59,11 @@ class ManifestContractError(ValueError):
   pass
 
 
+def is_folder_skill_member(name: str) -> bool:
+  """Whether a file directly inside a `<id>/` folder skill may ship with it."""
+  return name == FOLDER_SKILL_ENTRY or _SKILL_FILENAME_OK.fullmatch(name) is not None
+
+
 def skill_member_paths(manifest: dict) -> list[str]:
   """Every source file a validated manifest's `skills` materializes, in order.
 
@@ -799,9 +804,7 @@ def validate_manifest_contract(manifest) -> None:
         if not path.startswith(entry):
           continue
         member = path[len(entry):]
-        if member != FOLDER_SKILL_ENTRY and (
-          _SKILL_FILENAME_OK.fullmatch(member) is None
-        ):
+        if not is_folder_skill_member(member):
           _fail(
             f"Manifest folder skill {entry!r} may contain only `SKILL.md` and "
             f"lowercase `.md` files directly inside it; got {path!r}."

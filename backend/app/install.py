@@ -253,6 +253,7 @@ def _prune_empty_skill_folder(root: Path, rel: str) -> None:
     with contextlib.suppress(OSError):
       (root / rel.partition("/")[0]).rmdir()
 
+
 # Tracked files in a merged tree that are NOT hand-written app source: the
 # managed .gitignore, the install-managed static-asset manifest, and the cron
 # script. The job script is dropped separately (its name is known only at call
@@ -1878,12 +1879,11 @@ async def _sync_app_skills(
         rec.get("app_id") for key, rec in records.items()
         if isinstance(rec, dict) and _app_skill_id(key) == skill_id
       } - {app.id, None}
-      live_owner = next((
-        owner for owner in (
-          db.query(models.App).filter(models.App.id == owner_id).first()
-          for owner_id in owners
-        ) if owner is not None
-      ), None)
+      live_owner = None
+      for owner_id in owners:
+        live_owner = db.query(models.App).filter(models.App.id == owner_id).first()
+        if live_owner is not None:
+          break
       ours = {
         key for key, rec in records.items()
         if isinstance(rec, dict) and rec.get("app_id") == app.id
