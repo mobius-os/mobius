@@ -3641,6 +3641,45 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
+@pytest.mark.asyncio
+async def test_frontend_build_failure_never_rewinds_a_concurrent_writer(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'broken candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  raced: dict[str, str] = {}
+
+  def fail_after_concurrent_commit(_repo, _result):
+    raced["sha"] = _local_commit(
+      platform,
+      edits={"concurrent.txt": "newer owner\n"},
+      msg="concurrent writer during frontend build",
+    )
+    raise RuntimeError("vite exploded")
+
+  monkeypatch.setattr(pu, "_rebuild_frontend", fail_after_concurrent_commit)
+
+  with pytest.raises(pu.PlatformUpdateError, match="rollback_ref_changed"):
+    await pu.apply_platform_update(
+      SimpleNamespace(),
+      plan_id=preview["plan_id"],
+      current_sha=preview["current_sha"],
+      target_sha=preview["target_sha"],
+      repo=platform,
+    )
+
+  assert _served_sha(platform) == raced["sha"]
+  assert (platform / "concurrent.txt").read_text() == "newer owner\n"
+  assert _git(
+    platform, "merge-base", "--is-ancestor", target, raced["sha"],
+  ).returncode == 0
+
+
 def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():
   scripts = Path(__file__).resolve().parents[1] / "scripts"
   entrypoint = (scripts / "entrypoint.sh").read_text(encoding="utf-8")
