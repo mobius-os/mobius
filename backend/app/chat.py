@@ -894,8 +894,12 @@ def reconcile_startup_chats(
       # `pause.kind='restart'` marks this as a benign restart pause (not a
       # failure) so the card renders in the calm "Paused" family rather than
       # the danger-red error styling — a restart is a maintenance event, not
-      # something the turn did wrong.
-      err_block = _pause_note(note, kind="restart")
+      # something the turn did wrong. A crash or an ineligible restart is
+      # stamped `manual` so the card does not promise a continuation.
+      restart_pause = {"kind": "restart"}
+      if not restart_eligible:
+        restart_pause["manual"] = True
+      err_block = {**_pause_note(note, kind="restart"), "pause": restart_pause}
       live_id = (
         chat.live_assistant.get("id")
         if isinstance(chat.live_assistant, dict) else None
@@ -967,7 +971,7 @@ def reconcile_startup_chats(
             if block.get("type") != "question" or block.get("answers"):
               break
             trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
+          paused["pause"] = dict(restart_pause)
           if trailing_open_start < len(blocks):
             paused.pop("resumable", None)
             blocks.insert(trailing_open_start, paused)
@@ -2271,60 +2275,6 @@ async def _auto_resume_chat(
     return False
 
 
-def _auto_resume_rejection(
-  db: Session,
-  chat: models.Chat | None,
-  run: models.ChatRun,
-  accepted_restart_nonce: str | None | object,
-) -> str | None:
-  """Explain why a due recovery row cannot resume automatically."""
-  pending = list(chat.pending_messages or []) if chat is not None else []
-  app_work_queued = any(
-    isinstance(message, dict)
-    and message.get("_initiated_by_app_id") is not None
-    for message in pending
-  )
-  if chat is None or chat.deleted_at is not None:
-    return "chat unavailable"
-  restart_park = run.park_reason == "restart"
-  auto_retry_park = run.park_reason in AUTO_RETRY_PARK_REASONS
-  if app_work_queued:
-    return "app-attributed work"
-  delegation_resume_app_id = None
-  if not restart_park and not auto_retry_park:
-    from app.delegations import limit_resume_app_id
-    delegation_resume_app_id = limit_resume_app_id(
-      db,
-      child_chat_id=run.chat_id,
-      run_token=run.id,
-      initiated_by_app_id=run.initiated_by_app_id,
-    )
-  if (
-    run.initiated_by_app_id is not None
-    and not restart_park
-    and not auto_retry_park
-    and delegation_resume_app_id is None
-  ):
-    return "app-attributed work"
-  if _has_unanswered_question(chat):
-    return "waiting for an answer"
-  if run.park_reason == "model_capacity" and _model_capacity_retry_exhausted(db, run):
-    return "busy-model retry exhausted"
-  policy_enabled = (
-    _park_continues_automatically(chat, run)
-    or delegation_resume_app_id is not None
-  )
-  if not policy_enabled:
-    return "policy disabled"
-  if restart_park and not (
-    bool(accepted_restart_nonce)
-    and bool(run.restart_nonce)
-    and accepted_restart_nonce == run.restart_nonce
-  ):
-    return "boot authorization missing or mismatched"
-  return None
-
-
 async def sweep_reset_parks(
   db: Session,
   *,
@@ -2481,8 +2431,54 @@ async def sweep_reset_parks(
       return
     notification_requests.append((chat_id, run.park_reason == "restart"))
 
+  def auto_resume_rejection(chat, run) -> str | None:
+    pending = list(chat.pending_messages or []) if chat is not None else []
+    app_work_queued = any(
+      isinstance(msg, dict) and msg.get("_initiated_by_app_id") is not None
+      for msg in pending
+    )
+    if chat is None or chat.deleted_at is not None:
+      return "chat unavailable"
+    restart_park = run.park_reason == "restart"
+    auto_retry_park = run.park_reason in AUTO_RETRY_PARK_REASONS
+    delegation_resume_app_id = None
+    if not restart_park and not auto_retry_park:
+      from app.delegations import limit_resume_app_id
+      delegation_resume_app_id = limit_resume_app_id(
+        db,
+        child_chat_id=run.chat_id,
+        run_token=run.id,
+        initiated_by_app_id=run.initiated_by_app_id,
+      )
+    if app_work_queued:
+      return "app-attributed work"
+    if (
+      run.initiated_by_app_id is not None
+      and not restart_park
+      and not auto_retry_park
+      and delegation_resume_app_id is None
+    ):
+      return "app-attributed work"
+    if _has_unanswered_question(chat):
+      return "waiting for an answer"
+    if run.park_reason == "model_capacity" and _model_capacity_retry_exhausted(db, run):
+      return "busy-model retry exhausted"
+    policy_enabled = (
+      _park_continues_automatically(chat, run)
+      or delegation_resume_app_id is not None
+    )
+    if not policy_enabled:
+      return "policy disabled"
+    if restart_park and not (
+      bool(accepted_restart_nonce)
+      and bool(run.restart_nonce)
+      and accepted_restart_nonce == run.restart_nonce
+    ):
+      return "boot authorization missing or mismatched"
+    return None
+
   def wants_auto_resume(chat, run) -> bool:
-    return _auto_resume_rejection(db, chat, run, accepted_restart_nonce) is None
+    return auto_resume_rejection(chat, run) is None
 
   for run in due:
     chat_id = run.chat_id
@@ -2493,8 +2489,7 @@ async def sweep_reset_parks(
     if run.park_reason == "restart" and not auto_resume:
       log.info(
         "restart continuation stays manual chat_id=%s run_token=%s reason=%s",
-        chat_id, run.id,
-        _auto_resume_rejection(db, chat, run, accepted_restart_nonce),
+        chat_id, run.id, auto_resume_rejection(chat, run),
       )
     if auto_resume and not restart_auto_resume and limit_resume_started:
       # One provider-limit continuation per sweep. Leave this park untouched,

@@ -718,7 +718,7 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
   # The upgrade also stamps the benign pause descriptor so a drain note
   # persisted before it existed (or whose live event never landed) renders
   # in the calm "Paused" family, not danger-red.
-  assert errors[0]["pause"] == {"kind": "restart"}
+  assert errors[0]["pause"] == {"kind": "restart", "manual": True}
 
 
 def test_reconcile_crash_note_is_resumable():
@@ -848,7 +848,7 @@ def test_reconcile_restart_note_normalizes_before_open_question():
     "text", "error", "question",
   ]
   assert not blocks[1].get("resumable")
-  assert blocks[1]["pause"] == {"kind": "restart"}
+  assert blocks[1]["pause"] == {"kind": "restart", "manual": True}
 
 
 def test_historical_restart_note_does_not_mask_a_newer_crash():

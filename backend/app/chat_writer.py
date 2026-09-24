@@ -1094,20 +1094,6 @@ class ResolvePark(_Command):
 
 
 @dataclass
-class CancelRestartResume(_Command):
-  """Cancel only the queued automatic continuation for one restart park.
-
-  The actor serializes this against StartContinuation: if cancellation wins,
-  the exact superseded run becomes terminal and cannot be auto-started; if the
-  continuation wins, this command returns too_late. Saved transcript content
-  and the chat-wide auto-resume preference are preserved.
-  """
-
-  chat_id: str = ""
-  run_token: str = ""
-
-
-@dataclass
 class PrepareAutoResume(_Command):
   """Durably mark a due park as notified but still awaiting auto-resume.
 
@@ -1201,7 +1187,6 @@ _FENCE_COMMANDS = (
   RecoverWedgedRun,
   ParkRun,
   ResolvePark,
-  CancelRestartResume,
   PrepareAutoResume,
 )
 
@@ -2003,8 +1988,6 @@ class ChatWriterActor:
       return self._prepare_restart_intents(db, cmd)
     if isinstance(cmd, ResolvePark):
       return self._resolve_park(db, cmd)
-    if isinstance(cmd, CancelRestartResume):
-      return self._cancel_restart_resume(db, cmd)
     if isinstance(cmd, PrepareAutoResume):
       return self._prepare_auto_resume(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
@@ -5155,51 +5138,12 @@ class ChatWriterActor:
     )
     if run.park_reason == "restart":
       run.restart_nonce = None
+      _mark_restart_pause_manual(_active_chat(db, run.chat_id))
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("ResolvePark did not persist")
     return True
-
-  def _cancel_restart_resume(self, db, cmd: CancelRestartResume):
-    from datetime import UTC, datetime
-    from sqlalchemy.orm.attributes import flag_modified
-
-    chat = _active_chat(db, cmd.chat_id)
-    run = db.query(models.ChatRun).filter(
-      models.ChatRun.id == cmd.run_token,
-      models.ChatRun.chat_id == cmd.chat_id,
-    ).first()
-    if chat is None or run is None or run.park_reason != "restart":
-      return {"status": "stale"}
-    if (
-      run.status not in ("parked", "resume_pending")
-      or not self._run_is_latest(db, run)
-    ):
-      return {"status": "too_late"}
-    messages = copy.deepcopy(list(chat.messages or []))
-    pause = next((
-      block
-      for message in reversed(messages)
-      if isinstance(message, dict) and message.get("role") == "assistant"
-      for block in message.get("blocks") or []
-      if isinstance(block, dict)
-      and block.get("type") == "error"
-      and block.get("resumable") is True
-      and isinstance(block.get("pause"), dict)
-      and block["pause"].get("kind") == "restart"
-    ), None)
-    if pause is None:
-      return {"status": "stale"}
-    pause["restart_resume_cancelled"] = True
-    run.status = "interrupted"
-    run.restart_nonce = None
-    run.ended_at = datetime.now(UTC)
-    chat.messages = messages
-    flag_modified(chat, "messages")
-    if not _commit_or_rollback(db):
-      raise _PersistFailed("CancelRestartResume did not persist")
-    return {"status": "cancelled"}
 
   def _prepare_auto_resume(self, db, cmd: PrepareAutoResume):
     """Keep auto-resume retryable with one best-effort notify attempt."""
@@ -5908,6 +5852,37 @@ def _tail_open_question_state(
 def _tail_open_question_id(messages) -> str | None:
   """Compatibility projection for callers that only need the question id."""
   return _tail_open_question_state(messages)[0]
+
+
+def _mark_restart_pause_manual(chat) -> None:
+  """Stop the latest restart pause card from promising a continuation.
+
+  The drain writes its note before the next boot decides whether the parked
+  turn may continue. When that decision falls back to manual recovery, the note
+  must say so; otherwise the card keeps promising an automatic continuation.
+  """
+  if chat is None:
+    return
+  from sqlalchemy.orm.attributes import flag_modified
+
+  messages = copy.deepcopy(list(chat.messages or []))
+  latest = next((
+    message for message in reversed(messages)
+    if isinstance(message, dict) and message.get("role") == "assistant"
+  ), None)
+  pause = next((
+    block["pause"]
+    for block in reversed((latest or {}).get("blocks") or [])
+    if isinstance(block, dict)
+    and block.get("type") == "error"
+    and isinstance(block.get("pause"), dict)
+    and block["pause"].get("kind") == "restart"
+  ), None)
+  if pause is None or pause.get("manual"):
+    return
+  pause["manual"] = True
+  chat.messages = messages
+  flag_modified(chat, "messages")
 
 
 def _active_chat(db, chat_id: str):

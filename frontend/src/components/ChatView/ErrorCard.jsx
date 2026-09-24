@@ -56,12 +56,10 @@ export default function ErrorCard({
   autoResume = false,
   resetElapsed = false,
   recoveryCredit = null,
-  restartResumeQueued = false,
   cardRef,
   children,
 }) {
   const vm = errorCardViewModel(block)
-  const restartWaiting = block.pause?.kind === 'restart' && restartResumeQueued
   const recoveryTitle = vm.modelCapacity
     ? (vm.resetLabel ? `Trying again ${vm.resetLabel}` : 'Trying again shortly')
     : vm.parked
@@ -119,7 +117,7 @@ export default function ErrorCard({
         ) : vm.benign ? (
           <>
             <div className="chat__recovery-title chat__recovery-title--paused">
-              {restartWaiting ? 'Waiting to resume' : vm.label}
+              {vm.label}
             </div>
             <div className="chat__recovery-copy">
               {vm.modelCapacityExhausted
@@ -127,12 +125,10 @@ export default function ErrorCard({
                 : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
-                ? block.restart_resume_cancelled
-                  ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume whenever you’re ready.'
-                  : restartWaiting
-                    ? 'Your work is safe. Möbius will resume this chat automatically when its recovery turn starts.'
-                    : block.resumable
-                  ? 'Möbius will continue automatically when the restart is complete.'
+                ? block.resumable
+                  ? block.pause.manual
+                    ? 'Your work is saved. Resume to continue.'
+                    : 'Möbius will continue automatically when the restart is complete.'
                   : (block.message || 'This response is paused.')
                 : vm.resourceWait
                   ? (block.message || 'Möbius will continue automatically when resources free up.')

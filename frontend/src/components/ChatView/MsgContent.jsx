@@ -127,10 +127,6 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
-  onCancelRestartResume,
-  restartResumeCancelPending = false,
-  restartResumeCancelError = '',
-  restartResumeQueued = false,
   resumeState,
   onInternalNav,
   autoResumeEnabled,
@@ -489,7 +485,6 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
-            restartResumeQueued={restartResumeQueued}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -532,23 +527,6 @@ function MsgContentInner({
                   ? limitResetElapsed ? 'Continue now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
-            )}
-            {recoveryOwner && block.pause?.kind === 'restart'
-              && restartResumeQueued && onCancelRestartResume && (
-              <button
-                type="button"
-                className="chat__recovery-action"
-                onClick={onCancelRestartResume}
-                disabled={submissionBlocked || restartResumeCancelPending}
-                aria-busy={restartResumeCancelPending || undefined}
-              >
-                {restartResumeCancelPending ? 'Cancelling…' : 'Cancel resume'}
-              </button>
-            )}
-            {recoveryOwner && restartResumeCancelError && (
-              <span className="chat__recovery-action-error" role="alert">
-                {restartResumeCancelError}
-              </span>
             )}
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">
@@ -672,10 +650,6 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
-    && prev.onCancelRestartResume === next.onCancelRestartResume
-    && prev.restartResumeCancelPending === next.restartResumeCancelPending
-    && prev.restartResumeCancelError === next.restartResumeCancelError
-    && prev.restartResumeQueued === next.restartResumeQueued
     && prev.resumeState === next.resumeState
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

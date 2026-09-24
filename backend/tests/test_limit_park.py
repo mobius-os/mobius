@@ -37,7 +37,6 @@ from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
   Barrier,
-  CancelRestartResume,
   FinishRun,
   ParkRun,
   PrepareAutoResume,
@@ -548,47 +547,6 @@ def test_resolve_park_is_idempotent():
   assert first is True
   assert second is False
   assert _run_row("rt-resolve")["status"] == "parked_notified"
-
-
-def test_cancel_restart_resume_preserves_transcript_and_chat_policy():
-  cid = "restart-resume-cancel"
-  _seed_chat(cid, auto_restart=True, messages=[
-    {"role": "user", "content": "do work", "ts": 1},
-    {"role": "assistant", "ts": 2, "blocks": [{
-      "type": "error", "message": "Paused", "resumable": True,
-      "pause": {"kind": "restart"},
-    }]},
-  ])
-  _seed_run(cid, "rt-restart-cancel", status="resume_pending",
-            park_reason="restart", restart_nonce="nonce")
-
-  result = get_writer().submit(CancelRestartResume(
-    chat_id=cid, run_token="rt-restart-cancel",
-  )).result(timeout=5)
-
-  assert result == {"status": "cancelled"}
-  assert _run_row("rt-restart-cancel")["status"] == "interrupted"
-  chat = _chat_row(cid)
-  assert chat["messages"][-1]["blocks"][0]["restart_resume_cancelled"] is True
-  db = SessionLocal()
-  try:
-    row = db.query(models.Chat).filter(models.Chat.id == cid).first()
-    assert row.auto_resume_on_restart is True
-  finally:
-    db.close()
-
-
-def test_cancel_restart_resume_does_not_retire_stale_run():
-  cid = "restart-resume-stale"
-  _seed_chat(cid)
-  _seed_run(cid, "rt-restart-old", status="resume_pending",
-            park_reason="restart", started_offset=-30)
-  _seed_run(cid, "rt-restart-new", status="running", started_offset=30)
-  result = get_writer().submit(CancelRestartResume(
-    chat_id=cid, run_token="rt-restart-old",
-  )).result(timeout=5)
-  assert result == {"status": "too_late"}
-  assert _run_row("rt-restart-new")["status"] == "running"
 
 
 def test_prepare_auto_resume_is_retryable_and_notification_is_one_shot():
@@ -1978,12 +1936,22 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   _due_park(
     cid, token, auto_restart=True, park_reason="restart",
     restart_nonce="unaccepted-nonce-1234",
+    messages=[
+      {"role": "user", "content": "do work", "ts": 1},
+      {"role": "assistant", "ts": 2, "content": "", "blocks": [{
+        "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+        "resumable": True, "pause": {"kind": "restart"},
+      }]},
+    ],
   )
 
   assert _run_sweep() == [cid]
   assert _run_row(token)["status"] == "interrupted"
   assert _run_row(token)["restart_nonce"] is None
   assert notifications[0]["title"] == "Möbius restarted"
+  # The drained card no longer promises the continuation that fell back.
+  pause = _chat_row(cid)["messages"][-1]["blocks"][-1]["pause"]
+  assert pause == {"kind": "restart", "manual": True}
 
 
 def test_restart_park_with_no_nonce_never_matches_missing_ack(
