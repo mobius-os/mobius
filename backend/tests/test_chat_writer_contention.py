@@ -1399,6 +1399,47 @@ def test_answer_question_no_block_raises(actor):
     _await(fut)
 
 
+def test_competing_exact_card_answers_cannot_overwrite_winner(actor):
+  """Agent route checks may race, so the serialized writer owns settlement."""
+  from app.questions import AnswerConflict
+
+  _seed_chat(
+    messages=[_question_msg("q-race")],
+    pending_question_id="q-race",
+  )
+  actor.pause_for_test()
+  first = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  retry = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  changed = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Blue"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  actor.resume_for_test()
+
+  assert _await(first) is True
+  assert _await(retry) is True
+  with pytest.raises(AnswerConflict):
+    _await(changed)
+  assert _load_chat()["messages"][-1]["blocks"][0]["answers"] == {
+    "q-race": "Red",
+  }
+
+
 def test_recovered_answer_retires_old_assistant_before_continuation(actor):
   question = _question_msg(
     "q-recovered", message_id="assistant-before-recovery",

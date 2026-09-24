@@ -13,11 +13,13 @@ from app.database import get_db
 from app.deps import (
   Principal,
   get_agent_run_principal,
+  get_chat_view_principal,
   get_current_owner,
   get_current_owner_for_lifecycle_control,
-  get_current_owner_for_owner_input,
+  require_chat_embed_operation,
   reject_cross_site,
 )
+from app.resource_access import require_active_chat_access
 
 
 router = APIRouter(prefix="/api/secure-inputs", tags=["secure-inputs"])
@@ -166,10 +168,12 @@ async def submit_secure_input(
   chat_id: str,
   request_id: str,
   request: Request,
-  _: models.Owner = Depends(get_current_owner_for_owner_input),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """Move submitted fields into process memory without logging or persistence."""
+  require_chat_embed_operation(principal, "chat:send")
+  require_active_chat_access(db, chat_id, principal)
   chat = _active_owner_chat(db, chat_id)
   saved = _saved_request(db, chat_id, request_id)
   if saved is not None:
@@ -240,19 +244,21 @@ async def submit_secure_input(
   "/{chat_id}/{request_id}/cancel",
   dependencies=[Depends(reject_cross_site)],
 )
-async def cancel_secure_input_by_owner(
+async def cancel_secure_input(
   chat_id: str,
   request_id: str,
-  _: models.Owner = Depends(get_current_owner_for_owner_input),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
-  """Let the owner dismiss their own open card without the helper's capability.
+  """Let a participant dismiss an open card without the helper's capability.
 
   The capability-based cancel is for the local helper on exit; if that process
   dies the card would otherwise sit in the chat's one-per-chat slot with no way
-  for the owner to clear it. Owner authentication plus chat ownership stands in
-  for the capability here.
+  for a participant to clear it. Authenticated chat access stands in for the
+  capability here.
   """
+  require_chat_embed_operation(principal, "chat:send")
+  require_active_chat_access(db, chat_id, principal)
   chat = _active_owner_chat(db, chat_id)
   saved = _saved_request(db, chat_id, request_id)
   if saved is not None:

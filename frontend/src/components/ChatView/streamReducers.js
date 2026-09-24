@@ -48,6 +48,7 @@ export function startToolLifecycle(prev, event) {
     output: '',
     status: 'running',
     ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.app_activity ? { app_activity: event.app_activity } : {}),
     ...(event?.peer_message ? { peer_message: event.peer_message } : {}),
     ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
     ...(event?.tool_use_id ? { tool_use_id: event.tool_use_id } : {}),
@@ -83,6 +84,7 @@ export function attachToolInput(prev, event) {
     ...updated[i],
     input: event?.input || '',
     ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.app_activity ? { app_activity: event.app_activity } : {}),
     ...(event?.peer_message ? { peer_message: event.peer_message } : {}),
     ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
     ...(event?.tool_use_id && !updated[i].tool_use_id
@@ -555,6 +557,9 @@ export function attachToolOutput(prev, content, event = null) {
   if (event?.recall) {
     block.recall = event.recall
   }
+  if (event?.app_activity) {
+    block.app_activity = event.app_activity
+  }
   // Peer-network results follow the same two-phase contract: a provider-
   // neutral running marker arrives on start/input, then the sink stamps the
   // bounded authoritative receipt onto the completed output.
@@ -1008,12 +1013,29 @@ export function applyTaskEvent(items, event, now = Date.now()) {
   if (recall) {
     const recallIdx = idx !== -1 ? idx : items.findIndex(
       it => it.type === 'tool'
-        && it.tool_use_id === toolUseId
         && it.recall && it.recall.task_id === taskId
+        && (toolUseId == null || it.tool_use_id === toolUseId)
     )
     if (recallIdx !== -1 && items[recallIdx].recall !== recall) {
       const updated = [...items]
       updated[recallIdx] = { ...items[recallIdx], recall }
+      if (idx === -1) return updated
+      items = updated
+    }
+  }
+  const appActivity = event.type === 'task_done' && event.app_activity
+    && typeof event.app_activity === 'object' ? event.app_activity : null
+  if (appActivity) {
+    const activityIdx = idx !== -1 ? idx : items.findIndex(
+      it => it.type === 'tool'
+        && it.app_activity?.task_id === taskId
+        && (toolUseId == null || it.tool_use_id === toolUseId)
+    )
+    if (activityIdx !== -1 && items[activityIdx].app_activity !== appActivity) {
+      const updated = [...items]
+      updated[activityIdx] = {
+        ...items[activityIdx], app_activity: appActivity,
+      }
       if (idx === -1) return updated
       items = updated
     }

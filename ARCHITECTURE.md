@@ -243,11 +243,11 @@ does not replace its normal process.
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
-the device being offline. `GET /api/ready` is serviceability: it requires both
-a successfully initialized database with every mapped table and column, and
-the single-writer persistence actor. Deployment and container probes use
-readiness. `GET /api/health/strict` retains the database-only diagnostic
-contract.
+the device being offline. `GET /api/ready` is serviceability: it requires a
+successfully initialized database with every mapped table and column, the
+single-writer persistence actor, and the small set of boot-critical
+chat/restart supervisors. Deployment and container probes use readiness.
+`GET /api/health/strict` retains the database-only diagnostic contract.
 
 The shell's `connectivityStore.js` owns reachability, service readiness, and
 restart observation together. A response proves reachability even when the
@@ -501,13 +501,34 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
-| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/`; edits that must reach existing untouched copies register their predecessor digest in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
+| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); platform skills live in `backend/scripts/seed-skills/` and advance on image boot from their recorded `.seed-skills.json` baseline, while local changes stay in place for review; the index (`skills-index.md`) is generated — never hand-edit it |
 | Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Möbius · You) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer; it uses the provider captured with that settled chat only when its auth preflight passes, otherwise publishing the local deterministic fallback without spawning a dead CLI. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile against `.seed-skills.json` at image boot, preserving local changes, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer; it uses the provider captured with that settled chat only when its auth preflight passes, otherwise publishing the local deterministic fallback without spawning a dead CLI. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+
+Platform skill reconciliation is owned by the image boot script, not the source
+updater. `.seed-skills.json` records the last platform bytes applied per skill.
+An unchanged live copy advances to the next baked seed. An edited copy stays
+untouched and shows a review status in `GET /api/skills` and the generated
+index; a deleted copy stays absent and is recorded as `missing_local` in the
+sidecar. After comparing exact local and baked bytes, the owner can
+keep the local text (`init_skills.py --resolve NAME.md --decision keep-local
+--expected-sha256 DIGEST`), take the baked version after archiving the local
+bytes (`--decision take-upstream` with the same digest pin), or have an agent incorporate changes
+and keep the result locally. Contributing a local improvement upstream remains
+a separate, expressly authorized Contribute action. Existing installations
+without a sidecar are adopted only when the live bytes match a historical seed
+blob reachable from the image's exact `BUILD_SHA` in `/data/platform` Git; if
+that evidence is absent, boot preserves the live file and marks it for review.
+The sole non-history exception is two exact, previously identified unsafe
+owner-curated copies of `platform-maintenance.md` and `cron.md`: boot archives
+their bytes before replacing them with the safe seed. An edited variation
+remains untouched. This is a safety migration, not a general update registry.
+Retired seeds move to `/data/shared/retired-skills/` before leaving discovery.
+App and Skills-owned basenames are excluded from platform reconciliation.
 
 ## Data layout (`/data/` volume)
 
@@ -584,12 +605,12 @@ path introduces an alternate Möbius boot mode. A broken persistent clone falls
 back to the baked backend, so the live container remains reachable to inspect.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe and validation of its served identity broker. It fetches `origin/main`,
-commits stray local edits, and fast-forwards or replays the local overlay onto
-that target; a conflict or failed post-replay probe leaves the exact
-pre-reconcile commit served and records a visible flag. An invalid existing
-clone or broker selects the complete baked platform without overwriting,
-quarantining, or reseeding the broken tree. Owner-data disaster recovery is the separate
+probe and validation of its served identity broker. Startup may finish or undo
+an update interrupted during its own filesystem transaction, but it never
+fetches or selects a newer release. Fetching and replaying local commits happen
+only through the reviewed updater. An invalid existing clone or broker selects
+the complete baked platform without overwriting, quarantining, or reseeding the
+broken tree. Owner-data disaster recovery is the separate
 `backup-data.py` / `restore-data.py` flow and is not automatically armed by
 installing Möbius.
 
@@ -1687,7 +1708,23 @@ Every mini-app ships a `mobius.json`; the dependency-free source of truth is `ba
 
 Published apps should generate one random UUID once and declare it as `package_id` (for example `urn:uuid:550e8400-e29b-41d4-a716-446655440000`). It remains unchanged across product, manifest-id, repository-path, and owner renames. GitHub-backed packages are additionally bound to GitHub's immutable numeric repository identity, so a repository rename or transfer only changes the fetch locator. Moving code into a different repository is an explicit trust transfer: the old trusted manifest declares the same `package_id` plus `moved_to: {"manifest_url": "https://.../mobius.json"}`. Existing installs accept the new repository only after fetching and verifying that declaration from their current source; a separate fork generates a new package id. A reviewed service uses its own stable `service.id`, independent of both the package's current `id` and installed slug. Manifests that declare both `package_id` and `service` must declare `service.id` explicitly.
 
-Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, and `agent_activities`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+
+`agent_activities` is the app-neutral presentation contract for scripts an app
+asks the chat agent to run. Each activity declares an id, a repo-relative
+`entry` also present in `source_files`, its exact positional `arguments` count,
+and a short `running_label`. The platform binds the command path to the
+installed app identity, accepts only one simple direct/Python/`bash -lc`
+invocation, and persists a bounded lifecycle marker on that ordinary tool
+block. A completed script prints a final
+`MOBIUS_APP_ACTIVITY_V1:{...}` JSON line with the same `activity_id`, a
+`succeeded|empty|failed` status, required `label`, and optional `detail`,
+`warning`, and resources (`label`, optional `summary` and own-app `intent`).
+The shell owns identity, bounds, persistence, safe own-app navigation, and the
+generic card; every domain concept and all additional protocol fields stay in
+the app. The declaration is not included in the capability contract and grants
+no data, network, or execution permission. Old Memory V1/V2 receipts remain a
+read-only transcript compatibility path, never a live provider interface.
 
 ## Testing — determinism principle
 
@@ -1709,5 +1746,8 @@ cover it deterministically.
 
 ## See also
 
+- **Proposed platform and app update contract:** `UPDATE-ARCHITECTURE.md`.
+  It is explicitly a target design; this file remains the as-built map until
+  that migration ships.
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

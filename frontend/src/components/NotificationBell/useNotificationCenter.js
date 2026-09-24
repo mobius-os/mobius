@@ -29,6 +29,12 @@ export default function useNotificationCenter(queryClient) {
     queryClient.setQueryData(notificationQueries.unreadCount.key, 0)
   }, [queryClient])
 
+  const dismiss = useCallback(async (notificationId) => {
+    await api.notifications.dismiss(notificationId)
+    await queryClient.resetQueries({ queryKey: notificationQueries.list.key })
+    notificationQueries.unreadCount.invalidate(queryClient)
+  }, [queryClient])
+
   useEffect(() => {
     if (open) void markSeen()
   }, [open, markSeen])
@@ -65,7 +71,7 @@ export default function useNotificationCenter(queryClient) {
 
   return {
     state: { open, unreadCount },
-    actions: { toggle, close, clearAll, reconcile, onCreated },
+    actions: { toggle, close, clearAll, dismiss, reconcile, onCreated },
     meta: { rootRef, bellRef },
   }
 }

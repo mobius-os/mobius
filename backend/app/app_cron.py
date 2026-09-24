@@ -14,6 +14,14 @@ BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
 
 
+class CronDeclarationError(HTTPException):
+  """One app's schedule declaration is invalid; other apps may proceed."""
+
+
+class CronInfrastructureError(HTTPException):
+  """The shared cron installer is unavailable or failed to execute."""
+
+
 def cron_scaffold(override: Path | None = None) -> Path:
   """Resolve a test override, the served scaffold, or the baked boot floor."""
   if override is not None and override != BAKED_CRON_SCAFFOLD:
@@ -65,25 +73,33 @@ def register_cron(
   it so the served checkout is preferred over the baked fallback.
   """
   if cron_mutation_blocked_in_test_runtime():
-    raise HTTPException(500, "Cron mutation is disabled in the test runtime.")
+    raise CronInfrastructureError(
+      500, "Cron mutation is disabled in the test runtime.",
+    )
   if (timezone is None) != (zone_cron is None):
-    raise HTTPException(
+    raise CronDeclarationError(
       500, "Cron registration bug: timezone and zone_cron must be paired.",
     )
   if timezone is not None:
     from app import cron_tz
 
     if app_id is None:
-      raise HTTPException(500, "A timezone-owned schedule requires an app id.")
+      raise CronDeclarationError(
+        500, "A timezone-owned schedule requires an app id.",
+      )
     if not cron_tz.valid_timezone(timezone):
-      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
+      raise CronDeclarationError(
+        500, f"Unknown IANA timezone: {timezone!r}",
+      )
     if cron_tz.parse_daily_cron(zone_cron) is None:
-      raise HTTPException(
+      raise CronDeclarationError(
         500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
       )
   active_scaffold = scaffold or cron_scaffold()
   if not active_scaffold.exists():
-    raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
+    raise CronInfrastructureError(
+      500, "init-cron-scaffold.sh missing from image.",
+    )
   command = [
     str(active_scaffold), slug, schedule_expr, job_path.name,
   ]
@@ -99,11 +115,16 @@ def register_cron(
   env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
   if app_id is not None:
     env["MOBIUS_APP_CRON_STATE_DIR"] = str(schedule_state_dir(app_id))
-  result = subprocess.run(
-    command, capture_output=True, text=True, timeout=30, env=env,
-  )
+  try:
+    result = subprocess.run(
+      command, capture_output=True, text=True, timeout=30, env=env,
+    )
+  except (OSError, subprocess.SubprocessError) as exc:
+    raise CronInfrastructureError(
+      500, f"Cron registration could not run: {exc}",
+    ) from exc
   if result.returncode != 0:
-    raise HTTPException(
+    raise CronInfrastructureError(
       500,
       f"Cron registration failed: {result.stderr.strip()[:400]}",
     )

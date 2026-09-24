@@ -1540,7 +1540,9 @@ def _reconcile_cron_after_install_rollback() -> None:
     from app.routes.app_schedules import reconcile_app_cron_supervision
     cron_db = SessionLocal()
     try:
-      _count, warnings = reconcile_app_cron_supervision(cron_db)
+      _count, warnings, _infrastructure_ready = (
+        reconcile_app_cron_supervision(cron_db)
+      )
     finally:
       cron_db.close()
     for warning in warnings:
@@ -1669,8 +1671,8 @@ async def _sync_app_skills(
   guarantees skills ⊆ root source_files, so the tree carries them).
 
   The never-lose-work contract: a present skill file whose bytes differ
-  from what this installer last recorded (agent edits, or a pre-manifest
-  seed copy) is git-snapshotted into the /data repo BEFORE being
+  from what this installer last recorded (agent edits) is git-snapshotted
+  into the /data repo BEFORE being
   overwritten, and left untouched when the snapshot cannot be guaranteed.
   Ownership rides the installer-owned sidecar so one app can never
   silently take over another live app's skill file.
@@ -1693,6 +1695,33 @@ async def _sync_app_skills(
     installed_records = skills_mod._read_sidecar(
       skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR
     )
+    # Platform seeds have a recorded owner too. An app may continue managing a
+    # basename it already owns, but may not silently adopt a platform skill
+    # merely because both use the historical flat-file shape.
+    seed_sidecar = skills_dir / skills_mod.SEED_SKILLS_SIDECAR
+    if seed_sidecar.is_symlink():
+      warnings.append("skills: platform ownership unreadable — sync skipped")
+      return
+    if seed_sidecar.exists():
+      try:
+        seed_records = json.loads(seed_sidecar.read_text(encoding="utf-8"))
+      except (OSError, ValueError):
+        seed_records = None
+      if (
+        not isinstance(seed_records, dict)
+        or any(not isinstance(name, str) or not isinstance(rec, dict)
+               for name, rec in seed_records.items())
+      ):
+        warnings.append("skills: platform ownership unreadable — sync skipped")
+        return
+    else:
+      seed_records = {}
+    seed_owned = {
+      name for name, rec in seed_records.items()
+      if isinstance(rec, dict) and rec.get("status") != "retired"
+    } | {
+      f"{name}.md" for name in skills_mod._seed_names()
+    }
     sidecar_path = skills_dir / _APP_SKILLS_SIDECAR
     records: dict = {}
     if sidecar_path.exists():
@@ -1740,6 +1769,9 @@ async def _sync_app_skills(
         continue
       rec = records.get(rel)
       owner_id = rec.get("app_id") if isinstance(rec, dict) else None
+      if rel in seed_owned and owner_id != app.id:
+        warnings.append(f"skill {rel}: owned by the platform — skipped")
+        continue
       if owner_id is not None and owner_id != app.id:
         owner = db.query(models.App).filter(models.App.id == owner_id).first()
         if owner is not None:
@@ -1780,7 +1812,7 @@ async def _sync_app_skills(
         current_sha = hashlib.sha256(target.read_bytes()).hexdigest()
         if current_sha != recorded_sha:
           # Modified since last recorded, or never recorded (an agent
-          # edit, or the old platform seed's copy): snapshot the current
+          # edit): snapshot the current
           # bytes before replacing them — never trade edits for an update.
           if (data_dir / ".git").is_dir():
             try:

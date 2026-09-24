@@ -52,6 +52,7 @@ def test_boot_removes_stale_global_auto_resume_setting():
   with TestClient(app):
     pass
 
+  assert app.state.runtime_supervisors is None
   assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
 
 
@@ -443,7 +444,9 @@ def test_set_background_agents_persists_only_current_provider_rows(client, auth)
   assert merged["skills_enabled"] is True
   assert merged["background_agents"] == {"providers": rows}
   resolved = client.get("/api/settings", headers=auth).json()["background_agents"]
-  assert resolved["providers"] == rows
+  # Saved choices survive removal, but a connector without an accepted app
+  # declaration is not offered to background agents.
+  assert resolved["providers"] == rows[:2]
   assert resolved["primary"]["provider"] == "claude"
   assert resolved["fallback"]["provider"] == "codex"
 
@@ -730,18 +733,11 @@ def test_model_registry_returns_known_models_on_discovery_failure(
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
   body = res.json()
-  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  assert set(body["providers"]) == {"claude", "codex"}
   claude_ids = [m["id"] for m in body["providers"]["claude"]]
   assert claude_ids == KNOWN_MODELS["claude"]
   codex_ids = [m["id"] for m in body["providers"]["codex"]]
   assert codex_ids == KNOWN_MODELS["codex"]
-  mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
-  assert mobius_ids == KNOWN_MODELS["mobius"]
-  assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
   assert by_id["claude-opus-4-8"]["label"] == "claude-opus-4-8"

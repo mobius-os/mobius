@@ -265,6 +265,18 @@ test('toolCallLabel names the concrete nested step in progressive and past tense
   )
 })
 
+test('app activity is distinctive and uses app-owned copy with host identity', () => {
+  const tool = {
+    type: 'tool', tool: 'Bash', status: 'done',
+    app_activity: {
+      status: 'succeeded', app_slug: 'brain', app_name: 'Brain',
+      activity_id: 'lookup', label: 'Found a relevant note',
+    },
+  }
+  assert.equal(effectiveToolName(tool), 'AppActivity')
+  assert.equal(toolCallLabel(tool), 'Brain: Found a relevant note')
+})
+
 test('failed Memory activity is honest and remains distinctive', () => {
   const failed = {
     type: 'tool', tool: 'Bash', status: 'done',

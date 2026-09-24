@@ -195,6 +195,7 @@ def test_answer_delivers_immediately_when_pending_registered(
         "content": "answer",
         "hidden": True,
         "answers": {"Pick one": "a"},
+        "selected_options": {"q1": ["a"]},
         "question_id": pending.question_id,
       },
       headers=auth,
@@ -209,6 +210,7 @@ def test_answer_delivers_immediately_when_pending_registered(
     # Future resolved with the submitted answers.
     assert fut.done()
     assert fut.result() == {"Pick one": "a"}
+    assert _question_blocks(chat.id)[0]["selected_options"] == {"q1": ["a"]}
     # Registry cleared atomically by claim().
     assert questions.get(chat.id) is None
     assert system_events == [{

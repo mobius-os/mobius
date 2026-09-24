@@ -1,4 +1,5 @@
 // Shared compact relative-time formatting for recency labels in the shell.
+import { formatDateTime } from './dateTimeFormat.js'
 // Coarse on purpose — a list hint, not a clock. Reused by the notification
 // preview and global search so recency reads the same everywhere.
 
@@ -27,7 +28,7 @@ export function formatRelativeTime(isoString, now = Date.now()) {
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days}d ago`
   try {
-    return new Date(t).toLocaleDateString()
+    return formatDateTime(new Date(t))
   } catch {
     return ''
   }

@@ -1,512 +1,369 @@
 #!/usr/bin/env python3
-"""Bootstraps the agent-editable skills layer at /data/shared/skills/ on boot.
+"""Reconcile platform-owned skills at boot without a hand-maintained digest list.
 
-The system prompt (skill/core.md, baked + owner-curated) is the stable
-"constitution"; the detailed how-to skills live here, under /data, so the agent
-(and the nightly Reflection agent) can IMPROVE them and write new ones. Like the
-knowledge graph, this is CREATE-IF-ABSENT — reseeding would clobber the agent's
-own skill edits.
-
-Propagation policy, precisely (the code below is the contract): on first boot
-the whole seed tree is copied. On every later boot we add missing seed skills
-and apply only explicit, hash-gated migrations:
-an existing file is replaced when it is byte-for-byte a known baked predecessor,
-while every owner/agent-edited copy is preserved. A normal baked-seed edit does
-not propagate until its predecessor hash is deliberately registered below; this
-keeps urgent fix-forward migrations possible without blind overwrites.
-
-Retired flat seed skills use a separate one-way contract. Every known baked
-generation is removed from the active skills directory. A customized copy is
-not discarded: its exact bytes are moved to `/data/shared/retired-skills/`,
-outside runtime discovery, before the active legacy path is removed. This lets
-one overloaded skill id disappear without erasing owner notes or leaving stale
-instructions active forever.
-
-One narrow exception, and it is deliberate: a registered digest may name a
-known-bad OWNER-CURATED generation rather than a baked one, when that exact
-content is unsafe to leave in place (today: a `cron.md` copy that tells app
-jobs to read the owner service token). Such an entry is annotated with its
-provenance, because it cannot be reproduced from this repository's history and
-a reviewer would otherwise have no way to audit what is being overwritten. It
-remains an exact-hash match -- an owner edit that differs by one byte is still
-preserved. App-owned
-skills are not part of this seed tree; they arrive through manifests and their
-generic ownership sidecar.
-`.seed-version` remains a reserved internal name for instances that carry the
-retired marker; bootstrap neither reads nor writes it.
-
-Seed source: /app/scripts/seed-skills/ (baked), falling back to the in-repo
-backend/scripts/seed-skills/ for dev. Run from entrypoint after
-init_chat_summaries.py.
+The sidecar records the last platform version applied to each flat skill. Local
+edits or deletions remain in place and are marked for review. An installation
+predating the sidecar is adopted only when its bytes match a seed blob in the
+image revision's Git ancestry; uncertain copies are never overwritten. A
+retired seed is archived outside discovery before its active path is removed.
 """
 
+from __future__ import annotations
+
+import argparse
 import hashlib
 import json
 import os
 import pwd
-import shutil
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
-# Entrypoint executes this file by absolute path, which puts /app/scripts rather
-# than its sibling /app package on sys.path. Resolve the trusted runtime root
-# from this script so both boot reconciliation imports work standalone.
 _APP_IMPORT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _APP_IMPORT_ROOT not in sys.path:
   sys.path.insert(0, _APP_IMPORT_ROOT)
 
+from app.storage_io import atomic_write  # noqa: E402
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
-# Update only byte-for-byte baked copies; an owner/agent-edited file is never
-# touched. A set preserves every known unmodified predecessor when one skill
-# needs more than one fix-forward migration over its lifetime.
-_UNMODIFIED_MIGRATIONS = {
-  "agent-coaching.md": {
-    # First shared coaching seed, before Codex gained an exact thread-fork API
-    # and transcript reseeding was removed from the coaching contract.
-    "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
-  },
-  "platform-maintenance.md": {
-    # Untouched release copy before agent-side API examples standardized on
-    # mapi. Owner-edited copies still differ and remain protected.
-    "7cd74918a7d477f87addfdc51dd4559672a9a7face6da109a5af67dd47390efa",
-    # Baked copies before the container-boundary guidance. Both hashes are
-    # released, untouched generations; owner-edited copies remain protected.
-    "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
-    "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
-    # Locally curated hybrid that retained useful mapi diagnostics but omitted
-    # the Host-owned cutover contract. During the 2026-08-24 incident that stale
-    # safety guide left agents without the canonical replacement boundary and
-    # helped raw self-recreation look acceptable. It is not a baked generation,
-    # so register this exact known-bad hash deliberately; any further owner edit
-    # still differs and remains protected.
-    "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
-    # Untouched release copy before the mapi section described the safe
-    # option passthrough and the refused retargeting options instead of
-    # implying everything forwards to curl.
-    "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
-  },
-  "goal-planning.md": {
-    # Explicit-completion seed before the redundant preflight was made optional.
-    "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",
-    # First dependency-aware Goal-plan seed. Replace only the untouched copy
-    # so existing instances learn the completion preflight without clobbering
-    # any owner-authored planning guidance.
-    "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
-    # Dependency-aware plan seed before provider-neutral automatic promotion.
-    "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
-    # Hierarchical Goal seed before provider-neutral automatic promotion.
-    "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
-    # Provider-neutral promotion seed before phase-transition rechecks and the
-    # first-class platform promote_goal affordance.
-    "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
-    # Phase-transition seed before the mandatory turn-local routing decision.
-    "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
-    # Mandatory turn-local routing seed before every unfinished Goal wait had
-    # to declare a durable monitor or present an explicit owner action.
-    "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
-    # Provider-neutral promotion seed before the execution loop was
-    # front-loaded so a bounded skill read could not miss plan/parallel/handoff.
-    "630fe9ca1e8f080e052ed87d9e7d7b8ea92e4e891efcfc952a0bdf80e37afd66",
-    # Front-loaded execution-loop seed before routing became an explicit serial
-    # gate and the repeated guidance was condensed below Claude's read limit.
-    "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
-    # Compact serial-gate seed before Goals moved from provider-attempt fields
-    # to first-class durable records.
-    "4f77c36ab0c8d1ef7459911a813e0b742a5819a915601ca127495354a21d7ea7",
-    # Turn-local routing seed before plan-owned continuation and no-op revision
-    # fencing. Only untouched copies receive the new handoff contract.
-    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
-    # Initial plan-owned continuation seed before its bounded wording pass.
-    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
-  },
-  "waiting.md": {
-    # Untouched shared copy before explicit owner/deadline requirements and
-    # the no-model polling contract. The seed already carried the repair, but
-    # existing instances could never receive it without this migration.
-    "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
-    # Seed immediately before parent-owned Wait discovery and the explicit
-    # no-inert-monitor rule. Advance only untouched installations.
-    "52be8224de1586a91a0a2149907ac09da547aeead99e0649840ea794f8685847",
-  },
-  "claude.md": {
-    # Legacy direct-CLI guide before the installed Subagents app became the
-    # authoritative configured and restart-safe delegation boundary.
-    "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
-  },
-  "cron.md": {
-    # Untouched release copy before the agent/app credential boundary named
-    # mapi as agent-only and kept APP_TOKEN jobs on curl.
-    "2ec4c056ee8691283fbcdeaa1cdcaa1b106ed056600e38cac8b8a979de9dccb3",
-    "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
-    "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
-    # Every remaining baked generation that still shows the owner service token
-    # as the example an app job should read.  An instance sitting on one of
-    # these keeps the pre-app-token guidance until it is registered here, so
-    # the migration is only as complete as this set.
-    "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
-    "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
-    # Pre-#612 baked copy: remove guidance for the retired cron-emit wrapper.
-    "55a350281a94ecabf35297d4aef019eedaed28378ac0a2a440815120c6219ba7",
-    # Locally curated pre-app-token copy. It tells scheduled app jobs to read
-    # the owner service token, contradicting supervised $APP_TOKEN authority.
-    # Not a baked generation: it exists only on instances whose owner edited
-    # this skill before the app-token migration, which is why the digest
-    # cannot be reproduced from this repository's history.  Registered
-    # deliberately -- see the propagation policy note in the module docstring.
-    "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
-  },
-  "embedded-app-agent.md": {
-    # Untouched release copy before owner-context job triggers used mapi.
-    "8f74917e0978ae4c1470bed2a9d14c52a8a050875251aec42458a35d16ff6ac2",
-    # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
-    "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
-  },
-  "theming.md": {
-    # v22 baked copy: point shell-break guidance at the operator reset path.
-    "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
-    # Owner-curated copy that still sends agents to the removed /recover UI.
-    # The current seed retains its useful shell-scale invariant and removes the
-    # dead route, so this exact known-bad generation is safe to reconcile.
-    "1d655ec09d7f25c831e105411d59b8428b07defc6f58416f8290a8c1b08ca594",
-    # Untouched baked and locally curated mapi generations that still wrapped
-    # whole CSS documents inside hand-escaped JSON. Migrate both exact copies
-    # to the raw text boundary; any owner-authored variation remains protected.
-    "7994321819a43708debb77104edea12f785beb46d0933c2b94f93cf418f510ee",
-    "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
-  },
-  "workflows-app.md": {
-    # Resolved the app by slug=="workflows". An install whose preferred slug
-    # is taken gets a fallback (this instance's row is 'workflows-2'), so the
-    # lookup silently found nothing and the skill's own "skip silently" branch
-    # hid the failure. Now keyed on the manifest id, as bootstrap already is.
-    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
-  },
-  "images.md": {
-    "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
-    # v20 baked copy: publish the exact generated image, never newest-by-time.
-    "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
-    # Pre-direct-result seed: sent Codex through a backing file under the
-    # protected credentials tree instead of returning the tool result.
-    "75271f2a704a6db349e2529d76ddfa505f0ceb1a7f33894a6d4bba23dbd317bb",
-  },
-  "notifications.md": {
-    # Pre-slimming seed: open_item mechanics still lived in core.md, leaving
-    # this policy owner without the executable recipe.
-    "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
-    # Untouched baked and locally curated mapi generations that interpolated
-    # ids through nested shell quotes. Replace only those exact copies with
-    # stdin-delimited JSON guidance.
-    "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
-    "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
-    # Pre-durable-Undo seed: recoverable deletion still told agents nothing
-    # about the endpoint-owned notification receipt.
-    "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
-  },
-  "building-apps.md": {
-    # Untouched main copy: adopt the clarified platform/app responsibility
-    # boundary without replacing custom skills.
-    "2ea47c610eb2bffaf42c8cbe8e2c69d17943c992bb22ba2aaa2e0c65b6ea1499",
-    # Intermediate mapi copy before credential reads preserved HTTP failures.
-    "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
-    # Untouched release copy before owner-context API examples used mapi.
-    "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
-    "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
-    "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
-    "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
-    # v17 baked copy: replace watcher publication with explicit apply.
-    "a8591f03bd5fb6eb0cfcd811d6d6d4309657f2f4e9e8e11ded4cbefbd77facfd",
-    # v20 baked copy: delete by exact id and retain its recovery receipt.
-    "5a6bafaa654071c4af5a5c7a201e23e4b0294c392ccb2b9afd7c2b18e17ff3fe",
-    # Pre-slimming seed: duplicated the component catalog's full UI skeleton
-    # inside an advanced runtime guide that is always read with quickstart.
-    "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
-  },
-  "building-apps-quickstart.md": {
-    # Untouched main copy: adopt the clarified product-choice wording without
-    # replacing custom skills.
-    "61074dbfebf0dc17355eb7e2ce0b4e2ad41d0ce97c7dfa158d530e4f68ac6f35",
-    "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
-    # v16 baked copy: replace the unreliable CSS iframe selector.
-    "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
-    # v17 baked copy: teach the coherent apply/retry lifecycle.
-    "85a4b5ce5b47c81fa53bec90d530adfe433c0d2f7f31363427b6c792bd332e05",
-    # v18 baked copy: co-read completion policy and use compact app discovery.
-    "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
-    # v20 baked copy: retain the apply receipt's numeric id across the flow.
-    "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
-    # Owner-curated pre-preview-helper copy: valid local prose, but stale
-    # capture and apply receipts now bypass readiness and relist app state.
-    "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
-  },
-  "undo-and-restore.md": {
-    # Untouched release copy before recovery examples used mapi.
-    "84bcbf77edba170f2023824aac46e89e737a873b785c3128943ee8600ca66feb",
-  },
-  "resolving-app-git.md": {
-    # v17 baked copy: resolution is an explicit installer replay.
-    "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
-    # Pre-v17 baked copy still describing the retired source watcher
-    # ("finish by saving — the watcher does the rest"). It contradicts the
-    # resolver prompt in routes/apps.py, which sends the agent here and then
-    # tells it to run resolve_app_update.py. Unmodified copies migrate.
-    "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
-    # Owner-curated resolver guide predating the mandatory policy/review/finalize
-    # modes. Its bare command now fails argparse before doing useful work.
-    "6bbfe07a575734c4bc0b1d84e40dbaab9d9689671825e7a42383b4f2e673112a",
-  },
-  "app-component-shapes.md": {
-    "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
-    # v16 baked copy: keep routine app builds from loading the catalog.
-    "91243377242700acb5093165af58c372bed0005f358d3a4b26774aeb2ef8a365",
-  },
-  "visual-testing.md": {
-    "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
-    # v16 baked copy: use iframe refs and preserve React's inert cleanup.
-    "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
-    # v18 baked copy: avoid measured textbox and opaque-frame wait failures.
-    "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
-    # v19 baked copy: replace speculative selector examples with grounding.
-    "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
-    # Owner-curated copy using the retired opaque-frame selector path. The
-    # merged seed preserves its media-order and browser-cleanup safeguards.
-    "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
-    # Pre-agent-browser-0.38 copy: described node refs as ephemeral and the
-    # manual reap. Untouched installs keep that text without this entry.
-    "32e436df532ee4c17b3343b04ead4261d7e46dc48c1dc0a611dcdfdd7b593209",
-  },
-}
-
-# Every distinct recovery.md shipped on main. This legacy file mixed external
-# emergency access with ordinary maintenance, Git undo, and soft-delete APIs.
-# The focused replacement skills are platform-maintenance.md and
-# undo-and-restore.md. Current-seed hashes belong here by design: retirement,
-# unlike a fix-forward replacement, must also remove the latest untouched copy.
-_RETIRED_UNMODIFIED_SKILLS = {
-  # Live screen control remains an owner-consented platform capability, but it
-  # no longer needs a standalone procedural skill. Remove the untouched seed
-  # copy from discovery; a customized copy is archived by the generic retire
-  # path below instead of being discarded.
-  "live-screen-control.md": {
-    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
-  },
-  # Agent Coaching subsumes the former on-demand manager ritual with a neutral
-  # feedback-first method that Reflection can also use for self-improvement.
-  # Preserve customized copies in retired-skills, but keep no parallel active
-  # skill whose framing or procedure can drift from Agent Coaching.
-  "manager-session.md": {
-    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
-    "8375041d3b37cd3f97d8a3d554c85485a35dc9c8b1466abab2c5f52ff44e1c18",
-    "f1157721e9c874cd69c961bd018d13d0233bac1e3720b1d5655e06033bc20aea",
-  },
-  "recovery.md": {
-    "0a028cfea8427d9c7b7cd9522da64caf196554f268957e305dc521bb7d6faa3d",
-    "0e68863722e977c2ca78754fb2699ac0c19906062bbc63acc3a1aab41b4ea260",
-    "0f58a4b5d83dfab083549cc1209d3f7835c973b61928752543be286fad360017",
-    "0fbd53e4ac9d67ed7c2731271f5f4ccf5a74bb8348bd5885605bc3c2b5a2b7f4",
-    "109cc54c47595a2b9f7d09bbfbfc0f7b6be919ef3ca2a2c16cd2d8fc5d6533e7",
-    "157700e43f17cf81ef0cb993c8bbc887ae5dc1303508778382f136e7f80c3d8c",
-    "3c4db1828fd893738f0e241bcecb7da218159656ea3a2b63c35c16d4d771febe",
-    "467542740b110e6fbd21e86bfbd247551c676385a46d64a5130a2a648c47346a",
-    "4805da9cc334d5a1c0e0d5e30d0b2655bd4a4de3e1d1f470b73a01092d8d18cb",
-    "5fbf576db34553b5552e83383590435a8e96dbfcdf71837dbe3de4f4ca1c1d45",
-    "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe",
-    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
-    "79d4a1ff10cf2a28d8e74123aa95e1ba006f1ede299d64c619b2b15d0c89ce57",
-    "8cda43c1637cdb66702a70c53d1682629e6923ccf157676faf09582109b8e570",
-    "a27e02e948b417dddecf0f7d81c6d00e3c7a044e7901cd3c026031a2f05eb978",
-    "b4b634e93d43b635cf46ed37a12f3f419d3bee4d926cb912e42f9ddb1098dd94",
-    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
-    "cb283d498f55a188f9e8bed0664afb0472ec76f2ddfd421a007f844b720679f5",
-    "e4b2866319e5aa59f688e32f2e5ff3ddf262f339c1404ce6e451fa0857c3f995",
-    "e648e1d45b43c3a0360a244521f1387f52ee5c5e48eb7d5d2db9bddcdf86ae0e",
-    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
-    "f72a51b41f1cde7ca9b7bf00029a33bc90203a5f252d274381fccddf2040a4a0",
-  },
-}
-
-_SEED_CANDIDATES = [
+PLATFORM_REPO = DATA_DIR / "platform"
+BUILD_SHA = os.environ.get("BUILD_SHA", "")
+SIDECAR = ".seed-skills.json"
+SEED_PATH = "backend/scripts/seed-skills"
+_SEED_CANDIDATES = (
   Path("/app/scripts/seed-skills"),
   Path(__file__).resolve().parent / "seed-skills",
-]
+)
+
+# Two exact owner-curated legacy copies were deliberately migrated by the old
+# registry because their instructions crossed a safety boundary. They are not
+# recoverable from seed Git history: keep this narrow compatibility exception,
+# archive the exact bytes first, and never generalize it into an update list.
+# platform-maintenance omitted the Host-owned container cutover boundary;
+# cron told app jobs to read the owner service token instead of APP_TOKEN.
+_UNSAFE_LEGACY_COPIES = {
+  "platform-maintenance.md": "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
+  "cron.md": "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
+}
 
 
-def _seed_dir() -> Path | None:
-  return next((p for p in _SEED_CANDIDATES if p.is_dir()), None)
+def _sha(content: bytes) -> str:
+  return hashlib.sha256(content).hexdigest()
 
 
-def _chown_mobius(path: Path) -> None:
-  """Make the tree mobius-owned + writable so the agent can edit skills."""
+def _valid_digest(value: object) -> bool:
+  return (
+    isinstance(value, str) and len(value) == 64
+    and all(c in "0123456789abcdef" for c in value)
+  )
+
+
+def _plain_file(path: Path) -> bool:
   try:
-    m = pwd.getpwnam("mobius")
+    return stat.S_ISREG(path.lstat().st_mode)
+  except FileNotFoundError:
+    return False
+
+
+def _write_records(records: dict) -> None:
+  path = SKILLS / SIDECAR
+  atomic_write(path, json.dumps(records, indent=2, sort_keys=True) + "\n")
+  _writable(path)
+
+
+def _writable(path: Path) -> None:
+  try:
+    mobius = pwd.getpwnam("mobius")
   except KeyError:
     return
-  for p in [path, *path.rglob("*")]:
+  try:
+    os.chown(path, mobius.pw_uid, mobius.pw_gid)
+    os.chmod(path, 0o775 if path.is_dir() else 0o664)
+  except OSError:
+    pass
+
+
+def _read_records(path: Path, *, platform: bool = False) -> dict | None:
+  if path.is_symlink():
+    return None
+  if not path.exists():
+    return {}
+  if not _plain_file(path):
+    return None
+  try:
+    records = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  if not isinstance(records, dict):
+    return None
+  for name, record in records.items():
+    if (
+      not isinstance(name, str) or Path(name).name != name
+      or not name.endswith(".md") or not isinstance(record, dict)
+    ):
+      return None
+    if platform:
+      baseline = record.get("baseline_sha256")
+      upstream = record.get("upstream_sha256")
+      status = record.get("status")
+      if (
+        (baseline is not None and not _valid_digest(baseline))
+        or (upstream is not None and not _valid_digest(upstream))
+        or status not in {"current", "needs_review", "missing_local", "held", "retired"}
+        or (status == "retired") != (upstream is None)
+      ):
+        return None
+  return records
+
+
+def _git_history() -> dict[str, set[str]] | None:
+  """Historical seed bytes reachable from this image's exact source revision.
+
+  The image's baked checkout may be shallow. The persistent platform checkout
+  carries history, but may also have advanced past the image. Pin to BUILD_SHA
+  so a future-only or locally-authored seed cannot authorize a boot rewrite.
+  """
+  if len(BUILD_SHA) != 40 or any(c not in "0123456789abcdef" for c in BUILD_SHA):
+    return None
+  if not (PLATFORM_REPO / ".git").exists():
+    return None
+  env = {k: v for k, v in os.environ.items() if k not in {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  }}
+  base = ["git", "-c", f"safe.directory={PLATFORM_REPO}", "-C", str(PLATFORM_REPO)]
+  try:
+    listed = subprocess.run(
+      [*base, "log", "--raw", "--no-abbrev", "--no-renames", "--format=", BUILD_SHA, "--", SEED_PATH],
+      capture_output=True, check=True, timeout=30, env=env,
+    ).stdout
+    objects: list[tuple[str, str]] = []
+    for line in listed.decode("utf-8").splitlines():
+      meta, _, rel = line.partition("\t")
+      if rel.startswith(SEED_PATH + "/") and rel.endswith(".md"):
+        name = Path(rel).name
+        if rel == f"{SEED_PATH}/{name}":
+          parts = meta.split()
+          if len(parts) != 5:
+            return None
+          for oid in parts[2:4]:
+            if oid != "0" * 40:
+              objects.append((oid, name))
+    objects = list(dict.fromkeys(objects))
+    if not objects:
+      return None
+    batch = subprocess.run(
+      [*base, "cat-file", "--batch"],
+      input=("\n".join(oid for oid, _ in objects) + "\n").encode(),
+      capture_output=True, check=True, timeout=30, env=env,
+    ).stdout
+  except (OSError, subprocess.SubprocessError, UnicodeError):
+    return None
+  history: dict[str, set[str]] = {}
+  offset = 0
+  for oid, name in objects:
+    end = batch.find(b"\n", offset)
+    if end < 0:
+      return None
+    header = batch[offset:end].split()
+    if len(header) != 3 or header[0] != oid.encode() or header[1] != b"blob":
+      return None
     try:
-      os.chown(p, m.pw_uid, m.pw_gid)
-      os.chmod(p, 0o775 if p.is_dir() else 0o664)
-    except (PermissionError, OSError):
-      pass
+      size = int(header[2])
+    except ValueError:
+      return None
+    offset = end + 1
+    if size < 0 or batch[offset + size:offset + size + 1] != b"\n":
+      return None
+    history.setdefault(name, set()).add(_sha(batch[offset:offset + size]))
+    offset += size + 1
+  return history if offset == len(batch) else None
+
+
+def _archive(name: str, content: bytes) -> bool:
+  archive = RETIRED_SKILLS / f"{Path(name).stem}-{_sha(content)}.md"
+  try:
+    RETIRED_SKILLS.mkdir(parents=True, exist_ok=True)
+    _writable(RETIRED_SKILLS)
+    if archive.exists():
+      if not _plain_file(archive) or archive.read_bytes() != content:
+        return False
+    else:
+      atomic_write(archive, content)
+      _writable(archive)
+    return archive.read_bytes() == content
+  except OSError:
+    return False
 
 
 def _write_index() -> None:
-  """Regenerates skills-index.md via app.skills; best-effort.
-
-  This script runs standalone from the entrypoint (before uvicorn), so the
-  app package import can fail on a badly broken tree — the index is a
-  convenience surface, never worth failing boot over. The server-side install
-  paths regenerate it too, so a skipped boot write self-heals on the next
-  install.
-  """
   try:
-    from app.skills import reconcile_installed, write_index
-
-    # Startup half of the installer's crash-recovery contract: repair any
-    # install a crash interrupted (finalize published, discard staged) before
-    # the index snapshots the tree.
-    repaired = reconcile_installed(SKILLS)
-    if repaired:
-      print(f"init_skills: reconciled interrupted install(s): {repaired}")
+    from app.skills import write_index
     write_index(SKILLS)
-    print("init_skills: skills-index.md regenerated")
-  except Exception as exc:  # noqa: BLE001 - boot must not fail on the index
+  except Exception as exc:  # index is an inspection convenience, not boot-critical
     print(f"init_skills: index generation skipped ({exc})")
 
 
-def _retire_legacy_skills() -> tuple[int, int]:
-  """Remove baked legacy seeds and archive customized flat copies exactly."""
-  sidecar = SKILLS / ".app-skills.json"
-  app_owned: set[str] = set()
-  if sidecar.exists():
-    try:
-      records = json.loads(sidecar.read_text(encoding="utf-8"))
-      if not isinstance(records, dict) or any(
-        not isinstance(name, str) or not isinstance(record, dict)
-        for name, record in records.items()
-      ):
-        raise ValueError("expected an object of ownership records")
-      # The sidecar owns the basename even while a skill is inactive. Restore
-      # moves bytes back before it flips `active`, so filtering on discovery
-      # state would let boot retire an app-owned file after an interruption.
-      app_owned = set(records)
-    except (OSError, ValueError) as exc:
-      # Ownership ambiguity must preserve the live files. The app installer
-      # can repair its own sidecar on a later install/update.
-      print(f"init_skills: app skill ownership unreadable; retirement skipped ({exc})")
-      return 0, 0
-
-  removed = 0
-  archived = 0
-  for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
-    if name in app_owned:
-      continue
-    path = SKILLS / name
-    if not path.is_file():
-      continue
-    try:
-      content = path.read_bytes()
-    except OSError as exc:
-      print(f"init_skills: could not inspect retired {name} ({exc})")
-      continue
-    digest = hashlib.sha256(content).hexdigest()
-    if digest in baked_digests:
-      try:
-        path.unlink()
-      except OSError as exc:
-        print(f"init_skills: could not remove retired {name} ({exc})")
-        continue
-      removed += 1
-      continue
-
-    # A content-addressed archive is idempotent across a crash between writing
-    # the archive and unlinking the active path. Never overwrite different
-    # owner bytes, even under an astronomically unlikely digest collision.
-    archive = RETIRED_SKILLS / f"{path.stem}-{digest}.md"
-    try:
-      RETIRED_SKILLS.mkdir(parents=True, exist_ok=True)
-      if archive.exists():
-        if archive.read_bytes() != content:
-          raise OSError("archive digest collision")
-      else:
-        archive.write_bytes(content)
-        if archive.read_bytes() != content:
-          raise OSError("archive verification failed")
-      path.unlink()
-    except OSError as exc:
-      print(f"init_skills: could not archive customized {name} ({exc})")
-      continue
-    archived += 1
-  return removed, archived
-
-
 def init() -> None:
-  seed = _seed_dir()
+  seed = next((path for path in _SEED_CANDIDATES if path.is_dir()), None)
   if seed is None:
     print("init_skills: no seed-skills dir found; skipping")
     return
-  SKILLS.parent.mkdir(parents=True, exist_ok=True)
-  if not SKILLS.exists():
-    SKILLS.mkdir(parents=True)
-    for src in seed.glob("*.md"):
-      shutil.copy2(src, SKILLS / src.name)
-    n = len(list(SKILLS.glob("*.md")))
-    print(f"init_skills: seeded {n} skills")
-    _chown_mobius(SKILLS)
-    _write_index()
+  SKILLS.mkdir(parents=True, exist_ok=True)
+  _writable(SKILLS)
+  records = _read_records(SKILLS / SIDECAR, platform=True)
+  app_records = _read_records(SKILLS / ".app-skills.json")
+  if records is None or app_records is None:
+    print("init_skills: ownership sidecar unreadable; no seed changes made")
     return
-  # Present already — preserve the agent's edits. Only add NEW seed skills the
-  # instance doesn't have yet (never overwrite an existing one).
-  # Resolve any crash-interrupted /api/skills install first, so a pending
-  # directory skill is either published (and seen as a collision below) or
-  # gone — the same reconciliation the runtime skills mutations run.
   try:
-    from app.skills import reconcile_installed
-
+    from app.skills import load_installed_sidecar, reconcile_installed
     reconcile_installed(SKILLS)
-  except Exception as exc:  # pragma: no cover - best-effort at boot
-    print(f"init_skills: reconcile skipped ({exc})")
-  added = 0
-  migrated = 0
-  skipped = 0
-  for src in seed.glob("*.md"):
-    dst = SKILLS / src.name
-    old_digests = _UNMODIFIED_MIGRATIONS.get(src.name)
-    if dst.is_file() and old_digests:
-      try:
-        digest = hashlib.sha256(dst.read_bytes()).hexdigest()
-      except OSError:
-        digest = ""
-      if digest in old_digests:
-        shutil.copy2(src, dst)
-        migrated += 1
-        continue
-    # Both on-disk shapes share one logical id: never add a flat `foo.md` seed
-    # when an install-provenance directory skill `foo/` already holds `foo`
-    # (the runtime install path enforces the same both-shape rule).
-    if (SKILLS / src.stem).is_dir():
-      skipped += 1
+    installed = load_installed_sidecar(SKILLS)
+  except Exception as exc:
+    print(f"init_skills: installed skill ownership unreadable; no seed changes made ({exc})")
+    return
+  history = _git_history()
+  if history is None and not (SKILLS / SIDECAR).exists():
+    print("init_skills: seed history unavailable; existing skills will remain untouched")
+  candidates = list(seed.glob("*.md"))
+  if any(not _plain_file(path) for path in candidates):
+    print("init_skills: seed tree contains an unexpected file type; no seed changes made")
+    return
+  seed_files = {path.name: path for path in candidates}
+  app_owned = {name for name, rec in app_records.items() if isinstance(rec, dict)}
+  installed_owned = {name for name, rec in installed.items() if isinstance(rec, dict)}
+
+  # A removed platform seed leaves discovery, but its exact bytes are always
+  # archived first. App-owned names are outside this lifecycle even if a prior
+  # platform generation used the same basename.
+  retired_names = (set(records) | set(history or {})) - set(seed_files)
+  for name in sorted(retired_names):
+    if records.get(name, {}).get("status") == "retired":
       continue
-    if not dst.exists():
-      shutil.copy2(src, dst)
-      added += 1
-  retired, archived = _retire_legacy_skills()
-  if skipped:
-    print(f"init_skills: skipped {skipped} seed skill(s) colliding with an "
-          "installed directory skill of the same id")
-  if added:
-    print(f"init_skills: added {added} new seed skill(s) (existing kept)")
-  if migrated:
-    print(f"init_skills: migrated {migrated} unmodified base skill(s)")
-  if retired:
-    print(f"init_skills: removed {retired} retired base skill(s)")
-  if archived:
-    print(f"init_skills: archived {archived} customized retired skill(s)")
-  _chown_mobius(SKILLS)
-  if RETIRED_SKILLS.exists():
-    _chown_mobius(RETIRED_SKILLS)
+    if name in app_owned or Path(name).stem in installed_owned:
+      records.pop(name, None)
+      _write_records(records)
+      continue
+    target = SKILLS / name
+    if target.is_symlink() or (target.exists() and not _plain_file(target)):
+      print(f"init_skills: retired {name} has unexpected file type; left untouched")
+      continue
+    if _plain_file(target):
+      content = target.read_bytes()
+      if not _archive(name, content):
+        print(f"init_skills: could not archive retired {name}; left untouched")
+        continue
+      target.unlink()
+      print(f"init_skills: archived retired {name}")
+    records[name] = {"baseline_sha256": None, "upstream_sha256": None, "status": "retired"}
+    _write_records(records)
+
+  for name, source in sorted(seed_files.items()):
+    if name in app_owned or Path(name).stem in installed_owned or (SKILLS / Path(name).stem).exists():
+      print(f"init_skills: {name} belongs to another skill owner; skipped")
+      continue
+    target = SKILLS / name
+    upstream = source.read_bytes()
+    upstream_sha = _sha(upstream)
+    record = records.get(name)
+    if target.is_symlink() or (target.exists() and not _plain_file(target)):
+      print(f"init_skills: {name} has unexpected file type; left untouched")
+      continue
+    if target.exists():
+      current = target.read_bytes()
+      current_sha = _sha(current)
+      if current_sha == _UNSAFE_LEGACY_COPIES.get(name):
+        if not _archive(name, current):
+          print(f"init_skills: could not preserve unsafe legacy {name}; left untouched")
+          continue
+        atomic_write(target, upstream)
+        _writable(target)
+        records[name] = {"baseline_sha256": upstream_sha, "upstream_sha256": upstream_sha, "status": "current"}
+        _write_records(records)
+        print(f"init_skills: preserved and replaced unsafe legacy {name}")
+        continue
+    if record is None and not target.exists():
+      atomic_write(target, upstream)
+      _writable(target)
+      records[name] = {"baseline_sha256": upstream_sha, "upstream_sha256": upstream_sha, "status": "current"}
+    elif record is None:
+      baseline = current_sha if current_sha in (history or {}).get(name, set()) else None
+      record = {"baseline_sha256": baseline, "upstream_sha256": upstream_sha}
+      records[name] = record
+    if record is not None:
+      record["upstream_sha256"] = upstream_sha
+      if not target.exists():
+        record["status"] = "missing_local"
+      else:
+        current_sha = _sha(target.read_bytes())
+        if current_sha == upstream_sha:
+          record["baseline_sha256"] = upstream_sha
+          record["status"] = "current"
+        elif record.get("status") == "held":
+          pass
+        elif current_sha == record.get("baseline_sha256"):
+          atomic_write(target, upstream)
+          _writable(target)
+          record["baseline_sha256"] = upstream_sha
+          record["status"] = "current"
+        else:
+          record["status"] = "needs_review"
+          print(f"init_skills: {name} has local changes; kept for review")
+    _write_records(records)
+  _write_index()
+
+
+def resolve(name: str, decision: str, expected_sha256: str) -> None:
+  """Record an explicit review decision without editing the owner copy blindly."""
+  if Path(name).name != name or not name.endswith(".md"):
+    raise ValueError("expected one platform skill filename")
+  records = _read_records(SKILLS / SIDECAR, platform=True)
+  if records is None or not isinstance(records.get(name), dict):
+    raise ValueError("no readable platform ownership record for this skill")
+  seed = next((path for path in _SEED_CANDIDATES if path.is_dir()), None)
+  source = seed / name if seed is not None else None
+  if source is None or not _plain_file(source):
+    raise ValueError("platform seed is unavailable; nothing changed")
+  upstream = source.read_bytes()
+  record = records[name]
+  if _sha(upstream) != record.get("upstream_sha256"):
+    raise ValueError("image seed changed since review; reconcile before deciding")
+  target = SKILLS / name
+  if not _plain_file(target):
+    raise ValueError("active skill is missing or not a plain file")
+  current = target.read_bytes()
+  if _sha(current) != expected_sha256:
+    raise ValueError("skill changed since review; nothing changed")
+  if decision == "keep-local":
+    record["status"] = "held"
+  elif decision == "take-upstream":
+    if current != upstream and not _archive(name, current):
+      raise OSError("could not preserve local skill bytes; nothing changed")
+    atomic_write(target, upstream)
+    _writable(target)
+    record["baseline_sha256"] = _sha(upstream)
+    record["status"] = "current"
+  else:
+    raise ValueError("decision must be keep-local or take-upstream")
+  _write_records(records)
   _write_index()
 
 
 if __name__ == "__main__":
-  init()
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--resolve", metavar="SKILL.md")
+  parser.add_argument("--decision", choices=("keep-local", "take-upstream"))
+  parser.add_argument("--expected-sha256")
+  args = parser.parse_args()
+  if args.resolve:
+    if not args.decision or not args.expected_sha256:
+      parser.error("--decision and --expected-sha256 are required with --resolve")
+    resolve(args.resolve, args.decision, args.expected_sha256)
+  elif args.decision or args.expected_sha256:
+    parser.error("--decision and --expected-sha256 require --resolve")
+  else:
+    init()

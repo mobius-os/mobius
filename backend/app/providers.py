@@ -72,18 +72,10 @@ KNOWN_MODELS = {
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
   ],
-  "mobius": ["spark", "inkling", "reflect", "flow", "prism"],
 }
 
 MODEL_LABELS = {
   "claude-fable-5-1": "Claude Fable 5.1",
-  "spark": "Spark (Qwen3.8 27B)",
-  # Public product name. Keep the stable wire id so existing chats and the
-  # signed compute contract survive a display-name change without migration.
-  "inkling": "Evolve",
-  "reflect": "Reflect (DeepSeek V4.1 Flash)",
-  "flow": "Flow (GLM 5.3 Flash)",
-  "prism": "Prism (Gemini 3.8 Flash)",
 }
 
 
@@ -98,12 +90,6 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
-  # The subscription product models share one graduated effort scale.
-  "spark": ["minimal", "low", "medium", "high", "max"],
-  "inkling": ["minimal", "low", "medium", "high", "max"],
-  "reflect": ["minimal", "low", "medium", "high", "max"],
-  "flow": ["minimal", "low", "medium", "high", "max"],
-  "prism": ["minimal", "low", "medium", "high", "max"],
 }
 
 # Usable input context before the provider runtime compacts. Live Codex and
@@ -129,11 +115,6 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "gpt-5.4": 258_400,
   "gpt-5.4-mini": 258_400,
   "gpt-5.3-codex-spark": 121_600,
-  "spark": 235_930,
-  "inkling": 900_000,
-  "reflect": 943_718,
-  "flow": 943_718,
-  "prism": 943_718,
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
@@ -142,7 +123,6 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 DEFAULT_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-sol",
-  "mobius": "inkling",
 }
 
 # Curated first-run model visibility. The registry remains broader so an
@@ -163,7 +143,6 @@ DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
     "gpt-5.6-luna",
     "gpt-5.5",
   ),
-  "mobius": ("spark", "inkling", "reflect", "flow", "prism"),
 }
 DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
   provider_id: frozenset(models)
@@ -175,7 +154,6 @@ DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
 DEFAULT_BACKGROUND_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-terra",
-  "mobius": "inkling",
 }
 
 # Initial effort when no global default exists. Aligns with the
@@ -298,9 +276,21 @@ def _load_agent_settings(data_dir: str) -> dict:
     return {}
 
 
+def provider_enabled(data_dir: str, provider_id: str) -> bool:
+  """One default-on owner switch for any app-provided model connection."""
+  settings = _load_agent_settings(data_dir)
+  enabled = settings.get("model_providers_enabled")
+  if isinstance(enabled, dict) and isinstance(enabled.get(provider_id), bool):
+    return enabled[provider_id]
+  # Preserve the existing owner's choice when upgrading the first connector.
+  if provider_id == "mobius":
+    return settings.get("mobius_models_enabled") is not False
+  return True
+
+
 def mobius_models_enabled(data_dir: str) -> bool:
-  """The Möbius · You preference defaults on until explicitly disabled."""
-  return _load_agent_settings(data_dir).get("mobius_models_enabled") is not False
+  """Compatibility reader for existing Möbius preferences."""
+  return provider_enabled(data_dir, "mobius")
 
 
 def hidden_model_ids(model_prefs: Any) -> list[str]:
@@ -323,6 +313,8 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
 def known_model_ids(provider_id: str) -> list[str]:
   """Built-in fallback IDs or an installed app's accepted model IDs."""
   provider = PROVIDERS.get(provider_id)
+  if isinstance(provider, MobiusProvider) and provider.declaration:
+    return [model["id"] for model in provider.declaration["models"]]
   if isinstance(provider, AppModelProvider):
     return [model["id"] for model in provider.declaration["models"]]
   return KNOWN_MODELS.get(provider_id, [])
@@ -563,7 +555,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   providers in.
   """
   sync_app_model_providers(data_dir)
-  provider = default_provider if default_provider in PROVIDERS else DEFAULT_PROVIDER
+  provider = default_provider if default_provider and provider_selectable(data_dir, default_provider) else DEFAULT_PROVIDER
   file_layer = _load_agent_settings(data_dir)
   raw = file_layer.get("background_agents")
   bg = raw if isinstance(raw, dict) else {}
@@ -574,7 +566,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     if choice is None:
       return
     provider_id = choice["provider"]
-    if provider_id in seen:
+    if provider_id in seen or not provider_selectable(data_dir, provider_id):
       return
     row = dict(choice)
     row["model"] = row.get("model")
@@ -605,7 +597,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     )
 
   for provider_id in PROVIDERS:
-    if provider_id not in seen:
+    if provider_id not in seen and provider_selectable(data_dir, provider_id):
       rows.append(
         _background_default_choice(
           provider_id,
@@ -909,8 +901,37 @@ class CodexProvider(BaseProvider):
     return env
 
 
+def _write_responses_catalog(
+  path: Path, declaration: dict[str, Any], *, broker: bool = False,
+) -> None:
+  """Build Codex's model catalog from a reviewed app declaration."""
+  template = json.loads(MobiusProvider._catalog_path().read_text())["models"][0]
+  catalog = []
+  for priority, model in enumerate(declaration["models"], start=1):
+    efforts = model.get("effort_levels", ["low", "medium", "high"])
+    row = dict(template)
+    row.update({
+      "slug": model["id"],
+      "display_name": model["label"],
+      "description": declaration["name"],
+      "priority": priority,
+      "context_window": model.get("context_window", 128_000),
+      "max_context_window": model.get("context_window", 128_000),
+      "auto_compact_token_limit": model.get("auto_compact_token_limit"),
+      "input_modalities": model.get("input_modalities", ["text"]),
+      "supports_reasoning_summaries": broker,
+      "supports_reasoning_summary_parameter": broker,
+      "supported_reasoning_levels": [
+        {"effort": effort, "description": effort.title()} for effort in efforts
+      ],
+      "default_reasoning_level": "medium" if "medium" in efforts else efforts[0],
+    })
+    catalog.append(row)
+  atomic_write(path, json.dumps({"models": catalog}))
+
+
 class MobiusProvider(BaseProvider):
-  """Möbius, transported only through the local root broker."""
+  """Protected local-broker transport for an accepted app declaration."""
 
   name = "Möbius"
   cli_cmd = "codex"
@@ -918,28 +939,26 @@ class MobiusProvider(BaseProvider):
   runtime_kind = "codex_sdk"
   switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
 
+  def __init__(self):
+    self.declaration: dict[str, Any] | None = None
+    self.app_id: int | None = None
+
+  def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
+    self.app_id = app_id
+    self.declaration = declaration
+    self.name = declaration["name"] if declaration else "Möbius"
+    self.switch_efforts = (
+      frozenset(
+        effort for model in declaration["models"]
+        for effort in model.get("effort_levels", [])
+      ) or frozenset({"low", "medium", "high"})
+    ) if declaration else frozenset({"minimal", "low", "medium", "high", "max"})
+
   async def fetch_models(self, data_dir: str) -> list[Any]:
-    # Unlinked accounts cannot query the protected inference catalog.
-    if await asyncio.to_thread(self.check_auth, data_dir) is not None:
-      return _fallback_models("mobius")
-    import httpx
-    async with httpx.AsyncClient(timeout=5.0) as client:
-      response = await client.get("http://127.0.0.1:8765/v1/models")
-      response.raise_for_status()
-      payload = response.json()
-    rows = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-      raise RuntimeError("Möbius subscription model catalog has an invalid response")
-    return [
-      {
-        "id": row["id"],
-        "label": MODEL_LABELS[row["id"]],
-        "effort_levels": MODEL_EFFORT_LEVELS[row["id"]],
-        "context_window": _catalog_context_window(row) or MODEL_CONTEXT_WINDOWS[row["id"]],
-      }
-      for row in rows
-      if isinstance(row, dict) and row.get("id") in KNOWN_MODELS["mobius"]
-    ]
+    # Accepted app declarations are authoritative for every Responses
+    # connection. A broker's live list may use a different product alias from
+    # a stable saved-chat model ID; filtering it here would hide that model.
+    return self.declaration["models"] if self.declaration else []
 
   @staticmethod
   def _socket_path() -> str:
@@ -952,7 +971,7 @@ class MobiusProvider(BaseProvider):
   def _catalog_path() -> Path:
     # Möbius intentionally owns the public product catalog instead of exposing
     # implementation model names. The context cap also bounds trial exposure.
-    return Path(__file__).with_name("mobius_codex_models.json").resolve()
+    return Path(__file__).with_name("responses_codex_template.json").resolve()
 
   def _identity(self) -> dict[str, Any]:
     import httpx
@@ -975,8 +994,10 @@ class MobiusProvider(BaseProvider):
     return value
 
   def check_auth(self, data_dir: str) -> str | None:
-    if not mobius_models_enabled(data_dir):
-      return "Möbius models are turned off in Möbius · You."
+    if not self.declaration:
+      return "Install Möbius · You to use these models."
+    if not provider_enabled(data_dir, "mobius"):
+      return "This model provider is turned off in its app."
     try:
       if self._identity().get("linked") is True:
         return None
@@ -987,14 +1008,17 @@ class MobiusProvider(BaseProvider):
       "to activate your trial."
     )
 
-  def codex_config_overrides(self) -> list[str]:
+  def codex_config_overrides(self, catalog_path: Path | None = None) -> list[str]:
     quote = json.dumps
+    if catalog_path is None and self.declaration:
+      from app.config import get_settings
+      catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      'model="inkling"',
+      f'model={quote(self.declaration["default_model"] if self.declaration else "inkling")}',
       'model_provider="mobius_trial"',
-      f"model_catalog_json={quote(str(self._catalog_path()))}",
+      f"model_catalog_json={quote(str(catalog_path or self._catalog_path()))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
-      'model_providers.mobius_trial.base_url="http://127.0.0.1:8765/v1"',
+      f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"] if self.declaration else "http://127.0.0.1:8765/v1")}',
       'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
       'model_providers.mobius_trial.wire_api="responses"',
       # A stream that dies mid-answer must not kill the turn: the
@@ -1036,9 +1060,13 @@ class MobiusProvider(BaseProvider):
       env[key] = ""
     config_dir = Path(data_dir) / "cli-auth" / "mobius"
     config_dir.mkdir(parents=True, exist_ok=True)
+    catalog_path = self._catalog_path()
+    if self.declaration:
+      catalog_path = config_dir / "catalog.json"
+      _write_responses_catalog(catalog_path, self.declaration, broker=True)
     atomic_write(
       config_dir / "config.toml",
-      "\n".join(self.codex_config_overrides()) + "\n",
+      "\n".join(self.codex_config_overrides(catalog_path)) + "\n",
     )
     env["CODEX_HOME"] = str(config_dir)
     # Codex requires an env-key value for custom providers. This is a local
@@ -1067,6 +1095,8 @@ class AppModelProvider(BaseProvider):
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
+    if not provider_enabled(data_dir, f"app-{self.app_id}"):
+      return f"{self.name} is turned off in its app."
     path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
     if not path.is_file():
       return f"Connect {self.name} in its app to use these models."
@@ -1117,32 +1147,7 @@ class AppModelProvider(BaseProvider):
     # Isolate custom-provider threads and auth from the owner's Codex login.
     home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime"
     home.mkdir(parents=True, exist_ok=True)
-    template = json.loads(MobiusProvider._catalog_path().read_text())["models"][0]
-    catalog = []
-    for priority, model in enumerate(self.declaration["models"], start=1):
-      row = dict(template)
-      row.update({
-        "slug": model["id"],
-        "display_name": model["label"],
-        "description": self.name,
-        "priority": priority,
-        "context_window": model.get("context_window", 128_000),
-        "max_context_window": model.get("context_window", 128_000),
-        "auto_compact_token_limit": None,
-        "input_modalities": ["text"],
-        "supports_reasoning_summaries": False,
-        "supports_reasoning_summary_parameter": False,
-        "supported_reasoning_levels": [
-          {"effort": effort, "description": effort.title()}
-          for effort in model.get("effort_levels", ["low", "medium", "high"])
-        ],
-        "default_reasoning_level": (
-          "medium" if "medium" in model.get("effort_levels", ["low", "medium", "high"])
-          else model.get("effort_levels", ["low"])[0]
-        ),
-      })
-      catalog.append(row)
-    atomic_write(home / "catalog.json", json.dumps({"models": catalog}))
+    _write_responses_catalog(home / "catalog.json", self.declaration)
     env["CODEX_HOME"] = str(home)
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
@@ -1189,8 +1194,25 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     _model_registry_log.warning("app model registry read failed: %s", exc)
     return
   next_ids: set[str] = set()
-  claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
+  native_match = next(((app_id, declaration) for app_id, declaration in declarations
+                       if declaration.get("transport") == "identity_broker"), None)
+  native_id, native = native_match if native_match else (None, None)
+  mobius = PROVIDERS["mobius"]
+  if isinstance(mobius, MobiusProvider) and (mobius.app_id != native_id or mobius.declaration != native):
+    mobius.set_declaration(native_id, native)
+    _model_registry_cache.pop("mobius", None)
+  if native:
+    DEFAULT_MODELS["mobius"] = native["default_model"]
+    DEFAULT_BACKGROUND_MODELS["mobius"] = native["default_model"]
+  else:
+    DEFAULT_MODELS.pop("mobius", None)
+    DEFAULT_BACKGROUND_MODELS.pop("mobius", None)
+  claimed_models = {mid for key, ids in KNOWN_MODELS.items() if key != "mobius" for mid in ids}
+  if native:
+    claimed_models.update(model["id"] for model in native["models"])
   for app_id, declaration in declarations:
+    if declaration.get("transport") == "identity_broker":
+      continue
     provider_id = f"app-{app_id}"
     models = declaration.get("models", [])
     if not isinstance(models, list) or not models:
@@ -1216,6 +1238,13 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     _model_registry_locks.pop(provider_id, None)
   _app_provider_ids.clear()
   _app_provider_ids.update(next_ids)
+
+
+def provider_selectable(data_dir: str, provider_id: str) -> bool:
+  """Whether a registered provider has an active, declared model connection."""
+  provider = PROVIDERS.get(provider_id)
+  return (provider is not None and provider_enabled(data_dir, provider_id)
+          and (not isinstance(provider, MobiusProvider) or provider.declaration is not None))
 
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"
@@ -1289,7 +1318,7 @@ def resolve_default_provider(
   provider_id = (
     configured_provider if configured_provider in PROVIDERS else DEFAULT_PROVIDER
   )
-  if provider_id == "mobius" and not mobius_models_enabled(data_dir):
+  if not provider_selectable(data_dir, provider_id):
     connected = authenticated_provider_ids(data_dir)
     return connected[0] if connected else DEFAULT_PROVIDER
   if (
@@ -1351,16 +1380,13 @@ def owner_default_provider(
   settings = _load_agent_settings(data_dir)
   model = settings.get("model")
   prov = provider_of_model(model)
-  if prov is not None and prov in PROVIDERS and (
-    prov != "mobius" or mobius_models_enabled(data_dir)
-  ):
+  if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")
   if (
     isinstance(model, str)
     and model.strip()
-    and mirrored_provider in PROVIDERS
-    and (mirrored_provider != "mobius" or mobius_models_enabled(data_dir))
+    and provider_selectable(data_dir, mirrored_provider)
     and not _model_belongs_to_other_provider(model, mirrored_provider)
   ):
     return mirrored_provider
@@ -1434,6 +1460,8 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   the same dict shape the route layer's Pydantic serialization would
   produce."""
   provider = PROVIDERS.get(provider_id)
+  if isinstance(provider, MobiusProvider) and provider.declaration:
+    return _live_model_entries(provider_id, provider.declaration["models"])
   if isinstance(provider, AppModelProvider):
     return _live_model_entries(provider_id, provider.declaration["models"])
   return [
@@ -1503,16 +1531,6 @@ def _live_model_entries(
     ):
       entry["context_window"] = round(context_window)
     elif model_id in MODEL_CONTEXT_WINDOWS:
-      entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
-    # The trial broker bounds each model's usable context below its catalog
-    # spec, and the reported modelContextWindow on real runs proves the cap.
-    # Advertise the effective ceiling so the pre-turn gauge estimate matches
-    # what a completed turn reports.
-    if (
-      provider_id == "mobius"
-      and model_id in MODEL_CONTEXT_WINDOWS
-      and MODEL_CONTEXT_WINDOWS[model_id] < entry.get("context_window", 0)
-    ):
       entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
   return entries
@@ -1998,7 +2016,7 @@ async def list_models(
   result: dict[str, list[dict[str, Any]]] = {}
   cold: list[str] = []
   for provider_id in PROVIDERS:
-    if provider_id == "mobius" and not mobius_models_enabled(data_dir):
+    if not provider_selectable(data_dir, provider_id):
       continue
     hit = cache_fresh(provider_id)
     if hit is not None:

@@ -104,6 +104,7 @@ import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
+import useMessageMetadata from './hooks/useMessageMetadata.js'
 import { formatResetTime } from './resetTime.js'
 import { isResourcePause } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
@@ -5737,6 +5738,8 @@ export default function ChatView({
     }
   }
 
+  const messageMetadata = useMessageMetadata(displayedMessages)
+
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
     setDepth: depth => { fileDragDepthRef.current = depth },
@@ -5951,8 +5954,8 @@ export default function ChatView({
             // pin target mid-swap). data-ts stays for the revealed metadata row.
             const ownerUserMessage = isOwnerUserMessage(msg)
             const userCid = ownerUserMessage ? cidOf(msg) : null
-            const copyText = ownerUserMessage ? messageCopyText(msg) : ''
-            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
+            const { copyText, timestamp, alwaysVisible } = messageMetadata[i]
+            const hasMessageMeta = Boolean(copyText || timestamp)
             return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
@@ -6002,9 +6005,10 @@ export default function ChatView({
                 resumeCardRef={resumeCardRef}
               />
               <MessageMetaRow
-                timestamp={ownerUserMessage ? msg.ts : null}
+                timestamp={timestamp}
                 copyText={copyText}
-                visible={visibleMessageMetaKey === dataKey}
+                role={msg.role}
+                visible={alwaysVisible || visibleMessageMetaKey === dataKey}
               />
             </li>
           )]
@@ -6116,6 +6120,7 @@ export default function ChatView({
                 <MessageMetaRow
                   timestamp={msg.ts || null}
                   copyText={copyText}
+                  role="user"
                   visible={visibleMessageMetaKey === dataKey}
                 />
               </li>

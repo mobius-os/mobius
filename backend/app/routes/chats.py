@@ -73,10 +73,10 @@ from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
   Principal, get_current_owner_for_lifecycle_control,
-  get_current_owner_for_owner_input,
-  get_owner_or_chat_embed_principal, get_current_owner, get_principal,
+  get_chat_view_principal, get_owner_or_chat_embed_principal,
+  get_current_owner, get_principal,
   reject_cross_site, require_nondelegated_owner_control,
-  require_chat_embed_operation,
+  require_chat_embed_operation, is_owner_input_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal,
@@ -3529,7 +3529,7 @@ class QuestionAnswers(BaseModel):
 async def save_question_answers(
   chat_id: str,
   body: QuestionAnswers,
-  _: models.Owner = Depends(get_current_owner_for_owner_input),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """Saves the user's answers into the question block being answered.
@@ -3546,27 +3546,59 @@ async def save_question_answers(
   """
   from app.chat_writer import AnswerQuestion, await_ack, get_writer
 
-  chat = get_active_chat_or_404(db, chat_id)
-  from app.questions import is_secure_question
-  if is_secure_question(chat, body.question_id):
+  require_chat_embed_operation(principal, "chat:send")
+  chat = get_active_chat_for_principal(db, chat_id, principal)
+  if not is_owner_input_principal(principal):
+    if not body.question_id:
+      raise HTTPException(
+        status_code=409,
+        detail="Agent card answers require an exact question_id.",
+      )
+    exact_card = questions.saved_question(chat, body.question_id)
+    if exact_card is None:
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+    if questions.is_secure_question(chat, body.question_id):
+      raise HTTPException(409, detail="Use the secure input card to respond.")
+    if "answers" in exact_card:
+      if exact_card["answers"] == body.answers:
+        return {"ok": True}
+      raise HTTPException(
+        status_code=409,
+        detail="This question already has a different answer.",
+      )
+    if not questions.accepts_saved_answer(chat, body.question_id):
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+    try:
+      questions.validate_saved_answer(exact_card, body.answers, None)
+    except questions.AnswerConflict as exc:
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+  if questions.is_secure_question(chat, body.question_id):
     raise HTTPException(409, detail="Use the secure input card to respond.")
-  from app.questions import AnswerConflict
-  ack = get_writer().submit(
-    AnswerQuestion(
-      chat_id=chat_id,
-      run_token="",  # tokenless → broad-fence by chat
-      question_id=body.question_id,
-      answers=body.answers,
-      legacy_save_only=True,
+  from app import chat_queue
+  async with chat_queue.get_lock(chat_id):
+    ack = get_writer().submit(
+      AnswerQuestion(
+        chat_id=chat_id,
+        run_token="",  # tokenless → broad-fence by chat
+        question_id=body.question_id,
+        answers=body.answers,
+        legacy_save_only=True,
+        require_exact_card=not is_owner_input_principal(principal),
+      )
     )
-  )
-  try:
-    await await_ack(ack)
-  except AnswerConflict as exc:
-    raise HTTPException(409, detail=str(exc)) from exc
-  except Exception:
-    # No matching question block (or the write dropped). Preserve the
-    # route's 404 contract — the client treats it as "the question card
-    # is no longer addressable".
-    raise HTTPException(status_code=404, detail="No question block found.")
+    try:
+      await await_ack(ack)
+    except questions.AnswerConflict as exc:
+      raise HTTPException(409, detail=str(exc)) from exc
+    except Exception:
+      # No matching question block (or the write dropped). Preserve the
+      # route's 404 contract — the client treats it as "the question card
+      # is no longer addressable".
+      raise HTTPException(status_code=404, detail="No question block found.")
   return {"ok": True}

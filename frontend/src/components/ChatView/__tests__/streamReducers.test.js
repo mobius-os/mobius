@@ -65,6 +65,25 @@ test('Codex tool start preserves provider-neutral Memory recall metadata', () =>
   assert.equal(items[0].tool_use_id, 'cmd-1')
 })
 
+test('app-owned activity survives start and completion on the same tool', () => {
+  const running = startToolLifecycle([], {
+    tool: 'Bash', input: 'python3 /apps/brain/find.py q c', tool_use_id: 'app-1',
+    app_activity: {
+      status: 'running', app_slug: 'brain', app_name: 'Brain',
+      activity_id: 'lookup', label: 'Searching',
+    },
+  })
+  const settled = attachToolOutput(running, 'result', {
+    tool_use_id: 'app-1',
+    app_activity: {
+      status: 'succeeded', app_slug: 'brain', app_name: 'Brain',
+      activity_id: 'lookup', label: 'Found a note',
+    },
+  })
+  assert.equal(running[0].app_activity.status, 'running')
+  assert.equal(settled[0].app_activity.status, 'succeeded')
+})
+
 test('skill loads attach by tool id and accumulate without duplicates', () => {
   const running = [
     toolItem('Bash', { tool_use_id: 'cmd-1' }),

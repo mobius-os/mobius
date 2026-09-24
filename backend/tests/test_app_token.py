@@ -90,7 +90,8 @@ def test_app_token_can_list_models(client, owner_token):
   })
   assert r.status_code == 200
   body = r.json()
-  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  # Möbius is optional: no accepted account-app declaration in this fixture.
+  assert set(body["providers"]) == {"claude", "codex"}
   for entries in body["providers"].values():
     for entry in entries:
       assert set(entry) >= {"id", "label", "provider", "available"}

@@ -187,8 +187,8 @@ test('the reset formatter is a defensive, viewer-local, day-aware helper', () =>
     'formatResetTime must be an exported pure helper (shared by the SR status)')
   assert.match(resetTime, /Number\.isNaN\(d\.getTime\(\)\)/,
     'an unparseable timestamp must degrade (no crash, no garbage label)')
-  assert.match(resetTime, /toLocaleTimeString/,
-    'the reset renders in the viewer\'s local clock')
+  assert.match(resetTime, /formatTime\(d\)/,
+    'the reset uses the shared local 24-hour clock formatter')
   assert.match(resetTime, /tomorrow at/,
     'the label is day-aware — a 7-day park must not read as a bare time')
   assert.match(errorCard,
