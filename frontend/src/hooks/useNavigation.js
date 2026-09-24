@@ -627,6 +627,20 @@ export default function useNavigation({
     // mistakes for the whole open drawer. A close already in flight is the
     // exception: commitDrawerOpen owns remembering that reopen intent.
     if (drawerOpenRef.current) return
+    // Record a traversal-deferred open BEFORE the canvas preparation below.
+    // Both traversal handlers (onNavigate and onPopState) call
+    // cancelDrawerPreparation() as their first act, so on a canvas view the
+    // rAF pair below is destroyed by the very traversal this open is supposed
+    // to wait for -- and because commitDrawerOpen never runs, the in-flight
+    // check living there never records the intent either. The open is then
+    // LOST rather than deferred. Keeping it in drawerOpenAfterLocalPopRef
+    // survives the cancellation; resumeLocalAppPops replays it once the pump
+    // goes idle. commitDrawerOpen keeps its own copy of this check for the
+    // non-canvas path, which reaches it synchronously.
+    if (appLocalPopInFlightRef.current) {
+      drawerOpenAfterLocalPopRef.current = true
+      return
+    }
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
