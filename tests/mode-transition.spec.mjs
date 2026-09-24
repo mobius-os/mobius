@@ -674,6 +674,24 @@ test('leaving Builder replaces an empty Standard slot without allocating a chat'
   expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
+// KNOWN FAILURE (root-caused, needs a product call rather than a fixture edit).
+// The singleScreen assertion expects 'aaa'; it receives the explicit chat's own
+// id. That is what paneModel currently promises on an explicit exit:
+// selectFocusedBuilderTabForStandard() = setSingleScreen(ws, focusedSlotSeed(ws)),
+// and its comment is deliberate -- 'the visible selection is the user's current
+// navigation intent and must beat the older Standard slot'. focusedSlotSeed reads
+// the focused pane's ACTIVE tab, and right after New chat in Builder that active
+// tab is the new chat, so Standard receives it.
+//
+// This case toggles mode while that allocation is still IN FLIGHT (its create is
+// gated until later) and expects an unmaterialized cover to be retired first, so
+// the seed falls back to the real selected tab. focusedSlotSeed draws no such
+// distinction. Deciding whether a pending allocation may own the Standard slot is
+// a product question about that contract, not something a fixture can express.
+//
+// Not a rebase regression: upstream changed no pane/mode logic, and the seeded
+// chat-detail mock this file uses was corrected separately (it answered id:'x'
+// for every chat) without moving this assertion.
 test('retiring an explicit Builder cover returns the selected tab and preserves its draft', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
