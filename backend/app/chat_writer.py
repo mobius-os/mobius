@@ -5178,25 +5178,20 @@ class ChatWriterActor:
     ):
       return {"status": "too_late"}
     messages = copy.deepcopy(list(chat.messages or []))
-    matched = False
-    for message in reversed(messages):
-      if not isinstance(message, dict) or message.get("role") != "assistant":
-        continue
-      for block in message.get("blocks") or []:
-        if (
-          isinstance(block, dict)
-          and block.get("type") == "error"
-          and block.get("resumable") is True
-          and isinstance(block.get("pause"), dict)
-          and block["pause"].get("kind") == "restart"
-        ):
-          block["restart_resume_cancelled"] = True
-          matched = True
-          break
-      if matched:
-        break
-    if not matched:
+    pause = next((
+      block
+      for message in reversed(messages)
+      if isinstance(message, dict) and message.get("role") == "assistant"
+      for block in message.get("blocks") or []
+      if isinstance(block, dict)
+      and block.get("type") == "error"
+      and block.get("resumable") is True
+      and isinstance(block.get("pause"), dict)
+      and block["pause"].get("kind") == "restart"
+    ), None)
+    if pause is None:
       return {"status": "stale"}
+    pause["restart_resume_cancelled"] = True
     run.status = "interrupted"
     run.restart_nonce = None
     run.ended_at = datetime.now(UTC)

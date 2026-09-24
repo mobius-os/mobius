@@ -130,7 +130,7 @@ function MsgContentInner({
   onCancelRestartResume,
   restartResumeCancelPending = false,
   restartResumeCancelError = '',
-  restartRecoveryState,
+  restartResumeQueued = false,
   resumeState,
   onInternalNav,
   autoResumeEnabled,
@@ -489,7 +489,7 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
-            restartRecoveryState={restartRecoveryState}
+            restartResumeQueued={restartResumeQueued}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -530,12 +530,11 @@ function MsgContentInner({
               >
                 {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
                   ? limitResetElapsed ? 'Continue now' : (recoveryCredit?.actionLabel || 'Try now')
-                  : block.pause?.kind === 'restart' ? 'Resume now' : 'Resume'}
+                  : 'Resume'}
               </button>
             )}
             {recoveryOwner && block.pause?.kind === 'restart'
-              && ['waiting', 'starting'].includes(restartRecoveryState)
-              && onCancelRestartResume && (
+              && restartResumeQueued && onCancelRestartResume && (
               <button
                 type="button"
                 className="chat__recovery-action"
@@ -676,7 +675,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onCancelRestartResume === next.onCancelRestartResume
     && prev.restartResumeCancelPending === next.restartResumeCancelPending
     && prev.restartResumeCancelError === next.restartResumeCancelError
-    && prev.restartRecoveryState === next.restartRecoveryState
+    && prev.restartResumeQueued === next.restartResumeQueued
     && prev.resumeState === next.resumeState
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

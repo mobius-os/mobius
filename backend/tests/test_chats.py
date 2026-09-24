@@ -537,18 +537,14 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert body["detail"] == detail_body
 
 
-def test_chat_list_exposes_authenticated_restart_recovery_stages(
-  client, auth, chat, db, monkeypatch,
-):
+def _seed_due_restart_park(db, chat, run_id, nonce):
   from app.timeutil import now_naive_utc
 
-  nonce = "accepted-restart-for-list-projection"
   now = now_naive_utc()
-  chat.auto_resume_on_restart = True
   db.add(make_goal_run(
     db,
-    id="restart-waiting-row",
-    root_run_id="restart-root",
+    id=run_id,
+    root_run_id=f"{run_id}-root",
     chat_id=chat.id,
     status="parked",
     provider="claude",
@@ -558,34 +554,17 @@ def test_chat_list_exposes_authenticated_restart_recovery_stages(
     restart_nonce=nonce,
   ))
   db.commit()
-  monkeypatch.setattr(
-    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
-  )
-
-  def listed_state():
-    response = client.get("/api/chats", headers=auth)
-    assert response.status_code == 200
-    row = next(item for item in response.json() if item["id"] == chat.id)
-    return row.get("restart_recovery_state")
-
-  assert listed_state() == "waiting"
-
-  run = db.get(models.ChatRun, "restart-waiting-row")
-  run.status = "resume_pending"
-  db.commit()
-  assert listed_state() == "starting"
-
-  run.status = "running"
-  run.continuation_json = {"reason": "restart", "control_id": "restart-cid"}
-  db.commit()
-  assert listed_state() == "resuming"
 
 
-def test_restart_pause_card_state_and_owner_cancel_preserve_work(
+def _drawer_waiting(client, auth, chat_id):
+  response = client.get("/api/chats", headers=auth)
+  assert response.status_code == 200
+  return next(row for row in response.json() if row["id"] == chat_id)["waiting"]
+
+
+def test_queued_restart_resume_shows_as_waiting_and_owner_can_cancel_it(
   client, auth, chat, db, monkeypatch,
 ):
-  from app.timeutil import now_naive_utc
-
   nonce = "accepted-restart-for-card-cancel"
   chat.auto_resume_on_restart = True
   chat.messages = [
@@ -595,111 +574,57 @@ def test_restart_pause_card_state_and_owner_cancel_preserve_work(
       "pause": {"kind": "restart"},
     }]},
   ]
-  db.add(make_goal_run(
-    db,
-    id="restart-card-cancel-row",
-    root_run_id="restart-card-cancel-root",
-    chat_id=chat.id,
-    status="parked",
-    provider="claude",
-    started_at=now_naive_utc() - timedelta(seconds=2),
-    parked_until=now_naive_utc() - timedelta(seconds=1),
-    park_reason="restart",
-    restart_nonce=nonce,
-  ))
-  db.commit()
+  _seed_due_restart_park(db, chat, "restart-card-cancel-row", nonce)
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
   )
 
+  assert _drawer_waiting(client, auth, chat.id) is True
   detail = client.get(f"/api/chats/{chat.id}", headers=auth)
   runtime = client.get(f"/api/chats/{chat.id}/runtime", headers=auth)
-  assert detail.status_code == runtime.status_code == 200
-  assert detail.json()["restart_recovery_state"] == "waiting"
-  assert runtime.json()["restart_recovery_state"] == "waiting"
+  assert detail.json()["restart_resume_run_id"] == "restart-card-cancel-row"
+  assert runtime.json()["restart_resume_run_id"] == "restart-card-cancel-row"
 
+  cancel_url = f"/api/chats/{chat.id}/restart-resume/cancel"
+  stale = client.post(cancel_url, headers=auth, json={"run_id": "other-run"})
+  assert stale.status_code == 409
   cancelled = client.post(
-    f"/api/chats/{chat.id}/restart-resume/cancel",
-    headers=auth,
-    json={"run_id": "restart-card-cancel-row"},
+    cancel_url, headers=auth, json={"run_id": "restart-card-cancel-row"},
   )
   assert cancelled.status_code == 200, cancelled.text
-  assert cancelled.json() == {"status": "cancelled"}
   db.expire_all()
   saved = client.get(f"/api/chats/{chat.id}", headers=auth).json()
-  assert saved["restart_recovery_state"] is None
+  assert saved["restart_resume_run_id"] is None
   assert saved["messages"][-1]["blocks"][0]["restart_resume_cancelled"] is True
   assert saved["messages"][0]["content"] == "keep this"
   assert db.get(models.Chat, chat.id).auto_resume_on_restart is True
+  assert _drawer_waiting(client, auth, chat.id) is False
 
 
-def test_chat_list_does_not_label_ineligible_restart_parks_as_queued(
+def test_manual_fallback_restart_parks_are_not_shown_as_queued(
   client, auth, chat, db, monkeypatch,
 ):
-  from app.timeutil import now_naive_utc
-
-  now = now_naive_utc()
   chat.auto_resume_on_restart = True
-  db.add(make_goal_run(
-    db,
-    id="restart-manual-fallback-row",
-    root_run_id="restart-manual-root",
-    chat_id=chat.id,
-    status="parked",
-    provider="claude",
-    started_at=now - timedelta(seconds=2),
-    parked_until=now - timedelta(seconds=1),
-    park_reason="restart",
-    restart_nonce="not-the-accepted-nonce",
-  ))
-  db.commit()
+  _seed_due_restart_park(db, chat, "restart-manual-row", "stale-boot")
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_restart_nonce",
-    lambda: "different-accepted-nonce",
+    "app.restart_ledger.authorized_restart_nonce", lambda: "current-boot",
   )
+  assert _drawer_waiting(client, auth, chat.id) is False
 
-  listed = client.get("/api/chats", headers=auth)
-  row = next(item for item in listed.json() if item["id"] == chat.id)
-  assert row.get("restart_recovery_state") is None
-
-  chat.pending_question_id = None
-  db.commit()
+  # An unreadable boot receipt hides the promise but keeps the list readable.
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce",
     lambda: (_ for _ in ()).throw(OSError("boot receipt unavailable")),
   )
-  listed = client.get("/api/chats", headers=auth)
-  assert listed.status_code == 200
-  row = next(item for item in listed.json() if item["id"] == chat.id)
-  assert row.get("restart_recovery_state") is None
+  assert _drawer_waiting(client, auth, chat.id) is False
 
-  # Even a valid current-boot receipt is not enough when the chat opted out
-  # internally or app work / an owner question blocks automatic continuation.
-  run = db.get(models.ChatRun, "restart-manual-fallback-row")
-  run.restart_nonce = "accepted-restart-for-list-projection"
+  # A matching receipt still follows the sweep's rule, e.g. the chat opt-out.
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_restart_nonce",
-    lambda: "accepted-restart-for-list-projection",
+    "app.restart_ledger.authorized_restart_nonce", lambda: "stale-boot",
   )
   chat.auto_resume_on_restart = False
   db.commit()
-  listed = client.get("/api/chats", headers=auth)
-  row = next(item for item in listed.json() if item["id"] == chat.id)
-  assert row.get("restart_recovery_state") is None
-
-  chat.auto_resume_on_restart = True
-  chat.pending_messages = [{"_initiated_by_app_id": 7}]
-  db.commit()
-  listed = client.get("/api/chats", headers=auth)
-  row = next(item for item in listed.json() if item["id"] == chat.id)
-  assert row.get("restart_recovery_state") is None
-
-  chat.pending_messages = []
-  chat.pending_question_id = "question-still-open"
-  db.commit()
-  listed = client.get("/api/chats", headers=auth)
-  row = next(item for item in listed.json() if item["id"] == chat.id)
-  assert row.get("restart_recovery_state") is None
+  assert _drawer_waiting(client, auth, chat.id) is False
 
 
 def test_chat_failure_attention_is_listed_and_acknowledged_by_version(

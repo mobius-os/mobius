@@ -56,16 +56,13 @@ export default function ErrorCard({
   autoResume = false,
   resetElapsed = false,
   recoveryCredit = null,
-  restartRecoveryState = null,
+  restartResumeQueued = false,
   cardRef,
   children,
 }) {
   const vm = errorCardViewModel(block)
-  const restartWaiting = block.pause?.kind === 'restart'
-    && ['waiting', 'starting'].includes(restartRecoveryState)
-  const recoveryTitle = restartWaiting
-    ? 'Waiting to resume'
-    : vm.modelCapacity
+  const restartWaiting = block.pause?.kind === 'restart' && restartResumeQueued
+  const recoveryTitle = vm.modelCapacity
     ? (vm.resetLabel ? `Trying again ${vm.resetLabel}` : 'Trying again shortly')
     : vm.parked
     ? autoResume
@@ -74,11 +71,7 @@ export default function ErrorCard({
         ? 'Usage is available again'
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
-  const recoveryCopy = restartWaiting
-    ? 'Your work is safe. Möbius will resume this chat automatically when its recovery turn starts.'
-    : block.restart_resume_cancelled
-      ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume now whenever you’re ready.'
-    : vm.modelCapacity
+  const recoveryCopy = vm.modelCapacity
     ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
     : vm.parked
     ? autoResume
@@ -135,7 +128,7 @@ export default function ErrorCard({
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
                 ? block.restart_resume_cancelled
-                  ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume now whenever you’re ready.'
+                  ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume whenever you’re ready.'
                   : restartWaiting
                     ? 'Your work is safe. Möbius will resume this chat automatically when its recovery turn starts.'
                     : block.resumable

@@ -136,7 +136,7 @@ test('restart pause card distinguishes queued recovery and owner cancellation', 
     pause: { kind: 'restart' },
   }
   const waiting = renderToStaticMarkup(createElement(ErrorCard, {
-    block, restartRecoveryState: 'waiting',
+    block, restartResumeQueued: true,
   }))
   assert.match(waiting, /Waiting to resume/)
   assert.match(waiting, /resume this chat automatically/)

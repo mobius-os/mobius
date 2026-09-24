@@ -474,9 +474,9 @@ export default function ChatView({
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [recoveryRunId, setRecoveryRunId] = useState(cached?.recoveryRunId || null)
-  const [restartRecoveryState, setRestartRecoveryState] = useState(
-    cached?.restartRecoveryState || cached?.chatInfo?.restart_recovery_state || null,
-  )
+  // Queued restart recovery lasts seconds, so it is read only from live server
+  // snapshots; a cached value would offer a stale Cancel.
+  const [restartResumeRunId, setRestartResumeRunId] = useState(null)
   const [restartResumeCancelPending, setRestartResumeCancelPending] = useState(false)
   const [restartResumeCancelError, setRestartResumeCancelError] = useState('')
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
@@ -1469,7 +1469,7 @@ export default function ChatView({
       const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setGoalPresentationLocalState(runtimeGoal)
       setRecoveryRunId(data.recovery_run_id || null)
-      setRestartRecoveryState(data.restart_recovery_state || null)
+      setRestartResumeRunId(data.restart_resume_run_id || null)
       if (embedded) setEmbeddedRunActive(!!data.running)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1640,7 +1640,7 @@ export default function ChatView({
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
-      setRestartRecoveryState(data.restart_recovery_state || null)
+      setRestartResumeRunId(data.restart_resume_run_id || null)
       // A finalized reply can advance while this client holds an idle warm
       // cache with no stream left to reconcile it. Foreground runtime reads
       // already carry the durable version; when it disproves the cache, use
@@ -2548,6 +2548,7 @@ export default function ChatView({
       commitRuntimeSnapshot(transition)
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
+      setRestartResumeRunId(runtime.restart_resume_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -4140,14 +4141,14 @@ export default function ChatView({
     void fetchMessages({ force: true, authoritative: true })
   }, [fetchMessages])
   const handleCancelRestartResume = useCallback(async () => {
-    if (!recoveryRunId || !['waiting', 'starting'].includes(restartRecoveryState)) return
+    if (!restartResumeRunId) return
     setRestartResumeCancelPending(true)
     setRestartResumeCancelError('')
     try {
       const response = await apiFetch(`/chats/${chatId}/restart-resume/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: recoveryRunId }),
+        body: JSON.stringify({ run_id: restartResumeRunId }),
       })
       let data = null
       try { data = await response.json() } catch { /* status remains authoritative */ }
@@ -4158,7 +4159,7 @@ export default function ChatView({
     } finally {
       setRestartResumeCancelPending(false)
     }
-  }, [chatId, fetchMessages, recoveryRunId, restartRecoveryState])
+  }, [chatId, fetchMessages, restartResumeRunId])
   const resumeBlocked = useCallback(() => (
     isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
@@ -6005,7 +6006,7 @@ export default function ChatView({
                 onCancelRestartResume={isLastMsg ? handleCancelRestartResume : undefined}
                 restartResumeCancelPending={restartResumeCancelPending}
                 restartResumeCancelError={restartResumeCancelError}
-                restartRecoveryState={restartRecoveryState}
+                restartResumeQueued={!!restartResumeRunId}
                 resumeState={resumeState}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
@@ -6056,10 +6057,6 @@ export default function ChatView({
               onPrepareAnswer={prepareQuestionSubmission}
               onCancelAnswer={cancelQuestionSubmission}
               onResume={activeAssistantIsStreaming ? undefined : handleResume}
-              onCancelRestartResume={handleCancelRestartResume}
-              restartResumeCancelPending={restartResumeCancelPending}
-              restartResumeCancelError={restartResumeCancelError}
-              restartRecoveryState={restartRecoveryState}
               resumeState={resumeState}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}

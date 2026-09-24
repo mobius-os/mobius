@@ -945,10 +945,6 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     'owner input and active work must precede durable waiting and unseen completion',
   )
   assert.match(drawer, /drawer__attention-diamond drawer__owner-input-dot/)
-  assert.match(drawer, /const waiting = kind === 'chat' && \([\s\S]*item\.restart_recovery_state === 'waiting'[\s\S]*item\.restart_recovery_state === 'starting'/,
-    'automatic restart recovery reuses the standard waiting marker, not a custom badge')
-  assert.doesNotMatch(drawer, /restartRecoveryLabel|drawer__restart-recovery/,
-    'the drawer has no custom restart-recovery text label')
   assert.doesNotMatch(
     drawer,
     /drawer__contribution-pending|chatFlags|pendingContribution/,

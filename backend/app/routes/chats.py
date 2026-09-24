@@ -460,7 +460,6 @@ def _owner_chat_summary(
   *,
   durable_running: bool = False,
   durable_waiting: bool = False,
-  restart_recovery_state: str | None = None,
   transient_owner_input_kind: OwnerInputKind | None = None,
   unseen_failure_version: int | None = None,
   project_ref: dict | None = None,
@@ -471,7 +470,7 @@ def _owner_chat_summary(
   else None — the drawer renders it as a clickable project chip on the Recents
   row.
   """
-  summary = {
+  return {
     "id": chat.id,
     "title": chat.title,
     "updated_at": chat.updated_at.isoformat(),
@@ -501,110 +500,69 @@ def _owner_chat_summary(
     "has_unseen_failure": unseen_failure_version is not None,
     "unseen_failure_version": unseen_failure_version,
   }
-  if restart_recovery_state is not None:
-    summary["restart_recovery_state"] = restart_recovery_state
-  return summary
 
 
-def _restart_recovery_states(db: Session, chats) -> dict[str, str]:
-  """Project the automatic restart continuation stage for drawer rows.
+def _restart_resume_queue(db: Session, chat_ids) -> dict[str, str]:
+  """Map chats to the restart park the reset sweep will continue by itself.
 
-  This is owner-visible status, not a second scheduler. The durable ChatRun is
-  authoritative: a matching boot nonce plus the per-chat opt-in marks an
-  eligible due park as waiting; ``resume_pending`` means the reset sweep has
-  claimed it; a live typed restart continuation means it is resuming. Manual
-  fallback parks intentionally receive no automatic-recovery label.
+  Owner-visible status, not a second scheduler: the latest durable run must be
+  a due restart park bound to this boot's receipt, and the sweep's own
+  ``_auto_resume_rejection`` must accept it. Manual-fallback parks are left out.
   """
-  chat_ids = [str(chat.id) for chat in chats]
+  chat_ids = [str(chat_id) for chat_id in chat_ids]
   if not chat_ids:
     return {}
-  runs = db.query(
+  latest_by_chat = {}
+  for run in db.query(
     models.ChatRun.chat_id,
     models.ChatRun.id,
     models.ChatRun.status,
-    models.ChatRun.started_at,
     models.ChatRun.parked_until,
     models.ChatRun.park_reason,
     models.ChatRun.restart_nonce,
     models.ChatRun.initiated_by_app_id,
-    models.ChatRun.continuation_json,
   ).filter(
     models.ChatRun.chat_id.in_(chat_ids),
     models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-  ).order_by(
-    models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
-  ).all()
-  latest_by_chat = {}
-  for run in runs:
+  ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()):
     latest_by_chat.setdefault(run.chat_id, run)
-  if not latest_by_chat:
+  now = now_naive_utc()
+  due = {
+    chat_id: run
+    for chat_id, run in latest_by_chat.items()
+    if run.status in ("parked", "resume_pending")
+    and run.park_reason == "restart"
+    and run.parked_until is not None
+    and run.parked_until <= now
+  }
+  if not due:
     return {}
-
-  states: dict[str, str] = {}
-  parked_candidates = []
-  for chat_id, run in latest_by_chat.items():
-    control = run.continuation_json or {}
-    if (
-      run.status == "running"
-      and isinstance(control, dict)
-      and control.get("reason") == "restart"
-    ):
-      states[chat_id] = "resuming"
-    elif (
-      run.status in {"parked", "resume_pending"}
-      and run.park_reason == "restart"
-      and run.parked_until is not None
-      and run.parked_until <= now_naive_utc()
-    ):
-      parked_candidates.append((chat_id, run))
-
-  if not parked_candidates:
-    return states
   from app.restart_ledger import authorized_restart_nonce
 
   try:
     accepted_nonce = authorized_restart_nonce()
   except Exception:
-    # Recovery status is optional decoration on the owner list. A damaged or
-    # unavailable root-owned receipt must hide the automatic-resume promise,
-    # not make all chat history unreadable.
+    # Optional decoration: an unreadable root-owned receipt hides the
+    # automatic-resume promise instead of making chat history unreadable.
     log.warning(
-      "restart recovery list projection could not read boot receipt",
-      exc_info=True,
+      "restart resume projection could not read boot receipt", exc_info=True,
     )
-    return states
-  if not accepted_nonce:
-    return states
-  eligible = [
-    (chat_id, run)
-    for chat_id, run in parked_candidates
-    if run.restart_nonce and run.restart_nonce == accepted_nonce
-  ]
-  if not eligible:
-    return states
-
-  # Use the sweep's eligibility rule on only the columns it needs; never load
-  # the transcript as part of the ordinary drawer-list query.
-  eligible_ids = [chat_id for chat_id, _run in eligible]
-  chats_by_id = {
-    str(chat.id): chat
-    for chat in db.query(models.Chat).options(load_only(
-      models.Chat.id,
-      models.Chat.deleted_at,
-      models.Chat.pending_messages,
-      models.Chat.pending_question_id,
-      models.Chat.auto_resume_on_restart,
-    )).filter(models.Chat.id.in_(eligible_ids)).all()
-  }
-  for chat_id, run in eligible:
+    return {}
+  # Only the columns the eligibility rule reads; never the transcript.
+  chats = db.query(models.Chat).options(load_only(
+    models.Chat.id,
+    models.Chat.deleted_at,
+    models.Chat.pending_messages,
+    models.Chat.pending_question_id,
+    models.Chat.auto_resume_on_restart,
+  )).filter(models.Chat.id.in_(list(due)))
+  return {
+    str(chat.id): due[str(chat.id)].id
+    for chat in chats
     if _auto_resume_rejection(
-      db, chats_by_id.get(chat_id), run, accepted_nonce,
-    ):
-      continue
-    states[chat_id] = (
-      "starting" if run.status == "resume_pending" else "waiting"
-    )
-  return states
+      db, chat, due[str(chat.id)], accepted_nonce,
+    ) is None
+  }
 
 
 def _reclaim_expired_tombstones_after_chat_write(db: Session) -> None:
@@ -833,7 +791,7 @@ def _chat_detail_response(
     "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
-    "restart_recovery_state": _restart_recovery_states(db, [chat]).get(str(chat.id)),
+    "restart_resume_run_id": _restart_resume_queue(db, [chat.id]).get(str(chat.id)),
     "active_goal_objective": active_goal_objective,
     "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
@@ -916,10 +874,6 @@ def list_chats(
     # shell tell a parked turn from a live stream without decoding the messages
     # JSON. Consumed by _owner_chat_summary below.
     models.Chat.pending_question_id,
-    # A restart continuation is only automatically queued for chats whose
-    # owner opted into restart recovery. Used with the exact boot-bound run
-    # receipt in _restart_recovery_states; never exposed as a raw preference.
-    models.Chat.auto_resume_on_restart,
     models.Project.id.label("project_ref_id"),
     models.Project.name.label("project_name"),
     models.Project.root_path.label("project_root_path"),
@@ -947,7 +901,7 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
-  restart_recovery_states = _restart_recovery_states(db, chats)
+  restart_resume_queue = _restart_resume_queue(db, (chat.id for chat in chats))
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
   durable_waiting = (
     armed_wait_chat_ids(db)
@@ -966,8 +920,11 @@ def list_chats(
     _owner_chat_summary(
       chat,
       durable_running=chat.id in durable_running,
-      durable_waiting=chat.id in durable_waiting,
-      restart_recovery_state=restart_recovery_states.get(str(chat.id)),
+      # A queued restart continuation is durable idle work too, so it reuses
+      # the drawer's standard waiting marker.
+      durable_waiting=(
+        chat.id in durable_waiting or str(chat.id) in restart_resume_queue
+      ),
       transient_owner_input_kind=(
         "secure_input" if chat.id in secure_input_chats else None
       ),
@@ -1822,7 +1779,7 @@ def get_chat_runtime(
     "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
-    "restart_recovery_state": _restart_recovery_states(db, [chat]).get(str(chat.id)),
+    "restart_resume_run_id": _restart_resume_queue(db, [chat.id]).get(str(chat.id)),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "goal": presented_goal(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
@@ -1845,19 +1802,14 @@ def get_chat_runtime(
 async def cancel_restart_resume(
   chat_id: str,
   body: CancelRestartResumeRequest,
-  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Cancel one eligible automatic restart continuation; keep saved work."""
+  """Cancel one queued automatic restart continuation; keep saved work."""
   from app.chat_writer import CancelRestartResume, await_ack, get_writer
 
-  if principal.scope != "owner":
-    raise HTTPException(
-      status_code=403, detail="Only the owner can cancel restart recovery.",
-    )
-  chat = get_active_chat_for_principal(db, chat_id, principal)
-  state = _restart_recovery_states(db, [chat]).get(str(chat.id))
-  if state not in {"waiting", "starting"}:
+  chat = get_active_chat_or_404(db, chat_id)
+  if _restart_resume_queue(db, [chat.id]).get(str(chat.id)) != body.run_id:
     raise HTTPException(
       status_code=409,
       detail="Automatic restart recovery is no longer waiting.",
@@ -1875,7 +1827,7 @@ async def cancel_restart_resume(
   if result.get("status") != "cancelled":
     raise HTTPException(
       status_code=409,
-      detail="Automatic restart recovery has already changed.",
+      detail="Automatic restart recovery is no longer waiting.",
     )
   return {"status": "cancelled"}
 

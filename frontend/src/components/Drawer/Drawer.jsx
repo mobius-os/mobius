@@ -1585,11 +1585,7 @@ const DrawerRow = memo(function DrawerRow({
   const label = kind === 'chat' ? item.title : item.name
   const projectChip = recentsProjectChip(kind, item)
   const pinned = !!item.pinned_at
-  const waiting = kind === 'chat' && (
-    !!item.waiting
-    || item.restart_recovery_state === 'waiting'
-    || item.restart_recovery_state === 'starting'
-  )
+  const waiting = kind === 'chat' && !!item.waiting
   const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
