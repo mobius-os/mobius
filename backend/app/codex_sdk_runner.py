@@ -43,7 +43,6 @@ from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
   install_approval_handler,
-  start_turn_for_handle,
 )
 
 from app.codex_events import (
@@ -136,7 +135,6 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
 def _codex_config_overrides(
   *,
   allow_multi_agent: bool = True,
-  delegated_read_sandbox: bool = False,
 ) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
@@ -178,98 +176,7 @@ def _codex_config_overrides(
       "features.multi_agent_v2.tool_namespace=agents",
       "suppress_unstable_features_warning=true",
     ]
-  if delegated_read_sandbox:
-    # The production container blocks the user/mount namespaces required by
-    # Codex's default bubblewrap backend. Read Delegations still need a real
-    # filesystem boundary, so use Codex's own Landlock backend rather than
-    # retrying a failed command outside the sandbox. Do not use this legacy
-    # backend for workspace-write policies: the pinned CLI rejects that
-    # combination instead of enforcing it.
-    overrides += [
-      "features.use_legacy_landlock=true",
-      "features.network_proxy.enabled=true",
-      'features.network_proxy.domains={ "localhost" = "allow", '
-      '"127.0.0.1" = "allow", "::1" = "allow" }',
-    ]
   return overrides
-
-
-async def _start_codex_turn(
-  thread: Any,
-  user_message: str,
-  *,
-  cwd: str,
-  model: str | None,
-  effort: Any,
-  summary: Any,
-  delegated_read: bool,
-  approval_mode: Any,
-) -> Any:
-  """Start one turn, admitting only loopback network for read Delegations.
-
-  The public Python SDK's ``Sandbox.read_only`` preset fixes
-  ``networkAccess`` to false. Recursive Delegations need one narrower thing:
-  access to Möbius's loopback-only delegation API. The app-server network
-  proxy above allowlists only localhost; this turn-level policy enables that
-  already-filtered path without adding filesystem writes or permitting an
-  unsandboxed retry.
-
-  This uses the SDK's generated protocol seam until its public sandbox preset
-  can express read-only plus network. `_sdk_imports` already contract-tests
-  generated symbols for the same reason.
-  """
-  if not delegated_read:
-    return await thread.turn(
-      user_message,
-      cwd=cwd,
-      model=model,
-      effort=effort,
-      summary=summary,
-    )
-
-  from openai_codex.api import (
-    AsyncTurnHandle,
-    _approval_mode_override_settings,
-    _normalize_run_input,
-    _to_wire_input,
-  )
-  from openai_codex.generated.v2_all import (
-    ReadOnlySandboxPolicy,
-    SandboxPolicy,
-    TurnStartParams,
-  )
-
-  await thread._codex._ensure_initialized()
-  wire_input = _to_wire_input(_normalize_run_input(user_message))
-  approval_policy, approvals_reviewer = (
-    _approval_mode_override_settings(approval_mode)
-  )
-  params = TurnStartParams(
-    thread_id=thread.id,
-    input=wire_input,
-    approval_policy=approval_policy,
-    approvals_reviewer=approvals_reviewer,
-    cwd=cwd,
-    effort=effort,
-    model=model,
-    sandbox_policy=SandboxPolicy(root=ReadOnlySandboxPolicy(
-      type="readOnly",
-      network_access=True,
-    )),
-    summary=summary,
-  )
-  started, subscription = await start_turn_for_handle(
-    thread._codex,
-    thread.id,
-    wire_input,
-    params=params,
-  )
-  return AsyncTurnHandle(
-    thread._codex,
-    thread.id,
-    started.turn.id,
-    _subscription=subscription,
-  )
 
 
 def _codex_app_server_launch_args(
@@ -1613,12 +1520,7 @@ async def _run_codex_sdk_turn(
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
   )
-  config_overrides = _codex_config_overrides(
-    allow_multi_agent=True,
-    delegated_read_sandbox=(
-      delegated and run_policy.scope == "read"
-    ),
-  )
+  config_overrides = _codex_config_overrides(allow_multi_agent=True)
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1783,12 +1685,14 @@ async def _run_codex_sdk_turn(
 
       # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
       # maps to `approvalPolicy=on_request` with an automatic reviewer.
-      # Delegations deny provider-side escalation. Read-only app-servers use
-      # the Landlock override above, so inspection stays mechanically bounded.
-      # Write delegations deliberately use the container boundary below: their
-      # workspace is /data, so workspace_write would not narrow the partner's
-      # data surface, while its bwrap backend cannot start under the normal
-      # container seccomp policy and would make every write helper a no-op.
+      # Delegations deny provider-side escalation. Every Codex run, including
+      # a read Delegation, uses the container boundary below: Codex 0.156+
+      # requires bubblewrap for any filesystem-restricted policy
+      # (openai/codex#45984 retired Landlock for those, because it cannot hide
+      # app-server sockets), and bubblewrap cannot start under the normal
+      # container seccomp policy. A read Delegation's scope is therefore held
+      # by its brief, not a filesystem sandbox. Revisit if the deployment ever
+      # permits user namespaces.
       approval_mode = (
         sdk["ApprovalMode"].deny_all
         if delegated
@@ -1810,11 +1714,7 @@ async def _run_codex_sdk_turn(
       # ("trust the agent; container is the sandbox") is consistent. The
       # delegated prompt and tool policy still carry the exact project scope;
       # this only avoids a second sandbox that cannot function in-container.
-      _sandbox = (
-        sdk["Sandbox"].read_only
-        if delegated and run_policy.scope == "read"
-        else sdk["Sandbox"].full_access
-      )
+      _sandbox = sdk["Sandbox"].full_access
       # Upgrade existing native goals before resume: Möbius now owns intent
       # and schedules exactly one provider turn per admitted attempt. Clearing
       # the obsolete provider controller preserves conversation history.
@@ -1918,17 +1818,12 @@ async def _run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
-      turn = await _start_codex_turn(
-        thread,
+      turn = await thread.turn(
         user_message,
         cwd=cwd,
         model=model,
         effort=effort,
         summary=reasoning_summary,
-        delegated_read=(
-          delegated and run_policy.scope == "read"
-        ),
-        approval_mode=approval_mode,
       )
       if abort_requested():
         try:

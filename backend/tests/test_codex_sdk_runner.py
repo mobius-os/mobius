@@ -3567,112 +3567,6 @@ def test_codex_config_overrides_disable_competing_native_goal_runtime(monkeypatc
 
 
 
-def test_read_delegation_config_selects_container_safe_landlock():
-  ordinary = codex_sdk_runner._codex_config_overrides(
-    allow_multi_agent=False,
-  )
-  delegated = codex_sdk_runner._codex_config_overrides(
-    allow_multi_agent=False,
-    delegated_read_sandbox=True,
-  )
-
-  assert "features.use_legacy_landlock=true" not in ordinary
-  assert "features.use_legacy_landlock=true" in delegated
-  assert "features.network_proxy.enabled=true" not in ordinary
-  assert "features.network_proxy.enabled=true" in delegated
-  assert any(
-    "localhost" in override and '"127.0.0.1" = "allow"' in override
-    for override in delegated
-  )
-
-
-def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
-  from openai_codex import ApprovalMode
-  from openai_codex.generated.v2_all import (
-    Turn,
-    TurnCompletedNotification,
-    TurnStatus,
-  )
-  from openai_codex.models import Notification
-
-  captured = {}
-
-  class EarlyCompletionSubscription:
-    def __init__(self):
-      self.events = [Notification(
-        method="turn/completed",
-        payload=TurnCompletedNotification(
-          threadId="thread-read-network",
-          turn=Turn(
-            id="turn-read-network",
-            items=[],
-            status=TurnStatus.completed,
-          ),
-        ),
-      )]
-      self.closed = False
-
-    def next(self):
-      return self.events.pop(0)
-
-    def close(self):
-      self.closed = True
-
-  class FakeClient:
-    async def _start_turn(
-      self, thread_id, wire_input, *, params, for_handle,
-    ):
-      captured.update(
-        thread_id=thread_id,
-        wire_input=wire_input,
-        params=params,
-        for_handle=for_handle,
-      )
-      subscription = EarlyCompletionSubscription()
-      captured["subscription"] = subscription
-      # The completion is already available before _start_turn returns. A
-      # second, late subscription would begin after it and miss the event.
-      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network")), subscription
-
-    def _subscribe_turn_notifications(self, _turn_id):
-      raise AssertionError("the handle must own the turn/start subscription")
-
-  class FakeCodex:
-    def __init__(self):
-      self._client = FakeClient()
-
-    async def _ensure_initialized(self):
-      captured["initialized"] = True
-
-  thread = SimpleNamespace(id="thread-read-network", _codex=FakeCodex())
-
-  handle = asyncio.run(codex_sdk_runner._start_codex_turn(
-    thread,
-    "delegate through localhost",
-    cwd="/data",
-    model=None,
-    effort=None,
-    summary=None,
-    delegated_read=True,
-    approval_mode=ApprovalMode.deny_all,
-  ))
-
-  policy = captured["params"].sandbox_policy.root
-  assert captured["initialized"] is True
-  assert captured["for_handle"] is True
-  assert handle.id == "turn-read-network"
-  assert policy.type == "readOnly"
-  assert policy.network_access is True
-  assert captured["params"].approval_policy.root.value == "never"
-
-  async def collect_events():
-    return [event async for event in handle.stream()]
-
-  events = asyncio.run(collect_events())
-  assert [event.method for event in events] == ["turn/completed"]
-  assert captured["subscription"].closed is True
-
-
 def test_delegated_codex_approval_guard_fails_closed():
   sync = SimpleNamespace(_approval_handler=None)
   codex = SimpleNamespace(_client=SimpleNamespace(_sync=sync))
@@ -3691,11 +3585,14 @@ def test_delegated_codex_approval_guard_fails_closed():
 
 
 @pytest.mark.parametrize(
-  "scope, expected_sandbox, expected_approval, expects_landlock",
+  "scope, expected_sandbox, expected_approval",
   [
-    (None, "full-access", "auto_review", False),
-    ("read", "read-only", "deny_all", True),
-    ("write", "full-access", "deny_all", False),
+    (None, "full-access", "auto_review"),
+    # Codex 0.156+ needs bubblewrap for any filesystem-restricted policy and
+    # the container cannot start it, so a read-only sandbox would make every
+    # reviewer command panic before launch. Read scope is held by the brief.
+    ("read", "full-access", "deny_all"),
+    ("write", "full-access", "deny_all"),
   ],
 )
 @pytest.mark.parametrize("session_id", [None, "thread-policy"])
@@ -3704,7 +3601,6 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   scope,
   expected_sandbox,
   expected_approval,
-  expects_landlock,
   session_id,
 ):
   completed = SimpleNamespace(id="turn-policy", usage=None, error=None)
@@ -3739,13 +3635,6 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   monkeypatch.setattr(
     codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
   )
-  if scope == "read":
-    async def fake_start_turn(thread, user_message, **_kwargs):
-      return await thread.turn(user_message)
-
-    monkeypatch.setattr(
-      codex_sdk_runner, "_start_codex_turn", fake_start_turn,
-    )
   policy = None if scope is None else SimpleNamespace(scope=scope)
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
@@ -3771,9 +3660,7 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
       top_level=scope is None,
     )
   }
-  assert (
-    "features.use_legacy_landlock=true" in overrides
-  ) is expects_landlock
+  assert not any("use_legacy_landlock" in override for override in overrides)
   assert result["error"] is None
 
 
