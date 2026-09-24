@@ -52,6 +52,7 @@ async function runtimeExports() {
 
 test('runtime publishes additive feature markers for version-skew-safe app fallbacks', async () => {
   const { runtimeFeatures } = await runtimeExports()
+  assert.equal(runtimeFeatures.authoritativeVersionedReads, true)
   assert.equal(runtimeFeatures.idleDocument, true)
   assert.equal(Object.isFrozen(runtimeFeatures), true)
 })
@@ -829,6 +830,7 @@ test('init reuses one runtime per installation and updates its token broker', as
       getToken: async () => firstToken,
     })
     assert.equal(first.runtimeFeatures, runtime.runtimeFeatures)
+    assert.equal(first.runtimeFeatures.authoritativeVersionedReads, true)
     assert.equal(first.runtimeFeatures.idleDocument, true)
     assert.equal(Object.isFrozen(first.runtimeFeatures), true)
     const listenerCounts = () => ({
@@ -1439,6 +1441,29 @@ test('getWithVersion returns the value AND its server version (ETag)', async () 
   // server echo the ETag) — a plain get() must NOT, so it stays a cheap read.
   const vget = server.log.filter((e) => e.method === 'GET' && e.url.includes('index.json')).pop()
   assert.equal(vget.headers['X-Mobius-Version'], '1')
+})
+
+test('online getWithVersion pairs the server value with its version, not a queued overlay', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('shared.json', { remote: 1 })
+
+  const baseline = await s.getWithVersion('shared.json')
+  server.setOnline(false)
+  assert.equal((await s.durableWrite('shared.json', { local: 1 }, {
+    ifMatch: baseline.version,
+  })).durability, 'queued')
+
+  // Another writer advances the server while this device still has its queued
+  // overlay. A versioned online read is a CAS base: its value and ETag must
+  // describe the same authoritative server document.
+  server.seed('shared.json', { remote: 2 })
+  server.setOnline(true)
+  const current = await s.getWithVersion('shared.json')
+
+  assert.deepEqual(current.value, { remote: 2 })
+  assert.notEqual(current.version, baseline.version)
+  assert.equal(await s.pendingCount(), 1)
 })
 
 test('getWithVersion bypasses a plain-read HTTP cache before CAS', async () => {

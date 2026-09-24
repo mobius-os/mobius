@@ -35,7 +35,7 @@
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
 //   window.mobius.storage.pendingCount()          -> Promise<number>
-//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   read + its server ETag, for compare-and-swap
+//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   online: authoritative server value + its ETag; offline: queued overlay + offline:true
 //   window.mobius.storage.durableWrite(path, data, opts?) -> {durability, path, writeId, version?}
 //   window.mobius.storage.onConflict(cb)             -> unsubscribe fn; app owns merge/recovery
 //   window.mobius.storage.conflictContextItems(value) -> ordered opaque intents retained through coalescing
@@ -174,6 +174,7 @@ let _runtimeContext = null
 // preserve old locally-modified app bundles: an absent key simply means the app
 // should keep its legacy fallback.
 export const runtimeFeatures = Object.freeze({
+  authoritativeVersionedReads: true,
   idleDocument: true,
   projects: true,
 })
