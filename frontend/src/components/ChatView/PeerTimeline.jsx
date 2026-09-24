@@ -9,6 +9,7 @@ import { projectChatActivity } from './chatActivity.js'
 import {
   CHAT_ACTIVITY_STALE_TIME,
   chatActivityQueryKey,
+  retryChatActivity,
 } from './chatActivityQueries.js'
 import { groupTimelineRows } from './timelineRowGrouping.js'
 import { peerRecordTool, peerTime, foldPeerActivity } from './peerTimeline.js'
@@ -19,7 +20,7 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
     initialPageParam: null,
     queryFn: async ({ pageParam, signal }) => jsonOrThrow(await api.chats.activity(chatId, { before: pageParam, signal }), 'Chat activity failed:'),
     getNextPageParam: page => page.next_before || undefined,
-    enabled, staleTime: CHAT_ACTIVITY_STALE_TIME, retry: false,
+    enabled, staleTime: CHAT_ACTIVITY_STALE_TIME, retry: retryChatActivity,
   })
   const pages = query.data?.pages
   const events = useMemo(() => [...new Map((pages || []).flatMap(p => p.events).map(event => [event.id, event])).values()], [pages])

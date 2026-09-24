@@ -7,7 +7,9 @@ import {
   chatActivityQueryKey,
   invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
+  retryChatActivity,
 } from '../chatActivityQueries.js'
+import { QueryClient } from '@tanstack/react-query'
 
 function queryClientSpy() {
   const calls = []
@@ -84,4 +86,36 @@ test('system reconnect refreshes active activity queries without a poll loop', a
 
 test('activity remains cached until an owning event invalidates it', () => {
   assert.equal(CHAT_ACTIVITY_STALE_TIME, Infinity)
+})
+
+test('activity retries restart-shaped failures but accepts a real 4xx answer', () => {
+  const status = code => Object.assign(new Error('failed'), { status: code })
+  assert.equal(retryChatActivity(0, new TypeError('Failed to fetch')), true)
+  assert.equal(retryChatActivity(0, Object.assign(new Error('t'), { name: 'TimeoutError' })), true)
+  assert.equal(retryChatActivity(0, status(502)), true)
+  assert.equal(retryChatActivity(0, status(429)), true)
+  assert.equal(retryChatActivity(3, status(503)), true)
+  assert.equal(retryChatActivity(4, status(503)), false)
+  assert.equal(retryChatActivity(0, status(404)), false)
+  assert.equal(retryChatActivity(0, status(422)), false)
+  assert.equal(retryChatActivity(0, Object.assign(new Error('a'), { name: 'AbortError' })), false)
+})
+
+test('a restart gap heals the activity query without an owner retry', async () => {
+  const queryClient = new QueryClient()
+  let calls = 0
+  const data = await queryClient.fetchInfiniteQuery({
+    queryKey: chatActivityQueryKey('chat'),
+    initialPageParam: null,
+    queryFn: async () => {
+      calls += 1
+      if (calls < 3) throw new TypeError('Failed to fetch')
+      return { events: [], next_before: null }
+    },
+    retry: retryChatActivity,
+    retryDelay: 0,
+  })
+  assert.equal(calls, 3)
+  assert.deepEqual(data.pages, [{ events: [], next_before: null }])
+  queryClient.clear()
 })
