@@ -11,6 +11,23 @@ export function isContinuationMessage(message) {
     || message?.kind === 'auto_continuation'
 }
 
+/** Cached history may stay readable during a transient runtime-read failure.
+ * Retry only transport/server failures, and only a small fixed number of
+ * times; permanent client errors and missing chats need a different remedy. */
+export function cachedActivationRetryDelay(error, attempt) {
+  const message = String(error?.message || '')
+  const transientNetworkError = error?.name === 'TypeError'
+    && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
+  const transient = transientNetworkError
+    || error?.name === 'TimeoutError'
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
+    || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
+  if (!transient || !Number.isInteger(attempt) || attempt < 0 || attempt >= 3) {
+    return null
+  }
+  return [750, 2000, 5000][attempt]
+}
+
 /**
  * Project a completed resume as one product event instead of leaving the old
  * actionable pause beside its continuation marker. The durable transcript is
