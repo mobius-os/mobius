@@ -5054,7 +5054,11 @@ def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
 def test_autopilot_update_rechecks_current_source_before_push(
   client, owner_token, monkeypatch,
 ):
-  """A follow-up round cannot publish a head absent from installed source."""
+  """A follow-up cannot publish once the PR left the head its grant covers.
+
+  The installed source no longer contains the change either, but the grant
+  binding, not that local witness, is what refuses this update.
+  """
   from app import contribution_autopilot
   from app.database import SessionLocal
 
@@ -5128,7 +5132,8 @@ def test_autopilot_update_rechecks_current_source_before_push(
   )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.json()["detail"]["code"] == "pr_moved_outside_grant"
+  assert response.json()["detail"]["published"] is False
   assert not github_routes.contribution_runtime.personal_attempt_path(
     app_id, record["id"],
   ).exists()
