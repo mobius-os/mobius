@@ -305,7 +305,9 @@ def test_approval_saves_before_receipt_without_a_waiting_future(
   block = messages[-1]["blocks"][-1]
   assert block["response_mode"] == "continuation"
   assert block["action_key"] == PROMPT["work_key"]
-  assert block["questions"][0]["options"] == PROMPT["options"]
+  assert block["questions"][0]["options"] == [
+    {**option, "id": str(index)} for index, option in enumerate(PROMPT["options"])
+  ]
   assert "answers" not in block
 
 
@@ -757,7 +759,28 @@ def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, 
   again = client.post(f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1])
   assert first.status_code == 200, first.text
   assert first.json() == again.json()
-  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == payload["questions"]
+  saved = _row(chat.id)[1][-1]["blocks"][-1]["questions"]
+  assert saved[0]["options"] == [
+    {**option, "id": str(index)}
+    for index, option in enumerate(QUESTION_PROMPT["options"])
+  ]
+  assert saved[1] == payload["questions"][1]
+
+
+def test_every_saved_card_option_has_identity_without_a_quiet_choice(
+  client, chat, approval_run,
+):
+  # Identity is a property of every saved choice, not a side effect of a
+  # close-without-reply option; approvals get it through the same save point.
+  asked = client.post(f"/api/chats/{chat.id}/question", headers=approval_run[1], json={
+    "questions": [{"question": "Did it work?", "options": [
+      {"label": "Yes", "description": "It worked."},
+      {"label": "No", "description": "It failed."},
+    ]}],
+  })
+  assert asked.status_code == 200, asked.text
+  card = _row(chat.id)[1][-1]["blocks"][-1]
+  assert [o["id"] for o in card["questions"][0]["options"]] == ["0", "1"]
 
 
 def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(

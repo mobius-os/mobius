@@ -55,10 +55,11 @@ class QuestionSpec(BaseModel):
   options: list[ApprovalOption] = Field(default_factory=list, max_length=3)
 
   @model_validator(mode="after")
-  def unambiguous_quiet_options(self):
-    if (any(option.on_answer == "close" for option in self.options)
-        and len({option.label for option in self.options}) != len(self.options)):
-      raise ValueError("quiet-answer options must have distinct labels")
+  def distinct_option_labels(self):
+    # A saved answer is the chosen label text bound to its option identity, so
+    # two options with one label would make the answer ambiguous.
+    if len({option.label for option in self.options}) != len(self.options):
+      raise ValueError("question options must have distinct labels")
     return self
 
 
@@ -216,13 +217,15 @@ async def save_owner_question(
   question_id = str(uuid5(NAMESPACE_URL, json.dumps(
     [chat_id, principal.run_id, identity_payload if identity_payload is not None else payload], sort_keys=True,
   )))
-  # Stable identities belong to the saved card, never label inference in the
-  # answer route. Keep legacy cards byte-for-byte unchanged.
+  # Every saved option gets a stable identity so every answer path (the owner's
+  # tap, another authenticated agent, a quiet close) names the exact choice
+  # instead of inferring it from label text. A platform-derived identity, such
+  # as Restart's action-bound option, is kept. Already-saved cards are never
+  # rewritten; only new cards are normalized here.
   payload = deepcopy(payload)
-  if activation_requirement is None and questions.has_quiet_options(payload):
-    for question in payload.get("questions", []):
-      for index, option in enumerate(question.get("options", [])):
-        option["id"] = str(index)
+  for question in payload.get("questions", []):
+    for index, option in enumerate(question.get("options", [])):
+      option.setdefault("id", str(index))
   activation_wait = None
   if activation_requirement is not None:
     wait_id = f"activation-{question_id}"
