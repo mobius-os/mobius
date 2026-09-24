@@ -7,7 +7,6 @@ import pytest
 from app import models
 from app.chat_writer import ClearPending, PromotePending, get_writer
 from app.run_state import GOAL_HANDOFF_REASON
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 UNFINISHED = {"version": 1, "tasks": [{
@@ -303,7 +302,6 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Progress is saved."})
   scheduled = []
@@ -354,7 +352,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
     first_broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   first_sink.publish({"type": "text", "content": "Work remains."})
   first = await chat_mod._complete_turn(
@@ -379,7 +376,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
     second_broadcast,
     chat.id,
     run_token=continuation_run,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   second_sink.publish({
     "type": "text", "content": "No plan task changed status.",
@@ -407,7 +403,7 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   assert card["type"] == "question"
   assert card["response_mode"] == "continuation"
   assert card["questions"][0]["header"] == "Goal needs reconciliation"
-  assert "without updating the saved plan" in card["questions"][0]["question"]
+  assert "without handing off this Goal" in card["questions"][0]["question"]
   assert db.get(models.ChatRun, continuation_run).status == "interrupted"
 
 
@@ -447,7 +443,6 @@ async def test_only_visible_owner_steer_reauthorizes_one_goal_rollover(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Working on the saved plan."})
   steer = {
@@ -519,7 +514,6 @@ async def test_only_saved_owner_question_prevents_terminal_goal_fallback_questio
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "The reviewed batch is ready."})
   question = {
@@ -599,7 +593,6 @@ def test_open_continuation_card_requires_an_unanswered_terminal_card(block, expe
 
   sink = ChatEventSink(
     ChatBroadcast("card-state"), "card-state",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.assistant_blocks.append(block)
   assert sink.has_open_continuation_card() is expected
@@ -647,7 +640,6 @@ async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Connect an agent to continue."})
   scheduled = []
@@ -672,3 +664,70 @@ async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
 
   assert disposition is chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
   assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_plan_with_nothing_runnable_hands_off_instead_of_a_no_op_turn(
+  db, chat, monkeypatch,
+):
+  """Recording a blocker advances the plan but leaves nothing to run.
+
+  The ending turn parks on the owner card at once instead of starting a paid
+  automatic turn that can only restate the blocker.
+  """
+  from app import chat as chat_mod, chat_queue
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_event_sink import ChatEventSink
+
+  _add_goal_run(db, chat, plan={"version": 1, "tasks": [
+    {"id": "publish", "title": "Publish", "status": "blocked", "depends_on": []},
+    {"id": "verify", "title": "Verify", "status": "pending",
+     "depends_on": ["publish"]},
+  ]})
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
+  )
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+  broadcast = create_broadcast(chat.id)
+  sink = ChatEventSink(
+    broadcast, chat.id, run_token="goal-run",
+  )
+  sink.publish({"type": "text", "content": "Blocked until the owner acts."})
+  try:
+    disposition = await chat_mod._complete_turn(
+      bc=broadcast, sink=sink, db=db, chat_id=chat.id, run_gen=None,
+      provider_id="codex", cost_usd=0, close_browser=False,
+    )
+  finally:
+    remove_broadcast(chat.id)
+  db.expire_all()
+
+  assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
+  assert scheduled == []
+  saved = db.get(models.Chat, chat.id)
+  assert saved.pending_question_id == "goal-handoff-goal-run"
+
+
+def _task(task_id, status, depends_on=(), parent_id=None):
+  return {"id": task_id, "title": task_id, "status": status,
+          "depends_on": list(depends_on), "parent_id": parent_id}
+
+
+@pytest.mark.parametrize(("tasks", "automatic"), [
+  ([_task("gate", "blocked"), _task("next", "pending", ["gate"])], False),
+  ([_task("broken", "failed"), _task("next", "pending", ["broken"])], False),
+  ([_task("gate", "blocked"), _task("other", "pending")], True),
+  ([_task("gate", "blocked"), _task("next", "running")], True),
+  ([_task("gate", "blocked"), _task("parent", "pending"),
+    _task("child", "completed", parent_id="parent")], True),
+  ([_task("done", "completed")], True),
+], ids=["blocked", "failed", "ready", "running", "ready-to-verify",
+        "completable"])
+def test_rollover_needs_something_a_successor_can_run(db, chat, tasks, automatic):
+  from app.goal_plans import goal_terminal_handoff
+
+  _add_goal_run(db, chat, plan={"version": 1, "tasks": tasks})
+
+  handoff = goal_terminal_handoff(db, chat.id, "goal-run")
+  assert handoff.automatic_allowed is automatic

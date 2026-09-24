@@ -172,48 +172,6 @@ class ChatLiveAssistant(Base):
   snapshot = Column(JSON, nullable=True)
 
 
-class ChatContinuity(Base):
-  """Current projection of an agent-authored, append-only chat checkpoint log."""
-
-  __tablename__ = "chat_continuity"
-
-  chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
-  )
-  revision = Column(Integer, nullable=False, default=0, server_default="0")
-  current_summary = Column(Text, nullable=True)
-  covered_message_count = Column(
-    Integer, nullable=False, default=0, server_default="0",
-  )
-  covered_prefix_hash = Column(String(64), nullable=True)
-  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
-
-
-class ChatContinuityEntry(Base):
-  """One immutable checkpoint delta, or one lossless legacy baseline."""
-
-  __tablename__ = "chat_continuity_entries"
-  __table_args__ = (
-    UniqueConstraint("chat_id", "checkpoint_id", name="uq_continuity_checkpoint"),
-  )
-
-  chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
-  )
-  revision = Column(Integer, primary_key=True)
-  checkpoint_id = Column(String(128), nullable=False)
-  run_id = Column(String(64), nullable=True)
-  digest = Column(Text, nullable=False)
-  current_summary = Column(Text, nullable=True)
-  requested_title = Column(String(256), nullable=True)
-  covered_message_count = Column(
-    Integer, nullable=False, default=0, server_default="0",
-  )
-  covered_prefix_hash = Column(String(64), nullable=True)
-  legacy_markdown = Column(Text, nullable=True)
-  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
-
-
 class Chat(Base):
   """A chat conversation with the agent."""
 
@@ -411,26 +369,11 @@ class ChatRun(Base):
   # A successfully drained planned restart reuses that retry path with
   # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
-  # Progress lease: the single durable authority for whether a "running" turn is
-  # still making progress. The runner renews it to ``now + regime TTL`` as it
-  # emits progress (short while awaiting the model, a bounded cap while a
-  # CLI-internal tool runs, suspended while a platform-mediated long tool/wait is
-  # outstanding). A "running" row whose lease has lapsed is a crashed OR hung
-  # turn — recovery reclaims it on expiry alone, without asking whether the
-  # process handle or broadcast is still alive (those in-memory signals stay for
-  # operational routing, not liveness truth). NULL = no active lease (a
-  # non-running row, or a pre-migration/in-flight run at upgrade), for which
-  # recovery falls back to the legacy dead-process conjunction.
-  progress_expires_at = Column(DateTime, nullable=True, default=None)
   # False proves this physical run has not crossed provider entry. The writer
   # commits True before invoking either runner; a crash after that commit is
   # ambiguous even with no transcript output. NULL preserves that ambiguity
   # for pre-admission-ledger runs upgraded from an older backend.
   provider_execution_admitted = Column(Boolean, nullable=True, default=False)
-  # Set only after the SDK accepts this run's prepared input. Checkpoints
-  # reverify these exact transcript bytes before adopting the boundary.
-  delivered_message_count = Column(Integer, nullable=True, default=None)
-  delivered_prefix_hash = Column(String(64), nullable=True, default=None)
   # Inclusive boundary of the peer-message page injected into this provider
   # admission. Both fields are NULL when no peer message was delivered. The
   # pair advances only after the provider call returns successfully. Admission

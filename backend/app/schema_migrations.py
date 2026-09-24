@@ -5225,6 +5225,72 @@ def _add_run_delivered_input_boundary(eng) -> None:
       ))
 
 
+
+def _retire_chat_continuity_journal(eng) -> None:
+  """Fold 0064's journal back into each chat's note.
+
+  The journal briefly duplicated the note file with swapped section names.
+  Each chat that saved into it gets its note rewritten in the ordinary format
+  (Digest = current paragraph; Summary = earlier history plus every saved
+  entry). Nothing maps the 0064 tables or 0065 run columns any more; they stay
+  because a baked fallback platform may still map them.
+  """
+  import os
+  import re
+  from pathlib import Path
+
+  from sqlalchemy import inspect as sa_inspect, text
+
+  heading = re.compile(r"^## ", re.MULTILINE)
+
+  def split_legacy(markdown: str) -> tuple[str, str]:
+    """Return an old note's history and its trailing sections, losslessly."""
+    body = markdown
+    if body.startswith("---\n") and (end := body.find("\n---", 3)) != -1:
+      body = body[end + 4:]
+    summary = re.search(r"^## Summary[ \t]*$", body, re.MULTILINE)
+    trailing = re.search(r"^## (?:Facts & intent|Related)[ \t]*$", body, re.MULTILINE)
+    if summary is None:
+      return heading.sub("### ", body.strip()), ""
+    if trailing is None or trailing.start() < summary.end():
+      return body[summary.end():].strip(), ""
+    return body[summary.end():trailing.start()].strip(), body[trailing.start():].strip()
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if {"chats", "chat_continuity", "chat_continuity_entries"} <= tables:
+    chats_dir = Path(os.environ.get("DATA_DIR", "/data")) / "shared" / "memory" / "chats"
+    with eng.connect() as conn:
+      states = conn.execute(text(
+        "SELECT s.chat_id, s.current_summary, c.title FROM chat_continuity s "
+        "JOIN chats c ON c.id = s.chat_id"
+      )).all()
+      for chat_id, current, title in states:
+        history, trailing = [], ""
+        for digest, legacy, created_at in conn.execute(text(
+          "SELECT digest, legacy_markdown, created_at FROM chat_continuity_entries "
+          "WHERE chat_id = :chat_id ORDER BY revision"
+        ), {"chat_id": chat_id}):
+          if legacy is not None:
+            earlier, trailing = split_legacy(legacy)
+            history.append(earlier)
+          elif digest:
+            stamp = str(created_at)[:16].replace("T", " ")
+            history.append(f"### {stamp} UTC\n\n{heading.sub('### ', digest.strip())}")
+        name = " ".join((title or "").split())
+        note = (
+          f"---\ntype: chat\ndescription: {name}\n---\n\n"
+          f"## Digest\n\n{heading.sub('### ', (current or '').strip())}\n\n"
+          "## Summary\n\n" + "\n\n".join(part for part in history if part)
+          + (f"\n\n{trailing}" if trailing else "") + "\n"
+        )
+        path = chats_dir / chat_id / "index.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(".index.migrating")
+        temporary.write_text(note, encoding="utf-8")
+        os.replace(temporary, path)
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5290,12 +5356,17 @@ _SCHEMA_MIGRATIONS = (
   ("0059_app_service_aliases", _add_app_service_aliases),
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
+  # Retired: nothing maps chat_runs.progress_expires_at any more (turn
+  # liveness is the runner's own process/stream state). The column stays
+  # because the baked fallback platform can still map it.
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
   ("0064_require_git_app_sources", _require_git_app_sources),
+  # Retired by 0066: nothing maps these tables or columns any more.
   ("0064_chat_continuity_journal", _add_chat_continuity_journal),
   ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
+  ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
 )
 
 

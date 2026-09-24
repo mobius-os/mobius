@@ -9,7 +9,6 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _create_request(client, auth, chat, *, mode="sealed"):
@@ -219,7 +218,6 @@ def test_sink_builds_a_persistable_prompt_only_receipt(client, auth, chat):
   bc = create_broadcast(chat.id)
   sink = ChatEventSink(
     bc, chat.id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(chat.id, sink)
   try:
@@ -407,7 +405,6 @@ def test_reveal_marker_is_scrubbed_before_sink_broadcast_and_reduction():
   bus = Bus()
   sink = ChatEventSink(
     bus, "",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({
     "type": "tool_start",

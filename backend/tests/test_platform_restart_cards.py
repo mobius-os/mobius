@@ -26,7 +26,6 @@ from app.database import SessionLocal
 from app.platform_restart import activation_notice, activation_wait_verdict
 from app.routes import chats_stream
 from app.timeutil import now_naive_utc
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _requirement(action_id="platform-restart:test"):
@@ -606,7 +605,6 @@ def test_authenticated_agent_from_another_chat_dispatches_restart_once(
   ))
   sink = ChatEventSink(
     create_broadcast(chat.id), chat.id, run_token=run_id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
@@ -670,7 +668,6 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
   ))
   sink = ChatEventSink(
     create_broadcast(chat.id), chat.id, run_token=run_id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()

@@ -79,8 +79,6 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   run_migrations(eng)
 
   assert migrations.mapped_schema_gaps(eng) == []
-  run_columns = {column["name"] for column in inspect(eng).get_columns("chat_runs")}
-  assert {"delivered_message_count", "delivered_prefix_hash"} <= run_columns
   assert schema_migration_history(eng) == first_history
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
@@ -237,23 +235,16 @@ def test_goal_plan_admission_revision_upgrade_is_nullable_and_idempotent(tmp_pat
   assert columns["goal_plan_revision_at_admission"]["nullable"] is True
 
 
-def test_progress_lease_upgrade_adds_nullable_column(tmp_path):
+def test_retired_progress_lease_migration_stays_idempotent(tmp_path):
+  # The ledger entry still runs on fresh and upgraded databases; it only adds
+  # the retired nullable column, which no model maps any more.
   eng = create_engine(f"sqlite:///{tmp_path / 'progress-lease.db'}")
   models.Base.metadata.create_all(eng)
-  with eng.begin() as conn:
-    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN progress_expires_at"))
-    conn.execute(text(
-      "INSERT INTO chat_runs (id, chat_id, status) "
-      "VALUES ('legacy', 'chat', 'running')"
-    ))
   migrations._add_chat_run_progress_lease(eng)
   migrations._add_chat_run_progress_lease(eng)
-  cols = {c["name"] for c in inspect(eng).get_columns("chat_runs")}
-  assert "progress_expires_at" in cols
-  with Session(eng) as session:
-    # A pre-migration in-flight run stays NULL, so recovery keeps its legacy
-    # dead-process fallback instead of reaping it on a phantom expiry.
-    assert session.get(models.ChatRun, "legacy").progress_expires_at is None
+  cols = {c["name"]: c for c in inspect(eng).get_columns("chat_runs")}
+  assert cols["progress_expires_at"]["nullable"] is True
+  assert "progress_expires_at" not in models.ChatRun.__table__.columns
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -1733,6 +1724,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0064_require_git_app_sources",
     "0064_chat_continuity_journal",
     "0065_run_delivered_input_boundary",
+    "0066_retire_chat_continuity_journal",
   ]
   assert second == first
 

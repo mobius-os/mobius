@@ -97,7 +97,6 @@ from app.chat_writer import (
   PrepareAutoResume,
   PrepareRestartIntents,
   RecordRunMetrics,
-  RecordDeliveredInput,
   ReconcileStartupChat,
   RecoverWedgedRun,
   ResolvePark,
@@ -1212,6 +1211,15 @@ def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
 _WEDGED_RUN_MIN_AGE = timedelta(seconds=120)
 
 
+def _runner_alive(chat_id: str) -> bool:
+  """Whether a turn's runner still exists: a registered handle, or a broadcast
+  still streaming or finalizing."""
+  if registry.is_alive(chat_id):
+    return True
+  bc = get_broadcast(chat_id)
+  return bc is not None and bc.running
+
+
 async def sweep_wedged_runs(db: Session) -> list[str]:
   """Recover durable runs orphaned by a completed-but-unclosed turn.
 
@@ -1221,24 +1229,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   late-promote scheduling failure — leaves its ChatRun ``running`` forever.
   This periodic sweep closes that gap between boots.
 
-  Reaping keys on the progress LEASE (`ChatRun.progress_expires_at`), the single
-  liveness authority, not on the old registry+broadcast conjunction:
-
-    - Lease EXPIRED (non-NULL and in the past) → the turn stopped making
-      progress: crashed OR alive-but-hung. Reclaim regardless of whether a live
-      handle or a running broadcast still exists. A still-alive (hung) runner is
-      stopped first (graceful interrupt, then SIGKILL backstop) before recovery.
-      This is the fix for the old blind spot: a live handle or running broadcast
-      used to skip the chat forever, so a stalled model stream span endlessly.
-    - Lease VALID (non-NULL, in the future) → the runner is renewing it, so the
-      turn is making real progress — including a legitimately-long silent tool,
-      which renews with a bounded/suspended TTL. Never reaped.
-    - Lease NULL → a pre-migration/in-flight run or a provider without lease
-      renewal. Fall back to the legacy dead-process conjunction
-      (`registry.is_alive` False AND broadcast not running), so a live turn that
-      predates the lease is never reaped.
-    - `ChatRun.started_at` older than the floor — belt-and-suspenders; a valid
-      lease is always >= MODEL_IDLE_TTL past its last renewal anyway.
+  A run is a candidate only when its runner is gone: no registered handle and
+  no running broadcast. A live runner is never reaped, however quiet; a hung
+  provider stream is ended by the provider's own stall watchdog or the owner's
+  Stop.
 
   Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in, the actor no-ops rather than touching
@@ -1268,7 +1262,6 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
       db.query(
         models.ChatRun.id,
         models.ChatRun.chat_id,
-        models.ChatRun.progress_expires_at,
       )
       .join(models.Chat, models.Chat.id == models.ChatRun.chat_id)
       .filter(models.ChatRun.status == "running")
@@ -1280,28 +1273,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_wedged_runs: query failed")
     return swept
-  now = datetime.now(UTC).replace(tzinfo=None)
   for run in stale:
     chat_id = run.chat_id
-    if run.progress_expires_at is not None:
-      # The lease is the single liveness authority: a still-valid lease means
-      # the turn is making progress (even a legitimately-long silent tool), so
-      # leave it alone. An EXPIRED lease is a crashed OR hung turn — reclaim it
-      # regardless of whether a handle or broadcast still exists. That last part
-      # is the fix: the old conjunction skipped any chat with a live handle or a
-      # running broadcast, so an alive-but-hung turn was invisible forever.
-      if run.progress_expires_at >= now:
-        continue
-    else:
-      # NULL lease: a pre-migration/in-flight run, or a provider that does not
-      # renew leases yet. Fall back to the legacy dead-process conjunction so a
-      # live turn that simply predates the lease is never reaped.
-      if registry.is_alive(chat_id):
-        continue
-      bc = get_broadcast(chat_id)
-      if bc is not None and bc.running:
-        # Still streaming, in terminal cleanup, or a legitimately-long live turn.
-        continue
+    if _runner_alive(chat_id):
+      continue
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
@@ -1313,29 +1288,9 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
           if physical is None or physical.status != "running":
             # A fresh turn or a terminal transition raced in under the lock.
             continue
-          lease = physical.progress_expires_at
-          if lease is not None and lease >= datetime.now(UTC).replace(
-            tzinfo=None
-          ):
-            # The runner renewed the lease between the pre-check and the lock:
-            # healthy progress, never reap.
+          if _runner_alive(chat_id):
+            # A runner started between the pre-check and the lock.
             continue
-          # Past here the lease is either expired (non-NULL, in the past) or
-          # NULL (legacy fallback).
-          expired = lease is not None
-          handles = registry.get_handles(chat_id)
-          if handles and not expired:
-            # Only an expired lease authorizes tearing down a live handle; the
-            # legacy NULL-lease path never reaps a running runner.
-            continue
-          if handles:
-            # Alive but hung: stop the process first (graceful interrupt, then
-            # SIGKILL backstop) so a zombie write can't clobber recovery.
-            for handle in handles:
-              await _stop_handle_with_escalation(
-                chat_id, handle, source="sweep_wedged_runs",
-              )
-              registry.unregister(chat_id, handle.kind)
           chat = db.query(models.Chat).filter(
             models.Chat.id == chat_id,
             models.Chat.deleted_at.is_(None),
@@ -4112,8 +4067,9 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission. A plan advance or a committed owner steer permits one
-  # rollover; the successor must earn another before continuing again.
+  # provider admission. A plan advance that leaves runnable work, or a
+  # committed owner steer, permits one rollover; the successor must earn
+  # another before continuing again.
   # Otherwise the saved-question owner keeps the Goal exact and durable while
   # the partner decides whether to continue or stop it.
   terminal_handoff = None
@@ -4145,9 +4101,8 @@ async def _complete_turn(
           "id": "goal_next_step",
           "header": "Goal needs reconciliation",
           "question": (
-            "The turn ended without updating the saved plan or handing off "
-            "this Goal. Automatic continuation is paused. What should happen "
-            "next?"
+            "The turn ended without handing off this Goal, so automatic "
+            "continuation is paused. What should happen next?"
           ),
           "options": [
             {
@@ -5059,25 +5014,6 @@ async def _run_chat_impl_with_db(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
-  # Freeze source before any SDK call or mid-turn steer. The provider runner
-  # invokes the recorder only after the initial prepared input is accepted.
-  from app.chat_continuity import delivered_input_prefix
-  delivery_count, delivery_hash = delivered_input_prefix(
-    chat_row.messages or [] if chat_row else [], run_token, raw_user_message,
-  )
-
-  async def record_delivered_input() -> None:
-    if not chat_id:
-      return
-    try:
-      await _await_ack(get_writer().submit(RecordDeliveredInput(
-        chat_id=chat_id, run_token=run_token,
-        message_count=delivery_count, prefix_hash=delivery_hash,
-      )))
-    except Exception:
-      # The input reached the SDK, but no durable proof exists. A checkpoint
-      # must preserve earlier coverage rather than inventing this delivery.
-      log.exception("delivered-input proof failed chat_id=%s", chat_id)
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
   provider = get_provider(provider_id)
@@ -5128,19 +5064,18 @@ async def _run_chat_impl_with_db(
   startup_context = ""
   if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
-    ordered_chat_ids = [row[0] for row in db.query(models.Chat.id).filter(
+    ordered_chat_ids = [
+      row[0]
+      for row in db.query(models.Chat.id).filter(
         models.Chat.deleted_at.is_(None),
       ).order_by(
         func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
         models.Chat.id.desc(),
-      ).limit(memory.RECENT_CHAT_NOTES).all()]
-    continuity_by_chat_id = memory.recent_continuity_metadata(
-      db, ordered_chat_ids,
-    )
+      ).all()
+    ]
     block = memory.build_memory_block(
       settings.data_dir,
       ordered_chat_ids=ordered_chat_ids,
-      continuity_by_chat_id=continuity_by_chat_id,
     )
     ctx = block.text
     # Observability only. Chat-summary injection is core continuity, not graph
@@ -5518,8 +5453,6 @@ async def _run_chat_impl_with_db(
   # the provider's path.
   from app.agent_activity_provider import resolve_agent_activity_binding
   agent_activity_binding = resolve_agent_activity_binding(db)
-  from app.memory_provider import resolve_recall_binding
-  recall_binding = resolve_recall_binding(db)
 
   # Snapshot owner-managed MCP connections while this request session is still
   # live. Provider turns can wait for hours, so neither runner may query the
@@ -5629,7 +5562,6 @@ async def _run_chat_impl_with_db(
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
       sink = _ChatEventSink(
         bc, chat_id, run_token=run_token,
-        recall_binding=recall_binding,
         agent_activity_binding=agent_activity_binding,
       )
       register_active_sink(chat_id, sink)
@@ -5682,7 +5614,6 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
       agent_activity_binding=agent_activity_binding,
     )
     register_active_sink(chat_id, sink)
@@ -5724,7 +5655,6 @@ async def _run_chat_impl_with_db(
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        on_input_delivered=record_delivered_input,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5844,7 +5774,6 @@ async def _run_chat_impl_with_db(
         from app.delegations import REVIEW_REQUIRED_MARKER
         sink = _ChatEventSink(
           bc, chat_id, run_token=run_token,
-          recall_binding=recall_binding,
           agent_activity_binding=agent_activity_binding,
         )
         register_active_sink(chat_id, sink)
@@ -5881,7 +5810,6 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
       agent_activity_binding=agent_activity_binding,
     )
     register_active_sink(chat_id, sink)
@@ -5917,7 +5845,6 @@ async def _run_chat_impl_with_db(
         run_policy=run_policy,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        on_input_delivered=record_delivered_input,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

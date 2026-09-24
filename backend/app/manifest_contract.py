@@ -17,7 +17,6 @@ RECOGNIZED_CAPABILITIES = (
   "identity_manage",
   "railway_manage",
 )
-SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
 ENTRY_MAX_BYTES = 1024 * 1024
@@ -48,11 +47,46 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
 ))
 _CRON_FIELD_OK = re.compile(r"[0-9\*/,\- ]+", re.ASCII)
 _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
+# A folder skill is `<id>/`: `<id>/SKILL.md` plus sibling markdown the entry
+# links to relatively, mirroring installed ecosystem skills so progressive
+# disclosure travels with the skill instead of pointing into app source.
+_SKILL_FOLDER_OK = re.compile(r"^([a-z0-9][a-z0-9._-]*)/$")
+FOLDER_SKILL_ENTRY = "SKILL.md"
 _PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 
 
 class ManifestContractError(ValueError):
   pass
+
+
+def is_folder_skill_member(name: str) -> bool:
+  """Whether a file directly inside a `<id>/` folder skill may ship with it."""
+  return name == FOLDER_SKILL_ENTRY or _SKILL_FILENAME_OK.fullmatch(name) is not None
+
+
+def skill_member_paths(manifest: dict) -> list[str]:
+  """Every source file a validated manifest's `skills` materializes, in order.
+
+  A root `<id>.md` entry is itself; a `<id>/` folder entry is `<id>/SKILL.md`
+  followed by the other `source_files` directly inside that folder.
+  """
+  declared = [
+    path for path in (manifest.get("source_files") or [])
+    if isinstance(path, str)
+  ]
+  members: list[str] = []
+  for entry in manifest.get("skills") or []:
+    if not isinstance(entry, str):
+      continue
+    if _SKILL_FOLDER_OK.fullmatch(entry) is None:
+      members.append(entry)
+      continue
+    members.append(entry + FOLDER_SKILL_ENTRY)
+    members.extend(
+      path for path in declared
+      if path.startswith(entry) and path != entry + FOLDER_SKILL_ENTRY
+    )
+  return list(dict.fromkeys(members))
 
 
 def _fail(message: str) -> None:
@@ -621,15 +655,16 @@ def validate_manifest_contract(manifest) -> None:
   if source_files is not None:
     if not isinstance(source_files, list):
       _fail("Manifest `source_files` must be an array.")
-    if len(source_files) > SOURCE_FILES_COUNT_MAX:
-      _fail(
-        "Manifest has too many source_files "
-        f"(max {SOURCE_FILES_COUNT_MAX})."
-      )
+    # No file-count cap: the manifest byte cap bounds how many paths can be
+    # listed, and fetch enforces the per-file and total source byte caps.
     schedule = manifest.get("schedule")
     declared_job = schedule.get("job") if isinstance(schedule, Mapping) else None
+    seen_sources: set[str] = set()
     for index, path in enumerate(source_files):
       validate_repo_relative_path(path, f"source_files[{index}]")
+      if path in seen_sources:
+        _fail(f"Manifest `source_files[{index}]` repeats {path!r}.")
+      seen_sources.add(path)
       if (
         path in _SOURCE_FILES_MANAGED_EXACT
         or path == declared_job
@@ -739,22 +774,45 @@ def validate_manifest_contract(manifest) -> None:
       _fail("Manifest `skills` must be an array.")
     if len(skills) > SKILLS_COUNT_MAX:
       _fail(f"Manifest has too many skills (max {SKILLS_COUNT_MAX}).")
-    root_sources = {
-      path for path in (source_files or [])
-      if isinstance(path, str) and "/" not in path
-    }
-    for index, path in enumerate(skills):
-      if not isinstance(path, str) or _SKILL_FILENAME_OK.fullmatch(path) is None:
+    declared = [path for path in (source_files or []) if isinstance(path, str)]
+    skill_ids: set[str] = set()
+    for index, entry in enumerate(skills):
+      folder = (
+        _SKILL_FOLDER_OK.fullmatch(entry) if isinstance(entry, str) else None
+      )
+      if folder is None and (
+        not isinstance(entry, str) or _SKILL_FILENAME_OK.fullmatch(entry) is None
+      ):
         _fail(
-          f"Manifest `skills[{index}]` must match "
-          "`^[a-z0-9][a-z0-9._-]*\\.md$`."
+          f"Manifest `skills[{index}]` must be a root `<id>.md` file "
+          "(`^[a-z0-9][a-z0-9._-]*\\.md$`) or a `<id>/` folder skill."
         )
-      if path not in root_sources:
+      skill_id = folder.group(1) if folder else entry[:-len(".md")]
+      if skill_id in skill_ids:
+        _fail(f"Manifest `skills[{index}]` repeats skill id {skill_id!r}.")
+      skill_ids.add(skill_id)
+      if folder is None:
+        if entry not in declared:
+          _fail(
+            f"Manifest `skills[{index}]` {entry!r} must also be listed in "
+            "`source_files` as a root-level file — the installer reads skill "
+            "bytes from the installed source tree, so a skill that is not a "
+            "source file has nothing to install."
+          )
+        continue
+      for path in declared:
+        if not path.startswith(entry):
+          continue
+        member = path[len(entry):]
+        if not is_folder_skill_member(member):
+          _fail(
+            f"Manifest folder skill {entry!r} may contain only `SKILL.md` and "
+            f"lowercase `.md` files directly inside it; got {path!r}."
+          )
+      if entry + FOLDER_SKILL_ENTRY not in declared:
         _fail(
-          f"Manifest `skills[{index}]` {path!r} must also be listed in "
-          "`source_files` as a root-level file — the installer reads skill "
-          "bytes from the installed source tree, so a skill that is not a "
-          "source file has nothing to install."
+          f"Manifest `skills[{index}]` {entry!r} must list "
+          f"`{entry}{FOLDER_SKILL_ENTRY}` in `source_files`."
         )
 
   system_prompt = manifest.get("system_prompt")

@@ -24,6 +24,7 @@ See feature ticket 062 for the design rationale.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -80,6 +81,7 @@ from app.manifest_contract import (
   ManifestContractError,
   job_interpreter,
   require_executable_job,
+  skill_member_paths,
   static_asset_entries,
   validate_manifest_contract,
   validate_storage_destination,
@@ -208,12 +210,13 @@ UPDATE_RESOLUTION_POLICIES = frozenset({
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so Rolldown can bundle the import graph. The shared
-# manifest contract caps the count; fetch additionally caps the summed bytes.
+# manifest contract bounds the list by bytes; fetch caps per-file and summed bytes.
 _SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
 
-# Shared skill files an app declares via manifest `skills`: each entry is a
-# root-level `source_files` basename the post-commit sync phase copies into
-# /data/shared/skills/. Small caps — skills are instruction prose, not data.
+# Shared skill files an app declares via manifest `skills`: a root-level
+# `<id>.md` or a `<id>/` folder (SKILL.md + sibling markdown) whose
+# `source_files` the post-commit sync phase copies into /data/shared/skills/.
+# Records key by that relative path. Small caps — skills are prose, not data.
 _SKILL_MAX_BYTES = _CONTRACT_SKILL_MAX_BYTES
 
 # A system-prompt fragment is more privileged than a skill because it is read
@@ -224,6 +227,32 @@ _SYSTEM_PROMPT_MAX_BYTES = _CONTRACT_SYSTEM_PROMPT_MAX_BYTES
 # dotfile that is not `*.md`, so the skill loaders (the app-skills catalog
 # app, the SDK skill-load observers) never list or read it.
 _APP_SKILLS_SIDECAR = ".app-skills.json"
+
+
+def _app_skill_id(rel: str) -> str:
+  """The shared-skill id a recorded app skill path belongs to."""
+  folder, sep, _ = rel.partition("/")
+  return folder if sep else Path(rel).stem
+
+
+def _is_app_skill_rel(rel: str) -> bool:
+  """A record path the installer may touch: `<id>.md` or `<id>/<file>.md`."""
+  parts = rel.split("/")
+  if len(parts) == 1:
+    return rel.endswith(".md") and Path(rel).name == rel and rel[0] != "."
+  return (
+    len(parts) == 2
+    and all(part and not part.startswith(".") for part in parts)
+    and parts[1].endswith(".md")
+  )
+
+
+def _prune_empty_skill_folder(root: Path, rel: str) -> None:
+  """Drop a folder skill's directory once its last member has moved away."""
+  if "/" in rel:
+    with contextlib.suppress(OSError):
+      (root / rel.partition("/")[0]).rmdir()
+
 
 # Tracked files in a merged tree that are NOT hand-written app source: the
 # managed .gitignore, the install-managed static-asset manifest, and the cron
@@ -1762,7 +1791,7 @@ async def _sync_app_skills(
   Ownership rides the installer-owned sidecar so one app can never
   silently take over another live app's skill file.
   """
-  skills = list(dict.fromkeys(manifest.get("skills") or []))
+  skills = skill_member_paths(manifest)
   data_dir = Path(get_settings().data_dir)
   skills_dir = data_dir / "shared" / "skills"
   source_dir = Path(app.source_dir)
@@ -1837,9 +1866,61 @@ async def _sync_app_skills(
       if source.is_file():
         retired.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, retired)
+      _prune_empty_skill_folder(skills_dir, rel)
       records.pop(rel, None)
       warnings.append(f"skill {rel}: retired by update")
+    # Ownership and shape collisions are decided per skill id, so a folder
+    # skill lands or is skipped as a whole rather than file by file.
+    ours = {
+      key for key, rec in records.items()
+      if isinstance(rec, dict) and rec.get("app_id") == app.id
+    }
+    refused_ids: dict[str, str] = {}
+    for skill_id in dict.fromkeys(_app_skill_id(rel) for rel in skills):
+      is_folder = f"{skill_id}.md" not in skills
+      flat, folder = skills_dir / f"{skill_id}.md", skills_dir / skill_id
+      owners = {
+        rec.get("app_id") for key, rec in records.items()
+        if isinstance(rec, dict) and _app_skill_id(key) == skill_id
+      } - {app.id, None}
+      live_owner = None
+      for owner_id in owners:
+        live_owner = db.query(models.App).filter(models.App.id == owner_id).first()
+        if live_owner is not None:
+          break
+      if f"{skill_id}.md" in seed_owned and f"{skill_id}.md" not in ours:
+        refused_ids[skill_id] = "owned by the platform"
+      elif live_owner is not None:
+        # A hard-purged recorded owner no longer reserves the id.
+        refused_ids[skill_id] = f"owned by app {live_owner.slug}"
+      elif isinstance(installed_records.get(skill_id), dict) or (
+        not is_folder and folder.is_dir()
+      ):
+        # Cross-SHAPE collision: an install-provenance skill may hold the same
+        # logical id in the other on-disk shape. Refuse a second skill under
+        # one id; the owner resolves it by removing one deliberately.
+        refused_ids[skill_id] = (
+          f"an installed skill already holds id {skill_id!r} "
+          "(directory shape)"
+        )
+      elif is_folder and (
+        flat.exists()
+        # A folder is someone else's when it holds none of this app's recorded
+        # members and a file this app does not declare. A folder of only our
+        # declared files (e.g. after a sidecar rebuild) re-earns ownership
+        # through the snapshot-then-overwrite path, like a flat skill.
+        or (folder.is_dir()
+            and not any(key.startswith(f"{skill_id}/") for key in ours)
+            and any(f"{skill_id}/{child.name}" not in skills
+                    for child in folder.iterdir()))
+      ):
+        refused_ids[skill_id] = (
+          f"id {skill_id!r} is already held by another file or folder"
+        )
     for rel in skills:
+      if _app_skill_id(rel) in refused_ids:
+        warnings.append(f"skill {rel}: {refused_ids[_app_skill_id(rel)]} — skipped")
+        continue
       try:
         content = (source_dir / rel).read_bytes()
       except OSError:
@@ -1854,31 +1935,6 @@ async def _sync_app_skills(
         continue
       rec = records.get(rel)
       owner_id = rec.get("app_id") if isinstance(rec, dict) else None
-      if rel in seed_owned and owner_id != app.id:
-        warnings.append(f"skill {rel}: owned by the platform — skipped")
-        continue
-      if owner_id is not None and owner_id != app.id:
-        owner = db.query(models.App).filter(models.App.id == owner_id).first()
-        if owner is not None:
-          warnings.append(
-            f"skill {rel}: owned by app {owner.slug} — skipped"
-          )
-          continue
-        # The recorded owner was hard-purged after its recovery window, so the
-        # basename is no longer reserved and this app may take it over.
-      # Cross-SHAPE collision: an install-provenance skill may hold the same
-      # logical id in the OTHER on-disk shape. `rel` is the flat `<stem>.md`;
-      # the colliding directory skill is `<stem>/`. Refuse to write a second
-      # skill under one id (the direct-install path enforces the same both-shape
-      # rule) — the owner resolves it by removing one deliberately.
-      stem = Path(rel).stem
-      dir_shape = skills_dir / stem
-      if isinstance(installed_records.get(stem), dict) or dir_shape.is_dir():
-        warnings.append(
-          f"skill {rel}: an installed skill already holds id {stem!r} "
-          "(directory shape) — skipped"
-        )
-        continue
       if (
         isinstance(rec, dict)
         and owner_id == app.id
@@ -1920,6 +1976,7 @@ async def _sync_app_skills(
             warnings.append(
               f"skill {rel}: updated, no /data repo for snapshot"
             )
+      target.parent.mkdir(parents=True, exist_ok=True)
       atomic_write(target, content)
       # 0o664 mirrors init_skills' boot convention — group-writable so the
       # agent can edit the skill no matter which uid materialized it.
@@ -1975,8 +2032,8 @@ async def deactivate_app_skills(app_id: int) -> list[str]:
     for rel, rec in records.items():
       if not isinstance(rec, dict) or rec.get("app_id") != app_id:
         continue
-      if Path(rel).name != rel or not rel.endswith(".md"):
-        warnings.append(f"skill record {rel!r}: invalid basename")
+      if not _is_app_skill_rel(rel):
+        warnings.append(f"skill record {rel!r}: invalid path")
         continue
       target = skills_dir / rel
       inactive = skills_dir / ".inactive" / str(app_id) / rel
@@ -1984,6 +2041,7 @@ async def deactivate_app_skills(app_id: int) -> list[str]:
         if target.is_file():
           inactive.parent.mkdir(parents=True, exist_ok=True)
           os.replace(target, inactive)
+          _prune_empty_skill_folder(skills_dir, rel)
         if inactive.is_file():
           # Keep ``sha256`` as the last app-supplied baseline. The inactive
           # digest records the exact preserved bytes separately; otherwise an
@@ -2023,12 +2081,16 @@ async def restore_app_skills(app_id: int) -> list[str]:
         or rec.get("active", True) is not False
       ):
         continue
+      if not _is_app_skill_rel(rel):
+        warnings.append(f"skill record {rel!r}: invalid path")
+        continue
       inactive = skills_dir / ".inactive" / str(app_id) / rel
       target = skills_dir / rel
       if not inactive.is_file():
         warnings.append(f"skill {rel}: preserved bytes are missing")
         continue
       try:
+        target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
           if target.read_bytes() != inactive.read_bytes():
             conflict = (
@@ -2073,6 +2135,7 @@ async def purge_app_skills(app_id: int) -> None:
             digest = hashlib.sha256(target.read_bytes()).hexdigest()
             if digest == rec.get("sha256"):
               target.unlink()
+              _prune_empty_skill_folder(skills_dir, rel)
           except OSError:
             pass
         records.pop(rel, None)

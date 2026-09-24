@@ -164,7 +164,51 @@ def _runner_env(profile_id: str) -> dict[str, str]:
   env.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
   env["HOME"] = str(home)
   env["XDG_CONFIG_HOME"] = str(home / ".config")
+  # Tell the far side this runner is supervised here, so its Connect does not
+  # offer an install command that would add a second, unsupervised service.
+  env[connect_runner.SUPERVISOR_ENV] = "mobius"
   return env
+
+
+def _download_relaunch_runners() -> dict[str, bytes]:
+  """Fetch the current runner for every supervised runner about to relaunch.
+
+  Supervised runners have no service manager to update them, so each launch
+  takes the release the connected Möbius serves now. This runs before the
+  supervisor lock: an unreachable Möbius must not stall pairing or revocation.
+  A profile whose Möbius cannot be reached relaunches its saved runner.
+  """
+  sources = {}
+  for path in sorted(_profiles_dir().glob("o_*/profile.json")):
+    meta = _read_json(path) or {}
+    profile_id = str(meta.get("id") or "")
+    if (
+      not _ID_RE.fullmatch(profile_id)
+      or meta.get("status") != "active"
+      or profile_id in _owned_processes
+      or _process_alive(profile_id)
+    ):
+      continue
+    try:
+      sources[profile_id] = _download_runner(str(meta.get("base_url") or ""))
+    except OutboundConnectError as exc:
+      log.warning("keeping saved Connect runner for %s: %s", profile_id, exc)
+  return sources
+
+
+def _install_runner(profile_id: str, source: bytes | None) -> None:
+  if source is None:
+    return
+  runner = _runner_path(profile_id)
+  try:
+    if runner.read_bytes() == source:
+      return
+  except OSError:
+    pass
+  try:
+    atomic_write(runner, source, mode=0o700)
+  except OSError as exc:
+    log.warning("keeping saved Connect runner for %s: %s", profile_id, exc)
 
 
 def _write_pid(profile_id: str, pid: int) -> None:
@@ -489,6 +533,7 @@ async def revoke_profile(profile_id: str) -> None:
 
 
 def _reconcile_once() -> None:
+  fresh_runners = _download_relaunch_runners()
   with _lock:
     for path in sorted(_profiles_dir().glob("o_*/profile.json")):
       meta = _read_json(path)
@@ -525,6 +570,7 @@ def _reconcile_once() -> None:
       if meta.get("status") != "active":
         continue
       try:
+        _install_runner(profile_id, fresh_runners.get(profile_id))
         _launch(profile_id)
       except (OSError, OutboundConnectError):
         meta["status"] = "error"

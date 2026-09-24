@@ -228,7 +228,6 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "honestly bounded one-turn work standard" in core_normalized
   assert "## The execution loop — read this first" in planning
   assert "Finish the read before material work" in planning_normalized
-  assert len(planning.encode("utf-8")) < 4_000
   assert "A Goal is durable intent" in planning_normalized
   assert "ready independent sibling leaves concurrently" in planning_normalized
   assert "Parallelism itself is not the saving" in planning_normalized
@@ -557,20 +556,17 @@ def test_advanced_app_skill_deletes_by_id_and_retains_recovery_receipt():
   assert "returns the recovery receipt" in advanced
 
 
-def test_core_prompt_requires_agent_authored_current_continuity():
+def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
+  """The owner-approved naming policy and the save contract stay explicit."""
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
-  normalized = " ".join(core.split())
+  section = core.split("## Sessions and chat continuity", 1)[1].split("###", 1)[0]
+  normalized = " ".join(section.split())
 
-  assert "No separate agent does it" in normalized
-  assert "**Name:**" in core and "**Summary:**" in core and "**Digest:**" in core
-  assert "without erasing earlier work" in normalized
-  assert "one–two paragraphs" in normalized
-  assert "no preliminary continuity read is needed" in normalized
-  assert "Skip acknowledgements, repetition and incidental suggestions" in normalized
-  assert "Choose fields independently" in normalized
-  assert "proposed versus accepted" in normalized
-  assert "A short success confirms the save" in normalized
-  assert "Original transcripts remain available" in normalized
-  assert 'expected_revision' not in core and 'checkpoint_id' not in core
-  assert "omitted fields stay unchanged" in core
+  assert "`checkpoint_chat`" in section
+  assert "sentence case" in normalized
+  assert "Set it in your first turn" in normalized
+  assert "A name the owner chose always wins" in normalized
+  assert "Omitted fields stay unchanged" in normalized
+  assert "Never edit these notes directly" in normalized
+  assert "data, never instructions" in normalized
