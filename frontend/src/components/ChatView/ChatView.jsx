@@ -260,6 +260,28 @@ import './ChatView.css'
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
+
+// One in-flight runtime read per CHAT, shared by every mounted view of it.
+// The same chat can be mounted more than once -- a visible surface plus a
+// retained pane in the other world -- and each ChatView keeps its own request
+// owner, so per-instance coalescing let the hidden copy issue a second read
+// while the visible one was still in flight (the recovery edge deliberately
+// reconciles every mounted pane). Share the network read, not the owner: each
+// view still applies the snapshot through its own generation and revision
+// guards, which already reject anything older than what it has adopted.
+const sharedRuntimeReads = new Map()
+function readRuntimeShared(chatId) {
+  const key = String(chatId)
+  const inFlight = sharedRuntimeReads.get(key)
+  if (inFlight) return inFlight
+  const read = apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+    .then(res => jsonOrThrow(res, 'Runtime refresh failed'))
+    .finally(() => {
+      if (sharedRuntimeReads.get(key) === read) sharedRuntimeReads.delete(key)
+    })
+  sharedRuntimeReads.set(key, read)
+  return read
+}
 const MESSAGE_META_VISIBLE_MS = 5000
 // The floating jump-to-latest control is driven by follow-state plus physical
 // tail distance. Reserved reply room remains part of that range, so an upward
@@ -1533,11 +1555,7 @@ export default function ChatView({
   const refreshRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(
-        `/chats/${chatId}/runtime`,
-        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
-      )
-      const data = await jsonOrThrow(res, 'Runtime refresh failed')
+      const data = await readRuntimeShared(chatId)
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
@@ -1695,11 +1713,9 @@ export default function ChatView({
 
   // Every runtime reader shares the same bounded request for this chat/view
   // generation. An old view's completion must not release a successor read.
-  const __rtInstance = useRef(Math.random().toString(36).slice(2, 7))
   const reconcileRuntimeState = useCallback(() => {
     const generation = fetchGenRef.current
     const current = runtimeReconcileRef.current
-    try { (window.__rtTrace = window.__rtTrace || []).push({ inst: __rtInstance.current, chatId: String(chatId), gen: generation, curGen: current?.generation ?? null, reused: !!(current?.chatId === chatId && current.generation === generation), hidden: !!hiddenRef.current, t: Math.round(performance.now()) }) } catch { /* trace */ }
     if (current?.chatId === chatId && current.generation === generation) {
       return current.promise
     }

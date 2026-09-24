@@ -38,6 +38,19 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
+  // Settle delivery readiness deterministically. connectivityStore marks the
+  // composer delivery-ready only once /api/ready reports ready:true with a
+  // boot_id, and a send made before that probe lands is QUEUED (a
+  // .queued__row) instead of started (a .chat__msg--user). The composer can be
+  // enabled before the real round trip settles, so every send in this file
+  // raced it -- the question-card case lost that race and waited for a user row
+  // that was sitting in the queue. Same fix as stream-reconnect and
+  // send-viewport-stability; nothing in this file exercises readiness itself.
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ready: true, boot_id: 'frontend-spec-boot' }),
+  }))
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
