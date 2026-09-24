@@ -576,6 +576,14 @@ def goal_handoff_owner_kind(
   return None
 
 
+def _has_runnable_work(plan: dict[str, Any] | None) -> bool:
+  """Whether a successor could start, verify, or complete something."""
+  return plan is None or plan["summary"]["can_complete"] or any(
+    task["ready"] or task["ready_to_verify"] or task.get("status") == "running"
+    for task in plan["tasks"]
+  )
+
+
 @dataclass(frozen=True)
 class GoalTerminalHandoff:
   """An ownerless unfinished Goal and its plan-owned next move."""
@@ -597,8 +605,9 @@ def goal_terminal_handoff(
 
   A provider turn cannot authorize its own successor merely because the Goal
   remains unfinished. Another turn is automatic only after the durable plan
-  advances beyond the exact revision captured at admission. Otherwise the
-  terminal path saves an owner question instead of starting an unbounded
+  advances beyond the exact revision captured at admission and leaves a task
+  a successor could run; recording a blocker alone is not progress. Otherwise
+  the terminal path saves an owner question instead of starting an unbounded
   chain of clean, no-progress turns.
   """
   if not ending_run_token:
@@ -619,14 +628,13 @@ def goal_terminal_handoff(
     return None
   current_revision = goal_plan_revision(db, chat_id, run.goal_id)
   admitted_revision = run.goal_plan_revision_at_admission
-  plan_corrupt = (
-    goal.plan_json is not None
-    and serialize_plan(db, run, goal) is None
-  )
+  plan = serialize_plan(db, run, goal) if goal.plan_json is not None else None
+  plan_corrupt = goal.plan_json is not None and plan is None
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
       not plan_corrupt
+      and _has_runnable_work(plan)
       and isinstance(admitted_revision, int)
       and current_revision > admitted_revision
     ),

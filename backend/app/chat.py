@@ -4054,8 +4054,9 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission. A plan advance or a committed owner steer permits one
-  # rollover; the successor must earn another before continuing again.
+  # provider admission. A plan advance that leaves runnable work, or a
+  # committed owner steer, permits one rollover; the successor must earn
+  # another before continuing again.
   # Otherwise the saved-question owner keeps the Goal exact and durable while
   # the partner decides whether to continue or stop it.
   terminal_handoff = None
@@ -4087,9 +4088,8 @@ async def _complete_turn(
           "id": "goal_next_step",
           "header": "Goal needs reconciliation",
           "question": (
-            "The turn ended without updating the saved plan or handing off "
-            "this Goal. Automatic continuation is paused. What should happen "
-            "next?"
+            "The turn ended without handing off this Goal, so automatic "
+            "continuation is paused. What should happen next?"
           ),
           "options": [
             {
