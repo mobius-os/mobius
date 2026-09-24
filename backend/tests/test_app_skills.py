@@ -510,45 +510,44 @@ def _install_clone(client, auth, base, manifest, responses, bare):
     })
 
 
-def test_clone_install_reads_skill_from_repo_not_http(
+def test_clone_install_rejects_skill_bytes_that_differ_from_review(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """On the clone path the repo's bytes are canonical: the skill lands from
-  the checked-out tree, not from the (discarded) HTTP source_files fetch."""
+  """One reviewed package cannot resolve to different Git skill bytes."""
   base = "https://raw.githubusercontent.com/acme/app-skilled/main/"
-  _, bare = _make_repo(tmp_path, {
-    "index.jsx": JSX, "contributing.md": "REPO SKILL\n",
-  })
   m = _skill_manifest()
+  _, bare = _make_repo(tmp_path, {
+    "mobius.json": json.dumps(m),
+    "index.jsx": JSX,
+    "contributing.md": "REPO SKILL\n",
+  })
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "contributing.md": (200, b"HTTP SKILL\n"),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert (_skills_dir() / "contributing.md").read_text() == "REPO SKILL\n"
-  assert _sidecar()["contributing.md"]["sha256"] == _sha("REPO SKILL\n")
+  assert r.status_code == 409, r.text
+  assert r.json()["detail"]["code"] == "git_source_mismatch"
+  assert not (_skills_dir() / "contributing.md").exists()
 
 
-def test_clone_install_missing_skill_file_warns(
+def test_clone_install_rejects_missing_reviewed_skill_file(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """A repo tree that lacks the declared skill warns instead of silently
-  falling back to the HTTP bytes (validation checked the manifest's claim,
-  not the repo's contents)."""
+  """A Git package must contain every source file that review fetched."""
   base = "https://raw.githubusercontent.com/acme/app-noskill/main/"
-  _, bare = _make_repo(tmp_path, {"index.jsx": JSX})
   m = _skill_manifest(id="noskill", name="No Skill")
+  _, bare = _make_repo(tmp_path, {
+    "mobius.json": json.dumps(m),
+    "index.jsx": JSX,
+  })
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "contributing.md": (200, b"HTTP SKILL\n"),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert any(
-    "contributing.md: missing from installed source tree" in w
-    for w in r.json()["warnings"]
-  ), r.json()["warnings"]
+  assert r.status_code == 409, r.text
+  assert r.json()["detail"]["code"] == "git_source_mismatch"
   assert not (_skills_dir() / "contributing.md").exists()
 
 

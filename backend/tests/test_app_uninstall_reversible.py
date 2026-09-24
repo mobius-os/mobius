@@ -18,6 +18,7 @@ import pytest
 
 from app import models
 from app.config import get_settings
+from test_app_fixtures import write_git_package
 
 JSX = "export default function App() { return <div>ok</div> }"
 
@@ -105,8 +106,18 @@ def _install(client, auth, manifest=MANIFEST, base=BASE):
     base + "index.jsx": (200, JSX.encode()),
     base + "icon.png": (200, _png_bytes()),
   }
-  with patch("app.install.httpx.AsyncClient",
-             side_effect=_fake_async_client(responses)):
+  bare = write_git_package(
+    Path(get_settings().data_dir) / ".test-git-packages" / manifest["id"],
+    {
+      "mobius.json": json.dumps(manifest),
+      "index.jsx": JSX,
+      "icon.png": _png_bytes(),
+    },
+  )
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch("app.install.httpx.AsyncClient",
+           side_effect=_fake_async_client(responses)):
     r = client.post("/api/apps/install", headers=auth,
                     json={"manifest_url": base + "mobius.json"})
   assert r.status_code == 201, r.text
