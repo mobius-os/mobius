@@ -777,6 +777,47 @@ async def test_child_agent_card_receipt_still_interrupts_through_the_sink_path()
   assert handle.claim_owner_card_end() is False
 
 
+@pytest.mark.asyncio
+async def test_owner_card_still_ends_the_turn_after_an_earlier_steer():
+  """A steer's cut closes at its terminal; a later saved card must still end
+  the turn instead of letting post-card text persist below the card."""
+  class _Client:
+    def __init__(self):
+      self.interrupts = 0
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+  client = _Client()
+  handle = ActiveClaudeClient(client, chat_id="steer-then-card")
+  assert await handle.steer("peer note") is True
+  assert handle.claim_owner_card_end() is False  # the steer owns this cut
+
+  # A clean terminal that won the race leaves the stray interrupt owned.
+  assert handle.take_steer_for_requery(interrupt_landed=False) == ["peer note"]
+  assert handle.claim_owner_card_end() is False
+  await handle.steer("second note")
+  assert handle.take_steer_for_requery(interrupt_landed=True) == ["second note"]
+  assert handle.pending_steer == []
+  assert handle.claim_owner_card_end() is True
+  assert handle.owner_card_end is True
+  assert client.interrupts == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_stays_sticky_across_a_steer_requery_boundary():
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="stop-sticky")
+  await handle.steer("note")
+  await handle.interrupt()
+  assert handle.take_steer_for_requery(interrupt_landed=True) == []
+  assert handle.interrupt_requested is True
+  assert handle.claim_owner_card_end() is False
+
+
 def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
   """A completed assistant TEXT block — the clean boundary the runner
   cuts a buffered steer on. (TextBlock is the snapshot of streamed
