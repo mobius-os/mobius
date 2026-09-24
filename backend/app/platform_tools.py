@@ -8,7 +8,6 @@ network shared by top-level chats and durable delegated agents.
 from __future__ import annotations
 
 import sys
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -44,9 +43,7 @@ OWNER_CONTROL_TOOL_NAMES = (
   CHECKPOINT_CHAT_TOOL_NAME,
 )
 DELEGATED_CONTROL_TOOL_NAMES = (
-  *PEER_TOOL_NAMES,
-  *WORK_OWNERSHIP_TOOL_NAMES,
-  CHECKPOINT_CHAT_TOOL_NAME,
+  *PEER_TOOL_NAMES, *WORK_OWNERSHIP_TOOL_NAMES, CHECKPOINT_CHAT_TOOL_NAME,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
 CONTROL_ENV_VARS = (
@@ -128,43 +125,3 @@ def codex_turn_mcp_config(
       "startup_timeout_sec": 30,
     }
   return {"mcp_servers": servers} if servers else None
-
-
-def continuity_hook_command() -> str:
-  script = Path(__file__).resolve().parents[1] / "scripts" / "chat_continuity_hook.py"
-  return shlex.join([sys.executable, str(script)])
-
-
-def continuity_start_hooks() -> list[dict[str, Any]]:
-  return [{
-    "matcher": "startup|resume|compact|clear|fork",
-    "hooks": [{"type": "command", "command": continuity_hook_command(), "timeout": 10}],
-  }]
-
-
-def codex_continuity_overrides() -> list[str]:
-  """Trust only our exact run-local hook, without changing owner config.
-
-  Codex 0.156 uses canonical JSON of the normalized hook for trust. This is a
-  pinned protocol boundary (like codex_sdk_contract), verified against the
-  installed CLI; never replace it with a blanket trust bypass.
-  """
-  import hashlib
-  import json
-
-  group = continuity_start_hooks()[0]
-  handler = {**group["hooks"][0], "async": False}
-  identity = {"event_name": "session_start", "matcher": group["matcher"], "hooks": [handler]}
-  digest = "sha256:" + hashlib.sha256(json.dumps(
-    identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-  ).encode()).hexdigest()
-  hook = (
-    '[{matcher=' + json.dumps(group["matcher"]) + ',hooks=[{type="command",command='
-    + json.dumps(handler["command"]) + ',timeout=10}]}]'
-  )
-  return [
-    "features.hooks=true",
-    "hooks.SessionStart=" + hook,
-    'hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash='
-    + json.dumps(digest) + '}}',
-  ]

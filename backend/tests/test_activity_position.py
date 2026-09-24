@@ -4,13 +4,12 @@ from app import models
 from app.activity_position import attach_activity_positions, record_activity_position
 from app.broadcast import ChatBroadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def test_saved_position_is_exact_chat_utf16_and_does_not_move_on_retry(db):
   db.add_all([models.Chat(id='anchor-a', messages=[]), models.Chat(id='anchor-b', messages=[])])
   db.commit()
-  sink = ChatEventSink(ChatBroadcast('anchor-a'), chat_id='anchor-a', recall_binding=EMPTY_RECALL_BINDING)
+  sink = ChatEventSink(ChatBroadcast('anchor-a'), chat_id='anchor-a')
   register_active_sink('anchor-a', sink)
   try:
     sink.assistant_blocks = [
@@ -44,7 +43,7 @@ def test_absence_is_saved_not_backfilled_from_a_later_turn(db):
   db.commit()
   record_activity_position(db, 'anchor-quiet', 'delegation:one:completed')
   db.commit()
-  sink = ChatEventSink(ChatBroadcast('anchor-quiet'), chat_id='anchor-quiet', recall_binding=EMPTY_RECALL_BINDING)
+  sink = ChatEventSink(ChatBroadcast('anchor-quiet'), chat_id='anchor-quiet')
   register_active_sink('anchor-quiet', sink)
   try:
     record_activity_position(db, 'anchor-quiet', 'delegation:one:completed')
@@ -70,7 +69,7 @@ def test_peer_history_and_activity_share_the_creation_anchor(db):
 
   db.add_all([models.Chat(id='anchor-send', messages=[]), models.Chat(id='anchor-receive', messages=[])])
   db.commit()
-  sink = ChatEventSink(ChatBroadcast('anchor-receive'), chat_id='anchor-receive', recall_binding=EMPTY_RECALL_BINDING)
+  sink = ChatEventSink(ChatBroadcast('anchor-receive'), chat_id='anchor-receive')
   register_active_sink('anchor-receive', sink)
   try:
     sink.publish({'type': 'text', 'content': 'before 😀'})
@@ -111,8 +110,7 @@ def test_question_identity_resolves_position_when_live_hides_question_tool():
   from app.chat_event_sink import active_sink_activity_position
 
   sink = ChatEventSink(ChatBroadcast('question-anchor'), chat_id='question-anchor',
-    recall_binding=EMPTY_RECALL_BINDING,
-  )
+                       )
   register_active_sink('question-anchor', sink)
   try:
     sink.assistant_blocks = [
@@ -137,8 +135,7 @@ def test_empty_and_whitespace_segments_never_advertise_phantom_identity(db):
   db.add(models.Chat(id='unsealed-anchor', messages=[]))
   db.commit()
   sink = ChatEventSink(ChatBroadcast('unsealed-anchor'), chat_id='unsealed-anchor',
-    recall_binding=EMPTY_RECALL_BINDING,
-  )
+                       )
   register_active_sink('unsealed-anchor', sink)
   try:
     assert active_sink_activity_position('unsealed-anchor') is None
