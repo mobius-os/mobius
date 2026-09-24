@@ -669,6 +669,28 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         dirty = True
         repaired.append(str(name))
 
+    if not rec.get("status"):
+      # A reviewed launcher can reach disk without its execute bit (an older
+      # install path, a copy, or a backup restore). When every byte still
+      # matches the record, restore only the recorded, allowed launcher bits;
+      # any other difference is a local edit and stays untouched.
+      recorded = record_tree_identity(rec)
+      target = _safe_child(root, str(name))
+      state = disk_tree(target) if target is not None else DiskTree("unsafe")
+      if (
+        recorded is not None
+        and state.kind == "tree"
+        and state.identity is not None
+        and state.identity.digest == recorded.digest
+        and state.identity.executables < recorded.executables
+      ):
+        try:
+          for rel in sorted(recorded.executables - state.identity.executables):
+            os.chmod(target / rel, 0o775)
+          repaired.append(str(name))
+        except OSError:
+          log.warning("could not restore launcher mode for skill %s", name)
+
     if rec.get("status") == "updating":
       target = _safe_child(root, str(name))
       staging = _safe_child(root, str(rec.get("staging") or ""))
