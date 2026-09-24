@@ -950,6 +950,13 @@ class ChatEventSink:
       final_name = await _await_ack(get_writer().submit(
         ResolveGeneratedFilePublication(chat_id=self.chat_id, path=path),
       ))
+      data_dir = pending.get("data_dir")
+      captured = pending.get("captured")
+      if (
+        not isinstance(data_dir, str) or not data_dir
+        or not isinstance(captured, dict)
+      ):
+        raise RuntimeError("late generated-file commit lost settlement evidence")
       if isinstance(final_name, str) and final_name:
         committed = copy.deepcopy(pending["event"])
         committed["name"] = final_name
@@ -963,22 +970,15 @@ class ChatEventSink:
               "late generated-file broadcast failed chat_id=%s name=%s",
               self.chat_id, final_name, exc_info=True,
             )
-        data_dir = pending.get("data_dir")
-        captured = pending.get("captured")
-        if (
-          not isinstance(data_dir, str) or not data_dir
-          or not isinstance(captured, dict)
-          or not await asyncio.to_thread(
-            _settle_capture,
-            data_dir,
-            self.chat_id,
-            captured,
-            accepted=True,
-          )
-        ):
-          raise RuntimeError(
-            "late generated-file commit could not settle its inbox source"
-          )
+      accepted = isinstance(final_name, str) and bool(final_name)
+      if not await asyncio.to_thread(
+        _settle_capture,
+        data_dir,
+        self.chat_id,
+        captured,
+        accepted=accepted,
+      ):
+        raise RuntimeError("late generated-file commit could not settle capture")
       self._uncertain_generated_files.pop(path, None)
 
   async def generated_file_capacity(self) -> int:

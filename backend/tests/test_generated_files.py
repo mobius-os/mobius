@@ -552,6 +552,40 @@ def test_generated_file_timeout_preserves_late_writer_commit(
   assert len(list(gf.stored_dir(settings.data_dir, chat.id).iterdir())) == 1
 
 
+def test_generated_file_timeout_removes_frozen_copy_after_confirmed_rejection(
+  chat, monkeypatch,
+):
+  settings = get_settings()
+  inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+  captured = gf._freeze_file(settings.data_dir, chat.id, "report.pdf")
+  assert captured is not None
+  sink = _sink(chat)
+  sink._uncertain_generated_files[captured["path"]] = {
+    "event": {
+      "type": "generated_file", "name": "report.pdf",
+      "path": captured["path"], "size": captured["size"],
+      "mime_type": captured["mime_type"], "previewable": True,
+    },
+    "data_dir": settings.data_dir,
+    "captured": captured,
+  }
+
+  class Writer:
+    def submit(self, command):
+      assert isinstance(command, chat_writer.ResolveGeneratedFilePublication)
+      ack = Future()
+      ack.set_result(None)
+      return ack
+
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: Writer())
+  asyncio.run(sink._resolve_uncertain_generated_files())
+
+  assert (inbox / "report.pdf").read_bytes() == b"report"
+  assert list(gf.stored_dir(settings.data_dir, chat.id).iterdir()) == []
+  assert sink._uncertain_generated_files == {}
+
+
 def test_inbox_ignores_nested_symlink_and_unapproved_extension(tmp_path):
   inbox = gf.output_dir(str(tmp_path), "chat", create=True)
   outside = tmp_path / "secret.pdf"
