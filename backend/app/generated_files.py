@@ -20,17 +20,6 @@ from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
-ALLOWED_EXTENSIONS = frozenset({
-  ".pdf",
-  ".doc", ".docx", ".odt",
-  ".xls", ".xlsx", ".ods", ".csv",
-  ".ppt", ".pptx", ".odp",
-  ".png", ".jpg", ".jpeg", ".gif", ".svg",
-  ".zip",
-  ".mp3", ".wav",
-  ".mp4",
-})
-
 INLINE_PREVIEW_MIME_TYPES = frozenset({
   "application/pdf",
   "audio/mpeg",
@@ -121,7 +110,7 @@ def delivery_instruction(directory: Path) -> str:
 
 
 def _inbox_names(data_dir: str, chat_id: str) -> list[str]:
-  """List a bounded batch without letting permanent rejects starve it."""
+  """List a bounded batch of regular files without guessing file formats."""
   directory_fd = None
   try:
     directory_fd = _open_directory(
@@ -137,7 +126,6 @@ def _inbox_names(data_dir: str, chat_id: str) -> list[str]:
         if (
           stat.S_ISREG(info.st_mode)
           and info.st_size <= MAX_RECORDED_BYTES
-          and Path(entry.name).suffix.lower() in ALLOWED_EXTENSIONS
         ):
           names.append(entry.name)
   except OSError:
@@ -158,7 +146,10 @@ def _freeze_file(data_dir: str, chat_id: str, name: str) -> dict | None:
     root = _chat_root(data_dir, chat_id)
     inbox_fd = _open_directory(root / "inbox", create=False)
     stored_fd = _open_directory(root / "files", create=True)
-    stored_name = f"{uuid.uuid4().hex}{Path(name).suffix.lower()}"
+    # The display name and MIME type live in the row. Keeping the private key
+    # extensionless avoids treating an agent-controlled suffix as storage
+    # metadata and remains valid even for long or unfamiliar file names.
+    stored_name = uuid.uuid4().hex
     temporary_name = f".{stored_name}.tmp"
     source_fd = os.open(
       name,
@@ -311,12 +302,7 @@ async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
       "_capture_data_dir": data_dir,
       "_source_identity": captured["_source_identity"],
     }
-    try:
-      outcome = await sink.publish_generated_file(event)
-    except Exception:
-      # The sink is an asynchronous persistence boundary. An exception does
-      # not prove its command was rejected, so destructive cleanup is unsafe.
-      raise
+    outcome = await sink.publish_generated_file(event)
     if outcome is PUBLICATION_UNCERTAIN:
       # Do not enqueue a later file behind an unresolved publication: its
       # snapshot cannot yet include the first file's collision-resolved name.

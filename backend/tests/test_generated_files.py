@@ -586,14 +586,33 @@ def test_generated_file_timeout_removes_frozen_copy_after_confirmed_rejection(
   assert sink._uncertain_generated_files == {}
 
 
-def test_inbox_ignores_nested_symlink_and_unapproved_extension(tmp_path):
+def test_inbox_accepts_unknown_formats_but_ignores_symlinks(tmp_path):
   inbox = gf.output_dir(str(tmp_path), "chat", create=True)
   outside = tmp_path / "secret.pdf"
   outside.write_bytes(b"secret")
   (inbox / "alias.pdf").symlink_to(outside)
-  (inbox / "notes.txt").write_text("not a deliverable")
+  (inbox / "notes.txt").write_text("plain text")
+  (inbox / "custom.unknown").write_bytes(b"custom")
+  (inbox / "README").write_text("extensionless")
 
-  assert gf._inbox_names(str(tmp_path), "chat") == []
+  assert gf._inbox_names(str(tmp_path), "chat") == [
+    "README", "custom.unknown", "notes.txt",
+  ]
+
+
+def test_unknown_format_is_frozen_with_an_opaque_storage_name(tmp_path):
+  data_dir = str(tmp_path / "data")
+  inbox = gf.output_dir(data_dir, "chat", create=True)
+  (inbox / "artifact.custom").write_bytes(b"custom")
+
+  captured = gf._freeze_file(data_dir, "chat", "artifact.custom")
+
+  assert captured is not None
+  assert captured["mime_type"] == "application/octet-stream"
+  assert Path(captured["path"]).suffix == ""
+  assert (
+    gf.stored_dir(data_dir, "chat") / captured["path"]
+  ).read_bytes() == b"custom"
 
 
 def test_deliverables_namespace_survives_legacy_media_fix_forward(db, chat):
