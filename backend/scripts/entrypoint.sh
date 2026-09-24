@@ -979,27 +979,13 @@ ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 # back" failure. Retiring the plugin leaves one coherent, waking Codex door.
 # (See the "unifying Claude and Codex into an optional Subagents app" work.)
 
-# Seed Claude Code's settings on the persistent config volume. Merge-only so
-# owner edits to other keys survive every boot; includeCoAuthoredBy keeps
-# agent-made git commits free of the Co-Authored-By trailer.
-mkdir -p /data/cli-auth/claude
-[ -f /data/cli-auth/claude/settings.json ] || printf '{}\n' > /data/cli-auth/claude/settings.json
-python3 - <<'CLAUDE_SETTINGS_MERGE'
-import json
-p = "/data/cli-auth/claude/settings.json"
-try:
-    with open(p) as f:
-        settings = json.load(f)
-    if not isinstance(settings, dict):
-        settings = {}
-except (OSError, ValueError):
-    settings = {}
-if settings.get("includeCoAuthoredBy") is not False:
-    settings["includeCoAuthoredBy"] = False
-    with open(p, "w") as f:
-        json.dump(settings, f, indent=2)
-CLAUDE_SETTINGS_MERGE
-chown mobius:mobius /data/cli-auth/claude/settings.json 2>/dev/null || true
+# Seed fresh Claude Code settings with includeCoAuthoredBy=false, keeping
+# agent-made git commits free of the Co-Authored-By trailer. Existing settings
+# are never rewritten.
+if [ ! -f /data/cli-auth/claude/settings.json ]; then
+  mkdir -p /data/cli-auth/claude
+  printf '{\n  "includeCoAuthoredBy": false\n}\n' > /data/cli-auth/claude/settings.json
+fi
 
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
