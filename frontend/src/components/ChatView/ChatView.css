@@ -417,11 +417,8 @@
   .chat__msg--search-reveal { animation: none; }
 }
 
-/* Metadata (timestamp + copy) for both user and assistant messages.
-   Older rows reveal it on tap; the newest message of each role (see
-   useMessageMetadata) keeps it visible without a tap.
-   The row sits on the same side as its bubble: flush right by default
-   (user), flush left for --assistant. */
+/* Tap-to-show metadata for user messages. Timestamp and copy share one row;
+   ChatView clears it automatically after a short glance. */
 .chat__msg-meta {
   display: inline-flex;
   align-items: center;
@@ -439,12 +436,6 @@
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
-}
-.chat__msg-meta--assistant {
-  align-self: flex-start;
-  /* Mirror the row so the copy glyph hugs the same left edge the assistant
-     bubble itself hugs, instead of drifting to the far side under it. */
-  flex-direction: row-reverse;
 }
 .chat__msg-meta--visible {
   opacity: 1;

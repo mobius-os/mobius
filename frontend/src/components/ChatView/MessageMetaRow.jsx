@@ -1,7 +1,5 @@
-/* MessageMetaRow keeps a message's timestamp and copy action in one
-   revealable row. Sits on the same side as its message bubble — flush right
-   for the user (own messages), flush left for the assistant — via the
-   `role` modifier class. */
+/* MessageMetaRow keeps an owner's message timestamp and copy action in one
+   revealable row. */
 import MessageCopyButton from './MessageCopyButton.jsx'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
@@ -9,16 +7,13 @@ import { formatDateTime } from '../../lib/dateTimeFormat.js'
 export default function MessageMetaRow({
   timestamp,
   copyText,
-  role,
   visible,
 }) {
   if (!timestamp && !copyText) return null
 
-  const sideClass = role === 'assistant' ? ' chat__msg-meta--assistant' : ''
-
   return (
     <div
-      className={`chat__msg-meta${sideClass}${visible ? ' chat__msg-meta--visible' : ''}`}
+      className={`chat__msg-meta${visible ? ' chat__msg-meta--visible' : ''}`}
       aria-hidden={!visible}
     >
       {timestamp && (
