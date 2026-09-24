@@ -1205,7 +1205,11 @@ test.describe('Stream reconnection', () => {
       provider: 'claude',
       ...runtimeState,
     }
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)$/, route => {
+    // Every transcript read of this chat must be mocked: CHAT_ID exists only here.
+    // The authoritative activation read appends &anchor=<key>, which the exact
+    // two-shape pattern missed; it fell through to a backend with no such chat,
+    // failed as a transcript load error, and the composer dropped to an idle Send.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)(?:&anchor=[^&]*)?$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
         status: 200,

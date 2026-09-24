@@ -1629,7 +1629,12 @@ export default function useScrollMode({
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
-    //                   glued to the tail.
+    //                   glued to the tail. EXCEPT a firing driven by the
+    //                   focused inline answer editor: that growth is the
+    //                   reader's own typing, not new tail content, and
+    //                   following it moved the whole conversation one line per
+    //                   Shift+Enter. revealFocusedQuestionEditor owns that case
+    //                   (the browser already keeps the caret in view).
     //   ANCHOR_AT     — during the reveal window, re-applied every firing
     //                   (lazy renderers — KaTeX, highlight.js, markdown
     //                   re-wrap — settle in the first ~1s and shift the
@@ -1700,14 +1705,22 @@ export default function useScrollMode({
         // every late renderer or font swap becomes a visible jump.
         || (k === 'ANCHOR_AT' && !revealedRef.current)
       ) {
-        writeMode(
-          scrollEl,
-          modeRef.current,
-          k === 'FOLLOW_BOTTOM'
-            ? 'layout:follow-live-tail'
-            : 'layout:restore-anchor',
-          authorityVersion,
-        )
+        // The inline answer editor growing is the reader typing, not the live
+        // tail advancing. Following it here ran BEFORE the editor-resize path
+        // below and scrolled the transcript by each new line, so the card the
+        // reader is writing in slid upward under them. Any genuine tail growth
+        // in the same batch is picked up by the next firing that is not the
+        // editor's -- the turn is parked on the question meanwhile.
+        if (!(k === 'FOLLOW_BOTTOM' && editorResized)) {
+          writeMode(
+            scrollEl,
+            modeRef.current,
+            k === 'FOLLOW_BOTTOM'
+              ? 'layout:follow-live-tail'
+              : 'layout:restore-anchor',
+            authorityVersion,
+          )
+        }
       } else if (k === 'PIN_USER_MSG') {
         // Repair only a shifted row or a previously clamped target that has
         // become reachable. The predicate deliberately gates on the target,

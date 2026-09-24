@@ -122,6 +122,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       }
       ordinaryMessageHits++
       if (ordinaryMessageHits === 2) {
+        pendingSnapshot = [{ role: 'user', content: body.content, ts: 12344, cid: body.cid }]
         // Confirm the second send as a durable queued row so the fast-forward
         // control can enter its real in-flight path.
         return route.fulfill({
@@ -140,6 +141,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
           }),
         })
       }
+      turnRunning = true
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -186,6 +188,32 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       { type: 'catch_up_done' },
       { type: 'text', content: 'streaming response...' },
     ])
+    // Model the backend's run and queue for the runtime poll. The first turn's
+    // stream never ends, so the poll is the authority on whether a turn is
+    // running; unmocked, it reached the real backend (whose /messages this test
+    // stubs, so no run exists), reported idle, and the retired turn never showed
+    // Stop again. Stop clears both, exactly as the backend does, so this mock
+    // cannot itself resurrect the queue this case asserts stays cleared. The
+    // ?limit=1 route below is registered later and still wins for that shape.
+    let turnRunning = false
+    let pendingSnapshot = []
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ running: turnRunning, runtime_revision: 0, pending_messages: pendingSnapshot }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          messages: [], total: 0, offset: 0,
+          running: turnRunning, runtime_revision: 0, pending_messages: pendingSnapshot,
+        }),
+      })
+    })
     await page.route('**/api/chat/stop', async (route) => {
       stopHits++
       // Park for 250ms; any natural-handler refetch firing during
@@ -193,6 +221,8 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       // resurrection assertion below polls during this gap.
       await new Promise(r => setTimeout(r, 250))
       resolveStop()
+      turnRunning = false
+      pendingSnapshot = []
       route.fulfill({
         status: 200, contentType: 'application/json', body: '{"stopped": true}',
       })

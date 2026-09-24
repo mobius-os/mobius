@@ -434,25 +434,6 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
     expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
     expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
-    // KNOWN FAILURE (root-caused, not fixed here): the scroll mode is
-    // FOLLOW_BOTTOM by the time the stream ends (a captured
-    // window.__mobiusChatScrollTrace confirms the transition:
-    // send:pin-user-message -> layout:reservation-filled -> FOLLOW_BOTTOM).
-    // useScrollMode.js's ResizeObserver callback (~line 1696) treats this
-    // qcard textarea's own growth the same as new streamed tail content --
-    // it unconditionally writes 'layout:follow-live-tail' for any
-    // FOLLOW_BOTTOM resize, moving scrollTop to the bottom (47 -> 66 -> 85px
-    // across the two Shift+Enter growth steps) BEFORE the dedicated
-    // editorResized / revealFocusedQuestionEditor path (~line 1721) runs its
-    // own repositioning. By then the qcard has already moved, and
-    // revealFocusedQuestionEditor finds the (now-scrolled) editor already
-    // visible, so it no-ops. The apparent fix -- skip the follow-live-tail
-    // write when editorResized is true, so revealFocusedQuestionEditor is
-    // the sole authority for this case -- was not applied here: useScrollMode
-    // is an extensively contract-tested (see file docblock's "contract
-    // v1.23 -> v1.24" versioning) shared scroll engine, and this needs its
-    // own careful pass against that full test suite, not a guess under this
-    // task.
     expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
     expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
 
