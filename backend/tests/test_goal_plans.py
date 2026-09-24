@@ -1094,15 +1094,11 @@ def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
   )
   assert stale.status_code == 409
 
-  full = client.patch(
-    f"/api/chats/{chat_id}/goal-plan/tasks/repeat",
-    json={"expected_revision": 2, "progress": {"current": 3, "total": 3}},
-    headers=auth,
-  )
-  assert full.status_code == 200, full.text
   completed = client.patch(
     f"/api/chats/{chat_id}/goal-plan/tasks/repeat",
-    json={"expected_revision": 3, "status": "completed"}, headers=auth,
+    json={"expected_revision": 2, "progress": {"current": 3, "total": 3},
+          "status": "completed"},
+    headers=auth,
   )
   assert completed.status_code == 200, completed.text
   assert completed.json()["plan"]["summary"]["completed"] == 1
