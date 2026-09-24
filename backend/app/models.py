@@ -1728,6 +1728,28 @@ class ToolOutput(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class GeneratedFile(Base):
+  """Metadata for one immutable agent-created deliverable.
+
+  ``name`` is the chat-scoped display/download key. ``path`` is an opaque
+  filename relative to that chat's managed deliverable store, never a provider
+  working path. Rows are inserted through the chat writer after the bytes have
+  been frozen, so an overwritten inbox file cannot mutate an older transcript
+  download.
+  """
+
+  __tablename__ = "generated_files"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  name = Column(String(255), primary_key=True)
+  path = Column(String(128), nullable=False)
+  size = Column(Integer, nullable=False)
+  mime_type = Column(String(128), nullable=False)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
 class Connector(Base):
   """Owner-managed remote MCP endpoint shared by both agent providers."""
 

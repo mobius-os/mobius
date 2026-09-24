@@ -18,6 +18,7 @@ import {
   appendThinkingChunk,
   anchorReplayedThinking,
   attachToolSources,
+  attachGeneratedFile,
   reconcileStreamItems,
   applyTaskEvent,
   appendTextItem,
@@ -1203,6 +1204,10 @@ export default function useStreamConnection(chatId, {
             applyStreamItems(
               prev => attachToolSources(prev, event.sources, event.tool_use_id),
             )
+          } else if (event.type === 'generated_file') {
+            // Append the turn-owned download block. Idempotent under catch-up
+            // replay and identical to the durable reducer's event shape.
+            applyStreamItems(prev => attachGeneratedFile(prev, event))
           } else if (event.type === 'tool_end') {
             applyStreamItems(
               prev => closeToolLifecycle(prev, event.tool_use_id),

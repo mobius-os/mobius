@@ -29,6 +29,7 @@ import {
   anchorReplayedThinking,
   thinkingContentForDisplay,
   thinkingElapsedMs,
+  attachGeneratedFile,
   attachToolSources,
   reconcileStreamItems,
   appendTextItem,
@@ -45,6 +46,22 @@ import { questionKey } from '../questionKey.js'
 function toolItem(tool, overrides = {}) {
   return { type: 'tool', tool, input: '', output: '', status: 'running', ...overrides }
 }
+
+test('generated files collect in one turn-owned block and replay idempotently', () => {
+  const event = {
+    type: 'generated_file', name: 'report.pdf', size: 700,
+    mime_type: 'application/pdf',
+  }
+  const once = attachGeneratedFile([{ type: 'text', content: 'Done.' }], event)
+  const twice = attachGeneratedFile(once, event)
+
+  assert.deepEqual(twice, [
+    { type: 'text', content: 'Done.' },
+    { type: 'generated_files', files: [{
+      name: 'report.pdf', size: 700, mime_type: 'application/pdf',
+    }] },
+  ])
+})
 
 function questionEvent(id, text) {
   return {

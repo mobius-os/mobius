@@ -581,6 +581,18 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
+        {/* Deliverables are one turn-owned block rendered after the final text.
+            Keep them hidden while prose is still moving. */}
+        {msg.role === 'assistant' && !isStreaming && (() => {
+          const allFiles = (msg.blocks || []).flatMap(b =>
+            b.type === 'generated_files' && Array.isArray(b.files)
+              ? b.files.map(f => ({ ...f, kind: 'generated' }))
+              : []
+          )
+          return allFiles.length > 0
+            ? <Attachments attachments={allFiles} chatId={chatId} />
+            : null
+        })()}
         {/* Web sources collected from the turn's tool blocks and shown once
             after the answer. Memory keeps its own richer lookup card inline. */}
         {msg.role === 'assistant' && !isStreaming && (

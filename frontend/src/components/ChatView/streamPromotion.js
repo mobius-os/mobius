@@ -461,9 +461,10 @@ export function streamItemsHaveRenderableContent(items) {
   })
 }
 
-export function carryQuestionAnswers(blocks, existingBlocks = []) {
+export function carryDurableBlockState(blocks, existingBlocks = []) {
   const existingAnswersByKey = new Map()
   const existingActionsByKey = new Map()
+  const durableFiles = []
   for (const block of existingBlocks) {
     const answers = block?.answers
     if (
@@ -477,25 +478,53 @@ export function carryQuestionAnswers(blocks, existingBlocks = []) {
     if (block?.type === 'question' && block.platform_action) {
       existingActionsByKey.set(questionKey(block), block.platform_action)
     }
+    if (
+      block?.type === 'generated_files'
+      && Array.isArray(block.files)
+    ) {
+      durableFiles.push(...block.files)
+    }
   }
-  if (existingAnswersByKey.size === 0 && existingActionsByKey.size === 0) return blocks
+  if (
+    existingAnswersByKey.size === 0
+    && existingActionsByKey.size === 0
+    && durableFiles.length === 0
+  ) return blocks
 
-  return blocks.map(block => {
-    if (block.type !== 'question') return block
-    const carried = existingAnswersByKey.get(questionKey(block))
-    const action = existingActionsByKey.get(questionKey(block))
-    // The mirrored DB answer is authoritative. A reconnect can replay an
-    // older optimistic/non-empty answer as well as the original blank card;
-    // neither may replace the answer that actually committed. Conversely an
-    // empty saved map is still unanswered and must not erase newer live state.
-    return carried || action
-      ? {
-          ...block,
-          ...(carried ? { answers: carried } : {}),
-          ...(action ? { platform_action: action } : {}),
-        }
-      : block
+  let foundFilesBlock = false
+  const carriedBlocks = blocks.map(block => {
+    if (block.type === 'question') {
+      const carried = existingAnswersByKey.get(questionKey(block))
+      const action = existingActionsByKey.get(questionKey(block))
+      // The mirrored DB answer is authoritative. A reconnect can replay an
+      // older optimistic/non-empty answer as well as the original blank card;
+      // neither may replace the answer that actually committed. Conversely an
+      // empty saved map is still unanswered and must not erase newer live state.
+      return carried || action
+        ? {
+            ...block,
+            ...(carried ? { answers: carried } : {}),
+            ...(action ? { platform_action: action } : {}),
+          }
+        : block
+    }
+    if (block.type === 'generated_files') {
+      foundFilesBlock = true
+      const live = Array.isArray(block.files) ? block.files : []
+      const names = new Set(durableFiles.map(file => file.name))
+      return {
+        ...block,
+        files: [
+          ...durableFiles,
+          ...live.filter(file => !names.has(file.name)),
+        ],
+      }
+    }
+    return block
   })
+  return durableFiles.length > 0 && !foundFilesBlock
+    ? [...carriedBlocks, { type: 'generated_files', files: durableFiles }]
+    : carriedBlocks
 }
 
 export function findAssistantPromotionIndex(
@@ -545,7 +574,7 @@ export function promoteAssistantStream(
       ...bridgedMsg,
       ...(assistantMessageId ? { id: assistantMessageId } : {}),
       content,
-      blocks: carryQuestionAnswers(blocks, bridgedMsg.blocks || []),
+      blocks: carryDurableBlockState(blocks, bridgedMsg.blocks || []),
     }
     return [
       ...messages.slice(0, bridgeIdx),

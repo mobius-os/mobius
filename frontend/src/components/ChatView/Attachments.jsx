@@ -9,19 +9,24 @@ export default function Attachments({ attachments, chatId }) {
 
   // Fetch a short-lived media token for this chat. Owner JWTs must not appear
   // in ?token= query params (they leak into access logs/history/Referer).
-  const [tokenParam, setTokenParam] = useState('')
+  const [tokenParam, setTokenParam] = useState(null)
   useEffect(() => {
     if (!hasAttachments) return undefined
+    setTokenParam(null)
     let cancelled = false
     mediaTokenParam(chatId).then(p => {
-      if (!cancelled) setTokenParam(p)
+      if (!cancelled) setTokenParam(p || null)
     })
     return () => { cancelled = true }
   }, [chatId, hasAttachments])
 
   if (!hasAttachments) return null
-  const images = attachments.filter(a => a.mime_type?.startsWith('image/'))
-  const files = attachments.filter(a => !a.mime_type?.startsWith('image/'))
+  const images = attachments.filter(
+    a => a.kind !== 'generated' && a.mime_type?.startsWith('image/'),
+  )
+  const files = attachments.filter(
+    a => a.kind === 'generated' || !a.mime_type?.startsWith('image/'),
+  )
 
   return (
     <div className="chat__attachments">
@@ -38,19 +43,36 @@ export default function Attachments({ attachments, chatId }) {
           ))}
         </div>
       )}
-      {files.map((f, i) => (
-        <a
-          key={i}
-          className="chat__attach-file"
-          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}${tokenParam}`}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <FileDocument width={12} height={12} aria-hidden="true" />
-          <span className="chat__attach-file-name">{f.name}</span>
-          <span className="chat__attach-file-size">{Math.round(f.size / 1024)}KB</span>
-        </a>
-      ))}
+      {files.map((f, i) => {
+        const isGenerated = f.kind === 'generated'
+        const href = tokenParam ? `${BASE}/api/chats/${chatId}/${
+          isGenerated ? 'generated-files' : 'uploads'
+        }/${encodeURIComponent(f.name)}${tokenParam}` : ''
+        const content = (
+          <>
+            <FileDocument width={12} height={12} aria-hidden="true" />
+            <span className="chat__attach-file-name">{f.name}</span>
+            <span className="chat__attach-file-size">{Math.round(f.size / 1024)}KB</span>
+          </>
+        )
+        if (!tokenParam) return isGenerated ? (
+          <span key={i} className="chat__attach-file" aria-disabled="true">
+            {content}
+          </span>
+        ) : null
+        return (
+          <a
+            key={i}
+            className="chat__attach-file"
+            href={href}
+            download={isGenerated ? f.name : undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {content}
+          </a>
+        )
+      })}
     </div>
   )
 }

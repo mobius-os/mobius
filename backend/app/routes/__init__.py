@@ -76,6 +76,7 @@ settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
 uploads_router = _load("uploads")
+generated_files_router = _load("generated_files")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
@@ -130,6 +131,7 @@ __all__ = [
   "screen_control_router",
   "settings_router",
   "uploads_router",
+  "generated_files_router",
   "media_router",
   "secrets_router",
   "github_router",

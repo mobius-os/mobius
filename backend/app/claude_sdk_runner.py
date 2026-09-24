@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity
+from app import activity, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -234,6 +234,7 @@ _CLAUDE_UNUSED_BUILTINS = (
   "ReportFindings",
   "PushNotification",
 )
+
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
 # helper fallbacks, which print the same receipt. Naming them keeps the card-end
@@ -1137,6 +1138,13 @@ async def run_claude_sdk_turn(
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
   active_client: ActiveClaudeClient | None = None
+  # Generated deliverables use a chat-private directory, so provenance does
+  # not depend on serializing unrelated chats that share cwd=/data.
+  from app.config import get_settings
+  generated_data_dir = get_settings().data_dir
+  generated_dir = generated_files.output_dir(
+    generated_data_dir, chat_id, create=True,
+  )
   # Progress lease: renewed as this turn emits SDK messages so a stalled model
   # stream (alive process, no progress) lapses and recovery can reclaim it.
   lease = ProgressLease(chat_id)
@@ -1144,6 +1152,7 @@ async def run_claude_sdk_turn(
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  base_env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -1412,7 +1421,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": _system_prompt_with_register(skill_text),
+      "system_prompt": (
+        _system_prompt_with_register(skill_text).rstrip()
+        + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
+      ),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
@@ -1816,6 +1828,14 @@ async def run_claude_sdk_turn(
         "error": str(exc),
       }
     finally:
+      try:
+        await generated_files.publish_inbox_files(
+          bc,
+          data_dir=generated_data_dir,
+          chat_id=chat_id,
+        )
+      except Exception:
+        log.debug("generated-file turn capture failed", exc_info=True)
       # Durability catch-all: persist any steer that was buffered but never
       # sealed at a requery boundary — an exception/early return above, or a
       # hard Stop that cleared pending_steer. Runs before disconnect so the

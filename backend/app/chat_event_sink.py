@@ -23,6 +23,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   RecordAgentLifecycle,
+  RecordGeneratedFile,
   StashThinkingTrace,
   StashToolOutput,
   await_ack as _await_ack,
@@ -815,6 +816,43 @@ class ChatEventSink:
       )
     )
 
+  async def publish_generated_file(self, event: dict) -> str | None:
+    """Save-before-broadcast for a detected generated-file download.
+
+    `RecordGeneratedFile` may suffix a repeated display name. Await the insert
+    and put that exact key on the transcript event before it reaches either the
+    reducer or SSE; otherwise the visible link could name a different row.
+    Failed inserts do not publish a download with no backing record.
+    """
+    name = event.get("name")
+    path = event.get("path")
+    if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+      return None
+    if not self.chat_id:
+      return None
+    ack = get_writer().submit(
+      RecordGeneratedFile(
+        chat_id=self.chat_id,
+        name=name,
+        path=path,
+        size=event.get("size") or 0,
+        mime_type=event.get("mime_type") or "application/octet-stream",
+      )
+    )
+    try:
+      final_name = await _await_ack(ack)
+    except Exception:
+      _get_logger().warning(
+        "RecordGeneratedFile commit failed chat_id=%s name=%s",
+        self.chat_id, name, exc_info=True,
+      )
+      return None
+    if not isinstance(final_name, str) or not final_name:
+      return None
+    event["name"] = final_name
+    self.publish(event, _internal=True)
+    return final_name
+
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
 
@@ -853,7 +891,7 @@ class ChatEventSink:
         retry = RecordAgentLifecycle(values=cmd.values)
         await _await_ack(get_writer().submit(retry))
 
-  def publish(self, event: ChatEvent) -> bool:
+  def publish(self, event: ChatEvent, *, _internal: bool = False) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
     Live broadcast is best-effort independent from persistence and
@@ -866,10 +904,21 @@ class ChatEventSink:
     broadcast barrier can't be bypassed. Returns True (the bool is
     vestigial now that no commit runs inline; kept so the runner's
     call-site contract is unchanged).
+
+    `_internal` is set only by `publish_generated_file`, which has already
+    done its own save-before-broadcast write and rewritten `event["name"]`
+    to what was actually persisted — it re-enters this same method for the
+    ordinary process_event/broadcast/save-scheduling tail rather than
+    duplicating it, so the assert below can't fire on that legitimate path.
     """
     event_type = event.get("type")
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
+    )
+    assert _internal or event_type != "generated_file", (
+      "generated_file events must go through publish_generated_file(), "
+      "not publish() — see its docstring for the save-before-broadcast "
+      "reason"
     )
 
     # Edit diffs have the same inline-vs-full split as large tool output, but

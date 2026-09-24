@@ -50,6 +50,7 @@ import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -416,6 +417,21 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class RecordGeneratedFile(_Command):
+  """Insert one detected agent-written deliverable into `generated_files`.
+
+  ``name`` is the row identity within the chat; the handler suffixes display
+  collisions so the download route's by-name lookup stays unambiguous.
+  """
+
+  chat_id: str = ""
+  name: str = ""
+  path: str = ""
+  size: int = 0
+  mime_type: str = "application/octet-stream"
 
 
 @dataclass
@@ -1942,6 +1958,8 @@ class ChatWriterActor:
       return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, RecordGeneratedFile):
+      return self._record_generated_file(db, cmd)
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -2702,6 +2720,56 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
     return True
+
+  def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> str | None:
+    """Insert one detected deliverable, keeping `name` unique within the chat.
+
+    The bytes already live at a unique immutable managed path. Only the
+    human-facing name can collide, so one bounded query supplies both the row
+    cap and the suffix decision. The final name is returned before broadcast
+    so the transcript URL and database key cannot diverge.
+    """
+    if not cmd.chat_id or not cmd.name or not cmd.path:
+      return None
+    from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+    from app.models import GeneratedFile
+
+    existing_names = {
+      row[0] for row in db.query(GeneratedFile.name).filter(
+      GeneratedFile.chat_id == cmd.chat_id,
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).all()
+    }
+    if len(existing_names) >= MAX_RECORDED_ROWS_PER_CHAT:
+      # Agent-driven, unlike uploads, so the row count has no natural
+      # ceiling. Stop recording rather than let one long chat grow the
+      # table (and this insert's own collision probing) without bound.
+      log.warning(
+        "generated-file cap reached for chat %s; not recording %s",
+        cmd.chat_id, cmd.name,
+      )
+      return None
+
+    name = cmd.name
+    if name in existing_names:
+      # Same stem/suffix split uploads.py's `_unique_name` uses, so one
+      # basename collision reads the same on both surfaces
+      # (`a.tar.gz` -> `a.tar_1.gz`).
+      stem = Path(cmd.name).stem
+      suffix = Path(cmd.name).suffix
+      index = 1
+      while f"{stem}_{index}{suffix}" in existing_names:
+        index += 1
+      name = f"{stem}_{index}{suffix}"
+    db.add(GeneratedFile(
+      chat_id=cmd.chat_id,
+      name=name,
+      path=cmd.path,
+      size=cmd.size,
+      mime_type=cmd.mime_type,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGeneratedFile did not persist")
+    return name
 
   def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
     """Monotonic upsert for a deferred reasoning run.
