@@ -210,7 +210,7 @@ UPDATE_RESOLUTION_POLICIES = frozenset({
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so Rolldown can bundle the import graph. The shared
-# manifest contract caps the count; fetch additionally caps the summed bytes.
+# manifest contract bounds the list by bytes; fetch caps per-file and summed bytes.
 _SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
 
 # Shared skill files an app declares via manifest `skills`: a root-level

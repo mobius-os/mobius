@@ -17,7 +17,6 @@ RECOGNIZED_CAPABILITIES = (
   "identity_manage",
   "railway_manage",
 )
-SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
 ENTRY_MAX_BYTES = 1024 * 1024
@@ -651,15 +650,16 @@ def validate_manifest_contract(manifest) -> None:
   if source_files is not None:
     if not isinstance(source_files, list):
       _fail("Manifest `source_files` must be an array.")
-    if len(source_files) > SOURCE_FILES_COUNT_MAX:
-      _fail(
-        "Manifest has too many source_files "
-        f"(max {SOURCE_FILES_COUNT_MAX})."
-      )
+    # No file-count cap: the manifest byte cap bounds how many paths can be
+    # listed, and fetch enforces the per-file and total source byte caps.
     schedule = manifest.get("schedule")
     declared_job = schedule.get("job") if isinstance(schedule, Mapping) else None
+    seen_sources: set[str] = set()
     for index, path in enumerate(source_files):
       validate_repo_relative_path(path, f"source_files[{index}]")
+      if path in seen_sources:
+        _fail(f"Manifest `source_files[{index}]` repeats {path!r}.")
+      seen_sources.add(path)
       if (
         path in _SOURCE_FILES_MANAGED_EXACT
         or path == declared_job

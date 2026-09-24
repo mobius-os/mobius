@@ -855,3 +855,15 @@ def test_folder_skill_never_adopts_a_folder_it_does_not_own(
     assert not (foreign / "cycle.md").exists()
   finally:
     shutil.rmtree(foreign, ignore_errors=True)
+
+
+def test_source_files_have_no_count_cap_only_byte_caps():
+  """Splitting code or skills into more files is never refused by count; the
+  manifest, per-file, and total byte caps are the real bounds."""
+  from app.manifest_contract import validate_manifest_contract
+
+  members = [f"contributing/mode{i}.md" for i in range(60)]
+  validate_manifest_contract(_skill_manifest(
+    skills=["contributing/"],
+    source_files=["contributing/SKILL.md", *members],
+  ))
