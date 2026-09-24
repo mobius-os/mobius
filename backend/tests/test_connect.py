@@ -260,6 +260,7 @@ def test_outbound_reconcile_records_exits_and_relaunches_orphans(
     connect_outbound, "_launch",
     lambda profile_id, *args: launched.append((profile_id, args)),
   )
+  monkeypatch.setattr(connect_outbound, "_download_relaunch_runners", dict)
 
   connect_outbound._reconcile_once()
 
@@ -275,6 +276,188 @@ def test_outbound_reconcile_records_exits_and_relaunches_orphans(
   # found alive by pid, or one that already exited on its own, is left alone.
   assert launched == [(orphan, ())]
   assert set(owned) == {running}
+
+
+def test_outbound_relaunch_installs_the_connected_mobius_current_runner(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "7" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"old release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  downloads = []
+  monkeypatch.setattr(
+    connect_outbound, "_download_runner",
+    lambda base_url: downloads.append(base_url) or b"current release",
+  )
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append(runner.read_bytes()),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert downloads == ["https://friend.example"]
+  # The refreshed runner is in place before the process starts.
+  assert launched == [b"current release"]
+  assert stat.S_IMODE(runner.stat().st_mode) == 0o700
+
+
+def test_outbound_relaunch_keeps_the_saved_runner_when_unreachable(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "8" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"saved release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+
+  def unreachable(_base_url):
+    raise connect_outbound.OutboundConnectError("offline")
+
+  monkeypatch.setattr(connect_outbound, "_download_runner", unreachable)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append(runner.read_bytes()),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert launched == [b"saved release"]
+
+
+def test_outbound_runner_download_never_holds_the_supervisor_lock(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "a" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  held = []
+
+  def download(_base_url):
+    # An unreachable Möbius must not stall pairing or revocation.
+    held.append(connect_outbound._lock._is_owned())
+    raise connect_outbound.OutboundConnectError("slow and then offline")
+
+  monkeypatch.setattr(connect_outbound, "_download_runner", download)
+  monkeypatch.setattr(connect_outbound, "_launch", lambda profile_id, *a: None)
+
+  connect_outbound._reconcile_once()
+
+  assert held == [False]
+
+
+def test_outbound_relaunch_survives_a_failed_runner_write(tmp_path, monkeypatch):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "b" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True)
+  runner.write_bytes(b"saved release")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"new")
+
+  def disk_full(*_args, **_kwargs):
+    raise OSError("no space left on device")
+
+  monkeypatch.setattr(connect_outbound, "atomic_write", disk_full)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch", lambda profile_id, *a: launched.append(profile_id),
+  )
+
+  connect_outbound._reconcile_once()
+
+  assert launched == [profile_id]
+  assert runner.read_bytes() == b"saved release"
+
+
+def test_supervised_runner_announces_its_supervisor(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: tmp_path)
+  env = connect_outbound._runner_env("o_" + "9" * 16)
+  assert env[connect_runner.SUPERVISOR_ENV] == "mobius"
+
+  opened = []
+
+  class Stream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  monkeypatch.setenv(connect_runner.SUPERVISOR_ENV, "mobius")
+  monkeypatch.setattr(
+    connect_runner, "_open_url",
+    lambda request, **kwargs: opened.append(request.full_url) or Stream(),
+  )
+  monkeypatch.setattr(connect_runner, "_remove_connection", lambda url, host_id: 1)
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+  connect_runner._serve_connection(
+    {"url": "https://friend.example", "host_id": "h_f", "token": "t"},
+  )
+  assert "&managed=mobius" in opened[0]
+
+
+@pytest.mark.asyncio
+async def test_mobius_supervised_runner_is_not_offered_an_install_command(
+  client, auth,
+):
+  pairing, runner_token = _paired_host(client, auth)
+
+  async def receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+  request = Request({
+    "type": "http",
+    "method": "GET",
+    "path": "/api/connect/stream",
+    "query_string": (
+      f"protocol=4&release={connect_runner.RUNNER_RELEASE - 1}"
+      "&platform=Linux&managed=mobius"
+    ).encode(),
+    "headers": [(b"authorization", f"Bearer {runner_token}".encode())],
+  }, receive)
+  response = await connect_routes.stream(request)
+  public = connect_routes._public_host(connect_routes._load_host(pairing["id"]))
+
+  # Still outdated, but its supervising Möbius updates it on relaunch; the
+  # service installer would add a second, unsupervised runner.
+  assert public["runner_update_available"] is True
+  assert public["runner_managed"] == "mobius"
+  assert public["update_command"] is None
+
+  assert await response.body_iterator.__anext__() == ": connected\n\n"
+  connect_routes._channels[pairing["id"]].closed.set()
+  with pytest.raises(StopAsyncIteration):
+    await response.body_iterator.__anext__()
 
 
 @pytest.mark.asyncio
