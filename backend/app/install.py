@@ -1871,6 +1871,10 @@ async def _sync_app_skills(
       warnings.append(f"skill {rel}: retired by update")
     # Ownership and shape collisions are decided per skill id, so a folder
     # skill lands or is skipped as a whole rather than file by file.
+    ours = {
+      key for key, rec in records.items()
+      if isinstance(rec, dict) and rec.get("app_id") == app.id
+    }
     refused_ids: dict[str, str] = {}
     for skill_id in dict.fromkeys(_app_skill_id(rel) for rel in skills):
       is_folder = f"{skill_id}.md" not in skills
@@ -1884,10 +1888,6 @@ async def _sync_app_skills(
         live_owner = db.query(models.App).filter(models.App.id == owner_id).first()
         if live_owner is not None:
           break
-      ours = {
-        key for key, rec in records.items()
-        if isinstance(rec, dict) and rec.get("app_id") == app.id
-      }
       if f"{skill_id}.md" in seed_owned and f"{skill_id}.md" not in ours:
         refused_ids[skill_id] = "owned by the platform"
       elif live_owner is not None:
@@ -1905,11 +1905,14 @@ async def _sync_app_skills(
         )
       elif is_folder and (
         flat.exists()
-        # A folder holding none of this app's recorded members belongs to
-        # someone else; unrecorded extra files inside our own folder are left.
-        or (folder.is_dir() and not any(
-          key.startswith(f"{skill_id}/") for key in ours
-        ))
+        # A folder is someone else's when it holds none of this app's recorded
+        # members and a file this app does not declare. A folder of only our
+        # declared files (e.g. after a sidecar rebuild) re-earns ownership
+        # through the snapshot-then-overwrite path, like a flat skill.
+        or (folder.is_dir()
+            and not any(key.startswith(f"{skill_id}/") for key in ours)
+            and any(f"{skill_id}/{child.name}" not in skills
+                    for child in folder.iterdir()))
       ):
         refused_ids[skill_id] = (
           f"id {skill_id!r} is already held by another file or folder"

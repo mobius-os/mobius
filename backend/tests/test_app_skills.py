@@ -838,12 +838,30 @@ def test_uninstall_and_recover_folder_skill_preserve_every_member(
   assert (folder / "cycle.md").read_text() == "# my edit\n"
 
 
+def test_folder_skill_reearns_its_own_folder_after_a_lost_sidecar(
+  client, auth, bypass_url_validation,
+):
+  """Like a flat skill, a folder of only this app's declared files is updated
+  (snapshot-then-overwrite) when the ownership sidecar was lost."""
+  first = _install(client, auth, _folder_manifest(), _folder_files())
+  assert first.status_code == 201, first.text
+  (_skills_dir() / ".app-skills.json").unlink()
+  files = _folder_files()
+  files["contributing/cycle.md"] = "# cycle mode v2\n"
+  update = _install(client, auth, _folder_manifest(version="2.0.0"), files)
+  assert update.status_code == 201, update.text
+  assert not any("already held" in w for w in update.json()["warnings"])
+  assert (_skills_dir() / "contributing" / "cycle.md").read_text() == "# cycle mode v2\n"
+  assert _sidecar()["contributing/cycle.md"]["app_id"] == first.json()["id"]
+
+
 def test_folder_skill_never_adopts_a_folder_it_does_not_own(
   client, auth, bypass_url_validation,
 ):
   foreign = _skills_dir() / "contributing"
   foreign.mkdir(parents=True)
   (foreign / "SKILL.md").write_text("# someone else's skill\n")
+  (foreign / "their-notes.md").write_text("# not declared by this app\n")
   try:
     r = _install(client, auth, _folder_manifest(), _folder_files())
     assert r.status_code == 201, r.text
