@@ -32,6 +32,7 @@ import logging
 import os
 import signal
 import shutil
+import tempfile
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -173,9 +174,54 @@ def _codex_config_overrides() -> list[str]:
   return overrides
 
 
+# Landlock rights for a read Delegation's app-server. Everything may be read
+# and executed; only the writable roots below may change, and ``/dev`` keeps
+# the device writes a shell needs (/dev/null, PTYs).
+_READ_ONLY_RIGHTS = "read-file,read-dir,execute"
+_WRITABLE_RIGHTS = (
+  "execute,write-file,read-file,read-dir,remove-dir,remove-file,make-char,"
+  "make-dir,make-reg,make-sock,make-fifo,make-sym,refer,truncate"
+)
+
+
+class CodexReadConfinementUnavailable(RuntimeError):
+  """A read Delegation cannot be confined, so it must not start."""
+
+
+def _landlock_read_only_prefix(writable_roots: list[str]) -> list[str]:
+  """Return a ``setpriv`` prefix that makes the whole app-server read-only.
+
+  Codex's own read-only sandbox needs bubblewrap, whose user namespace the
+  Docker default seccomp profile blocks, and Codex 0.156+ refuses its legacy
+  Landlock backend because a command confined that way could still drive the
+  unconfined app-server through its control sockets (openai/codex#45984).
+  Confining the app-server process itself removes that escape: Landlock is
+  inherited by every tool command and MCP child and can never be lifted, so
+  there is no unconfined process left to reach. Landlock is unprivileged and
+  allowed by the default seccomp profile, so no container change is needed.
+  """
+  setpriv = shutil.which("setpriv")
+  if not setpriv:
+    raise CodexReadConfinementUnavailable(
+      "setpriv is unavailable, so a read Delegation cannot be kept read-only"
+    )
+  args = [
+    setpriv,
+    "--landlock-access", "fs",
+    "--landlock-rule", f"path-beneath:{_READ_ONLY_RIGHTS}:/",
+    "--landlock-rule", "path-beneath:read-file,write-file,truncate:/dev",
+  ]
+  for root in writable_roots:
+    if os.path.isdir(root):
+      args += ["--landlock-rule", f"path-beneath:{_WRITABLE_RIGHTS}:{root}"]
+  return [*args, "--"]
+
+
 def _codex_app_server_launch_args(
   codex_bin: str | None,
   config_overrides: list[str],
+  *,
+  read_only_writable_roots: list[str] | None = None,
 ) -> list[str] | None:
   """Build an app-server command isolated in its own Unix session.
 
@@ -194,8 +240,15 @@ def _codex_app_server_launch_args(
   """
   setsid_bin = shutil.which("setsid")
   if not codex_bin or not setsid_bin:
+    if read_only_writable_roots is not None:
+      raise CodexReadConfinementUnavailable(
+        "the Codex app-server cannot be launched confined on this host"
+      )
     return None
-  args = [setsid_bin, codex_bin]
+  args = [setsid_bin]
+  if read_only_writable_roots is not None:
+    args += _landlock_read_only_prefix(read_only_writable_roots)
+  args.append(codex_bin)
   for override in config_overrides:
     args.extend(["--config", override])
   args.extend(["app-server", "--listen", "stdio://"])
@@ -1516,7 +1569,21 @@ async def _run_codex_sdk_turn(
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
-  launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
+  # A read Delegation may write only Codex's own state, its deliverable
+  # directory, and scratch space; the rest of /data stays read-only.
+  launch_args = _codex_app_server_launch_args(
+    codex_bin,
+    config_overrides,
+    read_only_writable_roots=(
+      [
+        env["CODEX_HOME"],
+        str(generated_dir),
+        env.get("TMPDIR") or tempfile.gettempdir(),
+      ]
+      if delegated and run_policy.scope == "read"
+      else None
+    ),
+  )
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
     cwd=cwd,
@@ -1686,14 +1753,11 @@ async def _run_codex_sdk_turn(
         else sdk["ApprovalMode"].auto_review
       )
 
-      # Every Codex run, including a read Delegation, uses the container as
-      # its sandbox. Any filesystem-restricted policy needs bubblewrap, whose
-      # user namespace the Docker default seccomp profile blocks, so each
-      # command would fail before launch. Codex 0.156+ also refuses the old
-      # Landlock fallback because it cannot hide app-server sockets
-      # (openai/codex#45984). A read Delegation's scope is therefore held by
-      # its brief and deny_all approvals. Revisit if the deployment ever
-      # permits user namespaces.
+      # Codex's own filesystem-restricted policies need bubblewrap, whose user
+      # namespace the Docker default seccomp profile blocks. Every Codex run
+      # therefore turns Codex's sandbox off; a read Delegation is instead kept
+      # read-only by the Landlock wrapper around its whole app-server
+      # (_landlock_read_only_prefix).
       _sandbox = sdk["Sandbox"].full_access
       # Upgrade existing native goals before resume: Möbius now owns intent
       # and schedules exactly one provider turn per admitted attempt. Clearing
