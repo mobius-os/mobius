@@ -8,6 +8,7 @@ import { notificationQueries } from '../../hooks/queries.js'
 import NotificationsView from '../../components/NotificationsView/NotificationsView.jsx'
 import {
   completeNotificationRecovery,
+  hasRecoveryReceipt,
   notificationRecoveryAction,
   parseNotificationRecoveryAction,
   recoveryFailure,
@@ -34,6 +35,12 @@ test('recovery notifications require a matching tombstone-bound resource action'
     { completed_at: 'not-a-date' }, { deleted_at: null }, { expires_at: null },
     { expires_at: deletedAt },
   ]) assert.equal(parseNotificationRecoveryAction(receipt(fields)), null)
+})
+
+test('recovery receipts stay protected from dismissal even when their payload is malformed', () => {
+  assert.equal(hasRecoveryReceipt({ actions: [{ action: 'recover_chat' }] }), true)
+  assert.equal(hasRecoveryReceipt({ actions: [{ action: 'open_chat' }] }), false)
+  assert.equal(hasRecoveryReceipt({ actions: null }), false)
 })
 
 test('completed and expired receipts remain inspectable but are not actionable', () => {
@@ -94,15 +101,20 @@ test('rendered history disables expired Undo and offers older pages', () => {
     deleted_at: '2020-01-01T00:00:00Z', expires_at: '2020-01-08T00:00:00Z',
   })
   const rows = Array.from({ length: 8 }, (_, i) => ({
-    id: `n-${i}`, title: 'Chat deleted', source_type: 'shell', sent_at: deletedAt,
-    actions: i === 0 ? [expired] : [],
+    id: `n-${i}`,
+    title: i === 0 ? 'Chat deleted' : (i === 1 ? 'Legacy recovery' : 'Ordinary notice'),
+    source_type: 'shell', sent_at: deletedAt,
+    actions: i === 0 ? [expired] : (i === 1 ? [{ action: 'recover_chat' }] : []),
   }))
   queryClient.setQueryData(notificationQueries.list.key, { pages: [rows], pageParams: [null] })
   const html = renderToStaticMarkup(React.createElement(QueryClientProvider, { client: queryClient },
-    React.createElement(NotificationsView, { onRecoveryAction() {} }),
+    React.createElement(NotificationsView, { onDismiss() {}, onRecoveryAction() {} }),
   ))
   assert.match(html, /Recovery window expired/)
   assert.doesNotMatch(html, />Undo</)
+  assert.doesNotMatch(html, /aria-label="Dismiss Chat deleted"/)
+  assert.doesNotMatch(html, /aria-label="Dismiss Legacy recovery"/)
+  assert.match(html, /aria-label="Dismiss Ordinary notice"/)
   assert.match(html, /Load older notifications/)
   queryClient.clear()
 })

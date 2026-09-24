@@ -35,7 +35,10 @@ def resource(request, db, auth, monkeypatch):
     )
     monkeypatch.setattr("app.routes.apps.app_bundle_uses_current_compile_contract", lambda _: True)
     monkeypatch.setattr("app.routes.apps._revoke_app_publish_tokens", AsyncMock())
-    monkeypatch.setattr("app.routes.apps.reconcile_app_cron_supervision", lambda _: (0, []))
+    monkeypatch.setattr(
+      "app.routes.apps.reconcile_app_cron_supervision",
+      lambda _: (0, [], True),
+    )
     monkeypatch.setattr("app.install.restore_app_skills", AsyncMock(return_value=[]))
     monkeypatch.setattr("app.install.deactivate_app_skills", AsyncMock(return_value=[]))
     monkeypatch.setattr("app.routes.apps._drop_cron_only", lambda _: None)

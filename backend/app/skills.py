@@ -1,8 +1,8 @@
 """Skills enumeration, metadata parsing, provenance, and the generated index.
 
 The agent's how-to knowledge lives as markdown under `/data/shared/skills/`,
-seeded create-if-absent by `backend/scripts/init_skills.py` and agent-editable
-like memory. This module is the read-side + index-side of that layer; it does not
+reconciled against recorded platform baselines by `backend/scripts/init_skills.py`
+and agent-editable. This module is the read-side + index-side of that layer; it does not
 seed or own the delicate app-manifest sync (that stays in `install.py`).
 
 Two on-disk shapes are recognized, so Möbius is natively compatible with the
@@ -18,12 +18,12 @@ the filename + first heading/paragraph. Parsing is deliberately dependency-free
 (no PyYAML) in the same spirit as `manifest_contract.py`: only the flat scalar
 keys we surface are read.
 
-Provenance is informational — where a skill came from — computed from the two
-installer-owned sidecars plus the baked seed name set:
+Provenance is informational — where a skill came from — computed from the
+owner sidecars plus the baked seed name set:
 
   app:<slug>          declared by an installed mini-app (`.app-skills.json`)
   installed:<source>  pulled from an online source (`.installed-skills.json`)
-  seed                ships in the platform seed tree
+  seed                ships in the platform seed tree (`.seed-skills.json`)
   agent               written or renamed by the agent/owner in place
 
 Chat startup enumerates this model directly and injects bounded routing metadata
@@ -51,10 +51,11 @@ from app.storage_io import atomic_write
 
 log = logging.getLogger(__name__)
 
-# Installer-owned sidecars (kept in sync with the literals in install.py and
+# Owner sidecars (kept in sync with the literals in install.py and
 # routes/skills.py — a dotfile that is not `*.md`, so no skill loader lists it).
 APP_SKILLS_SIDECAR = ".app-skills.json"
 INSTALLED_SKILLS_SIDECAR = ".installed-skills.json"
+SEED_SKILLS_SIDECAR = ".seed-skills.json"
 
 # The generated inspection index. Written into the skills dir for management
 # and recovery flows. Runtime discovery enumerates skills directly, and this
@@ -73,6 +74,7 @@ GENERATED_INDEX_STEMS = frozenset({"skills-index", "catalog-index"})
 _RESERVED_NAMES = frozenset({
   APP_SKILLS_SIDECAR,
   INSTALLED_SKILLS_SIDECAR,
+  SEED_SKILLS_SIDECAR,
   INDEX_FILENAME,
   CATALOG_INDEX_FILENAME,
   ".seed-version",
@@ -106,6 +108,7 @@ class Skill:
   is_dir: bool
   # Extra frontmatter scalars we parsed but don't model explicitly.
   metadata: dict = field(default_factory=dict)
+  seed_status: str | None = None
 
 
 def _seed_names() -> set[str]:
@@ -816,7 +819,7 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
 def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
   """All installed skills (flat + directory), sorted by name.
 
-  Reads the two installer sidecars once for provenance. Never raises on a
+  Reads the owner sidecars once for provenance. Never raises on a
   malformed individual skill — a bad entry is skipped rather than failing the
   whole listing, because this feeds both the index write and a live API.
   """
@@ -835,6 +838,11 @@ def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
     if isinstance(rec, dict):
       installed[name] = str(rec.get("source") or "")
   seed_names = _seed_names()
+  seed_records = _read_sidecar(root / SEED_SKILLS_SIDECAR)
+  seed_names |= {
+    Path(name).stem for name, rec in seed_records.items()
+    if isinstance(rec, dict) and rec.get("status") != "retired"
+  }
 
   skills: list[Skill] = []
   for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
@@ -856,16 +864,33 @@ def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
     else:
       continue
     name, description, metadata = _read_meta(read_path, base_name)
+    seed_status = None
+    seed_record = seed_records.get(sidecar_key)
+    if not is_dir and isinstance(seed_record, dict) and seed_record.get("status") != "retired":
+      try:
+        current_sha = hashlib.sha256(read_path.read_bytes()).hexdigest()
+        if current_sha == seed_record.get("upstream_sha256"):
+          seed_status = "current"
+        elif seed_record.get("status") == "held":
+          seed_status = "held"
+        else:
+          seed_status = "needs_review"
+      except OSError:
+        seed_status = "needs_review"
     skills.append(
       Skill(
         name=name,
         description=description,
         provenance=_provenance(
-          sidecar_key, base_name, app_owned, installed, seed_names,
+          # An app folder skill records its members; SKILL.md stands for it.
+          f"{base_name}/SKILL.md"
+          if is_dir and f"{base_name}/SKILL.md" in app_owned else sidecar_key,
+          base_name, app_owned, installed, seed_names,
         ),
         read_path=read_path,
         is_dir=is_dir,
         metadata=metadata,
+        seed_status=seed_status,
       )
     )
   return skills
@@ -897,7 +922,10 @@ def _index_body(skills: list[Skill]) -> str:
     # cell each, whatever they contain: newlines/pipes escaped, length capped.
     title = _table_cell(skill.name, 100)
     desc = _table_cell(skill.description, _DESCRIPTION_MAX)
-    lines.append(f"| {read_ref} — {title} | {desc} | {skill.provenance} |")
+    source = skill.provenance
+    if skill.seed_status in ("needs_review", "held"):
+      source += f" · {skill.seed_status.replace('_', ' ')}"
+    lines.append(f"| {read_ref} — {title} | {desc} | {source} |")
   return "\n".join(lines) + "\n"
 
 

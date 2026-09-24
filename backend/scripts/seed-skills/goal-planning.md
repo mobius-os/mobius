@@ -54,11 +54,13 @@ Resume attaches an ordinary attempt; it cannot reopen closed work.
 Before ending unfinished, create exactly one owning interaction: for an observable
 condition, read `waiting.md` and declare a durable Wait; for owner action, use the
 saved question tool, which keeps the Goal marked **Waiting for you**. Restart uses
-its dedicated card.
+its dedicated card. A button in an app or the Changes panel is not a handoff,
+and a `blocked` task only records the gate: when only the owner can unblock it
+(an approval, a choice, or a change of scope), put exactly that on the card.
 
 With no gate, keep working. Terminal settlement continues the exact Goal only
-when its saved plan advanced during the admitted turn; otherwise it asks the
-owner. An unchanged plan is not progress.
+when its saved plan advanced during the admitted turn and still has runnable
+work; otherwise it asks the owner. An unchanged plan is not progress.
 
 Work in-run; turns are not a budget. Use `goal_plan.py context` for current focus
 or `context --task ID` for a branch. Running tasks select focus; the view includes

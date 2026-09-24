@@ -50,6 +50,7 @@ import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,7 +58,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import models, schemas
 from app.goals import admit_goal
 from app.chat_message_identity import assistant_message_index
-from app.chat_titles import first_message_title
+from app.chat_titles import apply_generated_title, first_message_title
 from app.json_safety import json_safe
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
@@ -87,6 +88,29 @@ def _name_chat_from_first_message(chat: models.Chat, content: object) -> None:
   """Apply the first-message fallback without overriding an owner rename."""
   if not chat.title_locked:
     chat.title = first_message_title(content) or "New chat"
+
+
+def _unique_generated_file_name(
+  requested: str, existing: set[str], *, max_length: int,
+) -> str:
+  """Return a bounded display name, reserving room for collision markers."""
+  name = requested[:max_length]
+  if name not in existing:
+    return name
+
+  stem = Path(name).stem or "file"
+  suffix = Path(name).suffix
+  index = 1
+  while True:
+    marker = f"_{index}"
+    # Keep at least one stem character even when an agent supplies a suffix
+    # that nearly fills the database column.
+    kept_suffix = suffix[:max(0, max_length - len(marker) - 1)]
+    stem_length = max_length - len(marker) - len(kept_suffix)
+    candidate = f"{stem[:stem_length]}{marker}{kept_suffix}"
+    if candidate not in existing:
+      return candidate
+    index += 1
 
 
 # Bounded wait for a strict (commit-before-ack) writer-actor command.
@@ -189,6 +213,22 @@ class PersistTranscript(_Command):
 
 
 @dataclass
+class PersistTranscriptBarrier(_Command):
+  """Must-persist snapshot used to close a short in-process mutation barrier.
+
+  Unlike the ordinary coalescible stream snapshot, this command fences older
+  snapshots and acknowledges only after this complete state commits. It lets
+  a sink temporarily defer concurrent saves while an atomic side-table +
+  transcript operation resolves, without dropping the events themselves.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
 class Finalize(_Command):
   """Terminal full-snapshot write for a turn.  Never coalesces.
 
@@ -275,6 +315,7 @@ class AnswerQuestion(_Command):
   answers: dict = field(default_factory=dict)
   close_without_reply: bool = False
   legacy_save_only: bool = False
+  require_exact_card: bool = False
   selected_options: dict | None = None
 
 
@@ -415,6 +456,47 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class RecordGeneratedFile(_Command):
+  """Atomically record one deliverable and its live transcript association.
+
+  ``name`` is the row identity within the chat; the handler suffixes display
+  collisions so the download route's by-name lookup stays unambiguous. The
+  snapshot contains ``placeholder`` at the new file entry; the actor replaces
+  it with that final name and commits both records together before the sink
+  broadcasts or consumes the inbox source.
+  """
+
+  chat_id: str = ""
+  name: str = ""
+  path: str = ""
+  size: int = 0
+  mime_type: str = "application/octet-stream"
+  snapshot: dict = field(default_factory=dict)
+  placeholder: str = ""
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
+class CheckGeneratedFileCapacity(_Command):
+  """Return the serialized number of file rows still available to one chat."""
+
+  chat_id: str = ""
+
+
+@dataclass
+class ResolveGeneratedFilePublication(_Command):
+  """Resolve an ambiguously acknowledged file command by its immutable path.
+
+  Submitted after a timed-out ``RecordGeneratedFile``. FIFO ordering makes
+  this read observe that earlier command's terminal database outcome before a
+  sink is allowed to finalize a potentially file-less transcript.
+  """
+
+  chat_id: str = ""
+  path: str = ""
 
 
 @dataclass
@@ -820,6 +902,7 @@ class AppendPending(_Command):
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
   answers: dict | None = None
+  selected_options: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
   owner_authored: bool = False
@@ -966,6 +1049,20 @@ class PersistCompaction(_Command):
   summary: str = ""
   expected_provider: str = ""
   source_messages_hash: str = ""
+
+
+@dataclass
+class AuthorizeCheckpoint(_Command):
+  """Admit a continuity save from the chat's live run; apply its name.
+
+  Returns ``{"status": "ok", "title_applied": bool}`` or
+  ``{"status": "stale_run"}``. The note file itself is written by the caller
+  under the chat's transition lock.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  title: str | None = None
 
 
 @dataclass
@@ -1167,6 +1264,7 @@ class _TestPersist(_Command):
 # successful commit safe without a pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
+  PersistTranscriptBarrier,
   PersistError,
   QuestionCommit,
   SettleSecureInput,
@@ -1844,6 +1942,13 @@ class ChatWriterActor:
       return self._persist_live_message(
         db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
       )
+    if isinstance(cmd, PersistTranscriptBarrier):
+      result = self._persist_live_message(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
+      if result is not True:
+        raise _PersistFailed("PersistTranscriptBarrier did not persist")
+      return True
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
@@ -1940,6 +2045,22 @@ class ChatWriterActor:
       return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, RecordGeneratedFile):
+      return self._record_generated_file(db, cmd)
+    if isinstance(cmd, CheckGeneratedFileCapacity):
+      from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+      from app.models import GeneratedFile
+      recorded = db.query(GeneratedFile.name).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).count()
+      return max(0, MAX_RECORDED_ROWS_PER_CHAT - recorded)
+    if isinstance(cmd, ResolveGeneratedFilePublication):
+      from app.models import GeneratedFile
+      row = db.query(GeneratedFile).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+        GeneratedFile.path == cmd.path,
+      ).first()
+      return row.name if row is not None else None
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -1966,6 +2087,8 @@ class ChatWriterActor:
       return self._append_steered_user_message(db, cmd)
     if isinstance(cmd, PersistCompaction):
       return self._persist_compaction(db, cmd)
+    if isinstance(cmd, AuthorizeCheckpoint):
+      return self._authorize_checkpoint(db, cmd)
     if isinstance(cmd, SwitchProviderWithCompaction):
       return self._switch_provider_with_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
@@ -2198,7 +2321,12 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("AnswerQuestion: chat not found or deleted")
     if cmd.legacy_save_only:
-      from app.questions import AnswerConflict, has_quiet_options
+      from app.questions import (
+        AnswerConflict,
+        accepts_saved_answer,
+        has_quiet_options,
+        validate_saved_answer,
+      )
       # Check the actual write target inside the actor: an unkeyed legacy
       # request must not bypass a card published after the route's read.
       candidates = list(chat.messages or [])
@@ -2211,7 +2339,20 @@ class ChatWriterActor:
                    and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
       if card and (has_quiet_options(card) or card.get("secure_input")):
         raise AnswerConflict("Use the question card to submit this answer.")
-    metadata = None
+      if cmd.require_exact_card:
+        if card is None:
+          raise AnswerConflict("This question is no longer open.")
+        if "answers" in card:
+          if card["answers"] == cmd.answers:
+            return True
+          raise AnswerConflict("This question already has a different answer.")
+        if not accepts_saved_answer(chat, cmd.question_id):
+          raise AnswerConflict("This question is no longer open.")
+        validate_saved_answer(card, cmd.answers, None)
+    metadata = (
+      {"selected_options": cmd.selected_options}
+      if cmd.selected_options is not None else None
+    )
     if cmd.close_without_reply:
       from app.questions import AnswerConflict, accepts_saved_answer, closes_without_reply, saved_question
       from app.goal_plans import require_quiet_answer_handoff
@@ -2234,11 +2375,12 @@ class ChatWriterActor:
       raise _PersistFailed("AnswerQuestion: no matching question block")
     # The question is answered — clear the durable open-question marker in the
     # same commit so every read surface unblocks atomically with the answer.
-    chat.pending_question_id = None
-    # Answering an interactive question is an owner action just like a visible
-    # send. Keep drawer recency separate from generic transcript writes, but do
-    # advance it here so a parked chat returns to the top as soon as the answer
-    # commits (including the same-turn answer-delivery path).
+    # A retained older card can be answered without orphaning a newer one.
+    if cmd.question_id is None or chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
+    # Keep drawer recency separate from generic transcript writes, but advance
+    # it when a participant answers so a parked chat returns to the top as soon
+    # as the answer commits (including the same-turn answer-delivery path).
     from datetime import UTC, datetime
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2372,7 +2514,8 @@ class ChatWriterActor:
             live_action["status"] = action["status"]
           chat.live_assistant = live
           break
-    chat.pending_question_id = None
+    if chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
     chat.activity_at = now
     if not _commit_or_rollback(db):
       raise _PersistFailed("Restart card resolution did not persist")
@@ -2680,6 +2823,74 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
     return True
+
+  def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> str | None:
+    """Persist one detected deliverable, keeping `name` unique within a chat.
+
+    The row and its transcript link are one transaction. A crash can therefore
+    leave, at worst, an unreferenced frozen byte copy for retention cleanup; it
+    cannot consume the inbox source after committing only half of the visible
+    download contract.
+    """
+    if (
+      not cmd.chat_id or not cmd.name or not cmd.path
+      or not cmd.placeholder or not isinstance(cmd.snapshot, dict)
+    ):
+      return None
+    from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+    from app.models import GeneratedFile
+
+    existing_names = {
+      row[0] for row in db.query(GeneratedFile.name).filter(
+      GeneratedFile.chat_id == cmd.chat_id,
+      ).limit(MAX_RECORDED_ROWS_PER_CHAT).all()
+    }
+    if len(existing_names) >= MAX_RECORDED_ROWS_PER_CHAT:
+      # Agent-driven, unlike uploads, so the row count has no natural
+      # ceiling. Stop recording rather than let one long chat grow the
+      # table (and this insert's own collision probing) without bound.
+      log.warning(
+        "generated-file cap reached for chat %s; not recording %s",
+        cmd.chat_id, cmd.name,
+      )
+      return None
+
+    name = _unique_generated_file_name(
+      cmd.name, existing_names, max_length=GeneratedFile.name.type.length,
+    )
+    snapshot = copy.deepcopy(cmd.snapshot)
+    replaced = False
+    for block in reversed(snapshot.get("blocks") or []):
+      if block.get("type") != "generated_files":
+        continue
+      for item in reversed(block.get("files") or []):
+        if item.get("name") == cmd.placeholder:
+          item["name"] = name
+          replaced = True
+          break
+      if replaced:
+        break
+    if not replaced:
+      raise _PersistFailed("RecordGeneratedFile placeholder missing from snapshot")
+
+    db.add(GeneratedFile(
+      chat_id=cmd.chat_id,
+      name=name,
+      path=cmd.path,
+      size=cmd.size,
+      mime_type=cmd.mime_type,
+    ))
+    if cmd.thinking_stashes:
+      self._stage_thinking_stashes(db, cmd.thinking_stashes)
+    persisted = update_live_assistant(
+      db, cmd.chat_id, snapshot, require_row=True, commit=False,
+    )
+    if persisted is not True:
+      db.rollback()
+      raise _PersistFailed("RecordGeneratedFile transcript association missing")
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGeneratedFile did not persist")
+    return name
 
   def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
     """Monotonic upsert for a deferred reasoning run.
@@ -3967,7 +4178,13 @@ class ChatWriterActor:
       )
       applied = True
     else:
-      applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+      metadata = (
+        {"selected_options": cmd.selected_options}
+        if cmd.selected_options is not None else None
+      )
+      applied = apply_answers_to_last_question(
+        chat, cmd.answers, cmd.question_id, metadata=metadata,
+      )
     if cmd.require_answer_match and not applied:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
@@ -4111,6 +4328,7 @@ class ChatWriterActor:
         and new_msg.get("role") == "user"
         and not new_msg.get("hidden")
       )
+    _stamp_provider_batch(stored_messages)
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4241,6 +4459,22 @@ class ChatWriterActor:
       "provider": chat.provider,
       "agent_settings_json": chat.agent_settings_json,
     }
+
+  def _authorize_checkpoint(self, db, cmd: AuthorizeCheckpoint) -> dict:
+    chat = _active_chat(db, cmd.chat_id)
+    run = db.get(models.ChatRun, cmd.run_token) if cmd.run_token else None
+    if (
+      chat is None or run is None or run.chat_id != cmd.chat_id
+      or run.status != "running"
+      or self._run_token_owner.get(cmd.chat_id) != cmd.run_token
+      or not self._run_is_latest(db, run)
+    ):
+      db.rollback()
+      return {"status": "stale_run"}
+    title_applied = bool(cmd.title and apply_generated_title(chat, cmd.title))
+    if title_applied and not _commit_or_rollback(db):
+      raise _PersistFailed("AuthorizeCheckpoint title did not persist")
+    return {"status": "ok", "title_applied": title_applied}
 
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
     """Append one marker and reset the resumable provider session."""
@@ -5741,7 +5975,32 @@ def _pending_messages_for_transcript(
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)
+  _stamp_provider_batch(stored)
   return stored
+
+
+def _stamp_provider_batch(messages: list[dict]) -> None:
+  """Mark visible rows that reached the provider as one combined input.
+
+  Both queued-turn promotion and in-turn steering call this, so the shell can
+  render the rows as one message without the two paths drifting apart. Every
+  row already carries a cid; the first one names the batch. Hidden rows and
+  continuation markers are not owner speech, so they stay outside the batch.
+  """
+  from app.continuations import is_continuation_message
+
+  owner_rows = [
+    msg for msg in messages
+    if not msg.get("hidden") and not is_continuation_message(msg)
+  ]
+  for msg in messages:
+    msg.pop("provider_batch", None)
+  if len(owner_rows) < 2:
+    return
+  for index, msg in enumerate(owner_rows):
+    msg["provider_batch"] = {
+      "id": owner_rows[0]["cid"], "index": index, "count": len(owner_rows),
+    }
 
 
 def _commit_or_rollback(db) -> bool:
@@ -5983,7 +6242,12 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
 
 
 def update_live_assistant(
-  db, chat_id: str, message: dict, *, require_row: bool = False,
+  db,
+  chat_id: str,
+  message: dict,
+  *,
+  require_row: bool = False,
+  commit: bool = True,
 ) -> bool | None:
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
@@ -6083,7 +6347,7 @@ def update_live_assistant(
       .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
       .values(active_assistant_message_id=owner_id, updated_at=Chat.updated_at)
     )
-  return _commit_or_rollback(db)
+  return _commit_or_rollback(db) if commit else True
 
 
 def finalize_response_outcome(

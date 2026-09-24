@@ -10,7 +10,6 @@ from app import auth as auth_mod, chat as chat_mod, chat_waits, models
 from app.broadcast import create_broadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
 from app.chat_writer import FinishRun, StartTurn, get_writer
-from app.memory_recall import EMPTY_RECALL_BINDING
 from app.timeutil import now_naive_utc
 
 
@@ -63,7 +62,7 @@ def test_modern_wait_queues_behind_saved_owner_input(client, chat, db, tmp_path,
     user_msg={"role": "user", "content": "Wait for the gate", "ts": 1},
   )).result(timeout=5)
   sink = ChatEventSink(create_broadcast(chat.id), chat.id, run_token=source,
-                       recall_binding=EMPTY_RECALL_BINDING)
+                       )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(

@@ -20,6 +20,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -27,15 +28,18 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import auth, models, runtime_identity, schemas
+from app.broadcast import get_system_broadcast
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   Principal,
+  get_principal,
   get_chat_view_principal,
   get_current_owner, get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models, reject_cross_site,
   require_chat_embed_operation,
+  require_nondelegated_owner_control,
 )
 from app.timeutil import now_naive_utc
 from app.routes.shell_install_pass import router as shell_install_pass_router
@@ -584,12 +588,65 @@ def create_app_job_token_endpoint(
 @router.get("/providers")
 def list_providers():
   """Returns which AI providers are available (CLI installed)."""
-  from app.providers import PROVIDERS, detect_available
+  from app.providers import PROVIDERS, detect_available, sync_app_model_providers
+  sync_app_model_providers(get_settings().data_dir)
   available = detect_available()
   return [
     {"id": pid, "name": p.name, "available": pid in available}
     for pid, p in PROVIDERS.items()
   ]
+
+
+class ModelConnectionPatch(BaseModel):
+  enabled: bool
+
+
+def _app_model_connection(provider_id: str, principal: Principal):
+  """The reviewed app connection this caller may switch, never a CLI provider."""
+  from app.providers import AppModelProvider, MobiusProvider, PROVIDERS, sync_app_model_providers
+  sync_app_model_providers(get_settings().data_dir)
+  provider = PROVIDERS.get(provider_id)
+  if isinstance(provider, MobiusProvider) and provider.declaration:
+    app_id = provider.app_id
+  elif isinstance(provider, AppModelProvider):
+    app_id = provider.app_id
+  else:
+    raise HTTPException(404, "This app model connection is not installed.")
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(403, "Only the declaring app can change this model connection.")
+  return provider
+
+
+@router.get("/providers/{provider_id}/enabled")
+def model_connection_enabled(
+  provider_id: str,
+  principal: Principal = Depends(get_principal),
+):
+  from app.providers import provider_enabled
+  _app_model_connection(provider_id, principal)
+  return {"enabled": provider_enabled(get_settings().data_dir, provider_id)}
+
+
+@router.patch("/providers/{provider_id}/enabled")
+def set_model_connection_enabled(
+  provider_id: str,
+  body: ModelConnectionPatch,
+  principal: Principal = Depends(get_principal),
+):
+  from app.providers import update_agent_settings
+  require_nondelegated_owner_control(principal)
+  _app_model_connection(provider_id, principal)
+  data_dir = get_settings().data_dir
+  if not update_agent_settings(data_dir, lambda current: {
+    **current,
+    "model_providers_enabled": {
+      **(current.get("model_providers_enabled") if isinstance(current.get("model_providers_enabled"), dict) else {}),
+      provider_id: body.enabled,
+    },
+  }):
+    raise HTTPException(500, "Could not save model connection preference.")
+  get_system_broadcast().publish({"type": "model_providers_changed"})
+  return {"enabled": body.enabled}
 
 
 # -- Provider auth (self-managed PKCE OAuth) -------------------------------
@@ -792,14 +849,13 @@ async def providers_status(
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
-  from app.providers import PROVIDERS
+  from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir
-  identity_app_installed = db.query(models.App.id).filter(
-    models.App.slug == "identity",
-    models.App.deleted_at.is_(None),
-  ).first() is not None
+  from app.providers import sync_app_model_providers
+  sync_app_model_providers(data_dir)
   out = {}
   for pid, provider in PROVIDERS.items():
+    enabled = provider_selectable(data_dir, pid)
     error = await run_in_threadpool(provider.check_auth, data_dir)
     out[pid] = {
       "name": provider.name,
@@ -809,14 +865,8 @@ async def providers_status(
       # status endpoint is not restored.
       "authenticated": error is None,
       "error": error,
+      "available": enabled,
     }
-    if pid == "mobius":
-      out[pid]["available"] = identity_app_installed
-      if not identity_app_installed:
-        out[pid]["configured"] = False
-        out[pid]["authenticated"] = False
-        out[pid]["error"] = "Install Möbius · You to use your Möbius subscription."
-        continue
     if pid == "mobius" and error is None and is_owner_caller:
       try:
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)

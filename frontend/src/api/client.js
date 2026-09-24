@@ -162,6 +162,7 @@ function clearOwnerClientState({ preserveChatOutbox }) {
       ? []
       : [clearChatOutbox()]),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
+    delDatabase('mobius-listings', 'directory listing cache').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
 }
@@ -1351,6 +1352,14 @@ export const api = {
     readAll: () => apiFetch('/notifications/read-all', { method: 'POST' }),
     // Owner action from the preview: remove all stored notifications.
     clearAll: () => apiFetch('/notifications', { method: 'DELETE' }),
+    // Per-item dismissal is limited by the server to ordinary notifications.
+    dismiss: async (notificationId) => jsonOrThrow(
+      await apiFetch(
+        `/notifications/${encodeURIComponent(notificationId)}`,
+        { method: 'DELETE' },
+      ),
+      'Could not dismiss notification:',
+    ),
   },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),

@@ -23,6 +23,7 @@ import pytest
 
 from app import models, schemas
 from app.chat_writer import (
+  _stamp_provider_batch,
   AnswerQuestion,
   AppendPending,
   AppendSteeredUserMessage,
@@ -699,6 +700,10 @@ def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
     )
   ))
   assert [m["cid"] for m in res["stored_messages"]] == ["c-a", "c-b"]
+  assert [m["provider_batch"] for m in res["stored_messages"]] == [
+    {"id": "c-a", "index": 0, "count": 2},
+    {"id": "c-a", "index": 1, "count": 2},
+  ]
   # A re-delivery of c-a (same cid) is dropped — no durable twin.
   res2 = _await(actor.submit(
     AppendSteeredUserMessage(
@@ -970,6 +975,15 @@ def test_promote_pending_collapses_all_followups(actor):
   assert result["promoted"]["ts"] == 10
   chat = _load_chat()
   assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
+  first_batch, second_batch = [
+    m["provider_batch"] for m in chat["messages"][-2:]
+  ]
+  assert first_batch == {
+    "id": chat["messages"][-2]["cid"], "index": 0, "count": 2,
+  }
+  assert second_batch == {
+    "id": first_batch["id"], "index": 1, "count": 2,
+  }
   assert chat["pending_messages"] == []
   assert chat["running_status"] == "running"
   assert chat["active_assistant_message_id"] == "rt1"
@@ -1397,6 +1411,47 @@ def test_answer_question_no_block_raises(actor):
   )
   with pytest.raises(Exception):
     _await(fut)
+
+
+def test_competing_exact_card_answers_cannot_overwrite_winner(actor):
+  """Agent route checks may race, so the serialized writer owns settlement."""
+  from app.questions import AnswerConflict
+
+  _seed_chat(
+    messages=[_question_msg("q-race")],
+    pending_question_id="q-race",
+  )
+  actor.pause_for_test()
+  first = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  retry = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Red"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  changed = actor.submit(AnswerQuestion(
+    chat_id="c1",
+    question_id="q-race",
+    answers={"q-race": "Blue"},
+    legacy_save_only=True,
+    require_exact_card=True,
+  ))
+  actor.resume_for_test()
+
+  assert _await(first) is True
+  assert _await(retry) is True
+  with pytest.raises(AnswerConflict):
+    _await(changed)
+  assert _load_chat()["messages"][-1]["blocks"][0]["answers"] == {
+    "q-race": "Red",
+  }
 
 
 def test_recovered_answer_retires_old_assistant_before_continuation(actor):
@@ -1828,3 +1883,22 @@ def test_clear_pending_hidden_only_queue_is_noop(actor):
   assert result["cleared_cids"] == []
   chat = _load_chat()
   assert [m.get("cid") for m in chat["pending_messages"]] == ["wait-result-xyz"]
+
+
+def test_provider_batch_marks_only_visible_owner_rows():
+  rows = [
+    {"role": "user", "cid": "cont", "kind": "continuation", "content": "continue"},
+    {"role": "user", "cid": "a", "content": "first"},
+    {"role": "user", "cid": "h", "hidden": True, "content": "internal"},
+    {"role": "user", "cid": "b", "content": "second", "provider_batch": {"id": "stale"}},
+  ]
+  _stamp_provider_batch(rows)
+  assert [row.get("provider_batch") for row in rows] == [
+    None,
+    {"id": "a", "index": 0, "count": 2},
+    None,
+    {"id": "a", "index": 1, "count": 2},
+  ]
+  single = [{"role": "user", "cid": "x", "provider_batch": {"id": "stale"}}]
+  _stamp_provider_batch(single)
+  assert "provider_batch" not in single[0]

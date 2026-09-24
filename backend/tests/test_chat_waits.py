@@ -1612,6 +1612,45 @@ def test_interval_can_never_outrun_the_deadline(client, owner_token, db):
   assert refreshed.next_check_at <= refreshed.deadline_at
 
 
+def test_force_kind_rechecks_future_platform_activation_wait(
+  client, owner_token, db, monkeypatch,
+):
+  chat_id = _owner_chat(client, owner_token)
+  now = now_naive_utc()
+  row = models.ChatWait(
+    id="forced-platform-activation",
+    chat_id=chat_id,
+    description="Wait for ready boot",
+    condition_owner="Möbius startup",
+    kind="platform_activation",
+    condition_json={"version": 1},
+    interval_secs=60,
+    deadline_at=now + timedelta(days=1),
+    next_check_at=now + timedelta(minutes=1),
+    status="armed",
+    created_at=now,
+  )
+  db.add(row)
+  db.commit()
+  monkeypatch.setattr(
+    "app.platform_restart.activation_wait_verdict",
+    lambda _db, _row: ("met", "ready"),
+  )
+
+  async def no_delivery(_row_id):
+    return False
+
+  monkeypatch.setattr(chat_waits_mod, "_deliver_resume", no_delivery)
+
+  assert asyncio.run(sweep_due_waits()) == 0
+  assert db.get(models.ChatWait, row.id).status == "armed"
+  assert asyncio.run(sweep_due_waits(force_kind="platform_activation")) == 0
+  db.expire_all()
+  refreshed = db.get(models.ChatWait, row.id)
+  assert refreshed.status == "met"
+  assert refreshed.checks_count == 1
+
+
 def test_timer_delay_cannot_exceed_deadline_cap(client, owner_token, db):
   chat_id = _owner_chat(client, owner_token)
   with pytest.raises(WaitValidationError):

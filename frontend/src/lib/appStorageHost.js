@@ -5,12 +5,15 @@ const RPC_METHODS = new Map([
   ['durableWrite', 'durableWrite'],
   ['remove', 'remove'],
   ['list', 'list'],
+  ['listWithStatus', 'listWithStatus'],
   ['pendingCount', 'pendingCount'],
   ['getWithVersion', 'getWithVersion'],
   ['queueSignals', '_queueSignals'],
   ['pendingSignalCount', '_pendingSignalCount'],
   ['drainSignals', '_drainSignals'],
   ['drain', '_drain'],
+  ['ackConflict', '_ackConflict'],
+  ['listConflicts', '_listConflicts'],
 ])
 
 const SUBSCRIBE_METHODS = {
@@ -51,6 +54,7 @@ export function createAppStorageHost({
   createStorage,
   send,
   onDeadLetter = null,
+  onConflict = null,
 }) {
   const expectedAppId = String(appId)
   const subscriptions = new Map()
@@ -89,6 +93,7 @@ export function createAppStorageHost({
       }
     }
     try { entry.detachDeadLetter?.() } catch {}
+    try { entry.detachConflict?.() } catch {}
     safeDestroy(entry.storage)
   }
 
@@ -158,12 +163,19 @@ export function createAppStorageHost({
       return null
     }
     retireReady()
-    const entry = { identity, storage, detachDeadLetter: null }
+    const entry = { identity, storage, detachDeadLetter: null, detachConflict: null }
     ready = entry
     if (typeof storage.onDeadLetter === 'function' && typeof onDeadLetter === 'function') {
       entry.detachDeadLetter = storage.onDeadLetter((payload) => {
         if (!destroyed && ready === entry
             && currentIdentity()?.key === entry.identity.key) onDeadLetter(payload)
+      })
+    }
+    if (typeof storage.onConflict === 'function' && typeof onConflict === 'function') {
+      entry.detachConflict = storage.onConflict((payload) => {
+        if (!destroyed && ready === entry
+            && currentIdentity()?.key === entry.identity.key) return onConflict(payload)
+        return false
       })
     }
     try {

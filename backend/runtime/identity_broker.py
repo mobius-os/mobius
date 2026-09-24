@@ -9,18 +9,22 @@ over a Unix socket; Codex sees only a narrow loopback Responses proxy.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import pwd
 import re
 import secrets
+import socket
 import socketserver
 import stat
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -86,8 +90,9 @@ MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 # and runtime provenance. Bump it whenever the served app starts depending on
 # broker routes an older broker lacks, so a stale served broker is rejected in
 # favour of the baked copy instead of returning 404 for the new routes.
-# 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present.
-BROKER_ROUTE_EPOCH = 2
+# 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present;
+# 3 = standalone web search endpoint; 4 = flat gateway wire for Codex web.run.
+BROKER_ROUTE_EPOCH = 4
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -190,6 +195,8 @@ def _community_scope(method: str, route_path: str, query: str) -> str | None:
 
 
 def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
+  if method == "POST" and path == "/v1/alpha/search":
+    return 256_000
   if method == "POST" and path == "/v1/responses":
     # Long-context requests are expected to exceed the broker's small control-
     # plane envelope. This route is still exact, capability-bound, and local;
@@ -201,6 +208,173 @@ def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
   ):
     return MAX_CONTRIBUTION_BODY
   return MAX_BODY
+
+
+def _public_web_url(value: str) -> str:
+  """Only hand search providers public HTTP URLs, never local targets."""
+  split = urllib.parse.urlsplit(value)
+  host = (split.hostname or "").lower().rstrip(".")
+  if split.scheme not in {"http", "https"} or not host or split.username or split.password:
+    raise ValueError("search page must be a public HTTP URL")
+  if host == "localhost" or host.endswith((".localhost", ".localdomain", ".local", ".internal")):
+    raise ValueError("search page must be a public HTTP URL")
+  try:
+    address = ipaddress.ip_address(host)
+  except ValueError:
+    # Some URL consumers accept shortened, octal, hex, or integer IPv4 hosts.
+    # Reject these alternate spellings rather than trusting different parsers
+    # to agree about where a page-open request will go.
+    try:
+      socket.inet_aton(host)
+    except OSError:
+      pass
+    else:
+      raise ValueError("search page must be a public HTTP URL")
+    address = None
+  if address is not None and not address.is_global:
+    raise ValueError("search page must be a public HTTP URL")
+  return value
+
+
+def _search_text(value: Any, *, limit: int) -> str:
+  return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _search_domain_matches(url: str, domains: list[str]) -> bool:
+  if not domains:
+    return True
+  host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+  return any(host == domain.lower() or host.endswith("." + domain.lower())
+             for domain in domains)
+
+
+_GATEWAY_WEB_TOOL = "mobius_web_run"
+
+
+def _flatten_web_tool(body: bytes) -> tuple[bytes, bool, bool]:
+  """Present Codex's web.run to the subscription gateway as a plain function.
+
+  Codex speaks the Responses namespace extension, but the custom-model
+  gateway accepts top-level functions only. Keep this at the broker's provider
+  boundary; Codex and its durable thread continue to see native web.run.
+  """
+  try:
+    request = json.loads(body)
+  except ValueError:
+    return body, False, False
+  if not isinstance(request, dict) or not isinstance(request.get("tools"), list):
+    return body, False, False
+  tools = request["tools"]
+  if not any(isinstance(tool, dict) and tool.get("type") == "namespace"
+             and tool.get("name") == "web" for tool in tools):
+    return body, False, False
+  if any(isinstance(tool, dict) and tool.get("name") == _GATEWAY_WEB_TOOL
+         for tool in tools):
+    raise ValueError("web search tool name collides with another tool")
+  flattened = []
+  changed = False
+  for tool in tools:
+    if not isinstance(tool, dict) or tool.get("type") != "namespace" or tool.get("name") != "web":
+      flattened.append(tool)
+      continue
+    subtools = tool.get("tools")
+    if not isinstance(subtools, list) or len(subtools) != 1:
+      raise ValueError("unsupported Codex web tool declaration")
+    run = subtools[0]
+    if not isinstance(run, dict) or run.get("type") != "function" or run.get("name") != "run":
+      raise ValueError("unsupported Codex web tool declaration")
+    flattened.append({
+      "type": "function", "name": _GATEWAY_WEB_TOOL,
+      "description": run.get("description", "Search the web."),
+      "parameters": run.get("parameters", {"type": "object"}),
+    })
+    changed = True
+  if not changed:
+    return body, False, False
+  request["tools"] = flattened
+  # Codex sends prior calls back as conversation input on the next request.
+  # The gateway must see the same flat name there as in the advertised tools;
+  # otherwise GLM can receive a result for an unadvertised web.run call.
+  if isinstance(request.get("input"), list):
+    for item in request["input"]:
+      if (isinstance(item, dict) and item.get("type") == "function_call"
+          and item.get("name") == "run" and item.get("namespace") == "web"):
+        item["name"] = _GATEWAY_WEB_TOOL
+        del item["namespace"]
+  run_candidates = []
+  for tool in tools:
+    if not isinstance(tool, dict):
+      continue
+    namespace = tool.get("name") if tool.get("type") == "namespace" else ""
+    members = (tool.get("tools") or []) if namespace else [tool]
+    for member in members:
+      if isinstance(member, dict) and member.get("name") == "run":
+        run_candidates.append(namespace)
+  # A bare `run` can denote web.run only when no other advertised tool
+  # could have meant it. Never guess across namespace collisions.
+  bare_run_is_web = run_candidates == ["web"]
+  return json.dumps(request, separators=(",", ":")).encode(), True, bare_run_is_web
+
+
+def _restore_web_tool_event(line: bytes, *, bare_run_is_web: bool = False) -> bytes:
+  """Restore gateway function calls to Codex's native namespace wire item."""
+  if not line.startswith(b"data:") or (
+    _GATEWAY_WEB_TOOL.encode() not in line
+    and (not bare_run_is_web or b'"run"' not in line)
+  ):
+    return line
+  try:
+    event = json.loads(line[5:].strip())
+  except ValueError:
+    return line
+
+  changed = False
+
+  def restore(value: Any) -> None:
+    nonlocal changed
+    if isinstance(value, dict):
+      if value.get("type") == "function_call" and (
+        value.get("name") == _GATEWAY_WEB_TOOL
+        or (bare_run_is_web and value.get("name") == "run"
+            and value.get("namespace") in (None, "", "functions"))
+      ):
+        value["name"] = "run"
+        value["namespace"] = "web"
+        changed = True
+      for child in value.values():
+        restore(child)
+    elif isinstance(value, list):
+      for child in value:
+        restore(child)
+
+  restore(event)
+  return b"data: " + json.dumps(event, separators=(",", ":")).encode() if changed else line
+
+
+def _restore_web_tool_stream(chunks: Any, *, bare_run_is_web: bool = False):
+  """Rewrite one SSE line at a time without buffering the inference stream."""
+  pending = bytearray()
+  passthrough_line = False
+  max_line = 1_000_000
+  for chunk in chunks:
+    pending.extend(chunk)
+    while (newline := pending.find(b"\n")) >= 0:
+      line = bytes(pending[:newline])
+      del pending[:newline + 1]
+      if passthrough_line or len(line) > max_line:
+        yield line + b"\n"
+      else:
+        yield _restore_web_tool_event(line, bare_run_is_web=bare_run_is_web) + b"\n"
+      passthrough_line = False
+    if len(pending) > max_line:
+      # An oversized provider event is forwarded unchanged. The normal path
+      # still streams each token; no response-sized buffer enters this broker.
+      yield bytes(pending)
+      pending.clear()
+      passthrough_line = True
+  if pending:
+    yield (bytes(pending) if passthrough_line else
+           _restore_web_tool_event(bytes(pending), bare_run_is_web=bare_run_is_web))
 
 
 def _b64(value: bytes) -> str:
@@ -440,10 +614,220 @@ class Broker:
     self.instance_id = _load_or_create_instance_id()
     self.lock = threading.RLock()
     self.client = httpx.Client(timeout=30.0, follow_redirects=False)
+    # Codex's opaque ref_ids are local to one search session, not a durable index.
+    self.search_sessions: dict[str, dict[str, Any]] = {}
     self.state = self._load_state()
 
   def close(self) -> None:
     self.client.close()
+
+  def _parallel(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call the anonymous Parallel Search MCP behind Codex's native web.run."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def invoke() -> dict[str, Any]:
+      async with streamablehttp_client(
+        "https://search.parallel.ai/mcp", timeout=20, sse_read_timeout=20,
+      ) as (read, write, _):
+        async with ClientSession(read, write) as session:
+          await session.initialize()
+          response = await session.call_tool(tool, arguments)
+          if response.isError:
+            detail = " ".join(part.text for part in response.content if part.type == "text")
+            raise ValueError(f"Parallel search failed: {detail[:500]}")
+          for part in response.content:
+            if part.type == "text":
+              value = json.loads(part.text)
+              if isinstance(value, dict) and isinstance(value.get("results"), list):
+                if not value["results"] and value.get("errors"):
+                  raise ValueError(f"Parallel search failed: {str(value['errors'])[:500]}")
+                return value
+          raise ValueError("Parallel search returned no results list")
+
+    return asyncio.run(invoke())
+
+  @staticmethod
+  def _search_failure(error: Exception) -> str:
+    def rate_limited(value: BaseException) -> bool:
+      if isinstance(value, httpx.HTTPStatusError) and value.response.status_code == 429:
+        return True
+      if "rate limit" in str(value).lower() or "429" in str(value):
+        return True
+      return any(rate_limited(child) for child in getattr(value, "exceptions", ()))
+
+    if rate_limited(error):
+      return (
+        "Live web search is temporarily rate-limited. Continue without claiming "
+        "current facts were verified; tell the user the limit was reached."
+      )
+    return (
+      "Live web search is temporarily unavailable. Continue without claiming "
+      "current facts were verified; tell the user search was unavailable."
+    )
+
+  def standalone_search(self, request: dict[str, Any]) -> dict[str, Any]:
+    """Serve native Codex web.run with one keyless search provider."""
+    commands = request.get("commands") or {}
+    if not isinstance(commands, dict):
+      raise ValueError("search commands must be an object")
+    session_id = _search_text(request.get("id"), limit=200)
+    if not session_id:
+      raise ValueError("search session id is required")
+    provider_session = hashlib.sha256(session_id.encode()).hexdigest()
+    unsupported = [
+      key for key in ("click", "screenshot", "finance", "weather", "sports", "time")
+      if commands.get(key)
+    ]
+    lines: list[str] = []
+    results: list[dict[str, str]] = []
+    if unsupported:
+      lines.append("Unsupported web search operation(s): " + ", ".join(unsupported) + ".")
+    budgets = {"short": 4000, "medium": 8000, "long": 16000}
+    budget = budgets.get(commands.get("response_length"), 8000)
+    with self.lock:
+      now = time.monotonic()
+      self.search_sessions = {
+        key: value for key, value in self.search_sessions.items()
+        if now - value["touched"] < 1800
+      }
+      if len(self.search_sessions) >= 100 and session_id not in self.search_sessions:
+        oldest = min(self.search_sessions, key=lambda key: self.search_sessions[key]["touched"])
+        self.search_sessions.pop(oldest, None)
+      session = self.search_sessions.setdefault(
+        session_id, {"touched": now, "turn": 0, "refs": {}}
+      )
+      session["touched"] = now
+      turn = session["turn"]
+      session["turn"] += 1
+
+    for kind, source in (("search_query", "web"), ("image_query", "images")):
+      queries = commands.get(kind) or []
+      if not isinstance(queries, list) or len(queries) > 4:
+        raise ValueError(f"{kind} must contain at most four queries")
+      for query in queries:
+        if not isinstance(query, dict) or not _search_text(query.get("q"), limit=500):
+          raise ValueError("search query text is required")
+        search_text = _search_text(query["q"], limit=500)
+        domains = query.get("domains") or []
+        if domains:
+          if not isinstance(domains, list) or len(domains) > 8 or any(
+            not isinstance(domain, str) or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", domain)
+            for domain in domains
+          ):
+            raise ValueError("invalid search domains")
+        recency = query.get("recency")
+        since = None
+        if source == "web" and type(recency) is int and 0 < recency <= 3650:
+          since = datetime.now(timezone.utc) - timedelta(days=recency)
+        if source == "images":
+          hits = []
+          search_available = False
+          lines.append("Image search is not supported by this provider; continue without images.")
+        else:
+          objective = "Find reliable, current sources for " + search_text
+          if domains:
+            objective += "; only these domains: " + ", ".join(domains)
+          if since:
+            objective += f"; published since {since:%Y-%m-%d}"
+            lines.append("Freshness filtering is advisory; verify publication dates.")
+          try:
+            value = self._parallel("web_search", {
+              "objective": objective[:1000], "search_queries": [search_text],
+              "session_id": provider_session,
+            })
+            hits = value.get("results") or []
+            search_available = True
+          # MCP transports can surface rate limits and outages as ExceptionGroups.
+          # Keep that external failure within the tool result, not the agent turn.
+          except Exception as error:
+            hits = []
+            search_available = False
+            lines.append(self._search_failure(error))
+        if not isinstance(hits, list):
+          hits = []
+        lines.append(f"Search results for {query['q']}:")
+        result_count = len(results)
+        for hit in hits:
+          if len(results) - result_count >= 5:
+            break
+          if not isinstance(hit, dict):
+            continue
+          url = _search_text(hit.get("url"), limit=2000)
+          try:
+            _public_web_url(url)
+          except ValueError:
+            continue
+          if not _search_domain_matches(url, domains):
+            continue
+          with self.lock:
+            refs = session["refs"]
+            ref_id = f"turn{turn}search{len(refs)}"
+            if len(refs) < 100:
+              refs[ref_id] = url
+            else:
+              ref_id = url
+          title = _search_text(hit.get("title"), limit=200) or url
+          excerpts = hit.get("excerpts") or []
+          snippet = _search_text(excerpts[0] if isinstance(excerpts, list) and excerpts else "", limit=700)
+          results.append({
+            "type": "text_result", "ref_id": ref_id, "url": url,
+            "title": title, "snippet": snippet,
+          })
+          lines.append(f"【{ref_id}】 {title}\n{url}\n{snippet}")
+        if search_available and len(results) == result_count:
+          lines.append("No results.")
+
+    for kind in ("open", "find"):
+      operations = commands.get(kind) or []
+      if not isinstance(operations, list) or len(operations) > 4:
+        raise ValueError(f"{kind} must contain at most four pages")
+      for operation in operations:
+        if not isinstance(operation, dict):
+          raise ValueError("page operation must be an object")
+        ref_id = _search_text(operation.get("ref_id"), limit=2000)
+        pattern = _search_text(operation.get("pattern"), limit=200) if kind == "find" else ""
+        if kind == "find" and not pattern:
+          raise ValueError("find pattern is required")
+        with self.lock:
+          url = session["refs"].get(ref_id)
+        if url is None and not urllib.parse.urlsplit(ref_id).scheme:
+          lines.append("Page reference unavailable; search again or open a public URL.")
+          continue
+        url = _public_web_url(url or ref_id)
+        try:
+          value = self._parallel("web_fetch", {
+            "urls": [url], "objective": "Read this page", "full_content": True,
+            "session_id": provider_session,
+          })
+          pages = value.get("results") or []
+          page = pages[0] if pages and isinstance(pages[0], dict) else {}
+          excerpts = page.get("excerpts") or []
+          markdown = _search_text(
+            page.get("full_content") or "\n".join(
+              excerpt for excerpt in excerpts if isinstance(excerpt, str)
+            ), limit=30_000,
+          )
+          note = ""
+        except Exception as error:
+          markdown = ""
+          note = self._search_failure(error)
+        if kind == "find":
+          position = markdown.lower().find(pattern.lower())
+          content = (
+            markdown[max(0, position - 300):position + len(pattern) + 900]
+            if position >= 0 else (
+              "Pattern not found on page." if markdown else "Page text unavailable."
+            )
+          )
+        else:
+          content = markdown[:8000] or "No page text returned."
+        lines.append(f"【{ref_id}】 {url}\n{note}\n{content}" if note else f"【{ref_id}】 {url}\n{content}")
+        if markdown:
+          results.append({"type": "text_result", "ref_id": ref_id, "url": url})
+
+    return {"output": ("\n\n".join(lines) or "No search command was provided.")[:budget],
+            "results": results}
 
   def public_jwk(self) -> dict[str, str]:
     raw = self.key.public_key().public_bytes(
@@ -923,7 +1307,17 @@ class _Handler(BaseHTTPRequestHandler):
         pending = broker.consume_oauth_state(str(state or ""))
         self._json(200, {"pending": pending})
         return
+      if method == "POST" and path == "/v1/alpha/search":
+        request = json.loads(self._body(maximum=body_limit))
+        if not isinstance(request, dict):
+          raise ValueError("search request must be an object")
+        self._json(200, broker.standalone_search(request))
+        return
       body = self._body(maximum=body_limit)
+      web_tool_flattened = False
+      bare_run_is_web = False
+      if method == "POST" and path == "/v1/responses":
+        body, web_tool_flattened, bare_run_is_web = _flatten_web_tool(body)
       incoming = {key.lower(): value for key, value in self.headers.items()}
       upstream = broker.proxy(
         method=method,
@@ -942,7 +1336,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.send_header("Connection", "close")
         self.end_headers()
-        for chunk in upstream.iter_raw():
+        chunks = upstream.iter_raw()
+        if (web_tool_flattened and upstream.status_code == 200
+            and upstream.headers.get("content-type", "").startswith("text/event-stream")):
+          chunks = _restore_web_tool_stream(chunks, bare_run_is_web=bare_run_is_web)
+        for chunk in chunks:
           if chunk:
             self.wfile.write(chunk)
             self.wfile.flush()
@@ -956,9 +1354,20 @@ class _Handler(BaseHTTPRequestHandler):
     except ValueError as exc:
       self._json(400, {"error": str(exc)})
     except httpx.HTTPStatusError as exc:
-      self._json(502, {"error": "central identity request failed", "status": exc.response.status_code})
+      status = exc.response.status_code
+      if route_path == "/v1/alpha/search":
+        message = (
+          "web search rate limit reached; try again later"
+          if status == 429 else "web search service failed"
+        )
+        self._json(429 if status == 429 else 502, {"error": message, "status": status})
+      else:
+        self._json(502, {"error": "central identity request failed", "status": status})
     except httpx.HTTPError:
-      self._json(502, {"error": "central service unavailable"})
+      self._json(502, {"error": (
+        "web search service unavailable" if route_path == "/v1/alpha/search"
+        else "central service unavailable"
+      )})
 
   do_GET = _handle
   do_POST = _handle

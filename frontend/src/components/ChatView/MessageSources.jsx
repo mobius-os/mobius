@@ -159,7 +159,7 @@ export default function MessageSources({
                     href={source.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    title={source.snippet || source.title || source.url}
+                    title={source.title || source.url}
                     aria-label={`${label}${host && label === baseLabel && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
                   >
                     <SourceFavicon

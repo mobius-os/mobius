@@ -67,8 +67,9 @@ test('restart confirms on the same button for four seconds without a cancel butt
   assert.match(updates, /confirmRestart === 'primary' \? restart : primary\.act/)
   assert.match(updates, /confirmRestart === 'dedicated' \? restart : \(\) => askRestart\('dedicated'\)/)
   assert.doesNotMatch(updates, /Not now|Restart server/)
-  assert.match(updates, /briefly interrupts active chats/)
-  assert.match(updates, /does not replace the container/)
+  assert.match(updates, /briefly pauses active chats/)
+  assert.match(updates, /page will reconnect automatically/)
+  assert.doesNotMatch(updates, /does not replace the container/)
   // An image replacement still belongs to its exact reviewed update, not a
   // second unreviewed maintenance action beside the server restart.
   assert.doesNotMatch(updates, /Rebuild now|Rebuild container|Replace now/)

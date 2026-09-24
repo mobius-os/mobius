@@ -1,4 +1,4 @@
-/* ChatSummaryViewer shows all three platform-published chat summary layers. */
+/* ChatSummaryViewer shows the chat's name, Digest, and cumulative Summary. */
 
 import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
@@ -64,7 +64,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
         <div className="chat-summary__head">
           <div>
             <h2 id="chat-summary-title" className="chat-summary__title">Chat summary</h2>
-            <p className="chat-summary__subtitle">Three levels of continuity, updated after each settled turn.</p>
+            <p className="chat-summary__subtitle">Three levels of continuity, saved by the agent as it works.</p>
           </div>
           <button
             ref={closeRef}
@@ -91,7 +91,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
                   <p>One-line summary used to identify this conversation.</p>
                 </div>
                 <div className="chat-summary__layer-body chat-summary__layer-body--plain">
-                  {state.layers.description || 'The chat name will appear after this conversation settles.'}
+                  {state.layers.description || 'The chat name appears once the agent saves this chat.'}
                 </div>
               </section>
               <section className="chat-summary__layer">
@@ -102,7 +102,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
                 <div className="chat-summary__layer-body">
                   {state.layers.digest
                     ? <StandardMarkdown text={state.layers.digest} />
-                    : <p className="chat-summary__empty">No separate digest has been published for this chat yet.</p>}
+                    : <p className="chat-summary__empty">No digest has been saved for this chat yet.</p>}
                 </div>
               </section>
               <section className="chat-summary__layer">
@@ -113,7 +113,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
                 <div className="chat-summary__layer-body">
                   {state.layers.summary
                     ? <StandardMarkdown text={state.layers.summary} />
-                    : <p className="chat-summary__empty">The full summary will appear after this conversation settles.</p>}
+                    : <p className="chat-summary__empty">No summary entries have been saved for this chat yet.</p>}
                 </div>
               </section>
             </div>

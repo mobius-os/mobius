@@ -58,6 +58,7 @@ apps_router = _load("apps")
 app_services_router = _load("app_services")
 auth_router = _load("auth")
 chat_router = _load("chat")
+chat_continuity_router = _load("chat_continuity")
 chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
 app_chat_router = _load("chats", "app_chat_router")
@@ -76,6 +77,7 @@ settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
 uploads_router = _load("uploads")
+generated_files_router = _load("generated_files")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
@@ -130,6 +132,7 @@ __all__ = [
   "screen_control_router",
   "settings_router",
   "uploads_router",
+  "generated_files_router",
   "media_router",
   "secrets_router",
   "github_router",

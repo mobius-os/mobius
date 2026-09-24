@@ -25,7 +25,6 @@ from app.chat_writer import Barrier, PersistTranscript, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
 from app.pending_questions import PendingQuestion
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _seed_chat(chat_id, messages=None, pending=None, session_id="sess"):
@@ -74,7 +73,7 @@ def test_sink_stream_then_question_survives_via_actor():
   serializes them, and the QuestionCommit fences the stale snapshot."""
   _seed_chat("c-sq", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("c-sq")
-  sink = chat_mod._ChatEventSink(bc, "c-sq", run_token="rt-sq", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "c-sq", run_token="rt-sq")
 
   async def go():
     sink._last_save = 0.0
@@ -432,7 +431,7 @@ def test_complete_turn_awaits_slow_promote_and_does_not_strand():
   )
 
   bc = ChatBroadcast("c-slow")
-  sink = chat_mod._ChatEventSink(bc, "c-slow", run_token="rt-slow", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "c-slow", run_token="rt-slow")
   # No accumulated blocks → finalize() is a no-op, so the turn reaches the
   # success path and the promote drain (what we're exercising).
   sink.assistant_blocks = []
@@ -519,7 +518,7 @@ def test_failed_question_commit_scrubs_orphan_block(monkeypatch):
     "c-q", messages=[{"role": "user", "content": "hi", "ts": 1}],
   )
   bc = ChatBroadcast("c-q")
-  sink = chat_mod._ChatEventSink(bc, "c-q", run_token="rt-q", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "c-q", run_token="rt-q")
   # A prior streamed text block — it must SURVIVE the scrub (only the failed
   # question block is removed).
   sink.publish({"type": "text", "content": "thinking"})

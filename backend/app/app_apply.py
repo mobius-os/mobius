@@ -239,6 +239,24 @@ def _finish_static_assets(commit_actions: list) -> None:
       log.exception("app apply: static asset backup cleanup failed")
 
 
+def _local_folder_skill_members(source_dir: Path, skills: list) -> list[str]:
+  """Member paths of approved folder skills, as present in accepted source."""
+  from app.manifest_contract import is_folder_skill_member
+
+  members: list[str] = []
+  for entry in skills:
+    if not isinstance(entry, str) or not entry.endswith("/"):
+      continue
+    folder = source_dir / entry
+    if folder.is_dir():
+      members.extend(
+        entry + child.name for child in sorted(folder.iterdir())
+        if child.is_file() and not child.is_symlink()
+        and is_folder_skill_member(child.name)
+      )
+  return members
+
+
 async def _sync_accepted_app_skills(
   db: Session, app: models.App, manifest: dict | None,
 ) -> tuple[str, ...]:
@@ -249,10 +267,13 @@ async def _sync_accepted_app_skills(
     contract = app.capability_contract or {}
     agent = contract.get("agent") if isinstance(contract, dict) else None
     skills = agent.get("skills") if isinstance(agent, dict) else None
+    skills = skills if isinstance(skills, list) else []
     manifest = {
       # Store metadata remains authoritative for WHICH skills are approved;
-      # the accepted local source revision owns their current bytes.
-      "skills": skills if isinstance(skills, list) else [],
+      # the accepted local source revision owns their current bytes, which
+      # for an approved `<id>/` folder skill are the member files inside it.
+      "skills": skills,
+      "source_files": _local_folder_skill_members(Path(app.source_dir), skills),
       "version": "accepted-local-revision",
     }
   warnings: list[str] = []

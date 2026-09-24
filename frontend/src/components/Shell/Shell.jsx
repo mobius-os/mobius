@@ -26,7 +26,6 @@ import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
-import { recoveryFailure } from '../../lib/notificationRecovery.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
@@ -43,6 +42,7 @@ import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.j
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
+  authQueries,
   notificationQueries,
   appQueries,
   appSourceQueries,
@@ -2859,6 +2859,9 @@ export default function Shell({ onInitialVisualReady }) {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
+    } else if (ev.type === 'model_providers_changed') {
+      void modelQueries.registry.invalidate(queryClient)
+      void authQueries.provider.statuses.invalidate(queryClient)
     } else if (ev.type === 'app_activity') {
       // The durable marker was committed with an app-attributed notification.
       // A refetch surfaces the dot; if the app is already visible, the effect
@@ -3095,6 +3098,8 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        // A saved question or secure-input request can be why the run ended;
+        // only its own clear event (or the next run starting) retires it.
         // Chat edits and their contribution ledger can both settle during an
         // agent turn. Completion is the shared freshness boundary even when
         // the chat card was hidden or unmounted while that work ran.
@@ -3119,7 +3124,6 @@ export default function Shell({ onInitialVisualReady }) {
             queryKey: ['projects', 'git', String(projectId)],
           })
         }
-        markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
@@ -3208,6 +3212,8 @@ export default function Shell({ onInitialVisualReady }) {
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
+      modelQueries.registry.invalidate(queryClient),
+      authQueries.provider.statuses.invalidate(queryClient),
       appSourceQueries.invalidate(queryClient),
       chatAppArtifactQueries.invalidateAll(queryClient),
       invalidateAllChatActivity(queryClient),
@@ -4053,25 +4059,6 @@ export default function Shell({ onInitialVisualReady }) {
     throw new Error('Unsupported recovery action')
   }
 
-  function showDeletionUndo(response, resourceType, resourceId) {
-    const notificationId = response.headers.get('X-Recovery-Notification-Id')
-    if (!notificationId) return
-    const name = resourceType[0].toUpperCase() + resourceType.slice(1)
-    showToast(`${name} deleted`, {
-      duration: 5000,
-      action: {
-        label: 'Undo',
-        onAction: async () => {
-          try {
-            await recoverNotificationAction(notificationId, { resourceType, resourceId: String(resourceId) })
-          } catch (error) {
-            showToast(recoveryFailure(error).message, { variant: 'error' })
-          }
-        },
-      },
-    })
-  }
-
   async function deleteChat(id) {
     // 409 means the agent is still running and stop_chat_for couldn't
     // interrupt it within the timeout. We MUST NOT clear local state
@@ -4109,7 +4096,7 @@ export default function Shell({ onInitialVisualReady }) {
     // Scrub any navStack entries pointing at the deleted chat —
     // otherwise pressing back would navigate into a chat that returns
     // 404, leaving the user staring at an empty view. Soft-deleted
-    // chats are recoverable for 7 days via Undo/the chat recovery API; once
+    // chats are recoverable for 7 days via the notification history's recover action or the chat recovery API; once
     // recovered
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
@@ -4132,7 +4119,6 @@ export default function Shell({ onInitialVisualReady }) {
     const wsAfterClose = workspaceStateRef.current.ws
     const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
-    showDeletionUndo(res, 'chat', id)
     if (!single && !focusedAfterClose?.activeTabKey) {
       await newChat()
     }
@@ -4197,7 +4183,6 @@ export default function Shell({ onInitialVisualReady }) {
         reason: 'deleted',
       })
     }
-    showDeletionUndo(res, 'project', projectId)
     await Promise.all([
       projectsQuery.refetch(),
       refreshChats(),
@@ -4257,7 +4242,6 @@ export default function Shell({ onInitialVisualReady }) {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
-    showDeletionUndo(res, 'app', id)
     await refreshApps()
   }
 

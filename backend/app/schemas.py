@@ -394,6 +394,15 @@ class AppInstall(BaseModel):
   reviewed_source_digest: str | None = Field(
     default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
   )
+  # Updates bind Apply to the exact app and Git commit returned by preview.
+  # Fresh installs omit both fields and keep the ordinary manifest flow.
+  update_app_id: int | None = Field(default=None, gt=0)
+  reviewed_upstream_commit: str | None = Field(
+    default=None,
+    min_length=40,
+    max_length=64,
+    pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+  )
 
 
 class AppPreviewOut(BaseModel):
@@ -500,20 +509,20 @@ class UpdatePreviewOut(BaseModel):
   app_id: int
   status: Literal["clean", "conflict"]
   upstream_version: str | None = None
-  upstream_commit: str | None = None
+  upstream_commit: str
   conflict_paths: list[str] = Field(default_factory=list)
   conflicts: list[ConflictFile] = Field(default_factory=list)
   upstream_diff: str | None = None
 
 
 class UpdateCandidatePreviewOut(BaseModel):
-  """Incoming published source compared with the last installed upstream."""
+  """One candidate owns both executable-source and capability review."""
 
+  capability_preview: AppPreviewOut
   app_id: int
   upstream_version: str | None = None
-  # The installed upstream base used for the comparison. This is intentionally
-  # not the candidate's remote SHA: synthetic manifest installs have no remote
-  # commit, but both package shapes share the same source-diff contract.
+  # The exact candidate commit reviewed by the owner and later supplied to
+  # Apply. Git-backed Store updates never refetch a second package transport.
   upstream_commit: str | None = None
   upstream_diff: str | None = None
   source_digest: str = Field(

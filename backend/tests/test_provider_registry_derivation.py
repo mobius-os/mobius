@@ -55,6 +55,8 @@ def test_existing_providers_remain_valid(provider):
   ("mobius", {"minimal", "low", "medium", "high", "max"}),
 ])
 def test_existing_switch_effort_contract_is_unchanged(provider, allowed):
+  if provider == "mobius":
+    providers.PROVIDERS["mobius"].set_declaration(None, None)
   for effort in get_args(AgentEffort):
     if effort in allowed:
       assert _switch(provider, effort=effort).agent_settings_json.effort == effort
@@ -116,7 +118,12 @@ def test_new_provider_uses_runtime_identity_scope(registered_provider):
 def test_model_only_patch_selects_its_provider_not_a_two_provider_flip(
   client, auth, chat, db, monkeypatch, registered_provider, target, model,
 ):
-  monkeypatch.setattr(providers.MobiusProvider, "check_auth", lambda self, _: None)
+  monkeypatch.setattr(providers.PROVIDERS["mobius"], "check_auth", lambda _: None)
+  if target == "mobius":
+    monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+    monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", {
+      "models": [{"id": "spark", "label": "Spark"}],
+    })
   chat.session_id = "original-session"
   db.commit()
   response = client.patch(

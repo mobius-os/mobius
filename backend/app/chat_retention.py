@@ -141,6 +141,7 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     models.ToolOutput,
     models.ThinkingTrace,
     models.ChatSessionLink,
+    models.GeneratedFile,
   )
   for model in dependent_models:
     db.query(model).filter(

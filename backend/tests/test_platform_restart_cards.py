@@ -24,7 +24,6 @@ from app.chat_writer import (
 )
 from app.database import SessionLocal
 from app.platform_restart import activation_notice, activation_wait_verdict
-from app.memory_recall import EMPTY_RECALL_BINDING
 from app.routes import chats_stream
 from app.timeutil import now_naive_utc
 
@@ -131,6 +130,30 @@ def test_restart_press_dispatches_once_and_retry_is_idempotent():
   assert retry["dispatch"] is False
   with SessionLocal() as db:
     assert db.get(models.ChatWait, w1).action_approved_at is not None
+
+
+def test_retained_restart_button_does_not_orphan_newer_question():
+  old_id, _wait_id, _run, _requirement = _install("restart-retained")
+  newer_id = "question-newer"
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-retained")
+    chat.messages = [*chat.messages, {
+      "role": "assistant", "ts": 3,
+      "blocks": [{
+        "type": "question", "question_id": newer_id,
+        "questions": [{"id": "new", "question": "New?", "options": []}],
+      }],
+    }]
+    chat.pending_question_id = newer_id
+    db.commit()
+
+  result = _submit(ResolvePlatformRestartCard(
+    chat_id="restart-retained", question_id=old_id,
+    selected_option_id="restart-id",
+  ))
+  assert result["dispatch"] is True
+  with SessionLocal() as db:
+    assert db.get(models.Chat, "restart-retained").pending_question_id == newer_id
 
 
 def test_restart_press_keeps_card_open_when_next_boot_would_fall_back(
@@ -563,7 +586,7 @@ def test_not_now_defers_execution_without_abandoning_activation():
     assert wait.action_approved_at is None
 
 
-def test_route_dispatches_platform_restart_once_without_an_answer_turn(
+def test_authenticated_agent_from_another_chat_dispatches_restart_once(
   client, chat, auth, db, monkeypatch,
 ):
   monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-route")
@@ -582,7 +605,6 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
   ))
   sink = ChatEventSink(
     create_broadcast(chat.id), chat.id, run_token=run_id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
@@ -591,6 +613,15 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
     token_epoch=owner.token_epoch, run_id=run_id,
     expires_delta=timedelta(minutes=5),
   )
+  answerer_id = client.post(
+    "/api/chats", json={"title": "Restart answerer"}, headers=auth,
+  ).json()["id"]
+  answerer_token = auth_mod.create_agent_token(
+    chat_id=answerer_id, owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+    expires_delta=timedelta(minutes=5),
+  )
+  answerer_auth = {"Authorization": f"Bearer {answerer_token}"}
   try:
     saved = client.post(
       f"/api/chats/{chat.id}/restart-request", json={},
@@ -612,10 +643,10 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
       "selected_options": {"restart": [restart_id]},
     }
     first = client.post(
-      f"/api/chats/{chat.id}/messages", json=body, headers=auth,
+      f"/api/chats/{chat.id}/messages", json=body, headers=answerer_auth,
     )
     retry = client.post(
-      f"/api/chats/{chat.id}/messages", json=body, headers=auth,
+      f"/api/chats/{chat.id}/messages", json=body, headers=answerer_auth,
     )
   finally:
     unregister_active_sink(chat.id, sink)
@@ -637,7 +668,6 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
   ))
   sink = ChatEventSink(
     create_broadcast(chat.id), chat.id, run_token=run_id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()

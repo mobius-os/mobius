@@ -1,4 +1,5 @@
 import MessagesSquare from 'lucide-react/dist/esm/icons/messages-square.mjs'
+import { formatTime } from '../../lib/dateTimeFormat.js'
 import './AgentCoordinationFeed.css'
 import {
   groupPeerMessages,
@@ -10,7 +11,7 @@ import {
 function clockLabel(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return formatTime(date)
 }
 
 export default function AgentCoordinationFeed({

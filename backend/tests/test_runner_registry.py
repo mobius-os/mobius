@@ -35,6 +35,21 @@ def test_maintenance_lease_cannot_reopen_concurrent_restart_drain():
   assert registry.mark_starting("late-chat") is False
 
 
+def test_quiescing_maintenance_blocks_new_starts_until_existing_runner_drains():
+  registry = RunnerRegistry()
+  registry.register(_FakeHandle("running", RunnerKind.CODEX_SDK, "codex"))
+
+  lease = registry.acquire_quiescing_admission_lease()
+  assert lease is not None
+  assert registry.is_idle() is False
+  assert registry.mark_starting("late-chat") is False
+
+  registry.unregister("running", RunnerKind.CODEX_SDK)
+  assert registry.is_idle() is True
+  registry.release_admission_lease(lease)
+  assert registry.mark_starting("late-chat") is True
+
+
 def test_register_replaces_same_kind_handle():
   registry = RunnerRegistry()
   first = _FakeHandle("chat-1", RunnerKind.CLAUDE_SDK, "first")

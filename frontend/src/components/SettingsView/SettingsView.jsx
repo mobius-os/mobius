@@ -30,7 +30,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from './providerUsage.js'
-import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
+import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
@@ -56,7 +56,7 @@ function defaultBackgroundModel(provider) {
 }
 
 function isKnownProvider(provider) {
-  return PROVIDER_CHOICES.some(p => p.id === provider)
+  return PROVIDER_CHOICES.some(p => p.id === provider) || /^app-\d+$/.test(provider || '')
 }
 
 function PlanUsageToggle({ provider, label, expanded, onToggle }) {
@@ -118,6 +118,7 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
 
 function BackgroundProviderRow({
   row,
+  providerInfo,
   index,
   models,
   dragging,
@@ -131,7 +132,7 @@ function BackgroundProviderRow({
   onReorderStart,
   configuredProviders,
 }) {
-  const info = PROVIDER_INFO[row.provider]
+  const info = providerInfo || providerInfoFor(row.provider)
   const Logo = info?.Logo
   const configured = configuredProviders.has(row.provider)
   const enabled = configured && row.enabled !== false
@@ -426,6 +427,10 @@ export default function SettingsView({
   // Registry and provider/settings probes are independent. Starting them
   // together avoids an unnecessary request waterfall on a first open.
   const modelRegistryQuery = modelQueries.registry.useQuery()
+  const modelProviderOrder = providerOrderFor(modelRegistryQuery.data)
+  const modelProviderInfo = Object.fromEntries(modelProviderOrder.map(id => [
+    id, providerInfoFor(id, providerStatusQuery.data),
+  ]))
   const providerError =
     !providerReady && (settingsQuery.isError || providerStatusQuery.isError)
   const providerErrorMsg =
@@ -1125,6 +1130,7 @@ export default function SettingsView({
                     <BackgroundProviderRow
                       key={row.provider}
                       row={row}
+                      providerInfo={modelProviderInfo[row.provider]}
                       index={index}
                       models={modelsForProvider(row.provider)}
                       dragging={backgroundDrag?.fromIndex === index}
@@ -1166,8 +1172,8 @@ export default function SettingsView({
               {manageModelsOpen && (
                 <ManageModelsModal
                   onClose={() => setManageModelsOpen(false)}
-                  providerOrder={PROVIDER_ORDER}
-                  providerInfo={PROVIDER_INFO}
+                  providerOrder={modelProviderOrder}
+                  providerInfo={modelProviderInfo}
                   configuredProviders={configuredProviders}
                 />
               )}

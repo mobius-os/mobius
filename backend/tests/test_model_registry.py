@@ -98,6 +98,45 @@ def test_default_model_visibility_is_curated_until_owner_saves_preferences():
   assert providers.hidden_model_ids({"hidden_ids": []}) == []
 
 
+@pytest.mark.asyncio
+async def test_mobius_switch_filters_picker_and_default_without_hiding_other_models(
+  tmp_path, monkeypatch,
+):
+  data_dir = str(tmp_path)
+  assert providers.mobius_models_enabled(data_dir)
+  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  declaration = {
+    "name": "Möbius", "base_url": "http://127.0.0.1:8765/v1",
+    "default_model": "inkling", "transport": "identity_broker",
+    "models": [{"id": "spark", "label": "Spark", "effort_levels": ["minimal", "low", "medium", "high", "max"]},
+               {"id": "inkling", "label": "Evolve"}],
+  }
+  providers.PROVIDERS["mobius"].set_declaration(6, declaration)
+  providers.invalidate_model_cache()
+  try:
+    for provider_id in providers.PROVIDERS:
+      providers._model_registry_cache[provider_id] = (
+        time.monotonic(), providers._fallback_models(provider_id),
+      )
+    before = await providers.list_models(data_dir)
+    assert "mobius" in before
+    assert "claude" in before and "codex" in before
+    assert providers.update_agent_settings(
+      data_dir, lambda settings: {**settings, "mobius_models_enabled": False},
+    )
+    assert not providers.mobius_models_enabled(data_dir)
+    after = await providers.list_models(data_dir)
+    assert "mobius" not in after
+    assert "claude" in after and "codex" in after
+    assert providers.PROVIDERS["mobius"].check_auth(data_dir) == (
+      "This model provider is turned off in its app."
+    )
+    assert providers.resolve_default_provider(data_dir, "mobius") != "mobius"
+  finally:
+    providers.PROVIDERS["mobius"].set_declaration(None, None)
+    providers.invalidate_model_cache()
+
+
 def test_fallback_models_shape_matches_registry_entries():
   """`_fallback_models` returns the same {id,label,provider,available}
   shape the live path produces, so the picker renders identically whether
@@ -141,42 +180,31 @@ def test_model_specific_effort_levels_are_registry_metadata(monkeypatch):
 
 
 def test_mobius_effort_scale_uses_the_public_product_model():
-  assert providers.MODEL_EFFORT_LEVELS["spark"] == [
-    "minimal", "low", "medium", "high", "max",
-  ]
-  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
-    "minimal", "low", "medium", "high", "max",
-  ]
-  for model_id in ("reflect", "flow", "prism"):
-    assert providers.MODEL_EFFORT_LEVELS[model_id] == [
-      "minimal", "low", "medium", "high", "max",
-    ]
+  assert "spark" not in providers.MODEL_EFFORT_LEVELS
+  assert "inkling" not in providers.MODEL_EFFORT_LEVELS
 
 
 @pytest.mark.asyncio
-async def test_unlinked_mobius_registry_skips_protected_broker_request(
+async def test_mobius_registry_uses_accepted_app_catalog_without_broker_request(
   tmp_path, monkeypatch,
 ):
-  """Disconnected identity is expected state, not a broker 401 failure."""
+  """The accepted declaration owns stable picker IDs, even if the broker differs."""
   monkeypatch.setattr(
     providers.MobiusProvider,
     "check_auth",
-    lambda self, _data_dir: "not linked",
+    lambda self, _data_dir: None,
   )
 
   class ForbiddenClient:
     def __init__(self, *args, **kwargs):
-      raise AssertionError("unlinked model discovery must not call the broker")
+      raise AssertionError("accepted app model discovery must not call the broker")
 
   monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
 
-  rows = await providers._fetch_provider_models("mobius", str(tmp_path))
-  assert [row["id"] for row in rows] == providers.KNOWN_MODELS["mobius"]
-  assert [row["label"] for row in rows] == [
-    "Spark (Qwen3.8 27B)", "Evolve",
-    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
-    "Prism (Gemini 3.8 Flash)",
-  ]
+  provider = providers.MobiusProvider()
+  provider.set_declaration(6, {"name": "Möbius", "base_url": "http://127.0.0.1:8765/v1", "models": [{"id": "inkling", "label": "Evolve"}]})
+  rows = await provider.fetch_models(str(tmp_path))
+  assert rows == [{"id": "inkling", "label": "Evolve"}]
 
 
 # --- Expired-token refresh (the 401 root cause) -----------------------
@@ -420,12 +448,7 @@ def test_claude_fallback_context_matches_documented_model_limit():
   assert by_id["claude-haiku-4-5-20251001"]["context_window"] == 200_000
 
 
-def test_mobius_live_context_is_clamped_to_the_trial_cap():
-  """The catalog advertises the raw spec; the trial broker enforces a cap.
-
-  Real runs report the capped modelContextWindow, so the registry must not
-  advertise a larger pre-turn estimate than a completed turn will confirm.
-  """
+def test_live_context_uses_provider_catalog_without_product_specific_cap():
   entries = providers._live_model_entries("mobius", [
     {
       "id": "flow",
@@ -435,6 +458,6 @@ def test_mobius_live_context_is_clamped_to_the_trial_cap():
     {"id": "mystery-model", "context_window": 50_000},
   ])
   by_id = {entry["id"]: entry for entry in entries}
-  assert by_id["flow"]["context_window"] == 943_718
+  assert by_id["flow"]["context_window"] == 1_048_576
   # A model without a known cap keeps its catalog value.
   assert by_id["mystery-model"]["context_window"] == 50_000

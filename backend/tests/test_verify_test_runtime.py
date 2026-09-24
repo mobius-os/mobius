@@ -335,12 +335,13 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     dockerfile.index("# Capture each installed agent CLI's publish date")
   ]
   assert "pip install --no-cache-dir --no-deps" in codex_layer
-  assert re.search(r"pip install --no-cache-dir 'openai-codex-cli-bin==\d+\.\d+\.\d+'", codex_layer)
+  assert '"openai-codex==${CODEX_SDK_VERSION}"' in codex_layer
+  assert '"openai-codex-cli-bin==${CODEX_SDK_VERSION}"' in codex_layer
   assert 'rm -rf "${_codex_cli_bin}/bin"' in codex_layer
   assert 'ln -s /usr/local/bin/codex "${_codex_cli_bin}/bin/codex"' in codex_layer
   assert "bundled_codex_path().samefile" in codex_layer
   assert "pip check" in codex_layer
-  assert "declared cli-bin package is retained for SDK compatibility" in requirements
+  assert "matching cli-bin package is retained for SDK compatibility" in requirements
 
 
 def test_production_image_keeps_persistent_sso_checkouts_bootable():
@@ -734,7 +735,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "pull_request:\n" in test_triggers
   assert "workflow_dispatch:\n" in test_triggers
   assert "push:\n" not in test_triggers
-  assert "openai-codex @ git+https://github.com/openai/codex.git@fe74a774" in backend
+  assert "openai-codex==$(sed -n 's/^ARG CODEX_SDK_VERSION=//p' Dockerfile)" in backend
   for job in (backend, e2e):
     assert "github.event_name == 'pull_request'" not in job
     assert "refs/heads/integration/" not in job

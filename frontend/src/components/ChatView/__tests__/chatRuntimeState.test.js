@@ -10,6 +10,8 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  combineOwnerMessagesForDisplay,
+  ownerMessageBatch,
   startsFollowingTurn,
   jumpToLatestShown,
   runtimeSnapshotTransition,
@@ -67,6 +69,40 @@ test('automatic and manual continuations are product markers, not owner messages
   assert.equal(startsFollowingTurn(marker), true)
   assert.equal(startsFollowingTurn({ role: 'user', content: 'hello' }), true)
   assert.equal(startsFollowingTurn({ role: 'assistant', content: 'reply' }), false)
+})
+
+test('owner rows delivered together display as one message with their boundaries', () => {
+  const messages = [
+    { role: 'assistant', content: 'Earlier' },
+    { role: 'user', cid: 'a', content: 'First', provider_batch: { id: 'a', index: 0, count: 3 } },
+    { role: 'user', cid: 'b', content: 'Second', provider_batch: { id: 'a', index: 1, count: 3 } },
+    { role: 'user', cid: 'c', content: 'Third', provider_batch: { id: 'a', index: 2, count: 3 } },
+    { role: 'assistant', content: 'Reply' },
+  ]
+  assert.deepEqual(ownerMessageBatch(messages, 1), { start: 1, end: 3, first: true })
+  assert.deepEqual(ownerMessageBatch(messages, 3), { start: 1, end: 3, first: false })
+  assert.equal(ownerMessageBatch(messages, 0), null)
+  assert.equal(ownerMessageBatch([
+    { role: 'user', content: 'Adjacent but separately delivered' },
+    { role: 'user', content: 'No inferred batch' },
+  ], 0), null)
+  assert.equal(ownerMessageBatch([{ ...messages[1], provider_batch: { id: 'a', count: 2 } }], 0), null)
+  assert.equal(ownerMessageBatch([messages[1], messages[3]], 0), null,
+    'an incomplete durable batch must not swallow unrelated rows')
+
+  const displayed = combineOwnerMessagesForDisplay(messages.slice(1, 4))
+  assert.equal(displayed.cid, 'a', 'the first durable row remains the visible identity')
+  assert.equal(displayed.content, 'First\n\nSecond\n\nThird')
+  assert.deepEqual(displayed.segments, ['First', 'Second', 'Third'])
+  assert.equal(combineOwnerMessagesForDisplay(messages.slice(1, 4)), displayed,
+    'unchanged members reuse the combined row so memoized bubbles skip re-render')
+
+  const imageOnly = { role: 'user', cid: 'i', content: '[Files in this session:\n- photo.png]' }
+  assert.deepEqual(
+    combineOwnerMessagesForDisplay([messages[1], imageOnly]).segments,
+    ['First'],
+    'an upload-only message adds no empty segment or stray divider',
+  )
 })
 
 test('a continuation supersedes the resumable pause it completed', () => {

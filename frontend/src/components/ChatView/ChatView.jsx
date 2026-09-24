@@ -33,6 +33,7 @@ import {
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
+import { cachedActivationRetryDelay } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -198,6 +199,8 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  combineOwnerMessagesForDisplay,
+  ownerMessageBatch,
   jumpToLatestShown,
   runtimeSnapshot,
   runtimeSnapshotTransition,
@@ -557,11 +560,12 @@ export default function ChatView({
   // render the empty-state UI ("What's on your mind?") as if the chat had no
   // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
-  // Bumped by either activation Retry surface to re-run the load effect in
+  // Bumped by a manual empty-load retry or quiet cached recovery to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
+  const cachedActivationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
@@ -2447,6 +2451,13 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
+    const recovery = cachedActivationRecoveryRef.current
+    if (recovery.chatId !== String(activationIdentity)) {
+      if (recovery.timer) clearTimeout(recovery.timer)
+      cachedActivationRecoveryRef.current = {
+        chatId: String(activationIdentity), attempts: 0, timer: null,
+      }
+    }
     setActivationPhase('pending')
     let cancelled = false
     const initialLoadController = new AbortController()
@@ -2539,6 +2550,7 @@ export default function ChatView({
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
       commitRuntimeSnapshot(transition)
+      cachedActivationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
@@ -2872,6 +2884,22 @@ export default function ChatView({
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
+        if (cacheIsSafeFallback) {
+          const retry = cachedActivationRetryDelay(
+            err,
+            cachedActivationRecoveryRef.current.attempts,
+          )
+          if (retry != null) {
+            const retryState = cachedActivationRecoveryRef.current
+            retryState.attempts += 1
+            retryState.timer = setTimeout(() => {
+              retryState.timer = null
+              setActivationPhase('pending')
+              setLoading(true)
+              setLoadNonce(nonce => nonce + 1)
+            }, retry)
+          }
+        }
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
             ? activationCache.messages
@@ -2895,6 +2923,10 @@ export default function ChatView({
         // cleanup, so modeRef is captured for the chat we're leaving.)
       } catch {}
       cancelled = true
+      if (cachedActivationRecoveryRef.current.timer) {
+        clearTimeout(cachedActivationRecoveryRef.current.timer)
+        cachedActivationRecoveryRef.current.timer = null
+      }
       initialLoadController.abort()
       chatIdStaleRef.current = true
       disconnect()
@@ -5205,7 +5237,6 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
-  const showActivationRetry = activationPhase === 'error' && !loadError
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
@@ -5243,7 +5274,8 @@ export default function ChatView({
       messageMatchesKey(message, offset + index, searchReveal.anchorKey)
     ))
     if (localIndex < 0) return
-    const canonicalKey = messageKey(messages[localIndex], offset + localIndex)
+    const renderIndex = ownerMessageBatch(messages, localIndex)?.start ?? localIndex
+    const canonicalKey = messageKey(messages[renderIndex], offset + renderIndex)
     const row = [...(scrollRef.current?.querySelectorAll('.chat__msg[data-key]') || [])]
       .find(element => element.dataset.key === canonicalKey)
     if (!canonicalKey || !row) return
@@ -5743,6 +5775,9 @@ export default function ChatView({
     setActive: setFileDropActive,
     onFiles: handleComposerAddFiles,
   })
+  const reservedSteerMessage = combineOwnerMessagesForDisplay(
+    pendingQueue.steerReservedMessages,
+  )
 
   return (
     <div
@@ -5900,8 +5935,16 @@ export default function ChatView({
             const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
             const projectedMsg = peerTimeline.messages[i] || msg
             if (projectedMsg.hidden) return [peerRows]
+            const ownerBatch = ownerMessageBatch(displayedMessages, i)
+            if (ownerBatch && !ownerBatch.first) return [peerRows]
+            const renderedMsg = ownerBatch
+              ? combineOwnerMessagesForDisplay(
+                  peerTimeline.messages.slice(ownerBatch.start, ownerBatch.end + 1),
+                )
+              : projectedMsg
             const continuationMarker = isContinuationMessage(msg)
-            const isLastMsg = i === lastVisibleMessageIndex
+            const renderedEndIndex = ownerBatch?.end ?? i
+            const isLastMsg = renderedEndIndex === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
             // that row; unrelated assistant history remains in this map.
@@ -5949,26 +5992,26 @@ export default function ChatView({
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the revealed metadata row.
-            const ownerUserMessage = isOwnerUserMessage(msg)
-            const userCid = ownerUserMessage ? cidOf(msg) : null
-            const copyText = ownerUserMessage ? messageCopyText(msg) : ''
-            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
+            const ownerUserMessage = isOwnerUserMessage(renderedMsg)
+            const userCid = ownerUserMessage ? cidOf(renderedMsg) : null
+            const copyText = ownerUserMessage ? messageCopyText(renderedMsg) : ''
+            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && renderedMsg.ts))
             return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
               tabIndex={-1}
-              ref={i === lastUserIdx ? setLastUserMsgRef : null}
+              ref={renderedEndIndex === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-anchor-key={anchorKey === dataKey ? undefined : anchorKey}
               data-cid={userCid || undefined}
-              data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
+              data-ts={ownerUserMessage && renderedMsg.ts ? String(renderedMsg.ts) : undefined}
               onClick={hasMessageMeta
                 ? (event) => showMessageMeta(event, dataKey)
                 : undefined}
             >
               <MsgContent
-                msg={peerTimeline.messages[i]}
+                msg={renderedMsg}
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
@@ -6002,7 +6045,7 @@ export default function ChatView({
                 resumeCardRef={resumeCardRef}
               />
               <MessageMetaRow
-                timestamp={ownerUserMessage ? msg.ts : null}
+                timestamp={ownerUserMessage ? renderedMsg.ts : null}
                 copyText={copyText}
                 visible={visibleMessageMetaKey === dataKey}
               />
@@ -6091,10 +6134,10 @@ export default function ChatView({
               after the active assistant segment. The authoritative cut seals
               that segment and replaces these provisional rows with the same
               cid-keyed messages, so provider latency never hides owner text. */}
-          {pendingQueue.steerReservedMessages.map((msg, i) => {
-            const cid = cidOf(msg)
-            const dataKey = `steer-pending-${cid || i}`
-            const copyText = messageCopyText(msg)
+          {reservedSteerMessage && (() => {
+            const cid = cidOf(reservedSteerMessage)
+            const dataKey = `steer-pending-${cid || 'batch'}`
+            const copyText = messageCopyText(reservedSteerMessage)
             return (
               <li
                 key={cid || dataKey}
@@ -6102,25 +6145,25 @@ export default function ChatView({
                 tabIndex={-1}
                 data-key={dataKey}
                 data-cid={cid || undefined}
-                data-ts={msg.ts ? String(msg.ts) : undefined}
+                data-ts={reservedSteerMessage.ts ? String(reservedSteerMessage.ts) : undefined}
                 data-steer-pending="true"
                 onClick={copyText
                   ? event => showMessageMeta(event, dataKey)
                   : undefined}
               >
                 <MsgContent
-                  msg={msg}
+                  msg={reservedSteerMessage}
                   chatId={chatId}
                   messageKey={dataKey}
                 />
                 <MessageMetaRow
-                  timestamp={msg.ts || null}
+                  timestamp={reservedSteerMessage.ts || null}
                   copyText={copyText}
                   visible={visibleMessageMetaKey === dataKey}
                 />
               </li>
             )
-          })}
+          })()}
         </ul>
         </PeerTimelineContext.Provider>
         </LocalAnswersContext.Provider>
@@ -6229,24 +6272,6 @@ export default function ChatView({
             resourcePause={resourcePause}
             onCancel={handleCancelWait}
           />
-        )}
-        {showActivationRetry && (
-          <div
-            className="chat__offline-note chat__offline-note--error chat__activation-retry"
-            role="alert"
-            aria-live="assertive"
-            aria-atomic="true"
-          >
-            <span>Chat activation needs a retry before sending.</span>
-            <button
-              type="button"
-              className="chat__empty-action"
-              onPointerDown={event => event.preventDefault()}
-              onClick={retryActivation}
-            >
-              Retry
-            </button>
-          </div>
         )}
         <ConnectionStatus
           error={connectionError}

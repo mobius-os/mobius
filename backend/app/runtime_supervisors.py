@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -30,6 +31,10 @@ AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
 CAPACITY_MONITOR_INTERVAL_SECS = 300.0
 CAPACITY_MONITOR_DOMAIN_EVERY_N_TICKS = 6
 PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
+# Retention may briefly close new-run admission so a busy installation gets a
+# real maintenance opportunity. Existing runs are never stopped.
+PROVIDER_SESSION_RETENTION_QUIESCE_TIMEOUT_SECS = 30.0
+PROVIDER_SESSION_RETENTION_QUIESCE_POLL_SECS = 0.25
 # OOM watchdog: the counter read is a single tiny file, but the per-tick process
 # sample walks the cgroup, so we sample fast only through the boot window (when a
 # resume burst can OOM) and back off afterwards. The kernel's oom_kill counter is
@@ -37,6 +42,12 @@ PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
 OOM_WATCHDOG_FAST_INTERVAL_SECS = 2.0
 OOM_WATCHDOG_SLOW_INTERVAL_SECS = 20.0
 OOM_WATCHDOG_FAST_WINDOW_SECS = 180.0
+REQUIRED_DATABASE_SUPERVISORS = frozenset({
+  "wedged-marker-sweep",
+  "reset-park-sweep",
+  "chat-wait-sweep",
+  "writer-supervisor",
+})
 
 
 class RuntimeSettings(Protocol):
@@ -48,20 +59,41 @@ async def sweep_provider_sessions_if_idle(
   *,
   sweep=None,
   runner_registry=None,
+  quiesce_timeout_secs: float = PROVIDER_SESSION_RETENTION_QUIESCE_TIMEOUT_SECS,
 ) -> dict:
-  """Run filesystem retention behind an atomic idle-runner boundary."""
+  """Run retention after a bounded, non-disruptive runner drain.
+
+  Closing admission first prevents a busy installation from continually
+  missing the instant when it happens to be idle. Existing runners drain
+  normally; a timeout defers maintenance rather than interrupting work.
+  """
   if sweep is None:
     from app.provider_session_retention import sweep_stale_provider_sessions
     sweep = sweep_stale_provider_sessions
   if runner_registry is None:
     from app.runner_registry import registry
     runner_registry = registry
-  lease = runner_registry.acquire_idle_admission_lease()
+  lease = runner_registry.acquire_quiescing_admission_lease()
   if lease is None:
-    return {"status": "skipped_active"}
+    return {"status": "skipped_competing_maintenance"}
   try:
+    started = time.monotonic()
+    deadline = started + max(0.0, quiesce_timeout_secs)
+    while not runner_registry.is_idle():
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        return {
+          "status": "deferred_active",
+          "waited_seconds": time.monotonic() - started,
+        }
+      await asyncio.sleep(
+        min(PROVIDER_SESSION_RETENTION_QUIESCE_POLL_SECS, remaining),
+      )
     result = await asyncio.to_thread(sweep, data_dir)
-    return {"status": "completed", **result}
+    return {
+      "waited_seconds": time.monotonic() - started,
+      **result,
+    }
   finally:
     runner_registry.release_admission_lease(lease)
 
@@ -84,6 +116,8 @@ class RuntimeSupervisors:
     self._tasks: dict[str, asyncio.Task] = {}
     self._frontend_observer = None
     self._frontend_handler = None
+    self._database_services_started = False
+    self._database_services_error: str | None = None
 
   def _spawn(self, name: str, coroutine) -> None:
     self._tasks[name] = asyncio.create_task(
@@ -162,13 +196,39 @@ class RuntimeSupervisors:
       await asyncio.sleep(interval)
 
   async def start_database_services(self) -> None:
-    """Start long-lived database work; individual wiring failures fail open."""
+    """Start required database owners and retain an explicit readiness verdict."""
+    before = set(self._tasks)
     try:
       await self._start_chat_supervisors()
+      await asyncio.sleep(0)
+      started = set(self._tasks) - before
+      missing = REQUIRED_DATABASE_SUPERVISORS - started
+      if missing:
+        raise RuntimeError(
+          "required runtime supervisors were not started: "
+          + ", ".join(sorted(missing))
+        )
+      self._database_services_started = True
+      self._database_services_error = None
     except Exception as exc:
+      self._database_services_error = str(exc)
       self.log.error(
         "chat supervisor wiring failed: %s", exc, exc_info=True,
       )
+
+  def database_service_readiness(self) -> tuple[bool, str]:
+    """Report whether every required database supervisor still has an owner."""
+    if self._database_services_error:
+      return False, "runtime_supervisor_start_failed"
+    if not self._database_services_started:
+      return False, "runtime_supervisors_not_started"
+    stopped = sorted(
+      name for name in REQUIRED_DATABASE_SUPERVISORS
+      if name not in self._tasks or self._tasks[name].done()
+    )
+    if stopped:
+      return False, "runtime_supervisor_stopped"
+    return True, ""
 
   async def _start_frontend_watcher(self) -> None:
     try:
@@ -242,7 +302,9 @@ class RuntimeSupervisors:
               async with asyncio.timeout(60):
                 while True:
                   event = await events.get()
-                  if event and event.get("type") == "chat_run_finished":
+                  if event and event.get("type") in {
+                    "chat_run_finished", "platform_boot_ready",
+                  }:
                     break
             except asyncio.TimeoutError:
               pass
@@ -268,14 +330,28 @@ class RuntimeSupervisors:
       # rows are the promise; this loop restarting with the server is what
       # makes a declared wait restart-immune.
       from app.chat_waits import sweep_due_waits
-      while True:
-        await asyncio.sleep(CHAT_WAIT_SWEEP_INTERVAL_SECS)
-        try:
-          await sweep_due_waits()
-        except asyncio.CancelledError:
-          raise
-        except Exception as exc:
-          self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
+      system_broadcast = get_system_broadcast()
+      events = system_broadcast.subscribe()
+      try:
+        while True:
+          force_kind = None
+          try:
+            async with asyncio.timeout(CHAT_WAIT_SWEEP_INTERVAL_SECS):
+              while True:
+                event = await events.get()
+                if event and event.get("type") == "platform_boot_ready":
+                  force_kind = "platform_activation"
+                  break
+          except asyncio.TimeoutError:
+            pass
+          try:
+            await sweep_due_waits(force_kind=force_kind)
+          except asyncio.CancelledError:
+            raise
+          except Exception as exc:
+            self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
+      finally:
+        system_broadcast.unsubscribe(events)
 
     async def delegation_startup_recovery_loop():
       # Startup admission and source-attached work have their own repair path;
@@ -487,9 +563,20 @@ class RuntimeSupervisors:
           result = await sweep_provider_sessions_if_idle(
             self.settings.data_dir,
           )
+          if result["status"] == "deferred_active":
+            self.log.info(
+              "provider session retention deferred after %.1fs waiting for active agents",
+              result["waited_seconds"],
+            )
+            continue
+          if result["status"] == "skipped_competing_maintenance":
+            self.log.info(
+              "provider session retention skipped by another maintenance boundary",
+            )
+            continue
           if result["status"] == "skipped_active":
             self.log.info(
-              "provider session retention skipped while agents are active",
+              "provider session retention skipped while an external Codex process holds its lock",
             )
             continue
           if result["reclaimed_bytes"]:

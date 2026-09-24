@@ -141,6 +141,22 @@ test('a client startup failure is visible even before a request is recorded', as
   assert.match(result.current.error, /Couldn’t open the chat/)
 })
 
+test('a delivered repair request navigates straight to its chat in the working shell', async t => {
+  const browser = installBrowser(t)
+  browser.stubChats({
+    create: async () => ({ ok: true, json: async () => ({ id: 'repair-chat' }) }),
+    send: async () => ({ ok: true }),
+  })
+  const { result } = renderHook(useAgentRepair, {
+    surfaceKey: SURFACE, prompt: 'help',
+    repairTransport: () => ({ client: browser.client, base: '' }),
+  })
+
+  await result.current.repair()
+
+  assert.deepEqual(browser.assigned, ['/shell/?chat=repair-chat&repair=1'])
+})
+
 test('a restored page cannot navigate from a response that settled just before cancellation', async t => {
   const browser = installBrowser(t)
   let finishSend

@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { Fragment, memo } from 'react'
 import { usePositionedPeerNotes } from './peerTimelineContext.js'
 import {
   insertPositionedActivity,
@@ -99,6 +99,17 @@ function UserMessageText({ text }) {
       <span className="chat__goal-message-objective">{goalObjective}</span>
     </span>
   )
+}
+
+/** Owner messages delivered together render as ONE bubble (one row for
+ * spacing/scroll) with a quiet squiggle where each original message began. */
+function UserMessageSegments({ segments }) {
+  return segments.map((segment, i) => (
+    <Fragment key={i}>
+      {i > 0 && <span className="chat__batch-squiggle" aria-hidden="true" />}
+      <UserMessageText text={segment} />
+    </Fragment>
+  ))
 }
 
 function GoalHistory({ msg }) {
@@ -222,7 +233,12 @@ function MsgContentInner({
     // positions — and their keys — are stable mid-run too.)
     const entries = displayBlocks
       .map((block, i) => ({ item: block, rawIdx: i }))
-      .filter(({ rawIdx }) => !skipToolIdx.has(rawIdx))
+      // Deliverables render once in the dedicated post-answer surface below.
+      // Excluding that non-inline block here also keeps the actual visible
+      // tail authoritative for Resume/Try-now ownership.
+      .filter(({ item, rawIdx }) => (
+        item.type !== 'generated_files' && !skipToolIdx.has(rawIdx)
+      ))
       .map(({ item }, pos) => ({ item, idx: pos }))
     // Repair already-persisted transcripts where a continuous reasoning pass was
     // fragmented into many thinking blocks: coalesce runs of adjacent thinking
@@ -581,6 +597,18 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
+        {/* Deliverables are one turn-owned block rendered after the final text.
+            Keep them hidden while prose is still moving. */}
+        {msg.role === 'assistant' && !isStreaming && (() => {
+          const allFiles = (msg.blocks || []).flatMap(b =>
+            b.type === 'generated_files' && Array.isArray(b.files)
+              ? b.files.map(f => ({ ...f, kind: 'generated' }))
+              : []
+          )
+          return allFiles.length > 0
+            ? <Attachments attachments={allFiles} chatId={chatId} />
+            : null
+        })()}
         {/* Web sources collected from the turn's tool blocks and shown once
             after the answer. Memory keeps its own richer lookup card inline. */}
         {msg.role === 'assistant' && !isStreaming && (
@@ -622,7 +650,11 @@ function MsgContentInner({
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)
-            : msg.role === 'user' ? <UserMessageText text={text} /> : text}
+            : msg.role === 'user'
+              ? (msg.segments?.length > 1
+                  ? <UserMessageSegments segments={msg.segments} />
+                  : <UserMessageText text={text} />)
+              : text}
         </div>
       ) : null}
       {!isStreaming && <GoalHistory msg={msg} />}

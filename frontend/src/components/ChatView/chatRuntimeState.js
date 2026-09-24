@@ -4,11 +4,29 @@
  */
 
 import { groupActivityRuns } from './activityGrouping.js'
+import { stripAugmentation } from './msgText.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
     || message?.kind === 'auto_continuation'
+}
+
+/** Cached history may stay readable during a transient runtime-read failure.
+ * Retry only transport/server failures, and only a small fixed number of
+ * times; permanent client errors and missing chats need a different remedy. */
+export function cachedActivationRetryDelay(error, attempt) {
+  const message = String(error?.message || '')
+  const transientNetworkError = error?.name === 'TypeError'
+    && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
+  const transient = transientNetworkError
+    || error?.name === 'TimeoutError'
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
+    || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
+  if (!transient || !Number.isInteger(attempt) || attempt < 0 || attempt >= 3) {
+    return null
+  }
+  return [750, 2000, 5000][attempt]
 }
 
 /**
@@ -57,6 +75,54 @@ export function isOwnerUserMessage(message) {
     && message.role === 'user'
     && !message.hidden
     && !isContinuationMessage(message)
+}
+
+/** The complete, contiguous batch of owner rows that reached the provider as
+ * one input, or null for an ordinary row or an incomplete marker. */
+export function ownerMessageBatch(messages, index) {
+  const batch = messages[index]?.provider_batch
+  if (!isOwnerUserMessage(messages[index]) || !batch?.id
+      || !Number.isInteger(batch.index) || !(batch.count > 1)) return null
+  const start = index - batch.index
+  const end = start + batch.count - 1
+  if (start < 0 || end >= messages.length) return null
+  const complete = messages.slice(start, end + 1).every((member, i) => (
+    isOwnerUserMessage(member)
+    && member.provider_batch?.id === batch.id
+    && member.provider_batch?.index === i
+    && member.provider_batch?.count === batch.count
+  ))
+  return complete ? { start, end, first: batch.index === 0 } : null
+}
+
+const combinedOwnerMessages = new WeakMap()
+
+/** One provider submission is one visible owner message, even when the
+ * durable transcript retains its independently addressable source rows. The
+ * result is reused while the member rows are unchanged, so a memoized bubble
+ * does not re-render on every streaming tick. */
+export function combineOwnerMessagesForDisplay(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null
+  if (messages.length === 1) return messages[0]
+  const cached = combinedOwnerMessages.get(messages[0])
+  if (cached?.members.length === messages.length
+      && cached.members.every((member, i) => member === messages[i])) {
+    return cached.combined
+  }
+  const attachments = messages.flatMap(message => message.attachments || [])
+  // `segments` keeps each original message's visible text so the bubble can
+  // mark the boundaries; `content` stays the joined text copy reads.
+  const segments = messages
+    .map(message => stripAugmentation(String(message.content || '')).trim())
+    .filter(Boolean)
+  const combined = {
+    ...messages[0],
+    content: segments.join('\n\n'),
+    segments,
+    ...(attachments.length ? { attachments } : {}),
+  }
+  combinedOwnerMessages.set(messages[0], { members: [...messages], combined })
+  return combined
 }
 
 /**

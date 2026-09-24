@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity
+from app import activity, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -100,7 +100,6 @@ from app.platform_tools import (
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
 )
-from app.progress_lease import ProgressLease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -193,7 +192,7 @@ async def _await_control_mcp_ready(
 # register: appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -234,6 +233,7 @@ _CLAUDE_UNUSED_BUILTINS = (
   "ReportFindings",
   "PushNotification",
 )
+
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
 # helper fallbacks, which print the same receipt. Naming them keeps the card-end
@@ -274,39 +274,20 @@ def _claude_cli_path() -> str:
   return _CLAUDE_CLI
 
 
-async def _drain_background_tasks(
-  client, bc, native_work, session_id, chat_id, usage_state,
-):
-  """Carry Claude's native background wake through its follow-up result.
+_HELPER_REPORT_LOST = (
+  "Background work ended before Claude reported its results back. "
+  "The reply above is saved; ask again to redo the background work."
+)
 
-  The main agent's terminal ResultMessage ends the TURN, not the background
-  work it spawned. Claude Code completes a native child, wakes the parent
-  itself, and emits a later ResultMessage for that follow-up turn. Keep the
-  same client open until that later result; a
-  task_done notification alone is too early because reaping there discards the
-  parent's synthesis.
 
-  There is no timer or second scheduler: the provider's real follow-up result is
-  the boundary. Stop/restart still interrupts the existing process normally. A
-  stream error fails safe into the ordinary reap.
-  """
-  try:
-    async for sdk_msg in client.receive_messages():
-      session_id, terminal = dispatch_sdk_message(
-        sdk_msg,
-        bc,
-        session_id,
-        native_work=native_work,
-        usage_state=usage_state,
-      )
-      if terminal is not None and not native_work.observe_result():
-        return session_id, terminal
-  except Exception as exc:
-    log.warning(
-      "background-task drain ended early chat_id=%s pending=%d: %s",
-      chat_id, native_work.pending_count, exc,
-    )
-  return session_id, None
+def _helper_phase_spend(helper_result: dict[str, Any] | None) -> dict[str, Any]:
+  """Cost and usage already spent before a turn's helper phase ended early."""
+  if helper_result is None:
+    return {"cost_usd": None, "usage": None}
+  return {
+    "cost_usd": helper_result.get("cost_usd"),
+    "usage": helper_result.get("usage"),
+  }
 
 
 def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
@@ -606,6 +587,23 @@ class ActiveClaudeClient:
       self._interrupt_owner = self._interrupt_owner or "steer"
       await self._client.interrupt()
     return True
+
+  def take_steer_for_requery(self, *, interrupt_landed: bool) -> list[str]:
+    """Drain buffered steer texts at a terminal; close a landed steer cut.
+
+    Once the steer's own interrupt has produced its terminal, the requery that
+    delivers the steer is fresh model work in the same turn. A "steer" owner
+    left sticky past that point made `claim_owner_card_end` refuse every later
+    card in the turn, so text written after a saved card persisted below it.
+    When the interrupt has NOT landed (a clean terminal won the race), it can
+    still abort the requery segment, so ownership stays to defuse that stray
+    cut. A Stop stays sticky; it always wins.
+    """
+    self._interrupt_in_flight = False
+    if interrupt_landed and self._interrupt_owner == "steer":
+      self._interrupt_owner = None
+    texts, self.pending_steer = self.pending_steer, []
+    return texts
 
   def claim_owner_card_end(self) -> bool:
     """Own this turn's end at the saved owner card, cutting no generation yet.
@@ -1137,13 +1135,18 @@ async def run_claude_sdk_turn(
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
   active_client: ActiveClaudeClient | None = None
-  # Progress lease: renewed as this turn emits SDK messages so a stalled model
-  # stream (alive process, no progress) lapses and recovery can reclaim it.
-  lease = ProgressLease(chat_id)
+  # Generated deliverables use a chat-private directory, so provenance does
+  # not depend on serializing unrelated chats that share cwd=/data.
+  from app.config import get_settings
+  generated_data_dir = get_settings().data_dir
+  generated_dir = generated_files.output_dir(
+    generated_data_dir, chat_id, create=True,
+  )
   base_env = dict(base_env)
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  base_env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -1412,7 +1415,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": _system_prompt_with_register(skill_text),
+      "system_prompt": (
+        _system_prompt_with_register(skill_text).rstrip()
+        + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
+      ),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
@@ -1521,6 +1527,10 @@ async def run_claude_sdk_turn(
 
     active_client = ActiveClaudeClient(client, chat_id=chat_id)
     registry.register(active_client)
+    # The root result reached while native helpers still owe a follow-up. Its
+    # cost and usage are already spent, so any exit before the follow-up keeps
+    # them.
+    helper_result: dict[str, Any] | None = None
 
     try:
       try:
@@ -1586,14 +1596,8 @@ async def run_claude_sdk_turn(
       # ResultMessage aggregate. Keep the latest call across retries, steers,
       # and native background follow-ups so context occupancy stays exact.
       usage_state: dict[str, Any] = {}
-      # Arm the model-idle lease before the first token; a first-token stall
-      # then lapses and is reclaimed like any other stall.
-      lease.start()
       while True:
         async for sdk_msg in client.receive_response():
-          lease.note_message(
-            sdk_msg, is_root=is_root_conversation_message(sdk_msg),
-          )
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -1661,15 +1665,18 @@ async def run_claude_sdk_turn(
               if not active_client.interrupt_requested:
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
-          # fresh boundary cut may fire on a later turn.
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # fresh boundary cut or a saved owner card may end a later segment.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
+              sdk_msg.stop_reason == "interrupt"
+              or sdk_msg.subtype == "error_during_execution"
+            ),
+          )
           if steer_texts:
             # Seal A1 + append the steered row(s) BEFORE the requery so the
             # answer (A2) lands as a fresh message. The turn-end finally is the
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -1695,6 +1702,7 @@ async def run_claude_sdk_turn(
             and terminal.get("api_error_status") != 429  # not a bare 429/park
             and not active_client.pending_steer
             and not did_auto_requery
+            and helper_result is None         # nor a helper follow-up
             and len(bc.assistant_blocks) == 0  # zero blocks: the synthetic no-op
           ):
             # The `stop_reason != "interrupt"` guard is load-bearing: the block
@@ -1714,19 +1722,14 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
-          # A native task owns a later parent continuation.
-          # This also covers a fast task that settles immediately before the
-          # spawning result, when a plain in-flight set would already be empty.
+          # Native work owns a later parent continuation: keep reading this
+          # same stream until Claude's follow-up result.
           if (
             not active_client.interrupt_requested
             and native_work.observe_result()
           ):
-            current_session_id, followup = await _drain_background_tasks(
-              client, bc, native_work, current_session_id, chat_id, usage_state,
-            )
-            if followup is not None:
-              terminal = followup
-              cost_usd = terminal.get("cost_usd")
+            helper_result = terminal
+            break
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered
@@ -1734,29 +1737,25 @@ async def run_claude_sdk_turn(
           # fired — e.g. a tool-only turn with no AssistantMessage text
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=False,
+          )
           if steer_texts:
             # Seal A1 before the requery (see the terminal-result branch); the
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
             continue
           break
 
-      # Reaching here means the outer while broke out of the resultless-end
-      # path above (line ~1237): the SDK stream ended WITHOUT a terminal
-      # ResultMessage and with no pending steer to requery. A successful turn
-      # returns its terminal at `return terminal` above and never falls
-      # through here. So this is an error exit, not a clean turn — the CLI
-      # died mid-stream (early resume failure, auth, OOM/SIGTERM kill) before
-      # emitting a result. Return it error-shaped so chat.py publishes the
-      # error and finalize() persists a durable error block, instead of the
-      # old silent `error=None` that logged a clean $0 "done" and let the
-      # just-consumed user message go unanswered with nothing to reconcile.
+      # Reached only when the stream ended with no result for the current
+      # phase (before the first result, or mid-helper after one) and no steer
+      # to re-send. That is an error exit, not a clean turn: return it
+      # error-shaped so chat.py publishes it and finalize() persists a durable
+      # error block instead of a silent clean $0 "done".
       if active_client.interrupt_requested:
         # A graceful interrupt may close the response stream without its usual
         # ResultMessage. The local ownership flag is enough here: there is no
@@ -1768,9 +1767,16 @@ async def run_claude_sdk_turn(
         return {
           "session_id": current_session_id,
           "cost_usd": cost_usd,
-          "usage": None,
+          "usage": _helper_phase_spend(helper_result)["usage"],
           "error": None,
           "terminal_status": "interrupted",
+        }
+      if helper_result is not None:
+        # The reply is already saved; only the helper's report back was lost.
+        return {
+          **_helper_phase_spend(helper_result),
+          "session_id": current_session_id,
+          "error": _HELPER_REPORT_LOST,
         }
       return {
         "session_id": current_session_id,
@@ -1796,26 +1802,31 @@ async def run_claude_sdk_turn(
           exc,
         )
         return {
+          **_helper_phase_spend(helper_result),
           "session_id": current_session_id,
-          "cost_usd": None,
-          "usage": None,
           "error": None,
           "terminal_status": "interrupted",
         }
       return {
+        **_helper_phase_spend(helper_result),
         "session_id": current_session_id,
-        "cost_usd": None,
-        "usage": None,
         "error": _process_error_with_stderr_tail(exc, stderr_tail),
       }
     except Exception as exc:
       return {
+        **_helper_phase_spend(helper_result),
         "session_id": current_session_id,
-        "cost_usd": None,
-        "usage": None,
         "error": str(exc),
       }
     finally:
+      try:
+        await generated_files.publish_inbox_files(
+          bc,
+          data_dir=generated_data_dir,
+          chat_id=chat_id,
+        )
+      except Exception:
+        log.debug("generated-file turn capture failed", exc_info=True)
       # Durability catch-all: persist any steer that was buffered but never
       # sealed at a requery boundary — an exception/early return above, or a
       # hard Stop that cleared pending_steer. Runs before disconnect so the

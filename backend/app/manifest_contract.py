@@ -17,7 +17,6 @@ RECOGNIZED_CAPABILITIES = (
   "identity_manage",
   "railway_manage",
 )
-SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
 ENTRY_MAX_BYTES = 1024 * 1024
@@ -35,6 +34,7 @@ PROJECT_TEMPLATES_COUNT_MAX = 12
 PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
+AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
 MAX_JOB_SHEBANG_BYTES = 256
@@ -45,13 +45,48 @@ _SOURCE_FILES_MANAGED_PREFIXES = (
 _SOURCE_FILES_MANAGED_EXACT = frozenset((
   "index.jsx", ".gitignore", "init-cron.sh", ".mobius-static-assets.json",
 ))
-_CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
+_CRON_FIELD_OK = re.compile(r"[0-9\*/,\- ]+", re.ASCII)
 _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
+# A folder skill is `<id>/`: `<id>/SKILL.md` plus sibling markdown the entry
+# links to relatively, mirroring installed ecosystem skills so progressive
+# disclosure travels with the skill instead of pointing into app source.
+_SKILL_FOLDER_OK = re.compile(r"^([a-z0-9][a-z0-9._-]*)/$")
+FOLDER_SKILL_ENTRY = "SKILL.md"
 _PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 
 
 class ManifestContractError(ValueError):
   pass
+
+
+def is_folder_skill_member(name: str) -> bool:
+  """Whether a file directly inside a `<id>/` folder skill may ship with it."""
+  return name == FOLDER_SKILL_ENTRY or _SKILL_FILENAME_OK.fullmatch(name) is not None
+
+
+def skill_member_paths(manifest: dict) -> list[str]:
+  """Every source file a validated manifest's `skills` materializes, in order.
+
+  A root `<id>.md` entry is itself; a `<id>/` folder entry is `<id>/SKILL.md`
+  followed by the other `source_files` directly inside that folder.
+  """
+  declared = [
+    path for path in (manifest.get("source_files") or [])
+    if isinstance(path, str)
+  ]
+  members: list[str] = []
+  for entry in manifest.get("skills") or []:
+    if not isinstance(entry, str):
+      continue
+    if _SKILL_FOLDER_OK.fullmatch(entry) is None:
+      members.append(entry)
+      continue
+    members.append(entry + FOLDER_SKILL_ENTRY)
+    members.extend(
+      path for path in declared
+      if path.startswith(entry) and path != entry + FOLDER_SKILL_ENTRY
+    )
+  return list(dict.fromkeys(members))
 
 
 def _fail(message: str) -> None:
@@ -150,13 +185,47 @@ def validate_cron_expr(expr: str) -> None:
     _fail("schedule.default must be a string.")
   if not expr or expr[0] == "-":
     _fail(f"schedule.default must not be empty or start with '-': {expr!r}")
-  if not _CRON_FIELD_OK.match(expr):
+  if not _CRON_FIELD_OK.fullmatch(expr):
     _fail(
       f"schedule.default contains disallowed characters: {expr!r}. "
       "Allowed: digits, *, /, ,, -, whitespace."
     )
-  if len(expr.split()) != 5:
+  fields = expr.split()
+  if len(fields) != 5:
     _fail(f"schedule.default must have exactly 5 cron fields, got {expr!r}")
+  bounds = (
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of month", 1, 31),
+    ("month", 1, 12),
+    ("day of week", 0, 7),
+  )
+  for field, (label, lower, upper) in zip(fields, bounds, strict=True):
+    for item in field.split(","):
+      if not item:
+        _fail(f"schedule.default has an empty {label} item: {expr!r}")
+      base, separator, step_text = item.partition("/")
+      if separator:
+        if "/" in step_text or not step_text.isdigit():
+          _fail(f"schedule.default has an invalid {label} step: {expr!r}")
+        try:
+          step = int(step_text)
+        except ValueError:
+          _fail(f"schedule.default has an invalid {label} step: {expr!r}")
+        if not 1 <= step <= upper - lower + 1:
+          _fail(f"schedule.default has an out-of-range {label} step: {expr!r}")
+      if base == "*":
+        continue
+      start_text, dash, end_text = base.partition("-")
+      if not start_text.isdigit() or (dash and not end_text.isdigit()) or "-" in end_text:
+        _fail(f"schedule.default has an invalid {label} value: {expr!r}")
+      try:
+        start = int(start_text)
+        end = int(end_text) if dash else start
+      except ValueError:
+        _fail(f"schedule.default has an invalid {label} value: {expr!r}")
+      if not lower <= start <= end <= upper:
+        _fail(f"schedule.default has an out-of-range {label} value: {expr!r}")
 
 
 def validate_manifest_offline(offline) -> None:
@@ -218,6 +287,61 @@ def validate_manifest_contract(manifest) -> None:
 
   mid = manifest["id"]
   validate_slug_field(mid, "id")
+  model_provider = manifest.get("model_provider")
+  if model_provider is not None:
+    if not isinstance(model_provider, Mapping):
+      _fail("Manifest `model_provider` must be an object.")
+    broker = model_provider.get("transport") == "identity_broker"
+    expected = {"name", "base_url", "models", "default_model"}
+    expected |= {"transport"} if broker else {"secret_name"}
+    if set(model_provider) != expected:
+      _fail("Manifest `model_provider` has invalid fields for its transport.")
+    if not isinstance(model_provider["name"], str) or not 1 <= len(model_provider["name"].strip()) <= 80:
+      _fail("Manifest `model_provider.name` must be 1–80 characters.")
+    url = urlparse(model_provider["base_url"] if isinstance(model_provider["base_url"], str) else "")
+    if broker:
+      if (manifest.get("id") != "identity"
+          or (manifest.get("permissions") or {}).get("identity_manage") is not True
+          or model_provider["base_url"] != "http://127.0.0.1:8765/v1"):
+        _fail("The protected identity broker is only available to the Möbius · You integration.")
+    else:
+      if (url.scheme != "https" or not url.hostname or url.username or url.password
+          or url.query or url.fragment or url.params):
+        _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
+      secret_name = model_provider["secret_name"]
+      if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
+        _fail("Manifest `model_provider.secret_name` must name one app secret.")
+    entries = model_provider["models"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
+      _fail("Manifest `model_provider.models` must contain 1–32 models.")
+    ids = set()
+    for index, entry in enumerate(entries):
+      if not isinstance(entry, Mapping) or set(entry) - {"id", "label", "effort_levels", "context_window", "input_modalities", "auto_compact_token_limit"} or not {"id", "label"}.issubset(entry):
+        _fail(f"Manifest `model_provider.models[{index}]` has invalid fields.")
+      model_id = entry["id"]
+      if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model_id) or model_id in ids:
+        _fail("Manifest model ids must be unique, bounded wire IDs.")
+      ids.add(model_id)
+      if not isinstance(entry["label"], str) or not 1 <= len(entry["label"].strip()) <= 100:
+        _fail("Manifest model labels must be 1–100 characters.")
+      efforts = entry.get("effort_levels")
+      if efforts is not None and (not isinstance(efforts, list) or not efforts or len(efforts) > 8
+          or not all(isinstance(value, str) and value in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} for value in efforts)
+          or len(set(efforts)) != len(efforts)):
+        _fail("Manifest model effort_levels contains unsupported or duplicate values.")
+      window = entry.get("context_window")
+      if window is not None and (isinstance(window, bool) or not isinstance(window, int) or not 1024 <= window <= 10_000_000):
+        _fail("Manifest model context_window must be an integer between 1024 and 10000000.")
+      modalities = entry.get("input_modalities")
+      if modalities is not None and (not isinstance(modalities, list)
+          or modalities not in (["text"], ["text", "image"])):
+        _fail("Manifest model input_modalities must be text or text and image.")
+      compact = entry.get("auto_compact_token_limit")
+      if compact is not None and (isinstance(compact, bool) or not isinstance(compact, int)
+          or not 1024 <= compact <= (window or 10_000_000)):
+        _fail("Manifest model auto_compact_token_limit must fit its context window.")
+    if model_provider["default_model"] not in ids:
+      _fail("Manifest `model_provider.default_model` must name a declared model.")
   package_id = manifest.get("package_id")
   if package_id is not None and (
     not isinstance(package_id, str)
@@ -531,15 +655,16 @@ def validate_manifest_contract(manifest) -> None:
   if source_files is not None:
     if not isinstance(source_files, list):
       _fail("Manifest `source_files` must be an array.")
-    if len(source_files) > SOURCE_FILES_COUNT_MAX:
-      _fail(
-        "Manifest has too many source_files "
-        f"(max {SOURCE_FILES_COUNT_MAX})."
-      )
+    # No file-count cap: the manifest byte cap bounds how many paths can be
+    # listed, and fetch enforces the per-file and total source byte caps.
     schedule = manifest.get("schedule")
     declared_job = schedule.get("job") if isinstance(schedule, Mapping) else None
+    seen_sources: set[str] = set()
     for index, path in enumerate(source_files):
       validate_repo_relative_path(path, f"source_files[{index}]")
+      if path in seen_sources:
+        _fail(f"Manifest `source_files[{index}]` repeats {path!r}.")
+      seen_sources.add(path)
       if (
         path in _SOURCE_FILES_MANAGED_EXACT
         or path == declared_job
@@ -553,6 +678,50 @@ def validate_manifest_contract(manifest) -> None:
           "node_modules/, the cron/job scripts, .bak snapshots, or the "
           "numeric-id storage tree)."
         )
+
+  agent_activities = manifest.get("agent_activities", {})
+  if not isinstance(agent_activities, Mapping):
+    _fail("Manifest `agent_activities` must be an object.")
+  if len(agent_activities) > AGENT_ACTIVITIES_COUNT_MAX:
+    _fail(
+      "Manifest has too many agent_activities "
+      f"(max {AGENT_ACTIVITIES_COUNT_MAX})."
+    )
+  declared_sources = set(source_files or []) if isinstance(source_files, list) else set()
+  activity_entries: set[str] = set()
+  for activity_id, activity in agent_activities.items():
+    validate_slug_field(activity_id, f"agent_activities.{activity_id}")
+    field = f"agent_activities.{activity_id}"
+    if not isinstance(activity, Mapping) or set(activity) != {
+      "entry", "arguments", "running_label",
+    }:
+      _fail(
+        f"Manifest `{field}` must contain only entry, arguments, and "
+        "running_label."
+      )
+    entry = activity.get("entry")
+    validate_repo_relative_path(entry, f"{field}.entry")
+    if entry not in declared_sources:
+      _fail(
+        f"Manifest `{field}.entry` must also be listed in source_files."
+      )
+    if entry in activity_entries:
+      _fail("Manifest agent_activities must use distinct entry paths.")
+    activity_entries.add(entry)
+    arguments = activity.get("arguments")
+    if (
+      isinstance(arguments, bool)
+      or not isinstance(arguments, int)
+      or not 0 <= arguments <= 16
+    ):
+      _fail(f"Manifest `{field}.arguments` must be an integer from 0 to 16.")
+    running_label = activity.get("running_label")
+    if (
+      not isinstance(running_label, str)
+      or not running_label.strip()
+      or len(running_label) > 160
+    ):
+      _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
 
   service = manifest.get("service")
   if service is not None:
@@ -605,22 +774,45 @@ def validate_manifest_contract(manifest) -> None:
       _fail("Manifest `skills` must be an array.")
     if len(skills) > SKILLS_COUNT_MAX:
       _fail(f"Manifest has too many skills (max {SKILLS_COUNT_MAX}).")
-    root_sources = {
-      path for path in (source_files or [])
-      if isinstance(path, str) and "/" not in path
-    }
-    for index, path in enumerate(skills):
-      if not isinstance(path, str) or _SKILL_FILENAME_OK.fullmatch(path) is None:
+    declared = [path for path in (source_files or []) if isinstance(path, str)]
+    skill_ids: set[str] = set()
+    for index, entry in enumerate(skills):
+      folder = (
+        _SKILL_FOLDER_OK.fullmatch(entry) if isinstance(entry, str) else None
+      )
+      if folder is None and (
+        not isinstance(entry, str) or _SKILL_FILENAME_OK.fullmatch(entry) is None
+      ):
         _fail(
-          f"Manifest `skills[{index}]` must match "
-          "`^[a-z0-9][a-z0-9._-]*\\.md$`."
+          f"Manifest `skills[{index}]` must be a root `<id>.md` file "
+          "(`^[a-z0-9][a-z0-9._-]*\\.md$`) or a `<id>/` folder skill."
         )
-      if path not in root_sources:
+      skill_id = folder.group(1) if folder else entry[:-len(".md")]
+      if skill_id in skill_ids:
+        _fail(f"Manifest `skills[{index}]` repeats skill id {skill_id!r}.")
+      skill_ids.add(skill_id)
+      if folder is None:
+        if entry not in declared:
+          _fail(
+            f"Manifest `skills[{index}]` {entry!r} must also be listed in "
+            "`source_files` as a root-level file — the installer reads skill "
+            "bytes from the installed source tree, so a skill that is not a "
+            "source file has nothing to install."
+          )
+        continue
+      for path in declared:
+        if not path.startswith(entry):
+          continue
+        member = path[len(entry):]
+        if not is_folder_skill_member(member):
+          _fail(
+            f"Manifest folder skill {entry!r} may contain only `SKILL.md` and "
+            f"lowercase `.md` files directly inside it; got {path!r}."
+          )
+      if entry + FOLDER_SKILL_ENTRY not in declared:
         _fail(
-          f"Manifest `skills[{index}]` {path!r} must also be listed in "
-          "`source_files` as a root-level file — the installer reads skill "
-          "bytes from the installed source tree, so a skill that is not a "
-          "source file has nothing to install."
+          f"Manifest `skills[{index}]` {entry!r} must list "
+          f"`{entry}{FOLDER_SKILL_ENTRY}` in `source_files`."
         )
 
   system_prompt = manifest.get("system_prompt")

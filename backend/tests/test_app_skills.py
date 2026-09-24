@@ -510,45 +510,44 @@ def _install_clone(client, auth, base, manifest, responses, bare):
     })
 
 
-def test_clone_install_reads_skill_from_repo_not_http(
+def test_clone_install_rejects_skill_bytes_that_differ_from_review(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """On the clone path the repo's bytes are canonical: the skill lands from
-  the checked-out tree, not from the (discarded) HTTP source_files fetch."""
+  """One reviewed package cannot resolve to different Git skill bytes."""
   base = "https://raw.githubusercontent.com/acme/app-skilled/main/"
-  _, bare = _make_repo(tmp_path, {
-    "index.jsx": JSX, "contributing.md": "REPO SKILL\n",
-  })
   m = _skill_manifest()
+  _, bare = _make_repo(tmp_path, {
+    "mobius.json": json.dumps(m),
+    "index.jsx": JSX,
+    "contributing.md": "REPO SKILL\n",
+  })
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "contributing.md": (200, b"HTTP SKILL\n"),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert (_skills_dir() / "contributing.md").read_text() == "REPO SKILL\n"
-  assert _sidecar()["contributing.md"]["sha256"] == _sha("REPO SKILL\n")
+  assert r.status_code == 409, r.text
+  assert r.json()["detail"]["code"] == "git_source_mismatch"
+  assert not (_skills_dir() / "contributing.md").exists()
 
 
-def test_clone_install_missing_skill_file_warns(
+def test_clone_install_rejects_missing_reviewed_skill_file(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """A repo tree that lacks the declared skill warns instead of silently
-  falling back to the HTTP bytes (validation checked the manifest's claim,
-  not the repo's contents)."""
+  """A Git package must contain every source file that review fetched."""
   base = "https://raw.githubusercontent.com/acme/app-noskill/main/"
-  _, bare = _make_repo(tmp_path, {"index.jsx": JSX})
   m = _skill_manifest(id="noskill", name="No Skill")
+  _, bare = _make_repo(tmp_path, {
+    "mobius.json": json.dumps(m),
+    "index.jsx": JSX,
+  })
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "contributing.md": (200, b"HTTP SKILL\n"),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert any(
-    "contributing.md: missing from installed source tree" in w
-    for w in r.json()["warnings"]
-  ), r.json()["warnings"]
+  assert r.status_code == 409, r.text
+  assert r.json()["detail"]["code"] == "git_source_mismatch"
   assert not (_skills_dir() / "contributing.md").exists()
 
 
@@ -687,3 +686,202 @@ def test_app_skill_skipped_when_id_held_by_installed_dir_skill(
   sidecar_path = _skills_dir() / ".app-skills.json"
   if sidecar_path.exists():
     assert "contributing.md" not in json.loads(sidecar_path.read_text())
+
+
+def test_app_cannot_take_platform_owned_skill_basename(
+  client, auth, bypass_url_validation,
+):
+  """A flat platform skill remains platform-owned across an app install."""
+  shutil.rmtree(_skills_dir(), ignore_errors=True)
+  _skills_dir().mkdir(parents=True)
+  target = _skills_dir() / "contributing.md"
+  target.write_text("# platform guidance\n")
+  (_skills_dir() / ".seed-skills.json").write_text(json.dumps({
+    "contributing.md": {
+      "baseline_sha256": _sha("# platform guidance\n"),
+      "upstream_sha256": _sha("# platform guidance\n"),
+      "status": "current",
+    },
+  }))
+
+  result = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+
+  assert result.status_code == 201, result.text
+  assert "skill contributing.md: owned by the platform — skipped" in result.json()["warnings"]
+  assert target.read_text() == "# platform guidance\n"
+  assert "contributing.md" not in _sidecar()
+
+
+# --- folder skills ----------------------------------------------------------
+
+FOLDER_CORE = "---\nname: contributing\ndescription: Folder core\n---\n# core\nSee [cycle](cycle.md).\n"
+FOLDER_CYCLE = "# cycle mode\n"
+FOLDER_PUBLISH = "# publish mode\n"
+
+
+def _folder_manifest(members=("cycle.md",), **over):
+  files = ["contributing/SKILL.md", *(f"contributing/{m}" for m in members)]
+  return _skill_manifest(skills=["contributing/"], source_files=files, **over)
+
+
+def _folder_files(members=("cycle.md",)):
+  bodies = {"cycle.md": FOLDER_CYCLE, "publish.md": FOLDER_PUBLISH}
+  files = {"index.jsx": JSX, "contributing/SKILL.md": FOLDER_CORE}
+  files.update({f"contributing/{m}": bodies[m] for m in members})
+  return files
+
+
+def test_folder_skill_requires_its_skill_md_source(client, auth):
+  _expect_400(
+    client, auth,
+    _skill_manifest(skills=["contributing/"], source_files=["contributing/cycle.md"]),
+    "contributing/SKILL.md",
+  )
+
+
+@pytest.mark.parametrize("bad", ["contributing/deep/x.md", "contributing/run.sh"])
+def test_folder_skill_members_are_direct_markdown_only(client, auth, bad):
+  _expect_400(
+    client, auth,
+    _skill_manifest(
+      skills=["contributing/"],
+      source_files=["contributing/SKILL.md", bad],
+    ),
+    "may contain only",
+  )
+
+
+def test_flat_and_folder_skill_cannot_share_one_id(client, auth):
+  _expect_400(
+    client, auth,
+    _skill_manifest(
+      skills=["contributing.md", "contributing/"],
+      source_files=["contributing.md", "contributing/SKILL.md"],
+    ),
+    "repeats skill id",
+  )
+
+
+def test_install_materializes_folder_skill_as_one_discoverable_skill(
+  client, auth, bypass_url_validation,
+):
+  from app import skills as skills_mod
+
+  r = _install(client, auth, _folder_manifest(), _folder_files())
+  assert r.status_code == 201, r.text
+  assert not any("skill" in w for w in r.json()["warnings"])
+  folder = _skills_dir() / "contributing"
+  assert (folder / "SKILL.md").read_text() == FOLDER_CORE
+  assert (folder / "cycle.md").read_text() == FOLDER_CYCLE
+  records = _sidecar()
+  assert records["contributing/SKILL.md"]["app_id"] == r.json()["id"]
+  assert records["contributing/cycle.md"]["sha256"] == _sha(FOLDER_CYCLE)
+  listed = {s.name: s for s in skills_mod.enumerate_skills(_skills_dir())}
+  assert listed["contributing"].is_dir is True
+  assert listed["contributing"].provenance == "app:skilled"
+
+
+def test_update_moving_flat_skill_into_folder_retires_the_flat_file(
+  client, auth, bypass_url_validation,
+):
+  first = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+  assert first.status_code == 201
+  update = _install(
+    client, auth, _folder_manifest(version="2.0.0"), _folder_files(),
+  )
+  assert update.status_code == 201, update.text
+  assert not (_skills_dir() / "contributing.md").exists()
+  assert "contributing.md" not in _sidecar()
+  assert (_skills_dir() / "contributing" / "SKILL.md").read_text() == FOLDER_CORE
+
+
+def test_update_dropping_a_folder_member_retires_only_that_file(
+  client, auth, bypass_url_validation,
+):
+  first = _install(
+    client, auth,
+    _folder_manifest(members=("cycle.md", "publish.md")),
+    _folder_files(members=("cycle.md", "publish.md")),
+  )
+  assert first.status_code == 201, first.text
+  update = _install(
+    client, auth, _folder_manifest(version="2.0.0"), _folder_files(),
+  )
+  assert update.status_code == 201, update.text
+  folder = _skills_dir() / "contributing"
+  assert not (folder / "publish.md").exists()
+  assert (folder / "cycle.md").exists()
+  retired = (
+    _skills_dir() / ".inactive" / str(first.json()["id"])
+    / "retired" / "contributing" / "publish.md"
+  )
+  assert retired.read_text() == FOLDER_PUBLISH
+
+
+def test_uninstall_and_recover_folder_skill_preserve_every_member(
+  client, auth, bypass_url_validation,
+):
+  r = _install(client, auth, _folder_manifest(), _folder_files())
+  assert r.status_code == 201, r.text
+  (_skills_dir() / "contributing" / "cycle.md").write_text("# my edit\n")
+  assert client.delete(f"/api/apps/{r.json()['id']}", headers=auth).status_code == 204
+  assert not (_skills_dir() / "contributing").exists()
+
+  recovered = client.post(f"/api/apps/{r.json()['id']}/recover", headers=auth)
+  assert recovered.status_code == 200, recovered.text
+  folder = _skills_dir() / "contributing"
+  assert (folder / "SKILL.md").read_text() == FOLDER_CORE
+  assert (folder / "cycle.md").read_text() == "# my edit\n"
+
+
+def test_folder_skill_reearns_its_own_folder_after_a_lost_sidecar(
+  client, auth, bypass_url_validation,
+):
+  """Like a flat skill, a folder of only this app's declared files is updated
+  (snapshot-then-overwrite) when the ownership sidecar was lost."""
+  first = _install(client, auth, _folder_manifest(), _folder_files())
+  assert first.status_code == 201, first.text
+  (_skills_dir() / ".app-skills.json").unlink()
+  files = _folder_files()
+  files["contributing/cycle.md"] = "# cycle mode v2\n"
+  update = _install(client, auth, _folder_manifest(version="2.0.0"), files)
+  assert update.status_code == 201, update.text
+  assert not any("already held" in w for w in update.json()["warnings"])
+  assert (_skills_dir() / "contributing" / "cycle.md").read_text() == "# cycle mode v2\n"
+  assert _sidecar()["contributing/cycle.md"]["app_id"] == first.json()["id"]
+
+
+def test_folder_skill_never_adopts_a_folder_it_does_not_own(
+  client, auth, bypass_url_validation,
+):
+  foreign = _skills_dir() / "contributing"
+  foreign.mkdir(parents=True)
+  (foreign / "SKILL.md").write_text("# someone else's skill\n")
+  (foreign / "their-notes.md").write_text("# not declared by this app\n")
+  try:
+    r = _install(client, auth, _folder_manifest(), _folder_files())
+    assert r.status_code == 201, r.text
+    assert any(
+      "contributing/SKILL.md: id 'contributing' is already held" in w
+      for w in r.json()["warnings"]
+    )
+    assert (foreign / "SKILL.md").read_text() == "# someone else's skill\n"
+    assert not (foreign / "cycle.md").exists()
+  finally:
+    shutil.rmtree(foreign, ignore_errors=True)
+
+
+def test_source_files_have_no_count_cap_only_byte_caps():
+  """Splitting code or skills into more files is never refused by count; the
+  manifest, per-file, and total byte caps are the real bounds."""
+  from app.manifest_contract import validate_manifest_contract
+
+  members = [f"contributing/mode{i}.md" for i in range(60)]
+  validate_manifest_contract(_skill_manifest(
+    skills=["contributing/"],
+    source_files=["contributing/SKILL.md", *members],
+  ))
