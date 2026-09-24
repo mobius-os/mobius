@@ -143,7 +143,7 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   }
   instructions = initialized["result"]["instructions"]
   assert "agents in other Möbius chats" in instructions
-  assert "agents.*" in instructions
+  assert "Provider-native subagent tools" in instructions
   assert "temporary subagent tree" in instructions
 
   listed = control._dispatch_message({
@@ -211,12 +211,31 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "instead of checking for replies" in send_description
 
 
+def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "isolated-owner-run")
+  monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
+  control = _control_module()
+
+  initialized = control._dispatch_message({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18"},
+  })
+  instructions = initialized["result"]["instructions"]
+  assert "Provider-native subagent tools" in instructions
+  assert "temporary subagent tree" in instructions
+  assert "peer tools" not in instructions
+  assert "agents in other Möbius chats" not in instructions
+
+
 def test_constitution_routes_each_agent_network_to_its_owner():
   core = (
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
   ).read_text(encoding="utf-8")
 
-  assert "provider-native `agents.*` tools" in core
+  assert "provider-native subagent tools" in core
+  assert "`agents.*`, Task, or Agent" in core
   assert "other Möbius chats" in core
   assert core.index("`list_agent_peers`") < core.index("`send_agent_message`")
   assert "ordinary chat-message API" in core
