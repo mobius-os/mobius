@@ -159,7 +159,6 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       const body = route.request().postDataJSON()
       if (!body.answers) {
         messagePosts += 1
-        ;(globalThis.__qfPosts = globalThis.__qfPosts || []).push({ cid: body.cid, content: String(body.content).slice(0, 40), t: Date.now() })
         acceptedMessage = { role: 'user', content: body.content, cid: body.cid, ts: 1700000600000 }
         turnStarted = true
         pendingQuestionId = questionBlock.question_id
@@ -248,7 +247,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       expect(messagePosts).toBe(0)
       releaseReadiness()
     }
-    try { await expect.poll(() => messagePosts, { timeout: 4000 }).toBe(1) } catch (e) { throw new Error('QFPOSTS ' + JSON.stringify(globalThis.__qfPosts)) }
+    await expect.poll(() => messagePosts).toBe(1)
 
     const card = surface.locator('.qcard')
     await expect(card).toBeVisible({ timeout: 5000 })

@@ -33,6 +33,15 @@ const authBlockedAttempted = new Set()
 // unavailable or still committing.
 const retirementFences = new Set()
 let clearGeneration = 0
+// Intents this document is dispatching INTERACTIVELY right now. The composer
+// that accepted a message owns its first POST; the shell drain replays only
+// what that owner has handed back. Both paths claim through
+// claimIntentDispatch, which deliberately does not refuse an already-claimed
+// record (server cid dedup is the cross-tab backstop), so without this the
+// drain -- woken by a readiness edge -- could list the composer's
+// freshly-enqueued intent and POST it again in the same millisecond.
+const interactiveDispatches = new Set()
+let drainDeferredToInteractive = false
 let retirementSequence = 0
 
 /**
@@ -119,6 +128,28 @@ export function subscribeOutboxChanges(callback) {
 function announceChange(change) {
   for (const callback of changeSubscribers) {
     try { callback(change) } catch { /* presentation cannot block persistence */ }
+  }
+}
+
+/**
+ * Mark a cid as owned by its interactive sender until the returned release
+ * runs. Take it BEFORE the intent is enqueued so the drain can never observe
+ * the record unowned. Release is idempotent; if the drain stepped around this
+ * chat while it was held, releasing asks it to run again so nothing queued
+ * behind the message is left waiting for an unrelated edge.
+ */
+export function holdInteractiveDispatch(cid) {
+  const key = String(cid)
+  interactiveDispatches.add(key)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    interactiveDispatches.delete(key)
+    if (drainDeferredToInteractive && interactiveDispatches.size === 0) {
+      drainDeferredToInteractive = false
+      announceChange({ kind: 'release', requestDelivery: true })
+    }
   }
 }
 
@@ -643,11 +674,21 @@ async function drainInner({ deliver, principalKey, generation }) {
   const records = await listIntents(principalKey)
   if (generation !== clearGeneration) return
   const questionBlockedChats = new Set()
+  // A chat whose earlier intent is being sent interactively keeps its order:
+  // skip it (and anything queued behind it in that chat) for this pass, the
+  // same way an open question card holds its follow-ups.
+  const interactivelyBusyChats = new Set()
   for (const snapshot of records) {
     // An open card blocks that chat's follow-ups, not the answer that can
     // release them or delivery to unrelated chats.
     if (snapshot.replayState === 'retired') continue
     if (questionBlockedChats.has(snapshot.chatId) && snapshot.type !== 'answer') continue
+    if (interactivelyBusyChats.has(snapshot.chatId)) continue
+    if (interactiveDispatches.has(String(snapshot.cid))) {
+      interactivelyBusyChats.add(snapshot.chatId)
+      drainDeferredToInteractive = true
+      continue
+    }
     if (retirementFences.has(String(snapshot.cid))) continue
     if (snapshot.authBlocked && authBlockedAttempted.has(snapshot.cid)) break
     if (snapshot.authBlocked) authBlockedAttempted.add(snapshot.cid)

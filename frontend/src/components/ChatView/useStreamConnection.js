@@ -38,6 +38,7 @@ import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
   classifyReplayOutcome,
   claimIntentDispatch,
+  holdInteractiveDispatch,
   enqueueIntent,
   markIntentLocallyQueued,
   outboxPrincipalKey,
@@ -1652,6 +1653,7 @@ export default function useStreamConnection(chatId, {
     let responseData = null
     let outboxCid = null
     let outboxRetained = false
+    let releaseDispatchHold = () => {}
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
@@ -1699,6 +1701,11 @@ export default function useStreamConnection(chatId, {
       // another turn. Steers target one live turn and are never replayable.
       outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
       const deferToOutbox = deferDelivery || !getDeliveryReadySnapshot()
+      // This send will POST its own intent, so own the cid BEFORE it becomes
+      // visible in the outbox. Otherwise the shell drain can list it between
+      // enqueue and our claim and dispatch the same cid alongside us. A
+      // deferred send hands the intent to that drain instead, so holds nothing.
+      if (outboxCid && !deferToOutbox) releaseDispatchHold = holdInteractiveDispatch(outboxCid)
       if (outboxCid) {
         outboxRetained = await enqueueIntent({
           chatId: requestOwner.chatId,
@@ -1713,6 +1720,9 @@ export default function useStreamConnection(chatId, {
       // a known interruption, leave presentation with the local queue/card.
       // No POST, stream reset, or optimistic run belongs to that transition.
       if (deferToOutbox || !getDeliveryReadySnapshot()) {
+        // Readiness may have dropped since deferToOutbox was read: hand the
+        // intent to the drain before it is announced as locally queued.
+        releaseDispatchHold()
         if (outboxRetained) {
           await markIntentLocallyQueued(outboxCid, { chatId: requestOwner.chatId, principalKey: outboxPrincipalKey(getToken()) })
           return { status: 'locally_queued', cid: outboxCid }
@@ -1914,6 +1924,9 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
+      // A failed or ambiguous POST leaves the record for the shell drain; release
+      // ownership before markIntentLocallyQueued asks that drain to take it.
+      releaseDispatchHold()
       if (err?.code === 'OUTBOX_SETTLED') {
         // A concurrent local cancellation or another tab's receipt owns this
         // cid now. Neither absence nor retirement authorizes another POST.
@@ -1947,6 +1960,8 @@ export default function useStreamConnection(chatId, {
         setIsStreaming(false)
       }
       throw err
+    } finally {
+      releaseDispatchHold()
     }
 
     // No delay needed: chats_stream.py's POST handler calls
