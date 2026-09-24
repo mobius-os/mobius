@@ -391,6 +391,7 @@ test('foreground and active-queue refreshes share one bounded runtime read', asy
     await wake()
     // Keep the response held across a real queue-poll interval as well.
     await page.waitForTimeout(1200)
+    if (fixture.runtimeRequestCount() !== 1) { const tr = await page.evaluate(() => window.__rtTrace || []); throw new Error('RTTRACE ' + JSON.stringify(tr)) }
     expect(fixture.runtimeRequestCount()).toBe(1)
     await expect(fixture.composer).toHaveValue(draft)
     await expect(fixture.attachment).toBeVisible()

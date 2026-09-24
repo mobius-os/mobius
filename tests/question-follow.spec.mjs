@@ -165,7 +165,12 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'started' }),
+          // Echo the ACCEPTED message. The send intent is retired by
+          // correlating this response back to the cid that was posted; a bare
+          // { status: 'started' } leaves it unretired, so the outbox drain
+          // re-sends the same turn and the case sees two POSTs where the
+          // contract is one. Sibling fixtures already answer this shape.
+          body: JSON.stringify({ status: 'started', message: acceptedMessage }),
         })
       }
       pendingQuestionId = null

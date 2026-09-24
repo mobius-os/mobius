@@ -143,7 +143,15 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'started' }),
+        // Echo the accepted message so the send intent retires. A bare
+        // { status: 'started' } leaves it unretired and the outbox re-sends it;
+        // that replay then consumes ordinaryMessageHits === 2, so the REAL second
+        // send is never confirmed as the queued row the fast-forward control
+        // needs, and the steer this case exists to observe never fires.
+        body: JSON.stringify({
+          status: 'started',
+          message: { role: 'user', content: body.content, cid: body.cid, ts: 12343 },
+        }),
       })
     })
     // page.route().fulfill() cannot drip a body: it delivers the complete payload and

@@ -1695,9 +1695,12 @@ export default function ChatView({
 
   // Every runtime reader shares the same bounded request for this chat/view
   // generation. An old view's completion must not release a successor read.
+  const __rtInstance = useRef(Math.random().toString(36).slice(2, 7))
   const reconcileRuntimeState = useCallback(() => {
     const generation = fetchGenRef.current
     const current = runtimeReconcileRef.current
+    try { (window.__rtTrace = window.__rtTrace || []).push({ inst: __rtInstance.current, chatId: String(chatId), gen: generation, curGen: current?.generation ?? null, curChat: current?.chatId ?? null, reused: !!(current?.chatId === chatId && current.generation === generation), hidden: !!hiddenRef.current, t: Math.round(performance.now()), stack: (new Error().stack || '').split('
+').slice(2, 5).join(' | ') }) } catch { /* trace */ }
     if (current?.chatId === chatId && current.generation === generation) {
       return current.promise
     }
