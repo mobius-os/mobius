@@ -611,14 +611,17 @@ test('a failed container result survives reopening Settings without an unsolicit
   await mockPlatform(page, state)
   let updates = await openSettings(page)
   const error = 'The reviewed image could not start.'
+  // 5ff0a501 removed the "Details and maintenance" disclosure (and its "Last
+  // container update" panel) along with the rest of the multi-action Settings
+  // UI, so the error is no longer reachable through an expander. What this
+  // case is named for is unchanged and still the point: a failed container
+  // result must never announce itself, and must stay quiet across a reopen.
   await expect(updates.getByText(error)).not.toBeVisible()
-  await updates.getByText('Details and maintenance', { exact: true }).click()
-  await expect(updates.getByRole('heading', { name: 'Last container update' })).toBeVisible()
-  await expect(updates.getByText(error)).toBeVisible()
+  await expect(updates.getByRole('alert')).toHaveCount(0)
   // A full reload exercises a fresh component with no in-memory request owner.
   updates = await openSettings(page)
-  await updates.getByText('Details and maintenance', { exact: true }).click()
-  await expect(updates.getByText(error)).toBeVisible()
+  await expect(updates.getByText(error)).not.toBeVisible()
+  await expect(updates.getByRole('alert')).toHaveCount(0)
   await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toBeEnabled()
   expect(state.unexpectedMutations).toEqual([])
 })

@@ -163,7 +163,11 @@ for (const restartVersion of [1, 2]) {
     const f = await mount(page, { restart: { version: restartVersion } })
     await f.card.getByRole('radio', { name: /Restart now/ }).click()
     const beforeStreams = f.streams()
-    await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+    // The submit label is version-dependent: QuestionCard's writtenRestartAction
+    // is `restartAction && platformAction?.version === 2`, so only a v2 written
+    // restart relabels the action 'Continue'. A v1 restart keeps 'Submit'.
+    const submitLabel = restartVersion === 2 ? 'Continue' : 'Submit'
+    await f.card.getByRole('button', { name: submitLabel, exact: true }).click()
     await expect(f.card.getByRole('status')).toContainText('Restart requested')
     expect(f.attempts).toHaveLength(1)
     expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })

@@ -237,13 +237,48 @@ async function seedSingleModeChat(page, chatId) {
   }, [paneModel.STORAGE_KEY, workspace])
 }
 
+/** Measure an element only once its geometry has stopped moving.
+ *
+ *  Tab strips reflow after the panes are up: a tab is laid out near-empty and
+ *  grows to its full width once its title resolves, shifting every tab after
+ *  it. A box read during that window is stale by the time the gesture presses,
+ *  so the press lands on a neighbour or on bare strip background -- neither
+ *  starts a drag session, and the drop silently never happens. */
+async function settledBox(locator, { frames = 3, maxFrames = 180 } = {}) {
+  await locator.scrollIntoViewIfNeeded()
+  return locator.evaluate((element, settings) => (
+    new Promise((resolve) => {
+      let previous = null
+      let stable = 0
+      let seen = 0
+      const read = () => {
+        const rect = element.getBoundingClientRect()
+        const now = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        const same = previous
+          && now.x === previous.x && now.y === previous.y
+          && now.width === previous.width && now.height === previous.height
+        stable = same ? stable + 1 : 0
+        previous = now
+        seen += 1
+        if (stable >= settings.frames || seen >= settings.maxFrames) resolve(now)
+        else requestAnimationFrame(read)
+      }
+      requestAnimationFrame(read)
+    })
+  ), { frames, maxFrames })
+}
+
 async function mouseDrag(page, sourceLocator, toX, toY) {
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 })
+  // Prove the press actually armed a drag. Without this a press that missed
+  // its tab reads as a silent no-op and the failure surfaces much later as an
+  // absent pane, with nothing pointing back at the gesture.
+  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
   await page.mouse.move(toX, toY, { steps: 14 })
   await page.mouse.up()
 }
