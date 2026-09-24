@@ -979,14 +979,6 @@ ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 # back" failure. Retiring the plugin leaves one coherent, waking Codex door.
 # (See the "unifying Claude and Codex into an optional Subagents app" work.)
 
-# Seed fresh Claude Code settings with includeCoAuthoredBy=false, keeping
-# agent-made git commits free of the Co-Authored-By trailer. Existing settings
-# are never rewritten.
-if [ ! -f /data/cli-auth/claude/settings.json ]; then
-  mkdir -p /data/cli-auth/claude
-  printf '{\n  "includeCoAuthoredBy": false\n}\n' > /data/cli-auth/claude/settings.json
-fi
-
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
 # mobius server can read script/source files copied into the image at
