@@ -393,6 +393,42 @@ async def test_steer_into_active_turn_interrupts_immediately():
 
 
 @pytest.mark.asyncio
+async def test_steer_before_generation_repeats_the_dropped_interrupt(
+  monkeypatch,
+):
+  """The CLI drops an interrupt sent before the query is generating. Such a
+  steer still interrupts at once, then repeats the cut at the first streamed
+  message — otherwise it latched and landed only when the turn ended."""
+  class _Client(_FakeClient):
+    async def query(self, prompt):
+      await super().query(prompt)
+      if len(self.queries) == 1:
+        assert await steer_into_active_turn("early-chat", "use blue") is True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="starting")
+        # The pre-generation interrupt was dropped; only the repeat cuts.
+        while self.interrupts < 2:
+          await asyncio.sleep(0)
+        yield _interrupt_result()
+        return
+      yield _stream_delta("text_delta", text="blue done")
+      yield _success_result()
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await asyncio.wait_for(
+    _run_turn("early-chat", prompt="start task"), timeout=5,
+  )
+
+  client = clients[0]
+  assert client.interrupts == 2
+  assert len(client.queries) == 2
+  assert "use blue" in client.queries[1]
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
 async def test_steer_into_active_turn_missing_or_finished_is_false():
   """Missing or already-finished Claude handles are not steerable."""
   assert await steer_into_active_turn("missing-claude", "x") is False
