@@ -63,7 +63,7 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  useEffect(() => { if (resultState) resultActionRef.current?.focus({ preventScroll: true }) }, [resultState])
+
 
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)
@@ -85,6 +85,15 @@ export default function UpdateReviewModal({
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
+
+  // Move focus to whichever action now owns the result. A known result state
+  // is one case; a FAIL-OPEN apply (an unparseable or unknown body) is the
+  // other -- it leaves resultState empty while still routing the owner to
+  // repair, so gating focus on resultState alone left that repair action
+  // rendered but unfocused and the owner with no announced next step.
+  useEffect(() => {
+    if (resultState || repairReason) resultActionRef.current?.focus({ preventScroll: true })
+  }, [resultState, repairReason])
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>

@@ -211,40 +211,36 @@ test('a staged update can check for and review another release before one restar
     })
   })
 
-  await page.setViewportSize({ width: 900, height: 800 })
-  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-      || document.querySelector('.chat__scroll')
-      || document.querySelector('.chat__form')),
-    { timeout: 10000 },
-  )
-  const navigationToggle = page.getByLabel('Toggle navigation')
-  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
-    await navigationToggle.click()
-  }
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await openSettings(page)
 
+  // 5ff0a501 ("Keep Settings focused on one state-dependent next step and a
+  // separate restart row") removed the secondary actions this case used to
+  // drive. There is no 'Check for more' button, and a staged 'Restart to
+  // finish' never coexists with 'Review update' -- `available` wins the single
+  // action slot. A newer release now reaches the owner through the status read
+  // Settings performs on every activation, not a manual check.
   await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  const check = page.getByRole('button', { name: 'Check for more' })
-  await expect(check).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
-  await check.click()
+  await expect(page.getByRole('button', { name: 'Check for more' })).toHaveCount(0)
+
+  // A newer release lands while this one is still staged.
+  state.overrides = { available: true, needs_restart: true }
+  await openSettings(page)
 
   await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
   const review = page.getByRole('button', { name: 'Review update' })
   await expect(review).toBeVisible()
-  await expect(review).toBeFocused()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
   await review.click()
 
   const dialog = page.getByRole('dialog', { name: 'Review update' })
   await expect(dialog).toBeVisible()
   await dialog.getByRole('button', { name: 'Apply update' }).click()
 
+  // The point of the case survives the redesign: reviewing and applying a
+  // second release while one is staged still leaves exactly ONE restart to do.
   await expect(dialog).toHaveCount(0)
   await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Check for more' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
 })
 
@@ -276,8 +272,19 @@ test('staged-update actions stack without overflow in a narrow settings pane', a
   expect(box).not.toBeNull()
   expect(box.x).toBeGreaterThanOrEqual(0)
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
+  // Settings now offers ONE state-dependent action plus its own restart row
+  // (5ff0a501), so `available` owns the slot here and 'Restart to finish' is
+  // not a sibling of it any more. The layout guarantee this case exists for is
+  // unchanged and asserted above: nothing in the actions row overflows a narrow
+  // pane. Pin the restart row too, since it is now the second thing that could.
   await expect(page.getByRole('button', { name: 'Review update' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
+  const restartRow = page.locator('.platform-updates__restart-row')
+  await expect(restartRow).toBeVisible()
+  const restartBox = await restartRow.boundingBox()
+  expect(restartBox).not.toBeNull()
+  expect(restartBox.x).toBeGreaterThanOrEqual(0)
+  expect(restartBox.x + restartBox.width).toBeLessThanOrEqual(viewport.width)
 })
 
 test('a blocked apply stays open, focuses its result, and shows resolver failures', async ({ page }) => {
@@ -372,7 +379,11 @@ test('a rolled-back apply stays open with an explicit repair action', async ({ p
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
+  // A repair state hands the primary slot to UpdateRepairAction, which takes
+  // actionRef -- so 'Ask Mobius' owns focus here, not 'Review update'. The
+  // separate Review action no longer coexists with it (5ff0a501 kept Settings
+  // to one state-dependent next step plus its own restart row).
+  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
 })
 
 test('a clean apply remains truthful when every follow-up status read fails', async ({ page }) => {
@@ -462,7 +473,11 @@ test('a rollback result keeps an explicit repair action when status reads fail',
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
+  // A repair state hands the primary slot to UpdateRepairAction, which takes
+  // actionRef -- so 'Ask Mobius' owns focus here, not 'Review update'. The
+  // separate Review action no longer coexists with it (5ff0a501 kept Settings
+  // to one state-dependent next step plus its own restart row).
+  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
 })
 
 for (const [label, body] of [
@@ -557,11 +572,16 @@ test('an installed image update can finish without a newer source release', asyn
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('finish submits the exact reviewed plan, not the newer available release', async ({ page }) => {
+test('finish submits the exact reviewed plan', async ({ page }) => {
   const installed = finishPreview({ activation: { ...imageActivation, deployment: 'railway' },
     image_digest: `sha256:${'b'.repeat(64)}` })
+  // `available` wins the single action slot, so a newer source release would
+  // hide the finish step entirely rather than sit beside it as 'Finish
+  // installed update' once did. Stage the image-activation case on its own so
+  // the finish path is reachable; the guarantee under test is the SUBMITTED
+  // plan, asserted below to be the reviewed/installed release.
   const state = { current: 'activation_needed',
-    overrides: { available: true, activation: imageActivation }, preview: installed }
+    overrides: { available: false, activation: imageActivation }, preview: installed }
   await mockPlatform(page, state)
   await page.route('**/api/health', route => route.fulfill({ status: 200,
     contentType: 'application/json', body: JSON.stringify({ status: 'ok', boot_id: 'before' }) }))
@@ -573,9 +593,8 @@ test('finish submits the exact reviewed plan, not the newer available release', 
     }) })
   })
   const updates = await openSettings(page)
-  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
   const request = page.waitForRequest('**/api/platform/update-preview?intent=finish')
-  await updates.getByRole('button', { name: 'Finish installed update' }).click()
+  await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
   await dialog.getByRole('button', { name: 'Update now', exact: true }).click()
