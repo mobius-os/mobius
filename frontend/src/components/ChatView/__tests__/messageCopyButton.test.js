@@ -1,8 +1,8 @@
 /* One-tap message copy: messageCopyText owns what "copy this message" means,
  * MessageCopyButton is a plain tap target on the shared clipboard helper, and
  * MessageMetaRow keeps copy beside the timestamp behind the row's existing
- * tap-to-reveal interaction. Both user and assistant messages get it; the
- * newest message of each role stays pinned visible without a tap. Native
+ * tap-to-reveal interaction. Both user and assistant messages get it; only the
+ * newest assistant message stays pinned visible without a tap. Native
  * long-press selection must stay untouched (chatUiPolish.test locks the
  * no-interception side). */
 import { readFileSync } from 'node:fs'

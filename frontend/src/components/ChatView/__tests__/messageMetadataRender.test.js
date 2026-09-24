@@ -31,30 +31,31 @@ const assistant = content => ({ role: 'assistant', blocks: [{ type: 'text', cont
 const user = { role: 'user', content: 'Question', ts: '2026-01-01T12:00:00Z' }
 const visible = html => html.includes('chat__msg-meta--visible')
 
-test('settled assistant copy renders alongside the newest owner copy, not on the older rows', () => {
+test('only the newest settled assistant pins its copy; owner timestamps stay tap-to-reveal', () => {
   const rendered = rows([user, assistant('Old answer'), user, assistant('New answer')])
-  assert.deepEqual(rendered.map(visible), [false, false, true, true])
+  assert.deepEqual(rendered.map(visible), [false, false, false, true])
+  assert.deepEqual(rows([user, assistant('Answer'), user], 2).map(visible), [false, true, true])
   for (const html of rendered) assert.match(html, /<button[^>]*aria-label="Copy message"/)
   for (const i of [1, 3]) {
     assert.match(rendered[i], /chat__msg-meta--assistant/)
     assert.doesNotMatch(rendered[i], /<time/)
   }
   assert.match(rendered[2], /<time/)
-  assert.match(rendered[0], /aria-hidden="true"/)
+  assert.match(rendered[2], /aria-hidden="true"/)
   assert.match(rendered[3], /aria-hidden="false"/)
 })
 
-test('revealing an older assistant does not unpin the latest message of either role', () => {
+test('revealing an older assistant does not unpin the latest assistant', () => {
   const messages = [assistant('Old answer'), assistant('Latest answer'), user]
-  assert.deepEqual(rows(messages).map(visible), [false, true, true])
-  assert.deepEqual(rows(messages, 0).map(visible), [true, true, true])
-  assert.deepEqual(rows(messages).map(visible), [false, true, true])
+  assert.deepEqual(rows(messages).map(visible), [false, true, false])
+  assert.deepEqual(rows(messages, 0).map(visible), [true, true, false])
+  assert.deepEqual(rows(messages).map(visible), [false, true, false])
 })
 
 test('a newer settled assistant takes the pinned control from its predecessor', () => {
   const messages = [user, assistant('First answer')]
-  assert.deepEqual(rows(messages).map(visible), [true, true])
-  assert.deepEqual(rows([...messages, assistant('Second answer')]).map(visible), [true, false, true])
+  assert.deepEqual(rows(messages).map(visible), [false, true])
+  assert.deepEqual(rows([...messages, assistant('Second answer')]).map(visible), [false, false, true])
 })
 
 test('non-copyable assistant rows render no metadata or copy button', () => {
