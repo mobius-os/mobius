@@ -203,3 +203,14 @@ def test_deleting_owner_releases_only_unfinished_exact_action(db):
   )
   assert reclaimed["state"] == "claimed"
   assert reclaimed["owner_chat_id"] == second.id
+
+
+def test_work_keys_accept_pr_references_with_hash_and_plus():
+  import pytest
+
+  from app.agent_work_claims import clean_work_key
+
+  key = "pr-update:mobius-os/mobius#1365:5d0e+steer"
+  assert clean_work_key(key) == key
+  with pytest.raises(ValueError, match="# \\+"):
+    clean_work_key("Has Spaces")
