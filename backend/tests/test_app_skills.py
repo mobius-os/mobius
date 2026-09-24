@@ -687,3 +687,29 @@ def test_app_skill_skipped_when_id_held_by_installed_dir_skill(
   sidecar_path = _skills_dir() / ".app-skills.json"
   if sidecar_path.exists():
     assert "contributing.md" not in json.loads(sidecar_path.read_text())
+
+
+def test_app_cannot_take_platform_owned_skill_basename(
+  client, auth, bypass_url_validation,
+):
+  """A flat platform skill remains platform-owned across an app install."""
+  shutil.rmtree(_skills_dir(), ignore_errors=True)
+  _skills_dir().mkdir(parents=True)
+  target = _skills_dir() / "contributing.md"
+  target.write_text("# platform guidance\n")
+  (_skills_dir() / ".seed-skills.json").write_text(json.dumps({
+    "contributing.md": {
+      "baseline_sha256": _sha("# platform guidance\n"),
+      "upstream_sha256": _sha("# platform guidance\n"),
+      "status": "current",
+    },
+  }))
+
+  result = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+
+  assert result.status_code == 201, result.text
+  assert "skill contributing.md: owned by the platform — skipped" in result.json()["warnings"]
+  assert target.read_text() == "# platform guidance\n"
+  assert "contributing.md" not in _sidecar()

@@ -705,6 +705,8 @@ def _skill_row(
     "update_supported": False,
     "update_unsupported_reason": "not_installer_managed",
   }
+  if skill.seed_status is not None:
+    row["seed_status"] = skill.seed_status
   if skill.is_dir:
     row["tree_digest"] = skills.tree_digest_on_disk(skill.read_path.parent)
   else:
