@@ -149,7 +149,12 @@ for (const acknowledgement of ['detail', 'replay']) {
     if (acknowledgement === 'replay') {
       await expect.poll(() => f.attempts.length).toBe(2)
     }
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
+    // Settling a lost acknowledgement is a chain -- the online edge, a readiness
+    // probe, the outbox reconcile, then the detail read or replay -- with no fixed
+    // latency floor. Under full-suite load that chain outran the default budget
+    // once. What this case asserts is the OUTCOME (settled, exactly once, draft
+    // intact), so give the settle room rather than time it.
+    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible({ timeout: 15000 })
     expect(f.attempts.length).toBeGreaterThanOrEqual(1)
     for (const attempt of f.attempts) expect(attempt).toEqual(f.attempts[0])
     expect(f.answerWrites()).toBe(1)
