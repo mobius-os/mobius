@@ -292,7 +292,8 @@ test('a staged update can review another release before one restart', async ({ p
   await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
   const review = page.getByRole('button', { name: 'Review update' })
   await expect(review).toBeVisible()
-  await expect(review).toBeFocused()
+  // Opening Settings does not move focus; PlatformUpdates restores focus to its
+  // action only after a review closes, which the end of this case asserts.
   await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
   await review.click()
@@ -385,7 +386,11 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
 
   await resolveButton.click()
   await expect(blocked.getByRole('button', { name: 'Opening…' })).toBeDisabled()
-  await page.keyboard.press('Shift+Tab')
+  // The review is a local, non-modal dialog (#1279): it does not trap Tab, and
+  // its Escape handler only answers events from inside it. Put focus on the
+  // dialog itself (every control is disabled) so Escape reaches that handler
+  // and the pending resolve is what keeps it open.
+  await blocked.focus()
   await expect(blocked).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(blocked).toBeVisible()
@@ -427,8 +432,8 @@ test('a rolled-back apply stays open with an explicit repair action', async ({ p
 
   const result = page.getByRole('dialog', { name: 'Update rolled back' })
   await expect(result).toBeVisible()
-  await expect(result.getByText('Your previous source was restored.')).toBeVisible()
-  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+  await expect(result.getByText('Your earlier source was restored.')).toBeVisible()
+  await expect(result.getByRole('button', { name: 'Fix with an agent' })).toBeFocused()
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
@@ -518,7 +523,7 @@ test('a rollback result keeps an explicit repair action when status reads fail',
 
   const result = page.getByRole('dialog', { name: 'Update rolled back' })
   await expect(result).toBeVisible()
-  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+  await expect(result.getByRole('button', { name: 'Fix with an agent' })).toBeFocused()
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
@@ -543,7 +548,7 @@ for (const [label, body] of [
     await review.getByRole('button', { name: 'Apply update' }).click()
     await expect(review).toBeVisible()
     await expect(review.getByRole('heading', { name: 'This update needs help' })).toBeVisible()
-    await expect(review.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+    await expect(review.getByRole('button', { name: 'Fix with an agent' })).toBeFocused()
     const failure = review.locator('.urm__error details')
     await expect(failure).not.toHaveAttribute('open', '')
     await failure.getByText('Failure details', { exact: true }).click()
@@ -576,7 +581,7 @@ test('Escape and dismissal stay gated while Apply is pending', async ({ page }) 
   const dialog = await openUpdateReview(page)
   await dialog.getByRole('button', { name: 'Apply update' }).click()
   await expect(dialog.getByRole('button', { name: 'Updating…' })).toBeDisabled()
-  await expect(dialog.getByText('Preparing dependencies and the interface…')).toBeVisible()
+  await expect(dialog.getByText('Preparing the update…')).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
 
@@ -672,7 +677,7 @@ test('server restart completion asks before restarting and cancellation performs
   const confirmation = updates.getByRole('group', { name: 'Confirm restart' })
   await expect(confirmation).toBeVisible()
   await expect(confirmation.getByRole('button', { name: 'Restart now' })).toBeEnabled()
-  await expect(confirmation).toContainText('briefly interrupts active chats')
+  await expect(confirmation).toContainText('briefly pauses active chats')
   expect(state.unexpectedMutations).toEqual([])
   await confirmation.getByRole('button', { name: 'Not now' }).click()
   await expect(confirmation).toHaveCount(0)
