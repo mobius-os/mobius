@@ -2295,14 +2295,12 @@ def get_current_chat_usage(
       "provider_session_id": provider_session_id,
       "input_tokens": None if has_settled_turn else 0,
       "context_window": None,
-      "has_settled_turn": has_settled_turn,
     }
   return {
     "provider": run.provider,
     "provider_session_id": run.provider_session_id,
     "input_tokens": _latest_model_input_tokens(run),
     "context_window": run.model_context_window,
-    "has_settled_turn": True,
   }
 
 

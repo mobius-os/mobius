@@ -408,7 +408,6 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
     "provider_session_id": "thread-current",
     "input_tokens": 193_800,
     "context_window": 258_400,
-    "has_settled_turn": True,
   }
 
 
@@ -445,7 +444,6 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
     "provider_session_id": "claude-session-current",
     "input_tokens": 123_456,
     "context_window": 200_000,
-    "has_settled_turn": True,
   }
 
 
@@ -485,7 +483,6 @@ def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
     "provider_session_id": "mobius-session",
     "input_tokens": 20_220,
     "context_window": 235_929,
-    "has_settled_turn": True,
   }
 
 
@@ -514,7 +511,6 @@ def test_current_chat_usage_reports_empty_context_before_the_first_settled_turn(
     "provider_session_id": "session-without-a-turn",
     "input_tokens": 0,
     "context_window": None,
-    "has_settled_turn": False,
   }
 
 
@@ -534,7 +530,6 @@ def test_current_chat_usage_stays_unknown_when_a_settled_turn_lacks_usage(
   )
 
   assert response.json()["input_tokens"] is None
-  assert response.json()["has_settled_turn"] is True
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

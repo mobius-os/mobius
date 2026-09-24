@@ -24,6 +24,7 @@ export default function BrainUsageButton({
   provider = null,
   providerSessionId = null,
   model = null,
+  liveContext = null,
 }) {
   const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
     enabled: usageEnabled && Boolean(provider),
@@ -34,7 +35,6 @@ export default function BrainUsageButton({
     providerSessionId,
     { enabled: usageEnabled },
   )
-  const liveContext = chatQueries.liveContext.useQuery(chatId).data
   // The registry supplies the ceiling before a session exists, for a fresh
   // session, and during a turn whose provider reports no window mid-turn.
   const modelRegistryQuery = modelQueries.registry.useQuery({

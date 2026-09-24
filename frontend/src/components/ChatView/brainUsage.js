@@ -83,10 +83,10 @@ export function resolvedContextTokenCounts(
   if (!settled) return null
   const recorded = contextTokenCounts(settled)
   if (recorded !== null) return recorded
-  // Only the server can prove that a chat has used no context yet (no settled
-  // turn). After a settled turn, missing usage is unknown—not an empty
-  // context—and a failed request has no snapshot at all.
-  return settled.has_settled_turn === false ? ceiling : null
+  // Only the server can prove that a chat has used no context yet: it reports
+  // 0 without a window before the first settled turn. After one, missing usage
+  // is unknown—not an empty context—and a failed request has no snapshot.
+  return settled.input_tokens === 0 ? ceiling : null
 }
 
 // Descending unit steps so a count keeps at most three digits before its

@@ -36,9 +36,6 @@ const chatCurrentUsageKey = (chatId, provider, providerSessionId) => [
   provider,
   providerSessionId,
 ]
-// Client-only: the running turn's latest context reading from the chat stream.
-// Never fetched and never persisted; the owning ChatView clears it.
-const chatLiveContextKey = chatId => ['chat-live-context', chatId]
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
@@ -238,15 +235,6 @@ function useChatCurrentUsageQuery(
     enabled: enabled && Boolean(chatId && provider && providerSessionId),
     staleTime: 60_000,
     retry: 0,
-  })
-}
-
-function useChatLiveContextQuery(chatId) {
-  return useQuery({
-    queryKey: chatLiveContextKey(chatId),
-    queryFn: () => null,
-    enabled: false,
-    staleTime: Infinity,
   })
 }
 
@@ -653,16 +641,6 @@ export const chatQueries = {
       queryKey: chatId
         ? [...chatCurrentUsageRootKey, chatId]
         : chatCurrentUsageRootKey,
-    }),
-  },
-  liveContext: {
-    key: chatLiveContextKey,
-    useQuery: useChatLiveContextQuery,
-    set: (queryClient, chatId, reading) => queryClient.setQueryData(
-      chatLiveContextKey(chatId), reading,
-    ),
-    clear: (queryClient, chatId) => queryClient.removeQueries({
-      queryKey: chatLiveContextKey(chatId), exact: true,
     }),
   },
 }

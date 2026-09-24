@@ -1784,6 +1784,9 @@ export default function ChatView({
     setChatInfo(newChatSession.chatInfo)
   }, [newChatSession?.chatInfo, newChatSession?.materialized, setChatInfo])
 
+  // The running turn's latest context reading. The pane is keyed by chat, so
+  // it never outlives this chat's stream.
+  const [liveContext, setLiveContext] = useState(null)
   const {
     streamItems,
     latestItemsRef,
@@ -1949,9 +1952,7 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
-    onContextUsage: reading => chatQueries.liveContext.set(
-      queryClient, chatId, reading,
-    ),
+    onContextUsage: setLiveContext,
     onSteeredIntoTurn: ({
       ts,
       content,
@@ -5001,16 +5002,10 @@ export default function ChatView({
       // The settled run now records what the live reading showed; drop the
       // live one only once that record is in, so the gauge never steps back.
       void chatQueries.currentUsage.invalidate(queryClient, chatId)
-        .finally(() => chatQueries.liveContext.clear(queryClient, chatId))
+        .finally(() => setLiveContext(null))
     }
     wasTurnActiveRef.current = turnActive
   }, [chatId, chatProvider, turnActive, queryClient])
-
-  // A live reading belongs to this mounted stream; a later remount must read
-  // the settled record rather than an old turn's reading.
-  useEffect(() => () => {
-    chatQueries.liveContext.clear(queryClient, chatId)
-  }, [chatId, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -6344,6 +6339,7 @@ export default function ChatView({
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
+              liveContext={liveContext}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover

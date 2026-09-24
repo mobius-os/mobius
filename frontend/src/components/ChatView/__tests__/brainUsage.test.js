@@ -61,7 +61,6 @@ test('a new chat starts at zero against the selected model context', () => {
     provider_session_id: 'first-thread',
     input_tokens: 0,
     context_window: null,
-    has_settled_turn: false,
   }, registry, 'codex', 'gpt-5.6-sol'), {
     used: 0,
     maximum: 258_400,
@@ -75,7 +74,6 @@ test('a running turn shows its latest model call before the turn settles', () =>
     provider_session_id: 'session-1',
     input_tokens: 100_000,
     context_window: 1_000_000,
-    has_settled_turn: true,
   }
   // Claude reports no window mid-turn, so the settled one is kept.
   assert.deepEqual(resolvedContextTokenCounts(
@@ -133,7 +131,6 @@ test('missing usage in an established session remains unknown', () => {
     provider_session_id: 'session-without-usage',
     input_tokens: null,
     context_window: null,
-    has_settled_turn: true,
   }, registry, 'codex', 'gpt-5.6-sol'), null)
   assert.equal(
     resolvedContextTokenCounts(null, registry, 'codex', 'gpt-5.6-sol'),
