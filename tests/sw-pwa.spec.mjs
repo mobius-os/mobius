@@ -18,6 +18,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { applyApp, applySource, writeStaticAppFiles } from './app-source.mjs'
+import { FAILURE_GRACE_MS } from '../frontend/src/lib/connectivityStore.js'
 // Import the cache names rather than repeating them. They are deliberately
 // bumped whenever a cached response's policy changes, so a literal here turns
 // every future bump into an unrelated e2e failure 5 minutes into the run —
@@ -236,7 +237,18 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       // The same authoritative response is now the offline fallback.
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
-      await expect(standaloneMarker()).toHaveText(secondMarker)
+      // An offline cold reopen is recognised by PROBING, not navigator.onLine:
+      // a document served from the service worker can report onLine=true while
+      // the network is down (connectivityStore documents exactly this). A failed
+      // probe only moves reachability to CHECKING, which still counts as online;
+      // it becomes OFFLINE after FAILURE_GRACE_MS, and only then does AppCanvas
+      // take its cached app token and boot the frame. CI's bundled Chromium
+      // takes that path: traced, the first failed probe landed ~5.0s before the
+      // app flipped offline, which is the default assertion budget to the
+      // millisecond. Budget for the grace window plus the boot after it.
+      await expect(standaloneMarker()).toHaveText(secondMarker, {
+        timeout: FAILURE_GRACE_MS + 10_000,
+      })
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {
