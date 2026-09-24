@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -30,6 +31,10 @@ AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
 CAPACITY_MONITOR_INTERVAL_SECS = 300.0
 CAPACITY_MONITOR_DOMAIN_EVERY_N_TICKS = 6
 PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
+# Retention may briefly close new-run admission so a busy installation gets a
+# real maintenance opportunity. Existing runs are never stopped.
+PROVIDER_SESSION_RETENTION_QUIESCE_TIMEOUT_SECS = 30.0
+PROVIDER_SESSION_RETENTION_QUIESCE_POLL_SECS = 0.25
 # OOM watchdog: the counter read is a single tiny file, but the per-tick process
 # sample walks the cgroup, so we sample fast only through the boot window (when a
 # resume burst can OOM) and back off afterwards. The kernel's oom_kill counter is
@@ -54,20 +59,41 @@ async def sweep_provider_sessions_if_idle(
   *,
   sweep=None,
   runner_registry=None,
+  quiesce_timeout_secs: float = PROVIDER_SESSION_RETENTION_QUIESCE_TIMEOUT_SECS,
 ) -> dict:
-  """Run filesystem retention behind an atomic idle-runner boundary."""
+  """Run retention after a bounded, non-disruptive runner drain.
+
+  Closing admission first prevents a busy installation from continually
+  missing the instant when it happens to be idle. Existing runners drain
+  normally; a timeout defers maintenance rather than interrupting work.
+  """
   if sweep is None:
     from app.provider_session_retention import sweep_stale_provider_sessions
     sweep = sweep_stale_provider_sessions
   if runner_registry is None:
     from app.runner_registry import registry
     runner_registry = registry
-  lease = runner_registry.acquire_idle_admission_lease()
+  lease = runner_registry.acquire_quiescing_admission_lease()
   if lease is None:
-    return {"status": "skipped_active"}
+    return {"status": "skipped_competing_maintenance"}
   try:
+    started = time.monotonic()
+    deadline = started + max(0.0, quiesce_timeout_secs)
+    while not runner_registry.is_idle():
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        return {
+          "status": "deferred_active",
+          "waited_seconds": time.monotonic() - started,
+        }
+      await asyncio.sleep(
+        min(PROVIDER_SESSION_RETENTION_QUIESCE_POLL_SECS, remaining),
+      )
     result = await asyncio.to_thread(sweep, data_dir)
-    return {"status": "completed", **result}
+    return {
+      "waited_seconds": time.monotonic() - started,
+      **result,
+    }
   finally:
     runner_registry.release_admission_lease(lease)
 
@@ -537,9 +563,20 @@ class RuntimeSupervisors:
           result = await sweep_provider_sessions_if_idle(
             self.settings.data_dir,
           )
+          if result["status"] == "deferred_active":
+            self.log.info(
+              "provider session retention deferred after %.1fs waiting for active agents",
+              result["waited_seconds"],
+            )
+            continue
+          if result["status"] == "skipped_competing_maintenance":
+            self.log.info(
+              "provider session retention skipped by another maintenance boundary",
+            )
+            continue
           if result["status"] == "skipped_active":
             self.log.info(
-              "provider session retention skipped while agents are active",
+              "provider session retention skipped while an external Codex process holds its lock",
             )
             continue
           if result["reclaimed_bytes"]:
