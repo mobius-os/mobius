@@ -294,6 +294,49 @@ def test_inbox_capture_is_immutable_across_same_name_regeneration(db, chat):
   ]
 
 
+def test_max_length_duplicate_names_stay_downloadable_and_distinct(
+  client, db, auth, chat,
+):
+  settings = get_settings()
+  inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
+  sink = _sink(chat)
+  name = f"{'a' * 251}.pdf"
+
+  for content in (b"first", b"second"):
+    (inbox / name).write_bytes(content)
+    asyncio.run(gf.publish_inbox_files(
+      sink, data_dir=settings.data_dir, chat_id=chat.id,
+    ))
+
+  expected = [name, f"{'a' * 249}_1.pdf"]
+  assert all(len(candidate) == 255 for candidate in expected)
+  rows = db.query(models.GeneratedFile).filter_by(chat_id=chat.id).all()
+  assert {row.name for row in rows} == set(expected)
+  block = next(
+    item for item in sink.assistant_blocks
+    if item.get("type") == "generated_files"
+  )
+  assert [file["name"] for file in block["files"]] == expected
+  assert [
+    client.get(
+      f"/api/chats/{chat.id}/generated-files/{candidate}",
+      params={"token": _media_token(client, auth, chat.id)},
+    ).content
+    for candidate in expected
+  ] == [b"first", b"second"]
+
+
+def test_generated_file_collision_bounds_pathological_suffix():
+  requested = f"a.{('z' * 253)}"
+  candidate = chat_writer._unique_generated_file_name(
+    requested, {requested}, max_length=255,
+  )
+
+  assert len(candidate) == 255
+  assert candidate != requested
+  assert "_1" in candidate
+
+
 def test_non_regular_swap_is_rejected_without_blocking(tmp_path):
   data_dir = str(tmp_path / "data")
   inbox = gf.output_dir(data_dir, "chat", create=True)

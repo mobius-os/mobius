@@ -90,6 +90,29 @@ def _name_chat_from_first_message(chat: models.Chat, content: object) -> None:
     chat.title = first_message_title(content) or "New chat"
 
 
+def _unique_generated_file_name(
+  requested: str, existing: set[str], *, max_length: int,
+) -> str:
+  """Return a bounded display name, reserving room for collision markers."""
+  name = requested[:max_length]
+  if name not in existing:
+    return name
+
+  stem = Path(name).stem or "file"
+  suffix = Path(name).suffix
+  index = 1
+  while True:
+    marker = f"_{index}"
+    # Keep at least one stem character even when an agent supplies a suffix
+    # that nearly fills the database column.
+    kept_suffix = suffix[:max(0, max_length - len(marker) - 1)]
+    stem_length = max_length - len(marker) - len(kept_suffix)
+    candidate = f"{stem[:stem_length]}{marker}{kept_suffix}"
+    if candidate not in existing:
+      return candidate
+    index += 1
+
+
 # Bounded wait for a strict (commit-before-ack) writer-actor command.
 # Every must-persist caller (QuestionCommit / Finalize / AnswerQuestion /
 # StartTurn / PromotePending / ...) awaits the ack before taking the next
@@ -2816,17 +2839,9 @@ class ChatWriterActor:
       )
       return None
 
-    name = cmd.name
-    if name in existing_names:
-      # Same stem/suffix split uploads.py's `_unique_name` uses, so one
-      # basename collision reads the same on both surfaces
-      # (`a.tar.gz` -> `a.tar_1.gz`).
-      stem = Path(cmd.name).stem
-      suffix = Path(cmd.name).suffix
-      index = 1
-      while f"{stem}_{index}{suffix}" in existing_names:
-        index += 1
-      name = f"{stem}_{index}{suffix}"
+    name = _unique_generated_file_name(
+      cmd.name, existing_names, max_length=GeneratedFile.name.type.length,
+    )
     snapshot = copy.deepcopy(cmd.snapshot)
     replaced = False
     for block in reversed(snapshot.get("blocks") or []):
