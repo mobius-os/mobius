@@ -59,8 +59,13 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
     // State from the check and focus restoration settle in the same render.
     actionRef.current?.focus({ preventScroll: true })
   }
-  function askRestart(source) { update.clearError(); setConfirmRestart(source) }
-  function restart() { setConfirmRestart(null); update.restart() }
+  // The first press arms that button as its own confirmation; the second restarts.
+  function pressRestart(source) {
+    update.clearError()
+    if (confirmRestart !== source) return setConfirmRestart(source)
+    setConfirmRestart(null)
+    update.restart()
+  }
 
   const primary = conflict
     ? { label: platform?.conflict_chat_id ? 'Open chat' : 'Resolve in chat', act: update.resolve }
@@ -69,7 +74,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
       : imageNeeded
         ? { label: 'Finish update', act: () => openReview('finish') }
         : restartNeeded
-          ? { label: 'Restart to finish', act: () => askRestart('primary') }
+          ? { label: confirmRestart === 'primary' ? 'Confirm restart' : 'Restart to finish', act: () => pressRestart('primary') }
           : { label: phase === 'checking' ? 'Checking…' : 'Check for updates', act: check }
   const status = activeRebuild ? rebuildProgressMessage(rebuild)
     : update.reconnecting ? (update.observingKind === 'apply' ? 'Checking the update…' : 'Restarting Möbius…')
@@ -86,8 +91,8 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
             disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
         ) : (
-          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={confirmRestart === 'primary' ? restart : primary.act}>
-            {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : 'Updating…') : confirmRestart === 'primary' ? 'Confirm restart' : primary.label}
+          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
+            {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : 'Updating…') : primary.label}
           </button>
         )}
       </div>
@@ -102,7 +107,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           <dt>Code</dt><dd>{formatUpstreamCommitDate(versionPlatform?.contained_upstream_committed_at) || missingVersionLabel} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
           <dt>Container</dt><dd>{formatUpstreamCommitDate(versionPlatform?.current_build_committed_at || version?.build_date) || missingVersionLabel} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
         </dl>
-        <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={confirmRestart === 'dedicated' ? restart : () => askRestart('dedicated')}>
+        <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => pressRestart('dedicated')}>
           {phase === 'restarting' ? 'Restarting…' : confirmRestart === 'dedicated' ? 'Confirm restart' : 'Restart'}
         </button>
       </div>

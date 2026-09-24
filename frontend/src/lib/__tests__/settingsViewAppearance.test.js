@@ -63,9 +63,9 @@ test('update versions paint from the persisted status cache without an Unknown f
 
 test('restart confirms on the same button for four seconds without a cancel button', () => {
   assert.match(updates, /setTimeout\(\(\) => setConfirmRestart\(null\), 4000\)/)
-  assert.match(updates, /function restart\(\) \{ setConfirmRestart\(null\); update\.restart\(\) \}/)
-  assert.match(updates, /confirmRestart === 'primary' \? restart : primary\.act/)
-  assert.match(updates, /confirmRestart === 'dedicated' \? restart : \(\) => askRestart\('dedicated'\)/)
+  assert.match(updates, /if \(confirmRestart !== source\) return setConfirmRestart\(source\)[\s\S]*?update\.restart\(\)/)
+  assert.match(updates, /act: \(\) => pressRestart\('primary'\)/)
+  assert.match(updates, /onClick=\{\(\) => pressRestart\('dedicated'\)\}/)
   assert.doesNotMatch(updates, /Not now|Restart server/)
   assert.match(updates, /briefly pauses active chats/)
   assert.match(updates, /page will reconnect automatically/)
@@ -205,8 +205,7 @@ test('simple Updates keeps versions and dedicated restart visible outside option
   assert.match(visible, />Updates<\/h2>/)
   assert.match(visible, /<dt>Code<\/dt>/)
   assert.match(visible, /<dt>Container<\/dt>/)
-  assert.match(visible, /onClick=\{confirmRestart === 'dedicated' \? restart/)
-  assert.match(updates, /Confirm restart/)
+  assert.match(visible, /pressRestart\('dedicated'\)/)
 })
 
 test('external update instructions come from the activation owner, not a second UI policy', () => {

@@ -37,7 +37,6 @@ _CLAUDE_EXTRA_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/organizations/"
   "{organization_uuid}/overage_spend_limit"
 )
-_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_RESET_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 )
@@ -532,20 +531,10 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    usage_response, reset_response = await asyncio.gather(
-      client.get(_CLAUDE_USAGE_URL, headers=headers),
-      client.get(_CLAUDE_RESET_USAGE_URL, headers=headers),
-    )
-    usage_response.raise_for_status()
-    reset_response.raise_for_status()
-    usage = usage_response.json()
-    reset = reset_response.json()
-    # The reset-only request skips spend data. Keep the ordinary usage
-    # document authoritative for paid extra usage and add only its reset offer.
-    if isinstance(usage, dict) and isinstance(reset, dict):
-      usage = {**usage, "cedar_ember": reset.get("cedar_ember")}
+    response = await client.get(_CLAUDE_RESET_USAGE_URL, headers=headers)
+    response.raise_for_status()
     return normalize_claude_usage(
-      usage,
+      response.json(),
       subscription_type=subscription_type,
     )
 
