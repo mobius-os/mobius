@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import stat
@@ -958,11 +959,14 @@ def test_community_mutations_are_narrow_and_require_idempotency(
       )
 
 
-def test_large_body_exception_is_only_for_exact_contribution_routes():
+def test_body_limits_are_only_for_exact_declared_routes():
   for is_unix in (False, True):
     assert broker_module._request_body_limit(
       is_unix=is_unix, method="POST", path="/v1/responses",
     ) == broker_module.MAX_INFERENCE_BODY
+    assert broker_module._request_body_limit(
+      is_unix=is_unix, method="POST", path="/v1/alpha/search",
+    ) == 256_000
   assert broker_module._request_body_limit(
     is_unix=True, method="POST", path="/v1/contributions",
   ) == broker_module.MAX_CONTRIBUTION_BODY
@@ -977,10 +981,413 @@ def test_large_body_exception_is_only_for_exact_contribution_routes():
     (True, "GET", "/v1/responses"),
     (True, "POST", "/v1/responses?x=1"),
     (True, "GET", "/v1/community/publications"),
+    (False, "POST", "/v1/alpha/search?x=1"),
   ):
     assert broker_module._request_body_limit(
       is_unix=args[0], method=args[1], path=args[2],
     ) == broker_module.MAX_BODY
+
+
+def test_standalone_search_preserves_codex_results_and_never_sends_history(broker, monkeypatch):
+  calls = []
+
+  def fake_parallel(tool, args):
+    calls.append((tool, args))
+    if tool == "web_search":
+      return {"results": [{
+        "url": "https://example.com/report", "title": "Report",
+        "excerpts": ["Current official figures"],
+      }]}
+    return {"results": [{"url": "https://example.com/report",
+                        "full_content": "The official rate is 3.75%."}]}
+
+  monkeypatch.setattr(broker, "_parallel", fake_parallel)
+  request = {
+    "id": "chat-one", "model": "flow",
+    "input": [{"role": "user", "content": "private conversation history"}],
+    "commands": {"search_query": [{"q": "official rate"}]},
+  }
+  response = broker.standalone_search(request)
+  assert response["results"][0] == {
+    "type": "text_result", "ref_id": "turn0search0",
+    "url": "https://example.com/report", "title": "Report",
+    "snippet": "Current official figures",
+  }
+  assert "【turn0search0】" in response["output"]
+  assert calls[0][0] == "web_search"
+  assert calls[0][1]["search_queries"] == ["official rate"]
+  assert "private conversation history" not in json.dumps(calls)
+  opened = broker.standalone_search({
+    "id": "chat-one", "commands": {"open": [{"ref_id": "turn0search0"}]},
+  })
+  assert "The official rate is 3.75%." in opened["output"]
+  assert calls[1][0] == "web_fetch"
+  assert calls[1][1]["urls"] == ["https://example.com/report"]
+  assert calls[0][1]["session_id"] == calls[1][1]["session_id"]
+
+
+def test_standalone_search_filters_domains_and_marks_date_advisory(broker, monkeypatch):
+  calls = []
+  monkeypatch.setattr(broker, "_parallel", lambda tool, args: (
+    calls.append((tool, args)) or {"results": [
+      {"url": "https://unrelated.example/page", "title": "Unrelated"},
+      {"url": "https://www.bankofengland.co.uk/decision", "title": "Bank of England"},
+    ]}
+  ))
+  result = broker.standalone_search({
+    "id": "chat-filters",
+    "commands": {"search_query": [{
+      "q": "official rate", "domains": ["bankofengland.co.uk"], "recency": 7,
+    }]},
+  })
+  assert [hit["url"] for hit in result["results"]] == [
+    "https://www.bankofengland.co.uk/decision",
+  ]
+  assert "Freshness filtering is advisory" in result["output"]
+  assert "bankofengland.co.uk" in calls[0][1]["objective"]
+  assert "published since" in calls[0][1]["objective"]
+
+
+def test_standalone_search_limits_after_domain_filtering(broker, monkeypatch):
+  hits = [
+    {"url": f"https://unrelated.example/{index}", "title": "Unrelated"}
+    for index in range(5)
+  ] + [
+    {"url": f"https://www.bankofengland.co.uk/decision/{index}", "title": "Decision"}
+    for index in range(7)
+  ]
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: {"results": hits})
+  result = broker.standalone_search({
+    "id": "chat-domain-cap",
+    "commands": {"search_query": [{
+      "q": "official rate", "domains": ["bankofengland.co.uk"],
+    }]},
+  })
+  assert [hit["url"] for hit in result["results"]] == [
+    f"https://www.bankofengland.co.uk/decision/{index}"
+    for index in range(5)
+  ]
+  assert "No results." not in result["output"]
+
+
+def test_standalone_image_search_is_nonfatal_when_not_supported(broker, monkeypatch):
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
+  result = broker.standalone_search({
+    "id": "chat-images", "commands": {"image_query": [{"q": "Moon"}]},
+  })
+  assert result["results"] == []
+  assert "Image search is not supported" in result["output"]
+
+
+def test_standalone_search_rejects_private_urls_without_calling_provider(broker, monkeypatch):
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
+  for url in (
+    "http://127.0.0.1/admin", "http://localhost/", "http://foo.localhost/",
+    "http://foo.localdomain/", "http://127.1/", "http://2130706433/",
+    "http://0x7f000001/", "http://0177.0.0.1/", "file:///etc/passwd",
+  ):
+    with pytest.raises(ValueError, match="public HTTP URL"):
+      broker.standalone_search({"id": "chat-one", "commands": {
+        "open": [{"ref_id": url}],
+      }})
+
+
+def test_standalone_search_expired_ref_is_nonfatal_without_fetch(broker, monkeypatch):
+  calls = []
+
+  def fake_parallel(tool, _args):
+    calls.append(tool)
+    return {"results": [{"url": "https://example.com/page", "title": "Example"}]}
+
+  monkeypatch.setattr(broker, "_parallel", fake_parallel)
+  searched = broker.standalone_search({
+    "id": "chat-expired", "commands": {"search_query": [{"q": "example"}]},
+  })
+  ref_id = searched["results"][0]["ref_id"]
+  broker.search_sessions.clear()
+  opened = broker.standalone_search({
+    "id": "chat-expired", "commands": {"open": [{"ref_id": ref_id}]},
+  })
+  assert opened["results"] == []
+  assert "Page reference unavailable; search again or open a public URL." in opened["output"]
+  assert calls == ["web_search"]
+  mixed = broker.standalone_search({
+    "id": "chat-mixed", "commands": {
+      "search_query": [{"q": "new example"}],
+      "find": [{"ref_id": "turn9search0", "pattern": "example"}],
+    },
+  })
+  assert [item["url"] for item in mixed["results"]] == ["https://example.com/page"]
+  assert "Page reference unavailable" in mixed["output"]
+  assert calls == ["web_search", "web_search"]
+
+
+def test_standalone_search_names_unsupported_commands(broker, monkeypatch):
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
+  response = broker.standalone_search({
+    "id": "chat-one", "commands": {"weather": [{"location": "London"}]},
+  })
+  assert "Unsupported web search operation(s): weather" in response["output"]
+
+
+def test_codex_search_endpoint_returns_native_response_shape(broker, monkeypatch):
+  calls = []
+
+  def fake_parallel(tool, args):
+    calls.append((tool, args))
+    if tool == "web_search":
+      return {"results": [{
+        "url": "https://example.com/", "title": "Example", "excerpts": ["A source"],
+      }]}
+    return {"results": [{"url": "https://example.com/", "full_content": "An official page."}]}
+
+  monkeypatch.setattr(broker, "_parallel", fake_parallel)
+  server = broker_module._TcpServer(("127.0.0.1", 0), broker_module._Handler)
+  server.broker = broker
+  server.is_unix = False
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  try:
+    with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}") as client:
+      response = client.post("/v1/alpha/search", json={
+        "id": "chat-one", "model": "reflect",
+        "commands": {"search_query": [{"q": "example"}]},
+      })
+      assert response.status_code == 200
+      assert response.json()["results"][0]["url"] == "https://example.com/"
+      assert "【turn0search0】" in response.json()["output"]
+      opened = client.post("/v1/alpha/search", json={
+        "id": "chat-one", "model": "reflect",
+        "commands": {"open": [{"ref_id": "turn0search0"}]},
+      })
+      assert opened.status_code == 200
+      assert "An official page." in opened.json()["output"]
+      assert opened.json()["results"][0]["url"] == "https://example.com/"
+      assert client.post("/v1/alpha/search?unexpected=1", json={}).status_code == 404
+    assert [call[0] for call in calls] == ["web_search", "web_fetch"]
+  finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("upstream_status, expected", [
+  (429, "temporarily rate-limited"), (503, "temporarily unavailable"),
+])
+def test_codex_search_endpoint_reports_provider_failure_without_failing_turn(
+  broker, monkeypatch, upstream_status, expected,
+):
+  request = httpx.Request("POST", "https://search.parallel.ai/mcp")
+  response = httpx.Response(upstream_status, request=request)
+
+  def fail_parallel(_tool, _args):
+    cause = httpx.HTTPStatusError("Parallel failed", request=request, response=response)
+    raise ExceptionGroup("MCP transport failed", [cause])
+
+  monkeypatch.setattr(broker, "_parallel", fail_parallel)
+  server = broker_module._TcpServer(("127.0.0.1", 0), broker_module._Handler)
+  server.broker = broker
+  server.is_unix = False
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  try:
+    with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}") as client:
+      result = client.post("/v1/alpha/search", json={
+        "id": "chat-one", "commands": {"search_query": [{"q": "example"}]},
+      })
+      assert result.status_code == 200
+      assert result.json()["results"] == []
+      assert expected in result.json()["output"]
+      assert "Continue without claiming current facts were verified" in result.json()["output"]
+      assert "No results." not in result.json()["output"]
+  finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+def test_page_fetch_rate_limit_is_nonfatal_and_not_a_false_pattern_miss(broker, monkeypatch):
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: (_ for _ in ()).throw(
+    ValueError("Parallel rate limit exceeded")
+  ))
+  result = broker.standalone_search({"id": "chat-open", "commands": {
+    "find": [{"ref_id": "https://example.org/page", "pattern": "official figure"}],
+  }})
+  assert "temporarily rate-limited" in result["output"]
+  assert "Page text unavailable" in result["output"]
+  assert "Pattern not found" not in result["output"]
+  assert result["results"] == []
+
+
+def test_subscription_wire_flattens_only_native_web_tool():
+  request = {
+    "model": "reflect", "input": [{"role": "user", "content": "private text"}],
+    "tools": [
+      {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+      {"type": "namespace", "name": "web", "tools": [{
+        "type": "function", "name": "run", "description": "Search the web",
+        "parameters": {"type": "object", "properties": {"search_query": {"type": "array"}}},
+      }]},
+      {"type": "namespace", "name": "mcp__other", "tools": [{
+        "type": "function", "name": "other", "parameters": {"type": "object"},
+      }]},
+    ],
+  }
+  encoded, changed, bare_run_is_web = broker_module._flatten_web_tool(json.dumps(request).encode())
+  assert changed is True
+  assert bare_run_is_web is True
+  decoded = json.loads(encoded)
+  assert decoded["input"] == request["input"]
+  assert [tool["name"] for tool in decoded["tools"]] == [
+    "exec_command", "mobius_web_run", "mcp__other",
+  ]
+  assert decoded["tools"][1]["parameters"] == request["tools"][1]["tools"][0]["parameters"]
+  assert broker_module._flatten_web_tool(encoded) == (encoded, False, False)
+
+
+def test_subscription_wire_does_not_guess_ambiguous_bare_run():
+  request = {"tools": [
+    {"type": "namespace", "name": "web", "tools": [{
+      "type": "function", "name": "run", "parameters": {"type": "object"},
+    }]},
+    {"type": "namespace", "name": "other", "tools": [{
+      "type": "function", "name": "run", "parameters": {"type": "object"},
+    }]},
+  ]}
+  _body, changed, bare_run_is_web = broker_module._flatten_web_tool(
+    json.dumps(request).encode()
+  )
+  assert changed is True
+  assert bare_run_is_web is False
+  event = b'data: {"item":{"type":"function_call","name":"run"}}'
+  assert broker_module._restore_web_tool_event(
+    event, bare_run_is_web=bare_run_is_web,
+  ) == event
+  foreign = b'data: {"item":{"type":"function_call","name":"run","namespace":"other"}}'
+  assert broker_module._restore_web_tool_event(
+    foreign, bare_run_is_web=True,
+  ) == foreign
+  plain_text = b'data: {"item":{"type":"message","text":"<tool_call>run</tool_call>"}}'
+  assert broker_module._restore_web_tool_event(
+    plain_text, bare_run_is_web=True,
+  ) == plain_text
+
+
+def test_subscription_wire_flattens_prior_web_call_to_match_advertised_tool():
+  request = {
+    "tools": [{"type": "namespace", "name": "web", "tools": [{
+      "type": "function", "name": "run", "parameters": {"type": "object"},
+    }]}],
+    "input": [
+      {"type": "function_call", "namespace": "web", "name": "run",
+       "call_id": "web-call", "arguments": '{"open":[{"ref_id":"turn0search0"}]}'},
+      {"type": "function_call_output", "call_id": "web-call", "output": [{
+        "type": "input_text", "text": "Search result",
+      }]},
+      {"type": "function_call", "namespace": "other", "name": "run",
+       "call_id": "other-call", "arguments": "{}"},
+      {"type": "message", "role": "assistant", "content": "run is ordinary text"},
+    ],
+  }
+  body, changed, _bare_run_is_web = broker_module._flatten_web_tool(
+    json.dumps(request).encode()
+  )
+  assert changed is True
+  flattened = json.loads(body)
+  assert flattened["tools"][0]["name"] == "mobius_web_run"
+  assert flattened["input"][0] == {
+    "type": "function_call", "name": "mobius_web_run", "call_id": "web-call",
+    "arguments": '{"open":[{"ref_id":"turn0search0"}]}',
+  }
+  assert flattened["input"][1:] == request["input"][1:]
+
+
+def test_subscription_wire_restores_streamed_web_call_without_buffering_response():
+  events = [
+    {"type": "response.output_item.added", "item": {
+      "type": "function_call", "name": "mobius_web_run", "call_id": "call-1",
+    }},
+    {"type": "response.output_item.done", "item": {
+      "type": "function_call", "name": "mobius_web_run", "call_id": "call-1",
+      "arguments": '{"search_query":[{"q":"test"}]}',
+    }},
+    {"type": "response.completed", "response": {"output": [{
+      "type": "function_call", "name": "mobius_web_run", "call_id": "call-1",
+    }]}},
+  ]
+  raw = b"".join(
+    b"event: message\n" + b"data: " + json.dumps(event).encode() + b"\n\n"
+    for event in events
+  ) + b"data: [DONE]\n\n"
+  chunks = [raw[:9], raw[9:37], raw[37:104], raw[104:]]
+  rendered = b"".join(broker_module._restore_web_tool_stream(chunks)).decode()
+  assert rendered.count('"namespace":"web"') == 3
+  assert '"name":"mobius_web_run"' not in rendered
+  assert "data: [DONE]" in rendered
+  assert "call-1" in rendered
+
+
+def test_subscription_wire_preserves_non_sse_and_unrelated_function_calls():
+  body = b'{"tools":[{"type":"function","name":"exec_command"}]}'
+  assert broker_module._flatten_web_tool(body) == (body, False, False)
+  unrelated = b'data: {"item":{"type":"function_call","name":"exec_command"}}'
+  assert broker_module._restore_web_tool_event(unrelated) == unrelated
+
+
+@pytest.mark.parametrize("gateway_name, gateway_namespace", [
+  ("mobius_web_run", None), ("run", None), ("run", "functions"),
+])
+def test_subscription_http_response_restores_codex_web_item(gateway_name, gateway_namespace):
+  seen = []
+
+  class FakeBroker:
+    def proxy(self, *, method, path, body, headers, allow_private_routes):
+      seen.append(json.loads(body))
+      payload = (
+        b'event: response.output_item.done\n'
+        + b'data: ' + json.dumps({"type": "response.output_item.done", "item": {
+          "type": "function_call", "name": gateway_name,
+          **({"namespace": gateway_namespace} if gateway_namespace else {}),
+          "call_id": "call-1", "arguments": "{}",
+        }}).encode() + b'\n\n'
+      )
+      return httpx.Response(
+        200, request=httpx.Request(method, "https://gateway.test" + path),
+        headers={"Content-Type": "text/event-stream"},
+        stream=httpx.ByteStream(payload),
+      )
+
+  server = broker_module._TcpServer(("127.0.0.1", 0), broker_module._Handler)
+  server.broker = FakeBroker()
+  server.is_unix = False
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  try:
+    request = {
+      "tools": [{"type": "namespace", "name": "web", "tools": [{
+        "type": "function", "name": "run", "description": "Search",
+        "parameters": {"type": "object"},
+      }]}],
+      "input": [
+        {"type": "function_call", "name": "run", "namespace": "web",
+         "call_id": "old-call", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "old-call", "output": "found"},
+      ],
+    }
+    with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}") as client:
+      response = client.post("/v1/responses", json=request)
+    assert response.status_code == 200
+    assert seen[0]["tools"][0]["name"] == "mobius_web_run"
+    assert seen[0]["input"][0]["name"] == "mobius_web_run"
+    assert "namespace" not in seen[0]["input"][0]
+    assert seen[0]["input"][1] == request["input"][1]
+    assert '"namespace":"web"' in response.text
+    assert '"name":"run"' in response.text
+    assert '"name":"mobius_web_run"' not in response.text
+  finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
 
 
 def test_handler_supports_feedback_broker_http_methods():

@@ -154,10 +154,9 @@ test('sourceFaviconDiscoveryUrl keeps only the safe source origin', () => {
   assert.equal(sourceFaviconDiscoveryUrl('not a url'), '')
 })
 
-// Codex's WebSearchThreadItem exposes a URL only on its openPage/findInPage
-// actions and never a title, so the title-less shape is the Codex reality —
-// not a hypothetical.
-test('a title-less source (Codex) reads as its host, not the raw URL', () => {
+// Older Codex web-search actions exposed only a URL, so the title-less shape
+// still occurs in saved chats and remains useful to read.
+test('a title-less source reads as its host, not the raw URL', () => {
   assert.equal(sourceLabel({ url: 'https://nodejs.org/en/blog/release/v24.0.0' }),
     'nodejs.org')
   assert.equal(sourceLabel({ title: '', url: 'https://a.example/p' }), 'a.example')
