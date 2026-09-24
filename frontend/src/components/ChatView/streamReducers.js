@@ -588,7 +588,12 @@ export function attachToolOutput(prev, content, event = null) {
 export function attachGeneratedFile(prev, event) {
   const name = event?.name
   if (!name) return prev
-  const entry = { name, size: event.size, mime_type: event.mime_type }
+  const entry = {
+    name,
+    size: event.size,
+    mime_type: event.mime_type,
+    previewable: event.previewable === true,
+  }
   const i = prev.findLastIndex(it => it.type === 'generated_files')
   if (i < 0) return [...prev, { type: 'generated_files', files: [entry] }]
   const block = prev[i]

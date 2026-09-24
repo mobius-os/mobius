@@ -966,6 +966,7 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       "name": name,
       "size": event.get("size"),
       "mime_type": event.get("mime_type"),
+      "previewable": event.get("previewable") is True,
     }
     target = next((
       block for block in reversed(assistant_blocks)

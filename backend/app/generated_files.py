@@ -31,6 +31,21 @@ ALLOWED_EXTENSIONS = frozenset({
   ".mp4",
 })
 
+INLINE_PREVIEW_MIME_TYPES = frozenset({
+  "application/pdf",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "video/mp4",
+})
+
+
+def previewable_mime_type(mime_type: str) -> bool:
+  return mime_type in INLINE_PREVIEW_MIME_TYPES
+
 MAX_RECORDED_BYTES = 100 * 1024 * 1024
 MAX_CANDIDATES_PER_TURN = 20
 MAX_RECORDED_ROWS_PER_CHAT = 500
@@ -163,6 +178,7 @@ async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
     event = {
       "type": "generated_file",
       **{key: value for key, value in captured.items() if not key.startswith("_")},
+      "previewable": previewable_mime_type(captured["mime_type"]),
     }
     try:
       accepted = bool(await sink.publish_generated_file(event))

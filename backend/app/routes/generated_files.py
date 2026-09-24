@@ -13,15 +13,16 @@ from app.path_utils import validate_chat_id, validate_path_within_base
 
 router = APIRouter(prefix="/api/chats", tags=["generated-files"])
 
-# Mirrors uploads.py's forced-download posture: never let a browser render an
-# agent-authored file inline (an SVG/HTML deliverable could carry a stored-XSS
-# payload). Every generated-file mime type is served as an attachment.
+# Unknown and active-content formats always download. A small explicit set of
+# browser-native document/media formats may opt into inline viewing; nosniff
+# keeps an agent-authored payload from changing that reviewed type boundary.
 
 
 @router.get("/{chat_id}/generated-files/{name}")
 def serve_generated_file(
   chat_id: str,
   name: str = PathParam(...),
+  preview: bool = False,
   token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),
 ):
@@ -49,8 +50,11 @@ def serve_generated_file(
   if not file_path.exists() or not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
 
+  inline = preview and generated_files.previewable_mime_type(row.mime_type)
   return FileResponse(
     str(file_path),
     media_type=row.mime_type,
     filename=row.name,
+    content_disposition_type="inline" if inline else "attachment",
+    headers={"X-Content-Type-Options": "nosniff"},
   )

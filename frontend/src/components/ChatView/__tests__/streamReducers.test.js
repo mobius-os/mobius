@@ -50,7 +50,7 @@ function toolItem(tool, overrides = {}) {
 test('generated files collect in one turn-owned block and replay idempotently', () => {
   const event = {
     type: 'generated_file', name: 'report.pdf', size: 700,
-    mime_type: 'application/pdf',
+    mime_type: 'application/pdf', previewable: true,
   }
   const once = attachGeneratedFile([{ type: 'text', content: 'Done.' }], event)
   const twice = attachGeneratedFile(once, event)
@@ -59,6 +59,7 @@ test('generated files collect in one turn-owned block and replay idempotently', 
     { type: 'text', content: 'Done.' },
     { type: 'generated_files', files: [{
       name: 'report.pdf', size: 700, mime_type: 'application/pdf',
+      previewable: true,
     }] },
   ])
 })

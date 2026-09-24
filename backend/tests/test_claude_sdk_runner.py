@@ -167,6 +167,7 @@ async def test_claude_collects_fast_generated_file_at_turn_end(monkeypatch, tmp_
     item for item in bus.events if item.get("type") == "generated_file"
   ]
   assert event["name"] == "fast.pdf"
+  assert event["previewable"] is True
   from app.config import get_settings
   stored = claude_sdk_runner.generated_files.stored_dir(
     get_settings().data_dir, "fast-generated-file",

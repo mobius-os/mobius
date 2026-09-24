@@ -56,6 +56,43 @@ def test_serve_generated_file_by_recorded_name(client, db, auth, chat):
   assert res.status_code == 200
   assert res.content == b"%PDF-1.4 fake"
   assert res.headers["content-disposition"] == 'attachment; filename="report.pdf"'
+  assert res.headers["x-content-type-options"] == "nosniff"
+
+
+def test_safe_generated_file_preview_opens_inline(client, db, auth, chat):
+  stored_name = _stored_file(chat)
+  _write_row(db, chat, name="report.pdf", path=stored_name)
+
+  res = client.get(
+    f"/api/chats/{chat.id}/generated-files/report.pdf",
+    params={"token": _media_token(client, auth, chat.id), "preview": True},
+  )
+
+  assert res.status_code == 200
+  assert res.headers["content-disposition"] == 'inline; filename="report.pdf"'
+  assert res.headers["x-content-type-options"] == "nosniff"
+
+
+def test_unsafe_generated_file_preview_still_downloads(client, db, auth, chat):
+  stored_name = _stored_file(chat, name="stored.svg", content=b"<svg/>")
+  _write_row(
+    db, chat, name="drawing.svg", path=stored_name,
+    mime_type="image/svg+xml",
+  )
+
+  res = client.get(
+    f"/api/chats/{chat.id}/generated-files/drawing.svg",
+    params={"token": _media_token(client, auth, chat.id), "preview": True},
+  )
+
+  assert res.status_code == 200
+  assert res.headers["content-disposition"] == 'attachment; filename="drawing.svg"'
+
+
+def test_preview_policy_keeps_active_images_out_of_inline_documents():
+  assert gf.previewable_mime_type("image/png") is True
+  assert gf.previewable_mime_type("image/svg+xml") is False
+  assert gf.previewable_mime_type("text/html") is False
 
 
 def test_serve_generated_file_unknown_name_404s(client, auth, chat):
@@ -143,6 +180,7 @@ def test_inbox_capture_is_immutable_across_same_name_regeneration(db, chat):
   assert [file["name"] for file in block["files"]] == [
     "report.pdf", "report_1.pdf",
   ]
+  assert all(file["previewable"] is True for file in block["files"])
   rows = db.query(models.GeneratedFile).filter_by(chat_id=chat.id).all()
   assert len(rows) == 2
   assert rows[0].path != rows[1].path

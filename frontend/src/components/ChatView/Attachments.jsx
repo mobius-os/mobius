@@ -4,6 +4,16 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 
+export function generatedFileCanPreview(file) {
+  return file?.kind === 'generated'
+    && file.previewable === true
+}
+
+export function attachmentIsGalleryImage(file) {
+  return file?.mime_type?.startsWith('image/')
+    && (file.kind !== 'generated' || file.previewable === true)
+}
+
 export default function Attachments({ attachments, chatId }) {
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0
 
@@ -21,12 +31,8 @@ export default function Attachments({ attachments, chatId }) {
   }, [chatId, hasAttachments])
 
   if (!hasAttachments) return null
-  const images = attachments.filter(
-    a => a.kind !== 'generated' && a.mime_type?.startsWith('image/'),
-  )
-  const files = attachments.filter(
-    a => a.kind === 'generated' || !a.mime_type?.startsWith('image/'),
-  )
+  const images = attachments.filter(attachmentIsGalleryImage)
+  const files = attachments.filter(a => !attachmentIsGalleryImage(a))
 
   return (
     <div className="chat__attachments">
@@ -36,7 +42,11 @@ export default function Attachments({ attachments, chatId }) {
             <AttachImage
               key={i}
               src={tokenParam
-                ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`
+                ? `${BASE}/api/chats/${chatId}/${
+                  img.kind === 'generated' ? 'generated-files' : 'uploads'
+                }/${encodeURIComponent(img.name)}${tokenParam}${
+                  img.kind === 'generated' ? '&preview=true' : ''
+                }`
                 : ''}
               alt={img.name}
             />
@@ -45,9 +55,10 @@ export default function Attachments({ attachments, chatId }) {
       )}
       {files.map((f, i) => {
         const isGenerated = f.kind === 'generated'
+        const canPreview = generatedFileCanPreview(f)
         const href = tokenParam ? `${BASE}/api/chats/${chatId}/${
           isGenerated ? 'generated-files' : 'uploads'
-        }/${encodeURIComponent(f.name)}${tokenParam}` : ''
+        }/${encodeURIComponent(f.name)}${tokenParam}${canPreview ? '&preview=true' : ''}` : ''
         const content = (
           <>
             <FileDocument width={12} height={12} aria-hidden="true" />
@@ -65,7 +76,7 @@ export default function Attachments({ attachments, chatId }) {
             key={i}
             className="chat__attach-file"
             href={href}
-            download={isGenerated ? f.name : undefined}
+            download={isGenerated && !canPreview ? f.name : undefined}
             target="_blank"
             rel="noopener noreferrer"
           >

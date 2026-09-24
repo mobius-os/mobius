@@ -14,6 +14,13 @@ const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
 )
 
+const {
+  attachmentIsGalleryImage,
+  generatedFileCanPreview,
+} = await vite.ssrLoadModule(
+  '/src/components/ChatView/Attachments.jsx',
+)
+
 const { default: ActiveAssistantSurface } = await vite.ssrLoadModule(
   '/src/components/ChatView/ActiveAssistantSurface.jsx',
 )
@@ -56,11 +63,11 @@ test('generated-file card appears after the assistant response settles', () => {
   assert.match(html, />report\.pdf</)
 })
 
-test('generated images remain downloads rather than broken inline previews', () => {
+test('generated images retain the existing inline gallery treatment', () => {
   const imageMessage = {
     ...generatedMessage,
     blocks: [{ type: 'generated_files', files: [{
-      name: 'chart.png', size: 900, mime_type: 'image/png',
+      name: 'chart.png', size: 900, mime_type: 'image/png', previewable: true,
     }] }],
   }
   const html = renderToStaticMarkup(createElement(MsgContent, {
@@ -70,8 +77,27 @@ test('generated images remain downloads rather than broken inline previews', () 
     isStreaming: false,
   }))
 
-  assert.match(html, /chat__attach-file/)
-  assert.doesNotMatch(html, /chat__attach-thumb/)
+  assert.doesNotMatch(html, /chat__attach-file/)
+  assert.match(html, /chat__attach-images/)
+  assert.match(html, /chat__attach-thumb-frame/)
+})
+
+test('only browser-safe generated documents open as previews', () => {
+  assert.equal(generatedFileCanPreview({
+    kind: 'generated', previewable: true,
+  }), true)
+  assert.equal(generatedFileCanPreview({
+    kind: 'generated', previewable: false,
+  }), false)
+  assert.equal(generatedFileCanPreview({
+    kind: 'generated', mime_type: 'application/pdf',
+  }), false)
+  assert.equal(attachmentIsGalleryImage({
+    kind: 'generated', mime_type: 'image/png', previewable: true,
+  }), true)
+  assert.equal(attachmentIsGalleryImage({
+    kind: 'generated', mime_type: 'image/svg+xml', previewable: false,
+  }), false)
 })
 
 for (const isStreaming of [true, false]) {
