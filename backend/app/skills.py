@@ -882,7 +882,10 @@ def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
         name=name,
         description=description,
         provenance=_provenance(
-          sidecar_key, base_name, app_owned, installed, seed_names,
+          # An app folder skill records its members; SKILL.md stands for it.
+          f"{base_name}/SKILL.md"
+          if is_dir and f"{base_name}/SKILL.md" in app_owned else sidecar_key,
+          base_name, app_owned, installed, seed_names,
         ),
         read_path=read_path,
         is_dir=is_dir,
