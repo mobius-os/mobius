@@ -5,7 +5,6 @@ import argparse
 import json
 from pathlib import Path
 import re
-import tomllib
 from urllib.request import urlopen
 
 
@@ -32,14 +31,23 @@ def propose(root, fetch=read_url):
     dockerfile = (root / "Dockerfile").read_text()
     requirements = (root / "backend/requirements.txt").read_text()
     codex_pin = r"(?m)^(ARG CODEX_VERSION=)[^\s]+$"
+    codex_sdk_pin = r"(?m)^(ARG CODEX_SDK_VERSION=)[^\s]+$"
     claude_pin = r"(?m)^(claude-agent-sdk==)[^\s]+$"
-    sdk_pin = r"(openai-codex @ git\+https://github.com/openai/codex.git@)[0-9a-f]{40}"
-    bin_pin = r"(openai-codex-cli-bin==)[0-9.]+"
     codex = json.loads(fetch("https://registry.npmjs.org/@openai/codex/latest"))["version"]
+    sdk_info = json.loads(fetch("https://pypi.org/pypi/openai-codex/json"))["info"]
+    codex_sdk = sdk_info["version"]
+    sdk_bins = [requirement.removeprefix("openai-codex-cli-bin==")
+                for requirement in (sdk_info["requires_dist"] or [])
+                if requirement.startswith("openai-codex-cli-bin==")]
+    if sdk_bins != [codex_sdk]:
+        raise ValueError("Codex SDK release does not declare its matching CLI runtime")
+    if codex != codex_sdk:
+        raise ValueError("Codex npm CLI and Python SDK releases differ; wait for matching versions")
     claude = json.loads(fetch("https://pypi.org/pypi/claude-agent-sdk/json"))["info"]["version"]
     changes = []
     for name, text, pattern, latest in [
         ("Codex", dockerfile, codex_pin, codex),
+        ("Codex Python SDK", dockerfile, codex_sdk_pin, codex_sdk),
         ("Claude SDK + bundled CLI", requirements, claude_pin, claude),
     ]:
         match = re.search(pattern, text)
@@ -53,26 +61,8 @@ def propose(root, fetch=read_url):
     if not changes:
         return {}, []
 
-    current_codex = re.search(codex_pin, dockerfile)[0].split("=", 1)[1]
-    if codex != current_codex:
-        # The npm CLI and Python protocol types must come from the SAME release.
-        commit = json.loads(fetch(
-            f"https://api.github.com/repos/openai/codex/commits/rust-v{codex}"
-        ))["sha"]
-        if not re.fullmatch(r"[0-9a-f]{40}", commit):
-            raise ValueError("Codex release did not resolve to an immutable commit")
-        project = tomllib.loads(fetch(
-            f"https://raw.githubusercontent.com/openai/codex/{commit}/sdk/python/pyproject.toml"
-        ))["project"]
-        bins = [value.removeprefix("openai-codex-cli-bin==")
-                for value in project["dependencies"]
-                if value.startswith("openai-codex-cli-bin==")]
-        if len(bins) != 1:
-            raise ValueError("Codex SDK changed its CLI package contract; review required")
-        stable(bins[0])
-        dockerfile = replace_pin(dockerfile, codex_pin, codex)
-        dockerfile = replace_pin(dockerfile, sdk_pin, commit)
-        dockerfile = replace_pin(dockerfile, bin_pin, bins[0])
+    dockerfile = replace_pin(dockerfile, codex_pin, codex)
+    dockerfile = replace_pin(dockerfile, codex_sdk_pin, codex_sdk)
     requirements = replace_pin(requirements, claude_pin, claude)
     files = {"Dockerfile": dockerfile, "backend/requirements.txt": requirements}
     return {path: content for path, content in files.items()
