@@ -17,7 +17,9 @@ from app.agent_activity import (
 )
 from app.agent_activity_provider import resolve_agent_activity_binding
 from app.chat_event_sink import ChatEventSink
+from app.broadcast import ChatBroadcast
 from app.events import process_event
+from app.memory_recall import RecallBinding
 
 
 COMMAND = ActivityCommand(
@@ -26,6 +28,30 @@ COMMAND = ActivityCommand(
 )
 BINDING = AgentActivityBinding.of([("/apps/brain/find.py", COMMAND)])
 COMMAND_TEXT = 'python3 /apps/brain/find.py "quiet interface" "chat-1"'
+
+
+def test_memory_recall_and_generic_app_activity_share_a_turn_without_loss():
+  memory_command = 'python3 /apps/memory/memory_search.py "quiet interface" "chat-1"'
+  sink = ChatEventSink(
+    ChatBroadcast("chat-1"), "chat-1",
+    recall_binding=RecallBinding.of([("/apps/memory/memory_search.py", "memory")]),
+    agent_activity_binding=BINDING,
+  )
+  sink.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "memory",
+                "input": memory_command})
+  sink.publish({"type": "tool_output", "tool_use_id": "memory",
+                "content": 'MOBIUS_MEMORY_RESULT_V1:{"status":"empty"}',
+                "output_complete": True, "output_exit_code": 0})
+  sink.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "brain",
+                "input": COMMAND_TEXT})
+  sink.publish({"type": "tool_output", "tool_use_id": "brain",
+                "content": _receipt(), "output_complete": True,
+                "output_exit_code": 0})
+  memory, brain = sink.assistant_blocks
+  assert memory["recall"]["status"] == "empty"
+  assert "app_activity" not in memory
+  assert brain["app_activity"]["status"] == "succeeded"
+  assert "recall" not in brain
 
 
 def _receipt(**overrides):

@@ -9,6 +9,7 @@ from app import chat_queue, chat_waits, chat_writer, models
 from app.database import SessionLocal
 from app.platform_restart import activation_notice
 from tests.test_platform_restart_cards import _install, _submit
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _activation_command(chat_id, wait_id, root_id, **kw):
@@ -237,7 +238,7 @@ def test_active_sink_attaches_activation_once_without_a_second_runner(monkeypatc
     run.status = "running"
     run.ended_at = None
     db.commit()
-  sink = ChatEventSink(create_broadcast(cid), cid, run_token=root)
+  sink = ChatEventSink(create_broadcast(cid), cid, run_token=root, recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(cid, sink)
   monkeypatch.setattr(chat_mod, "is_chat_running", lambda _: True)
   def never_schedule(**_):

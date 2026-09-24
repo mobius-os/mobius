@@ -300,8 +300,11 @@ def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
   _helper(db, suffix='position', parent_chat_id=parent_id,
           created_at=datetime(2026, 9, 9), notify=False)
   db.commit()
-  sink = ChatEventSink(ChatBroadcast(parent_id), chat_id=parent_id,
-                       )
+  from app.memory_recall import EMPTY_RECALL_BINDING
+  sink = ChatEventSink(
+    ChatBroadcast(parent_id), chat_id=parent_id,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
   register_active_sink(parent_id, sink)
   try:
     sink.publish({'type': 'text', 'content': 'before'})

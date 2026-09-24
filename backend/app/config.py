@@ -99,11 +99,6 @@ class Settings(BaseSettings):
   # concern, not a today one.
   github_oauth_client_id: str = "Ov23liMpOLS6qp5YV8Vk"
 
-  # Ensure every settled chat has a current platform-owned summary note. The
-  # tool-free publisher (scripts/chat_note.py) runs at turn-end after the reply
-  # is sent, so it adds no user-facing latency. No chat agent writes these files.
-  ensure_chat_note: bool = True
-
   # The unprivileged app receives only managed deployment identity. Its
   # credential stays in the root-owned identity broker. When this pair is
   # absent, Möbius is an ordinary self-hosted installation and keeps the local

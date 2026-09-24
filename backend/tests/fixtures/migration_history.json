@@ -67,6 +67,8 @@
     "0062_chat_run_progress_lease": "fbb17fa7ff6d9f9b84b2ebc99d851cdc220b62152d54e8aac41c9fc647967b5d",
     "0063_durable_goal_records": "c174b8f15d4621aec6ba23898b5ad231f678b7b83d16088a481d777a67ddd859",
     "0063_chat_run_continuation_control": "309bbb9b7b0441d8e0404182de74be40b497bb2acb1e236471ec188e4fbb9a0e",
-    "0064_require_git_app_sources": "c145e0d58b03dee0722278c757cf665be7372abf7c8916ee60575f7795e3cae1"
+    "0064_require_git_app_sources": "c145e0d58b03dee0722278c757cf665be7372abf7c8916ee60575f7795e3cae1",
+    "0064_chat_continuity_journal": "2d60b647390d8e40ac627966c650190b71ff1e1eaed7e10e11cca97296c97813",
+    "0065_run_delivered_input_boundary": "8558e4473f24dd62f78f84e24f69a0f0ce876019ff716ef195baac43a3fc55eb"
   }
 }

@@ -5169,6 +5169,62 @@ def _add_chat_run_continuation_control(eng) -> None:
     ))
 
 
+def _add_chat_continuity_journal(eng) -> None:
+  """Create the current-state row and immutable checkpoint journal."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity (
+        chat_id VARCHAR(64) NOT NULL PRIMARY KEY
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL DEFAULT 0,
+        current_summary TEXT,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        updated_at TIMESTAMP NOT NULL
+      )
+    """))
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity_entries (
+        chat_id VARCHAR(64) NOT NULL
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        checkpoint_id VARCHAR(128) NOT NULL,
+        run_id VARCHAR(64),
+        digest TEXT NOT NULL,
+        current_summary TEXT,
+        requested_title VARCHAR(256),
+        source_cursor_json JSON,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        legacy_markdown TEXT,
+        created_at TIMESTAMP NOT NULL,
+        PRIMARY KEY (chat_id, revision),
+        CONSTRAINT uq_continuity_checkpoint UNIQUE (chat_id, checkpoint_id)
+      )
+    """))
+
+
+def _add_run_delivered_input_boundary(eng) -> None:
+  """Remember an SDK-accepted transcript prefix for each physical run."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "delivered_message_count" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_message_count INTEGER NULL"
+      ))
+    if "delivered_prefix_hash" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_prefix_hash VARCHAR(64) NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5238,6 +5294,8 @@ _SCHEMA_MIGRATIONS = (
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
   ("0064_require_git_app_sources", _require_git_app_sources),
+  ("0064_chat_continuity_journal", _add_chat_continuity_journal),
+  ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
 )
 
 

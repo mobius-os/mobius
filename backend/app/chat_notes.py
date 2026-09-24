@@ -43,5 +43,14 @@ def extract_section(
 
 
 def extract_cumulative_summary(text: str) -> str | None:
-  """Read Summary through the next platform-owned peer section."""
+  """Read complete continuity using the note's explicit format version.
+
+  A version-two file is normally only a projection of authoritative DB rows.
+  If it is read independently, retain its short summary, journal and historical
+  baseline together rather than treating its short Summary as the old history.
+  """
+  from app.memory import parse_frontmatter
+
+  if parse_frontmatter(text).get("continuity_version") == 2:
+    return extract_section(text, "Summary", terminators=frozenset())
   return extract_section(text, "Summary", terminators=_SUMMARY_TERMINATORS)

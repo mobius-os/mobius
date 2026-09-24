@@ -1084,6 +1084,12 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
   )
 
   bc = _FakeBroadcast()
+  accepted = []
+
+  async def on_input_delivered():
+    assert mismatched_thread.turn_args is not None
+    accepted.append(mismatched_thread.turn_args[0])
+
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
       user_message="hello",
@@ -1094,6 +1100,7 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
       bc=bc,
       pending_questions={},
       db=None,
+      on_input_delivered=on_input_delivered,
     )
   )
 
@@ -1101,6 +1108,7 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
   assert result["error"] is None
   assert {"type": "session_init", "session_id": "actual-thread"} in bc.events
   assert not any(e.get("type") == "error" for e in bc.events)
+  assert accepted == ["hello"]
 
 
 def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
@@ -2203,7 +2211,7 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert mark_finished_calls == [True]
 
 
-def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch):
+def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch, caplog):
   class AgentMessage:
     def __init__(self, item_id, text, phase):
       self.id = item_id
@@ -2236,20 +2244,24 @@ def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch
     items=[replacement],
   )
   notifications = [
-    SimpleNamespace(payload=ItemStarted(abandoned)),
-    SimpleNamespace(payload=AgentMessageDelta(
+    SimpleNamespace(method="test/notification", payload=ItemStarted(abandoned)),
+    SimpleNamespace(method="test/notification", payload=AgentMessageDelta(
       abandoned.id, "I will publish those two commits",
     )),
-    SimpleNamespace(payload=ItemStarted(replacement)),
-    SimpleNamespace(payload=AgentMessageDelta(
+    SimpleNamespace(method="test/notification", payload=ItemStarted(replacement)),
+    SimpleNamespace(method="test/notification", payload=AgentMessageDelta(
       replacement.id, "I will publish the two approved commits",
     )),
     # Late notifications for the abandoned item must never resurrect it.
-    SimpleNamespace(payload=AgentMessageDelta(abandoned.id, " (late)")),
-    SimpleNamespace(payload=ItemCompleted(abandoned)),
-    SimpleNamespace(payload=ItemCompleted(replacement)),
-    SimpleNamespace(payload=_FakeTurnCompletedNotification(completed_turn)),
+    SimpleNamespace(method="test/notification", payload=AgentMessageDelta(abandoned.id, " (late)")),
+    SimpleNamespace(method="test/notification", payload=ItemCompleted(abandoned)),
+    SimpleNamespace(method="test/notification", payload=ItemCompleted(replacement)),
+    SimpleNamespace(method="test/notification", payload=_FakeTurnCompletedNotification(completed_turn)),
   ]
+  from openai_codex.generated.v2_all import HookEventName, HookRunStatus
+  notifications.insert(0, SimpleNamespace(method="hook/completed", payload=SimpleNamespace(
+    run=SimpleNamespace(event_name=HookEventName.session_start, status=HookRunStatus.failed),
+  )))
   thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
 
   class FakeAsyncCodex:
@@ -2280,6 +2292,7 @@ def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch
     chat_id="chat-replacement", bc=bus, pending_questions={}, db=None,
   ))
 
+  assert "SessionStart context hook failed" in caplog.text
   assert result["error"] is None
   assert {
     "type": "text_boundary",

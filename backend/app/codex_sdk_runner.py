@@ -33,10 +33,10 @@ import os
 import signal
 import shutil
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app import generated_files
 from app.codex_sdk_contract import (
@@ -1474,6 +1474,7 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1621,6 +1622,8 @@ async def _run_codex_sdk_turn(
     ),
   )
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
+  from app.platform_tools import codex_continuity_overrides
+  config_overrides.extend(codex_continuity_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -1931,6 +1934,8 @@ async def _run_codex_sdk_turn(
         ),
         approval_mode=approval_mode,
       )
+      if on_input_delivered is not None:
+        await on_input_delivered()
       if abort_requested():
         try:
           await turn.interrupt()
@@ -2020,6 +2025,15 @@ async def _run_codex_sdk_turn(
       async for notification in turn.stream():
         lease.note_message(notification, is_root=False)
         payload = notification.payload
+
+        if notification.method == "hook/completed":
+          hook_run = getattr(payload, "run", None)
+          event_name = getattr(hook_run, "event_name", None)
+          status = getattr(hook_run, "status", None)
+          if getattr(event_name, "value", event_name) == "sessionStart" and getattr(
+            status, "value", status,
+          ) in {"failed", "blocked", "stopped"}:
+            log.warning("SessionStart context hook failed chat_id=%s", chat_id)
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           item_id = str(getattr(payload, "item_id", None) or "")
@@ -2473,6 +2487,7 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2508,6 +2523,7 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
+      on_input_delivered=on_input_delivered,
     )
   finally:
     ownership.release()
