@@ -139,7 +139,13 @@ def _isolate_git_env(monkeypatch, tmp_path):
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
   ):
     monkeypatch.delenv(var, raising=False)
-  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+  # A commit ends with `git maintenance run --auto`, which detaches and briefly
+  # holds maintenance.lock after the commit has returned. Tests that assert a
+  # read-only operation leaves no lock behind would then flake on that
+  # unrelated background writer.
+  global_config = tmp_path / "gitconfig"
+  global_config.write_text("[maintenance]\n\tauto = false\n")
+  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
   repo_root = _Path(__file__).resolve().parents[2]
   monkeypatch.setenv(
