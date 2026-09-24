@@ -1197,9 +1197,16 @@ test.describe('Workspace drag (PR3)', () => {
 
   test('dragging a tab to a pane center joins it as a tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragCenter')
-    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    await mouseDrag(page, src, p1.x + p1.width / 2, p1.y + p1.height / 2)
+    // Resolve the destination after the drag arms, as the strip-insert case does:
+    // arming builds the scene and can re-tile, so a box read beforehand can
+    // describe a layout that no longer exists when the pointer arrives.
+    await mouseDrag(page, src, 0, 0, {
+      resolveTarget: async () => {
+        const p1 = await settledBox(page.locator(`[data-tab-key="chat:${b.id}"]`))
+        return { x: p1.x + p1.width / 2, y: p1.y + p1.height / 2 }
+      },
+    })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'C joined p1 as a tab' },
@@ -1278,7 +1285,12 @@ test.describe('Workspace drag (PR3)', () => {
     const { c, b } = await bootThreeTab(page, 'touchDrag')
     await page.setViewportSize(PHONE)
     await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
-    const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    // A viewport switch re-lays out every strip (phone projection, tab widths),
+    // and a box read during that reflow is stale by the time the gesture
+    // travels -- under load the drop lands short and nothing moves. Settle
+    // first, then measure.
+    await waitStripSettled(page)
+    const target = await settledBox(page.locator(`[data-tab-key="chat:${b.id}"]`))
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
     await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
       // Move once the shared drag stage (PRESS_DRAG_HOLD_MS) has actually won
@@ -1296,9 +1308,14 @@ test.describe('Workspace drag (PR3)', () => {
   test('phone horizontal touch-drag reorders tabs in the same strip after a short hold', async ({ page }) => {
     const { a, c } = await bootThreeTab(page, 'touchReorder')
     await page.setViewportSize(PHONE)
-    const target = await page.locator(
+    // A viewport switch re-lays out every strip (phone projection, tab widths),
+    // and a box read during that reflow is stale by the time the gesture
+    // travels -- under load the drop lands short and nothing moves. Settle
+    // first, then measure.
+    await waitStripSettled(page)
+    const target = await settledBox(page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
-    ).boundingBox()
+    ))
     const src = page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`,
     )
@@ -1353,7 +1370,11 @@ test.describe('Workspace drag (PR3)', () => {
     const divider = page.locator('.workspace__divider').first()
     await expect(divider).toBeVisible({ timeout: 4000 })
     const before = (await readWs(page)).layout.ratio
-    const box = await divider.boundingBox()
+    // A viewport switch re-lays out every strip (phone projection, tab widths),
+    // and a box read during that reflow is stale by the time the gesture
+    // travels -- under load the drop lands short and nothing moves. Settle
+    // first, then measure.
+    const box = await settledBox(divider)
     await touchDrag(page, divider, box.x + box.width / 2, box.y + box.height / 2 + 90)
     await expect.poll(async () => (await readWs(page)).layout.ratio, {
       timeout: 3000, message: 'the real touch stream resized the stacked panes',
