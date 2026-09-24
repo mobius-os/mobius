@@ -18,7 +18,6 @@ from app.broadcast import (
   _EVENT_LOG_MAX,
   _TEXT_LOG_SEGMENT_MAX,
 )
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +58,6 @@ def _make_sink(chat_id="chat1", run_token="tok1"):
   bc = _FakeBroadcast()
   sink = ChatEventSink(
     bc, chat_id=chat_id, run_token=run_token,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   return sink, bc
 

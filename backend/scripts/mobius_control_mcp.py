@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "1.11.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -35,7 +35,6 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
-CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 SAVED_CARD_TERMINAL_INSTRUCTION = (
   "This tool call ends the turn: the response is cut at the card, so nothing "
   "said or done after it can reach the owner until they reply."
@@ -44,6 +43,7 @@ LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
 FINISH_AGENT_WORK_TOOL = "finish_agent_work"
+CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 PEER_TOOLS = (
   LIST_AGENT_PEERS_TOOL,
   SEND_AGENT_MESSAGE_TOOL,
@@ -62,11 +62,7 @@ OWNER_TOOLS = (
   *WORK_OWNERSHIP_TOOLS,
   CHECKPOINT_CHAT_TOOL,
 )
-DELEGATED_TOOLS = (
-  *PEER_TOOLS,
-  *WORK_OWNERSHIP_TOOLS,
-  CHECKPOINT_CHAT_TOOL,
-)
+DELEGATED_TOOLS = (*PEER_TOOLS, *WORK_OWNERSHIP_TOOLS, CHECKPOINT_CHAT_TOOL)
 PROMOTE_GOAL_DESCRIPTION = (
   "Promote the current ordinary top-level owner turn into a durable, "
   "platform-owned Goal after the goal-planning criteria are satisfied. "
@@ -207,7 +203,6 @@ def _agent_api_call(
   method: str,
   path: str,
   payload: dict[str, Any] | None = None,
-  *, timeout: float = 10,
 ) -> dict[str, Any]:
   """Call one run-bound local endpoint without importing the backend app."""
   base, token = _agent_api_settings()
@@ -224,7 +219,7 @@ def _agent_api_call(
     },
   )
   try:
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=10) as response:
       raw = response.read()
   except HTTPError as exc:
     detail = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -479,26 +474,12 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
 
 
-def _call_checkpoint_chat(arguments: dict[str, Any], *, invocation_id: str | None = None) -> str:
-  if not set(arguments).issubset({"digest", "summary", "title"}):
-    raise ValueError("checkpoint_chat accepts only digest, summary, and title")
-  payload = {}
-  for name, value in arguments.items():
-    if not isinstance(value, str):
-      raise ValueError(f"{name} must be a string")
-    payload[name] = value.strip()
-  # Transport identity remains fixed for an exact JSON-RPC request in this
-  # server lifetime. A separate model invocation is a separate write: never
-  # deduplicate by prose, which could erase a legitimate repeated event.
-  payload["checkpoint_id"] = invocation_id or uuid.uuid4().hex
-  result = _agent_api_call("POST", "/api/chat/continuity/checkpoints", payload)
-  status = result.get("status")
-  if status == "unchanged":
-    return "Unchanged."
-  if status not in {"committed", "already_committed"}:
-    raise RuntimeError("Checkpoint did not return a durable acknowledgement; do not blindly retry.")
-  if result.get("projection_warning"):
-    return "Saved; the readable note projection needs repair."
+def _call_checkpoint_chat(arguments: dict[str, Any]) -> str:
+  if not arguments or not set(arguments).issubset({"title", "digest", "summary"}):
+    raise ValueError("checkpoint_chat takes one or more of title, digest, summary")
+  if not all(isinstance(value, str) for value in arguments.values()):
+    raise ValueError("checkpoint_chat fields must be strings")
+  _agent_api_call("POST", "/api/chat/continuity/checkpoints", arguments)
   return "Saved."
 
 
@@ -506,22 +487,18 @@ _TOOL_DEFINITIONS = {
   CHECKPOINT_CHAT_TOOL: {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
-      "Update this chat's continuity. All fields are optional and independent: "
-      "title replaces its generated name (respecting owner renames), summary "
-      "replaces its current one–two-paragraph handoff, digest appends a small "
-      "new entry. Omitted fields stay unchanged; an empty call does nothing. "
-      "Möbius owns revisions, retry identity, and the received-input boundary. "
-      "A summary or digest save declares the intended current handoff; a title "
-      "alone never marks conversation content summarized. No preliminary read "
-      "or revision number is needed. A success acknowledges durable storage; "
-      "do not repeat an uncertain call blindly."
+      "Save this chat's continuity note. Every field is optional: title "
+      "renames the chat (a name the owner chose always wins), digest replaces "
+      "its short current paragraph, and summary appends one entry to its "
+      "cumulative Summary. Omitted fields stay unchanged. If a save fails, "
+      "read the note before retrying so an entry is not added twice."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
       "properties": {
-        "digest": {"type": "string", "maxLength": 8000},
-        "summary": {"type": "string", "maxLength": 12000},
-        "title": {"type": "string", "maxLength": 256},
+        "title": {"type": "string", "maxLength": 200},
+        "digest": {"type": "string", "maxLength": 1000},
+        "summary": {"type": "string", "maxLength": 8000},
       },
     },
   },
@@ -808,7 +785,6 @@ _TOOL_DEFINITIONS = {
 }
 
 _TOOL_HANDLERS = {
-  CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
   REQUEST_RESTART_TOOL: _call_request_restart,
@@ -819,10 +795,11 @@ _TOOL_HANDLERS = {
   SEND_AGENT_MESSAGE_TOOL: _call_send_agent_message,
   CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
   FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
+  CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
 }
 
 
-def _call_tool(params: Any, *, invocation_id: str | None = None) -> dict[str, Any]:
+def _call_tool(params: Any) -> dict[str, Any]:
   if not isinstance(params, dict):
     return _tool_result("Tool call must be an object.", is_error=True)
   name = params.get("name")
@@ -835,14 +812,9 @@ def _call_tool(params: Any, *, invocation_id: str | None = None) -> dict[str, An
   if not isinstance(arguments, dict):
     return _tool_result("Tool arguments must be an object.", is_error=True)
   try:
-    if name == CHECKPOINT_CHAT_TOOL:
-      return _tool_result(_call_checkpoint_chat(arguments, invocation_id=invocation_id))
     return _tool_result(handler(arguments))
   except Exception as exc:  # Tool failures are data; keep the MCP server alive.
     return _tool_result(str(exc) or "Tool call failed.", is_error=True)
-
-
-_TRANSPORT_ID = uuid.uuid4()
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:
@@ -866,9 +838,7 @@ def _dispatch_message(message: Any) -> dict[str, Any] | None:
   if method == "tools/list":
     return _response(message_id, _tools_list_result())
   if method == "tools/call":
-    return _response(message_id, _call_tool(
-      params, invocation_id=uuid.uuid5(_TRANSPORT_ID, json.dumps(message_id)).hex,
-    ))
+    return _response(message_id, _call_tool(params))
   return _error(message_id, -32601, "Method not found")
 
 

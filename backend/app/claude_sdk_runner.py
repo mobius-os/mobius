@@ -64,7 +64,7 @@ import signal
 import shutil
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -192,7 +192,7 @@ async def _await_control_mcp_ready(
 # register: appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -1086,7 +1086,6 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
-  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1424,7 +1423,6 @@ async def run_claude_sdk_turn(
       ],
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
-      "include_hook_events": True,
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
@@ -1467,8 +1465,6 @@ async def run_claude_sdk_turn(
     # binary-only `workflowKeywordTriggerEnabled`, which we deliberately avoid.
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
-    from app.platform_tools import continuity_start_hooks
-    _cli_settings["hooks"] = {"SessionStart": continuity_start_hooks()}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
 
     # A dict-valued SDK mcp_servers option is serialized directly into the CLI
@@ -1569,8 +1565,6 @@ async def run_claude_sdk_turn(
       )
       active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
-      if on_input_delivered is not None:
-        await on_input_delivered()
 
       # At most one automatic re-query per turn (see the synthetic-resume
       # recovery in the terminal branch below), so a genuinely-empty resume
@@ -1587,14 +1581,6 @@ async def run_claude_sdk_turn(
       usage_state: dict[str, Any] = {}
       while True:
         async for sdk_msg in client.receive_response():
-          # Native hooks fail open. Preserve a bounded diagnostic when the
-          # helper itself dies; never log its context payload or credentials.
-          if getattr(sdk_msg, "subtype", None) == "hook_response":
-            hook_data = getattr(sdk_msg, "data", {})
-            if hook_data.get("hook_event") == "SessionStart" and (
-              hook_data.get("exit_code", 0) != 0 or hook_data.get("outcome") == "error"
-            ):
-              log.warning("SessionStart context hook failed chat_id=%s", chat_id)
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
