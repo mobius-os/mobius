@@ -581,7 +581,11 @@ test('Escape and dismissal stay gated while Apply is pending', async ({ page }) 
   const dialog = await openUpdateReview(page)
   await dialog.getByRole('button', { name: 'Apply update' }).click()
   await expect(dialog.getByRole('button', { name: 'Updating…' })).toBeDisabled()
-  await expect(dialog.getByText('Preparing the update…')).toBeVisible()
+  // The progress notice follows the phase the apply reports, so it may already
+  // have moved past 'Preparing the update…' by the time it is read.
+  await expect(dialog.locator('.urm__notice[role="status"]')).toHaveText(
+    /Preparing the update…|Getting the reviewed version…|Combining the update with your local changes…|Checking the update…|Getting everything ready…|Finishing the update…/,
+  )
   await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
 

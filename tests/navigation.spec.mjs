@@ -438,7 +438,12 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
-  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+  // The cold composer is revealed and editable before the chat's authoritative
+  // read settles, but ChatView deliberately does not start a turn until that
+  // activation is ready (#1281 retired #820's "send supersedes the cold read").
+  // The draft typed early must survive, and once the read lands it sends
+  // normally and the first user message is placed at the top.
+  test('a first send typed during a cold activation waits for it and then lands', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
     let runtimeRunning = false
@@ -508,14 +513,21 @@ test.describe('Navigation basics', () => {
       const composer = painted
         .getByRole('textbox', { name: 'Message Möbius…' })
       await expect(composer).toBeVisible()
-      await composer.fill('Visible after superseding the cold read')
+      await composer.fill('Visible after the cold read settles')
+      await expect(painted.locator('.chat__send')).toBeDisabled()
       await composer.press('Enter')
+      // Enter must not start a turn before activation has settled.
+      await page.waitForTimeout(500)
+      expect(sendRequests).toBe(0)
+      await expect(composer).toHaveValue('Visible after the cold read settles')
 
-      await expect.poll(() => sendRequests).toBe(1)
       releaseChatDetail()
+      await expect(painted.locator('.chat__send')).toBeEnabled()
+      await composer.press('Enter')
+      await expect.poll(() => sendRequests).toBe(1)
 
       const userRow = painted.locator('.chat__msg--user')
-      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toContainText('Visible after the cold read settles')
       await expect(userRow).toBeVisible()
 
       const position = await userRow.evaluate((row) => {

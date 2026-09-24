@@ -26,6 +26,21 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
  * the empty state, a scroll container, or the composer form. Call this
  * right after the initial navigation to BASE, before any chat exists.
  */
+/**
+ * Wait until the composer in `root` will accept a submit.
+ *
+ * The composer is revealed (and editable) before the chat's activation has
+ * settled; until then ChatView deliberately ignores Enter, so a message typed
+ * into an early composer stays in the draft and nothing is sent. The primary
+ * action (Send with a draft, Voice input without one) carries that same
+ * `submissionBlocked` gate as its disabled state, so it is the observable
+ * "ready to send" signal. Resolves immediately if neither control is disabled.
+ */
+export async function waitForComposerSendable(root, { timeout = 10000 } = {}) {
+  await expect(root.locator('.chat__send:disabled, .chat__mic:disabled'))
+    .toHaveCount(0, { timeout })
+}
+
 export async function waitForChatShell(page, { timeout = 10000 } = {}) {
   await page.waitForFunction(
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
@@ -90,6 +105,7 @@ export async function sendMessage(page, text, {
   const root = scope || page.locator('[data-chat-surface="painted"]')
   const input = root.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(root)
   await page.keyboard.press('Enter')
   if (wait === 'user-message') {
     await expect(root.locator('.chat__msg--user').first()).toBeVisible({ timeout })

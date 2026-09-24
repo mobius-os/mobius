@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -63,6 +64,8 @@ test('an uploaded attachment survives a chat switch and remains sendable', async
       body: JSON.stringify({ status: 'started' }),
     })
   })
+  // The reopened chat reveals its restored draft before activation settles.
+  await waitForComposerSendable(paintedChat)
   await composer.press('Enter')
   await expect.poll(() => sentBody?.attachments?.map(file => file.name) || [])
     .toEqual(['draft-note.txt'])

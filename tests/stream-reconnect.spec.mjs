@@ -17,6 +17,7 @@ import {
   QUICK_WAKE_HIDDEN_MS,
 } from '../frontend/src/components/ChatView/streamTiming.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -88,6 +89,7 @@ async function setupChat(page) {
 async function send(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
   await page.keyboard.press('Enter')
 }
 

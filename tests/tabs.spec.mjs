@@ -14,6 +14,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
@@ -92,6 +93,7 @@ async function sendMessage(page, text) {
   const paintedChat = page.locator('[data-chat-surface="painted"]')
   const input = paintedChat.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(paintedChat)
   await page.keyboard.press('Enter')
   await expect(paintedChat.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>

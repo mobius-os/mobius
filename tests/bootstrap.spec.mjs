@@ -627,6 +627,12 @@ test.describe('Logout cache wipe', () => {
       forced401Count += 1
       return route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' })
     })
+    // apiFetch only treats a 401 as an expired OWNER session once a probe of an
+    // owner-only endpoint with the same token is rejected too (a relayed
+    // upstream 401 must not sign the owner out). Genuine expiry rejects every
+    // owner request, so reject that probe as well.
+    await page.route(/\/api\/notifications\/unread-count(?:\?.*)?$/, route =>
+      route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' }))
 
     // Trigger a real apiFetch through the live client's authenticated boot.
     // Navigation presentation no longer owns data refreshes: tying this test to
