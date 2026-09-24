@@ -238,12 +238,91 @@ class FinishedClaim:
 
 @dataclass(frozen=True)
 class ReleasedClaim:
-  """One unfinished exact action released by chat deletion."""
+  """One open exact action settled because its owner can no longer act."""
 
   claim_id: str
   work_key: str
   revision: int
   interested_chat_ids: list[str]
+  state: str = "released"
+  outcome: str = ""
+  owner_id: int | None = None
+
+
+_DELETED_OWNER_OUTCOME = "Owning chat was deleted before this action completed."
+
+
+def work_claim_notice_body(work_key: str, state: str, outcome: str) -> str:
+  """One notice text for every completed or released claim, however settled."""
+  body = f"Work claim {work_key} was {state}: {outcome}".strip()
+  if state == "released":
+    body += " You may claim it now if your Goal still needs this exact action."
+  return body
+
+
+def _live_follower_ids(
+  db: Session, claim_id: str, owner_chat_id: str,
+) -> list[str]:
+  return list(dict.fromkeys(
+    interest.chat_id
+    for interest in db.query(models.AgentWorkInterest).join(
+      models.Chat, models.Chat.id == models.AgentWorkInterest.chat_id,
+    ).filter(
+      models.AgentWorkInterest.claim_id == claim_id,
+      models.AgentWorkInterest.resolved_at.is_(None),
+      models.AgentWorkInterest.chat_id != owner_chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).all()
+  ))
+
+
+def _stage_settle(
+  db: Session, row: models.AgentWorkClaim, *, complete: bool, outcome: str,
+) -> ReleasedClaim | None:
+  """Settle one still-open claim in the caller's txn, fenced by revision.
+
+  A concurrent explicit finish/transfer wins: the revision fence makes this a
+  no-op instead of overwriting an outcome the owner already recorded.
+  """
+  now = now_naive_utc()
+  claim_id, work_key, owner_id = row.id, row.work_key, row.owner_id
+  previous_revision = row.revision
+  owner_chat_id = row.owner_chat_id
+  changed = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.id == claim_id,
+    models.AgentWorkClaim.owner_chat_id == owner_chat_id,
+    models.AgentWorkClaim.revision == previous_revision,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).update({
+    models.AgentWorkClaim.outcome: outcome[:1000],
+    models.AgentWorkClaim.updated_at: now,
+    models.AgentWorkClaim.revision: previous_revision + 1,
+    (
+      models.AgentWorkClaim.completed_at if complete
+      else models.AgentWorkClaim.released_at
+    ): now,
+  }, synchronize_session=False)
+  if changed != 1:
+    return None
+  db.expire(row)
+  return ReleasedClaim(
+    claim_id=claim_id,
+    work_key=work_key,
+    revision=previous_revision + 1,
+    interested_chat_ids=_live_follower_ids(db, claim_id, owner_chat_id),
+    state="completed" if complete else "released",
+    outcome=outcome[:1000],
+    owner_id=owner_id,
+  )
+
+
+def _open_claims_for_chat(db: Session, chat_id: str):
+  return db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).all()
 
 
 def stage_release_claims_for_chat(
@@ -257,37 +336,147 @@ def stage_release_claims_for_chat(
   The caller commits the release atomically with the chat tombstone and then
   delivers the returned follower notices.
   """
-  now = now_naive_utc()
+  released = [
+    settled for row in _open_claims_for_chat(db, chat_id)
+    if (settled := _stage_settle(
+      db, row, complete=False, outcome=_DELETED_OWNER_OUTCOME,
+    )) is not None
+  ]
+  db.flush()
+  return released
+
+
+def _goal_outcome(status: str, result: str | None) -> tuple[bool, str]:
+  """Map an ended Goal to (complete, outcome) for the claims it still owns."""
+  if status == "completed":
+    text = " ".join(str(result or "").split())
+    return True, f"Owning Goal completed: {text}" if text else (
+      "Owning Goal completed."
+    )
+  return False, f"Owning Goal was {status} before this action finished."
+
+
+def stage_settle_goal_claims(
+  db: Session, *, chat_id: str, goal_id: str, status: str,
+  result: str | None = None,
+) -> list[ReleasedClaim]:
+  """Settle one ended Goal's still-open claims in the caller's transaction.
+
+  Called by every lifecycle write that moves a Goal out of ``open`` so the
+  claim and the Goal end atomically; a restart can never observe an ended
+  Goal that still owns an open exact action. A completed Goal verified its
+  whole outcome, so its claims complete with the Goal result. A stopped or
+  dismissed Goal left the action unfinished, so its claims are released and
+  followers may reclaim them. The caller delivers follower notices after
+  commit (``pending_settlement_notices``).
+  """
+  if not goal_id or status == "open":
+    return []
+  complete, outcome = _goal_outcome(status, result)
+  settled = [
+    item for row in db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.owner_chat_id == chat_id,
+      models.AgentWorkClaim.owner_goal_id == goal_id,
+      models.AgentWorkClaim.completed_at.is_(None),
+      models.AgentWorkClaim.released_at.is_(None),
+    ).all()
+    if (item := _stage_settle(
+      db, row, complete=complete, outcome=outcome,
+    )) is not None
+  ]
+  db.flush()
+  return settled
+
+
+def stage_settle_claims_with_owner(
+  db: Session, chat_id: str,
+) -> list[ReleasedClaim]:
+  """Idempotent repair: settle claims whose owning Goal or chat has ended.
+
+  Lifecycle writes normally settle claims atomically through
+  ``stage_settle_goal_claims``. This re-derives the same result from durable
+  Goal state at each post-commit seam, so a Goal ended by any older or
+  unforeseen path still cannot strand its claims. Claims taken outside a Goal
+  have no Goal lifecycle; they wait for an explicit finish or chat deletion.
+  """
+  deleted = db.query(models.Chat.deleted_at).filter(
+    models.Chat.id == chat_id,
+  ).scalar()
+  if deleted is not None:
+    return stage_release_claims_for_chat(db, chat_id)
+  goal_ids = {
+    goal_id for (goal_id,) in db.query(models.AgentWorkClaim.owner_goal_id).filter(
+      models.AgentWorkClaim.owner_chat_id == chat_id,
+      models.AgentWorkClaim.owner_goal_id.is_not(None),
+      models.AgentWorkClaim.completed_at.is_(None),
+      models.AgentWorkClaim.released_at.is_(None),
+    ).all()
+  }
+  if not goal_ids:
+    return []
+  settled: list[ReleasedClaim] = []
+  for goal in db.query(models.ChatGoal).filter(
+    models.ChatGoal.chat_id == chat_id,
+    models.ChatGoal.id.in_(goal_ids),
+    models.ChatGoal.status != "open",
+  ).all():
+    settled.extend(stage_settle_goal_claims(
+      db, chat_id=chat_id, goal_id=goal.id, status=goal.status,
+      result=goal.result,
+    ))
+  return settled
+
+
+def pending_settlement_notices(
+  db: Session, chat_id: str,
+) -> list[ReleasedClaim]:
+  """Settled claims of this chat whose follower notice is not yet acknowledged.
+
+  ``notification_revision < revision`` is the durable retry latch shared with
+  explicit finish and transfer: a crash between the settling commit and the
+  wake leaves it set, and the next lifecycle seam for the chat re-sends the
+  idempotent notice.
+  """
   rows = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,
-    models.AgentWorkClaim.completed_at.is_(None),
-    models.AgentWorkClaim.released_at.is_(None),
+    models.AgentWorkClaim.notification_revision < models.AgentWorkClaim.revision,
+    (models.AgentWorkClaim.completed_at.is_not(None))
+    | (models.AgentWorkClaim.released_at.is_not(None)),
   ).all()
-  released: list[ReleasedClaim] = []
-  for row in rows:
-    row.released_at = now
-    row.updated_at = now
-    row.outcome = "Owning chat was deleted before this action completed."
-    row.revision += 1
-    recipients = [
-      interest.chat_id
-      for interest in db.query(models.AgentWorkInterest).join(
-        models.Chat, models.Chat.id == models.AgentWorkInterest.chat_id,
-      ).filter(
-        models.AgentWorkInterest.claim_id == row.id,
-        models.AgentWorkInterest.resolved_at.is_(None),
-        models.AgentWorkInterest.chat_id != chat_id,
-        models.Chat.deleted_at.is_(None),
-      ).all()
-    ]
-    released.append(ReleasedClaim(
+  return [
+    ReleasedClaim(
       claim_id=row.id,
       work_key=row.work_key,
       revision=row.revision,
-      interested_chat_ids=list(dict.fromkeys(recipients)),
-    ))
-  db.flush()
-  return released
+      interested_chat_ids=_live_follower_ids(db, row.id, chat_id),
+      state="completed" if row.completed_at is not None else "released",
+      outcome=row.outcome or "",
+      owner_id=row.owner_id,
+    )
+    for row in rows
+  ]
+
+
+def release_unsaved_approval_claim(
+  db: Session, *, claim_id: str, revision: int, chat_id: str,
+) -> bool:
+  """Release a claim that ``request_approval`` took for a card that never saved.
+
+  Fenced by the exact revision the failed call acquired, so a claim that has
+  since been refreshed, transferred, or settled is left alone. Commits.
+  """
+  row = db.get(models.AgentWorkClaim, claim_id)
+  if row is None or row.revision != revision or row.owner_chat_id != chat_id:
+    return False
+  settled = _stage_settle(
+    db, row, complete=False,
+    outcome="The approval card for this action was not saved; it was released.",
+  )
+  if settled is None:
+    db.rollback()
+    return False
+  db.commit()
+  return True
 
 
 def finish_work(

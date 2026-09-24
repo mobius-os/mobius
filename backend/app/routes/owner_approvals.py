@@ -8,6 +8,7 @@ There is no human timeout, held request, new table, or approval executor.
 from __future__ import annotations
 
 import json
+import logging
 from copy import deepcopy
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
@@ -24,6 +25,7 @@ from app.owner_input import publish_owner_input_changed
 from app.resource_access import get_active_chat_for_principal
 from app.agent_work_claims import claim_work
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chats", tags=["owner-approvals"])
 
 
@@ -270,7 +272,11 @@ async def save_owner_question(
         raise HTTPException(status_code=409, detail="Answer the open question before asking another.")
       # A rejected/stale card must not mutate workspace ownership. Claim only
       # after the exact run, sink, retry identity, and single-card admission
-      # have all passed under the same lifecycle locks.
+      # have all passed under the same lifecycle locks. The approval key IS the
+      # claim (one call, not claim + approval): the first chat saves the sole
+      # card; any later caller gets the claim_agent_work follower or completed
+      # result, is registered as a follower, and its turn continues cardless.
+      claim = None
       if approval_work_key is not None:
         try:
           claim = claim_work(
@@ -283,19 +289,9 @@ async def save_owner_question(
           )
         except ValueError as exc:
           raise HTTPException(409, str(exc)) from exc
-        if claim["state"] == "completed":
-          raise HTTPException(
-            409,
-            "This exact work already completed: "
-            f"{claim.get('outcome') or approval_work_key}",
-          )
-        if claim["owner_chat_id"] != principal.chat_id:
-          raise HTTPException(
-            409,
-            "This approval is already owned by "
-            f"{claim['owner_name']} ({claim['owner_chat_id']}); "
-            "no duplicate card was created.",
-          )
+        if (claim["state"] == "completed"
+            or claim["owner_chat_id"] != principal.chat_id):
+          return _approval_follower_result(claim)
       try:
         await sink.publish_question({
           "type": "question",
@@ -310,6 +306,8 @@ async def save_owner_question(
             else {}
         ))
       except Exception as exc:
+        if claim is not None and claim["state"] == "claimed":
+          await _release_claim_if_card_unsaved(db, chat_id, question_id, claim)
         raise HTTPException(
           status_code=503, detail="Could not save the approval card; retry the same request.",
         ) from exc
@@ -318,6 +316,70 @@ async def save_owner_question(
         "waiting_for_owner", question_id,
         platform_restart=activation_requirement is not None,
       )
+
+
+def _approval_follower_result(claim: dict) -> dict:
+  """No card: another chat owns this exact action, or it already completed."""
+  if claim["state"] == "completed":
+    claim["next_action"] = (
+      "No approval card was saved and your turn continues. This exact action "
+      "already completed; do not repeat it. Reconcile your Goal with the "
+      "recorded outcome."
+    )
+  else:
+    claim["next_action"] = (
+      "No approval card was saved and your turn continues. "
+      f"{claim['owner_name']} owns this exact action and its approval; you now "
+      "follow it and will be notified when it completes or is released. Do "
+      "not request approval for or perform it yourself. Continue independent "
+      "work and settle the overlapping plan task; your Goal stays yours."
+    )
+  return claim
+
+
+async def _release_claim_if_card_unsaved(
+  db: Session, chat_id: str, question_id: str, claim: dict,
+) -> None:
+  """Release the claim this call took when its card provably did not save.
+
+  A failed save ack is ambiguous: a timed-out QuestionCommit may still land.
+  A writer Barrier orders after that commit, so once it acks the transcript is
+  the truth. A saved card keeps its claim (the identical retry recovers the
+  receipt); an unsaved one releases the claim so it cannot strand, and the
+  identical retry simply re-acquires it. If even the Barrier fails, the claim
+  stays owned: the Goal lifecycle or chat deletion settles it.
+  """
+  from app.agent_coordination import schedule_claim_settlement
+  from app.agent_work_claims import release_unsaved_approval_claim
+  from app.chat_writer import Barrier, await_ack, get_writer
+
+  try:
+    await await_ack(get_writer().submit(Barrier()))
+    db.rollback()
+    chat = db.get(models.Chat, chat_id)
+    if chat is None:
+      return
+    db.refresh(chat)
+    saved = chat.pending_question_id == question_id or any(
+      block.get("question_id") == question_id
+      for message in chat.messages or []
+      if isinstance(message, dict)
+      for block in message.get("blocks") or []
+      if isinstance(block, dict)
+    )
+    if saved:
+      return
+    if release_unsaved_approval_claim(
+      db, claim_id=claim["id"], revision=claim["revision"], chat_id=chat_id,
+    ):
+      # A follower that joined in the gap is woken off these chat locks.
+      schedule_claim_settlement(chat_id)
+  except Exception:
+    db.rollback()
+    log.warning(
+      "approval card for claim %s failed; claim kept", claim.get("work_key"),
+      exc_info=True,
+    )
 
 
 def _receipt(

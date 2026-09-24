@@ -10,6 +10,7 @@ import pytest
 from app import auth as auth_mod, models
 from app.agent_coordination import (
   MAX_CONTEXT_MESSAGES,
+  PeerDeliveryResult,
   agent_context_snapshot,
   build_coordination_context,
   build_coordination_context_delivery,
@@ -904,7 +905,7 @@ def test_work_claim_transfer_acknowledges_only_after_delivery(
   ).count() == 1
 
   async def deliver_on_retry(**_kwargs):
-    return SimpleNamespace(
+    return PeerDeliveryResult(
       steered=[chats["root"].id], woken=[], queued=[],
     )
 
@@ -1546,3 +1547,182 @@ def test_interrupt_does_not_wake_a_chat_without_unfinished_goal_work(
   assert response.status_code == 200, response.text
   assert response.json()["woken"] == []
   assert started == []
+
+
+# --- Honest per-recipient delivery feedback -------------------------------
+
+def test_send_names_a_recipient_whose_latest_run_failed_as_unreachable(
+  client, auth, db, monkeypatch,
+):
+  """The auditor whose only run failed at startup must not look reachable."""
+  import app.agent_coordination as coordination
+
+  chats, runs = _network_fixture(db)
+  outsider, builder = chats["outsider"], chats["builder"]
+  runs["outsider"].status = "failed"
+  registry.discard_starting(outsider.id)
+  db.commit()
+  monkeypatch.setattr(coordination, "paused_goal_run", lambda _db, _chat: None)
+  scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
+
+  for delivery in ("next_turn", "interrupt"):
+    response = client.post(
+      "/api/agent-coordination/messages", headers=scout_auth,
+      json={
+        "recipients": [outsider.id, builder.id], "delivery": delivery,
+        "body": "Review /data/platform/backend/app/agent_coordination.py.",
+      },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["unreachable"] == [outsider.id]
+    assert "failed" in body["unreachable_reasons"][outsider.id]
+    assert outsider.id not in body["queued"] + body["steered"] + body["woken"]
+    assert builder.id in body["queued"] + body["steered"]
+    assert "Do not resend" in body["next_action"]
+
+
+def test_send_to_an_idle_recipient_is_queued_not_unreachable(client, auth, db):
+  chats, runs = _network_fixture(db)
+  outsider = chats["outsider"]
+  runs["outsider"].status = "completed"
+  registry.discard_starting(outsider.id)
+  db.commit()
+
+  response = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={"recipients": [outsider.id], "body": "Read this on your next turn."},
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert (body["queued"], body["unreachable"]) == ([outsider.id], [])
+  assert "unreachable_reasons" not in body and "next_action" not in body
+
+
+# --- Claims settle with their owner and wake followers --------------------
+
+CLAIM_KEY = "platform:agent-network:settle-with-owner"
+
+
+def _claim_owner_and_follower(db):
+  """A running owner Goal holds CLAIM_KEY; another running Goal follows it."""
+  for name in ("owner", "follower"):
+    db.add_all([
+      models.Chat(id=f"claim-{name}", title=f"Claim {name}", messages=[],
+                  provider="codex"),
+      models.ChatGoal(id=f"claim-{name}-goal", chat_id=f"claim-{name}",
+                      objective=f"{name} objective"),
+      models.ChatRun(
+        id=f"claim-{name}-run", root_run_id=f"claim-{name}-run",
+        chat_id=f"claim-{name}", goal_id=f"claim-{name}-goal",
+        goal_objective=f"{name} objective", status="running", provider="codex",
+      ),
+    ])
+  db.commit()
+  from app.agent_work_claims import claim_work
+  owner_id = db.query(models.Owner).first().id
+  claim_work(db, owner_id=owner_id, chat_id="claim-owner",
+             run_id="claim-owner-run", work_key=CLAIM_KEY,
+             summary="Merge the reviewed PR")
+  followed = claim_work(db, owner_id=owner_id, chat_id="claim-follower",
+                        run_id="claim-follower-run", work_key=CLAIM_KEY,
+                        summary="Merge the same PR")
+  assert followed["state"] == "held_by_peer"
+
+
+def _record_deliveries(monkeypatch):
+  import app.agent_coordination as coordination
+
+  delivered: list[tuple[list[str], str]] = []
+
+  async def record(*, recipients, delivery, kind, sender_chat_id):
+    delivered.append((list(recipients), delivery))
+    return PeerDeliveryResult(steered=[], woken=[], queued=list(recipients))
+
+  monkeypatch.setattr(coordination, "deliver_peer_recipients", record)
+  return delivered
+
+
+def _claim_and_notices(db):
+  db.expire_all()
+  claim = db.query(models.AgentWorkClaim).filter_by(work_key=CLAIM_KEY).one()
+  notices = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.from_run_id == f"work-claim:{claim.id}",
+  ).all()
+  return claim, notices
+
+
+def test_goal_completion_wakes_claim_followers_without_a_finish_call(
+  client, auth, db, monkeypatch,
+):
+  _claim_owner_and_follower(db)
+  delivered = _record_deliveries(monkeypatch)
+
+  completed = client.patch(
+    "/api/chats/claim-owner/goal",
+    headers=_top_level_auth(db, "claim-owner", "claim-owner-run"),
+    json={"goal_id": "claim-owner-goal", "expected_revision": 0,
+          "result": "Merged as 0b44dc9d; CI green"},
+  )
+
+  assert completed.status_code == 200, completed.text
+  claim, [notice] = _claim_and_notices(db)
+  assert claim.completed_at is not None
+  assert claim.notification_revision == claim.revision
+  assert notice.to_chat_id == "claim-follower"
+  assert "completed: Owning Goal completed: Merged as 0b44dc9d" in notice.body
+  assert delivered == [(["claim-follower"], "interrupt")]
+
+
+def test_stop_wakes_followers_of_released_claims_off_the_lifecycle_path(
+  client, auth, db, monkeypatch,
+):
+  import asyncio
+
+  import app.agent_coordination as coordination
+  from app import chat as chat_mod
+
+  _claim_owner_and_follower(db)
+  delivered = _record_deliveries(monkeypatch)
+
+  async def stop_then_drain_settlement():
+    await chat_mod._finish_run("claim-owner", "", "stopped")
+    await asyncio.gather(*list(coordination._SETTLEMENT_TASKS))
+
+  asyncio.run(stop_then_drain_settlement())
+
+  claim, [notice] = _claim_and_notices(db)
+  assert claim.released_at is not None
+  assert "You may claim it now" in notice.body
+  assert delivered == [(["claim-follower"], "interrupt")]
+
+
+def test_settlement_notice_lost_to_a_crash_is_delivered_by_the_next_seam(
+  client, auth, db, monkeypatch,
+):
+  """The settle commit survives a restart; only the wake is retried."""
+  import asyncio
+
+  from app.agent_coordination import settle_claims_with_owner
+  from app.goals import update_goal_record
+
+  _claim_owner_and_follower(db)
+  # Completion commits, then the process "dies" before any notice is sent.
+  update_goal_record(
+    db, db.get(models.ChatRun, "claim-owner-run"),
+    db.get(models.ChatGoal, "claim-owner-goal"), 0, result="Merged",
+  )
+  claim, notices = _claim_and_notices(db)
+  assert claim.notification_revision < claim.revision and notices == []
+  delivered = _record_deliveries(monkeypatch)
+
+  assert asyncio.run(settle_claims_with_owner("claim-owner")) == [
+    "claim-follower",
+  ]
+  assert asyncio.run(settle_claims_with_owner("claim-owner")) == []
+  claim, notices = _claim_and_notices(db)
+  assert claim.notification_revision == claim.revision
+  assert len(notices) == 1
+  assert delivered == [(["claim-follower"], "interrupt")]

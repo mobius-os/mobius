@@ -4097,6 +4097,7 @@ class ChatWriterActor:
     if goal is not None and goal.status != "completed":
       goal.status = "dismissed"
       goal.revision += 1
+      _settle_ended_goal_claims(db, goal)
     # Exact Goal dismissal does not cancel another Goal or generic wait.
     _cancel_activation_owners(db, chat, goal_id=goal_id)
     if not cmd.preserve_execution:
@@ -5089,6 +5090,7 @@ class ChatWriterActor:
         if goal is not None and goal.status == "open":
           goal.status = "stopped"
           goal.revision += 1
+          _settle_ended_goal_claims(db, goal)
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -5138,6 +5140,7 @@ class ChatWriterActor:
           if goal is not None and goal.status == "open":
             goal.status = "stopped"
             goal.revision += 1
+            _settle_ended_goal_claims(db, goal)
         if cmd.terminal_status == "failed":
           from app.chat_failure_activity import mark_failed
           mark_failed(
@@ -5173,6 +5176,7 @@ class ChatWriterActor:
             goal.status = "stopped"
             goal.revision += 1
             changed = True
+            _settle_ended_goal_claims(db, goal)
         for request in db.query(models.SavedSecureInput).filter(
           models.SavedSecureInput.chat_id == cmd.chat_id,
           models.SavedSecureInput.status.in_(("pending", "consuming")),
@@ -6496,6 +6500,29 @@ def finalize_response_outcome(
   return _apply_last_assistant_message(
     db, chat_id, terminal_message, commit=commit,
   )
+
+
+def _settle_ended_goal_claims(db, goal) -> None:
+  """Settle an ending Goal's open work claims inside the same writer commit.
+
+  Stop and dismissal release the claims so followers may take the exact action
+  over. A savepoint keeps a claim-table failure from failing the lifecycle
+  write itself; the post-commit seam (``settle_claims_with_owner``) repairs
+  any claim left open from the durable Goal status.
+  """
+  from app.agent_work_claims import stage_settle_goal_claims
+
+  try:
+    with db.begin_nested():
+      stage_settle_goal_claims(
+        db, chat_id=goal.chat_id, goal_id=goal.id, status=goal.status,
+        result=goal.result,
+      )
+  except Exception:
+    log.warning(
+      "goal %s ended but its work claims were not settled in-commit",
+      goal.id, exc_info=True,
+    )
 
 
 def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:

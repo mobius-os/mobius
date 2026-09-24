@@ -584,6 +584,19 @@ async def _finish_run(
       "FinishRun did not persist chat_id=%s (reconciliation will repair)",
       chat_id, exc_info=True,
     )
+    return
+  _after_terminal_status(chat_id, terminal_status)
+
+
+def _after_terminal_status(chat_id: str, terminal_status: str) -> None:
+  """Post-commit follow-up for a durable Stop of this chat's work.
+
+  FinishRun released the stopped Goal's work claims in its own commit; the
+  followers are woken off this lifecycle path, which may still hold locks.
+  """
+  if terminal_status == "stopped":
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
 
 
 async def _record_run_metrics(
@@ -657,6 +670,7 @@ async def _finish_run_strict(
     )
   )
   await _await_ack(ack)
+  _after_terminal_status(chat_id, terminal_status)
 
 
 async def _recover_wedged_run_strict(

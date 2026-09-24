@@ -221,6 +221,10 @@ async def clear_presented_goal(
     )
   if result["status"] == "missing":
     return {"cleared": False, "goal": None}
+  # Dismissal released the Goal's open work claims in its own commit; wake
+  # the followers so they may take the exact action over.
+  from app.agent_coordination import settle_claims_with_owner
+  await settle_claims_with_owner(chat_id)
   broadcast = get_broadcast(chat_id)
   if broadcast is not None and broadcast.running:
     broadcast.publish({
@@ -341,6 +345,12 @@ async def patch_goal_record(
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, serialize_plan(db, run, goal))
+  if result.get("status") == "completed":
+    # Completion settled the Goal's open work claims with its verified result
+    # in the same commit; wake the followers, so the owner needs no trailing
+    # finish_agent_work call.
+    from app.agent_coordination import settle_claims_with_owner
+    await settle_claims_with_owner(chat_id)
   return result
 
 

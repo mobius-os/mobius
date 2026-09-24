@@ -106,6 +106,15 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   if changed.rowcount != 1:
     db.rollback()
     raise GoalPlanConflict("Goal changed; fetch it and retry")
+  if result is not None:
+    # The verified result settles the Goal's still-open exact-action claims in
+    # the same commit, so the owner needs no trailing finish call and a
+    # restart can never see a completed Goal that still holds a claim.
+    from app.agent_work_claims import stage_settle_goal_claims
+    stage_settle_goal_claims(
+      db, chat_id=goal.chat_id, goal_id=goal.id, status="completed",
+      result=values["result"],
+    )
   db.commit()
   db.refresh(goal)
   return {"goal_id": goal.id, "status": goal.status, "revision": goal.revision}

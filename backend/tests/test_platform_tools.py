@@ -229,6 +229,29 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
   assert "agents in other Möbius chats" not in instructions
 
 
+def test_peer_tool_descriptions_cut_coordination_calls():
+  """Descriptions steer agents to paths, quiet delivery, and one-call approval."""
+  control = _control_module()
+  tools = control._TOOL_DEFINITIONS
+  send = tools[control.SEND_AGENT_MESSAGE_TOOL]
+  assert "by absolute path" in send["description"]
+  assert "never paste or chunk" in send["description"]
+  assert "unreachable" in send["description"]
+  assert "never paste" in send["inputSchema"]["properties"]["body"]["description"]
+  approval = tools[control.REQUEST_APPROVAL_TOOL]["description"]
+  assert "do not call claim_agent_work first" in approval
+  assert "your turn continues" in approval
+  assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
+  finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
+  assert "Usually unnecessary" in finish and "declined approval" in finish
+  for name in (
+    control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
+    control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
+    control.LIST_AGENT_PEERS_TOOL,
+  ):
+    assert len(tools[name]["description"]) <= 1000, name
+
+
 def test_constitution_routes_each_agent_network_to_its_owner():
   core = (
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
