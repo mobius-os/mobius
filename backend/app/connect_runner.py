@@ -782,8 +782,9 @@ class _CommandRunner:
         self.active = {}
         self.outbox = deque()
         self.reconcile_requested = False
-        # Set per stream by the server's hello; older servers send none and
-        # receive only final results.
+        # Turned on by the server's stream hello and kept across reconnects,
+        # so output buffered during an outage is still delivered. Older
+        # servers send no hello and receive only final results.
         self.live_output = False
         # A rotating stream can deliver the same event from the retiring and
         # replacement connection. Request ids are idempotency keys: once this
@@ -1097,9 +1098,6 @@ def _serve_connection(conn, stop_event=None):
                 # A slow DNS/TLS/HTTP handshake followed by an immediate EOF
                 # is still an early failure and must retain retry backoff.
                 stream_opened_at = time.monotonic()
-                # Each stream's server says whether it accepts live output;
-                # it may have been upgraded while the stream was down.
-                commands.live_output = False
                 print("Connected. This machine is now reachable from Mobius.")
                 commands.flush_pending_results()
                 if commands.take_reconcile_request():

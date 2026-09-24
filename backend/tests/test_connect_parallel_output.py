@@ -428,7 +428,7 @@ def test_heavy_output_cannot_starve_the_time_limit(monkeypatch):
   assert runner.active == {}
 
 
-def test_hello_decides_live_output_for_each_stream(monkeypatch):
+def test_hello_enables_live_output_and_survives_reconnects(monkeypatch):
   events = iter([
     [b'data: {"type":"hello","live_output":true}\n\n', b": ping\n\n"],
     [b'data: {"type":"disconnect","request_id":"z"}\n\n'],
@@ -466,9 +466,9 @@ def test_hello_decides_live_output_for_each_stream(monkeypatch):
   connect_runner._serve_connection(
     {"url": "https://mobius.test", "host_id": "h_u", "token": "t"},
   )
-  # Off until the first stream's hello; on after it; off again on reconnect
-  # until that server says otherwise.
-  assert seen == [False, True, False]
+  # Off until the server's hello, then kept across the reconnect so output
+  # buffered while disconnected is still delivered.
+  assert seen == [False, True, True]
 
 
 def test_time_limit_accepts_long_work_but_rejects_absurd_values():

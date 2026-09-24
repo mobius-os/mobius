@@ -1175,13 +1175,14 @@ async def read_command_output(
       )
       continue
     host = _load_host(host_id)
+    if host is not None:
+      _prune_recent_commands(host)
     entry = _recent_command(host, request_id) if host is not None else None
     if entry is None:
       raise HTTPException(
         status_code=404,
         detail="Connect has no running or recent command with that id.",
       )
-    _prune_recent_commands(host)
     log = _finished_output.get(host_id, {}).get(request_id) or _OutputLog()
     return {
       "request_id": request_id,
