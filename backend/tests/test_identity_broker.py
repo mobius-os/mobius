@@ -1088,6 +1088,36 @@ def test_standalone_search_rejects_private_urls_without_calling_provider(broker,
       }})
 
 
+def test_standalone_search_expired_ref_is_nonfatal_without_fetch(broker, monkeypatch):
+  calls = []
+
+  def fake_parallel(tool, _args):
+    calls.append(tool)
+    return {"results": [{"url": "https://example.com/page", "title": "Example"}]}
+
+  monkeypatch.setattr(broker, "_parallel", fake_parallel)
+  searched = broker.standalone_search({
+    "id": "chat-expired", "commands": {"search_query": [{"q": "example"}]},
+  })
+  ref_id = searched["results"][0]["ref_id"]
+  broker.search_sessions.clear()
+  opened = broker.standalone_search({
+    "id": "chat-expired", "commands": {"open": [{"ref_id": ref_id}]},
+  })
+  assert opened["results"] == []
+  assert "Page reference unavailable; search again or open a public URL." in opened["output"]
+  assert calls == ["web_search"]
+  mixed = broker.standalone_search({
+    "id": "chat-mixed", "commands": {
+      "search_query": [{"q": "new example"}],
+      "find": [{"ref_id": "turn9search0", "pattern": "example"}],
+    },
+  })
+  assert [item["url"] for item in mixed["results"]] == ["https://example.com/page"]
+  assert "Page reference unavailable" in mixed["output"]
+  assert calls == ["web_search", "web_search"]
+
+
 def test_standalone_search_names_unsupported_commands(broker, monkeypatch):
   monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
   response = broker.standalone_search({

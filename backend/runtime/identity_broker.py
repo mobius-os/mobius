@@ -776,12 +776,15 @@ class Broker:
         if not isinstance(operation, dict):
           raise ValueError("page operation must be an object")
         ref_id = _search_text(operation.get("ref_id"), limit=2000)
-        with self.lock:
-          url = session["refs"].get(ref_id, ref_id)
-        url = _public_web_url(url)
         pattern = _search_text(operation.get("pattern"), limit=200) if kind == "find" else ""
         if kind == "find" and not pattern:
           raise ValueError("find pattern is required")
+        with self.lock:
+          url = session["refs"].get(ref_id)
+        if url is None and not urllib.parse.urlsplit(ref_id).scheme:
+          lines.append("Page reference unavailable; search again or open a public URL.")
+          continue
+        url = _public_web_url(url or ref_id)
         try:
           value = self._parallel("web_fetch", {
             "urls": [url], "objective": "Read this page", "full_content": True,
