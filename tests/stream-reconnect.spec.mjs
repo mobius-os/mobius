@@ -747,13 +747,20 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] .connection-status')).toBeVisible({
       timeout: 25000,
     })
+    // Settle the reserved composer height before measuring overlap. Compare
+    // NUMERICALLY within a pixel rather than by exact string: useScrollMode
+    // writes --composer-h only when its layout pass actually runs, and a wake
+    // failure keeps re-rendering the footer underneath it (the status mounts,
+    // the repair restarts the stream), so an exact match can be momentarily
+    // stale even though the reservation is correct. The overlap assertions
+    // below are what this case is for.
     await page.waitForFunction(() => {
       const chat = document.querySelector('[data-chat-surface="painted"] .chat')
       const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
-      return chat && foot
-        && getComputedStyle(chat).getPropertyValue('--composer-h').trim()
-          === `${foot.offsetHeight}px`
-    })
+      if (!chat || !foot) return false
+      const reserved = parseFloat(getComputedStyle(chat).getPropertyValue('--composer-h'))
+      return Number.isFinite(reserved) && Math.abs(reserved - foot.offsetHeight) <= 1
+    }, undefined, { timeout: 15000 })
 
     const diagnostics = await pillOverlapDiagnostics(page)
     expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
@@ -1312,7 +1319,15 @@ test.describe('Stream reconnection', () => {
     // browser exhausts its reconnects, the connection warning must not retire
     // the goal while the authoritative runtime still reports `running:true`.
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
-    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 12000 })
+    // Connection trouble must SURFACE without retiring the goal, and the
+    // surfaced element is the status. The terminal Retry is not a state this
+    // can hold: once the answer clears the parked question the runtime is a
+    // live run again, and shouldRepairRuntimeStream restarts the retry owner
+    // the moment the bounded retries exhaust -- so Retry only ever exists
+    // between exhaustion and repair. The goal-rail assertions either side of
+    // this are the actual guarantee.
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status'))
+      .toBeVisible({ timeout: 25000 })
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
 
     // Answering MUST POST the answer payload (the turn unfreezes).
