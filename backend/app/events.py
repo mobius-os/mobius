@@ -12,6 +12,7 @@ position is only the compatibility path for older id-less events.
 import copy
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -693,9 +694,8 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
     # sink's normal PersistTranscript/Finalize path persists it — this never
     # writes Chat.messages directly (the single-writer guardrail).
     #
-    # Frozen shape: block["subagent"] = {"<task_id>": {description, status,
-    # summary}} — status is "running" until task_done, then the terminal status
-    # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
+    # Persist startedAt with the lifecycle receipt so a reloaded chat can keep
+    # showing the helper's elapsed time. task_progress stays LIVE-ONLY: its
     # per-tick usage/last_tool_name is not worth persisting (it falls through to
     # `return False` below). A missing id, or a tool_use_id with no matching
     # block (unknown), no-ops so a stray event can never append a phantom block.
@@ -737,7 +737,9 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
       "description": "",
       "status": "running",
       "summary": None,
+      "startedAt": int(time.time() * 1000),
     })
+    entry.setdefault("startedAt", int(time.time() * 1000))
     was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
     if event_type == "task_start":
       if event.get("description"):
