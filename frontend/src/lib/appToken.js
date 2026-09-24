@@ -34,10 +34,46 @@
  * previous one's token.
  */
 import { clearCachedAppTokens } from './appFrameStorage.js'
+import { ReachabilityPhase } from './connectivityStore.js'
 
 const APP_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
 const APP_TOKEN_MIN_REFRESH_MS = 30_000
 const APP_TOKEN_FALLBACK_REFRESH_MS = 5 * 60_000
+
+export const AppTokenStartupState = Object.freeze({
+  READY: 'ready',
+  CHECKING: 'checking',
+  LOADING: 'loading',
+  OFFLINE_MISSING: 'offline-missing',
+  ONLINE_ERROR: 'online-error',
+})
+
+/**
+ * Decide which startup surface AppCanvas should show while its secure,
+ * app-scoped token is being resolved.
+ *
+ * Reachability CHECKING is intentionally distinct from ONLINE here. The
+ * shared connectivity store keeps browsing available during uncertainty, but
+ * a cold offline app launch can fail its token request before the bounded
+ * reachability probe confirms Offline. Treating that temporary uncertainty as
+ * an online authentication failure flashes a scary, actionable error and then
+ * replaces it with the correctly cached app a few seconds later.
+ *
+ * This only changes presentation. Token selection remains strict: cached
+ * app-scoped sessions are used only after confirmed Offline, and a confirmed
+ * Online token error is still surfaced rather than bypassed.
+ */
+export function appTokenStartupState(token, reachabilityPhase, hasTokenError) {
+  if (token) return AppTokenStartupState.READY
+  if (reachabilityPhase === ReachabilityPhase.CHECKING) {
+    return AppTokenStartupState.CHECKING
+  }
+  if (reachabilityPhase === ReachabilityPhase.OFFLINE) {
+    return AppTokenStartupState.OFFLINE_MISSING
+  }
+  if (hasTokenError) return AppTokenStartupState.ONLINE_ERROR
+  return AppTokenStartupState.LOADING
+}
 
 export function appTokenIdentity(token) {
   try {

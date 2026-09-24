@@ -56,6 +56,26 @@ async function queueOwnerIntent(cid) {
   })
 }
 
+async function seedPrivateListing() {
+  await new Promise((resolve, reject) => {
+    const request = indexedDB.open('mobius-listings', 1)
+    request.onupgradeneeded = () => request.result.createObjectStore('listings', { keyPath: 'key' })
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      const tx = db.transaction('listings', 'readwrite')
+      tx.objectStore('listings').put({ key: '7:owner:notes', entries: [{ name: 'private-title.json' }] })
+      tx.oncomplete = () => { db.close(); resolve() }
+      tx.onerror = () => reject(tx.error)
+    }
+  })
+}
+
+async function listingDatabaseExists() {
+  const databases = typeof indexedDB.databases === 'function' ? await indexedDB.databases() : []
+  return databases.some((database) => database.name === 'mobius-listings')
+}
+
 before(() => {
   globalThis.indexedDB = new IDBFactory()
   globalThis.localStorage = storage(localValues)
@@ -93,6 +113,15 @@ test('explicit cleanup wipes principal-bound intent from the live outbox store',
   await clearQueryCache()
 
   assert.equal((await listIntents(owner)).length, 0)
+})
+
+test('owner cleanup removes private cached directory metadata', async () => {
+  await seedPrivateListing()
+  assert.equal(await listingDatabaseExists(), true)
+
+  await clearQueryCache()
+
+  assert.equal(await listingDatabaseExists(), false)
 })
 test('explicit logout revokes copied handoffs before local owner state', async () => {
   const calls = []

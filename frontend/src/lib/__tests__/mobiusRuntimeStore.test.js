@@ -98,6 +98,12 @@ test('an opaque frame delegates offline durability and subscriptions to the shel
     }
     if (method === 'pendingCount') return 1
     if (method === 'list') return [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }]
+    if (method === 'listWithStatus') return {
+      entries: [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }],
+      complete: true,
+      source: 'cache',
+      updatedAt: 123,
+    }
     if (method === 'remove') {
       values.delete(path)
       return { queued: true }
@@ -117,6 +123,12 @@ test('an opaque frame delegates offline durability and subscriptions to the shel
     assert.equal(values.get('draft.txt'), 'tube edit')
     assert.equal(await s.pendingCount(), 1)
     assert.deepEqual(await s.list(''), [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }])
+    assert.deepEqual(await s.listWithStatus(''), {
+      entries: [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }],
+      complete: true,
+      source: 'cache',
+      updatedAt: 123,
+    })
     assert.deepEqual(await s.remove('draft.txt'), { queued: true })
     assert.equal(values.has('draft.txt'), false)
 
@@ -130,6 +142,33 @@ test('an opaque frame delegates offline durability and subscriptions to the shel
   } finally {
     delete globalThis.window.__mobiusStorageBridgeCall
     delete globalThis.window.__mobiusStorageBridgeSubscribe
+  }
+})
+
+test('a new frame runtime falls back safely when an older shell lacks listWithStatus', async () => {
+  freshEnv()
+  globalThis.indexedDB = {
+    open() { throw new DOMException('denied', 'SecurityError') },
+  }
+  globalThis.window.__mobiusStorageBridgeCall = async (method) => {
+    if (method === 'listWithStatus') {
+      const error = new Error('mobius.storage: shell method is not allowed')
+      error.code = 'storage_method_denied'
+      throw error
+    }
+    if (method === 'list') return [{ name: 'board.json', path: 'boards/board.json', type: 'file' }]
+    throw new Error(`unexpected bridge method ${method}`)
+  }
+  try {
+    const s = await newStorage()
+    assert.deepEqual(await s.listWithStatus('boards'), {
+      entries: [{ name: 'board.json', path: 'boards/board.json', type: 'file' }],
+      complete: false,
+      source: 'legacy',
+      updatedAt: null,
+    })
+  } finally {
+    delete globalThis.window.__mobiusStorageBridgeCall
   }
 })
 
@@ -177,6 +216,193 @@ test('list can batch JSON content in one bounded server request', async () => {
     server.log.filter((request) => request.url.includes('/api/storage/apps/')).length,
     0,
   )
+})
+
+test('a complete online listing survives reload offline with JSON bodies', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  server.seed('records/b.json', { id: 'b' })
+
+  const online = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(online.complete, true)
+  assert.equal(online.source, 'server')
+  assert.deepEqual(online.entries.map((entry) => entry.content), [{ id: 'a' }, { id: 'b' }])
+
+  server.setOnline(false)
+  const offline = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(offline.complete, true)
+  assert.equal(offline.source, 'cache')
+  assert.deepEqual(offline.entries.map((entry) => entry.content), [{ id: 'a' }, { id: 'b' }])
+})
+
+test('a cold per-path cache is useful but explicitly incomplete offline', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  server.seed('records/b.json', { id: 'b' })
+  assert.deepEqual(await s.get('records/a.json'), { id: 'a' })
+
+  server.setOnline(false)
+  const status = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(status.complete, false)
+  assert.equal(status.source, 'derived')
+  assert.deepEqual(status.entries.map((entry) => entry.name), ['a.json'])
+  assert.deepEqual(status.entries[0].content, { id: 'a' })
+  // Compatibility callers still receive the best-known entries array.
+  assert.deepEqual((await s.list('records')).map((entry) => entry.name), ['a.json'])
+})
+
+test('a confirmed write cannot manufacture a complete directory snapshot', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+
+  assert.deepEqual(await s.set('records/new.json', { id: 'new' }), { synced: true })
+  server.setOnline(false)
+
+  const offline = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(offline.complete, false)
+  assert.equal(offline.source, 'derived')
+  assert.deepEqual(offline.entries.map((entry) => entry.name), ['new.json'])
+  assert.deepEqual(offline.entries[0].content, { id: 'new' })
+})
+
+test('queued writes and deletes overlay a complete cached directory snapshot', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  server.seed('records/b.json', { id: 'b' })
+  await s.listWithStatus('records', { includeContent: true })
+
+  server.setOnline(false)
+  assert.deepEqual(await s.remove('records/a.json'), { queued: true })
+  assert.deepEqual(await s.set('records/c.json', { id: 'c' }), { queued: true })
+  const offline = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(offline.complete, true)
+  assert.equal(offline.source, 'cache')
+  assert.deepEqual(offline.entries.map((entry) => entry.name), ['b.json', 'c.json'])
+  assert.deepEqual(offline.entries.map((entry) => entry.content), [{ id: 'b' }, { id: 'c' }])
+
+  server.setOnline(true)
+  await s._drain()
+  assert.equal(server.serverHas('records/a.json'), false)
+  assert.deepEqual(server.serverValue('records/c.json'), { id: 'c' })
+  assert.equal(await s.pendingCount(), 0)
+})
+
+test('confirmed creates advance a cached directory snapshot for the next offline reload', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  await s.listWithStatus('records', { includeContent: true })
+
+  assert.deepEqual(await s.set('records/b.json', { id: 'b' }), { synced: true })
+  assert.equal(await s.pendingCount(), 0)
+  server.setOnline(false)
+
+  const offline = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(offline.complete, true)
+  assert.equal(offline.source, 'cache')
+  assert.deepEqual(offline.entries.map((entry) => entry.name), ['a.json', 'b.json'])
+  assert.deepEqual(offline.entries.map((entry) => entry.content), [{ id: 'a' }, { id: 'b' }])
+})
+
+test('confirmed deletes advance a cached directory snapshot for the next offline reload', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  server.seed('records/b.json', { id: 'b' })
+  await s.listWithStatus('records', { includeContent: true })
+
+  assert.deepEqual(await s.remove('records/a.json'), { synced: true })
+  assert.equal(await s.pendingCount(), 0)
+  server.setOnline(false)
+
+  const offline = await s.listWithStatus('records', { includeContent: true })
+  assert.equal(offline.complete, true)
+  assert.equal(offline.source, 'cache')
+  assert.deepEqual(offline.entries.map((entry) => entry.name), ['b.json'])
+  assert.deepEqual(offline.entries[0].content, { id: 'b' })
+})
+
+test('an authoritative refresh retires a synced create mutation after a remote delete', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  await s.listWithStatus('records')
+  await s.durableWrite('records/a.json', { id: 'mine' })
+  await fetch('/api/storage/apps/1/records/a.json', { method: 'DELETE' })
+
+  const online = await s.listWithStatus('records')
+  assert.deepEqual(online.entries, [])
+  server.setOnline(false)
+  assert.deepEqual((await s.listWithStatus('records')).entries, [])
+})
+
+test('an authoritative refresh retires a synced delete mutation after remote recreation', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'base' })
+  await s.listWithStatus('records')
+  await s.remove('records/a.json')
+  server.seed('records/a.json', { id: 'remote' })
+
+  const online = await s.listWithStatus('records')
+  assert.deepEqual(online.entries.map((entry) => entry.name), ['a.json'])
+  server.setOnline(false)
+  assert.deepEqual((await s.listWithStatus('records')).entries.map((entry) => entry.name), ['a.json'])
+})
+
+test('a nested create updates every previously complete ancestor snapshot', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  await s.listWithStatus('')
+  await s.listWithStatus('new-dir')
+
+  await s.durableWrite('new-dir/child/file.json', { id: 'nested' })
+  server.setOnline(false)
+
+  const root = await s.listWithStatus('')
+  const parent = await s.listWithStatus('new-dir')
+  assert.equal(root.complete, true)
+  assert.deepEqual(root.entries.map((entry) => [entry.name, entry.type]), [['new-dir', 'directory']])
+  assert.equal(parent.complete, true)
+  assert.deepEqual(parent.entries.map((entry) => [entry.name, entry.type]), [['child', 'directory']])
+})
+
+test('a delayed old listing cannot hide a concurrent confirmed create or restore a delete', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/delete.json', { id: 'delete' })
+  await s.listWithStatus('records')
+
+  const originalFetch = globalThis.fetch
+  let capturedResolve
+  let releaseResolve
+  const captured = new Promise((resolve) => { capturedResolve = resolve })
+  const release = new Promise((resolve) => { releaseResolve = resolve })
+  globalThis.fetch = async (url, options) => {
+    const response = await originalFetch(url, options)
+    if (String(url).includes('/apps-list/')) {
+      capturedResolve()
+      await release
+    }
+    return response
+  }
+  try {
+    const listing = s.listWithStatus('records')
+    await captured
+    await s.durableWrite('records/create.json', { id: 'create' })
+    await s.remove('records/delete.json')
+    releaseResolve()
+    await listing
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  server.setOnline(false)
+  const offline = await s.listWithStatus('records')
+  assert.equal(offline.complete, true)
+  assert.deepEqual(offline.entries.map((entry) => entry.name), ['create.json'])
 })
 
 test('content listings page at the server byte-budget boundary', async () => {
@@ -416,6 +642,41 @@ test('the outbox coalesces to one op per path; the last write wins on drain', as
   assert.deepEqual(server.serverValue('y.json'), { n: 'c' })  // LWW
 })
 
+test('same-path coalescing retains every bounded app conflict intent across reload', async () => {
+  const { server } = freshEnv()
+  const first = await newStorage('7', { appInstanceId: 'intent-batch' })
+  server.seed('shared.json', { remote: [] })
+  const baseline = await first.getWithVersion('shared.json')
+  server.setOnline(false)
+
+  await first.durableWrite('shared.json', { local: ['a'] }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'test-intent', value: 'a' },
+  })
+  await first.durableWrite('shared.json', { local: ['a', 'b'] }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'test-intent', value: 'b' },
+  })
+  assert.equal(await first.pendingCount(), 1)
+  first._destroy()
+
+  const remounted = await newStorage('7', { appInstanceId: 'intent-batch' })
+  const conflicts = []
+  remounted.onConflict((conflict) => { conflicts.push(conflict); return false })
+  server.seed('shared.json', { remote: ['other-device'] })
+  server.setOnline(true)
+  await remounted._drain()
+  await waitFor(() => conflicts.length === 1)
+  assert.deepEqual(conflicts[0].conflictContext, {
+    kind: 'mobius-conflict-context-batch',
+    version: 1,
+    items: [
+      { kind: 'test-intent', value: 'a' },
+      { kind: 'test-intent', value: 'b' },
+    ],
+  })
+})
+
 test('offline signal batches from separate runtimes do not coalesce', async () => {
   const { server } = freshEnv()
   const first = await newStorage('7')
@@ -599,6 +860,9 @@ test('explicit data wipe purges one app runtime state without touching another',
   const { server } = freshEnv()
   const removed = await newStorage('7', { appInstanceId: 'removed-install' })
   const retained = await newStorage('8', { appInstanceId: 'retained-install' })
+  server.seed('records/known.json', { text: 'known' })
+  assert.equal((await removed.listWithStatus('records')).complete, true)
+  assert.equal((await retained.listWithStatus('records')).complete, true)
   server.setOnline(false)
   await removed.set('note.json', { text: 'remove me' })
   await removed._queueSignals([{ id: 'removed', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
@@ -611,6 +875,8 @@ test('explicit data wipe purges one app runtime state without touching another',
   assert.equal(await removed._pendingSignalCount(), 0)
   assert.equal(await retained.pendingCount(), 1)
   assert.equal(await retained._pendingSignalCount(), 1)
+  assert.equal((await removed.listWithStatus('records')).complete, false)
+  assert.equal((await retained.listWithStatus('records')).complete, true)
 })
 
 test('a failing signal endpoint cannot block or dead-letter user storage writes', async () => {
@@ -989,7 +1255,9 @@ test('412 CAS conflict is retryable and does not emit dead-letter', async () => 
   const s = await newStorage()
   const { DurableWriteError } = await runtimeExports()
   const deadLetters = []
+  const conflicts = []
   const unsub = s.onDeadLetter((dl) => deadLetters.push(dl))
+  const unsubConflict = s.onConflict((conflict) => conflicts.push(conflict))
 
   server.forceWrite('conflict.json', 412)
   await assert.rejects(
@@ -1002,7 +1270,157 @@ test('412 CAS conflict is retryable and does not emit dead-letter', async () => 
   await waitFor(async () => (await s.pendingCount()) === 0)
   assert.equal(await s.pendingCount(), 0)
   assert.deepEqual(deadLetters, [])
+  assert.equal(conflicts.length, 1)
+  assert.equal(conflicts[0].path, 'conflict.json')
+  assert.deepEqual(conflicts[0].refusedValue, { stale: true })
   unsub()
+  unsubConflict()
+})
+
+test('an offline CAS conflict is replayed to the app and restores the authoritative mirror', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('shared.json', { remote: 1 })
+  const first = await s.getWithVersion('shared.json')
+
+  server.setOnline(false)
+  const queued = await s.durableWrite('shared.json', { mine: 1 }, { ifMatch: first.version })
+  assert.equal(queued.durability, 'queued')
+  server.seed('shared.json', { remote: 2 })
+
+  const conflicts = []
+  s.onConflict((conflict) => conflicts.push(conflict))
+  server.setOnline(true)
+  await s._drain()
+  await waitFor(() => conflicts.length === 1)
+
+  assert.deepEqual(conflicts[0].refusedValue, { mine: 1 })
+  assert.deepEqual(server.serverValue('shared.json'), { remote: 2 })
+  assert.deepEqual(await s.get('shared.json'), { remote: 2 })
+  assert.equal(await s.pendingCount(), 0)
+})
+
+test('an async conflict listener must finish successfully before the outcome is consumed', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('shared.json', { remote: 1 })
+  const first = await s.getWithVersion('shared.json')
+  server.setOnline(false)
+  await s.durableWrite('shared.json', { mine: 1 }, {
+    ifMatch: first.version,
+    conflictContext: { kind: 'test-intent', field: 'mine' },
+  })
+  server.seed('shared.json', { remote: 2 })
+
+  const detach = s.onConflict(async () => false)
+  server.setOnline(true)
+  await s._drain()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  detach()
+
+  const replay = []
+  s.onConflict((conflict) => { replay.push(conflict); return false })
+  await waitFor(() => replay.length === 1)
+  assert.equal(replay[0].path, 'shared.json')
+  assert.deepEqual(replay[0].conflictContext, { kind: 'test-intent', field: 'mine' })
+})
+
+test('a conflict listener that only observes and returns undefined does not consume the outcome', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const observed = []
+  const detach = s.onConflict((conflict) => { observed.push(conflict) })
+  server.forceWrite('undefined-listener.json', 412)
+  await assert.rejects(() => s.durableWrite(
+    'undefined-listener.json', { mine: true }, { ifMatch: '"old"' },
+  ))
+  await waitFor(() => observed.length === 1)
+  detach()
+
+  const replayed = []
+  s.onConflict((conflict) => { replayed.push(conflict); return false })
+  await waitFor(() => replayed.length === 1)
+  assert.equal(replayed[0].path, 'undefined-listener.json')
+})
+
+test('more than 200 unhandled conflicts remain durable for replay', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const detach = s.onConflict(() => false)
+  for (let index = 0; index < 205; index += 1) {
+    const path = `many-conflicts/${index}.json`
+    server.forceWrite(path, 412)
+    await assert.rejects(() => s.durableWrite(path, { index }, { ifMatch: '"old"' }))
+  }
+  detach()
+
+  const replayed = new Set()
+  const remounted = await newStorage()
+  remounted.onConflict((conflict) => { replayed.add(conflict.path); return false })
+  await waitFor(() => replayed.size === 205)
+  assert.equal(replayed.has('many-conflicts/0.json'), true)
+  assert.equal(replayed.has('many-conflicts/204.json'), true)
+})
+
+test('oversized combined conflict context retains separate writes and the newest refusal', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('overflow.json', { remote: 1 })
+  const baseline = await s.getWithVersion('overflow.json')
+  server.setOnline(false)
+  await s.durableWrite('overflow.json', { offline: 1 }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'large-intent', order: 1, payload: 'a'.repeat(35_000) },
+  })
+  await s.durableWrite('overflow.json', { offline: 2 }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'large-intent', order: 2, payload: 'b'.repeat(35_000) },
+  })
+  assert.equal(await s.pendingCount(), 2)
+
+  const conflicts = []
+  s.onConflict((conflict) => { conflicts.push(conflict); return false })
+  server.setOnline(true)
+  await s._drain()
+  await waitFor(() => conflicts.length === 1)
+  assert.deepEqual(server.serverValue('overflow.json'), { offline: 1 })
+  assert.deepEqual(conflicts[0].refusedValue, { offline: 2 })
+  assert.equal(conflicts[0].conflictContext.order, 2)
+
+  const replayed = []
+  const remounted = await newStorage()
+  remounted.onConflict((conflict) => { replayed.push(conflict); return false })
+  await waitFor(() => replayed.length === 1)
+  assert.equal(replayed[0].conflictContext.order, 2)
+})
+
+test('an opaque frame pulls unacknowledged host conflicts when its listener remounts', async () => {
+  freshEnv()
+  globalThis.indexedDB = {
+    open() { throw new DOMException('denied', 'SecurityError') },
+  }
+  const pending = [{
+    path: 'shared.json', writeId: 'host-conflict-1', status: 412,
+    refusedValue: { mine: true }, conflictContext: { kind: 'test-intent' },
+  }]
+  const calls = []
+  globalThis.window.__mobiusStorageBridgeCall = async (method, args) => {
+    calls.push([method, ...args])
+    if (method === 'listConflicts') return pending
+    if (method === 'ackConflict') return true
+    throw new Error(`unexpected bridge method ${method}`)
+  }
+  try {
+    const frame = await newStorage('7')
+    const seen = []
+    frame.onConflict((conflict) => { seen.push(conflict); return false })
+    await waitFor(() => seen.length === 1)
+    assert.equal(seen[0].writeId, 'host-conflict-1')
+    assert.equal(calls.some(([method]) => method === 'listConflicts'), true)
+    assert.equal(calls.some(([method]) => method === 'ackConflict'), false)
+  } finally {
+    delete globalThis.window.__mobiusStorageBridgeCall
+  }
 })
 
 // ── Compare-and-swap: getWithVersion + conditional durableWrite ────────────

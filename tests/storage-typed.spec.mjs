@@ -193,7 +193,7 @@ test('FATAL write resolves (no deadlock) + leaves the path lock acquirable', asy
   expect(after).toEqual({ synced: true })
 })
 
-// ── 078: offline-capable list() (cache + outbox overlay) ──────────────────
+// ── Offline listings: complete snapshots/derived fallback + outbox overlay ──
 
 test('list() online returns the server listing + entry shape', async ({ page }) => {
   await installStore(page)
