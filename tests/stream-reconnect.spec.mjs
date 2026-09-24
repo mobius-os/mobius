@@ -1355,6 +1355,12 @@ test.describe('Stream reconnection', () => {
     // over a running turn offers Stop. The draft was already asserted intact.
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
     await activeComposer.fill('')
-    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+    const __samples = []
+    for (let n = 0; n < 12; n += 1) {
+      __samples.push(await page.evaluate(() => { const s = document.querySelector('[data-chat-surface="painted"]'); const ta = s?.querySelector('textarea[aria-label="Message Möbius…"]'); const act = s?.querySelector('.chat__action'); return { v: ta?.value ?? null, act: act?.getAttribute('aria-label') || null, focused: document.activeElement === ta } }))
+      await page.waitForTimeout(150)
+    }
+    try { await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible() }
+    catch (err) { throw new Error('C10 ' + JSON.stringify(__samples) + ' :: ' + err.message) }
   })
 })

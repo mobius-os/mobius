@@ -294,13 +294,18 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
     timeout: 10000,
   })
-  await page.waitForFunction(ts => {
-    const rows = document.querySelectorAll(
-      '[data-chat-surface="painted"] .chat__msg--assistant',
-    )
-    const key = rows[rows.length - 1]?.dataset.key
-    return key && key !== `assistant-${ts}`
-  }, scenario.settledAssistant.ts)
+  try {
+    await page.waitForFunction(ts => {
+      const rows = document.querySelectorAll(
+        '[data-chat-surface="painted"] .chat__msg--assistant',
+      )
+      const key = rows[rows.length - 1]?.dataset.key
+      return key && key !== `assistant-${ts}`
+    }, scenario.settledAssistant.ts)
+  } catch (err) {
+    const rows = await page.evaluate(() => [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg')].slice(-6).map(r => ({ cls: r.className, key: r.dataset.key || null, text: (r.textContent || '').slice(0, 50) })))
+    throw new Error('STROWS ' + JSON.stringify({ settledTs: scenario.settledAssistant.ts, rows }) + ' :: ' + err.message)
+  }
 
   // Sample every painted frame across that source handoff. The newly sent row
   // must stay at its semantic pin rather than wait for a later resize repair.
