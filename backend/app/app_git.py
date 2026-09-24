@@ -1,8 +1,4 @@
-"""Shared Git source/history primitives for app and platform repositories.
-
-Each accepted app source has a Git repo: pristine `upstream` history plus a
-local working branch. Store packages always come from a real fetched origin;
-locally authored apps may have only their local repository.
+"""Per-app git repo: pristine `upstream` history + a local working branch.
 
 Each installed app gets its own git repo at `/data/apps/<slug>/.git` with
 two branches:
@@ -25,10 +21,13 @@ surfaces the conflicting paths and leaves the local edits intact for an
 agent to resolve later. One and many files share one tree path — the entry
 `index.jsx` is just one key in the tree.
 
-A resolved legacy conflict finalized through ``commit_local`` uses one
-upstream parent rather than creating a merge commit. New Store updates replay
-the original local commits in a separate candidate worktree and promote that
-exact history only after validation.
+A finalized update is a SINGLE-parent replay (linear): both the clean
+apply (`commit_replay`) and a resolved conflict (`commit_local` with
+MERGE_HEAD set) commit the applied tree with `upstream` as its sole
+parent, squashing the local delta into one replay commit on top of
+upstream. So `main` is a straight-line descendant of `upstream`
+(`A -> B -> X`) and `git merge-base --is-ancestor upstream main` is
+exact — never the 2-parent merge a `git merge` would leave.
 
 Only SOURCE is tracked — `index.jsx`, job scripts (`*.sh`), prompts,
 seed templates. The compiled bundle
@@ -39,10 +38,10 @@ runtime, not under this source dir at all. A committed `.gitignore`
 keeps both out even if a future caller drops them here.
 
 Why shell out to the container's `git` rather than pygit2: `git` 2.x is
-already in the image, and `merge-tree --write-tree` — the primitive that
-makes the no-clobber verdict possible — is a porcelain we get for free
-without a libgit2 binding to pin and maintain. Binary tree reads use Git's
-batch object protocol so a tree's blobs share one reader process.
+already in the image, the operations are coarse-grained (one subprocess
+per install/update, not a hot loop), and `merge-tree --write-tree` — the
+primitive that makes the no-clobber verdict possible — is a porcelain we
+get for free without a libgit2 binding to pin and maintain.
 
 CONCURRENCY: callers MUST hold `fs_locks.source_dir_lock(<source_dir>)`
 around every entry point here, so explicit apply cannot race the installer's
@@ -51,8 +50,8 @@ lock itself — the lock is keyed on the source dir, which only the caller
 knows, and nesting lock acquisition inside would hide the ordering the
 rest of install.py reasons about.
 
-App installation, explicit apply, and platform reconciliation all use these
-shared source-tree and history primitives under their owning source locks.
+install.py drives this module for every app that has a source directory; an
+app with no source_dir has no `.git`.
 """
 
 from __future__ import annotations
@@ -68,7 +67,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app import managed_paths
 
@@ -97,24 +96,6 @@ _MANAGED_RUNTIME_PATHS = managed_paths.MANAGED_RUNTIME_PATHS
 _EXCLUDE_BEGIN = "# BEGIN MOBIUS MANAGED IGNORE RULES"
 _EXCLUDE_END = "# END MOBIUS MANAGED IGNORE RULES"
 
-# Exact hashes of every Möbius-generated .gitignore shipped before managed
-# rules moved to .git/info/exclude. Exact matching keeps owner-authored files
-# out of the migration path even if they happen to mention the same patterns.
-_HISTORICAL_MANAGED_GITIGNORE_SHA256 = frozenset({
-  "b5b42b19950656d9adb7de10b5ec305f334c5994e6574efb356b97be7e2f32ab",
-  "9f45d75dfd4f4713f401bf21f8c7239cd8b73f47cf66676f2d2a282ee8fbe465",
-  "3de0200c1c0ec1a2af3580b6ec0e5112fe30b741d8739e0d323a4eb33a3e5808",
-  "f48294f806320d44794f1ed91c7576a9cbc73ef67d39b7066f14c25dddbddcd4",
-  "65dba515bd279befaa1ba736cfbed46978b480cca0f844d893474d383c4f7f2e",
-  "7e18ab2caa04b5e3a93f878d5c7b9949e019963a62b920a40938a74a767056ff",
-  "bae0ad8f370fd651f5dd16112429c5b07d21ea0196230be8fe9573e6864e1a70",
-  "8afebc02bb47044108bac8d2ba09c9aa8b316287a95894c1a4b81b2ef0bc9285",
-  "468c154cd3e48f3d0cefd96622b81a2e9b412c5f57520fbc11d97ccc3ac8c52b",
-  "9f2eea5b262b0f949f0da4eb9c8f9c689ef62669efe22eacb1c26c57a0028cd7",
-  "92e151357b2c152e50ee61cab5e527b245be50ba4ddf8f4d9b7916b7c2fceb08",
-  "9bd0fb0a85185d18f82ecd1f762327c8a3f3cae5356c6291af1842a3b3134100",
-})
-
 # A fixed identity so commits don't depend on the container's global git
 # config (which the mobius user may not have set). The installer commits
 # under the upstream identity; local commits keep the same identity since
@@ -126,11 +107,6 @@ _GIT_EMAIL = "mobius@localhost"
 # of scripts), so any git op that runs longer than this is wedged, not
 # slow.
 _GIT_TIMEOUT = 30
-
-# Keep the bytes returned by one cat-file process bounded. Materialization can
-# write each completed batch before requesting the next one; tree readers still
-# retain their required final dict, but never a second full-tree payload.
-_CAT_FILE_BATCH_MAX_BYTES = 8 * 1024 * 1024
 
 # Contribute records a reviewed change as a Git object in the repository that
 # owns the live source.  The pending ref proves the reviewed diff came from a
@@ -147,7 +123,6 @@ _DIFF_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _APP_MANIFEST_PUBLICATION_ADAPTER = "github_app_manifest_identity_v1"
 _APP_MANIFEST_PUBLICATION_PATH = "mobius.json"
 _APP_MANIFEST_PUBLICATION_FIELDS = ("author", "homepage")
-MIGRATION_BASELINE_REF = "refs/mobius/migration-baseline"
 
 
 @dataclass
@@ -525,11 +500,13 @@ def _ref_has_path(repo: Path, ref: str, rel: str) -> bool:
 
 
 def _looks_like_managed_gitignore(text: str) -> bool:
-  normalized = text if text.endswith("\n") else text + "\n"
-  if normalized == _GITIGNORE:
+  if text in (_GITIGNORE, _GITIGNORE + "\n"):
     return True
-  return hashlib.sha256(normalized.encode("utf-8")).hexdigest() in (
-    _HISTORICAL_MANAGED_GITIGNORE_SHA256
+  return (
+    "Generated build output and vendored deps are not hand-written source" in text
+    and "Manifest static_assets are install-managed" in text
+    and "init-cron.sh" in text
+    and "[0-9]*/" in text
   )
 
 
@@ -563,8 +540,7 @@ def _drop_stale_managed_gitignore_from_origin_repo(
     else (lambda *args, **kwargs: _run(repo, *args, **kwargs))
   )
   runner("rm", "--cached", "--ignore-unmatch", "--", ".gitignore", check=False)
-  if index_file is None:
-    gitignore.unlink(missing_ok=True)
+  gitignore.unlink(missing_ok=True)
 
 
 def _refresh_ignore_rules(
@@ -590,18 +566,8 @@ def _refresh_ignore_rules(
     )
   else:
     gitignore = repo / ".gitignore"
-    if os.path.lexists(gitignore) and (
-      gitignore.is_symlink() or not gitignore.is_file()
-    ):
-      raise SourceTreeChanged("App .gitignore must be a regular file.")
-    current = gitignore.read_text(encoding="utf-8") if gitignore.exists() else None
-    if current is not None and _looks_like_managed_gitignore(current):
-      if current != _GITIGNORE:
-        gitignore.write_text(_GITIGNORE, encoding="utf-8")
-    else:
-      exclude = repo / ".git" / "info" / "exclude"
-      exclude.parent.mkdir(parents=True, exist_ok=True)
-      _write_managed_exclude(exclude)
+    if not gitignore.exists() or gitignore.read_text(encoding="utf-8") != _GITIGNORE:
+      gitignore.write_text(_GITIGNORE, encoding="utf-8")
   if index_file is None:
     _run(
       repo, "rm", "-r", "--cached", "--ignore-unmatch", "--",
@@ -660,19 +626,6 @@ def ref_is_ancestor(
   if proc.returncode == 1:
     return False
   return None
-
-
-def merge_base(
-  source_dir: str | Path, left: str, right: str,
-) -> str | None:
-  """Return Git's last shared ancestor for two refs, or ``None``."""
-  proc = _run(
-    Path(source_dir), "merge-base", left, right, check=False,
-  )
-  if proc.returncode != 0:
-    return None
-  value = proc.stdout.strip()
-  return value or None
 
 
 def ref_exists(source_dir: str | Path, ref: str) -> bool:
@@ -2219,8 +2172,8 @@ def carry_equivalent_change_sources(
 ) -> int:
   """Carry local witnesses across the app model's intentional replay rewrite.
 
-  Resolved-conflict finalization can preserve the accepted source tree while
-  replacing its ancestry with the new upstream tip. Any pending
+  ``commit_replay`` and resolved-conflict finalization preserve the accepted
+  source tree but replace its ancestry with the new upstream tip. Any pending
   or not-yet-integrated landed contribution whose source witness was reachable
   from the old local tip therefore needs the new replay commit as its witness
   only if the exact reviewed delta is still present there. This rejects the
@@ -2473,16 +2426,11 @@ def replace_upstream_ref(
 
 
 def origin_url(source_dir: str | Path) -> str | None:
-  """Return this app repo's configured ``origin`` identity, if available.
-
-  Read the literal configuration rather than Git's expanded transport URL.
-  User-level ``url.*.insteadOf`` rules may change how Git reaches a repository,
-  but must not change which repository Möbius believes it is reviewing.
-  """
+  """Return this app repo's configured ``origin`` URL, if available."""
   if not is_repo(source_dir):
     return None
   proc = _run(
-    Path(source_dir), "config", "--get", "remote.origin.url", check=False,
+    Path(source_dir), "remote", "get-url", "origin", check=False,
   )
   value = proc.stdout.strip()
   return value if proc.returncode == 0 and value else None
@@ -2497,7 +2445,12 @@ def set_origin_url(source_dir: str | Path, url: str) -> None:
 
 
 def has_origin(source_dir: str | Path) -> bool:
-  """Whether this app repo has a configured ``origin`` remote."""
+  """Whether this app repo has a real `origin` remote.
+
+  A cloned catalog app has `origin`; a synthetic-upstream app created via
+  `record_upstream` does not. Treat any git failure as false so callers can
+  fall back to the synthetic path unchanged.
+  """
   return origin_url(source_dir) is not None
 
 
@@ -2515,16 +2468,16 @@ def clone_upstream(
   is a real catalog commit an update can fetch from and a local fix can be
   pushed against as a PR. Local edits then commit onto ``main``.
 
-  `source_dir` may already exist only as an empty directory. The clone is built
-  in a sibling temp directory and the complete directory is renamed into place
-  once. Publishing child-by-child would let a concurrently created owner file
-  be overwritten between an emptiness check and its matching move.
+  `source_dir` may already exist as an empty directory. The clone is built in a
+  sibling temp directory first and moved into place after success, so a failed
+  clone leaves the caller free to fall back to the synthetic `record_upstream`
+  path without a half-created `.git`.
 
   Returns:
     The checked-out HEAD sha.
   """
   repo = Path(source_dir)
-  if os.path.lexists(repo) and not repo.is_dir():
+  if repo.exists() and not repo.is_dir():
     raise RuntimeError(f"source_dir exists and is not a directory: {repo}")
   repo.parent.mkdir(parents=True, exist_ok=True)
   clone_parent = repo.parent
@@ -2573,12 +2526,8 @@ def clone_upstream(
         cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
         check=True, env=_git_env(repo),
       )
-      # ``--branch`` accepts both branches and tags. A tag checkout has no
-      # ``origin/<ref>`` remote-tracking branch, so the verified checked-out
-      # commit is the one common identity for both shapes.
-      remote_ref = _run(
-        clone_dir, "rev-parse", "--verify", "HEAD^{commit}",
-      ).stdout.strip()
+      remote_ref = f"origin/{ref}"
+      _run(clone_dir, "rev-parse", "--verify", remote_ref)
     # Keep later checkouts under the same safety policy as clone's first
     # checkout instead of relying on a process-local ``git -c`` forever. On
     # the immutable path this is set BEFORE its first checkout.
@@ -2594,18 +2543,12 @@ def clone_upstream(
     # on-disk .gitignore — never self-heals (the card-099 orphan-cron class).
     _refresh_ignore_rules(clone_dir)
     sha = _run(clone_dir, "rev-parse", "HEAD").stdout.strip()
-    if repo.exists():
-      try:
-        repo.rmdir()
-      except OSError as exc:
-        raise RuntimeError(f"source_dir is not empty: {repo}") from exc
-    try:
-      os.replace(clone_dir, repo)
-    except OSError as exc:
-      # A concurrent creator owns whatever appeared at the destination. The
-      # private clone remains under the temporary directory and is discarded;
-      # never merge its children into that owner path.
-      raise RuntimeError(f"source_dir changed while cloning: {repo}") from exc
+    repo.mkdir(parents=True, exist_ok=True)
+    existing = list(repo.iterdir())
+    if existing:
+      raise RuntimeError(f"source_dir is not empty: {repo}")
+    for child in clone_dir.iterdir():
+      shutil.move(str(child), str(repo / child.name))
     return sha
 
 
@@ -2614,13 +2557,13 @@ def fetch_upstream(
   ref: str,
   *,
   trusted_origin_adoption: bool = False,
+  verify: Callable[[str], None] | None = None,
 ) -> FetchUpstreamResult:
-  """Fetch ``ref`` from origin and advance ``upstream`` to its exact commit.
+  """Fetch `origin/<ref>` and advance local `upstream` to that real commit.
 
   This is the cloned-app update analogue of `record_upstream`: the catalog's
-  complete Git tree is fetched from the real remote, then the installer-owned
-  ``upstream`` branch is moved to the commit named by ``FETCH_HEAD``. This
-  works uniformly for branches, tags, and immutable commit ids.
+  complete git tree is fetched from the real remote, then the installer-owned
+  `upstream` branch is moved to the fetched remote-tracking commit.
   Depth-1 fetches can leave the previous upstream behind a shallow boundary;
   when that happens, unshallow so Git can prove ancestry and the existing merge
   path can compute a real merge base.
@@ -2637,20 +2580,42 @@ def fetch_upstream(
     The fetched commit and any trusted equal-tree adoption proof.
   """
   repo = Path(source_dir)
+  _run(repo, "fetch", "--depth", "1", "origin", ref)
+  # A branch/tag fetch updates ``origin/<ref>``.  Fetching an immutable commit
+  # oid does not create that remote-tracking name; Git records the exact fetched
+  # commit only in FETCH_HEAD.  Store updates are commonly review-bound to a
+  # commit-pinned raw URL, so resolve that shape through FETCH_HEAD rather than
+  # falling back to a synthetic upstream with unrelated history.
+  remote_ref = (
+    "FETCH_HEAD"
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", ref)
+    else f"origin/{ref}"
+  )
+  sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
+  if verify is not None:
+    verify(sha)
+  return promote_upstream(
+    repo,
+    sha,
+    trusted_origin_adoption=trusted_origin_adoption,
+  )
+
+
+def promote_upstream(
+  source_dir: str | Path,
+  commit: str,
+  *,
+  trusted_origin_adoption: bool = False,
+) -> FetchUpstreamResult:
+  """Advance managed upstream to one already-fetched immutable commit."""
+  repo = Path(source_dir)
+  fetched_ref = _resolve_commit(repo, str(commit).lower())
+  if fetched_ref is None or fetched_ref != str(commit).lower():
+    raise RuntimeError("reviewed upstream commit is unavailable")
   previous = _run(
     repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
   )
   previous_sha = previous.stdout.strip() if previous.returncode == 0 else ""
-  _run(repo, "fetch", "--depth", "1", "origin", ref)
-  # FETCH_HEAD is the exact object Git resolved for a branch, tag, or immutable
-  # commit request. Remote-tracking refs do not exist for tags or pinned oids.
-  sha = _run(
-    repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}",
-  ).stdout.strip()
-  # FETCH_HEAD is transient: the shallow-history repair below may itself fetch
-  # and replace it.  Resolve once, then use the immutable object id for every
-  # later comparison and ref move in this operation.
-  fetched_ref = sha
   # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
   # relationship the installer actually needs (local main ↔ fetched tip), not
   # only on whether the remote SHA string changed.
@@ -2659,21 +2624,21 @@ def fetch_upstream(
     trusted_origin_adoption
     and ref_trees_equal(repo, LOCAL_BRANCH, fetched_ref)
   )
-  if previous_sha and previous_sha != sha:
+  if previous_sha and previous_sha != fetched_ref:
     related = _run(
-      repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
+      repo, "merge-base", "--is-ancestor", previous_sha, fetched_ref,
+      check=False,
     )
     if (
       related.returncode != 0
       and not equal_local_adoption
     ):
       raise RuntimeError(
-        f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
-        "refusing to replace its Git history"
+        f"reviewed commit is unrelated to recorded upstream {previous_sha}"
       )
   _run(repo, "branch", "-f", UPSTREAM_BRANCH, fetched_ref)
   return FetchUpstreamResult(
-    sha=sha,
+    sha=fetched_ref,
     allow_unrelated_histories=equal_local_adoption,
   )
 
@@ -2681,11 +2646,9 @@ def fetch_upstream(
 def ensure_repo(source_dir: str | Path) -> None:
   """Initializes the per-app repo if absent; a no-op once it exists.
 
-  Creates the repo and makes an empty root commit on `upstream`. A pre-existing
-  owner `.gitignore` is preserved; Möbius runtime exclusions are layered in
-  `.git/info/exclude`. New empty app directories receive the canonical managed
-  `.gitignore`. `main` is branched from that same root and checked out as the
-  working branch.
+  Creates the repo, writes the `.gitignore`, and makes an empty root
+  commit on `upstream`. `main` is branched from that same root and
+  checked out as the working branch.
 
   The empty root is deliberate: a meaningful merge needs `main` to
   descend from the SAME `upstream` commit that recorded the version it
@@ -2696,57 +2659,14 @@ def ensure_repo(source_dir: str | Path) -> None:
   re-running on an existing repo does nothing.
   """
   repo = Path(source_dir)
-  repo.mkdir(parents=True, exist_ok=True)
-  gitignore = repo / ".gitignore"
-  if os.path.lexists(gitignore) and (
-    gitignore.is_symlink() or not gitignore.is_file()
-  ):
-    raise SourceTreeChanged("App .gitignore must be a regular file.")
-  owner_gitignore = gitignore.exists()
-  if not is_repo(repo):
-    _run(repo, "init", "-q", "-b", UPSTREAM_BRANCH)
-
-  upstream_exists = ref_exists(repo, UPSTREAM_BRANCH)
-  main_exists = ref_exists(repo, LOCAL_BRANCH)
-  head = _run(
-    repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False,
-  ).stdout.strip()
-  if upstream_exists and main_exists:
-    if head == LOCAL_BRANCH:
-      return
-    if (
-      head == UPSTREAM_BRANCH
-      and head_sha(repo, UPSTREAM_BRANCH) == head_sha(repo, LOCAL_BRANCH)
-    ):
-      _run(repo, "checkout", "-q", LOCAL_BRANCH)
-      return
-    raise SourceTreeChanged("App source must be checked out on 'main'.")
-  if head not in {UPSTREAM_BRANCH, LOCAL_BRANCH}:
-    raise SourceTreeChanged("App Git repository is incomplete.")
-  if main_exists and not upstream_exists:
-    if head != LOCAL_BRANCH:
-      raise SourceTreeChanged("App source must be checked out on 'main'.")
-    _run(repo, "branch", UPSTREAM_BRANCH, LOCAL_BRANCH)
+  if is_repo(repo):
     return
-
-  # Resume either supported interrupted bootstrap shape. No source bytes are
-  # rewritten: an unborn main is redirected to the shared upstream seed, while
-  # an already-created seed only needs its missing branch/check-out step.
-  if not upstream_exists:
-    if head != UPSTREAM_BRANCH:
-      _run(repo, "symbolic-ref", "HEAD", f"refs/heads/{UPSTREAM_BRANCH}")
-    if owner_gitignore:
-      _write_managed_exclude(repo / ".git" / "info" / "exclude")
-      _run(repo, "add", "-f", "--", ".gitignore")
-    else:
-      gitignore.write_text(_GITIGNORE, encoding="utf-8")
-      _run(repo, "add", "--", ".gitignore")
-    _run(
-      repo, "commit", "-q", "-m", "Initialize app repo", "--allow-empty",
-    )
-    upstream_exists = True
-  if not main_exists:
-    _run(repo, "branch", LOCAL_BRANCH, UPSTREAM_BRANCH)
+  repo.mkdir(parents=True, exist_ok=True)
+  _run(repo, "init", "-q", "-b", UPSTREAM_BRANCH)
+  (repo / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+  _run(repo, "add", ".gitignore")
+  _run(repo, "commit", "-q", "-m", "Initialize app repo", "--allow-empty")
+  _run(repo, "branch", LOCAL_BRANCH, UPSTREAM_BRANCH)
   _run(repo, "checkout", "-q", LOCAL_BRANCH)
 
 
@@ -2765,124 +2685,10 @@ def snapshot_worktree(source_dir: str | Path) -> WorktreeTree:
   with tempfile.TemporaryDirectory(prefix="mobius-app-index-") as tmp:
     index_file = Path(tmp) / "index"
     _run_with_index(repo, index_file, "read-tree", parent)
-    # First create any generated rules that belong to a legacy repo.
     _refresh_ignore_rules(repo, index_file=index_file)
     _run_with_index(repo, index_file, "add", *_tracked_source(repo))
-    # Normalize again after staging. In a real-origin repo, a generated legacy
-    # .gitignore remains on disk while a temporary index is in use; the add
-    # above can reintroduce it even though commit_local removes it.
-    _refresh_ignore_rules(repo, index_file=index_file)
     tree = _run_with_index(repo, index_file, "write-tree").stdout.strip()
   return WorktreeTree(tree_oid=tree, parent_sha=parent)
-
-
-def normalize_source_tree(
-  files: dict[str, bytes],
-  *,
-  executable_paths: frozenset[str] = frozenset(),
-) -> dict[str, bytes]:
-  """Apply the canonical source/managed-runtime boundary to detached bytes.
-
-  Store candidates come from real Git commits or merge trees. Running both
-  through the same temporary-index rules prevents tracked
-  runtime residue (settings, runs, logs, caches, secrets) from becoming
-  accepted source merely because an upstream repository committed it.
-  """
-  with tempfile.TemporaryDirectory(prefix="mobius-app-normalize-") as tmp:
-    root = Path(tmp)
-    ensure_repo(root)
-    # This projection represents a real-origin package, not a synthetic local
-    # app. Give it origin semantics so a repository-owned .gitignore remains
-    # exact while Möbius rules stay private in .git/info/exclude. Remove the
-    # synthetic seed ignore file when the package itself does not track one.
-    _run(root, "remote", "add", "origin", "https://invalid.local/source.git")
-    if ".gitignore" not in files:
-      (root / ".gitignore").unlink(missing_ok=True)
-      _run(root, "rm", "--cached", "--ignore-unmatch", "--", ".gitignore")
-    for rel, content in files.items():
-      pure = PurePosixPath(rel)
-      if (
-        pure.is_absolute()
-        or not pure.parts
-        or any(part in ("", ".", "..") for part in pure.parts)
-        or pure.parts[0] == ".git"
-      ):
-        raise RuntimeError(f"Unsafe app source path: {rel!r}")
-      target = root.joinpath(*pure.parts)
-      target.parent.mkdir(parents=True, exist_ok=True)
-      target.write_bytes(content)
-      if rel in executable_paths:
-        target.chmod(0o755)
-    # Candidate dictionaries represent an already tracked package tree. Seed
-    # that tree first so ignore-only paths retain Git's tracked-file behavior;
-    # snapshot_worktree then removes the canonical managed-runtime pathspecs.
-    _run(root, "add", "-f", "-A", ".")
-    _run(
-      root, "commit", "-q", "-m", "Normalize candidate source",
-      "--allow-empty",
-    )
-    snapshot = snapshot_worktree(root)
-    return read_ref_tree(root, snapshot.tree_oid)
-
-
-def commit_source_projection(
-  source_dir: str | Path,
-  *,
-  parent: str,
-  files: dict[str, bytes],
-  executable_paths: frozenset[str] = frozenset(),
-) -> str:
-  """Return a commit whose tree is exactly one accepted source projection.
-
-  Store updates are compiled from ``normalize_source_tree`` output. The same
-  bytes must become the accepted Git revision and frozen runtime; otherwise a
-  raw upstream/replay commit can reintroduce tracked runtime residue after a
-  clean compile. If the parent already has this exact tree, preserve its
-  identity. Otherwise append one platform-owned commit while retaining every
-  upstream and local parent commit below it.
-  """
-  repo = Path(source_dir)
-  parent_sha = _resolve_commit(repo, parent)
-  if parent_sha is None:
-    raise SourceTreeChanged("Accepted app source history is unavailable.")
-  with tempfile.TemporaryDirectory(prefix="mobius-app-projection-") as tmp:
-    index_file = Path(tmp) / "index"
-    _run_with_index(repo, index_file, "read-tree", "--empty")
-    for rel, content in sorted(files.items()):
-      pure = PurePosixPath(rel)
-      if (
-        pure.is_absolute()
-        or not pure.parts
-        or any(part in ("", ".", "..") for part in pure.parts)
-        or pure.parts[0] == ".git"
-      ):
-        raise RuntimeError(f"Unsafe app source path: {rel!r}")
-      blob = subprocess.run(
-        ["git", "-C", str(repo), "hash-object", "-w", "--stdin", "--path", rel],
-        input=content,
-        capture_output=True,
-        timeout=_GIT_TIMEOUT,
-        check=True,
-        env=_git_env(repo),
-      ).stdout.decode("ascii").strip()
-      mode = "100755" if rel in executable_paths else "100644"
-      _run_with_index(
-        repo, index_file, "update-index", "--add", "--cacheinfo",
-        f"{mode},{blob},{rel}",
-      )
-    tree = _run_with_index(repo, index_file, "write-tree").stdout.strip()
-  parent_tree = _run(
-    repo, "rev-parse", f"{parent_sha}^{{tree}}",
-  ).stdout.strip()
-  if tree == parent_tree:
-    return parent_sha
-  return _run(
-    repo, "commit-tree", tree, "-p", parent_sha,
-    "-m", (
-      "Normalize accepted app source\n\n"
-      "Mobius-Source-Projection: true\n"
-    ),
-  ).stdout.strip()
 
 
 def commit_worktree_tree(
@@ -3059,7 +2865,7 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   and this returns False (no unmerged entries, `--check` not run).
   """
   repo = Path(source_dir)
-  if not update_operation_in_progress(repo):
+  if not (repo / ".git" / "MERGE_HEAD").exists():
     return False
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
@@ -3079,25 +2885,10 @@ def merge_in_progress(source_dir: str | Path) -> bool:
   return path.is_file()
 
 
-def rebase_in_progress(source_dir: str | Path) -> bool:
-  """Whether Git records an in-progress rebase for this repository."""
-  repo = Path(source_dir)
-  if not is_repo(repo):
-    return False
-  git_dir = Path(_run(
-    repo, "rev-parse", "--absolute-git-dir", read_only=True,
-  ).stdout.strip())
-  return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
-
-
-def update_operation_in_progress(source_dir: str | Path) -> bool:
-  return merge_in_progress(source_dir) or rebase_in_progress(source_dir)
-
-
 def has_conflict_markers(source_dir: str | Path) -> bool:
-  """Whether an in-progress update operation still has text markers."""
+  """Whether an in-progress merge's working tree still has text markers."""
   repo = Path(source_dir)
-  if not update_operation_in_progress(repo):
+  if not (repo / ".git" / "MERGE_HEAD").exists():
     return False
   # Scan tracked content for the labeled conflict boundaries. `git grep`
   # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
@@ -3116,7 +2907,7 @@ def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
   markers, so an unmerged binary path is never auto-accepted.
   """
   repo = Path(source_dir)
-  if not update_operation_in_progress(repo):
+  if not (repo / ".git" / "MERGE_HEAD").exists():
     return False
   listing = _run(repo, "ls-files", "-u", "-z").stdout
   paths = {
@@ -3142,62 +2933,6 @@ def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
   return False
 
 
-def migration_baseline(source_dir: str | Path) -> str | None:
-  """Return the finite pre-Git migration base, when one is still active."""
-  repo = Path(source_dir)
-  result = _run(
-    repo, "rev-parse", "--verify", MIGRATION_BASELINE_REF,
-    check=False, read_only=True,
-  )
-  if result.returncode == 0:
-    return result.stdout.strip()
-  # Pre-release builds may have run migration 0064 before its explicit ref was
-  # added. Its exact root identity is a stable one-time compatibility witness;
-  # ordinary app commits do not use this author/message combination.
-  candidate = _run(
-    repo, "rev-parse", "--verify", UPSTREAM_BRANCH,
-    check=False, read_only=True,
-  )
-  if candidate.returncode != 0:
-    return None
-  sha = candidate.stdout.strip()
-  root = _run(
-    repo, "rev-list", "--max-parents=0", sha,
-    check=False, read_only=True,
-  )
-  identity = _run(
-    repo, "show", "-s", "--format=%an%n%ae%n%s", sha,
-    check=False, read_only=True,
-  )
-  tree = _run(
-    repo, "rev-parse", f"{sha}^{{tree}}",
-    check=False, read_only=True,
-  )
-  if (
-    root.returncode == 0
-    and root.stdout.strip() == sha
-    and identity.returncode == 0
-    and tree.returncode == 0
-    and tree.stdout.strip() == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    and identity.stdout.splitlines() == [
-      "Mobius", "mobius@localhost", "Capture existing app source",
-    ]
-  ):
-    return sha
-  return None
-
-
-def retire_migration_baseline(
-  source_dir: str | Path, *, expected: str | None = None,
-) -> None:
-  """Retire the finite bridge after a real upstream history is accepted."""
-  repo = Path(source_dir)
-  current = migration_baseline(repo)
-  if current is None or (expected is not None and current != expected):
-    return
-  _run(repo, "update-ref", "-d", MIGRATION_BASELINE_REF, current)
-
-
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
   """Commits the current working-tree source onto `main`.
 
@@ -3219,7 +2954,8 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   markers), this finalizes it as a SINGLE-parent replay commit parented on
   the upstream tip read from `.git/MERGE_HEAD`, so the upstream tip becomes
   a direct parent of `main` and the merge base advances for free while
-  history stays linear. The pre-merge local `main` tip becomes unreachable
+  history stays linear — the same `A -> B -> X` shape `commit_replay` makes
+  for a clean apply. The pre-merge local `main` tip becomes unreachable
   (its content lives on in the replay's tree); the squash is intentional.
   An ordinary local edit (no MERGE_HEAD) still commits as a plain
   single-parent commit on the old `main` tip.
@@ -3260,10 +2996,6 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   # never `git add`ed would still show as an unmerged index entry and we'd
   # wrongly refuse to finalize a clean resolution.
   _run(repo, "add", *_tracked_source(repo))
-  # Owner .gitignore negations outrank .git/info/exclude. Reapply the managed
-  # untrack set after staging so a rule like !settings.json cannot turn
-  # runtime/private state into accepted source.
-  _refresh_ignore_rules(repo)
   if merge_head_path.exists():
     if has_unresolved_conflicts(repo):
       return None
@@ -3271,7 +3003,7 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
     # tip so the line stays linear. A plain `git commit` here would parent on
     # BOTH the old main tip and MERGE_HEAD (git makes a merge commit whenever
     # MERGE_HEAD is set), fanning history into a 2-parent merge; we want the
-    # squashed `A -> B -> X` shape instead.
+    # squashed `A -> B -> X` shape instead, identical to commit_replay.
     merge_head = merge_head_path.read_text(encoding="utf-8").strip()
     old_local = head_sha(repo, LOCAL_BRANCH)
     tree = _run(repo, "write-tree").stdout.strip()
@@ -3297,6 +3029,58 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
 
 
+def commit_replay(
+  source_dir: str | Path, upstream_tip: str, msg: str,
+) -> str | None:
+  """Records the working-tree source onto `main` as a single-parent replay.
+
+  Commits the current working tree (the just-applied merge result) with a
+  SINGLE parent: `upstream_tip` (the upstream commit whose changes were
+  folded in). The local delta is squashed into this one replay commit on
+  top of upstream, so history stays linear (`A -> B -> X`): `main` is a
+  straight-line descendant of `upstream`, after which `upstream_tip` is a
+  direct parent of `main` and `git merge-base --is-ancestor upstream main`
+  is exact. That ancestry is what advances the base — the NEXT update's
+  three-way merge diffs only the genuinely-new upstream delta against local
+  edits instead of re-litigating already-merged history against a stale base
+  (the bug that turned every repeated update into a spurious conflict).
+
+  The previous local `main` tip becomes unreachable after the replay, which
+  is intentional: its content lives on in the replay commit's tree, and the
+  squash is what keeps the line linear rather than fanning into a merge.
+
+  A plain `commit_local` cannot do this: it parents on the old `main` tip,
+  which leaves `upstream` unreachable from `main`, so `git merge-base` keeps
+  returning the original install point. Returns the new commit sha, or None
+  when there is nothing to record (working tree already matches `main` and
+  `upstream_tip` is already an ancestor — e.g. a re-install of the same
+  version with no local edits).
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  old_local = head_sha(repo, LOCAL_BRANCH)
+  _refresh_ignore_rules(repo)
+  _run(repo, "add", *_tracked_source(repo))
+  tree = _run(repo, "write-tree").stdout.strip()
+  main_tree = _run(repo, "rev-parse", f"{LOCAL_BRANCH}^{{tree}}").stdout.strip()
+  already_merged = _run(
+    repo, "merge-base", "--is-ancestor", upstream_tip, LOCAL_BRANCH,
+    check=False,
+  ).returncode == 0
+  if tree == main_tree and already_merged:
+    return None
+  sha = _run(
+    repo, "commit-tree", tree, "-p", upstream_tip, "-m", msg,
+  ).stdout.strip()
+  _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
+  try:
+    carry_equivalent_change_sources(repo, old_local, sha)
+  except Exception:
+    log.warning("could not carry contribution provenance across replay",
+                exc_info=True)
+  return sha
+
+
 # ── Linear overlay ───────────────────────────────────────────────────────────
 #
 # A project's local history is an exact accepted upstream commit plus a LINEAR
@@ -3310,7 +3094,6 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
 OVERLAY_UNIT_TRAILER = "Mobius-Overlay-Unit"
 OVERLAY_DISPOSITION_TRAILER = "Mobius-Disposition"
 OVERLAY_RECORD_TRAILER = "Mobius-Record"
-SOURCE_PROJECTION_TRAILER = "Mobius-Source-Projection"
 # ``pending``: has a Contribute record on its way upstream. ``local-only``: an
 # intentional overlay this installation keeps. ``private``: never leaves the
 # instance. ``wip``: not yet organised.
@@ -3326,8 +3109,7 @@ _OVERLAY_LOG_FORMAT = (
   "%H%x00%s%x00"
   f"%(trailers:key={OVERLAY_UNIT_TRAILER},valueonly=true)%x00"
   f"%(trailers:key={OVERLAY_DISPOSITION_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={OVERLAY_RECORD_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={SOURCE_PROJECTION_TRAILER},valueonly=true)%x1e"
+  f"%(trailers:key={OVERLAY_RECORD_TRAILER},valueonly=true)%x1e"
 )
 _CONFLICT_BOUNDARY_RE = r"^(<<<<<<< |>>>>>>> )"
 
@@ -3423,13 +3205,7 @@ def _overlay_log(repo: Path, *rev_args: str) -> list[OverlayCommit]:
     if not record.strip():
       continue
     fields = record.strip("\n").split("\x00")
-    fields.extend([""] * (6 - len(fields)))
-    if _first_line(fields[5]).lower() == "true":
-      # This platform-owned commit only removes managed runtime paths from the
-      # accepted tree. Replaying it as owner intent on the next Store update
-      # would manufacture delete conflicts; the new candidate receives its
-      # own projection after the real owner commits have replayed.
-      continue
+    fields.extend([""] * (5 - len(fields)))
     unit = _first_line(fields[2])
     disposition = _first_line(fields[3])
     record_id = _first_line(fields[4])
@@ -3788,59 +3564,6 @@ def replay_overlay(
   return _replay_into(repo, path, list(commits), set(skip), [], [])
 
 
-def activate_overlay_candidate(
-  source_dir: str | Path,
-  *,
-  candidate: str,
-  expected_local: str,
-  worktree: str | Path | None = None,
-) -> str:
-  """Promote a clean overlay candidate without replacing working bytes.
-
-  ``replay_overlay`` deliberately never moves the served branch. Once the
-  candidate has been compiled and accepted by the installer, this is the one
-  promotion point: ``main`` must still equal ``expected_local``. The installer
-  has already published the candidate files with conditional rollback guards,
-  so this function moves the ref and refreshes only the index. It deliberately
-  never runs ``reset --hard``: a later owner edit must survive both promotion
-  and rollback. Every replayed local commit remains in history.
-  """
-  repo = Path(source_dir)
-  _require_local_branch(repo)
-  candidate_sha = _resolve_commit(repo, candidate)
-  expected_sha = _resolve_commit(repo, expected_local)
-  if candidate_sha is None or expected_sha is None:
-    raise SourceTreeChanged("Overlay candidate history is unavailable.")
-  moved = _run(
-    repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", candidate_sha,
-    expected_sha, check=False,
-  )
-  if moved.returncode != 0:
-    raise SourceTreeChanged(
-      "App source history changed while promoting the update candidate."
-    )
-  try:
-    _run(repo, "read-tree", candidate_sha)
-    carry_equivalent_change_sources(repo, expected_sha, candidate_sha)
-  except Exception:
-    _run(
-      repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", expected_sha,
-      candidate_sha, check=False,
-    )
-    _run(repo, "read-tree", expected_sha, check=False)
-    try:
-      carry_equivalent_change_sources(repo, candidate_sha, expected_sha)
-    except Exception:
-      log.warning(
-        "could not restore contribution provenance after replay rollback",
-        exc_info=True,
-      )
-    raise
-  if worktree is not None:
-    remove_overlay_worktree(repo, worktree)
-  return candidate_sha
-
-
 def replay_more(
   source_dir: str | Path,
   *,
@@ -3949,15 +3672,6 @@ def _restore_shallow_history_if_needed(
     raise RuntimeError(f"failed to restore app git history: {detail}")
 
 
-def restore_shallow_history_if_needed(
-  source_dir: str | Path,
-  left: str = LOCAL_BRANCH,
-  right: str = UPSTREAM_BRANCH,
-) -> None:
-  """Public update-check seam for restoring a hidden Git merge base."""
-  _restore_shallow_history_if_needed(source_dir, left, right)
-
-
 def merge_upstream(
   source_dir: str | Path,
   *,
@@ -4025,125 +3739,6 @@ def merge_upstream(
   return equivalent or ordinary
 
 
-def _cat_file_batch(
-  repo: Path, object_oids: Iterable[str],
-) -> dict[str, bytes]:
-  """Read blob objects through one binary ``git cat-file --batch`` process.
-
-  The batch protocol keeps object payloads length-delimited, so bytes are
-  returned without decoding or line-ending conversion.  Requests are
-  de-duplicated because a tree may reference the same blob more than once.
-  Missing objects and non-blob objects are integrity failures, not empty
-  files; callers must never materialize an incomplete tree.
-  """
-  oids = list(dict.fromkeys(object_oids))
-  if not oids:
-    return {}
-  proc = subprocess.Popen(
-    ["git", "-C", str(repo), "cat-file", "--batch"],
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    env=_git_env(repo),
-  )
-  request = b"".join(oid.encode("ascii") + b"\n" for oid in oids)
-  try:
-    stdout, stderr = proc.communicate(request, timeout=_GIT_TIMEOUT)
-  except subprocess.TimeoutExpired:
-    proc.kill()
-    proc.communicate()
-    raise
-  if proc.returncode:
-    raise subprocess.CalledProcessError(
-      proc.returncode,
-      proc.args,
-      output=stdout,
-      stderr=stderr,
-    )
-
-  blobs: dict[str, bytes] = {}
-  cursor = 0
-  for requested_oid in oids:
-    line_end = stdout.find(b"\n", cursor)
-    if line_end < 0:
-      raise RuntimeError("Invalid Git cat-file batch response.")
-    header = stdout[cursor:line_end].split(b" ")
-    cursor = line_end + 1
-    if len(header) == 2 and header[1] == b"missing":
-      raise RuntimeError(f"Missing Git object: {requested_oid}")
-    if len(header) != 3:
-      raise RuntimeError("Invalid Git cat-file batch response.")
-    returned_oid, object_type, raw_size = header
-    try:
-      size = int(raw_size)
-    except ValueError as exc:
-      raise RuntimeError("Invalid Git cat-file batch response.") from exc
-    if returned_oid.decode("ascii", errors="replace") != requested_oid:
-      raise RuntimeError("Git cat-file returned an unexpected object.")
-    if object_type != b"blob":
-      raise RuntimeError(
-        f"Unsupported Git object {requested_oid!r} ({object_type.decode('ascii', errors='replace')})."
-      )
-    end = cursor + size
-    if size < 0 or end >= len(stdout) or stdout[end:end + 1] != b"\n":
-      raise RuntimeError("Invalid Git cat-file batch response.")
-    blobs[requested_oid] = stdout[cursor:end]
-    cursor = end + 1
-  if cursor != len(stdout):
-    raise RuntimeError("Unexpected trailing Git cat-file batch output.")
-  return blobs
-
-
-def _tree_entries(
-  repo: Path, tree_oid: str,
-) -> list[tuple[str, str, str, str, int | None]]:
-  """Return ``(mode, type, object oid, path, size)`` tree entries."""
-  listing = subprocess.run(
-    ["git", "-C", str(repo), "ls-tree", "-r", "-l", "-z", tree_oid],
-    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
-  ).stdout
-  entries: list[tuple[str, str, str, str, int | None]] = []
-  for raw_entry in listing.split(b"\0"):
-    if not raw_entry:
-      continue
-    raw_meta, separator, raw_path = raw_entry.partition(b"\t")
-    if not separator:
-      raise RuntimeError("Invalid Git tree entry.")
-    try:
-      mode, object_type, object_oid, raw_size = (
-        raw_meta.decode("ascii").split(" ", 3)
-      )
-      rel = raw_path.decode("utf-8")
-      size = None if raw_size == "-" else int(raw_size)
-    except (UnicodeDecodeError, ValueError) as exc:
-      raise RuntimeError("Invalid Git tree entry.") from exc
-    entries.append((mode, object_type, object_oid, rel, size))
-  return entries
-
-
-def _tree_entry_batches(
-  entries: Iterable[tuple[str, str, str, str, int | None]],
-) -> Iterable[list[tuple[str, str, str, str, int | None]]]:
-  """Group tree entries without exceeding the bounded blob payload budget."""
-  batch: list[tuple[str, str, str, str, int | None]] = []
-  total = 0
-  for entry in entries:
-    size = entry[4]
-    if batch and size is not None and total + size > _CAT_FILE_BATCH_MAX_BYTES:
-      yield batch
-      batch = []
-      total = 0
-    batch.append(entry)
-    if size is not None:
-      total += size
-    if size is not None and size > _CAT_FILE_BATCH_MAX_BYTES:
-      yield batch
-      batch = []
-      total = 0
-  if batch:
-    yield batch
-
-
 def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
   """Read EVERY file of a merged tree oid into {repo_relative_path: bytes}.
 
@@ -4155,16 +3750,20 @@ def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
   newlines survive.
   """
   repo = Path(source_dir)
-  entries = _tree_entries(repo, tree_oid)
-  for mode, object_type, _, rel, _ in entries:
-    if object_type != "blob":
-      raise RuntimeError(
-        f"Unsupported Git tree entry {rel!r} ({mode} {object_type})."
-      )
+  listing = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", tree_oid],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  )
   files: dict[str, bytes] = {}
-  for batch in _tree_entry_batches(entries):
-    blobs = _cat_file_batch(repo, (entry[2] for entry in batch))
-    files.update({entry[3]: blobs[entry[2]] for entry in batch})
+  for rel in listing.stdout.decode().split("\0"):
+    if not rel:
+      continue
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:{rel}"],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
+    )
+    if blob.returncode == 0:
+      files[rel] = blob.stdout
   return files
 
 
@@ -4194,8 +3793,21 @@ def materialize_tree(
   repo = Path(source_dir)
   target = Path(target_dir)
   target.mkdir(parents=True, exist_ok=True)
-  entries = _tree_entries(repo, tree_oid)
-  for mode, object_type, object_oid, rel, _ in entries:
+  listing = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", tree_oid],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  ).stdout
+  for raw_entry in listing.split(b"\0"):
+    if not raw_entry:
+      continue
+    raw_meta, separator, raw_path = raw_entry.partition(b"\t")
+    if not separator:
+      raise RuntimeError("Invalid Git tree entry.")
+    try:
+      mode, object_type, object_oid = raw_meta.decode("ascii").split(" ", 2)
+      rel = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+      raise RuntimeError("Invalid Git tree entry.") from exc
     pure = PurePosixPath(rel)
     if (
       pure.is_absolute()
@@ -4208,14 +3820,15 @@ def materialize_tree(
       raise RuntimeError(
         f"Unsupported Git tree entry {rel!r} ({mode} {object_type})."
       )
-  for batch in _tree_entry_batches(entries):
-    blobs = _cat_file_batch(repo, (entry[2] for entry in batch))
-    for mode, _, object_oid, rel, _ in batch:
-      pure = PurePosixPath(rel)
-      output = target.joinpath(*pure.parts)
-      output.parent.mkdir(parents=True, exist_ok=True)
-      output.write_bytes(blobs[object_oid])
-      output.chmod(0o755 if mode == "100755" else 0o644)
+    output = target.joinpath(*pure.parts)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "blob", object_oid],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+      env=_git_env(repo),
+    ).stdout
+    output.write_bytes(blob)
+    output.chmod(0o755 if mode == "100755" else 0o644)
 
 
 def read_tree_exec_paths(
@@ -4404,134 +4017,6 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
     return False
   _run(repo, "merge", "--abort", check=False)
   return True
-
-
-def abort_in_progress_update(source_dir: str | Path) -> bool:
-  """Abort the merge or rebase used to materialize an app update conflict."""
-  repo = Path(source_dir)
-  if rebase_in_progress(repo):
-    _run(repo, "rebase", "--abort", check=False)
-    return True
-  return abort_in_progress_merge(repo)
-
-
-def start_overlay_rebase(
-  source_dir: str | Path,
-  *,
-  base: str,
-  onto: str = UPSTREAM_BRANCH,
-) -> list[str]:
-  """Materialize the same commit-by-commit replay used by update candidates.
-
-  This mutates the primary checkout only after the owner selected the
-  preserve-local resolver policy. The first update attempt remains isolated in
-  a candidate worktree; this operation gives the resolver ordinary Git rebase
-  state to inspect and continue while retaining every local commit.
-  """
-  repo = Path(source_dir)
-  ensure_repo(repo)
-  abort_in_progress_update(repo)
-  _require_local_branch(repo)
-  base_sha = _resolve_commit(repo, base)
-  onto_sha = _resolve_commit(repo, onto)
-  local_sha = _resolve_commit(repo, LOCAL_BRANCH)
-  if not base_sha or not onto_sha or not local_sha:
-    raise RuntimeError("app update replay inputs are unavailable")
-  if ref_is_ancestor(repo, base_sha, local_sha) is not True:
-    raise RuntimeError("local history does not descend from the replay base")
-  if _run(repo, "status", "--porcelain", read_only=True).stdout.strip():
-    raise RuntimeError("app source changed after the update was reviewed")
-
-  commits = overlay_commits(repo, base_sha, local_sha)
-  skip = landed_overlay_commits(repo, commits, onto_sha)
-  with tempfile.TemporaryDirectory(prefix="mobius-app-resolver-") as tmp:
-    candidate = Path(tmp) / "candidate"
-    try:
-      replay = replay_overlay(
-        repo, commits=commits, onto=onto_sha, worktree=candidate, skip=skip,
-      )
-    except Exception:
-      remove_overlay_worktree(repo, candidate)
-      raise
-    if not replay.tip:
-      remove_overlay_worktree(repo, candidate)
-      raise RuntimeError("app update replay did not produce a candidate tip")
-    if (
-      _resolve_commit(repo, LOCAL_BRANCH) != local_sha
-      or _run(repo, "status", "--porcelain", read_only=True).stdout.strip()
-    ):
-      remove_overlay_worktree(repo, candidate)
-      raise SourceTreeChanged(
-        "App source changed while preparing the update resolver."
-      )
-    if replay.status == "clean":
-      # Move the branch and checkout together without a later hard reset.
-      # ``--keep`` is the final no-clobber check if a draft arrives after the
-      # freshness check above but before Git acquires its own locks.
-      moved = _run(repo, "reset", "--keep", replay.tip, check=False)
-      if moved.returncode != 0:
-        remove_overlay_worktree(repo, candidate)
-        raise SourceTreeChanged(
-          "App source changed while preparing the update resolver."
-        )
-      try:
-        carry_equivalent_change_sources(repo, local_sha, replay.tip)
-      except Exception:
-        restored = _run(repo, "reset", "--keep", local_sha, check=False)
-        if restored.returncode != 0:
-          log.error(
-            "could not restore app source after resolver promotion failed"
-          )
-        remove_overlay_worktree(repo, candidate)
-        raise
-      remove_overlay_worktree(repo, candidate)
-      return []
-
-    conflict = replay.conflict or {}
-    planned_shas = [
-      sha for sha in [conflict.get("sha"), *conflict.get("remaining", [])]
-      if sha and sha not in skip
-    ]
-    if not planned_shas:
-      remove_overlay_worktree(repo, candidate)
-      raise RuntimeError("app update replay conflict has no resumable plan")
-    clean_tip = replay.tip
-    remove_overlay_worktree(repo, candidate)
-    subjects = {commit.sha: commit.subject for commit in commits}
-    plan = Path(tmp) / "rebase-todo"
-    plan.write_text("".join(
-      f"pick {sha} {subjects.get(sha, 'local app change')}\n"
-      for sha in planned_shas
-    ))
-    editor = Path(tmp) / "sequence-editor"
-    editor.write_text(
-      "#!/bin/sh\ncat \"$MOBIUS_REBASE_TODO\" > \"$1\"\n"
-    )
-    editor.chmod(0o700)
-    env = _git_env(repo)
-    env["GIT_SEQUENCE_EDITOR"] = str(editor)
-    env["MOBIUS_REBASE_TODO"] = str(plan)
-    result = subprocess.run(
-      [
-        "git",
-        "-c", f"user.name={_GIT_NAME}",
-        "-c", f"user.email={_GIT_EMAIL}",
-        "-C", str(repo),
-        "rebase", "-i", "--onto", clean_tip, base_sha, LOCAL_BRANCH,
-      ],
-      capture_output=True,
-      text=True,
-      timeout=_GIT_TIMEOUT,
-      check=False,
-      env=env,
-    )
-  conflicts = _worktree_unmerged(repo)
-  if result.returncode == 0:
-    return []
-  if not conflicts:
-    detail = (result.stderr or result.stdout).strip()
-    raise RuntimeError(f"git rebase failed: {detail[-500:]}")
-  return conflicts
 
 
 # A version identifier is never a semantic merge: when both the local edits and

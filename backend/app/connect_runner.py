@@ -1066,7 +1066,10 @@ def main():
             if not conns:
                 print("Not paired. Run with --pair CODE --url URL first.")
                 sys.exit(2)
-            install_base = _validated_base_url(conns[0]["url"])
+            # An update can be started by any paired Möbius. Honor the
+            # explicitly selected source instead of always downloading from
+            # the first saved connection, which may be an older instance.
+            install_base = _validated_base_url(args.url or conns[0]["url"])
     except ValueError as exc:
         print(str(exc))
         sys.exit(2)

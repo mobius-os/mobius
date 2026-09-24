@@ -47,7 +47,8 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CODEX_VERSION=0.156.0
+ARG CODEX_VERSION=0.156.1
+ARG CODEX_SDK_VERSION=0.156.1
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux \
@@ -144,17 +145,12 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
       'from pathlib import Path; import shutil, claude_agent_sdk; assert Path(shutil.which("claude")).samefile(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")' \
     && claude --version | grep -Fx "$(python -c 'from claude_agent_sdk._cli_version import __cli_version__; print(__cli_version__ + " (Claude Code)")')"
 
-# openai-codex Python SDK: its upstream pyproject pins a second, older
-# openai-codex-cli-bin payload. Keep that declared package so `pip check` and
-# owner-authored Python SDK code retain the documented default constructor, but
-# replace its private payload in the SAME image layer with a link to Möbius's
-# lockstep npm CLI. This preserves the external SDK contract without storing a
-# second ~350 MB runtime or running a second protocol version.
-# Pin the SDK to the immutable commit for the npm CLI's release. Production
-# SDK contract tests verify the protocol and approval bridge before image merge.
-RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@fe74a774532af67b5a4a3dec03ce9469e17f89af#subdirectory=sdk/python' \
-    && pip install --no-cache-dir 'openai-codex-cli-bin==0.153.4' \
+# openai-codex Python SDK: the SDK and CLI are released independently. Pin the
+# package and its declared runtime together, then replace that runtime payload
+# in the SAME image layer with Möbius's npm CLI. This preserves the documented
+# SDK runtime contract without storing a second ~350 MB executable.
+RUN pip install --no-cache-dir --no-deps "openai-codex==${CODEX_SDK_VERSION}" \
+    && pip install --no-cache-dir "openai-codex-cli-bin==${CODEX_SDK_VERSION}" \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
     && rm -rf "${_codex_cli_bin}/bin" \

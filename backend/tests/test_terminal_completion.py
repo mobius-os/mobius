@@ -1710,16 +1710,25 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
     "t13", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[], running="running",
   )
-  # No streamed text → finalize() is a no-op, so the turn reaches the
-  # empty-queue drain (which issues the strict FinishRun we latch).
+  # Leave setup, finalization, and queue promotion at their normal timeout;
+  # only the marker-clear operation should time out under a busy CI runner.
   _patch_claude_runner(monkeypatch, text=None)
-  monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.2)
+  orig_finish = chat_mod._finish_run_strict
+
+  async def short_finish_timeout(*args, **kwargs):
+    with monkeypatch.context() as patch:
+      patch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.2)
+      return await orig_finish(*args, **kwargs)
+
+  monkeypatch.setattr(chat_mod, "_finish_run_strict", short_finish_timeout)
 
   writer = get_writer()
   release = threading.Event()
+  entered = threading.Event()
   orig_clear = writer._finish_run
 
   def latched_clear(db, cmd):
+    entered.set()
     release.wait(timeout=10)  # block the actor inside the clear commit
     return orig_clear(db, cmd)
 
@@ -1734,6 +1743,8 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   published = []
   try:
     _run_real_chat("t13", run_token="rt-13", run_gen=gen, published=published)
+
+    assert entered.is_set(), "timeout must reach the marker-clear operation"
 
     # The caller's await_ack timed out and returned FAILED_LEAVE_MARKER. The
     # latched clear has NOT committed yet (release is still unset), so the

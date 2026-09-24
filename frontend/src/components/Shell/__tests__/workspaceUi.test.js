@@ -929,6 +929,11 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     /ev\.type === 'chat_run_finished'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)/,
     'completion must refresh Changes even when its local card missed the active-to-idle transition',
   )
+  assert.doesNotMatch(
+    shell.slice(shell.indexOf("ev.type === 'chat_run_finished'"), shell.indexOf("ev.type === 'delegation_changed'")),
+    /markChatOwnerInput\(chatId, \{ kind: null, questionId: null \}\)/,
+    'run completion must not erase an owner-input request that is still pending',
+  )
   assert.match(
     shell,
     /ev\.type === 'delegation_changed'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)[\s\S]*?\['completed', 'failed', 'needs_review'\][\s\S]*?setAttentionChatIds/,

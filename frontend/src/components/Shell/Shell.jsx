@@ -31,7 +31,6 @@ import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
-import { managedAppEventForShellEvent } from '../../lib/managedAppEvents.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import {
@@ -2838,15 +2837,8 @@ export default function Shell({ onInitialVisualReady }) {
       refreshChats, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
-  const [managedAppEvent, setManagedAppEvent] = useState(null)
-
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
-    if (ev.type === 'app_updated') {
-      setManagedAppEvent(current => managedAppEventForShellEvent(
-        ev, current?.sequence || 0,
-      ))
-    }
     if (ev.type === 'agent_coordination_message') {
       // Mailbox hints refresh owner views without polling a model inbox.
       const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
@@ -3107,6 +3099,8 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        // A saved question or secure-input request can be why the run ended;
+        // only its own clear event (or the next run starting) retires it.
         // Chat edits and their contribution ledger can both settle during an
         // agent turn. Completion is the shared freshness boundary even when
         // the chat card was hidden or unmounted while that work ran.
@@ -3131,7 +3125,6 @@ export default function Shell({ onInitialVisualReady }) {
             queryKey: ['projects', 'git', String(projectId)],
           })
         }
-        markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
@@ -4764,7 +4757,6 @@ export default function Shell({ onInitialVisualReady }) {
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}
-              managedAppEvent={managedAppEvent}
               pendingIntent={appIntents[String(id)] || null}
               immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
                 ? immersiveMode

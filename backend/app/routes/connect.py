@@ -572,7 +572,14 @@ def _install_command(base: str, code: str) -> str:
 
 
 def _update_command(base: str) -> str:
-  return f'curl -fsSL "{base}/api/connect/runner" | python3 - --install'
+  # The target can be paired with several Möbius instances. Pin both the
+  # download and the install source to the instance whose Connect UI generated
+  # this command; otherwise the runner's saved first connection may silently
+  # supply a different (older) release.
+  return (
+    f'curl -fsSL "{base}/api/connect/runner" '
+    f'| python3 - --url "{base}" --install'
+  )
 
 
 def _reported_runner_release(value: object) -> int | None:

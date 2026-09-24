@@ -370,12 +370,15 @@ class AppApplyOut(BaseModel):
 
 
 class AppInstall(BaseModel):
-  """Body for one atomic install from a Git-backed ``mobius.json`` URL.
+  """Body for POST /api/apps/install — atomic install from a manifest.
 
-  ``manifest_url`` is the supported public source. Möbius derives and clones
-  its repository, then installs the exact reviewed commit. ``manifest`` and
-  ``raw_base`` remain parseable only so older clients receive the installer's
-  explicit ``git_source_required`` response; they never supply app bytes.
+  Exactly one of `manifest_url` or `manifest` must be set:
+    - `manifest_url`: the installer GETs the manifest, derives raw_base
+      from the URL (everything before the trailing filename), and
+      fetches the entry JSX + icon + storage_seed files relative to it.
+    - `manifest`: an inline manifest object. The caller must also pass
+      `raw_base` so the installer knows where to fetch referenced files
+      from. Useful for tests + future "install from local tarball".
   """
   manifest_url: str | None = None
   manifest: dict | None = None
@@ -390,6 +393,15 @@ class AppInstall(BaseModel):
   # executable source byte changes before Apply, install rejects before writes.
   reviewed_source_digest: str | None = Field(
     default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
+  # Updates bind Apply to the exact app and Git commit returned by preview.
+  # Fresh installs omit both fields and keep the ordinary manifest flow.
+  update_app_id: int | None = Field(default=None, gt=0)
+  reviewed_upstream_commit: str | None = Field(
+    default=None,
+    min_length=40,
+    max_length=64,
+    pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
   )
 
 
@@ -497,7 +509,7 @@ class UpdatePreviewOut(BaseModel):
   app_id: int
   status: Literal["clean", "conflict"]
   upstream_version: str | None = None
-  upstream_commit: str | None = None
+  upstream_commit: str
   conflict_paths: list[str] = Field(default_factory=list)
   conflicts: list[ConflictFile] = Field(default_factory=list)
   upstream_diff: str | None = None
@@ -509,9 +521,8 @@ class UpdateCandidatePreviewOut(BaseModel):
   capability_preview: AppPreviewOut
   app_id: int
   upstream_version: str | None = None
-  # The installed Git commit used as the comparison base. The fetched
-  # candidate's exact commit is bound into source_digest and the install
-  # receipt rather than being substituted with an HTTP-only identity.
+  # The exact candidate commit reviewed by the owner and later supplied to
+  # Apply. Git-backed Store updates never refetch a second package transport.
   upstream_commit: str | None = None
   upstream_diff: str | None = None
   source_digest: str = Field(
@@ -567,15 +578,6 @@ class AppConflictResolverChatOut(BaseModel):
 class AppConflictResolverChatRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  resolution_policy: UpdateResolutionPolicy
-
-
-class AppConflictResolverBatchChatRequest(BaseModel):
-  """One owner-approved resolver turn for a complete Store issue set."""
-
-  model_config = ConfigDict(extra="forbid")
-
-  app_ids: list[int] = Field(min_length=1, max_length=50)
   resolution_policy: UpdateResolutionPolicy
 
 

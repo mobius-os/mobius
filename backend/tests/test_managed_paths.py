@@ -99,7 +99,7 @@ _EXPECTED_RUNTIME_PATHSPECS = {
 }
 
 _EXPECTED_MERGED_NON_SOURCE = frozenset(
-  {".mobius-static-assets.json", "init-cron.sh"}
+  {".gitignore", ".mobius-static-assets.json", "init-cron.sh"}
 )
 
 

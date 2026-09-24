@@ -883,10 +883,9 @@ fi
 # system app; base boot must not activate them.
 python3 /app/scripts/init_chat_summaries.py
 
-# Bootstrap the agent-editable skills layer (/data/shared/skills/). CREATE-IF-
-# ABSENT like the graph — the agent (and the nightly Reflection agent) improve
-# these skills, so a reseed must not clobber their edits. The system prompt
-# (skill/core.md) points at these.
+# Reconcile platform-owned skills against their recorded baseline. Untouched
+# copies advance with the image; owner-edited copies remain in place for review.
+# The system prompt (skill/core.md) points at this mixed ownership directory.
 python3 /app/scripts/init_skills.py
 
 # Theme: no starter file written here. /api/theme reads
