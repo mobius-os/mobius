@@ -18,6 +18,7 @@ import os
 import pwd
 import re
 import secrets
+import socket
 import socketserver
 import stat
 import threading
@@ -215,11 +216,20 @@ def _public_web_url(value: str) -> str:
   host = (split.hostname or "").lower().rstrip(".")
   if split.scheme not in {"http", "https"} or not host or split.username or split.password:
     raise ValueError("search page must be a public HTTP URL")
-  if host in {"localhost", "localhost.localdomain"} or host.endswith((".local", ".internal")):
+  if host == "localhost" or host.endswith((".localhost", ".localdomain", ".local", ".internal")):
     raise ValueError("search page must be a public HTTP URL")
   try:
     address = ipaddress.ip_address(host)
   except ValueError:
+    # Some URL consumers accept shortened, octal, hex, or integer IPv4 hosts.
+    # Reject these alternate spellings rather than trusting different parsers
+    # to agree about where a page-open request will go.
+    try:
+      socket.inet_aton(host)
+    except OSError:
+      pass
+    else:
+      raise ValueError("search page must be a public HTTP URL")
     address = None
   if address is not None and not address.is_global:
     raise ValueError("search page must be a public HTTP URL")

@@ -1081,7 +1081,11 @@ def test_standalone_image_search_is_nonfatal_when_not_supported(broker, monkeypa
 
 def test_standalone_search_rejects_private_urls_without_calling_provider(broker, monkeypatch):
   monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
-  for url in ("http://127.0.0.1/admin", "http://localhost/", "file:///etc/passwd"):
+  for url in (
+    "http://127.0.0.1/admin", "http://localhost/", "http://foo.localhost/",
+    "http://foo.localdomain/", "http://127.1/", "http://2130706433/",
+    "http://0x7f000001/", "http://0177.0.0.1/", "file:///etc/passwd",
+  ):
     with pytest.raises(ValueError, match="public HTTP URL"):
       broker.standalone_search({"id": "chat-one", "commands": {
         "open": [{"ref_id": url}],
