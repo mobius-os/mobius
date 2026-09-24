@@ -111,7 +111,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
         <Alert color="warning" variant="soft" description={
           platform.late_changes.state === 'restore_pending'
             ? 'An interrupted update saved a platform edit that still needs review before changing platform source.'
-            : 'The update is installed, but later local edits conflicted. Review the saved edits before another update.'
+            : 'The update is installed. Edits made after its review are saved for a separate merge; review them before another update.'
         } />
       )}
       <dl className="platform-updates__versions">
