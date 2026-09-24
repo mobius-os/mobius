@@ -4339,6 +4339,7 @@ class ChatWriterActor:
         and new_msg.get("role") == "user"
         and not new_msg.get("hidden")
       )
+    _stamp_provider_batch(stored_messages)
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -6097,18 +6098,18 @@ def _pending_messages_for_transcript(
   pending: list[dict],
   existing: list[dict],
 ) -> list[dict]:
-  """Return separate visible transcript rows for promoted pending messages."""
+  """Return separate visible rows with an exact shared-turn marker."""
   from app.continuations import continuation_reason
   from app.run_state import GOAL_HANDOFF_REASON
 
   stored: list[dict] = []
   used = list(existing)
-  for pending_msg in pending:
-    if continuation_reason(pending_msg) == GOAL_HANDOFF_REASON:
-      # This is a scheduler control carried by the one existing FIFO, not
-      # owner speech. Its provider prompt is ephemeral and its identity lives
-      # on the admitted ChatRun; the transcript records only actual messages.
-      continue
+  visible_pending = [
+    pending_msg
+    for pending_msg in pending
+    if continuation_reason(pending_msg) != GOAL_HANDOFF_REASON
+  ]
+  for pending_msg in visible_pending:
     msg = dict(pending_msg)
     msg["role"] = "user"
     msg.pop("queued", None)
@@ -6123,7 +6124,31 @@ def _pending_messages_for_transcript(
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)
+  _stamp_provider_batch(stored)
   return stored
+
+
+def _stamp_provider_batch(messages: list[dict]) -> None:
+  """Mark separate visible rows that shared one provider delivery.
+
+  Queued next-turn promotion and in-turn steering both preserve the owner's
+  individual messages in the transcript while sending one combined provider
+  input. The marker is durable delivery truth used by the shell to present
+  those rows as one divided bubble; keeping it here prevents the two delivery
+  paths from drifting again.
+  """
+  for msg in messages:
+    msg.pop("provider_batch", None)
+  if len(messages) < 2:
+    return
+  batch_id = ensure_user_cid(messages[0])
+  for index, msg in enumerate(messages):
+    ensure_user_cid(msg)
+    msg["provider_batch"] = {
+      "id": batch_id,
+      "index": index,
+      "count": len(messages),
+    }
 
 
 def _commit_or_rollback(db) -> bool:

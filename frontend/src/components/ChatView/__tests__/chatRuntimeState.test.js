@@ -10,6 +10,9 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  combineOwnerMessagesForDisplay,
+  ownerMessageBatch,
+  ownerMessageBatchPosition,
   startsFollowingTurn,
   jumpToLatestShown,
   runtimeSnapshotTransition,
@@ -67,6 +70,46 @@ test('automatic and manual continuations are product markers, not owner messages
   assert.equal(startsFollowingTurn(marker), true)
   assert.equal(startsFollowingTurn({ role: 'user', content: 'hello' }), true)
   assert.equal(startsFollowingTurn({ role: 'assistant', content: 'reply' }), false)
+})
+
+test('adjacent owner rows retain their separate identity inside one visible batch', () => {
+  const messages = [
+    { role: 'assistant', content: 'Earlier' },
+    { role: 'user', cid: 'a', content: 'First', provider_batch: { id: 'a', index: 0, count: 3 } },
+    { role: 'user', cid: 'b', content: 'Second', provider_batch: { id: 'a', index: 1, count: 3 } },
+    { role: 'user', cid: 'c', content: 'Third', provider_batch: { id: 'a', index: 2, count: 3 } },
+    { role: 'assistant', content: 'Reply' },
+  ]
+  assert.deepEqual(ownerMessageBatchPosition(messages, 1), {
+    id: 'a', count: 3, first: true,
+  })
+  assert.deepEqual(ownerMessageBatchPosition(messages, 2), {
+    id: 'a', count: 3, first: false,
+  })
+  assert.deepEqual(ownerMessageBatchPosition(messages, 3), {
+    id: 'a', count: 3, first: false,
+  })
+  assert.equal(ownerMessageBatchPosition(messages, 0), null)
+  assert.equal(ownerMessageBatchPosition([{ role: 'user', content: 'Only' }], 0), null)
+  assert.equal(ownerMessageBatchPosition([
+    { role: 'user', content: 'Adjacent but separately delivered' },
+    { role: 'user', content: 'No inferred batch' },
+  ], 0), null)
+
+  const batch = ownerMessageBatch(messages, 2)
+  assert.equal(batch.start, 1)
+  assert.equal(batch.end, 3)
+  assert.deepEqual(batch.members.map(message => message.cid), ['a', 'b', 'c'])
+  assert.equal(ownerMessageBatch([
+    messages[1],
+    { ...messages[3], provider_batch: { id: 'a', index: 2, count: 3 } },
+  ], 0), null, 'an incomplete durable batch must not swallow unrelated rows')
+
+  const displayed = combineOwnerMessagesForDisplay(batch.members)
+  assert.equal(displayed.cid, 'a', 'the first durable row remains the visible identity')
+  assert.equal(displayed.content, 'First\n\nSecond\n\nThird')
+  assert.deepEqual(displayed.segments, ['First', 'Second', 'Third'],
+    'original message boundaries survive for the in-bubble divider')
 })
 
 test('a continuation supersedes the resumable pause it completed', () => {

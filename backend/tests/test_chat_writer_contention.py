@@ -699,6 +699,10 @@ def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
     )
   ))
   assert [m["cid"] for m in res["stored_messages"]] == ["c-a", "c-b"]
+  assert [m["provider_batch"] for m in res["stored_messages"]] == [
+    {"id": "c-a", "index": 0, "count": 2},
+    {"id": "c-a", "index": 1, "count": 2},
+  ]
   # A re-delivery of c-a (same cid) is dropped — no durable twin.
   res2 = _await(actor.submit(
     AppendSteeredUserMessage(
@@ -714,6 +718,10 @@ def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
   # The seeded Q1 row (no cid) plus the two distinct steered rows — the
   # re-delivery of c-a produced no third row.
   assert user_cids == [None, "c-a", "c-b"]
+  assert [m["provider_batch"] for m in chat["messages"][-2:]] == [
+    {"id": "c-a", "index": 0, "count": 2},
+    {"id": "c-a", "index": 1, "count": 2},
+  ]
 
 
 # -- 7. StartTurn atomic --------------------------------------------------
@@ -970,6 +978,15 @@ def test_promote_pending_collapses_all_followups(actor):
   assert result["promoted"]["ts"] == 10
   chat = _load_chat()
   assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
+  first_batch, second_batch = [
+    m["provider_batch"] for m in chat["messages"][-2:]
+  ]
+  assert first_batch == {
+    "id": chat["messages"][-2]["cid"], "index": 0, "count": 2,
+  }
+  assert second_batch == {
+    "id": first_batch["id"], "index": 1, "count": 2,
+  }
   assert chat["pending_messages"] == []
   assert chat["running_status"] == "running"
   assert chat["active_assistant_message_id"] == "rt1"

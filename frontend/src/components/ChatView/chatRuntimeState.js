@@ -76,6 +76,64 @@ export function isOwnerUserMessage(message) {
     && !isContinuationMessage(message)
 }
 
+/** Read the durable marker for owner rows delivered in one provider turn. */
+export function ownerMessageBatchPosition(messages, index) {
+  const message = Array.isArray(messages) ? messages[index] : null
+  if (!isOwnerUserMessage(message)) return null
+  const batch = message.provider_batch
+  if (
+    !batch
+    || typeof batch.id !== 'string'
+    || !batch.id
+    || !Number.isInteger(batch.index)
+    || !Number.isInteger(batch.count)
+    || batch.count < 2
+    || batch.index < 0
+    || batch.index >= batch.count
+  ) return null
+  return {
+    id: batch.id,
+    count: batch.count,
+    first: batch.index === 0,
+  }
+}
+
+/** Return one complete, contiguous provider batch or null for an ordinary row. */
+export function ownerMessageBatch(messages, index) {
+  const position = ownerMessageBatchPosition(messages, index)
+  if (!position) return null
+  const start = index - messages[index].provider_batch.index
+  const end = start + position.count - 1
+  if (start < 0 || end >= messages.length) return null
+  const members = messages.slice(start, end + 1)
+  const complete = members.every((member, memberIndex) => (
+    isOwnerUserMessage(member)
+    && member.provider_batch?.id === position.id
+    && member.provider_batch?.index === memberIndex
+    && member.provider_batch?.count === position.count
+  ))
+  return complete ? { ...position, start, end, members } : null
+}
+
+/** One provider submission is one visible owner message, even when the
+ * durable transcript retains its independently addressable source rows. */
+export function combineOwnerMessagesForDisplay(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null
+  if (messages.length === 1) return messages[0]
+  const first = messages[0]
+  const attachments = messages.flatMap(message => message.attachments || [])
+  // `segments` keeps the original split so the bubble can mark it visually;
+  // `content` stays the joined text that copy and every other consumer read.
+  const segments = messages.map(message => String(message.content || '').trim())
+    .filter(Boolean)
+  return {
+    ...first,
+    content: segments.join('\n\n'),
+    segments,
+    ...(attachments.length ? { attachments } : {}),
+  }
+}
+
 /**
  * A row that opens a new turn after an assistant partial: an owner message OR a
  * continuation marker. The auto-resume "Resumed automatically" card is a

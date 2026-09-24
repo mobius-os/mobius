@@ -595,6 +595,18 @@
   white-space: pre-wrap;
 }
 
+/* Boundary between owner messages delivered together in one bubble: a
+   wavy cut in the page background spanning the bubble edge to edge
+   (negative margins cancel .chat__text--user's 16px side padding). */
+.chat__batch-squiggle {
+  display: block;
+  height: 6px;
+  margin: 10px -16px;
+  background: var(--bg);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='6' viewBox='0 0 16 6'%3E%3Cpath d='M0 3 Q4 0 8 3 T16 3' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E") repeat-x left center / 16px 6px;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='6' viewBox='0 0 16 6'%3E%3Cpath d='M0 3 Q4 0 8 3 T16 3' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E") repeat-x left center / 16px 6px;
+}
+
 .chat__goal-message {
   display: inline;
 }

@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { Fragment, memo } from 'react'
 import { usePositionedPeerNotes } from './peerTimelineContext.js'
 import {
   insertPositionedActivity,
@@ -99,6 +99,17 @@ function UserMessageText({ text }) {
       <span className="chat__goal-message-objective">{goalObjective}</span>
     </span>
   )
+}
+
+/** Owner messages delivered together render as ONE bubble (one row for
+ * spacing/scroll) with a quiet squiggle where each original message began. */
+function UserMessageSegments({ segments }) {
+  return segments.map((segment, i) => (
+    <Fragment key={i}>
+      {i > 0 && <span className="chat__batch-squiggle" aria-hidden="true" />}
+      <UserMessageText text={stripAugmentation(segment)} />
+    </Fragment>
+  ))
 }
 
 function GoalHistory({ msg }) {
@@ -639,7 +650,11 @@ function MsgContentInner({
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)
-            : msg.role === 'user' ? <UserMessageText text={text} /> : text}
+            : msg.role === 'user'
+              ? (msg.segments?.length > 1
+                  ? <UserMessageSegments segments={msg.segments} />
+                  : <UserMessageText text={text} />)
+              : text}
         </div>
       ) : null}
       {!isStreaming && <GoalHistory msg={msg} />}
