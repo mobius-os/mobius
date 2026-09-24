@@ -235,14 +235,19 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
       const sr = scroll?.getBoundingClientRect()
       const rr = row?.getBoundingClientRect()
       window.__handoffFrames.push({
-        t: Math.round(performance.now()),
-        rows: [...(surface?.querySelectorAll('.chat__msg') || [])].slice(-4).map(r => [r.dataset.key || r.className.split(' ').pop(), Math.round(r.getBoundingClientRect().height)]),
         users: users.length,
         top: sr && rr ? rr.top - sr.top : null,
       })
-      if (window.__handoffSampling) requestAnimationFrame(sample)
+      if (window.__handoffSampling) schedule()
     }
-    requestAnimationFrame(sample)
+    // Measure each frame AFTER it renders. A read inside requestAnimationFrame
+    // forces layout before that frame's ResizeObserver step, so it observes
+    // geometry the scroll owner corrects before paint -- traced here as one
+    // 54px sample with the repair-pin write 1ms later and identical row
+    // heights either side. A task queued from rAF runs once the frame has
+    // painted, so these samples are what the owner actually saw.
+    const schedule = () => requestAnimationFrame(() => setTimeout(sample, 0))
+    schedule()
   })
 
   // The handoff is performed by the authoritative TERMINAL refresh, not by the
@@ -298,20 +303,6 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
     scenario.settledAssistant.ts,
   )
   expect(tops.length).toBeGreaterThan(0)
-  if (Math.max(...tops) > 12 || Math.min(...tops) < -2) {
-    const dump = await page.evaluate(() => {
-      const frames = (window.__handoffFrames || []).filter(f => f.top != null)
-      const tr = window.__mobiusChatScrollTrace || {}
-      const t0 = frames.length ? frames[0].t : 0
-      const pick = e => ({ at: e.at, ev: e.event, from: e.from?.kind, to: e.to?.kind, st: e.geometry?.scrollTop, sh: e.geometry?.scrollHeight })
-      return {
-        frames: frames.filter((f, i, all) => i === 0 || JSON.stringify(f.rows) !== JSON.stringify(all[i - 1].rows) || Math.abs(f.top - all[i - 1].top) > 1).map(f => [f.t, Math.round(f.top), f.rows]),
-        transitions: (tr.transitions || []).filter(e => e.at >= t0 - 50).map(pick),
-        writes: (tr.writes || []).filter(e => e.at >= t0 - 50).map(pick),
-      }
-    })
-    throw new Error('STTRACE ' + JSON.stringify(dump))
-  }
   expect(Math.max(...tops)).toBeLessThanOrEqual(12)
   expect(Math.min(...tops)).toBeGreaterThanOrEqual(-2)
 })
