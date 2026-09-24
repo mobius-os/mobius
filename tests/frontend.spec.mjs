@@ -1125,6 +1125,9 @@ test.describe('Scroll position', () => {
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
 
+    const __hist = await page.evaluate(() => ({ len: history.length, state: history.state && { kind: history.state.kind, index: history.state.index, route: history.state.route }, url: location.pathname + location.search }))
+    await page.evaluate(() => { window.__pops = 0; window.addEventListener('popstate', () => { window.__pops += 1 }); try { navigation?.addEventListener?.('navigate', e => { (window.__navs = window.__navs || []).push(e.navigationType) }) } catch {} })
+    let __loads = 0; page.on('load', () => { __loads += 1 })
     returning = true
     await page.evaluate(() => {
       window.__entryTrajectory = []
@@ -1182,11 +1185,16 @@ test.describe('Scroll position', () => {
     // --repeat-each=3: fails identically every run, not a race). Fixing this
     // needs a coordinated change across both restore paths, done as its own
     // careful pass rather than under this task.
+    try {
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
       { timeout: 3000 },
     )
+    } catch (err) {
+      const after = await page.evaluate(() => ({ len: history.length, pops: window.__pops, navs: window.__navs || null, state: history.state && { kind: history.state.kind, index: history.state.index, route: history.state.route }, url: location.pathname + location.search, active: localStorage.getItem('moebius_active_chat') })).catch(e => ({ evalError: String(e) }))
+      throw new Error('HIST10D ' + JSON.stringify({ before: __hist, after, loads: __loads, chatId }) + ' :: ' + err.message)
+    }
     await page.waitForFunction(id => {
       const painted = document.querySelector(
         `[data-chat-surface="painted"][data-chat-id="${id}"]`,
