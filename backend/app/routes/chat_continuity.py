@@ -33,8 +33,7 @@ class CheckpointBody(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   checkpoint_id: str = Field(min_length=1, max_length=128)
-  expected_revision: int = Field(ge=0)
-  digest: str = Field(min_length=1, max_length=8_000)
+  digest: str = Field(default="", max_length=8_000)
   summary: str | None = Field(default=None, max_length=12_000)
   title: str | None = Field(default=None, max_length=256)
 
@@ -97,7 +96,6 @@ async def checkpoint_agent_continuity(
       chat_id=chat_id,
       run_token=run_id,
       checkpoint_id=body.checkpoint_id,
-      expected_revision=body.expected_revision,
       digest=body.digest,
       summary=body.summary,
       title=body.title,
@@ -139,3 +137,13 @@ async def read_owner_continuity(
     include_legacy=include_legacy,
     data_dir=get_settings().data_dir,
   )
+
+
+@router.get("/api/chat/continuity/context")
+async def read_agent_current_context(
+  principal: Principal = Depends(get_agent_principal),
+  db: Session = Depends(get_db),
+):
+  from app.chat_continuity import current_context
+  chat = _active_chat(db, principal.chat_id or "")
+  return {"context": current_context(db, chat, data_dir=get_settings().data_dir)}

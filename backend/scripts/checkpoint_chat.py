@@ -53,9 +53,7 @@ def _parser() -> argparse.ArgumentParser:
   read.add_argument("--limit", type=int, default=5)
   read.add_argument("--full", action="store_true")
   save = commands.add_parser("save")
-  save.add_argument("--checkpoint-id", required=True)
-  save.add_argument("--expected-revision", required=True, type=int)
-  save.add_argument("--digest", required=True)
+  save.add_argument("--digest")
   save.add_argument("--summary")
   save.add_argument("--title")
   return parser
@@ -71,16 +69,11 @@ def main() -> int:
       query["full"] = "true"
     result = _call("GET", "/api/chat/continuity?" + urlencode(query))
   else:
-    payload = {
-      "checkpoint_id": args.checkpoint_id,
-      "expected_revision": args.expected_revision,
-      "digest": args.digest,
-    }
-    if args.summary is not None:
-      payload["summary"] = args.summary
-    if args.title is not None:
-      payload["title"] = args.title
-    result = _call("POST", "/api/chat/continuity/checkpoints", payload)
+    from mobius_control_mcp import _call_checkpoint_chat
+    payload = {name: getattr(args, name) for name in ("digest", "summary", "title")
+               if getattr(args, name) is not None}
+    print(_call_checkpoint_chat(payload))
+    return 0
   print(json.dumps(result, ensure_ascii=False, indent=2))
   return 0
 

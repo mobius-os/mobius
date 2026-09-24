@@ -120,7 +120,8 @@ def build_continuity_source(db, chat_id: str, messages: list[dict]) -> str | Non
     "--- APPEND-ONLY DIGEST ---",
   ]
   for row in rows:
-    parts.append(f"REVISION {row.revision}: {row.digest}")
+    if row.digest:
+      parts.append(f"REVISION {row.revision}: {row.digest}")
     if row.legacy_markdown is not None:
       parts.extend([
         "--- LOSSLESS LEGACY BASELINE ---",

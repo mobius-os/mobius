@@ -35,7 +35,6 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
-READ_CHAT_CONTINUITY_TOOL = "read_chat_continuity"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 SAVED_CARD_TERMINAL_INSTRUCTION = (
   "This tool call ends the turn: the response is cut at the card, so nothing "
@@ -61,13 +60,11 @@ OWNER_TOOLS = (
   REQUEST_QUESTION_TOOL,
   REQUEST_RESTART_TOOL,
   *WORK_OWNERSHIP_TOOLS,
-  READ_CHAT_CONTINUITY_TOOL,
   CHECKPOINT_CHAT_TOOL,
 )
 DELEGATED_TOOLS = (
   *PEER_TOOLS,
   *WORK_OWNERSHIP_TOOLS,
-  READ_CHAT_CONTINUITY_TOOL,
   CHECKPOINT_CHAT_TOOL,
 )
 PROMOTE_GOAL_DESCRIPTION = (
@@ -210,6 +207,7 @@ def _agent_api_call(
   method: str,
   path: str,
   payload: dict[str, Any] | None = None,
+  *, timeout: float = 10,
 ) -> dict[str, Any]:
   """Call one run-bound local endpoint without importing the backend app."""
   base, token = _agent_api_settings()
@@ -226,7 +224,7 @@ def _agent_api_call(
     },
   )
   try:
-    with urlopen(request, timeout=10) as response:
+    with urlopen(request, timeout=timeout) as response:
       raw = response.read()
   except HTTPError as exc:
     detail = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -481,97 +479,47 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
 
 
-def _call_read_chat_continuity(arguments: dict[str, Any]) -> dict:
-  allowed = {"after_revision", "limit", "full"}
-  if not set(arguments).issubset(allowed):
-    raise ValueError("read_chat_continuity received unknown arguments")
-  query = []
-  for name in ("after_revision", "limit"):
-    value = arguments.get(name)
-    if value is not None:
-      if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{name} must be a non-negative integer")
-      query.append(f"{name}={value}")
-  full = arguments.get("full", False)
-  if not isinstance(full, bool):
-    raise ValueError("full must be true or false")
-  if full:
-    query.append("full=true")
-  suffix = "?" + "&".join(query) if query else ""
-  return _agent_api_call("GET", f"/api/chat/continuity{suffix}")
-
-
-def _call_checkpoint_chat(arguments: dict[str, Any]) -> dict:
-  required = {"checkpoint_id", "expected_revision", "digest"}
-  allowed = required | {"summary", "title"}
-  if not required.issubset(arguments) or not set(arguments).issubset(allowed):
-    raise ValueError(
-      "checkpoint_chat needs checkpoint_id, expected_revision, and digest"
-    )
-  checkpoint_id = arguments.get("checkpoint_id")
-  digest = arguments.get("digest")
-  revision = arguments.get("expected_revision")
-  if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
-    raise ValueError("checkpoint_id must be a non-empty string")
-  if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-    raise ValueError("expected_revision must be a non-negative integer")
-  if not isinstance(digest, str) or not digest.strip():
-    raise ValueError("digest must be a non-empty string")
-  payload = dict(arguments)
-  payload["checkpoint_id"] = checkpoint_id.strip()
-  payload["digest"] = digest.strip()
-  for name in ("summary", "title"):
-    value = payload.get(name)
-    if value is not None:
-      if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
-      payload[name] = value.strip()
-  return _agent_api_call("POST", "/api/chat/continuity/checkpoints", payload)
+def _call_checkpoint_chat(arguments: dict[str, Any], *, invocation_id: str | None = None) -> str:
+  if not set(arguments).issubset({"digest", "summary", "title"}):
+    raise ValueError("checkpoint_chat accepts only digest, summary, and title")
+  payload = {}
+  for name, value in arguments.items():
+    if not isinstance(value, str):
+      raise ValueError(f"{name} must be a string")
+    payload[name] = value.strip()
+  # Transport identity remains fixed for an exact JSON-RPC request in this
+  # server lifetime. A separate model invocation is a separate write: never
+  # deduplicate by prose, which could erase a legitimate repeated event.
+  payload["checkpoint_id"] = invocation_id or uuid.uuid4().hex
+  result = _agent_api_call("POST", "/api/chat/continuity/checkpoints", payload)
+  status = result.get("status")
+  if status == "unchanged":
+    return "Unchanged."
+  if status not in {"committed", "already_committed"}:
+    raise RuntimeError("Checkpoint did not return a durable acknowledgement; do not blindly retry.")
+  if result.get("projection_warning"):
+    return "Saved; the readable note projection needs repair."
+  return "Saved."
 
 
 _TOOL_DEFINITIONS = {
-  READ_CHAT_CONTINUITY_TOOL: {
-    "name": READ_CHAT_CONTINUITY_TOOL,
-    "description": (
-      "Read this chat's platform-owned continuity state and append-only digest "
-      "entries. Use on a cold start, provider handoff, or checkpoint revision "
-      "conflict; ordinary successful checkpoint receipts already return the "
-      "new revision. Reads never create or modify continuity state."
-    ),
-    "inputSchema": {
-      "type": "object", "additionalProperties": False,
-      "properties": {
-        "after_revision": {"type": "integer", "minimum": 0},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        "full": {"type": "boolean", "default": False},
-      },
-    },
-  },
   CHECKPOINT_CHAT_TOOL: {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
-      "Append one lightweight continuity delta for this exact live chat run. "
-      "Supply the revision last read or returned by a successful checkpoint; "
-      "on revision conflict, read continuity and reconcile before a new "
-      "checkpoint. Retry an uncertain save with the SAME checkpoint_id and "
-      "identical payload: the ID is an idempotency key, not a sequence. "
-      "digest appends the new durable fact or decision. summary optionally "
-      "replaces the current one–two-paragraph handoff when the picture changes; "
-      "title optionally updates the generated name when scope has changed, "
-      "but never overrides an owner rename. The platform automatically "
-      "adopts the exact transcript boundary of input accepted by this run's "
-      "SDK; its hash verifies transcript identity, not that older rows remain "
-      "literal model context. Your checkpoint declares the handoff adequate, "
-      "not that the platform verified the meaning of its prose. No transcript "
-      "cursor is needed."
+      "Update this chat's continuity. All fields are optional and independent: "
+      "title replaces its generated name (respecting owner renames), summary "
+      "replaces its current one–two-paragraph handoff, digest appends a small "
+      "new entry. Omitted fields stay unchanged; an empty call does nothing. "
+      "Möbius owns revisions, retry identity, and the received-input boundary. "
+      "A summary or digest save declares the intended current handoff; a title "
+      "alone never marks conversation content summarized. No preliminary read "
+      "or revision number is needed. A success acknowledges durable storage; "
+      "do not repeat an uncertain call blindly."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
-      "required": ["checkpoint_id", "expected_revision", "digest"],
       "properties": {
-        "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "expected_revision": {"type": "integer", "minimum": 0},
-        "digest": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "digest": {"type": "string", "maxLength": 8000},
         "summary": {"type": "string", "maxLength": 12000},
         "title": {"type": "string", "maxLength": 256},
       },
@@ -860,7 +808,6 @@ _TOOL_DEFINITIONS = {
 }
 
 _TOOL_HANDLERS = {
-  READ_CHAT_CONTINUITY_TOOL: _call_read_chat_continuity,
   CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
@@ -875,7 +822,7 @@ _TOOL_HANDLERS = {
 }
 
 
-def _call_tool(params: Any) -> dict[str, Any]:
+def _call_tool(params: Any, *, invocation_id: str | None = None) -> dict[str, Any]:
   if not isinstance(params, dict):
     return _tool_result("Tool call must be an object.", is_error=True)
   name = params.get("name")
@@ -888,9 +835,14 @@ def _call_tool(params: Any) -> dict[str, Any]:
   if not isinstance(arguments, dict):
     return _tool_result("Tool arguments must be an object.", is_error=True)
   try:
+    if name == CHECKPOINT_CHAT_TOOL:
+      return _tool_result(_call_checkpoint_chat(arguments, invocation_id=invocation_id))
     return _tool_result(handler(arguments))
   except Exception as exc:  # Tool failures are data; keep the MCP server alive.
     return _tool_result(str(exc) or "Tool call failed.", is_error=True)
+
+
+_TRANSPORT_ID = uuid.uuid4()
 
 
 def _dispatch_message(message: Any) -> dict[str, Any] | None:
@@ -914,7 +866,9 @@ def _dispatch_message(message: Any) -> dict[str, Any] | None:
   if method == "tools/list":
     return _response(message_id, _tools_list_result())
   if method == "tools/call":
-    return _response(message_id, _call_tool(params))
+    return _response(message_id, _call_tool(
+      params, invocation_id=uuid.uuid5(_TRANSPORT_ID, json.dumps(message_id)).hex,
+    ))
   return _error(message_id, -32601, "Method not found")
 
 

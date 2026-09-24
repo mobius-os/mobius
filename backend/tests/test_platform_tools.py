@@ -695,37 +695,42 @@ def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
 
 def test_continuity_tools_available_to_owner_and_delegated_runs():
   control = _control_module()
-  names = {"read_chat_continuity", "checkpoint_chat"}
+  names = {"checkpoint_chat"}
+  assert "read_chat_continuity" not in control.OWNER_TOOLS
   assert names <= set(control.OWNER_TOOLS)
   assert names <= set(control.DELEGATED_TOOLS)
   assert names <= set(platform_tools.DELEGATED_CONTROL_TOOL_NAMES)
   assert names <= set(platform_tools.OWNER_CONTROL_TOOL_NAMES)
 
 
-def test_continuity_read_is_bounded_and_checkpoint_has_no_cursor(monkeypatch):
+def test_checkpoint_content_only_and_small_ack(monkeypatch):
   control = _control_module()
   calls = []
-
   def call(method, path, payload=None):
     calls.append((method, path, payload))
-    return {"revision": 4}
-
+    return {"status": "committed", "revision": 4}
   monkeypatch.setattr(control, "_agent_api_call", call)
-  assert control._call_read_chat_continuity({"after_revision": 3, "limit": 5}) == {
-    "revision": 4,
-  }
-  payload = {
-    "checkpoint_id": "run-milestone-1", "expected_revision": 3,
-    "digest": "A test failed; repair is not verified.",
-    "summary": "Fixing the reproducible failure.",
-  }
-  control._call_checkpoint_chat(payload)
-  assert calls == [
-    ("GET", "/api/chat/continuity?after_revision=3&limit=5", None),
-    ("POST", "/api/chat/continuity/checkpoints", payload),
-  ]
-  control._call_checkpoint_chat(payload)
-  assert "source_cursor" not in calls[-1][2]
+  payload = {"summary": "Fixing the reproducible failure."}
+  assert control._call_checkpoint_chat(payload, invocation_id="transport-1") == "Saved."
+  assert calls == [("POST", "/api/chat/continuity/checkpoints", {
+    **payload, "checkpoint_id": "transport-1",
+  })]
+  assert "expected_revision" not in calls[-1][2]
+
+
+def test_checkpoint_transport_retries_keep_identity(monkeypatch):
+  control = _control_module()
+  monkeypatch.setattr(control, "_available_tool_names", lambda: ("checkpoint_chat",))
+  calls = []
+  monkeypatch.setattr(control, "_agent_api_call", lambda *a: calls.append(a) or {"status":"committed"})
+  message = {"jsonrpc":"2.0", "id":19, "method":"tools/call", "params":{
+    "name":"checkpoint_chat", "arguments":{"digest":"Same request"},
+  }}
+  control._dispatch_message(message)
+  control._dispatch_message(message)
+  control._dispatch_message({**message,"id":20})
+  assert calls[0][2]["checkpoint_id"] == calls[1][2]["checkpoint_id"]
+  assert calls[2][2]["checkpoint_id"] != calls[0][2]["checkpoint_id"]
 
 
 @pytest.mark.parametrize("arguments", [
@@ -739,3 +744,11 @@ def test_continuity_tool_rejects_malformed_or_cross_chat_payload(arguments, monk
   monkeypatch.setattr(control, "_agent_api_call", lambda *a, **kw: pytest.fail("unexpected API call"))
   with pytest.raises(ValueError):
     control._call_checkpoint_chat(arguments)
+
+
+def test_checkpoint_does_not_invent_success(monkeypatch):
+  control = _control_module()
+  monkeypatch.setattr(control, "_agent_api_call", lambda *a: {})
+  import pytest
+  with pytest.raises(RuntimeError, match="durable acknowledgement"):
+    control._call_checkpoint_chat({"summary": "Goal remains open."})

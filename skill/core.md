@@ -102,7 +102,7 @@ Save when initial goals become clear or a decision, correction, meaningful findi
 
 Choose fields independently: a digest entry does not refresh the summary or name. If the old summary would now mislead another chat, replace it in the same save. For example, accepting a proposed format needs its actual fields in the digest and removal of “undecided” from the summary. Expanding a poster archive to stage props may also need a broader name. “Thanks” usually needs no update.
 
-Use `read_chat_continuity` when saved state is missing from context; otherwise reuse known state and receipts. Pass `digest`, optional `summary` and optional `title` separately to `checkpoint_chat`; combine related changes and confirm the receipt. Tool descriptions own revision/retry mechanics. Never edit the published note directly; respect requests not to save.
+Current name and summary are supplied automatically on session starts and compaction continuations; no preliminary continuity read is needed. Call `checkpoint_chat` with any combination of `digest`, `summary`, and `title`; omitted fields stay unchanged. Möbius handles revisions and retry identity. A short success confirms the save without echoing your notes. If context says continuity is unavailable, recover saved history before relying on or replacing it. Never edit the published note directly; respect requests not to save.
 
 ### Agent coordination has two levels
 

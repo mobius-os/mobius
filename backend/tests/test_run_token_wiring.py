@@ -12,6 +12,7 @@ from unittest import mock
 
 from app.chat import _ChatEventSink
 from app.chat_writer import alloc_run_token
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 class _FakeBroadcast:
@@ -34,7 +35,7 @@ def test_sink_stores_run_token_passed_at_construction():
   # — the actor owns the session now.
   bc = _FakeBroadcast()
   token = alloc_run_token()
-  sink = _ChatEventSink(bc, "chat-1", run_token=token)
+  sink = _ChatEventSink(bc, "chat-1", run_token=token, recall_binding=EMPTY_RECALL_BINDING)
   assert sink.run_token == token
 
 
@@ -42,7 +43,7 @@ def test_sink_run_token_defaults_when_omitted():
   # Backward-compatible construction: callers that don't pass a token
   # (e.g. legacy/test code) still get a working sink with run_token None.
   bc = _FakeBroadcast()
-  sink = _ChatEventSink(bc, "chat-1")
+  sink = _ChatEventSink(bc, "chat-1", recall_binding=EMPTY_RECALL_BINDING)
   assert sink.run_token is None
 
 
@@ -63,7 +64,7 @@ def test_initial_and_continuation_turns_get_distinct_tokens():
     # a sink with it (the exact pattern the scheduler + runner follow).
     for _ in range(2):
       turn_token = alloc_run_token()
-      _ChatEventSink(bc, "chat-1", run_token=turn_token)
+      _ChatEventSink(bc, "chat-1", run_token=turn_token, recall_binding=EMPTY_RECALL_BINDING)
 
   assert len(captured) == 2
   assert captured[0] is not None and captured[1] is not None

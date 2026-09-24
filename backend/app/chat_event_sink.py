@@ -678,7 +678,7 @@ class ChatEventSink:
         with open(path, "rb") as handle:
           handle.seek(0, 2)
           size = handle.tell()
-          handle.seek(max(0, size - 262_144))
+          handle.seek(max(0, size - MAX_RECALL_RESULT_SCAN_CHARS))
           text = handle.read().decode("utf-8", "replace")
       except OSError:
         text = None
@@ -1213,7 +1213,9 @@ class ChatEventSink:
       tool_use_id = event.get("tool_use_id")
       pending_activity = self._app_activity_for_tool(tool_use_id)
       pending_recall = self._memory_recall_for_tool(tool_use_id)
-      if isinstance(tool_use_id, str) and (pending_activity is not None or pending_recall is not None):
+      if isinstance(tool_use_id, str) and (
+        pending_activity is not None or pending_recall is not None
+      ):
         chunk = full_tool_output if isinstance(full_tool_output, str) else ""
         if event.get("output_complete") is True:
           streamed = self._app_output_tails.pop(tool_use_id, "")

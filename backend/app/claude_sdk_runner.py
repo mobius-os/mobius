@@ -1447,6 +1447,7 @@ async def run_claude_sdk_turn(
       ],
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
+      "include_hook_events": True,
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
@@ -1489,6 +1490,8 @@ async def run_claude_sdk_turn(
     # binary-only `workflowKeywordTriggerEnabled`, which we deliberately avoid.
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
+    from app.platform_tools import continuity_start_hooks
+    _cli_settings["hooks"] = {"SessionStart": continuity_start_hooks()}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
 
     # A dict-valued SDK mcp_servers option is serialized directly into the CLI
@@ -1609,6 +1612,14 @@ async def run_claude_sdk_turn(
           lease.note_message(
             sdk_msg, is_root=is_root_conversation_message(sdk_msg),
           )
+          # Native hooks fail open. Preserve a bounded diagnostic when the
+          # helper itself dies; never log its context payload or credentials.
+          if getattr(sdk_msg, "subtype", None) == "hook_response":
+            hook_data = getattr(sdk_msg, "data", {})
+            if hook_data.get("hook_event") == "SessionStart" and (
+              hook_data.get("exit_code", 0) != 0 or hook_data.get("outcome") == "error"
+            ):
+              log.warning("SessionStart context hook failed chat_id=%s", chat_id)
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every

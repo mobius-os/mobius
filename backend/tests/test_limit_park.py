@@ -49,6 +49,7 @@ from app.chat_writer import (
 from app.database import SessionLocal
 from app.chat_transcript import materialized_messages
 from app.runner_registry import RunnerKind, registry
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 NOW = datetime(2026, 7, 10, 22, 0, 0)
@@ -2904,7 +2905,7 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
   _seed_chat(cid)
   _seed_run(cid, f"rt-{cid}")
   bc = create_broadcast(cid)
-  sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}")
+  sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}", recall_binding=EMPTY_RECALL_BINDING)
   sink.publish({"type": "text", "content": "partial answer"})
   sink.publish(chat_mod._park_event(
     "hit your weekly limit · resets 1:40am", parked_until, "usage_limit",

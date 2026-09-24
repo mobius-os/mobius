@@ -507,7 +507,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, the working agent authors its chat name, short current Summary, and append-only Digest through run-bound continuity checkpoint tools. The chat writer commits revisioned state and entries; `/data/shared/memory/chats/<id>/index.md` is a recoverable platform-owned projection. There is no routine turn-end summary agent. New sessions receive only bounded recent names/current summaries and timestamped runtime activity. Old notes are preserved losslessly as historical baselines on first checkpoint; their reversed Summary/Digest terminology is read by format version, not guessed from content. Portable continuation uses the detailed digest and every uncovered transcript message; native provider compaction remains separate. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile at image boot without overwriting owner edits, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, the working agent authors its chat name, short current Summary, and append-only Digest through run-bound continuity checkpoint tools. The chat writer commits revisioned state and entries; `/data/shared/memory/chats/<id>/index.md` is a recoverable platform-owned projection. There is no routine turn-end summary agent. New sessions receive only bounded recent names/current summaries and timestamped runtime activity. Old notes are preserved losslessly as historical baselines on first checkpoint; their reversed Summary/Digest terminology is read by format version, not guessed from content. Portable continuation uses the detailed digest and every uncovered transcript message; native provider compaction remains separate but receives current continuity through session-start hooks. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
 
 Platform skill reconciliation is owned by the image boot script, not the source
 updater. `.seed-skills.json` records the last platform bytes applied per skill.
@@ -1295,12 +1295,13 @@ The **working agent authors** three levels: a generated name, a short current
 `## Summary`, and an append-only substantive `## Digest`. It saves at meaningful
 milestones through `checkpoint_chat`, not after every command. A single
 `CheckpointContinuity` writer command binds writes to the current chat/run,
-checks the expected revision, deduplicates checkpoint retry identities, and
+allocates revisions, deduplicates transport retry identities, and
 commits the new entry, state, and unlocked generated title together. A manually
 set title always wins. No semantic validator, forced continuation, recurring
 observer, or fallback LLM is involved.
 
-A checkpoint declares the agent's intended current handoff. The platform records
+A summary or digest checkpoint declares the agent's intended current handoff;
+a name-only save does not advance transcript coverage. The platform records
 an input-prefix count/hash on the physical run only after the SDK accepts that
 run's prepared input, and the writer re-verifies those bytes before advancing
 coverage. This records the input position, not a claim that every older message
@@ -1321,10 +1322,28 @@ a historical baseline; `continuity_version: 2` distinguishes the new short
 Summary / append-only Digest from the old short Digest / cumulative Summary.
 Corrections append explicit supersession rather than deleting history.
 
-`read_chat_continuity` returns short state and bounded entries; full history is
-an explicit read. The lightweight helper `backend/scripts/checkpoint_chat.py`
-uses the same authenticated routes when native tools are unavailable. Writes
-return a small receipt and revision, not the full accumulated journal.
+`checkpoint_chat` accepts independent optional `title`, `summary`, and `digest`
+fields. Omitted fields remain unchanged. Title and summary replace current
+state; only nonempty digest text appends a journal entry. Receipt-only rows
+retain retry identity without manufacturing digest prose. The model receives
+only a short durable acknowledgement, not note text or revision bookkeeping.
+The CLI helper uses the same content-only contract. Empty calls are no-ops.
+Exact transport retries within an MCP process reuse one identity; a new model
+invocation is a new write, never deduplicated by prose. There is no volatile
+fire-and-forget queue or automatic retry after an ambiguous transport failure.
+
+A provider-native command `SessionStart` hook supplies current name and summary
+on startup, resume and compaction, with history/transcript locations but no
+accumulating journal. Both Claude and Codex use the same run-authenticated
+renderer. Möbius and app-declared custom model connections use Codex's adapter.
+Codex's run-local configuration enables hooks and trusts only this exact hook
+hash; no owner config is rewritten. The native hook must complete before the
+first post-compaction inference (not a queued injection for a later request).
+Read failures return explicit unavailable context; helper process failures are
+logged through native lifecycle events. Providers can fail open on process
+death, so logs do not constitute a guaranteed inference barrier in that case.
+The separate model-selected continuity read tool is removed; full historical
+retrieval remains available through the authenticated routes.
 
 Consumers:
 

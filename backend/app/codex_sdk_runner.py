@@ -1622,6 +1622,8 @@ async def _run_codex_sdk_turn(
     ),
   )
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
+  from app.platform_tools import codex_continuity_overrides
+  config_overrides.extend(codex_continuity_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -2023,6 +2025,15 @@ async def _run_codex_sdk_turn(
       async for notification in turn.stream():
         lease.note_message(notification, is_root=False)
         payload = notification.payload
+
+        if notification.method == "hook/completed":
+          hook_run = getattr(payload, "run", None)
+          event_name = getattr(hook_run, "event_name", None)
+          status = getattr(hook_run, "status", None)
+          if getattr(event_name, "value", event_name) == "sessionStart" and getattr(
+            status, "value", status,
+          ) in {"failed", "blocked", "stopped"}:
+            log.warning("SessionStart context hook failed chat_id=%s", chat_id)
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           item_id = str(getattr(payload, "item_id", None) or "")

@@ -31,7 +31,7 @@ def _start(chat, run_id="continuity-run"):
   return {"Authorization": f"Bearer {token}"}
 
 
-def test_checkpoint_retry_revision_conflict_and_manual_title(
+def test_checkpoint_retry_platform_revision_and_manual_title(
   client, auth, chat, db,
 ):
   chat.title = "Owner title"
@@ -40,7 +40,6 @@ def test_checkpoint_retry_revision_conflict_and_manual_title(
   agent = _start(chat)
   payload = {
     "checkpoint_id": "cp-1",
-    "expected_revision": 0,
     "digest": "Implemented the first durable slice.",
     "summary": "Core work is underway.",
     "title": "Generated title",
@@ -65,9 +64,10 @@ def test_checkpoint_retry_revision_conflict_and_manual_title(
 
   stale = client.post(
     "/api/chat/continuity/checkpoints", headers=agent,
-    json={**payload, "checkpoint_id": "cp-2", "expected_revision": 0},
+    json={**payload, "checkpoint_id": "cp-2"},
   )
-  assert stale.status_code == 409
+  assert stale.status_code == 200
+  assert stale.json()["revision"] == 2
   db.expire_all()
   assert db.get(models.Chat, chat.id).title == "Owner title"
 
@@ -99,7 +99,7 @@ Related fact C.
   saved = client.post(
     "/api/chat/continuity/checkpoints", headers=agent,
     json={
-      "checkpoint_id": "after-legacy", "expected_revision": 0,
+      "checkpoint_id": "after-legacy",
       "digest": "New work started.",
     },
   )
@@ -152,7 +152,7 @@ def test_stale_running_row_cannot_checkpoint(client, chat, db):
     "/api/chat/continuity/checkpoints",
     headers={"Authorization": f"Bearer {stale_token}"},
     json={
-      "checkpoint_id": "stale-cp", "expected_revision": 0,
+      "checkpoint_id": "stale-cp",
       "digest": "Must not land.",
     },
   )
@@ -173,7 +173,7 @@ def test_ordinary_run_checkpoints_despite_historical_goal(client, chat, db):
   response = client.post(
     "/api/chat/continuity/checkpoints", headers=agent,
     json={
-      "checkpoint_id": "ordinary-checkpoint", "expected_revision": 0,
+      "checkpoint_id": "ordinary-checkpoint",
       "digest": "Discussion-only continuity is durable too.",
       "summary": "The ordinary turn remains current.",
     },

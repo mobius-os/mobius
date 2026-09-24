@@ -1477,6 +1477,24 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
     db.close()
 
 
+
+def test_native_context_hook_death_is_logged_without_payload(monkeypatch, caplog):
+  from claude_agent_sdk.types import HookEventMessage
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield HookEventMessage(subtype="hook_response", hook_event_name="SessionStart", data={
+        "hook_event": "SessionStart", "outcome": "error", "exit_code": 1,
+        "stderr": "sensitive hook payload", "session_id": "phantom",
+      })
+      yield _success_result("sess-hook")
+
+  _install_fake_client(monkeypatch, _Client)
+  result = asyncio.run(_run_turn("claude-hook-death"))
+  assert "SessionStart context hook failed" in caplog.text
+  assert "sensitive hook payload" not in caplog.text
+  assert result["session_id"] == "sess-hook"
+
 def test_dispatch_text_delta_emits_text():
   bus = _Bus()
   msg = _stream_delta("text_delta", text="hello")

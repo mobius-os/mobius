@@ -5831,7 +5831,7 @@ async def _run_chat_impl_with_db(
         sink = _ChatEventSink(
           bc, chat_id, run_token=run_token,
           recall_binding=recall_binding,
-        agent_activity_binding=agent_activity_binding,
+          agent_activity_binding=agent_activity_binding,
         )
         register_active_sink(chat_id, sink)
         sink.publish({

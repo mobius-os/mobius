@@ -1085,7 +1085,6 @@ class CheckpointContinuity(_Command):
   chat_id: str = ""
   run_token: str = ""
   checkpoint_id: str = ""
-  expected_revision: int = 0
   digest: str = ""
   summary: str | None = None
   title: str | None = None
@@ -4526,6 +4525,8 @@ class ChatWriterActor:
       or not self._run_is_latest(db, run)
     ):
       return {"status": "stale_run"}
+    if not cmd.digest and cmd.summary is None and not cmd.title:
+      return {"status": "unchanged"}
     if cmd.checkpoint_id == "legacy-baseline-v1":
       return {"status": "conflict", "reason": "reserved_checkpoint_id"}
 
@@ -4558,11 +4559,6 @@ class ChatWriterActor:
 
     state = db.get(models.ChatContinuity, cmd.chat_id)
     revision = state.revision if state is not None else 0
-    if revision != cmd.expected_revision:
-      return {
-        "status": "conflict", "reason": "revision_changed",
-        "revision": revision,
-      }
 
     if state is None:
       state = models.ChatContinuity(
@@ -4586,14 +4582,14 @@ class ChatWriterActor:
           legacy_markdown=cmd.legacy_markdown, created_at=now_naive(),
         ))
       revision = state.revision
-      # expected_revision=0 accepts the one-time import the caller could not
-      # observe as a database revision before its first checkpoint.
 
     covered_count = state.covered_message_count
     covered_hash = state.covered_prefix_hash
     delivered_count = run.delivered_message_count
     delivered_hash = run.delivered_prefix_hash
-    if delivered_count is not None and delivered_count >= covered_count:
+    if (cmd.summary is not None or cmd.digest) and (
+      delivered_count is not None and delivered_count >= covered_count
+    ):
       _tail, verified = verified_uncovered_messages(
         list(chat.messages or []), covered_count=delivered_count,
         covered_prefix_hash=delivered_hash,

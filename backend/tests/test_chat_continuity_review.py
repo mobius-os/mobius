@@ -28,7 +28,7 @@ def _agent(chat):
 
 def _save(client, headers, checkpoint="first", revision=0, **extra):
   return client.post("/api/chat/continuity/checkpoints", headers=headers, json={
-    "checkpoint_id": checkpoint, "expected_revision": revision,
+    "checkpoint_id": checkpoint,
     "digest": "New milestone, not a claim about earlier uncovered work.",
     **extra,
   })
@@ -244,17 +244,17 @@ def test_current_segments_and_late_steers_stay_uncovered():
   assert completed_prefix(source, "review-run")[1] != proof
 
 
-def test_two_same_revision_commands_have_one_winner(chat, db):
+def test_concurrent_commands_receive_serial_platform_revisions(chat, db):
   _agent(chat)
   futures = [get_writer().submit(CheckpointContinuity(
     chat_id=chat.id, run_token="review-run", checkpoint_id=identity,
-    expected_revision=0, digest=identity,
+    digest=identity,
   )) for identity in ("branch-a", "branch-b")]
   results = [future.result(timeout=5) for future in futures]
-  assert [result["status"] for result in results] == ["committed", "conflict"]
+  assert [result["status"] for result in results] == ["committed", "committed"]
   db.expire_all()
-  assert db.get(models.ChatContinuity, chat.id).revision == 1
-  assert db.query(models.ChatContinuityEntry).count() == 1
+  assert db.get(models.ChatContinuity, chat.id).revision == 2
+  assert db.query(models.ChatContinuityEntry).count() == 2
 
 
 def test_bounded_reads_do_not_fetch_full_historical_baseline(client, auth, chat, db):
