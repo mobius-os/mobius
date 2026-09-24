@@ -2865,7 +2865,7 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   and this returns False (no unmerged entries, `--check` not run).
   """
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
@@ -2873,22 +2873,23 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   return has_conflict_markers(repo)
 
 
+def _git_control_path(repo: Path, name: str) -> Path:
+  """Resolve per-worktree Git state without assuming `.git` is a directory."""
+  return Path(_run(
+    repo, "rev-parse", "--path-format=absolute", "--git-path", name,
+  ).stdout.strip())
+
+
 def merge_in_progress(source_dir: str | Path) -> bool:
   """Whether Git records an in-progress merge for this repository."""
   repo = Path(source_dir)
-  if not is_repo(repo):
-    return False
-  git_path = _run(repo, "rev-parse", "--git-path", "MERGE_HEAD").stdout.strip()
-  path = Path(git_path)
-  if not path.is_absolute():
-    path = repo / path
-  return path.is_file()
+  return is_repo(repo) and _git_control_path(repo, "MERGE_HEAD").is_file()
 
 
 def has_conflict_markers(source_dir: str | Path) -> bool:
   """Whether an in-progress merge's working tree still has text markers."""
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   # Scan tracked content for the labeled conflict boundaries. `git grep`
   # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
@@ -2907,7 +2908,7 @@ def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
   markers, so an unmerged binary path is never auto-accepted.
   """
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   listing = _run(repo, "ls-files", "-u", "-z").stdout
   paths = {
@@ -2972,17 +2973,16 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   repo = Path(source_dir)
   ensure_repo(repo)
   _require_local_branch(repo)
-  git_dir = repo / ".git"
-  merge_head_path = git_dir / "MERGE_HEAD"
+  merge_head_path = _git_control_path(repo, "MERGE_HEAD")
   # Refuse to touch the index while a rebase/cherry-pick/am is in progress
   # (see the docstring's HARD GATE). Scoped to "no MERGE_HEAD" so the merge
   # finalize path below still stages-then-scans. `ls-files -u` covers a
   # conflict left in the index with no state dir (e.g. a bare `read-tree -m`).
   if not merge_head_path.exists():
     in_progress = (
-      (git_dir / "rebase-merge").exists()
-      or (git_dir / "rebase-apply").exists()
-      or (git_dir / "CHERRY_PICK_HEAD").exists()
+      _git_control_path(repo, "rebase-merge").exists()
+      or _git_control_path(repo, "rebase-apply").exists()
+      or _git_control_path(repo, "CHERRY_PICK_HEAD").exists()
       or bool(_run(repo, "ls-files", "-u").stdout.strip())
     )
     if in_progress:
@@ -3020,13 +3020,29 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
       log.warning("could not carry contribution provenance across replay",
                   exc_info=True)
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-      (repo / ".git" / name).unlink(missing_ok=True)
+      _git_control_path(repo, name).unlink(missing_ok=True)
     return sha
   status = _run(repo, "status", "--porcelain").stdout.strip()
   if not status:
     return None
   _run(repo, "commit", "-q", "-m", msg)
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
+
+
+def preserve_local_tip_for_recovery(source_dir: str | Path) -> str:
+  """Pin the current app source before a deliberate upstream-only replacement.
+
+  The Store self-update must stay installable even if its own source conflicts;
+  this ref keeps the displaced local tree (including captured working edits)
+  reachable for a later owner-guided reconciliation.
+  """
+  repo = Path(source_dir)
+  tip = head_sha(repo, LOCAL_BRANCH)
+  if not tip:
+    raise RuntimeError("local app source is unavailable for recovery")
+  ref = f"refs/mobius/app-pre-update/{tip}"
+  _run(repo, "update-ref", ref, tip)
+  return ref
 
 
 def commit_replay(
@@ -3970,9 +3986,8 @@ def start_conflict_merge(
             repo, "checkout", "--conflict=merge", "--", path, check=False,
           )
       _run(repo, "update-ref", "ORIG_HEAD", local_sha)
-      git_dir = repo / ".git"
-      (git_dir / "MERGE_HEAD").write_text(upstream_sha + "\n")
-      (git_dir / "MERGE_MSG").write_text(
+      _git_control_path(repo, "MERGE_HEAD").write_text(upstream_sha + "\n")
+      _git_control_path(repo, "MERGE_MSG").write_text(
         f"Merge {upstream_branch} with reviewed contribution base\n"
       )
       merged = subprocess.CompletedProcess(
@@ -3981,7 +3996,7 @@ def start_conflict_merge(
     except Exception:
       _run(repo, "reset", "--hard", local_sha, check=False)
       for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-        (repo / ".git" / name).unlink(missing_ok=True)
+        _git_control_path(repo, name).unlink(missing_ok=True)
       raise
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
@@ -3994,12 +4009,12 @@ def start_conflict_merge(
   if merged.returncode != 0 and not conflict_paths:
     detail = merged.stderr.strip() or merged.stdout.strip()
     raise RuntimeError(f"git merge failed (rc={merged.returncode}): {detail}")
-  if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
+  if not conflict_paths and merge_in_progress(repo):
     # Real/explicit-base materialization resolved clean despite the earlier
     # verdict. Don't strand a dangling merge; restore the committed local state.
     _run(repo, "reset", "--hard", local_sha, check=False)
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-      (repo / ".git" / name).unlink(missing_ok=True)
+      _git_control_path(repo, name).unlink(missing_ok=True)
   return conflict_paths
 
 
@@ -4013,7 +4028,7 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
   (committed local) state. Returns True if a merge was aborted, else False.
   """
   repo = Path(source_dir)
-  if not is_repo(repo) or not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   _run(repo, "merge", "--abort", check=False)
   return True
@@ -4232,7 +4247,8 @@ class BenignResolution:
 
 
 def resolve_benign_conflict(
-  source_dir: str | Path, conflict_paths: list[str]
+  source_dir: str | Path, conflict_paths: list[str],
+  *, merge_base: str | None = None,
 ) -> BenignResolution | None:
   """Full merged source tree with every BENIGN conflict auto-resolved, or None
   when any conflicting file carries a genuine overlap.
@@ -4258,9 +4274,11 @@ def resolve_benign_conflict(
   # conflict paths from THIS run (not the caller's list) so the tree oid and the
   # paths we overwrite are guaranteed to come from the same merge — a marker can
   # never leak through a path mismatch.
+  args = ["merge-tree", "--write-tree", "--name-only"]
+  if merge_base is not None:
+    args.extend(("--merge-base", merge_base))
   proc = _run(
-    repo, "merge-tree", "--write-tree", "--name-only",
-    LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    repo, *args, LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
   )
   if proc.returncode != 1:
     return None
@@ -4275,21 +4293,30 @@ def resolve_benign_conflict(
     merge_conflicts.append(ln)  # verbatim — a path may legitimately hold spaces
   if not merge_conflicts:
     return None
-  base_proc = _run(
-    repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
-  )
-  base_ref = base_proc.stdout.strip()
-  if base_proc.returncode != 0 or not base_ref:
-    return None
+  if merge_base is None:
+    base_proc = _run(
+      repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    )
+    base_ref = base_proc.stdout.strip()
+    if base_proc.returncode != 0 or not base_ref:
+      return None
+  else:
+    base_ref = merge_base
   resolved: dict[str, bytes] = {}
   for rel in merge_conflicts:
     ours = read_blob(repo, LOCAL_BRANCH, rel)
     theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
     base_blob = read_blob(repo, base_ref, rel)
-    # An add/add or delete conflict (a side missing the file) is not a benign
-    # shape we reconcile here; leave it to the owner.
-    if ours is None or theirs is None or base_blob is None:
+    # A deletion still needs the owner. A JSON manifest independently added
+    # on both sides can be merged from the empty object: matching keys agree,
+    # disjoint keys combine, and divergent non-version keys remain conflicts.
+    # Other add/add source files have no structural contract and stay manual.
+    if ours is None or theirs is None:
       return None
+    if base_blob is None:
+      if rel.rsplit("/", 1)[-1] not in _JSON_MANIFESTS:
+        return None
+      base_blob = b"{}"
     merged = _resolve_benign_conflict_file(rel, base_blob, ours, theirs)
     if merged is None:
       return None

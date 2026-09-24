@@ -207,6 +207,13 @@ test('simple Updates keeps versions and server restart visible outside optional 
   assert.match(updates, /aria-label="Confirm restart"/)
 })
 
+test('saved platform edits have one direct review action', () => {
+  assert.match(updates, /const savedEdits = Boolean\(platform\?\.late_changes\)/)
+  assert.match(updates, /Review saved edits[\s\S]*act: update\.resolve/)
+  assert.match(requests, /platform\?\.late_changes\?\.chat_id/)
+  assert.doesNotMatch(updates, /Ask Möbius to reconcile/)
+})
+
 test('external update instructions come from the activation owner, not a second UI policy', () => {
   assert.match(updates, /platform\?\.activation\?\.guidance/)
   assert.doesNotMatch(updates, /scripts\/deploy-prod\.sh|hostMaintenanceNeeded|little maintenance/)

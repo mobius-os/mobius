@@ -3959,14 +3959,10 @@ async def install_from_manifest(
           await asyncio.to_thread(
             app_git.abort_in_progress_merge, git_source_dir,
           )
-        # Update of an app already on the Git model. First capture any
-        # unapplied on-disk draft onto `main` so the divergence check and any
-        # merge see the real local source.
-        await asyncio.to_thread(
-          app_git.commit_local, git_source_dir,
-          "local edits before update",
-        )
         if reviewed_resolution_tree_oid is not None:
+          # The resolver reviewed the complete source tree. A writer can edit
+          # it after the route's check but before this installer takes the
+          # source lock. Reject that drift before committing it to main.
           replay_snapshot = await asyncio.to_thread(
             app_git.snapshot_worktree, git_source_dir,
           )
@@ -3981,6 +3977,13 @@ async def install_from_manifest(
                 ),
               },
             )
+        # Update of an app already on the Git model. First capture any
+        # unapplied on-disk draft onto `main` so the divergence check and any
+        # merge see the real local source.
+        await asyncio.to_thread(
+          app_git.commit_local, git_source_dir,
+          "local edits before update",
+        )
         # Decide divergence against the PREVIOUS upstream before advancing
         # it. When local `main` never diverged from what upstream last
         # shipped, the new upstream is the answer outright: no three-way
@@ -4260,11 +4263,20 @@ async def install_from_manifest(
           reconciliation = merge.reconciliation
           if merge.status == "conflict":
             if force_core_store_update:
-              # Core App Store self-update: published upstream wins, keep the
-              # fetched `source_tree` and apply it like a fast-forward.
-              warnings.append(
-                "core App Store self-update replaced local edits with upstream"
+              # The Store must remain able to update itself even when its own
+              # source conflicts. Pin its full local tip before choosing the
+              # reviewed upstream tree so that choice is recoverable.
+              recovery_ref = await asyncio.to_thread(
+                app_git.preserve_local_tip_for_recovery, git_source_dir,
               )
+              log.info("Store source saved before self-update: %s", recovery_ref)
+              warnings.append(
+                "App Store updated; previous local edits were saved "
+                "for recovery"
+              )
+              # This is an intentional upstream choice, not an unresolved
+              # merge. The displaced local tip is the recovery receipt.
+              reconciliation = app_git.ReconciliationReceipt()
               divergence = "fast_forward"
               merge_applied = True
             else:
@@ -4275,6 +4287,7 @@ async def install_from_manifest(
               benign = await asyncio.to_thread(
                 app_git.resolve_benign_conflict,
                 git_source_dir, merge.conflict_paths,
+                merge_base=git_merge_base_override,
               )
               resolved_source = None
               if benign is not None:

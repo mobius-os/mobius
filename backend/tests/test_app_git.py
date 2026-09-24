@@ -3562,6 +3562,75 @@ def test_version_only_conflict_resolves_to_upstream(tmp_path):
   assert tree["index.jsx"] == jsx
 
 
+def test_add_add_manifest_uses_recorded_base_without_shared_history(
+  tmp_path,
+):
+  """A synthetic base lacking mobius.json can prove disjoint manifest additions.
+
+  The real release may be unrelated to the installed Git history. Both the
+  first merge and benign resolution must use the same recorded previous version.
+  """
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  _diverge(
+    repo,
+    local_files={"index.jsx": jsx, "mobius.json": _manifest("1.0.1")},
+    upstream_files={
+      "index.jsx": jsx,
+      "mobius.json": _manifest("2.0.0").replace(
+        b'"entry": "index.jsx"',
+        b'"entry": "index.jsx", "model_provider": {"models": []}',
+      ),
+    },
+    base_files={"index.jsx": jsx},
+  )
+  base = app_git._run(repo, "rev-parse", "main~1").stdout.strip()
+  release_tree = app_git._run(repo, "rev-parse", "upstream^{tree}").stdout.strip()
+  unrelated_release = app_git._run(
+    repo, "commit-tree", release_tree, "-m", "unrelated reviewed release",
+  ).stdout.strip()
+  app_git._run(repo, "update-ref", "refs/heads/upstream", unrelated_release)
+  assert app_git._run(repo, "merge-base", "main", "upstream", check=False).returncode == 1
+
+  merge = app_git.merge_refs(repo, "main", "upstream", merge_base=base)
+  assert merge.status == "conflict"
+  assert "mobius.json" in merge.conflict_paths
+  resolved = app_git.resolve_benign_conflict(
+    repo, merge.conflict_paths, merge_base=base,
+  )
+  assert resolved is not None
+  assert json.loads(resolved.tree["mobius.json"]) == {
+    "id": "demo", "name": "Demo", "version": "2.0.0",
+    "entry": "index.jsx", "model_provider": {"models": []},
+  }
+
+
+def test_add_add_manifest_does_not_auto_merge_permission_disagreement(tmp_path):
+  """A missing manifest base never authorizes a conflicting permission edit."""
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  common = {"id": "demo", "name": "Demo", "entry": "index.jsx"}
+  _diverge(
+    repo,
+    local_files={
+      "index.jsx": jsx,
+      "mobius.json": json.dumps({
+        **common, "version": "1.0.0", "permissions": {"data.github_access": False},
+      }).encode(),
+    },
+    upstream_files={
+      "index.jsx": jsx,
+      "mobius.json": json.dumps({
+        **common, "version": "2.0.0", "permissions": {"data.github_access": True},
+      }).encode(),
+    },
+    base_files={"index.jsx": jsx},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
+
+
 def test_version_only_conflict_preserves_disjoint_local_edit(tmp_path):
   """A version bump AND a disjoint local code edit: resolve to upstream version
   while carrying the unrelated local edit forward (never silently dropped)."""

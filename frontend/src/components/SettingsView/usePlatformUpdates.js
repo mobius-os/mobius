@@ -286,7 +286,8 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
 
   async function resolve() {
     if (pending.current || busy || !onOpenChat) return
-    if (platform?.conflict_chat_id) { onOpenChat(platform.conflict_chat_id); return }
+    const existingChat = platform?.conflict_chat_id || platform?.late_changes?.chat_id
+    if (existingChat) { onOpenChat(existingChat); return }
     pending.current = true
     setPhase('resolving'); setError('')
     try {

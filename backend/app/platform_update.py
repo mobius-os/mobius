@@ -1,45 +1,38 @@
-"""Platform self-update — clone-native ``git fetch`` + linear overlay replay.
+"""Platform self-update — fetch one reviewed release and merge final source trees.
 
 ``/data/platform`` is a real ``git clone`` of the canonical repo; uvicorn serves
 its backend directly (``cd /data/platform/backend && uvicorn app.main:app``).
-Local ``main`` is the exact accepted upstream commit (recorded by the
-``upstream`` marker branch) plus a LINEAR overlay of local commits, each tagged
-with the unit it belongs to and why it is local (see ``app_git`` overlay
-trailers). Only an explicit update replays that overlay onto a new target.
+Local ``main`` contains the exact accepted upstream commit (recorded by the
+``upstream`` marker branch) plus local changes. An explicit update compares
+the final local and reviewed upstream trees once, then records their resolved
+net local delta as one linear commit on the reviewed target.
 Owner Apply pins the exact target returned by the review plan; backend changes
 then need a restart to load. Startup recovers interrupted work and runs the
 installed source, without fetching or selecting another release.
 
-Upstream is never merged INTO local history: that woven the same change in
-twice whenever a contribution landed upstream under a squash identity, and
-every later update re-merged an ever-larger local lineage. Instead each update
-drops the overlay commits proven to have landed (equivalence anchors by
-patch-id, or a cherry-pick that becomes empty), replays the rest in an
-isolated worktree, and moves ``main`` to the candidate only once it is
-complete. ``upstream..main`` therefore always reads as exactly what this
-installation carries on top of upstream.
+Historical local commits are not replayed: many may be obsolete copies of
+changes already merged upstream. Reviewed equivalence anchors can improve the
+single merge base; any residual conflict is resolved once in an isolated
+worktree. The old local tip stays reachable under a pre-update ref for undo.
 
 The reconcile is built to be non-destructive above all else:
 
 1. ``/data/platform`` holds the SERVED backend, so a reconcile must never leave a
-   half-applied tree. A replay conflict stays in the candidate worktree (the
+   half-applied tree. A merge conflict stays in the candidate worktree (the
    old, working code keeps serving) and is surfaced for a resolver; a crash
    mid-reconcile is detected on the next boot and reset before anything else
    runs. Legacy interrupted merges and rebases are still cleaned up too.
 
-2. Local edits are NEVER lost. Uncommitted working-tree edits ride through the
-   update as a transient overlay commit and return to the working tree
-   afterwards, so ``git status`` reads the same before and after. A conflict
-   or an import-broken result rolls the served tree back to exactly those
-   local edits.
+2. Update-owned local edits are pinned before source moves. Uncommitted
+   working-tree edits ride separately through the update and return to the
+   working tree afterwards. A conflict or import-broken result rolls back.
+   Direct filesystem writers that ignore the reconcile lock can still race
+   the final tree check and checkout; a Git CAS alone cannot freeze them.
 
-3. A clean replay can still produce a tree that fails to import (e.g. upstream
-   deleted a module a local edit still imports). A post-replay import probe
+3. A clean merge can still produce a tree that fails to import (e.g. upstream
+   deleted a module a local edit still imports). A post-merge import probe
    catches that and rolls back to the previous served commit rather than
    serving a broken tree.
-
-Merge-shaped pre-overlay history is never rewritten automatically. The update
-returns an explicit normalization error and leaves the served tree untouched.
 
 Availability is an EXACT ancestry check, not a sha-string compare: an update is
 available iff the configured target is NOT already an ancestor of local ``main`` — the
@@ -70,7 +63,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, NotRequired, TypedDict
 
 from sqlalchemy.orm import Session
 
@@ -116,6 +109,13 @@ ROLLED_BACK_FLAG = Path("/data/.platform-rolled-back")
 # post-timeout boot guard uses this sha to restore the last committed served tip
 # before uvicorn imports anything.
 RECONCILE_PRE_FLAG = Path("/data/.platform-reconcile-pre")
+# A resolver-prepared release activated while live-source changes made after
+# its resolution could not be layered on it. The late work is pinned under
+# _LATE_CHANGES_REF_PREFIX; this record exposes it as pending, never applied.
+LATE_CHANGES_FLAG = Path("/data/.platform-late-changes")
+# A pinned dirty snapshot remains discoverable across a process kill between
+# the live-tree switch and its uncommitted-edit restoration.
+LATE_SNAPSHOT_FLAG = Path("/data/.platform-late-snapshot")
 # A filesystem lock shared by the startup recovery subprocess and the running
 # uvicorn's Apply path. It MUST be a real flock (not an asyncio.Lock): the boot
 # reconcile runs in a throwaway ``python3 -c`` process, so an in-process lock
@@ -143,14 +143,21 @@ OWNER_UPDATE_FETCH_REFSPEC = (
 # Keeps an off-tree semantic merge-base tree reachable while an owner may leave
 # a platform conflict unresolved across Git maintenance or server restarts.
 _CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
+# Keeps late committed and uncommitted work reachable when a frozen release
+# activates without it (see LATE_CHANGES_FLAG).
+_LATE_CHANGES_REF_PREFIX = "refs/mobius/platform-late-changes/"
+# A staged working-edit conflict may refer to an otherwise unreachable
+# synthetic committed release. Keep it until resolution or explicit recovery.
+_PARKED_RIGHT_REF_PREFIX = "refs/mobius/platform-parked-right/"
+_LATE_CHANGE_SUBJECT = "Carry local platform changes made during update resolution"
 
 # The platform tree is larger than an app but still small; a git op slower than
 # this is wedged, not busy. Fetch gets its own (network-bound) budget.
 _GIT_TIMEOUT = 120
 _FETCH_TIMEOUT = 120
-# The candidate worktree an update replays the overlay into. It lives inside
+# The candidate worktree an update reconciles the final trees in. It lives inside
 # the clone's own git directory so neither the outer ``/data`` safety repo nor
-# the platform tree ever sees it as content, and a conflicting replay can stay
+# the platform tree ever sees it as content, and a conflicting merge can stay
 # parked there for a resolver without touching the served checkout.
 _OVERLAY_CANDIDATE_DIRNAME = "mobius-overlay-candidate"
 # The post-merge import probe. A module-level infinite loop or a blocking call
@@ -286,9 +293,14 @@ class PlatformStatus(TypedDict):
   rollback_target_sha: str | None
   rollback_error: str | None
   # The overlay invariant: ``linear`` when the contained upstream commit is an
-  # ancestor of local main with no merge between them; ``units`` lists what
-  # this installation carries on top of upstream, in replay order.
+  # ancestor of local main with no merge between them; ``units`` describes the
+  # net local change that this installation carries on top of upstream.
   overlay: dict | None
+  # Live-source work made while a resolved release was parked that could not
+  # be layered on it. The release is active; this work is pinned at ``ref``
+  # and still pending. None when nothing is pending. Optional so managed
+  # status projections that never park a resolver need not carry it.
+  late_changes: NotRequired[dict | None]
 
 
 class PlatformApplyResult(TypedDict):
@@ -724,15 +736,19 @@ def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
       _reset_hard_to(repo, local, pre)
       restored = True
     _clear_reconcile_pre()
-    _restore_working_edits(repo, local)
+    restored_working = _restore_working_edits(repo, local)
+    late = _recover_late_snapshot(repo, local, restored_working)
     state = "reset" if restored else "preserved"
-    return f"boot_guard[{state}] pre={_short(pre)}"
+    return f"boot_guard[{state}] pre={_short(pre)}" + (
+      f" late={late}" if late else ""
+    )
   if interrupted:
     _git("checkout", "-q", local, repo=repo, check=False)
     _git("reset", "--hard", local, repo=repo, check=False)
   _clear_reconcile_pre()
-  _restore_working_edits(repo, local)
-  return "boot_guard[clean]"
+  restored_working = _restore_working_edits(repo, local)
+  late = _recover_late_snapshot(repo, local, restored_working)
+  return "boot_guard[clean]" + (f" late={late}" if late else "")
 
 
 def _fetch(
@@ -773,25 +789,136 @@ def _parked_overlay_for(repo: Path, tip: str) -> dict | None:
   """The parked replay that still belongs to the served tip, if any.
 
   A replay is parked against the committed tip the owner had (``served``);
-  its candidate worktree must still exist for a resolver to finish it.
+  its candidate worktree must still exist for a resolver to finish it. Later
+  commits on top of that tip do not orphan it: they are carried as one late
+  delta when the parked resolution activates.
   """
   parked = (_read_conflict_flag() or {}).get("overlay")
   if not parked or not tip:
     return None
   worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
-  if str(parked.get("served") or "") != tip or not (worktree / ".git").exists():
+  served = str(parked.get("served") or "")
+  if not served or not (worktree / ".git").exists():
+    return None
+  if served != tip and not _is_ancestor(repo, served, tip):
     return None
   return parked
 
 
-def _activate_candidate(repo: Path, local: str, pre_sha: str, tip: str) -> None:
+def _commit_tree_oid(repo: Path, commit: str) -> str | None:
+  """Resolve one commit's tree without accepting another object type."""
+  if not commit:
+    return None
+  oid = _git(
+    "rev-parse", "--verify", "--quiet", f"{commit}^{{tree}}",
+    repo=repo, check=False,
+  ).stdout.strip().lower()
+  return oid if re.fullmatch(r"[0-9a-f]{40}", oid) else None
+
+
+def _is_sha(value: object) -> bool:
+  return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{40}", value))
+
+
+def _prepared_overlay_for(
+  repo: Path, *, served: str, target: str,
+) -> dict | None:
+  """Return a frozen, resolver-prepared release for ``target``, if intact.
+
+  The release was resolved against one served source tree and is frozen
+  there. Live-source changes made since are layered on it as one late delta
+  (see :func:`_frozen_release_tip`), so they never invalidate it. Reuse still
+  requires the exact reviewed target, a clean worktree, and its HEAD at the
+  frozen resolution.
+  """
+  parked = _parked_overlay_for(repo, served)
+  if not parked or parked.get("ready") is not True:
+    return None
+  release = parked.get("release")
+  resolution = parked.get("working_release") or release
+  worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
+  if (
+    str(parked.get("target") or "") != target
+    or not _is_sha(release) or not _is_sha(resolution)
+    or not _is_sha(parked.get("source"))
+    or _rev(worktree, "HEAD") != resolution
+    or _rev(repo, str(release)) != release
+    or not _is_ancestor(repo, target, str(release))
+    or _git("status", "--porcelain", repo=worktree, check=False).stdout.strip()
+  ):
+    return None
+  return parked
+
+
+def _write_frozen_release(
+  repo: Path,
+  *,
+  parked: dict,
+  target: str,
+  source: str,
+  release: str,
+  working_release: str | None,
+  working_source: str | None,
+  chat_id: str | None,
+) -> dict:
+  """Persist a resolved release frozen against its initial served source.
+
+  ``release`` is the one local commit on ``target`` resolved from ``source``.
+  For a parked working-edit conflict, ``working_release`` is the resolver's
+  dirty tree on ``release``, resolved from ``working_source``. Nothing here
+  depends on the live branch, so later edits cannot invalidate it.
+  """
+  worktree = _overlay_candidate_path(repo)
+  _git("merge", "--quit", repo=worktree, check=False)
+  _git("reset", "-q", "--hard", working_release or release, repo=worktree)
+  frozen = {
+    **parked,
+    "ready": True,
+    "served": source,
+    "source": source,
+    "release": release,
+    "working_release": working_release,
+    "working_source": working_source,
+    "target": target,
+    "worktree": str(worktree),
+    "paths": [],
+    "remaining": [],
+  }
+  _write_conflict_flag(target, [], chat_id, overlay=frozen)
+  return frozen
+
+
+def _activate_candidate(
+  repo: Path, local: str, pre_sha: str, tip: str,
+  *, expected_working_tree: str | None = None,
+) -> None:
   """Move the served branch to a complete candidate, compare-and-swap.
 
   The update refuses if another writer moved the local branch after
   ``pre_sha``; only after that succeeds does the checked-out tree follow.
   """
+  if _rev(repo, local) != pre_sha:
+    raise PlatformUpdateError(
+      "activation_ref_changed: a newer writer owns the served branch"
+    )
+  if (
+    expected_working_tree is not None
+    and _working_tree_oid(repo, pre_sha) != expected_working_tree
+  ):
+    raise PlatformUpdateError(
+      "activation_tree_changed: platform files changed after the update snapshot"
+    )
   _write_reconcile_pre(pre_sha, tip)
-  _git("update-ref", f"refs/heads/{local}", tip, pre_sha, repo=repo)
+  moved = _git(
+    "update-ref", f"refs/heads/{local}", tip, pre_sha, repo=repo, check=False,
+  )
+  if moved.returncode != 0:
+    # Nothing moved: the newer writer keeps the branch and its tree, and a
+    # prepared candidate stays parked for a later attempt.
+    _clear_reconcile_pre()
+    raise PlatformUpdateError(
+      "activation_ref_changed: a newer writer owns the served branch"
+    )
   try:
     _git("checkout", "-q", local, repo=repo)
     _git("reset", "--hard", tip, repo=repo)
@@ -1988,6 +2115,7 @@ def _roll_back_failed_frontend_build(
   # Apply does not create/replace the restart marker until preparation succeeds.
   # A marker already present before this attempt belongs to earlier on-disk
   # backend changes and must survive this failed frontend candidate.
+  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
   CONFLICT_FLAG.unlink(missing_ok=True)
   message = f"frontend_build_failed: {error!r}"[:_ERROR_EXCERPT_CHARS]
   restore_error = _restore_update_dependencies(
@@ -2028,6 +2156,147 @@ def _carry_working_edits(repo: Path, local: str) -> _Carried:
   ))
   pre = _rev(repo, local) or served
   return _Carried(served=served, pre=pre, working=pre if pre != served else None)
+
+
+def _snapshot_late_working_edits(repo: Path, local: str) -> _Carried:
+  """Capture a parked update's dirty tree without moving its served branch.
+
+  The temporary index includes ordinary tracked and unignored new files, but
+  neither the real index nor ``main`` changes. Pin the synthetic commit before
+  any checkout can replace these bytes; a crash or rejected activation still
+  leaves an explicit recovery object instead of an unreachable loose commit.
+  """
+  served = _rev(repo, local)
+  if not served:
+    raise PlatformUpdateError("The served platform commit is unavailable.")
+  tree = _working_tree_oid(repo, served)
+  if tree == _commit_tree_oid(repo, served):
+    return _Carried(served, served, None)
+  working = _working_overlay_commit(repo, served, tree)
+  _git("update-ref", _LATE_CHANGES_REF_PREFIX + working, working, repo=repo)
+  return _Carried(served, working, working)
+
+
+def _write_late_snapshot(carried: _Carried) -> None:
+  if carried.working:
+    _atomic_write_text(
+      LATE_SNAPSHOT_FLAG,
+      json.dumps(
+        {"served": carried.served, "snapshot": carried.pre},
+        separators=(",", ":"),
+      ) + "\n",
+    )
+
+
+def _read_late_snapshot(repo: Path) -> _Carried | None:
+  try:
+    record = json.loads(LATE_SNAPSHOT_FLAG.read_text())
+  except (OSError, ValueError):
+    return None
+  if not isinstance(record, dict):
+    return None
+  served, snapshot = record.get("served"), record.get("snapshot")
+  if not (_is_sha(served) and _is_sha(snapshot)):
+    return None
+  if _rev(repo, _LATE_CHANGES_REF_PREFIX + snapshot) != snapshot:
+    return None
+  return _Carried(served, snapshot, snapshot)
+
+
+def _recover_late_snapshot(
+  repo: Path, local: str, restored_working: bool,
+) -> str | None:
+  """Recover a crash-stranded dirty tree or keep its pin visibly pending."""
+  carried = _read_late_snapshot(repo)
+  if carried is None:
+    return None
+  if restored_working:
+    # Boot unwound the tagged transient commit. Keep the snapshot pin for
+    # recovery history rather than infer byte identity from that tag alone.
+    LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
+    return "restored"
+  try:
+    restored_old = _restore_rejected_late_snapshot(repo, local, carried)
+  except PlatformUpdateError:
+    restored_old = False
+  if restored_old:
+    LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
+    _git(
+      "update-ref", "-d", _LATE_CHANGES_REF_PREFIX + carried.pre,
+      repo=repo, check=False,
+    )
+    return "restored"
+  if _pending_late_changes(repo, _rev(repo, local)) is not None:
+    LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
+  return "pending"
+
+
+def _working_tree_oid(repo: Path, base: str) -> str:
+  """Snapshot tracked and unignored files without changing the shared index."""
+  with tempfile.TemporaryDirectory(prefix="mobius-platform-index-") as tmp:
+    index = Path(tmp) / "index"
+    app_git._run_with_index(repo, index, "read-tree", base)
+    app_git._run_with_index(repo, index, "add", "-A", ".")
+    return app_git._run_with_index(repo, index, "write-tree").stdout.strip()
+
+
+def _restore_rejected_late_snapshot(repo: Path, local: str, carried: _Carried) -> bool:
+  """Put an off-branch dirty snapshot back after rollback to its exact base.
+
+  A concurrent branch or working-tree writer owns its new state: never apply
+  this snapshot over it. The pinned commit remains available for recovery.
+  """
+  if not carried.working or _rev(repo, local) != carried.served:
+    return False
+  if _git("status", "--porcelain", repo=repo).stdout.strip():
+    # A failed compare-and-swap may have left the original bytes in place.
+    # Prove that before releasing the recovery pin; never mistake a newer
+    # writer's different dirty tree for the one we captured.
+    return _working_tree_oid(repo, carried.served) == _commit_tree_oid(
+      repo, carried.pre,
+    )
+  diff = subprocess.run(
+    ["git", "-C", str(repo), "diff", "--binary", carried.served, carried.pre],
+    capture_output=True, check=True, timeout=_GIT_TIMEOUT,
+    env=_scrubbed_git_env(repo),
+  ).stdout
+  command = ["git", "-C", str(repo), "apply", "--binary"]
+  check = subprocess.run(
+    [*command, "--check"], input=diff, capture_output=True,
+    check=False, timeout=_GIT_TIMEOUT, env=_scrubbed_git_env(repo),
+  )
+  if check.returncode != 0:
+    raise PlatformUpdateError(
+      "The late working edits could not be restored automatically; their "
+      f"recovery ref is {_LATE_CHANGES_REF_PREFIX}{carried.pre}."
+    )
+  subprocess.run(
+    command, input=diff, capture_output=True, check=True,
+    timeout=_GIT_TIMEOUT, env=_scrubbed_git_env(repo),
+  )
+  return True
+
+
+def _settle_late_snapshot(
+  repo: Path, local: str, carried: _Carried, *, activated_clean: bool = False,
+) -> bool:
+  """Restore dirty edits or retire a proven, fully integrated snapshot."""
+  restored_on_release = _restore_working_edits(repo, local)
+  restored_on_old = (
+    False if restored_on_release
+    else _restore_rejected_late_snapshot(repo, local, carried)
+  )
+  if carried.working and (
+    restored_on_release or restored_on_old or activated_clean
+  ):
+    LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
+    _git(
+      "update-ref", "-d", _LATE_CHANGES_REF_PREFIX + carried.pre,
+      repo=repo, check=False,
+    )
+  elif carried.working and _pending_late_changes(repo, _rev(repo, local)):
+    LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
+  return restored_on_release
 
 
 def _reconcile_pass(
@@ -2089,13 +2358,48 @@ def _reconcile_pass(
   # replay underneath the resolver's edits; Settings still shows that newer
   # releases are stacked up behind the parked one.
   parked = _parked_overlay_for(repo, pre)
-  if parked is not None:
+  if parked is not None and parked.get("ready") is not True:
     flag = _read_conflict_flag() or {}
     return ReconcileResult.unchanged(
       "conflict", pre, str(parked.get("target") or target),
       conflict_paths=list(flag.get("paths") or []),
       overlay=parked,
     )
+
+  # A resolver-completed release already has its immutable X commit. Do not
+  # run the ordinary pre-update carry here: that would temporarily commit
+  # late dirty edits onto the live main before the compare-and-swap. Snapshot
+  # them off-branch and layer their net tree on X instead.
+  prepared = _prepared_overlay_for(repo, served=pre, target=target)
+  if prepared is not None:
+    _reattach_detached_head(repo, local)
+    carried = _snapshot_late_working_edits(repo, local)
+    _write_late_snapshot(carried)
+    restored_on_release = False
+    planned = None
+    try:
+      planned = _frozen_release_tip(repo, prepared, carried)
+      if _changes_python_dependencies(repo, carried.pre, planned.tip):
+        raise PlatformUpdateError("image_rebuild_required")
+      result = _activate_frozen_release(
+        repo, local, frozen=prepared, carried=carried,
+        planned=planned, target=target, progress=progress,
+      )
+    except Exception as exc:
+      result = ReconcileResult.unchanged(
+        "error", carried.served, target, error=repr(exc),
+      )
+    finally:
+      restored_on_release = _settle_late_snapshot(
+        repo, local, carried,
+        activated_clean=(
+          result.status == "updated" and planned is not None
+          and not planned.late_paths
+        ),
+      )
+    if restored_on_release and result.status == "updated":
+      return replace(result, new_sha=_rev(repo, local) or result.new_sha)
+    return result
 
   if progress:
     progress(PlatformUpdatePhase.RECONCILING)
@@ -2114,6 +2418,13 @@ def _reconcile_pass(
   # (The conflict/rollback branches below return normally; only a real error
   # reaches the except.)
   try:
+    # A prepared release is reusable only for its exact reviewed target. Once
+    # that changes, retire it before constructing the new exact candidate in
+    # the same owned worktree location.
+    if parked is not None and parked.get("ready") is True:
+      app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+      CONFLICT_FLAG.unlink(missing_ok=True)
+
     # Do not unshallow a clean instance merely because it is many releases
     # behind. The normal fetch has already transferred the new first-parent
     # chain, so Git can prove the overwhelmingly common fast-forward directly.
@@ -2168,8 +2479,11 @@ def _reconcile_pass(
     # Nothing here is actionable by a resolver, and any earlier flag belonged
     # to an attempt this pass already superseded: leave the served tree at PRE
     # with no stale conflict/rollback state to mislead the next status read.
-    app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-    CONFLICT_FLAG.unlink(missing_ok=True)
+    # A frozen resolved release is not superseded by a failed activation (for
+    # example a concurrent branch move); keep it for the next attempt.
+    if _prepared_overlay_for(repo, served=_rev(repo, local), target=target) is None:
+      app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+      CONFLICT_FLAG.unlink(missing_ok=True)
     ROLLED_BACK_FLAG.unlink(missing_ok=True)
     _clear_reconcile_pre()
     return ReconcileResult.unchanged("error", pre, target, error=repr(exc))
@@ -2186,6 +2500,7 @@ def _roll_back_update(
       error="rollback_ref_changed: a newer writer owns the served branch",
     )
   _write_rolled_back_flag(target, message)
+  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
   CONFLICT_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
   return ReconcileResult.unchanged("rolled_back", pre, target, error=error)
@@ -2201,6 +2516,7 @@ def _finalize_update(
   progress: Callable[[PlatformUpdatePhase], None] | None,
   reconciliation: app_git.ReconciliationReceipt,
   overlay: dict | None,
+  expected_working_tree: str | None = None,
 ) -> ReconcileResult:
   """Move the served branch to a complete candidate and run every gate.
 
@@ -2217,8 +2533,19 @@ def _finalize_update(
   frontend_changed = any(path in _FRONTEND_DEPENDENCY_INPUTS for path in changed)
   touched_frontend = any(path.startswith("frontend/") for path in changed)
 
-  _activate_candidate(repo, local, pre, tip)
-  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+  if (overlay or {}).get("mode") == "net" and tip != pre:
+    # The new linear commit replaces the old local commit chain. Keep that
+    # chain reachable for undo and source-history inspection after promotion.
+    _git(
+      "update-ref", f"refs/mobius/platform-pre-update/{pre}", pre,
+      repo=repo,
+    )
+  if expected_working_tree is None:
+    _activate_candidate(repo, local, pre, tip)
+  else:
+    _activate_candidate(
+      repo, local, pre, tip, expected_working_tree=expected_working_tree,
+    )
 
   # Post-reconcile import probe: a text-clean replay can still produce a tree
   # that fails to import (upstream dropped a module a local edit imports; a bad
@@ -2248,7 +2575,6 @@ def _finalize_update(
     log.warning("platform: could not update contribution provenance", exc_info=True)
   previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
   _set_upstream(repo, target)
-  CONFLICT_FLAG.unlink(missing_ok=True)
   ROLLED_BACK_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
   result = ReconcileResult(
@@ -2257,6 +2583,8 @@ def _finalize_update(
     overlay=overlay,
   )
   if not touched_frontend:
+    app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+    CONFLICT_FLAG.unlink(missing_ok=True)
     return result
   # Source moved without a watcher event. Dropping the build stamp makes the
   # watcher's startup check (and /api/version's freshness fact) see the
@@ -2278,6 +2606,8 @@ def _finalize_update(
       repo, result, previous_upstream_sha, exc,
       frontend_changed=frontend_changed,
     )
+  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+  CONFLICT_FLAG.unlink(missing_ok=True)
   return result
 
 
@@ -2324,74 +2654,6 @@ class _Candidate:
   overlay: dict
 
 
-def _overlay_summary(
-  commits: list[app_git.OverlayCommit],
-  replay: app_git.OverlayReplayResult,
-) -> dict:
-  unit_of = {commit.sha: commit.unit for commit in commits}
-  replayed_units = list(dict.fromkeys(
-    unit_of[old] for old, _new in replay.replayed
-  ))
-  return {
-    "replayed_units": replayed_units,
-    "dropped_units": list(dict.fromkeys(
-      unit_of[old] for old in replay.dropped
-      if unit_of[old] not in replayed_units
-    )),
-    "dropped_commits": list(replay.dropped),
-  }
-
-
-def _park_replay(
-  repo: Path,
-  carried: _Carried,
-  target: str,
-  ordinary_base: str,
-  reconciliation: app_git.ReconciliationReceipt,
-  worktree: Path,
-  replay: app_git.OverlayReplayResult,
-  skip: set[str],
-) -> ReconcileResult:
-  """Leave a conflicting replay in its worktree for the resolver.
-
-  The parked cherry-pick is the actionable conflict; the complete net conflict
-  set tells the resolver what else lies behind it. The transient working-tree
-  commit is never listed as remaining work: the owner's edits go back to the
-  working tree now and are carried afresh when the replay continues.
-  """
-  pre = carried.pre
-  try:
-    net_paths = set(app_git.merge_refs(repo, pre, target).conflict_paths)
-  except (OSError, subprocess.SubprocessError, RuntimeError):
-    net_paths = set()
-  paths = sorted(net_paths | set(replay.conflict["paths"]))
-  parked = {
-    **replay.conflict,
-    "remaining": [
-      sha for sha in replay.conflict.get("remaining", [])
-      if sha != carried.working
-    ],
-    "worktree": str(worktree),
-    "served": carried.served,
-    "pre": pre,
-    "working": carried.working,
-    "target": target,
-    "candidate": replay.tip,
-    "skip": sorted(skip),
-  }
-  _write_conflict_flag(target, paths, overlay=parked)
-  ROLLED_BACK_FLAG.unlink(missing_ok=True)
-  _clear_reconcile_pre()
-  return ReconcileResult.unchanged(
-    "conflict", pre, target,
-    conflict_paths=paths,
-    overlay=parked,
-    reconciliation=app_git.describe_reconciliation(
-      repo, ordinary_base, target, local=pre, conflict_paths=paths,
-    ),
-  )
-
-
 def _apply_overlay(
   repo: Path,
   carried: _Carried,
@@ -2399,128 +2661,411 @@ def _apply_overlay(
   ordinary_base: str,
   reconciliation: app_git.ReconciliationReceipt,
 ) -> ReconcileResult | _Candidate:
-  """Build the candidate that carries the local overlay onto ``target``.
+  """Reconcile the final local and upstream trees once, off the served tree.
 
-  A linear overlay is replayed commit by commit in the candidate worktree,
-  dropping every commit already proven upstream. No ref of the served checkout
-  moves here; :func:`_finalize_update` activates a complete candidate. A
-  conflict parks the worktree and returns the conflict result. A merge-shaped
-  history remains untouched until the owner explicitly normalizes it.
+  Historical local commits may contain older versions of changes that have
+  since landed upstream. Replaying each commit makes the owner resolve those
+  obsolete intermediate states. A single three-way merge compares only the
+  final trees, using reviewed contribution provenance when available. The
+  resulting local delta is one linear commit on the reviewed target.
   """
-  pre = carried.pre
-  try:
-    commits = app_git.overlay_commits(repo, target, pre)
-  except app_git.OverlayNotLinear:
-    _clear_reconcile_pre()
-    return ReconcileResult.unchanged(
-      "error", pre, target,
-      error=(
-        "local_overlay_not_linear: normalize this installation's local Git "
-        "history into a linear overlay before applying the update"
-      ),
-      reconciliation=reconciliation,
-    )
-  equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
+  # The transient working-tree commit is NOT part of the durable local delta.
+  # Merge committed source first; apply the dirty delta separately so it can
+  # return to the owner's working tree after activation.
+  source = carried.served
+  equivalent = app_git.merge_with_equivalent_changes(repo, source, target)
   if equivalent is not None:
     reconciliation = equivalent.reconciliation
-  skip = app_git.landed_overlay_commits(repo, commits, target)
+  merged = equivalent or app_git.merge_refs(repo, source, target)
   worktree = _overlay_candidate_path(repo)
-  replay = app_git.replay_overlay(
-    repo, commits=commits, onto=target, worktree=worktree, skip=skip,
+  app_git.remove_overlay_worktree(repo, worktree)
+  if merged.status == "clean" and merged.merged_tree_oid:
+    tip = _net_overlay_commit(repo, target, merged.merged_tree_oid, source)
+    if carried.working:
+      dirty = app_git.merge_refs(
+        repo, carried.pre, tip, merge_base=source,
+      )
+      if dirty.status == "conflict":
+        return _park_net_conflict(
+          repo, carried, target, worktree, source=carried.pre,
+          right=tip, base=source, stage="working",
+          reconciliation=reconciliation,
+        )
+      if not dirty.merged_tree_oid:
+        raise PlatformUpdateError("The working-tree merge returned no tree.")
+      tip = _working_overlay_commit(repo, tip, dirty.merged_tree_oid)
+    _git("worktree", "add", "--detach", "-q", str(worktree), tip, repo=repo)
+    return _Candidate(tip, reconciliation, {"mode": "net", "source": source})
+  if merged.status != "conflict":
+    raise PlatformUpdateError("The local and upstream trees could not be merged.")
+  return _park_net_conflict(
+    repo, carried, target, worktree, source=source, right=target,
+    base=merged.merge_base_oid or ordinary_base, stage="committed",
+    reconciliation=reconciliation,
   )
-  if replay.status == "conflict":
-    return _park_replay(
-      repo, carried, target, ordinary_base, reconciliation, worktree,
-      replay, skip,
+
+
+def _park_net_conflict(
+  repo: Path, carried: _Carried, target: str, worktree: Path,
+  *, source: str, right: str, base: str, stage: str,
+  reconciliation: app_git.ReconciliationReceipt,
+) -> ReconcileResult:
+  """Park all residual conflicts from one tree merge in an isolated worktree."""
+  _git("worktree", "add", "--detach", "-q", str(worktree), source, repo=repo)
+  paths = app_git.start_conflict_merge(
+    worktree, merge_base=base, local_branch="HEAD", upstream_branch=right,
+  )
+  if not paths:
+    raise PlatformUpdateError(
+      "The net merge verdict changed while preparing its conflict worktree."
     )
-  return _Candidate(replay.tip, reconciliation, _overlay_summary(commits, replay))
+  if stage == "working":
+    _git("update-ref", _PARKED_RIGHT_REF_PREFIX + right, right, repo=repo)
+  parked = {
+    "mode": "net", "worktree": str(worktree), "served": carried.served,
+    "pre": carried.pre, "target": target, "paths": paths,
+    "stage": stage, "base": base, "right": right,
+  }
+  _write_conflict_flag(target, paths, overlay=parked)
+  ROLLED_BACK_FLAG.unlink(missing_ok=True)
+  _clear_reconcile_pre()
+  return ReconcileResult.unchanged(
+    "conflict", carried.pre, target, conflict_paths=paths, overlay=parked,
+    reconciliation=app_git.describe_reconciliation(
+      repo, base, right, local=source, conflict_paths=paths,
+    ),
+  )
+
+
+def _net_overlay_commit(repo: Path, target: str, tree: str, source: str) -> str:
+  """Make the one local commit after upstream; never rewrite the live branch."""
+  target_tree = _commit_tree_oid(repo, target)
+  if not target_tree:
+    raise PlatformUpdateError("The reviewed upstream tree is unavailable.")
+  if tree == target_tree:
+    return target
+  message = app_git.overlay_message(
+    "Reconcile local platform source with reviewed upstream",
+    unit="platform-local-tree", disposition="local-only",
+    body=f"Previous local source: {source}",
+  )
+  return app_git._run(
+    repo, "commit-tree", tree, "-p", target, "-m", message,
+  ).stdout.strip()
+
+
+def _working_overlay_commit(repo: Path, parent: str, tree: str) -> str:
+  """Carry uncommitted edits temporarily so they can be unwound after Apply."""
+  if tree == _commit_tree_oid(repo, parent):
+    return parent
+  return app_git._run(
+    repo, "commit-tree", tree, "-p", parent, "-m",
+    app_git.overlay_message(
+      "platform: working edits carried across update",
+      unit=app_git.OVERLAY_WORKING_UNIT, disposition="wip",
+    ),
+  ).stdout.strip()
+
+
+def _late_change_commit(
+  repo: Path, parent: str, tree: str, source: str, late: str,
+) -> str:
+  """The one commit carrying source committed after the release resolved."""
+  if tree == _commit_tree_oid(repo, parent):
+    return parent
+  message = app_git.overlay_message(
+    _LATE_CHANGE_SUBJECT, unit="platform-local-late", disposition="local-only",
+    body=f"Resolved from local source: {source}\nLate local source: {late}",
+  )
+  return app_git._run(
+    repo, "commit-tree", tree, "-p", parent, "-m", message,
+  ).stdout.strip()
+
+
+def _layer_late_delta(
+  repo: Path, *, onto: str, live: str, base: str,
+) -> tuple[str | None, list[str]]:
+  """Apply only ``base -> live`` to ``onto``; ``(tree, [])`` or ``(None, paths)``."""
+  merged = app_git.merge_refs(repo, live, onto, merge_base=base)
+  if merged.status == "conflict":
+    return None, list(merged.conflict_paths) or ["(unreported path)"]
+  if merged.status != "clean" or not merged.merged_tree_oid:
+    raise PlatformUpdateError("A late source merge returned no tree.")
+  return merged.merged_tree_oid, []
+
+
+@dataclass(frozen=True)
+class _FrozenTip:
+  """What a frozen release activates as, given the live source now."""
+
+  tip: str
+  # Non-empty when late live-source work could not be layered on the
+  # release. The release still activates; that work is pinned as pending.
+  late_paths: list[str]
+
+
+def _frozen_release_tip(repo: Path, frozen: dict, carried: _Carried) -> _FrozenTip:
+  """Layer late live-source work on a frozen release without re-merging it.
+
+  History stays ``target -> release -> [one late commit]``. Late commits are
+  never replayed one by one: their net delta since the frozen source becomes
+  at most one commit. Uncommitted edits ride on top as the transient working
+  commit and return to the working tree afterwards. If either layer
+  conflicts, the release activates without it and the caller pins it.
+  """
+  release = str(frozen["release"])
+  source = str(frozen["source"])
+  working_release = frozen.get("working_release") or None
+  working_source = frozen.get("working_source") or None
+  late_committed = carried.served != source
+  if late_committed and not _is_ancestor(repo, source, carried.served):
+    raise PlatformUpdateError(
+      "The live source was rewritten while this merge was parked. "
+      "The resolved candidate is preserved for review."
+    )
+  tip = release
+  if late_committed:
+    tree, paths = _layer_late_delta(
+      repo, onto=release, live=carried.served, base=source,
+    )
+    if tree is None and working_release and not carried.working:
+      # The owner committed the dirty state the resolver already resolved;
+      # its resolution, not a second conflict, is the answer.
+      tree, paths = _layer_late_delta(
+        repo, onto=str(working_release), live=carried.served,
+        base=str(working_source),
+      )
+    if tree is None:
+      return _FrozenTip(release, paths)
+    tip = _late_change_commit(repo, release, tree, source, carried.served)
+  if not carried.working:
+    return _FrozenTip(tip, [])
+  if working_release:
+    # The resolver's dirty-tree answer is parented on the frozen release.
+    # Transplant that answer onto the late committed layer first. Otherwise
+    # merging the current dirty snapshot directly onto working_release would
+    # silently drop every clean late committed change from ``tip``.
+    if tip != release:
+      resolved, paths = _layer_late_delta(
+        repo, onto=tip, live=str(working_release), base=release,
+      )
+      if resolved is None:
+        return _FrozenTip(tip, paths)
+      resolved_tip = _working_overlay_commit(repo, tip, resolved)
+    else:
+      resolved_tip = str(working_release)
+    # Then take only edits made to the dirty tree since it was parked.
+    full, paths = _layer_late_delta(
+      repo, onto=resolved_tip, live=carried.pre,
+      base=str(working_source),
+    )
+  else:
+    full, paths = _layer_late_delta(
+      repo, onto=tip, live=carried.pre, base=carried.served,
+    )
+  if full is None:
+    return _FrozenTip(tip, paths)
+  return _FrozenTip(_working_overlay_commit(repo, tip, full), [])
+
+
+def _activate_frozen_release(
+  repo: Path,
+  local: str,
+  *,
+  frozen: dict,
+  carried: _Carried,
+  planned: _FrozenTip,
+  target: str,
+  progress: Callable[[PlatformUpdatePhase], None] | None,
+) -> ReconcileResult:
+  """Run every activation gate on a frozen release plus its late layer."""
+  late: dict | None = None
+  if planned.late_paths:
+    # Pin before the branch moves: carried.pre holds every late commit and
+    # the uncommitted edits. The record is written first and survives only a
+    # successful activation, so status never claims pending work that the
+    # served branch still carries.
+    ref = _LATE_CHANGES_REF_PREFIX + carried.pre
+    _git("update-ref", ref, carried.pre, repo=repo)
+    late = {
+      "state": "needs_merge",
+      "ref": ref,
+      "late_sha": carried.pre,
+      "committed_sha": carried.served,
+      "uncommitted": carried.working is not None,
+      "release_sha": str(frozen["release"]),
+      "source_sha": str(frozen["source"]),
+      "target_sha": target,
+      "paths": planned.late_paths,
+    }
+    _atomic_write_text(
+      LATE_CHANGES_FLAG, json.dumps(late, separators=(",", ":")) + "\n",
+    )
+  activated = False
+  try:
+    result = _finalize_update(
+      repo, local, pre=carried.served, tip=planned.tip, target=target,
+      progress=progress, reconciliation=app_git.ReconciliationReceipt(),
+      overlay={"mode": "net", "continued": True, "prepared": True, "late": late},
+      expected_working_tree=_commit_tree_oid(repo, carried.pre),
+    )
+    activated = result.status == "updated"
+    return result
+  finally:
+    if late is not None and not activated:
+      LATE_CHANGES_FLAG.unlink(missing_ok=True)
+
+
+def _pending_late_changes(repo: Path, local: str) -> dict | None:
+  """Late work pinned by an activated frozen release and not yet integrated."""
+  try:
+    record = json.loads(LATE_CHANGES_FLAG.read_text())
+  except (OSError, ValueError):
+    return None
+  if not isinstance(record, dict):
+    return None
+  release, late = record.get("release_sha"), record.get("late_sha")
+  ref = str(record.get("ref") or "")
+  if not (_is_sha(release) and _is_sha(late) and ref.startswith(_LATE_CHANGES_REF_PREFIX)):
+    return None
+  if (
+    _rev(repo, ref) != late
+    or _is_ancestor(repo, str(late), local)
+  ):
+    return None
+  return record
+
+
+def _late_changes_status(repo: Path, local: str) -> dict | None:
+  """One status shape for saved post-resolution work and interrupted restores."""
+  late = _pending_late_changes(repo, local)
+  if late is not None:
+    return late
+  stranded = _read_late_snapshot(repo)
+  if stranded is None:
+    return None
+  result = {
+    "state": "restore_pending",
+    "ref": _LATE_CHANGES_REF_PREFIX + stranded.pre,
+    "late_sha": stranded.pre,
+    "committed_sha": stranded.served,
+    "uncommitted": True,
+    "paths": [],
+  }
+  try:
+    record = json.loads(LATE_SNAPSHOT_FLAG.read_text())
+    if isinstance(record, dict) and record.get("snapshot") == stranded.pre:
+      result["chat_id"] = record.get("chat_id")
+  except (OSError, ValueError):
+    pass
+  return result
 
 
 def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
-  """Finish a parked overlay replay after the resolver edited its worktree.
+  """Finish one parked net-tree resolution through the normal activation gates.
 
-  Returns ``updated`` once the served checkout moved to the completed
-  candidate, ``conflict`` when a later commit conflicted (the flag now names
-  it), or ``rolled_back`` when the finished tree failed a post-replay gate.
-  Runs the same finalize path as an ordinary owner Apply, including the
-  dependency sync, import probe, and frontend build.
+  Returns ``updated_late_changes_pending`` when the release activated but
+  live-source work made during resolution was pinned instead of applied.
   """
   with _reconcile_flock():
     flag = _read_conflict_flag() or {}
-    parked = flag.get("overlay")
-    if not parked:
-      raise PlatformUpdateError("No parked platform overlay replay.")
-    local = _local_branch(repo)
-    served = str(parked.get("served") or "")
-    target = str(parked.get("target") or "")
-    worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
-    if not served or not target or _rev(repo, local) != served:
+    parked = flag.get("overlay") or {}
+    if parked.get("mode") != "net":
+      raise PlatformUpdateError("No parked net-tree platform resolution.")
+    return _continue_net_overlay_update(repo, flag, parked)
+
+
+def _resolved_release(
+  repo: Path, parked: dict, worktree: Path, *, target: str, source: str,
+) -> dict:
+  """Turn the resolver's staged tree into frozen release commits (no refs move)."""
+  if app_git.has_unresolved_conflicts(worktree):
+    raise PlatformUpdateError("Unresolved files remain in the candidate worktree.")
+  # write-tree reads the index, but a resolver can fix staged markers or add
+  # files without staging the final bytes. Never freeze a stale index or
+  # silently publish an untracked scratch file: require an explicit git add.
+  tree = _git("write-tree", repo=worktree).stdout.strip()
+  if _working_tree_oid(worktree, _rev(worktree, "HEAD")) != tree:
+    raise PlatformUpdateError(
+      "Stage every intended resolution before continuing the update."
+    )
+  if str(parked.get("stage") or "committed") != "working":
+    return {
+      "target": target, "source": source,
+      "release": _net_overlay_commit(repo, target, tree, source),
+      "working_release": None, "working_source": None,
+    }
+  committed = str(parked.get("right") or "")
+  working_source = str(parked.get("pre") or "")
+  if (
+    not committed or not _is_ancestor(repo, target, committed)
+    or not _rev(repo, working_source)
+  ):
+    raise PlatformUpdateError("The committed candidate is unavailable.")
+  return {
+    "target": target, "source": source, "release": committed,
+    "working_release": _working_overlay_commit(repo, committed, tree),
+    "working_source": working_source,
+  }
+
+
+def _continue_net_overlay_update(repo: Path, flag: dict, parked: dict) -> str:
+  """Freeze one resolved net merge, then activate it with any late work.
+
+  The resolution is frozen against the source it was parked from before the
+  live branch is read again. Late commits and edits never re-open it: they
+  are layered as at most one later commit, or pinned as pending if they
+  conflict, while the release itself still activates.
+  """
+  local = _local_branch(repo)
+  target = str(parked.get("target") or "")
+  source = str(parked.get("served") or "")
+  worktree = Path(str(parked.get("worktree") or _overlay_candidate_path(repo)))
+  if not target or not source or not (worktree / ".git").exists():
+    raise PlatformUpdateError("The parked net merge is incomplete.")
+  already_frozen = parked.get("ready") is True
+  if already_frozen:
+    if _prepared_overlay_for(repo, served=_rev(repo, local), target=target) is None:
       raise PlatformUpdateError(
-        "The served branch moved since the replay was parked; run the update "
-        "again instead of continuing this one."
+        "The prepared release is incomplete or predates frozen releases. "
+        "Abandon it and apply the update again."
       )
-    # The owner's current edits ride along exactly as they would on a fresh
-    # update; they are unwound again below whatever the outcome.
-    _reattach_detached_head(repo, local)
-    carried = _carry_working_edits(repo, local)
-    try:
-      replay = app_git.continue_overlay_replay(
-        repo,
-        worktree=worktree,
-        commit_sha=str(parked.get("sha") or ""),
-        remaining=list(parked.get("remaining") or []),
-        skip=list(parked.get("skip") or []),
+    frozen = parked
+  else:
+    frozen = _resolved_release(
+      repo, parked, worktree, target=target, source=source,
+    )
+  _reattach_detached_head(repo, local)
+  carried = _snapshot_late_working_edits(repo, local)
+  _write_late_snapshot(carried)
+  planned = None
+  result = None
+  try:
+    planned = _frozen_release_tip(repo, frozen, carried)
+    if _changes_python_dependencies(repo, carried.pre, planned.tip):
+      # A resolver may finish a textual overlap, but the old image still
+      # cannot validate source that imports its newly declared packages.
+      # Leave the parked candidate untouched for a reviewed image operation.
+      raise PlatformUpdateError("image_rebuild_required")
+    if not already_frozen:
+      frozen = _write_frozen_release(
+        repo, parked=parked, chat_id=flag.get("chat_id"), **frozen,
       )
-      if replay is None:
-        raise PlatformUpdateError(
-          "Unmerged files or conflict markers remain in the candidate worktree."
-        )
-      if replay.status == "clean" and carried.working:
-        # Carry the current edits onto the candidate unless the resolved pick
-        # WAS those edits and they have not changed since it was parked.
-        consumed = (
-          parked.get("sha") == parked.get("working")
-          and bool(parked.get("working"))
-          and app_git.ref_trees_equal(repo, carried.working, parked["working"])
-        )
-        if not consumed:
-          replay = app_git.replay_more(
-            repo,
-            worktree=worktree,
-            commits=app_git.overlay_commits(repo, carried.served, carried.pre),
-            previous=replay,
-          )
-      if replay.status == "conflict":
-        again = {
-          **parked, **replay.conflict, "candidate": replay.tip,
-          "pre": carried.pre, "working": carried.working,
-          "remaining": [
-            sha for sha in replay.conflict.get("remaining", [])
-            if sha != carried.working
-          ],
-        }
-        _write_conflict_flag(
-          target,
-          sorted(set(flag.get("paths") or []) | set(replay.conflict["paths"])),
-          flag.get("chat_id"),
-          overlay=again,
-        )
-        return "conflict"
-      if _changes_python_dependencies(repo, carried.pre, replay.tip):
-        # A resolver may finish a textual overlap, but the old image still
-        # cannot validate source that imports its newly declared packages.
-        # Leave the parked candidate untouched for a reviewed image operation.
-        raise PlatformUpdateError("image_rebuild_required")
-      _write_reconcile_pre(carried.pre)
-      result = _finalize_update(
-        repo, local, pre=carried.pre, tip=replay.tip, target=target,
-        progress=None,
-        reconciliation=app_git.ReconciliationReceipt(),
-        overlay={"continued": True, "dropped_commits": list(replay.dropped)},
-      )
-      return result.status
-    finally:
-      _restore_working_edits(repo, local)
+    result = _activate_frozen_release(
+      repo, local, frozen=frozen, carried=carried, planned=planned,
+      target=target, progress=None,
+    )
+    if result.status == "updated" and planned.late_paths:
+      return "updated_late_changes_pending"
+    return result.status
+  finally:
+    _settle_late_snapshot(
+      repo, local, carried,
+      activated_clean=(
+        result is not None and result.status == "updated"
+        and planned is not None and not planned.late_paths
+      ),
+    )
 
 
 def abandon_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
@@ -2698,7 +3243,11 @@ def platform_status(
   local = _update_source_tip(repo)
   image_sha = current_build_sha()
   upstream_sha = recorded_upstream_sha(repo)
-  conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
+  conflict_record = _read_conflict_flag() or {}
+  prepared = (conflict_record.get("overlay") or {}).get("ready") is True
+  conflict = (
+    (CONFLICT_FLAG.exists() and not prepared) or _reconcile_in_progress(repo)
+  )
   rolled_back = ROLLED_BACK_FLAG.exists()
   rollback = _read_rolled_back_flag() if rolled_back else None
   # A rollback flag is stale once its recorded target is already contained in
@@ -2732,9 +3281,10 @@ def platform_status(
   )
   current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
+  late_changes = _late_changes_status(repo, local)
 
   if conflict:
-    flag = _read_conflict_flag() or {}
+    flag = conflict_record
     paths = flag.get("paths") or _unmerged_paths(repo)
     # `target` is the last-fetched origin/main. If it strictly descends the
     # version this conflict is pinned to, newer releases stacked up behind the
@@ -2760,6 +3310,7 @@ def platform_status(
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
       overlay=_overlay_status(repo, local, contained_upstream_sha),
+      late_changes=late_changes,
     )
 
   # A freshly published GHCR revision may not yet be in this clone's object
@@ -2796,6 +3347,7 @@ def platform_status(
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
     overlay=_overlay_status(repo, local, contained_upstream_sha),
+    late_changes=late_changes,
   )
 
 
@@ -2988,6 +3540,16 @@ def _preview_blocking_diff(
   return (text or None), False
 
 
+def _preview_overlay_conflict_paths(
+  repo: Path, local: str, target: str,
+) -> list[str]:
+  """Predict the one net merge without a worktree or history replay."""
+  merged = app_git.merge_with_equivalent_changes(repo, local, target)
+  if merged is None:
+    merged = app_git.merge_refs(repo, local, target)
+  return sorted(merged.conflict_paths)
+
+
 def _read_worktree_path_without_links(repo: Path, relative: str) -> str:
   """Read one regular worktree file without following any path symlink.
 
@@ -3065,9 +3627,10 @@ def platform_update_preview(
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
-  base; local edits are excluded from the public diff. Review never reconciles
-  local history. Apply owns that work once and reports a real conflict if one
-  exists, rather than making every review replay the full local overlay.
+  base; local edits are excluded from the public diff. Review never replays or
+  reconciles local history: it only predicts the one final-tree merge Apply
+  will run, off-tree, without moving a ref or worktree. Apply owns that work
+  once and reports a real conflict if one exists.
   Availability is the same ancestry check :func:`platform_status` uses; an
   already-applied target can still have actionable activation work.
   Missing source or target provenance is an explicit error on both deployments;
@@ -3159,6 +3722,11 @@ def _platform_update_preview_unlocked(
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
+  prepared = _prepared_overlay_for(repo, served=local, target=target)
+  predicted_conflicts = (
+    [] if prepared is not None
+    else _preview_overlay_conflict_paths(repo, local, target)
+  )
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
@@ -3178,7 +3746,9 @@ def _platform_update_preview_unlocked(
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=sorted(set(conflict.get("paths") or [])),
+    conflict_paths=sorted(
+      set(conflict.get("paths") or []) | set(predicted_conflicts)
+    ),
     blocking_paths=[],
     blocking_diff=None,
     blocking_diff_truncated=False,
@@ -3411,10 +3981,17 @@ async def create_platform_conflict_resolver_chat(
   from app import models
 
   flag = _read_conflict_flag() or {}
-  if not (CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)):
-    raise PlatformUpdateError("No unresolved platform update conflict.")
+  conflict = (
+    (CONFLICT_FLAG.exists() and (flag.get("overlay") or {}).get("ready") is not True)
+    or _reconcile_in_progress(repo)
+  )
+  late = None if conflict else _late_changes_status(
+    repo, _rev(repo, _local_branch(repo)),
+  )
+  if not conflict and late is None:
+    raise PlatformUpdateError("No platform edits need review.")
 
-  existing_chat_id = flag.get("chat_id")
+  existing_chat_id = flag.get("chat_id") if conflict else late.get("chat_id")
   if existing_chat_id:
     existing = (
       db.query(models.Chat)
@@ -3429,16 +4006,40 @@ async def create_platform_conflict_resolver_chat(
       )
 
   conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+  target_sha = (
+    flag.get("upstream") or (late or {}).get("target_sha")
+    or _rev(repo, DEFAULT_TARGET_REF) or _rev(repo, _local_branch(repo))
+  )
   merge_base = flag.get("merge_base")
   parked = flag.get("overlay")
   if not target_sha:
     raise PlatformUpdateError("Platform conflict target is unavailable.")
-  result = await spawn_platform_conflict_chat(
-    db, conflict_paths, target_sha, merge_base, parked,
-  )
+  if late is not None:
+    result = await spawn_platform_conflict_chat(
+      db, conflict_paths, target_sha, merge_base, parked,
+      late_changes=late,
+    )
+  else:
+    result = await spawn_platform_conflict_chat(
+      db, conflict_paths, target_sha, merge_base, parked,
+    )
   if result is None:
     raise PlatformUpdateError("Could not open resolver chat.")
+
+  if late is not None:
+    path = (
+      LATE_SNAPSHOT_FLAG if late["state"] == "restore_pending"
+      else LATE_CHANGES_FLAG
+    )
+    try:
+      record = json.loads(path.read_text())
+      expected = "snapshot" if path == LATE_SNAPSHOT_FLAG else "late_sha"
+      if isinstance(record, dict) and record.get(expected) == late["late_sha"]:
+        record["chat_id"] = result["chat_id"]
+        _atomic_write_text(path, json.dumps(record, separators=(",", ":")) + "\n")
+    except (OSError, ValueError):
+      pass
+    return result
 
   _write_conflict_flag(
     target_sha,
@@ -3479,34 +4080,33 @@ def _platform_conflict_resolver_message(
 ) -> str:
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
-  if overlay:
-    parked_files = ", ".join(overlay.get("paths") or []) or files
-    remaining = len(overlay.get("remaining") or [])
+  if overlay and overlay.get("mode") == "net":
     return (
-      "A platform update is ready but one of this installation's local "
-      "changes conflicts with it — the new version and that local change "
-      "both touched the same lines.\n\n"
-      "The updater keeps local work as a linear overlay on top of the exact "
-      f"upstream version. It replayed that overlay onto `{target_sha}` in a "
-      f"separate candidate worktree at `{overlay.get('worktree')}` and stopped "
-      f"at local commit `{overlay.get('sha')}` (\"{overlay.get('subject')}\", "
-      f"unit `{overlay.get('unit')}`) with conflicts in: {parked_files}. "
-      f"Every conflicting file behind it, if any, is: {files}.\n\n"
-      "Resolve IN THAT WORKTREE, not in `/data/platform` (which keeps serving "
-      "the old code untouched): edit each conflicting file to combine the "
-      "intent of the local change and upstream's, remove the conflict "
-      f"markers, and `git -C {overlay.get('worktree')} add` it. Then finish "
-      "the update non-interactively: `cd /data/platform/backend && python3 -c "
-      "\"from app.platform_update import continue_platform_overlay_update as "
-      "c; print(c())\"`. That commits the resolved change under its original "
-      f"message, replays the remaining {remaining} local commit(s), and moves "
-      "the served checkout to the finished result; if a later commit "
-      "conflicts it stops again and this flag names the new stop. When it "
-      "prints `updated`, tell the owner to **restart the server** from "
-      "Settings to finish. To skip this update instead, run `python3 -c "
-      "\"from app.platform_update import abandon_platform_overlay_update as "
-      "a; print(a())\"` from the same directory and tell the owner the "
-      "update was skipped."
+      "The platform update compared the final local source with the reviewed "
+      "upstream source once. Both changed these paths: " + files + ".\n\n"
+      "The running platform is untouched. Resolve all marked files together "
+      f"in the isolated candidate at `{overlay.get('worktree')}`; preserve "
+      "the intended local behavior and the incoming upstream behavior. Stage "
+      "the resolved files there, then run `cd /data/platform/backend && "
+      "python3 -c \"from app.platform_update import "
+      "continue_platform_overlay_update as c; print(c())\"`. The updater "
+      "will make one local commit on the reviewed upstream version and run "
+      "the normal build/import and rollback gates. Your resolution is frozen: "
+      "changes made to the live source while it is parked are added as at "
+      "most one later commit, not replayed as old commits. If they conflict "
+      "with the resolution, it prints `updated_late_changes_pending`: the "
+      "release is active and that late work is pinned under "
+      "`refs/mobius/platform-late-changes/` for a separate follow-up, not "
+      "applied. Do not report the platform active until its separate "
+      "image/restart actions finish."
+    )
+  if overlay:
+    return (
+      "This update has a conflict candidate created by an older updater. "
+      "The running platform is untouched. Preserve any resolved candidate "
+      "source before abandoning this old attempt, then start a fresh update "
+      "that compares the final local and upstream trees once. The older "
+      "per-commit replay must not be resumed."
     )
   if merge_base:
     start_merge = (
@@ -3544,16 +4144,42 @@ def _platform_conflict_resolver_message(
   )
 
 
+def _platform_late_changes_message(late: dict) -> str:
+  """Guide the resolver to compare saved late work without clobbering main."""
+  ref = str(late["ref"])
+  if late["state"] == "restore_pending":
+    return (
+      "An interrupted platform update saved uncommitted edits under Git ref "
+      f"`{ref}`, but did not prove they were restored. Inspect the current "
+      "served source and this saved tree before changing either. Restore only "
+      "the missing edits, preserve newer work, and clear the snapshot marker "
+      "only after verifying the final working tree. Do not reset live main or "
+      "treat the saved ref as permission to discard anything."
+    )
+  return (
+    "The reviewed platform release is installed, but later local edits "
+    f"conflicted and are saved under Git ref `{ref}`. Compare the saved final "
+    "tree against the frozen source and current served tree in an isolated "
+    "worktree. Reconcile only missing net edits, not the old commits one by "
+    "one. Preserve the official upstream ancestry and any newer local work; "
+    "do not reset live main. Clear the late-changes marker only after the "
+    "combined source is verified. If intent is ambiguous, ask the owner."
+  )
+
+
 async def spawn_platform_conflict_chat(
   db: Session,
   conflict_paths: list[str],
   target_sha: str,
   merge_base: str | None = None,
   overlay: dict | None = None,
+  *, late_changes: dict | None = None,
 ) -> PlatformConflictResolverChatOut | None:
-  """Open a visible agent chat to reconcile the new platform version into
-  the checked-out working branch — the platform analogue of a per-app
-  update-conflict resolver chat. Dedupes on a running resolver."""
+  """Open an owner-clicked chat for a source conflict or saved late edits.
+
+  The served source remains unchanged until the resolver verifies its work.
+  Dedupes on a running resolver of the same kind.
+  """
   import uuid
 
   from app import models, providers
@@ -3562,7 +4188,10 @@ async def spawn_platform_conflict_chat(
   from app.push import notify_owner
   from app.run_state import running_chat_ids
 
-  title = "Resolve platform update conflict"
+  title = (
+    "Review saved platform edits" if late_changes is not None
+    else "Resolve platform update conflict"
+  )
   candidate_ids = [
     row.id for row in (
       db.query(models.Chat.id)
@@ -3593,8 +4222,12 @@ async def spawn_platform_conflict_chat(
   provider = _bg_choice["provider"]
   agent_settings = _bg_choice["agent_settings"]
 
-  content = _platform_conflict_resolver_message(
-    target_sha, conflict_paths, merge_base, overlay,
+  content = (
+    _platform_late_changes_message(late_changes)
+    if late_changes is not None
+    else _platform_conflict_resolver_message(
+      target_sha, conflict_paths, merge_base, overlay,
+    )
   )
 
   chat_id = str(uuid.uuid4())
@@ -3616,8 +4249,16 @@ async def spawn_platform_conflict_chat(
   finally:
     try:
       notify_owner(
-        db, owner.id, title="Platform update needs conflict resolution",
-        body="The platform update conflicts with local edits. Opened a chat to resolve it.",
+        db, owner.id,
+        title=(
+          "Saved platform edits need review" if late_changes is not None
+          else "Platform update needs conflict resolution"
+        ),
+        body=(
+          "Opened a chat to reconcile saved edits with the installed update."
+          if late_changes is not None
+          else "The platform update conflicts with local edits. Opened a chat to resolve it."
+        ),
         source_type="platform_conflict", source_id=chat_id,
         target=f"/shell/?chat={chat_id}",
       )
