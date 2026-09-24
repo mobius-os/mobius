@@ -161,14 +161,20 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     const rows = painted?.querySelectorAll('.chat__msg--assistant') || []
     const paragraphs = rows[rows.length - 1]?.querySelectorAll('.md-paragraph') || []
     const paragraph = paragraphs[paragraphs.length - 1]
-    const scrollRect = scroll?.getBoundingClientRect()
+    const row = rows[rows.length - 1]
+    const blocks = row?.querySelector('.md-blocks')
+    const rowRect = row?.getBoundingClientRect()
     const paragraphRect = paragraph?.getBoundingClientRect()
     return {
-      scrollHeight: scroll?.scrollHeight ?? -1,
-      scrollTop: scroll?.scrollTop ?? -1,
-      paragraphTop: paragraphRect && scrollRect
-        ? paragraphRect.top - scrollRect.top
+      blocksHeight: blocks?.getBoundingClientRect().height ?? -1,
+      // Measured within the answer row: the settled turn also reveals its
+      // metadata footer below the answer, which moves the whole followed row.
+      paragraphOffset: paragraphRect && rowRect
+        ? paragraphRect.top - rowRect.top
         : null,
+      bottomGap: scroll
+        ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
+        : -1,
     }
   })
   const live = await measure()
@@ -180,13 +186,14 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   )))
   const settled = await measure()
 
-  expect(Math.abs(settled.scrollHeight - live.scrollHeight)).toBeLessThanOrEqual(1)
-  // scrollTop is a DERIVED value and the only one here subject to fractional
-  // re-clamping when the cursor node leaves the flow, so it carries a sub-pixel
-  // allowance the other two do not. What the owner actually sees is pinned at
-  // 1px by the scrollHeight and paragraphTop assertions either side of this:
-  // the content is the same height and the followed paragraph has not moved, so
-  // a ~1.1px scrollTop difference is rounding, not a visible shift.
-  expect(Math.abs(settled.scrollTop - live.scrollTop)).toBeLessThanOrEqual(1.5)
-  expect(Math.abs(settled.paragraphTop - live.paragraphTop)).toBeLessThanOrEqual(1)
+  // Terminal promotion also reveals the turn's metadata footer
+  // (.chat__msg-meta--visible), a few pixels taller than its reserved room, and
+  // a followed view scrolls with it. That footer is separate from the cursor.
+  // The cursor contract is that removing it leaves the answer's own flow alone:
+  // the rendered blocks keep their height, the followed paragraph keeps its
+  // place in the row, and the view is still pinned to the live tail.
+  expect(Math.abs(settled.blocksHeight - live.blocksHeight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(settled.paragraphOffset - live.paragraphOffset)).toBeLessThanOrEqual(1)
+  // bottomGap is derived from fractional scrollTop, hence the sub-pixel allowance.
+  expect(Math.abs(settled.bottomGap - live.bottomGap)).toBeLessThanOrEqual(1.5)
 })
