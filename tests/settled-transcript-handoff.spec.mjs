@@ -236,6 +236,7 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
       const rr = row?.getBoundingClientRect()
       window.__handoffFrames.push({
         t: Math.round(performance.now()),
+        rows: [...(surface?.querySelectorAll('.chat__msg') || [])].slice(-4).map(r => [r.dataset.key || r.className.split(' ').pop(), Math.round(r.getBoundingClientRect().height)]),
         users: users.length,
         top: sr && rr ? rr.top - sr.top : null,
       })
@@ -304,7 +305,7 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
       const t0 = frames.length ? frames[0].t : 0
       const pick = e => ({ at: e.at, ev: e.event, from: e.from?.kind, to: e.to?.kind, st: e.geometry?.scrollTop, sh: e.geometry?.scrollHeight })
       return {
-        frames: frames.map(f => [f.t, f.users, Math.round(f.top)]),
+        frames: frames.filter((f, i, all) => i === 0 || JSON.stringify(f.rows) !== JSON.stringify(all[i - 1].rows) || Math.abs(f.top - all[i - 1].top) > 1).map(f => [f.t, Math.round(f.top), f.rows]),
         transitions: (tr.transitions || []).filter(e => e.at >= t0 - 50).map(pick),
         writes: (tr.writes || []).filter(e => e.at >= t0 - 50).map(pick),
       }
