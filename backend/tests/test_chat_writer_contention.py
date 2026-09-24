@@ -23,6 +23,7 @@ import pytest
 
 from app import models, schemas
 from app.chat_writer import (
+  _stamp_provider_batch,
   AnswerQuestion,
   AppendPending,
   AppendSteeredUserMessage,
@@ -1882,3 +1883,22 @@ def test_clear_pending_hidden_only_queue_is_noop(actor):
   assert result["cleared_cids"] == []
   chat = _load_chat()
   assert [m.get("cid") for m in chat["pending_messages"]] == ["wait-result-xyz"]
+
+
+def test_provider_batch_marks_only_visible_owner_rows():
+  rows = [
+    {"role": "user", "cid": "cont", "kind": "continuation", "content": "continue"},
+    {"role": "user", "cid": "a", "content": "first"},
+    {"role": "user", "cid": "h", "hidden": True, "content": "internal"},
+    {"role": "user", "cid": "b", "content": "second", "provider_batch": {"id": "stale"}},
+  ]
+  _stamp_provider_batch(rows)
+  assert [row.get("provider_batch") for row in rows] == [
+    None,
+    {"id": "a", "index": 0, "count": 2},
+    None,
+    {"id": "a", "index": 1, "count": 2},
+  ]
+  single = [{"role": "user", "cid": "x", "provider_batch": {"id": "stale"}}]
+  _stamp_provider_batch(single)
+  assert "provider_batch" not in single[0]

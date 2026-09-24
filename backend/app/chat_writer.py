@@ -6133,14 +6133,23 @@ def _stamp_provider_batch(messages: list[dict]) -> None:
 
   Both queued-turn promotion and in-turn steering call this, so the shell can
   render the rows as one message without the two paths drifting apart. Every
-  row already carries a cid; the first one names the batch.
+  row already carries a cid; the first one names the batch. Hidden rows and
+  continuation markers are not owner speech, so they stay outside the batch.
   """
-  for index, msg in enumerate(messages):
+  from app.continuations import is_continuation_message
+
+  owner_rows = [
+    msg for msg in messages
+    if not msg.get("hidden") and not is_continuation_message(msg)
+  ]
+  for msg in messages:
     msg.pop("provider_batch", None)
-    if len(messages) > 1:
-      msg["provider_batch"] = {
-        "id": messages[0]["cid"], "index": index, "count": len(messages),
-      }
+  if len(owner_rows) < 2:
+    return
+  for index, msg in enumerate(owner_rows):
+    msg["provider_batch"] = {
+      "id": owner_rows[0]["cid"], "index": index, "count": len(owner_rows),
+    }
 
 
 def _commit_or_rollback(db) -> bool:

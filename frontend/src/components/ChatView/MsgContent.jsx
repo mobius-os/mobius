@@ -107,7 +107,7 @@ function UserMessageSegments({ segments }) {
   return segments.map((segment, i) => (
     <Fragment key={i}>
       {i > 0 && <span className="chat__batch-squiggle" aria-hidden="true" />}
-      <UserMessageText text={stripAugmentation(segment)} />
+      <UserMessageText text={segment} />
     </Fragment>
   ))
 }

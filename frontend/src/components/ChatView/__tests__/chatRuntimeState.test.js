@@ -94,6 +94,15 @@ test('owner rows delivered together display as one message with their boundaries
   assert.equal(displayed.cid, 'a', 'the first durable row remains the visible identity')
   assert.equal(displayed.content, 'First\n\nSecond\n\nThird')
   assert.deepEqual(displayed.segments, ['First', 'Second', 'Third'])
+  assert.equal(combineOwnerMessagesForDisplay(messages.slice(1, 4)), displayed,
+    'unchanged members reuse the combined row so memoized bubbles skip re-render')
+
+  const imageOnly = { role: 'user', cid: 'i', content: '[Files in this session:\n- photo.png]' }
+  assert.deepEqual(
+    combineOwnerMessagesForDisplay([messages[1], imageOnly]).segments,
+    ['First'],
+    'an upload-only message adds no empty segment or stray divider',
+  )
 })
 
 test('a continuation supersedes the resumable pause it completed', () => {

@@ -4,6 +4,7 @@
  */
 
 import { groupActivityRuns } from './activityGrouping.js'
+import { stripAugmentation } from './msgText.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
 
 export function isContinuationMessage(message) {
@@ -94,23 +95,34 @@ export function ownerMessageBatch(messages, index) {
   return complete ? { start, end, first: batch.index === 0 } : null
 }
 
+const combinedOwnerMessages = new WeakMap()
+
 /** One provider submission is one visible owner message, even when the
- * durable transcript retains its independently addressable source rows. */
+ * durable transcript retains its independently addressable source rows. The
+ * result is reused while the member rows are unchanged, so a memoized bubble
+ * does not re-render on every streaming tick. */
 export function combineOwnerMessagesForDisplay(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return null
   if (messages.length === 1) return messages[0]
-  const first = messages[0]
+  const cached = combinedOwnerMessages.get(messages[0])
+  if (cached?.members.length === messages.length
+      && cached.members.every((member, i) => member === messages[i])) {
+    return cached.combined
+  }
   const attachments = messages.flatMap(message => message.attachments || [])
-  // `segments` keeps the original split so the bubble can mark it visually;
-  // `content` stays the joined text that copy and every other consumer read.
-  const segments = messages.map(message => String(message.content || '').trim())
+  // `segments` keeps each original message's visible text so the bubble can
+  // mark the boundaries; `content` stays the joined text copy reads.
+  const segments = messages
+    .map(message => stripAugmentation(String(message.content || '')).trim())
     .filter(Boolean)
-  return {
-    ...first,
+  const combined = {
+    ...messages[0],
     content: segments.join('\n\n'),
     segments,
     ...(attachments.length ? { attachments } : {}),
   }
+  combinedOwnerMessages.set(messages[0], { members: [...messages], combined })
+  return combined
 }
 
 /**
