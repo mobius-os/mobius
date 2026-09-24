@@ -1326,6 +1326,15 @@ test.describe('Desktop sidebar navigation', () => {
       pinned_at: index === 1 ? '2026-09-12T12:00:30' : null,
     }))
     let listRequests = 0
+    // Identify the focus refresh by ARMING, not by count. The shell cancels
+    // and reissues its drawer read whenever the system connection opens
+    // (fetchFreshShellList: "Cancellation is part of the read"), so boot can
+    // make one list request or two depending on when that connection lands.
+    // On CI the second boot read became "request #2" and was aborted by the
+    // page before this case even fired its focus event -- the held request was
+    // already dead, fulfill threw, and staleListFinished never flipped.
+    let holdArmed = false
+    let staleListHeld = false
     let staleListFinished = false
     let releaseStaleList
     let releasePinWrite
@@ -1337,13 +1346,23 @@ test.describe('Desktop sidebar navigation', () => {
       chatListResponder: async route => {
         listRequests += 1
         const snapshot = serverChats.map(chat => ({ ...chat }))
-        if (listRequests === 2) await staleListGate
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(snapshot),
-        })
-        if (listRequests === 2) staleListFinished = true
+        const hold = holdArmed && !staleListHeld
+        if (hold) {
+          staleListHeld = true
+          await staleListGate
+        }
+        try {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(snapshot),
+          })
+        } catch {
+          // The page may cancel a list read it has superseded; that stale
+          // snapshot then never lands, which is the safe outcome here.
+        } finally {
+          if (hold) staleListFinished = true
+        }
       },
       chatPatchResponder: async route => {
         const id = new URL(route.request().url()).pathname.split('/').pop()
@@ -1370,8 +1389,12 @@ test.describe('Desktop sidebar navigation', () => {
 
     // A real return to the tab revalidates chats even inside staleTime. Hold
     // that request at the older unpinned snapshot while the owner pins.
+    holdArmed = true
     await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
-    await expect.poll(() => listRequests).toBe(2)
+    // Any drawer read that starts after arming and before the pin commits is
+    // a stale read for this case. On a slow runner the focus refresh can
+    // coalesce into the next readiness-driven read rather than fire at once.
+    await expect.poll(() => staleListHeld, { timeout: 15000 }).toBe(true)
 
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
@@ -1389,10 +1412,13 @@ test.describe('Desktop sidebar navigation', () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     )))
     await expect(pinnedAlpha).toBeVisible()
+    const listRequestsBeforeWrite = listRequests
 
     releasePinWrite()
     await expect(pinnedAlpha).toBeVisible()
-    await expect.poll(() => listRequests).toBe(2)
+    // Committing the pin applies the server rank directly; it must not need
+    // another list read to become canonical.
+    await expect.poll(() => listRequests).toBe(listRequestsBeforeWrite)
     await expect.poll(() => pinnedSection.locator('[data-pinned-key]').evaluateAll(
       rows => rows.map(row => row.dataset.pinnedKey),
     )).toEqual([
