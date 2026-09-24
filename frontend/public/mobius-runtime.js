@@ -1692,7 +1692,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			const ct = kind === "blob" ? value instanceof Blob ? value.type : null : kind === "text" ? "text/plain;charset=utf-8" : null;
 			await cachePut(path, value, kind, ct, nextVer(), version);
 			return {
-				value: finalizeRead(await effectiveValue(path, value), kind, ct, path),
+				value: finalizeRead(value, kind, ct, path),
 				version
 			};
 		});
@@ -4461,6 +4461,7 @@ if (typeof window !== "undefined") {
 }
 let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({
+	authoritativeVersionedReads: true,
 	idleDocument: true,
 	projects: true
 });
