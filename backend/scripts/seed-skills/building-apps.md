@@ -256,9 +256,14 @@ manifest, layered by how always-on they are:
   `/data/shared/skills/<name>.md` on install and deactivated on uninstall. It
   is a *reference the agent Reads when a matching task comes up*, not always in
   context — use it for how-to detail: build steps, workflows, gotchas. Artifacts
-  ships `artifacts.md`; Contribute ships `contributing.md`. Max 5 per app,
-  ≤ 256 KB each; basenames are a global namespace, so pick a distinctive one so
-  two apps can't collide.
+  ships `artifacts.md`. Max 5 per app, ≤ 256 KB per file; ids are a global
+  namespace, so pick a distinctive one so two apps can't collide.
+  A long skill can instead be a **folder**: `"skills": ["<id>/"]` ships
+  `<id>/SKILL.md` plus sibling `.md` files directly inside the folder (each
+  also in `source_files`) to `/data/shared/skills/<id>/`. Keep SKILL.md a
+  short core that links its mode files relatively (`[publish](publish.md)`),
+  so agents re-read only the core plus the one file a step needs. Contribute
+  ships `contributing/` this way.
 - **A system-prompt fragment (always-on, while installed).** `"system_app":
   true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
   entry) — the file is appended to the base constitution (`core.md`) for EVERY
