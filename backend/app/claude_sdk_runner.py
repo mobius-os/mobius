@@ -588,6 +588,23 @@ class ActiveClaudeClient:
       await self._client.interrupt()
     return True
 
+  def take_steer_for_requery(self, *, interrupt_landed: bool) -> list[str]:
+    """Drain buffered steer texts at a terminal; close a landed steer cut.
+
+    Once the steer's own interrupt has produced its terminal, the requery that
+    delivers the steer is fresh model work in the same turn. A "steer" owner
+    left sticky past that point made `claim_owner_card_end` refuse every later
+    card in the turn, so text written after a saved card persisted below it.
+    When the interrupt has NOT landed (a clean terminal won the race), it can
+    still abort the requery segment, so ownership stays to defuse that stray
+    cut. A Stop stays sticky; it always wins.
+    """
+    self._interrupt_in_flight = False
+    if interrupt_landed and self._interrupt_owner == "steer":
+      self._interrupt_owner = None
+    texts, self.pending_steer = self.pending_steer, []
+    return texts
+
   def claim_owner_card_end(self) -> bool:
     """Own this turn's end at the saved owner card, cutting no generation yet.
 
@@ -1648,15 +1665,18 @@ async def run_claude_sdk_turn(
               if not active_client.interrupt_requested:
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
-          # fresh boundary cut may fire on a later turn.
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # fresh boundary cut or a saved owner card may end a later segment.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
+              sdk_msg.stop_reason == "interrupt"
+              or sdk_msg.subtype == "error_during_execution"
+            ),
+          )
           if steer_texts:
             # Seal A1 + append the steered row(s) BEFORE the requery so the
             # answer (A2) lands as a fresh message. The turn-end finally is the
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -1717,13 +1737,14 @@ async def run_claude_sdk_turn(
           # fired — e.g. a tool-only turn with no AssistantMessage text
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=False,
+          )
           if steer_texts:
             # Seal A1 before the requery (see the terminal-result branch); the
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
