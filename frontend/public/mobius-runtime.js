@@ -429,14 +429,17 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				const v = cursor.value;
 				if (belongsToInstance(v)) seen.push({
 					key: v.key,
-					ts: v.ts || 0
+					ts: v.ts || 0,
+					state: v.state,
+					consumed: v.consumed
 				});
 				cursor.continue();
 				return;
 			}
 			if (seen.length <= MAX_WRITE_OUTCOMES) return;
 			seen.sort((a, b) => a.ts - b.ts);
-			for (const old of seen.slice(0, seen.length - MAX_WRITE_OUTCOMES)) store.delete(old.key);
+			const disposable = seen.filter(({ state, consumed }) => consumed === true || state === "confirmed" || state === "superseded");
+			for (const old of disposable.slice(0, seen.length - MAX_WRITE_OUTCOMES)) store.delete(old.key);
 		};
 	}
 	function recordWriteOutcome(outcome) {
@@ -546,7 +549,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		}
 		conflictsInFlight.add(key);
 		try {
-			const handled = (await Promise.allSettled(listeners.map((cb) => Promise.resolve().then(() => cb(payload))))).some((result) => result.status === "fulfilled" && result.value !== false);
+			const handled = (await Promise.allSettled(listeners.map((cb) => Promise.resolve().then(() => cb(payload))))).some((result) => result.status === "fulfilled" && Boolean(result.value));
 			if (handled) await acknowledgeConflict(rec.writeId);
 			return handled;
 		} finally {

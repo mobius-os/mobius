@@ -1325,6 +1325,75 @@ test('an async conflict listener must finish successfully before the outcome is 
   assert.deepEqual(replay[0].conflictContext, { kind: 'test-intent', field: 'mine' })
 })
 
+test('a conflict listener that only observes and returns undefined does not consume the outcome', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const observed = []
+  const detach = s.onConflict((conflict) => { observed.push(conflict) })
+  server.forceWrite('undefined-listener.json', 412)
+  await assert.rejects(() => s.durableWrite(
+    'undefined-listener.json', { mine: true }, { ifMatch: '"old"' },
+  ))
+  await waitFor(() => observed.length === 1)
+  detach()
+
+  const replayed = []
+  s.onConflict((conflict) => { replayed.push(conflict); return false })
+  await waitFor(() => replayed.length === 1)
+  assert.equal(replayed[0].path, 'undefined-listener.json')
+})
+
+test('more than 200 unhandled conflicts remain durable for replay', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const detach = s.onConflict(() => false)
+  for (let index = 0; index < 205; index += 1) {
+    const path = `many-conflicts/${index}.json`
+    server.forceWrite(path, 412)
+    await assert.rejects(() => s.durableWrite(path, { index }, { ifMatch: '"old"' }))
+  }
+  detach()
+
+  const replayed = new Set()
+  const remounted = await newStorage()
+  remounted.onConflict((conflict) => { replayed.add(conflict.path); return false })
+  await waitFor(() => replayed.size === 205)
+  assert.equal(replayed.has('many-conflicts/0.json'), true)
+  assert.equal(replayed.has('many-conflicts/204.json'), true)
+})
+
+test('oversized combined conflict context retains separate writes and the newest refusal', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('overflow.json', { remote: 1 })
+  const baseline = await s.getWithVersion('overflow.json')
+  server.setOnline(false)
+  await s.durableWrite('overflow.json', { offline: 1 }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'large-intent', order: 1, payload: 'a'.repeat(35_000) },
+  })
+  await s.durableWrite('overflow.json', { offline: 2 }, {
+    ifMatch: baseline.version,
+    conflictContext: { kind: 'large-intent', order: 2, payload: 'b'.repeat(35_000) },
+  })
+  assert.equal(await s.pendingCount(), 2)
+
+  const conflicts = []
+  s.onConflict((conflict) => { conflicts.push(conflict); return false })
+  server.setOnline(true)
+  await s._drain()
+  await waitFor(() => conflicts.length === 1)
+  assert.deepEqual(server.serverValue('overflow.json'), { offline: 1 })
+  assert.deepEqual(conflicts[0].refusedValue, { offline: 2 })
+  assert.equal(conflicts[0].conflictContext.order, 2)
+
+  const replayed = []
+  const remounted = await newStorage()
+  remounted.onConflict((conflict) => { replayed.push(conflict); return false })
+  await waitFor(() => replayed.length === 1)
+  assert.equal(replayed[0].conflictContext.order, 2)
+})
+
 test('an opaque frame pulls unacknowledged host conflicts when its listener remounts', async () => {
   freshEnv()
   globalThis.indexedDB = {

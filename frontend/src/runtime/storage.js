@@ -358,13 +358,22 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       const cursor = e.target.result
       if (cursor) {
         const v = cursor.value
-        if (belongsToInstance(v)) seen.push({ key: v.key, ts: v.ts || 0 })
+        if (belongsToInstance(v)) {
+          seen.push({ key: v.key, ts: v.ts || 0, state: v.state, consumed: v.consumed })
+        }
         cursor.continue()
         return
       }
       if (seen.length <= MAX_WRITE_OUTCOMES) return
       seen.sort((a, b) => a.ts - b.ts)
-      for (const old of seen.slice(0, seen.length - MAX_WRITE_OUTCOMES)) {
+      // Never age out work the app has not handled. Confirmed/superseded
+      // outcomes and explicitly consumed failures are only bookkeeping; an
+      // unconsumed conflict or rejection still owns the refused value and
+      // opaque recovery intent needed after a frame remount.
+      const disposable = seen.filter(({ state, consumed }) => (
+        consumed === true || state === 'confirmed' || state === 'superseded'
+      ))
+      for (const old of disposable.slice(0, seen.length - MAX_WRITE_OUTCOMES)) {
         store.delete(old.key)
       }
     }
@@ -471,7 +480,10 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     conflictsInFlight.add(key)
     try {
       const results = await Promise.allSettled(listeners.map((cb) => Promise.resolve().then(() => cb(payload))))
-      const handled = results.some((result) => result.status === 'fulfilled' && result.value !== false)
+      // Observation is not recovery. A listener must affirm completion with a
+      // truthy result; an omitted return keeps the durable outcome available
+      // for replay just like an explicit false.
+      const handled = results.some((result) => result.status === 'fulfilled' && Boolean(result.value))
       if (handled) await acknowledgeConflict(rec.writeId)
       return handled
     } finally {
