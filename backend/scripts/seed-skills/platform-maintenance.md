@@ -1,12 +1,15 @@
 # Platform maintenance
 
-How backend edits load, how to make them durable, where platform files live,
-and how to repair a broken shell. Read this before editing backend Python,
-changing the image userspace, or asking for a server restart.
+How backend edits load, how to make them durable, and how to repair a broken
+shell. Read this before editing backend Python, changing the image userspace, or
+asking for a server restart. Call this instance's API with `mapi` as the
+constitution describes. Rarer topics (the container's Docker boundary, external
+Recovery, host container replacement, file locations, and viewing apps directly)
+live in `platform-reference`.
 
 ---
 
-## Authority and the external repair boundary
+## Root authority
 
 The normal Möbius agent has passwordless full root inside its own container by
 default. Check the operator-controlled capability before root work:
@@ -21,17 +24,10 @@ not part of the agent's authority. Package changes made only in a running
 container are ephemeral; declare them in the Dockerfile or lockfile and ship a
 new image when they must survive recreation.
 
-### Container root stops at the container boundary
+### Validation inside Möbius
 
-The normal Möbius app container intentionally has no Docker daemon or CLI and
-does not mount the host's Docker socket. `sudo` grants root inside that
-container only. Treat Docker's absence there as an expected trust boundary,
-not a broken dependency. Do not install a Docker CLI, start Docker-in-Docker,
-or request a host-socket mount for agent tests: the CLI alone has no daemon,
-while a socket or privileged daemon would cross into operator-owned host
-authority and would not work consistently on managed deployments.
-
-This boundary is not a reason to hide or skip validation. Inside Möbius:
+The app container has no Docker (see `platform-reference`), which is not a
+reason to hide or skip validation. Inside Möbius:
 
 - run `scripts/test.sh --fast` for the cheap hermetic contracts and
   `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
@@ -47,47 +43,6 @@ This boundary is not a reason to hide or skip validation. Inside Möbius:
 hosted pull-request checks give full-suite evidence for the exact reviewed
 commit without merging it, and the merge queue remains the unconditional
 authoritative gate.
-
-Recovery is not a daemon, listener, alternate boot mode, or second process
-inside Möbius. If the interface is unavailable, ask the partner to open
-**Recovery** from the deployment card in Möbius Launch. The launcher creates a
-separate temporary worker on demand and pins Railway SSH to the exact live
-Möbius service instance. Commands reach that container as root, while the
-worker itself remains outside the container and is deleted when the session
-finishes or expires. Never try to start or repair an in-container Recovery
-service; none should exist.
-
-Self-hosted operators use the authority they already own:
-
-```bash
-docker compose exec -u 0 app bash
-```
-
-That also attaches to the normal live container; it does not select a Recovery
-boot profile.
-
-### Host-owned container replacement
-
-A container recreation is not an ordinary server restart. On a self-hosted
-Host, use one of the two owning paths:
-
-- `scripts/deploy-prod.sh` for a checkout/image deployment; or
-- the installed Settings replacement controller documented in
-  `scripts/CONTAINER-REBUILD.md` for an official-image refresh.
-
-Both paths open a root-owned cutover challenge, ask the still-running worker to
-park and nonce-bind exact active chat runs, then let Docker perform the only
-stop. A failed replacement explicitly re-arms the same receipt for one rollback
-boot. This is why a raw `docker compose up --force-recreate`, `docker restart`,
-or direct container replacement is not an equivalent shortcut: it bypasses the
-handoff and intentionally falls back to conservative manual Resume after boot.
-Unexpected crashes remain manual by design; never make arbitrary boots look
-planned merely to hide recovery prompts.
-
-The running image must already contain the frozen `external-cutover-v1` helper.
-The first upgrade from an older image cannot manufacture that root capability;
-`deploy-prod.sh` says when it is using the legacy owner-presence gate, and that
-one upgrade installs the helper for later replacements.
 
 ---
 
@@ -146,44 +101,6 @@ Review the exact changed paths and use the smallest matching action:
    restart can activate it. If no change is pending, say so. For a
    constitution-only change, default to leaving it pending unless the partner
    needs the rule in new sessions now.
-
----
-
-## Calling the Möbius API — use `mapi`
-
-`mapi` is the standard way for an agent to call this instance's backend. It is
-`curl` with `$API_BASE_URL` and the owner `Authorization: Bearer $AGENT_TOKEN`
-already filled in, and it only accepts `/api/...` targets so owner auth can
-never be forwarded to an external URL. `mapi /api/apps/` is exactly:
-
-```bash
-curl -s "$API_BASE_URL/api/apps/" -H "Authorization: Bearer $AGENT_TOKEN"
-```
-
-Supported safe curl options pass through, so ordinary recipes translate by
-dropping the base URL and the auth header. Options that can retarget the
-authenticated request—such as redirects, proxies, curl config files, alternate
-destinations, or replacement Host headers—are refused:
-
-```bash
-mapi /api/apps/ | python3 -m json.tool
-mapi -X PATCH /api/apps/<app-id> -H 'Content-Type: application/json' -d '{...}'
-mapi -X PUT /api/storage/shared/theme.css \
-  -H 'Content-Type: text/css' --data-binary @/data/shared/theme.css
-```
-
-Notes:
-- `mapi` reflects the AGENT's owner token. A background app job only has
-  `$APP_TOKEN`, so app-job scripts keep plain `curl -H "Authorization: Bearer $APP_TOKEN" ...`.
-- A successful write often returns **204 No Content**: `mapi` then prints
-  nothing. That silence is success, not failure — verify with a follow-up
-  `GET`, or show the status with
-  `mapi -o /dev/null -w '%{http_code}' -X PUT /api/... -d '...'`.
-- Use the exact documented path **including its trailing slash** (for example
-  `/api/apps/`). Möbius routes do not redirect slash-less variants: the
-  slash-less form is a plain 404, not a redirect curl could follow.
-- Raw `curl` remains correct for anything that is not this instance's `/api`.
-- Prefer `mapi` everywhere else, including new skills and examples.
 
 ---
 
@@ -271,8 +188,8 @@ the write-surface contract.
    specific selection rather than an automatic retry. A scheduled/background
    agent cannot open a live card, but may answer an existing one it can access.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
-   and repair `/data/platform` there, or use external Recovery if the interface
-   itself is unavailable.
+   and repair `/data/platform` there, or use external Recovery (see
+   `platform-reference`) if the interface itself is unavailable.
 5. Restart time varies with active work and boot time; the page reloads when
    healthy. Verify the fix in the original chat.
 
@@ -291,35 +208,3 @@ writer, reconciliation, cron, and database supervisors. Recovery repairs the
 database externally, then the partner approves one normal restart so boot can
 verify the database and start those owners coherently. Do not hand-edit the
 in-memory readiness verdict or try to start skipped owners piecemeal.
-
----
-
-## File locations
-
-- Uploaded files: `/data/chats/{chat_id}/uploads/`
-- Chat media: `/data/chats/{chat_id}/media/`
-- Encrypted app credentials: `/data/app-secrets/{app_id}/` — use the app-secret
-  API, never edit ciphertext files.
-- Per-app storage (numeric id): `/data/apps/{app_id}/<path>`
-- Per-app source (slug): `/data/apps/{slug}/`
-- Shared storage: `/data/shared/<path>`
-- Compiled bundles: read the exact `compiled_path` from `GET /api/apps/{id}`
-- Cron logs: `/data/cron-logs/`
-- Owner service token: `/data/service-token.txt` (mode 0600)
-
-Chat files are purged when their chat is permanently deleted after the
-retention window. Put data that must outlive a chat in per-app or shared
-storage.
-
-## Viewing apps directly
-
-Capture an app through the authenticated shell, which supplies the frame-init
-message a standalone frame does not receive:
-
-```bash
-bash "$SCRIPTS_DIR/agent-screenshot.sh" --content-only /app/<id>
-```
-
-The frame URL is stable and cache-revalidated, but opening it alone normally
-ends at “Loading timeout.” Use the authenticated capture helper or the live
-shell.

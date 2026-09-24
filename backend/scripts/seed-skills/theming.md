@@ -58,7 +58,7 @@ Keep experimental overlays bounded and cheap. Full-viewport animated gradients a
 
 ## Structural changes (JSX/CSS) — a watcher rebuilds, no restart
 
-Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to their deployment's external Recovery action (see `platform-maintenance.md`).
+Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to their deployment's external Recovery action (see `platform-reference.md`).
 
 ### Shell scale belongs to the shell; local zoom belongs to apps
 
