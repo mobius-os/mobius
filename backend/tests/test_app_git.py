@@ -4552,11 +4552,11 @@ def test_path_scoped_dirty_check_ignores_unrelated_work_but_not_reviewed_paths(
   reviewed = ["index.jsx", "new/added.js"]
 
   assert app_git.worktree_dirty(repo)
-  assert not app_git.worktree_paths_dirty(repo, reviewed)
+  assert not app_git.worktree_dirty(repo, reviewed)
   # A glob-looking reviewed path is matched literally, never as a pattern.
-  assert not app_git.worktree_paths_dirty(repo, ["a?b.js"])
+  assert not app_git.worktree_dirty(repo, ["a?b.js"])
 
   (repo / "new").mkdir()
   (repo / "new" / "added.js").write_text("untracked reviewed file\n")
-  assert app_git.worktree_paths_dirty(repo, reviewed)
-  assert app_git.worktree_paths_dirty(repo, []) is app_git.worktree_dirty(repo)
+  assert app_git.worktree_dirty(repo, reviewed)
+  assert app_git.worktree_dirty(repo, []) is app_git.worktree_dirty(repo)

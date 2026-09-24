@@ -605,24 +605,17 @@ def _reviewed_source_identity(record: dict) -> str:
   ).encode("utf-8")).hexdigest()
 
 
-def reviewed_source_paths_dirty(
-  source_repo: Path,
-  review_repo: Path,
-  base_sha: str,
-  head_sha: str,
+def _reviewed_paths_dirty(
+  source_repo: Path, review_repo: Path, base_sha: str, head_sha: str,
 ) -> bool:
   """Whether installed working bytes differ from HEAD on a reviewed path.
 
-  Fails closed: when neither repository can list the reviewed paths, the
-  source is treated as dirty.
+  Unlistable reviewed paths count as dirty, so the proof fails closed.
   """
-  for repo in (review_repo, source_repo):
-    paths = app_git.endpoint_diff_paths(
-      repo, base_sha, head_sha, read_only=True,
-    )
-    if paths is not None:
-      return app_git.worktree_paths_dirty(source_repo, paths)
-  return True
+  paths = app_git.endpoint_diff_paths(
+    review_repo, base_sha, head_sha, read_only=True,
+  )
+  return paths is None or app_git.worktree_dirty(source_repo, paths)
 
 
 def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
@@ -655,9 +648,7 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
 
   try:
     current_source = app_git.head_sha(source_repo, "HEAD")
-    dirty = reviewed_source_paths_dirty(
-      source_repo, review_repo, base_sha, head_sha,
-    )
+    dirty = _reviewed_paths_dirty(source_repo, review_repo, base_sha, head_sha)
   except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
     current_source = ""
     dirty = True
