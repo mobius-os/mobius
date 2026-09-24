@@ -596,6 +596,27 @@ def worktree_dirty(source_dir: str | Path) -> bool:
   ).stdout.strip())
 
 
+def worktree_paths_dirty(
+  source_dir: str | Path, paths: Iterable[str],
+) -> bool:
+  """Whether any of ``paths`` has uncommitted or untracked working bytes.
+
+  Callers that must prove what a specific change serves use this instead of
+  :func:`worktree_dirty`, so unrelated in-progress edits elsewhere in the
+  checkout do not block them. An empty path set falls back to the whole tree.
+  """
+  paths = sorted(set(paths))
+  if not paths:
+    return worktree_dirty(source_dir)
+  if not is_repo(source_dir):
+    return False
+  return bool(_run(
+    Path(source_dir), "status", "--porcelain", "-z", "--untracked-files=all",
+    "--", *(f":(literal){path}" for path in paths),
+    read_only=True,
+  ).stdout.strip("\0").strip())
+
+
 def head_sha(source_dir: str | Path, branch: str) -> str:
   """The commit sha at the tip of `branch` (e.g. the merge base an
   update will diverge from). Assumes the repo + branch exist."""

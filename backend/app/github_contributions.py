@@ -605,6 +605,26 @@ def _reviewed_source_identity(record: dict) -> str:
   ).encode("utf-8")).hexdigest()
 
 
+def reviewed_source_paths_dirty(
+  source_repo: Path,
+  review_repo: Path,
+  base_sha: str,
+  head_sha: str,
+) -> bool:
+  """Whether installed working bytes differ from HEAD on a reviewed path.
+
+  Fails closed: when neither repository can list the reviewed paths, the
+  source is treated as dirty.
+  """
+  for repo in (review_repo, source_repo):
+    paths = app_git.endpoint_diff_paths(
+      repo, base_sha, head_sha, read_only=True,
+    )
+    if paths is not None:
+      return app_git.worktree_paths_dirty(source_repo, paths)
+  return True
+
+
 def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
   """Resolve the immutable inputs shared by preview and witness creation."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -635,15 +655,19 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
 
   try:
     current_source = app_git.head_sha(source_repo, "HEAD")
-    dirty = app_git.worktree_dirty(source_repo)
+    dirty = reviewed_source_paths_dirty(
+      source_repo, review_repo, base_sha, head_sha,
+    )
   except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
     current_source = ""
     dirty = True
-  # Send must prove the source that is installed *now*. Its clean committed
-  # HEAD is the only source-of-truth candidate. Falling back to the captured
+  # Send must prove the source that is installed *now*. Its committed HEAD is
+  # the only source-of-truth candidate. Falling back to the captured
   # preparation SHA when HEAD is unreadable would publish against stale source.
-  # Dirty working bytes are equally unprovable: the app serves those bytes, not
-  # merely HEAD, so force them through the normal commit + review path first.
+  # Dirty working bytes on a reviewed path are equally unprovable: the app
+  # serves those bytes, not merely HEAD, so force them through the normal
+  # commit + review path first. Another chat's uncommitted work on unrelated
+  # paths does not change what the reviewed paths serve.
   candidates = (current_source,) if current_source and not dirty else ()
   return _PendingEquivalenceSpec(
     source_repo=source_repo,

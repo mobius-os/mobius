@@ -4539,3 +4539,24 @@ def test_legacy_continuity_witness_remains_readable_and_allows_a_fresh_identity(
   assert replacement and replacement != legacy_ref
   assert app_git._read_prepublication_source_continuity(repo, replacement) is not None
   assert app_git._resolve_commit(repo, legacy_ref) is None
+
+
+def test_path_scoped_dirty_check_ignores_unrelated_work_but_not_reviewed_paths(
+  tmp_path,
+):
+  """Send proves reviewed paths; other in-progress edits must not block it."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  (repo / "notes.md").write_text("unrelated draft\n")
+  (repo / "a*b.js").write_text("literal glob name\n")
+  reviewed = ["index.jsx", "new/added.js"]
+
+  assert app_git.worktree_dirty(repo)
+  assert not app_git.worktree_paths_dirty(repo, reviewed)
+  # A glob-looking reviewed path is matched literally, never as a pattern.
+  assert not app_git.worktree_paths_dirty(repo, ["a?b.js"])
+
+  (repo / "new").mkdir()
+  (repo / "new" / "added.js").write_text("untracked reviewed file\n")
+  assert app_git.worktree_paths_dirty(repo, reviewed)
+  assert app_git.worktree_paths_dirty(repo, []) is app_git.worktree_dirty(repo)
