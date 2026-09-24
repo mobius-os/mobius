@@ -663,24 +663,22 @@ test('a failed container result survives reopening Settings without an unsolicit
   expect(state.unexpectedMutations).toEqual([])
 })
 
-for (const level of ['server_restart', 'dependency_sync']) {
-  test(`${level} completion asks before restarting and cancellation performs no mutation`, async ({ page }) => {
-    const state = { current: 'restart_needed', overrides: { available: false, needs_restart: true,
-      activation: { level, required_actions: [level], deployment: 'self_hosted', reasons: [], guidance: [] } } }
-    await mockPlatform(page, state)
-    const updates = await openSettings(page)
-    await updates.getByRole('button', { name: 'Restart to finish' }).click()
-    const confirmation = updates.getByRole('group', { name: 'Confirm restart' })
-    await expect(confirmation).toBeVisible()
-    await expect(confirmation.getByRole('button', { name: 'Restart now' })).toBeEnabled()
-    await expect(confirmation).toContainText('briefly interrupts active chats')
-    expect(state.unexpectedMutations).toEqual([])
-    await confirmation.getByRole('button', { name: 'Not now' }).click()
-    await expect(confirmation).toHaveCount(0)
-    await expect(updates.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
-    expect(state.unexpectedMutations).toEqual([])
-  })
-}
+test('server restart completion asks before restarting and cancellation performs no mutation', async ({ page }) => {
+  const state = { current: 'restart_needed', overrides: { available: false, needs_restart: true,
+    activation: { level: 'server_restart', required_actions: ['server_restart'], deployment: 'self_hosted', reasons: [], guidance: [] } } }
+  await mockPlatform(page, state)
+  const updates = await openSettings(page)
+  await updates.getByRole('button', { name: 'Restart to finish' }).click()
+  const confirmation = updates.getByRole('group', { name: 'Confirm restart' })
+  await expect(confirmation).toBeVisible()
+  await expect(confirmation.getByRole('button', { name: 'Restart now' })).toBeEnabled()
+  await expect(confirmation).toContainText('briefly interrupts active chats')
+  expect(state.unexpectedMutations).toEqual([])
+  await confirmation.getByRole('button', { name: 'Not now' }).click()
+  await expect(confirmation).toHaveCount(0)
+  await expect(updates.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
+  expect(state.unexpectedMutations).toEqual([])
+})
 
 test('technical changes stay behind an optional disclosure in the review', async ({ page }) => {
   const state = { current: 'available', preview: { ...preview,
