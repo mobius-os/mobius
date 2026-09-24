@@ -213,8 +213,8 @@ test('message references use a bounded responsive two-column grid', () => {
   assert.match(chipRule, /width:\s*100%/,
     'each source card should fill its grid column')
   assert.match(css,
-    /@media\s*\(max-width:\s*680px\)\s*\{\s*\.chat__sources-list\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
-    'mobile panes should fall back to one readable reference column')
+    /@media\s*\(max-width:\s*340px\)\s*\{\s*\.chat__sources-list\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
+    'narrow panes should fall back to one reference column')
 })
 
 test('transitions into Stop are sequential while Send to Steer stays immediate', () => {

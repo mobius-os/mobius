@@ -9,6 +9,7 @@ over a Unix socket; Codex sees only a narrow loopback Responses proxy.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import ipaddress
@@ -209,7 +210,7 @@ def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
 
 
 def _public_web_url(value: str) -> str:
-  """Only hand Firecrawl public HTTP URLs, never credentials or local targets."""
+  """Only hand search providers public HTTP URLs, never local targets."""
   split = urllib.parse.urlsplit(value)
   host = (split.hostname or "").lower().rstrip(".")
   if split.scheme not in {"http", "https"} or not host or split.username or split.password:
@@ -227,6 +228,14 @@ def _public_web_url(value: str) -> str:
 
 def _search_text(value: Any, *, limit: int) -> str:
   return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _search_domain_matches(url: str, domains: list[str]) -> bool:
+  if not domains:
+    return True
+  host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+  return any(host == domain.lower() or host.endswith("." + domain.lower())
+             for domain in domains)
 
 
 _GATEWAY_WEB_TOOL = "mobius_web_run"
@@ -273,6 +282,15 @@ def _flatten_web_tool(body: bytes) -> tuple[bytes, bool, bool]:
   if not changed:
     return body, False, False
   request["tools"] = flattened
+  # Codex sends prior calls back as conversation input on the next request.
+  # The gateway must see the same flat name there as in the advertised tools;
+  # otherwise GLM can receive a result for an unadvertised web.run call.
+  if isinstance(request.get("input"), list):
+    for item in request["input"]:
+      if (isinstance(item, dict) and item.get("type") == "function_call"
+          and item.get("name") == "run" and item.get("namespace") == "web"):
+        item["name"] = _GATEWAY_WEB_TOOL
+        del item["namespace"]
   run_candidates = []
   for tool in tools:
     if not isinstance(tool, dict):
@@ -593,29 +611,60 @@ class Broker:
   def close(self) -> None:
     self.client.close()
 
-  def _firecrawl(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-    # Never send the Codex SearchRequest.input history, model, or settings to
-    # Firecrawl: only the explicit query or page URL leaves this instance.
-    response = self.client.post(
-      f"https://api.firecrawl.dev/v2/{operation}",
-      json=payload,
-      headers={"Accept": "application/json"},
-      timeout=25.0,
+  def _parallel(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call the anonymous Parallel Search MCP behind Codex's native web.run."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def invoke() -> dict[str, Any]:
+      async with streamablehttp_client(
+        "https://search.parallel.ai/mcp", timeout=20, sse_read_timeout=20,
+      ) as (read, write, _):
+        async with ClientSession(read, write) as session:
+          await session.initialize()
+          response = await session.call_tool(tool, arguments)
+          if response.isError:
+            detail = " ".join(part.text for part in response.content if part.type == "text")
+            raise ValueError(f"Parallel search failed: {detail[:500]}")
+          for part in response.content:
+            if part.type == "text":
+              value = json.loads(part.text)
+              if isinstance(value, dict) and isinstance(value.get("results"), list):
+                if not value["results"] and value.get("errors"):
+                  raise ValueError(f"Parallel search failed: {str(value['errors'])[:500]}")
+                return value
+          raise ValueError("Parallel search returned no results list")
+
+    return asyncio.run(invoke())
+
+  @staticmethod
+  def _search_failure(error: Exception) -> str:
+    def rate_limited(value: BaseException) -> bool:
+      if isinstance(value, httpx.HTTPStatusError) and value.response.status_code == 429:
+        return True
+      if "rate limit" in str(value).lower() or "429" in str(value):
+        return True
+      return any(rate_limited(child) for child in getattr(value, "exceptions", ()))
+
+    if rate_limited(error):
+      return (
+        "Live web search is temporarily rate-limited. Continue without claiming "
+        "current facts were verified; tell the user the limit was reached."
+      )
+    return (
+      "Live web search is temporarily unavailable. Continue without claiming "
+      "current facts were verified; tell the user search was unavailable."
     )
-    response.raise_for_status()
-    value = response.json()
-    if not isinstance(value, dict) or value.get("success") is False:
-      raise ValueError("Firecrawl did not return a successful result")
-    return value
 
   def standalone_search(self, request: dict[str, Any]) -> dict[str, Any]:
-    """Adapt keyless Firecrawl to Codex's provider-relative alpha/search API."""
+    """Serve native Codex web.run with one keyless search provider."""
     commands = request.get("commands") or {}
     if not isinstance(commands, dict):
       raise ValueError("search commands must be an object")
     session_id = _search_text(request.get("id"), limit=200)
     if not session_id:
       raise ValueError("search session id is required")
+    provider_session = hashlib.sha256(session_id.encode()).hexdigest()
     unsupported = [
       key for key in ("click", "screenshot", "finance", "weather", "sports", "time")
       if commands.get(key)
@@ -623,7 +672,7 @@ class Broker:
     lines: list[str] = []
     results: list[dict[str, str]] = []
     if unsupported:
-      lines.append("Unsupported Firecrawl operation(s): " + ", ".join(unsupported) + ".")
+      lines.append("Unsupported web search operation(s): " + ", ".join(unsupported) + ".")
     budgets = {"short": 4000, "medium": 8000, "long": 16000}
     budget = budgets.get(commands.get("response_length"), 8000)
     with self.lock:
@@ -657,18 +706,38 @@ class Broker:
             for domain in domains
           ):
             raise ValueError("invalid search domains")
-          search_text += " (" + " OR ".join(f"site:{domain}" for domain in domains) + ")"
         recency = query.get("recency")
-        if isinstance(recency, int) and 0 < recency <= 3650:
+        since = None
+        if source == "web" and type(recency) is int and 0 < recency <= 3650:
           since = datetime.now(timezone.utc) - timedelta(days=recency)
-          search_text += " after:" + since.date().isoformat()
-        value = self._firecrawl("search", {
-          "query": search_text, "limit": 5, "sources": [source],
-        })
-        hits = (value.get("data") or {}).get(source) or []
+        if source == "images":
+          hits = []
+          search_available = False
+          lines.append("Image search is not supported by this provider; continue without images.")
+        else:
+          objective = "Find reliable, current sources for " + search_text
+          if domains:
+            objective += "; only these domains: " + ", ".join(domains)
+          if since:
+            objective += f"; published since {since:%Y-%m-%d}"
+            lines.append("Freshness filtering is advisory; verify publication dates.")
+          try:
+            value = self._parallel("web_search", {
+              "objective": objective[:1000], "search_queries": [search_text],
+              "session_id": provider_session,
+            })
+            hits = value.get("results") or []
+            search_available = True
+          # MCP transports can surface rate limits and outages as ExceptionGroups.
+          # Keep that external failure within the tool result, not the agent turn.
+          except Exception as error:
+            hits = []
+            search_available = False
+            lines.append(self._search_failure(error))
+        if not isinstance(hits, list):
+          hits = []
         lines.append(f"Search results for {query['q']}:")
-        if not hits:
-          lines.append("No results.")
+        result_count = len(results)
         for hit in hits[:5]:
           if not isinstance(hit, dict):
             continue
@@ -676,6 +745,8 @@ class Broker:
           try:
             _public_web_url(url)
           except ValueError:
+            continue
+          if not _search_domain_matches(url, domains):
             continue
           with self.lock:
             refs = session["refs"]
@@ -685,12 +756,15 @@ class Broker:
             else:
               ref_id = url
           title = _search_text(hit.get("title"), limit=200) or url
-          snippet = _search_text(hit.get("description"), limit=700)
+          excerpts = hit.get("excerpts") or []
+          snippet = _search_text(excerpts[0] if isinstance(excerpts, list) and excerpts else "", limit=700)
           results.append({
             "type": "text_result", "ref_id": ref_id, "url": url,
             "title": title, "snippet": snippet,
           })
           lines.append(f"【{ref_id}】 {title}\n{url}\n{snippet}")
+        if search_available and len(results) == result_count:
+          lines.append("No results.")
 
     for kind in ("open", "find"):
       operations = commands.get(kind) or []
@@ -703,22 +777,39 @@ class Broker:
         with self.lock:
           url = session["refs"].get(ref_id, ref_id)
         url = _public_web_url(url)
-        value = self._firecrawl("scrape", {"url": url, "formats": ["markdown"]})
-        data = value.get("data") or {}
-        markdown = _search_text(data.get("markdown"), limit=30_000)
+        pattern = _search_text(operation.get("pattern"), limit=200) if kind == "find" else ""
+        if kind == "find" and not pattern:
+          raise ValueError("find pattern is required")
+        try:
+          value = self._parallel("web_fetch", {
+            "urls": [url], "objective": "Read this page", "full_content": True,
+            "session_id": provider_session,
+          })
+          pages = value.get("results") or []
+          page = pages[0] if pages and isinstance(pages[0], dict) else {}
+          excerpts = page.get("excerpts") or []
+          markdown = _search_text(
+            page.get("full_content") or "\n".join(
+              excerpt for excerpt in excerpts if isinstance(excerpt, str)
+            ), limit=30_000,
+          )
+          note = ""
+        except Exception as error:
+          markdown = ""
+          note = self._search_failure(error)
         if kind == "find":
-          pattern = _search_text(operation.get("pattern"), limit=200)
-          if not pattern:
-            raise ValueError("find pattern is required")
           position = markdown.lower().find(pattern.lower())
           content = (
             markdown[max(0, position - 300):position + len(pattern) + 900]
-            if position >= 0 else "Pattern not found on page."
+            if position >= 0 else (
+              "Pattern not found on page." if markdown else "Page text unavailable."
+            )
           )
         else:
           content = markdown[:8000] or "No page text returned."
-        lines.append(f"【{ref_id}】 {url}\n{content}")
-        results.append({"type": "text_result", "ref_id": ref_id, "url": url})
+        lines.append(f"【{ref_id}】 {url}\n{note}\n{content}" if note else f"【{ref_id}】 {url}\n{content}")
+        if markdown:
+          results.append({"type": "text_result", "ref_id": ref_id, "url": url})
 
     return {"output": ("\n\n".join(lines) or "No search command was provided.")[:budget],
             "results": results}
@@ -1251,15 +1342,15 @@ class _Handler(BaseHTTPRequestHandler):
       status = exc.response.status_code
       if route_path == "/v1/alpha/search":
         message = (
-          "Firecrawl keyless search limit reached; try again later"
-          if status == 429 else "Firecrawl search service failed"
+          "web search rate limit reached; try again later"
+          if status == 429 else "web search service failed"
         )
         self._json(429 if status == 429 else 502, {"error": message, "status": status})
       else:
         self._json(502, {"error": "central identity request failed", "status": status})
     except httpx.HTTPError:
       self._json(502, {"error": (
-        "Firecrawl search service unavailable" if route_path == "/v1/alpha/search"
+        "web search service unavailable" if route_path == "/v1/alpha/search"
         else "central service unavailable"
       )})
 

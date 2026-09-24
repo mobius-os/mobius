@@ -145,41 +145,34 @@ export default function MessageSources({
           </div>
         )}
         {open && loadedSources !== null && (
-          <>
-            <p className="chat__sources-note">Pages found in search order; not every page was used in the answer.</p>
-            <ul className="chat__sources-list" aria-label="References for this answer">
-              {sources.map((source, index) => {
-                const label = labels[index]
-                const baseLabel = sourceLabel(source)
-                const host = sourceHost(source.url)
-                const faviconUrl = sourceFaviconUrl(source.url)
-                const faviconDiscoveryUrl = sourceFaviconDiscoveryUrl(source.url)
-                return (
-                  <li key={source.url} className="chat__source-item chat__source-item--web">
-                    <span className="chat__source-rank">{index + 1}.</span>
-                    <div className="chat__source-detail">
-                      <a
-                        className="chat__source-chip"
-                        href={source.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={source.snippet || source.title || source.url}
-                        aria-label={`${label}${host && label === baseLabel && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
-                      >
-                        <SourceFavicon
-                          faviconUrl={faviconUrl}
-                          discoveryUrl={faviconDiscoveryUrl}
-                          fallback={sourceMark(host)}
-                        />
-                        <span className="chat__source-title">{label}</span>
-                      </a>
-                      {source.snippet && <p className="chat__source-snippet">{source.snippet}</p>}
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          </>
+          <ul className="chat__sources-list" aria-label="References for this answer">
+            {sources.map((source, index) => {
+              const label = labels[index]
+              const baseLabel = sourceLabel(source)
+              const host = sourceHost(source.url)
+              const faviconUrl = sourceFaviconUrl(source.url)
+              const faviconDiscoveryUrl = sourceFaviconDiscoveryUrl(source.url)
+              return (
+                <li key={source.url} className="chat__source-item chat__source-item--web">
+                  <a
+                    className="chat__source-chip"
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={source.title || source.url}
+                    aria-label={`${label}${host && label === baseLabel && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
+                  >
+                    <SourceFavicon
+                      faviconUrl={faviconUrl}
+                      discoveryUrl={faviconDiscoveryUrl}
+                      fallback={sourceMark(host)}
+                    />
+                    <span className="chat__source-title">{label}</span>
+                  </a>
+                </li>
+              )
+            })}
+          </ul>
         )}
       </div>
     </section>
