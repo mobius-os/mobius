@@ -738,7 +738,9 @@ class Broker:
           hits = []
         lines.append(f"Search results for {query['q']}:")
         result_count = len(results)
-        for hit in hits[:5]:
+        for hit in hits:
+          if len(results) - result_count >= 5:
+            break
           if not isinstance(hit, dict):
             continue
           url = _search_text(hit.get("url"), limit=2000)

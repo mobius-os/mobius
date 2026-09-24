@@ -1048,6 +1048,28 @@ def test_standalone_search_filters_domains_and_marks_date_advisory(broker, monke
   assert "published since" in calls[0][1]["objective"]
 
 
+def test_standalone_search_limits_after_domain_filtering(broker, monkeypatch):
+  hits = [
+    {"url": f"https://unrelated.example/{index}", "title": "Unrelated"}
+    for index in range(5)
+  ] + [
+    {"url": f"https://www.bankofengland.co.uk/decision/{index}", "title": "Decision"}
+    for index in range(7)
+  ]
+  monkeypatch.setattr(broker, "_parallel", lambda *_args: {"results": hits})
+  result = broker.standalone_search({
+    "id": "chat-domain-cap",
+    "commands": {"search_query": [{
+      "q": "official rate", "domains": ["bankofengland.co.uk"],
+    }]},
+  })
+  assert [hit["url"] for hit in result["results"]] == [
+    f"https://www.bankofengland.co.uk/decision/{index}"
+    for index in range(5)
+  ]
+  assert "No results." not in result["output"]
+
+
 def test_standalone_image_search_is_nonfatal_when_not_supported(broker, monkeypatch):
   monkeypatch.setattr(broker, "_parallel", lambda *_args: pytest.fail("must not call"))
   result = broker.standalone_search({
