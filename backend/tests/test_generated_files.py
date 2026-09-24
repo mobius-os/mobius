@@ -1,11 +1,16 @@
 import asyncio
+from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
+import os
 from pathlib import Path
+import shutil
 import uuid
 
 import pytest
 
 from app import generated_files as gf
+from app import chat_writer
+from app import chat_event_sink
 from app import models
 from app.broadcast import ChatBroadcast
 from app.chat_event_sink import ChatEventSink
@@ -135,7 +140,98 @@ def test_serve_generated_file_rejects_post_record_symlink_escape(
     f"/api/chats/{chat.id}/generated-files/alias.pdf",
     params={"token": _media_token(client, auth, chat.id)},
   )
-  assert res.status_code == 400
+  assert res.status_code == 404
+
+
+def test_managed_store_root_cannot_be_replaced_by_symlink(tmp_path):
+  data_dir = str(tmp_path / "data")
+  inbox = gf.output_dir(data_dir, "chat", create=True)
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  (inbox.parent / "files").symlink_to(outside, target_is_directory=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+
+  assert gf._freeze_file(data_dir, "chat", "report.pdf") is None
+  assert list(outside.iterdir()) == []
+
+
+def test_route_rejects_symlinked_managed_store_root(client, db, auth, chat):
+  settings = get_settings()
+  managed = gf.stored_dir(settings.data_dir, chat.id, create=True)
+  stored_name = "opaque.pdf"
+  _write_row(db, chat, name="report.pdf", path=stored_name)
+  outside = managed.parent / "outside-store"
+  outside.mkdir()
+  (outside / stored_name).write_bytes(b"not chat-scoped")
+  shutil.rmtree(managed)
+  managed.symlink_to(outside, target_is_directory=True)
+
+  res = client.get(
+    f"/api/chats/{chat.id}/generated-files/report.pdf",
+    params={"token": _media_token(client, auth, chat.id)},
+  )
+
+  assert res.status_code == 404
+
+
+def test_capture_keeps_held_store_when_directory_path_is_swapped(
+  tmp_path, monkeypatch,
+):
+  data_dir = str(tmp_path / "data")
+  inbox = gf.output_dir(data_dir, "chat", create=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+  managed = gf.stored_dir(data_dir, "chat", create=True)
+  parked = managed.parent / "parked-store"
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  real_open = gf._open_directory
+  swapped = False
+
+  def open_then_swap(directory, *, create):
+    nonlocal swapped
+    fd = real_open(directory, create=create)
+    if directory == managed and not swapped:
+      swapped = True
+      managed.rename(parked)
+      managed.symlink_to(outside, target_is_directory=True)
+    return fd
+
+  monkeypatch.setattr(gf, "_open_directory", open_then_swap)
+
+  captured = gf._freeze_file(data_dir, "chat", "report.pdf")
+
+  assert captured is not None
+  assert list(outside.iterdir()) == []
+  assert (parked / captured["path"]).read_bytes() == b"report"
+
+
+def test_route_serves_held_inode_when_recorded_path_is_swapped(
+  client, db, auth, chat, monkeypatch,
+):
+  settings = get_settings()
+  stored_name = _stored_file(chat, content=b"original")
+  _write_row(db, chat, name="report.pdf", path=stored_name)
+  managed = gf.stored_dir(settings.data_dir, chat.id)
+  outside = managed.parent / "outside.pdf"
+  outside.write_bytes(b"secret")
+  parked = managed / "parked.pdf"
+  real_open = gf.open_stored_file
+
+  def open_then_swap(data_dir, chat_id, name):
+    fd, info = real_open(data_dir, chat_id, name)
+    (managed / name).rename(parked)
+    (managed / name).symlink_to(outside)
+    return fd, info
+
+  monkeypatch.setattr(gf, "open_stored_file", open_then_swap)
+
+  res = client.get(
+    f"/api/chats/{chat.id}/generated-files/report.pdf",
+    params={"token": _media_token(client, auth, chat.id)},
+  )
+
+  assert res.status_code == 200
+  assert res.content == b"original"
 
 
 def test_generated_file_row_is_scoped_to_its_chat(client, db, auth, chat):
@@ -188,6 +284,37 @@ def test_inbox_capture_is_immutable_across_same_name_regeneration(db, chat):
   assert (stored / rows[0].path).read_bytes() == b"first report"
   assert (stored / rows[1].path).read_bytes() == b"second report"
 
+  live = db.get(models.ChatLiveAssistant, chat.id)
+  file_blocks = [
+    block for block in live.snapshot["blocks"]
+    if block.get("type") == "generated_files"
+  ]
+  assert [file["name"] for file in file_blocks[0]["files"]] == [
+    "report.pdf", "report_1.pdf",
+  ]
+
+
+def test_non_regular_swap_is_rejected_without_blocking(tmp_path):
+  data_dir = str(tmp_path / "data")
+  inbox = gf.output_dir(data_dir, "chat", create=True)
+  fifo = inbox / "report.pdf"
+  os.mkfifo(fifo)
+
+  assert gf._freeze_file(data_dir, "chat", "report.pdf") is None
+
+
+def test_oversized_candidates_do_not_starve_later_valid_file(
+  tmp_path, monkeypatch,
+):
+  data_dir = str(tmp_path / "data")
+  inbox = gf.output_dir(data_dir, "chat", create=True)
+  monkeypatch.setattr(gf, "MAX_RECORDED_BYTES", 4)
+  for index in range(gf.MAX_CANDIDATES_PER_TURN):
+    (inbox / f"a{index:02}.pdf").write_bytes(b"oversized")
+  (inbox / "z-valid.pdf").write_bytes(b"good")
+
+  assert gf._inbox_names(data_dir, "chat") == ["z-valid.pdf"]
+
 
 def test_rejected_capture_keeps_inbox_and_removes_frozen_copy(
   db, chat, monkeypatch,
@@ -202,12 +329,12 @@ def test_rejected_capture_keeps_inbox_and_removes_frozen_copy(
   ))
 
   assert (inbox / "report.pdf").read_bytes() == b"report"
-  stored = gf.stored_dir(settings.data_dir, chat.id)
+  stored = gf._chat_root(settings.data_dir, chat.id) / "files"
   assert not stored.exists() or list(stored.iterdir()) == []
   assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 0
 
 
-def test_publish_failure_keeps_inbox_and_removes_frozen_copy(chat):
+def test_publish_failure_keeps_inbox_and_frozen_copy(chat):
   class FailingSink:
     async def publish_generated_file(self, _event):
       raise RuntimeError("writer unavailable")
@@ -223,7 +350,188 @@ def test_publish_failure_keeps_inbox_and_removes_frozen_copy(chat):
 
   assert (inbox / "report.pdf").read_bytes() == b"report"
   stored = gf.stored_dir(settings.data_dir, chat.id)
-  assert not stored.exists() or list(stored.iterdir()) == []
+  assert [item.read_bytes() for item in stored.iterdir()] == [b"report"]
+
+
+def test_uncertain_publish_keeps_inbox_and_frozen_copy(chat):
+  class UncertainSink:
+    async def publish_generated_file(self, _event):
+      return gf.PUBLICATION_UNCERTAIN
+
+  settings = get_settings()
+  inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+
+  asyncio.run(gf.publish_inbox_files(
+    UncertainSink(), data_dir=settings.data_dir, chat_id=chat.id,
+  ))
+
+  assert (inbox / "report.pdf").read_bytes() == b"report"
+  stored = gf.stored_dir(settings.data_dir, chat.id)
+  assert [item.read_bytes() for item in stored.iterdir()] == [b"report"]
+
+
+def test_transcript_failure_rolls_back_generated_row_and_keeps_inbox(
+  db, chat, monkeypatch,
+):
+  settings = get_settings()
+  inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+  monkeypatch.setattr(chat_writer, "update_live_assistant", lambda *a, **k: None)
+
+  asyncio.run(gf.publish_inbox_files(
+    _sink(chat), data_dir=settings.data_dir, chat_id=chat.id,
+  ))
+
+  assert (inbox / "report.pdf").read_bytes() == b"report"
+  assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 0
+  stored = gf.stored_dir(settings.data_dir, chat.id)
+  assert list(stored.iterdir()) == []
+
+
+def test_generated_file_wait_keeps_concurrent_error_and_no_placeholder(
+  chat, monkeypatch,
+):
+  sink = _sink(chat)
+  record_ack = Future()
+  barrier_snapshots = []
+
+  class Writer:
+    def submit(self, command):
+      if isinstance(command, chat_writer.RecordGeneratedFile):
+        return record_ack
+      assert isinstance(command, chat_writer.PersistTranscriptBarrier)
+      barrier_snapshots.append(command.snapshot)
+      ack = Future()
+      ack.set_result(True)
+      return ack
+
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: Writer())
+
+  async def scenario():
+    task = asyncio.create_task(sink.publish_generated_file({
+      "type": "generated_file", "name": "report.pdf", "path": "opaque.pdf",
+      "size": 6, "mime_type": "application/pdf", "previewable": True,
+    }))
+    await asyncio.sleep(0)
+    sink.publish({
+      "type": "error", "message": "Stopped", "resumable": True,
+    })
+    record_ack.set_result("report.pdf")
+    assert await task == "report.pdf"
+
+  asyncio.run(scenario())
+
+  assert [block["type"] for block in sink.assistant_blocks] == [
+    "error", "generated_files",
+  ]
+  assert barrier_snapshots[-1]["blocks"] == sink.assistant_blocks
+  assert "__pending_generated_" not in str(barrier_snapshots)
+
+
+def test_rejected_generated_file_does_not_erase_concurrent_error(
+  chat, monkeypatch,
+):
+  sink = _sink(chat)
+  record_ack = Future()
+
+  class Writer:
+    def submit(self, command):
+      if isinstance(command, chat_writer.RecordGeneratedFile):
+        return record_ack
+      assert isinstance(command, chat_writer.PersistTranscriptBarrier)
+      ack = Future()
+      ack.set_result(True)
+      return ack
+
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: Writer())
+
+  async def scenario():
+    task = asyncio.create_task(sink.publish_generated_file({
+      "type": "generated_file", "name": "report.pdf", "path": "opaque.pdf",
+      "size": 6, "mime_type": "application/pdf", "previewable": True,
+    }))
+    await asyncio.sleep(0)
+    sink.publish({
+      "type": "error", "message": "Stopped", "resumable": True,
+    })
+    record_ack.set_result(None)
+    assert await task is None
+
+  asyncio.run(scenario())
+
+  assert [block["type"] for block in sink.assistant_blocks] == ["error"]
+
+
+def test_generated_file_timeout_preserves_late_writer_commit(
+  db, chat, monkeypatch,
+):
+  settings = get_settings()
+  inbox = gf.output_dir(settings.data_dir, chat.id, create=True)
+  (inbox / "report.pdf").write_bytes(b"report")
+  sink = _sink(chat)
+  chat_writer.get_writer().submit(chat_writer.ReplaceTranscript(
+    chat_id=chat.id,
+    messages=[{
+      "role": "user", "content": "make a report", "ts": 1, "cid": "u1",
+    }],
+  )).result(timeout=5)
+  from app.database import SessionLocal
+  writer = chat_writer.ChatWriterActor(session_factory=SessionLocal)
+  writer.pause_for_test()
+  writer.start()
+  assert writer._session_ready.wait(timeout=5)
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: writer)
+  sink.assistant_blocks.append({"type": "text", "content": "Done"})
+
+  async def capacity_available():
+    return True
+
+  sink.can_publish_generated_files = capacity_available
+
+  async def scenario():
+    monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.01)
+    await gf.publish_inbox_files(
+      sink, data_dir=settings.data_dir, chat_id=chat.id,
+    )
+    assert (inbox / "report.pdf").read_bytes() == b"report"
+    sink.publish({
+      "type": "error", "message": "Stopped", "resumable": True,
+    })
+    monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 2)
+    finalize = asyncio.create_task(sink.finalize())
+    await asyncio.sleep(0.02)
+    writer.resume_for_test()
+    await finalize
+
+  try:
+    asyncio.run(scenario())
+  finally:
+    writer.resume_for_test()
+    writer.stop(timeout=5)
+
+  db.expire_all()
+  row = db.query(models.GeneratedFile).filter_by(chat_id=chat.id).one()
+  assert row.name == "report.pdf"
+  assert not (inbox / "report.pdf").exists()
+  assert [item.name for item in gf.stored_dir(
+    settings.data_dir, chat.id,
+  ).iterdir()] == [row.path]
+  db.refresh(chat)
+  assistant = chat.messages[-1]
+  assert assistant["role"] == "assistant"
+  assert [block["type"] for block in assistant["blocks"]] == [
+    "text", "error", "generated_files",
+  ]
+  assert assistant["blocks"][-1]["files"][0]["name"] == "report.pdf"
+  assert db.get(models.ChatLiveAssistant, chat.id) is None
+
+  asyncio.run(gf.publish_inbox_files(
+    _sink(chat), data_dir=settings.data_dir, chat_id=chat.id,
+  ))
+  db.expire_all()
+  assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 1
+  assert len(list(gf.stored_dir(settings.data_dir, chat.id).iterdir())) == 1
 
 
 def test_inbox_ignores_nested_symlink_and_unapproved_extension(tmp_path):

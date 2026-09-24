@@ -190,6 +190,22 @@ class PersistTranscript(_Command):
 
 
 @dataclass
+class PersistTranscriptBarrier(_Command):
+  """Must-persist snapshot used to close a short in-process mutation barrier.
+
+  Unlike the ordinary coalescible stream snapshot, this command fences older
+  snapshots and acknowledges only after this complete state commits. It lets
+  a sink temporarily defer concurrent saves while an atomic side-table +
+  transcript operation resolves, without dropping the events themselves.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
 class Finalize(_Command):
   """Terminal full-snapshot write for a turn.  Never coalesces.
 
@@ -421,10 +437,13 @@ class StashToolOutput(_Command):
 
 @dataclass
 class RecordGeneratedFile(_Command):
-  """Insert one detected agent-written deliverable into `generated_files`.
+  """Atomically record one deliverable and its live transcript association.
 
   ``name`` is the row identity within the chat; the handler suffixes display
-  collisions so the download route's by-name lookup stays unambiguous.
+  collisions so the download route's by-name lookup stays unambiguous. The
+  snapshot contains ``placeholder`` at the new file entry; the actor replaces
+  it with that final name and commits both records together before the sink
+  broadcasts or consumes the inbox source.
   """
 
   chat_id: str = ""
@@ -432,6 +451,29 @@ class RecordGeneratedFile(_Command):
   path: str = ""
   size: int = 0
   mime_type: str = "application/octet-stream"
+  snapshot: dict = field(default_factory=dict)
+  placeholder: str = ""
+  thinking_stashes: list = field(default_factory=list)
+
+
+@dataclass
+class CheckGeneratedFileCapacity(_Command):
+  """Read the serialized per-chat row cap before copying another batch."""
+
+  chat_id: str = ""
+
+
+@dataclass
+class ResolveGeneratedFilePublication(_Command):
+  """Resolve an ambiguously acknowledged file command by its immutable path.
+
+  Submitted after a timed-out ``RecordGeneratedFile``. FIFO ordering makes
+  this read observe that earlier command's terminal database outcome before a
+  sink is allowed to finalize a potentially file-less transcript.
+  """
+
+  chat_id: str = ""
+  path: str = ""
 
 
 @dataclass
@@ -1185,6 +1227,7 @@ class _TestPersist(_Command):
 # successful commit safe without a pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
+  PersistTranscriptBarrier,
   PersistError,
   QuestionCommit,
   SettleSecureInput,
@@ -1862,6 +1905,13 @@ class ChatWriterActor:
       return self._persist_live_message(
         db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
       )
+    if isinstance(cmd, PersistTranscriptBarrier):
+      result = self._persist_live_message(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
+      if result is not True:
+        raise _PersistFailed("PersistTranscriptBarrier did not persist")
+      return True
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
@@ -1960,6 +2010,19 @@ class ChatWriterActor:
       return self._stash_tool_output(db, cmd)
     if isinstance(cmd, RecordGeneratedFile):
       return self._record_generated_file(db, cmd)
+    if isinstance(cmd, CheckGeneratedFileCapacity):
+      from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+      from app.models import GeneratedFile
+      return db.query(GeneratedFile).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+      ).count() < MAX_RECORDED_ROWS_PER_CHAT
+    if isinstance(cmd, ResolveGeneratedFilePublication):
+      from app.models import GeneratedFile
+      row = db.query(GeneratedFile).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+        GeneratedFile.path == cmd.path,
+      ).first()
+      return row.name if row is not None else None
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -2722,14 +2785,17 @@ class ChatWriterActor:
     return True
 
   def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> str | None:
-    """Insert one detected deliverable, keeping `name` unique within the chat.
+    """Persist one detected deliverable, keeping `name` unique within a chat.
 
-    The bytes already live at a unique immutable managed path. Only the
-    human-facing name can collide, so one bounded query supplies both the row
-    cap and the suffix decision. The final name is returned before broadcast
-    so the transcript URL and database key cannot diverge.
+    The row and its transcript link are one transaction. A crash can therefore
+    leave, at worst, an unreferenced frozen byte copy for retention cleanup; it
+    cannot consume the inbox source after committing only half of the visible
+    download contract.
     """
-    if not cmd.chat_id or not cmd.name or not cmd.path:
+    if (
+      not cmd.chat_id or not cmd.name or not cmd.path
+      or not cmd.placeholder or not isinstance(cmd.snapshot, dict)
+    ):
       return None
     from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
     from app.models import GeneratedFile
@@ -2760,6 +2826,21 @@ class ChatWriterActor:
       while f"{stem}_{index}{suffix}" in existing_names:
         index += 1
       name = f"{stem}_{index}{suffix}"
+    snapshot = copy.deepcopy(cmd.snapshot)
+    replaced = False
+    for block in reversed(snapshot.get("blocks") or []):
+      if block.get("type") != "generated_files":
+        continue
+      for item in reversed(block.get("files") or []):
+        if item.get("name") == cmd.placeholder:
+          item["name"] = name
+          replaced = True
+          break
+      if replaced:
+        break
+    if not replaced:
+      raise _PersistFailed("RecordGeneratedFile placeholder missing from snapshot")
+
     db.add(GeneratedFile(
       chat_id=cmd.chat_id,
       name=name,
@@ -2767,6 +2848,14 @@ class ChatWriterActor:
       size=cmd.size,
       mime_type=cmd.mime_type,
     ))
+    if cmd.thinking_stashes:
+      self._stage_thinking_stashes(db, cmd.thinking_stashes)
+    persisted = update_live_assistant(
+      db, cmd.chat_id, snapshot, require_row=True, commit=False,
+    )
+    if persisted is not True:
+      db.rollback()
+      raise _PersistFailed("RecordGeneratedFile transcript association missing")
     if not _commit_or_rollback(db):
       raise _PersistFailed("RecordGeneratedFile did not persist")
     return name
@@ -6079,7 +6168,12 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
 
 
 def update_live_assistant(
-  db, chat_id: str, message: dict, *, require_row: bool = False,
+  db,
+  chat_id: str,
+  message: dict,
+  *,
+  require_row: bool = False,
+  commit: bool = True,
 ) -> bool | None:
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
@@ -6179,7 +6273,7 @@ def update_live_assistant(
       .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
       .values(active_assistant_message_id=owner_id, updated_at=Chat.updated_at)
     )
-  return _commit_or_rollback(db)
+  return _commit_or_rollback(db) if commit else True
 
 
 def finalize_response_outcome(

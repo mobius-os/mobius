@@ -18,12 +18,15 @@ from app.broadcast import get_broadcast
 from app.chat_logging import get_logger as _get_logger
 from app.chat_writer import (
   AppendSteeredUserMessage,
+  CheckGeneratedFileCapacity,
   Finalize,
   PersistError,
   PersistTranscript,
+  PersistTranscriptBarrier,
   QuestionCommit,
   RecordAgentLifecycle,
   RecordGeneratedFile,
+  ResolveGeneratedFilePublication,
   StashThinkingTrace,
   StashToolOutput,
   await_ack as _await_ack,
@@ -44,6 +47,7 @@ from app.events import (
   undo_question_scrub,
 )
 from app.config import agent_scratch_root
+from app.generated_files import PUBLICATION_UNCERTAIN, _settle_capture
 from app.agent_activity import (
   EMPTY_AGENT_ACTIVITY_BINDING,
   MAX_RESULT_SCAN_CHARS,
@@ -374,6 +378,14 @@ class ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
+    # Generated-file publication briefly waits for the writer to choose a
+    # collision-free display name. Ordinary provider events may still arrive
+    # in that window. Keep reducing/broadcasting them, but defer snapshots
+    # until the final file entry can be merged without exposing a placeholder.
+    self._generated_file_lock = asyncio.Lock()
+    self._generated_file_pending = False
+    self._generated_file_revision = 0
+    self._uncertain_generated_files: dict[str, dict] = {}
     # The last error message published via publish() during this turn, or None.
     # Used by finalize(): a turn that errors before accumulating any content
     # (auth failure, connect timeout) leaves assistant_blocks empty, so the
@@ -816,42 +828,173 @@ class ChatEventSink:
       )
     )
 
-  async def publish_generated_file(self, event: dict) -> str | None:
-    """Save-before-broadcast for a detected generated-file download.
+  async def publish_generated_file(self, event: dict) -> str | object | None:
+    """Atomically save a detected download and its transcript association.
 
-    `RecordGeneratedFile` may suffix a repeated display name. Await the insert
-    and put that exact key on the transcript event before it reaches either the
-    reducer or SSE; otherwise the visible link could name a different row.
-    Failed inserts do not publish a download with no backing record.
+    `RecordGeneratedFile` may suffix a repeated display name. A unique private
+    placeholder lets the writer choose that name and commit both the metadata
+    row and complete live transcript snapshot in one transaction. Only then do
+    we expose the final key on SSE and let the caller consume the inbox source.
     """
-    name = event.get("name")
-    path = event.get("path")
+    public_event = {
+      key: value for key, value in event.items() if not key.startswith("_")
+    }
+    name = public_event.get("name")
+    path = public_event.get("path")
     if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
       return None
     if not self.chat_id:
       return None
-    ack = get_writer().submit(
-      RecordGeneratedFile(
-        chat_id=self.chat_id,
-        name=name,
-        path=path,
-        size=event.get("size") or 0,
-        mime_type=event.get("mime_type") or "application/octet-stream",
-      )
-    )
+    async with self._generated_file_lock:
+      if self._uncertain_generated_files:
+        return PUBLICATION_UNCERTAIN
+      placeholder = f"__pending_generated_{uuid.uuid4().hex}"
+      provisional_blocks = copy.deepcopy(self.assistant_blocks)
+      provisional = dict(public_event)
+      provisional["name"] = placeholder
+      if not process_event(provisional, provisional_blocks):
+        return None
+      snapshot, stashes = self._deferred_snapshot(provisional_blocks)
+      self._generated_file_pending = True
+      try:
+        ack = get_writer().submit(
+          RecordGeneratedFile(
+            chat_id=self.chat_id,
+            name=name,
+            path=path,
+            size=public_event.get("size") or 0,
+            mime_type=public_event.get("mime_type") or "application/octet-stream",
+            snapshot=snapshot,
+            placeholder=placeholder,
+            thinking_stashes=stashes,
+          )
+        )
+        try:
+          final_name = await _await_ack(ack)
+        except asyncio.TimeoutError:
+          _get_logger().warning(
+            "generated-file atomic commit timed out chat_id=%s name=%s",
+            self.chat_id, name, exc_info=True,
+          )
+          self._uncertain_generated_files[path] = {
+            "event": copy.deepcopy(public_event),
+            "data_dir": event.get("_capture_data_dir"),
+            "captured": {
+              "name": name,
+              "path": path,
+              "_source_identity": event.get("_source_identity"),
+            },
+          }
+          return PUBLICATION_UNCERTAIN
+        except Exception:
+          _get_logger().warning(
+            "generated-file atomic commit failed chat_id=%s name=%s",
+            self.chat_id, name, exc_info=True,
+          )
+          final_name = None
+
+        if isinstance(final_name, str) and final_name:
+          public_event["name"] = final_name
+          process_event(public_event, self.assistant_blocks)
+          self._generated_file_revision += 1
+        else:
+          final_name = None
+
+        # Events reduced while the writer chose a collision-free name were
+        # deliberately not snapshotted: they would omit the file or persist a
+        # private placeholder. Commit the merged state, and repeat if another
+        # event landed while that barrier itself was in flight.
+        while self.assistant_blocks and (
+          final_name is not None or self._generated_file_revision
+        ):
+          revision = self._generated_file_revision
+          merged_snapshot, merged_stashes = self._deferred_snapshot(
+            self.assistant_blocks,
+          )
+          try:
+            await _await_ack(get_writer().submit(
+              PersistTranscriptBarrier(
+                chat_id=self.chat_id,
+                run_token=self.run_token or "",
+                snapshot=merged_snapshot,
+                thinking_stashes=merged_stashes,
+              )
+            ))
+          except Exception:
+            _get_logger().warning(
+              "generated-file transcript barrier failed chat_id=%s name=%s",
+              self.chat_id, name, exc_info=True,
+            )
+            break
+          self._last_save = time.monotonic()
+          if self._generated_file_revision == revision:
+            break
+      finally:
+        self._generated_file_pending = False
+
+      if final_name is None:
+        return None
+      self._publish_activity_frontier()
+      try:
+        self.bc.publish(public_event)
+      except Exception:
+        _get_logger().warning(
+          "generated-file live broadcast failed chat_id=%s name=%s",
+          self.chat_id, final_name, exc_info=True,
+        )
+      return final_name
+
+  async def _resolve_uncertain_generated_files(self) -> None:
+    """Merge every late file commit before a terminal snapshot can replace it."""
+    for path, pending in list(self._uncertain_generated_files.items()):
+      final_name = await _await_ack(get_writer().submit(
+        ResolveGeneratedFilePublication(chat_id=self.chat_id, path=path),
+      ))
+      if isinstance(final_name, str) and final_name:
+        committed = copy.deepcopy(pending["event"])
+        committed["name"] = final_name
+        if process_event(committed, self.assistant_blocks):
+          self._generated_file_revision += 1
+          self._publish_activity_frontier()
+          try:
+            self.bc.publish(committed)
+          except Exception:
+            _get_logger().warning(
+              "late generated-file broadcast failed chat_id=%s name=%s",
+              self.chat_id, final_name, exc_info=True,
+            )
+        data_dir = pending.get("data_dir")
+        captured = pending.get("captured")
+        if (
+          not isinstance(data_dir, str) or not data_dir
+          or not isinstance(captured, dict)
+          or not await asyncio.to_thread(
+            _settle_capture,
+            data_dir,
+            self.chat_id,
+            captured,
+            accepted=True,
+          )
+        ):
+          raise RuntimeError(
+            "late generated-file commit could not settle its inbox source"
+          )
+      self._uncertain_generated_files.pop(path, None)
+
+  async def can_publish_generated_files(self) -> bool:
+    """Return whether another file can fit without performing a disk copy."""
+    if not self.chat_id:
+      return False
     try:
-      final_name = await _await_ack(ack)
+      return bool(await _await_ack(get_writer().submit(
+        CheckGeneratedFileCapacity(chat_id=self.chat_id),
+      )))
     except Exception:
       _get_logger().warning(
-        "RecordGeneratedFile commit failed chat_id=%s name=%s",
-        self.chat_id, name, exc_info=True,
+        "generated-file capacity check failed chat_id=%s",
+        self.chat_id, exc_info=True,
       )
-      return None
-    if not isinstance(final_name, str) or not final_name:
-      return None
-    event["name"] = final_name
-    self.publish(event, _internal=True)
-    return final_name
+      return False
 
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
@@ -891,7 +1034,7 @@ class ChatEventSink:
         retry = RecordAgentLifecycle(values=cmd.values)
         await _await_ack(get_writer().submit(retry))
 
-  def publish(self, event: ChatEvent, *, _internal: bool = False) -> bool:
+  def publish(self, event: ChatEvent) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
     Live broadcast is best-effort independent from persistence and
@@ -905,17 +1048,14 @@ class ChatEventSink:
     vestigial now that no commit runs inline; kept so the runner's
     call-site contract is unchanged).
 
-    `_internal` is set only by `publish_generated_file`, which has already
-    done its own save-before-broadcast write and rewritten `event["name"]`
-    to what was actually persisted — it re-enters this same method for the
-    ordinary process_event/broadcast/save-scheduling tail rather than
-    duplicating it, so the assert below can't fire on that legitimate path.
+    Generated files have their own atomic metadata/transcript barrier and may
+    not enter this ordinary broadcast-before-save path.
     """
     event_type = event.get("type")
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
     )
-    assert _internal or event_type != "generated_file", (
+    assert event_type != "generated_file", (
       "generated_file events must go through publish_generated_file(), "
       "not publish() — see its docstring for the save-before-broadcast "
       "reason"
@@ -1018,8 +1158,12 @@ class ChatEventSink:
     # before A1 is sealed and the steered user row is appended. The split's
     # own transcript writes carry the durable state across this window; once
     # it completes the next snapshot appends the continuation cleanly.
+    if accumulated:
+      self._generated_file_revision += 1
     needs_save = accumulated and self.chat_id and self.run_token and (
       not self._steering
+    ) and (
+      not self._generated_file_pending and not self._uncertain_generated_files
     ) and (
       event_type in self._IMMEDIATE_SAVE_TYPES
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
@@ -1105,6 +1249,11 @@ class ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
+    # A timed-out RecordGeneratedFile may still be ahead of us in the same
+    # FIFO writer. Resolve it before Finalize can replace its atomic live
+    # snapshot with this sink's file-less in-memory state. If the writer is
+    # still unavailable, let the terminal barrier fail closed instead.
+    await self._resolve_uncertain_generated_files()
     await self._flush_lifecycle()
     # An app activity deferred to a background task whose task_done never reached us
     # (turn stopped, provider suppressed the terminal frame) must not persist

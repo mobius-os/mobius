@@ -222,7 +222,12 @@ function MsgContentInner({
     // positions — and their keys — are stable mid-run too.)
     const entries = displayBlocks
       .map((block, i) => ({ item: block, rawIdx: i }))
-      .filter(({ rawIdx }) => !skipToolIdx.has(rawIdx))
+      // Deliverables render once in the dedicated post-answer surface below.
+      // Excluding that non-inline block here also keeps the actual visible
+      // tail authoritative for Resume/Try-now ownership.
+      .filter(({ item, rawIdx }) => (
+        item.type !== 'generated_files' && !skipToolIdx.has(rawIdx)
+      ))
       .map(({ item }, pos) => ({ item, idx: pos }))
     // Repair already-persisted transcripts where a continuous reasoning pass was
     // fragmented into many thinking blocks: coalesce runs of adjacent thinking

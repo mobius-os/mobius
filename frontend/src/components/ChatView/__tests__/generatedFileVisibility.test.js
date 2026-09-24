@@ -63,6 +63,25 @@ test('generated-file card appears after the assistant response settles', () => {
   assert.match(html, />report\.pdf</)
 })
 
+test('a post-answer generated file does not hide the recovery action', () => {
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: {
+      role: 'assistant', content: '', blocks: [
+        {
+          type: 'error', message: 'Paused for restart.', resumable: true,
+          pause: { kind: 'restart' },
+        },
+        ...generatedMessage.blocks,
+      ],
+    },
+    chatId: 'chat-generated-file', isLastMsg: true, isStreaming: false,
+    onResume() {},
+  }))
+
+  assert.match(html, />Resume<\/button>/)
+  assert.match(html, />report\.pdf</)
+})
+
 test('generated images retain the existing inline gallery treatment', () => {
   const imageMessage = {
     ...generatedMessage,
