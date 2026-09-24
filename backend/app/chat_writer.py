@@ -4328,6 +4328,7 @@ class ChatWriterActor:
         and new_msg.get("role") == "user"
         and not new_msg.get("hidden")
       )
+    _stamp_provider_batch(stored_messages)
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -5974,7 +5975,32 @@ def _pending_messages_for_transcript(
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)
+  _stamp_provider_batch(stored)
   return stored
+
+
+def _stamp_provider_batch(messages: list[dict]) -> None:
+  """Mark visible rows that reached the provider as one combined input.
+
+  Both queued-turn promotion and in-turn steering call this, so the shell can
+  render the rows as one message without the two paths drifting apart. Every
+  row already carries a cid; the first one names the batch. Hidden rows and
+  continuation markers are not owner speech, so they stay outside the batch.
+  """
+  from app.continuations import is_continuation_message
+
+  owner_rows = [
+    msg for msg in messages
+    if not msg.get("hidden") and not is_continuation_message(msg)
+  ]
+  for msg in messages:
+    msg.pop("provider_batch", None)
+  if len(owner_rows) < 2:
+    return
+  for index, msg in enumerate(owner_rows):
+    msg["provider_batch"] = {
+      "id": owner_rows[0]["cid"], "index": index, "count": len(owner_rows),
+    }
 
 
 def _commit_or_rollback(db) -> bool:
