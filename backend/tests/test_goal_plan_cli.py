@@ -165,17 +165,30 @@ def test_checkpoint_needs_only_the_next_action(cli, monkeypatch):
   assert body["next_action"] == "Finish a" and body["checkpoint"]
 
 
-def test_server_refusals_print_their_message(cli, monkeypatch):
+@pytest.mark.parametrize(("status", "detail", "remedy"), [
+  (409, {"code": "no_active_goal",
+         "message": "This chat has no active Goal to plan."},
+   r"no active Goal to plan\. Promote first, or run `list` then `resume ID`"),
+  (422, {"code": "progress_incomplete", "task_id": "t", "current": 1,
+         "total": 2, "message": "t cannot complete at 1/2 progress"},
+   r"at 1/2 progress\. .*update t --progress 2/2 --status completed"),
+  (422, {"code": "invalid_plan", "message": "duplicate task id: t"},
+   r"\(422\): duplicate task id: t$"),
+  (409, "goal plan changed; fetch it and retry", r"\(409\): goal plan changed"),
+])
+def test_typed_refusals_name_this_helpers_own_remedy(
+  cli, monkeypatch, status, detail, remedy,
+):
   import io
   from urllib.error import HTTPError
 
   def refuse(request, timeout):
-    body = io.BytesIO(json.dumps({"detail": "goal plan changed; fetch it and retry"}).encode())
-    raise HTTPError(request.full_url, 409, "Conflict", {}, body)
+    body = io.BytesIO(json.dumps({"detail": detail}).encode())
+    raise HTTPError(request.full_url, status, "Refused", {}, body)
 
   monkeypatch.setattr(cli, "_settings", lambda: ("http://mobius.test", "token", "chat"))
   monkeypatch.setattr(cli, "urlopen", refuse)
-  with pytest.raises(SystemExit, match=r"\(409\): goal plan changed"):
+  with pytest.raises(SystemExit, match=remedy):
     cli._request("GET", "/api/chats/chat/goal-plan")
 
 

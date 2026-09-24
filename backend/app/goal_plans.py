@@ -44,7 +44,16 @@ def goal_plan_revision(db: Session, chat_id: str, goal_id: str) -> int:
 
 
 class GoalPlanError(ValueError):
-  """The requested plan would violate the visible execution contract."""
+  """The requested plan would violate the visible execution contract.
+
+  ``code`` and ``facts`` let a client name its own remedy without matching
+  the prose; the message stays client-neutral.
+  """
+
+  def __init__(self, message: str, *, code: str = "invalid_plan", **facts: Any):
+    super().__init__(message)
+    self.code = code
+    self.facts = facts
 
 
 class GoalPlanConflict(RuntimeError):
@@ -240,9 +249,9 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     ):
       raise GoalPlanError(
         f"{task['id']} cannot complete at {progress['current']}/"
-        f"{progress['total']} progress; if every repetition is done, record "
-        f"it in the same update: --progress {progress['total']}/"
-        f"{progress['total']} --status completed"
+        f"{progress['total']} progress",
+        code="progress_incomplete", task_id=task["id"],
+        current=progress["current"], total=progress["total"],
       )
   return tasks
 
