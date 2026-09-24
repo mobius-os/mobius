@@ -154,6 +154,8 @@ test('message references are an accessible lazy disclosure with safe links', () 
   assert.match(msgContent, /sourceRef=\{msg\.source_ref\}/)
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
+  assert.doesNotMatch(source, /source\.snippet|chat__source-snippet|chat__source-rank/,
+    'the reference preview should show links only, not search-result prose')
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
   assert.match(source, /<SourceFavicon/,
     'expanded references should use the shared safe icon loader')
