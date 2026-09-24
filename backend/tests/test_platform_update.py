@@ -696,6 +696,52 @@ def test_import_broken_merge_rolls_back(clone_env):
   assert _served_sha(platform) == pre
 
 
+def test_activation_compare_and_swap_never_rewinds_a_concurrent_writer(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'update'\n"})
+  original = pu._activate_candidate
+  raced: dict[str, str] = {}
+
+  def concurrent_then_activate(repo, local, pre_sha, tip):
+    raced["sha"] = _local_commit(
+      platform, edits={"concurrent.txt": "owned elsewhere\n"},
+      msg="concurrent writer",
+    )
+    original(repo, local, pre_sha, tip)
+
+  monkeypatch.setattr(pu, "_activate_candidate", concurrent_then_activate)
+  result = pu.reconcile_clone(platform)
+
+  assert result.status == "error"
+  assert _served_sha(platform) == raced["sha"]
+  assert (platform / "concurrent.txt").read_text() == "owned elsewhere\n"
+
+
+def test_failed_candidate_never_rolls_back_a_newer_concurrent_writer(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'update'\n"})
+  raced: dict[str, str] = {}
+
+  def fail_after_concurrent_commit(repo=platform, timeout=pu._PROBE_TIMEOUT):
+    raced["sha"] = _local_commit(
+      platform, edits={"concurrent.txt": "newer owner\n"},
+      msg="concurrent writer after activation",
+    )
+    return False, "candidate rejected"
+
+  monkeypatch.setattr(pu, "_import_probe", fail_after_concurrent_commit)
+  result = pu.reconcile_clone(platform)
+
+  assert result.status == "error"
+  assert "rollback_ref_changed" in result.error
+  assert _served_sha(platform) == raced["sha"]
+  assert (platform / "concurrent.txt").read_text() == "newer owner\n"
+
+
 def test_stale_rollback_flag_is_ignored_once_its_target_landed(clone_env):
   origin, platform = clone_env
   # A rollback flag left from a prior failed attempt whose target is now already
@@ -3896,9 +3942,9 @@ def test_startup_restores_interrupted_update_without_selecting_new_release(clone
   installed = _served_sha(platform)
   (platform / "owner.txt").write_text("unsaved-to-git owner work")
   carried = pu._carry_working_edits(platform, "main")
-  pu._write_reconcile_pre(carried.pre)
   target = _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'candidate'\n"})
   _git(platform, "fetch", "origin")
+  pu._write_reconcile_pre(carried.pre, target)
   _git(platform, "reset", "--hard", target)
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   assert "boot_guard[reset]" in pu.reconcile_clone_sync()
