@@ -90,7 +90,8 @@ extract() {
         for (i = seg_start[s]; i <= seg_end[s]; i++) {
           l = line[i]
           if (block > 0) {
-            # node:test details are indented under their header. The spec
+            # node:test details are indented under their header (a crashed
+            # file carries up to 40 output lines). The spec
             # reporter prints each failure twice; keep the fuller copy.
             if (l ~ /^[ \t]/ || l ~ /^$/) {
               if (l !~ /^ *$/ && l !~ /^ +at .*node:/) buf = buf "\n" l
@@ -109,7 +110,7 @@ extract() {
           if (l ~ /^ *(✖|not ok [0-9]+) / && l !~ /✖ [0-9]+ problems? \(0 errors/ && l !~ /✖ failing tests:/) {
             key = l; sub(/ \([0-9.]+m?s\)$/, "", key); sub(/^ +/, "", key)
             if (!(key in detail)) { order[++tests] = key; detail[key] = "" }
-            buf = ""; block = 12; found++; continue
+            buf = ""; block = 45; found++; continue
           }
           if (l ~ /(^|[^A-Za-z])[A-Za-z]*Error(\[[A-Z_]+\])?: / && l !~ /^##\[error\]Process completed/) {
             emit(l); found++; continue

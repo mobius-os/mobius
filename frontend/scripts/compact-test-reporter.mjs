@@ -141,7 +141,7 @@ export default async function* compactReporter(source) {
       remember(data.entryFile || data.file, data.message)
     } else if (type === 'test:fail') {
       // A failing todo test does not fail the run; the full log keeps it.
-      if (data.todo !== undefined) continue
+      if (data.todo) continue
       const error = data.details?.error
       const failureType = error?.failureType
       if (failureType === 'subtestsFailed') continue
@@ -178,7 +178,9 @@ export default async function* compactReporter(source) {
   const label = process.env.npm_lifecycle_event || 'node --test'
   const counts = summary?.counts || {}
   const seconds = typeof summary?.duration_ms === 'number' ? `${(summary.duration_ms / 1000).toFixed(1)}s` : '?s'
-  const ok = summary ? summary.success : failureCount === 0
+  // A coverage threshold breach fails the run through an error diagnostic even
+  // when every test passed, so it must not read as ok.
+  const ok = (summary ? summary.success : failureCount === 0) && errorDiagnostics.length === 0
   const extra = ['cancelled', 'skipped', 'todo']
     .filter(key => counts[key])
     .map(key => `${counts[key]} ${key}`)
