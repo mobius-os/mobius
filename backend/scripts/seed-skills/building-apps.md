@@ -261,8 +261,9 @@ manifest, layered by how always-on they are:
   A long skill can instead be a **folder**: `"skills": ["<id>/"]` ships
   `<id>/SKILL.md` plus sibling `.md` files directly inside the folder (each
   also in `source_files`) to `/data/shared/skills/<id>/`. Keep SKILL.md a
-  short core that links its mode files relatively (`[publish](publish.md)`),
-  so agents re-read only the core plus the one file a step needs. Contribute
+  short core whose relative Markdown links point at its sibling mode files
+  (a `publish.md` section, say), so agents re-read only the core plus the one
+  file a step needs. Contribute
   ships `contributing/` this way.
 - **A system-prompt fragment (always-on, while installed).** `"system_app":
   true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
