@@ -2280,17 +2280,29 @@ def get_current_chat_usage(
     .first()
   )
   if run is None:
+    # Before this chat has settled any turn with the provider, its context is
+    # genuinely empty so far (live readings take over at the first model
+    # call). After one, missing usage stays unknown rather than claiming zero.
+    has_settled_turn = db.query(
+      db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.provider == provider,
+        models.ChatRun.status.notin_(models.NONTERMINAL_RUN_STATUSES),
+      ).exists()
+    ).scalar()
     return {
       "provider": provider,
       "provider_session_id": provider_session_id,
-      "input_tokens": None,
+      "input_tokens": None if has_settled_turn else 0,
       "context_window": None,
+      "has_settled_turn": has_settled_turn,
     }
   return {
     "provider": run.provider,
     "provider_session_id": run.provider_session_id,
     "input_tokens": _latest_model_input_tokens(run),
     "context_window": run.model_context_window,
+    "has_settled_turn": True,
   }
 
 

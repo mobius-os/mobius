@@ -83,7 +83,12 @@ from app.question_bridge import (
   park_question,
 )
 from app.runtime_types import RunnerResult
-from app.usage_metrics import codex_cost_usd, normalize_codex_usage
+from app.usage_metrics import (
+  codex_call_input_tokens,
+  codex_cost_usd,
+  context_usage_event,
+  normalize_codex_usage,
+)
 from app.runner_registry import RunnerKind, registry
 from app.memory_observability import record_memory_checkpoint_once
 
@@ -2200,9 +2205,13 @@ async def _run_codex_sdk_turn(
             str(getattr(payload, "turn_id", ""))
             == str(getattr(turn, "id", ""))
           ):
-            call_token_usages.append(
-              getattr(payload.token_usage, "last", None)
-            )
+            last_call = getattr(payload.token_usage, "last", None)
+            call_token_usages.append(last_call)
+            bc.publish(context_usage_event(
+              provider_id,
+              codex_call_input_tokens(last_call),
+              getattr(payload.token_usage, "model_context_window", None),
+            ))
           continue
 
         if isinstance(

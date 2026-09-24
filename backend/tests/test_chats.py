@@ -408,6 +408,7 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
     "provider_session_id": "thread-current",
     "input_tokens": 193_800,
     "context_window": 258_400,
+    "has_settled_turn": True,
   }
 
 
@@ -444,6 +445,7 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
     "provider_session_id": "claude-session-current",
     "input_tokens": 123_456,
     "context_window": 200_000,
+    "has_settled_turn": True,
   }
 
 
@@ -483,12 +485,20 @@ def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
     "provider_session_id": "mobius-session",
     "input_tokens": 20_220,
     "context_window": 235_929,
+    "has_settled_turn": True,
   }
 
 
-def test_current_chat_usage_returns_unknown_for_a_fresh_session(
-  client, auth, chat,
+def test_current_chat_usage_reports_empty_context_before_the_first_settled_turn(
+  client, auth, chat, db,
 ):
+  # The first turn is still running: its row has no session stamp yet.
+  db.add(make_goal_run(db,
+    id="first-turn", chat_id=chat.id, status="running", provider="claude",
+    started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
     params={
@@ -502,9 +512,29 @@ def test_current_chat_usage_returns_unknown_for_a_fresh_session(
   assert response.json() == {
     "provider": "claude",
     "provider_session_id": "session-without-a-turn",
-    "input_tokens": None,
+    "input_tokens": 0,
     "context_window": None,
+    "has_settled_turn": False,
   }
+
+
+def test_current_chat_usage_stays_unknown_when_a_settled_turn_lacks_usage(
+  client, auth, chat, db,
+):
+  db.add(make_goal_run(db,
+    id="interrupted-turn", chat_id=chat.id, status="interrupted",
+    provider="claude", started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    params={"provider": "claude", "provider_session_id": "claude-session"},
+    headers=auth,
+  )
+
+  assert response.json()["input_tokens"] is None
+  assert response.json()["has_settled_turn"] is True
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

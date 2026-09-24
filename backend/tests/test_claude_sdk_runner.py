@@ -1979,18 +1979,28 @@ def test_dispatch_assistant_empty_text_block_is_silent():
   assert bus.events == []
 
 
-def test_dispatch_assistant_usage_emits_usage_event():
+def test_each_root_model_call_publishes_its_live_context_occupancy():
   bus = _Bus()
   msg = AssistantMessage(
     content=[],
     model="claude-opus",
-    usage={"input_tokens": 10, "output_tokens": 5},
+    usage={
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 200,
+      "cache_read_input_tokens": 3_000,
+      "output_tokens": 5,
+    },
   )
   dispatch_sdk_message(msg, bus, None)
-  usages = [e for e in bus.events if e["type"] == "usage"]
-  assert len(usages) == 1
-  assert usages[0]["input_tokens"] == 10
-  assert usages[0]["output_tokens"] == 5
+  context = [e for e in bus.events if e["type"] == "context_usage"]
+  # Uncached + cache-write + cache-read: the same figure the settled run
+  # records as latest_model_input_tokens.
+  assert context == [{
+    "type": "context_usage",
+    "provider": "claude",
+    "input_tokens": 3_210,
+    "context_window": None,
+  }]
 
 
 def test_dispatch_assistant_stop_reason():
@@ -2337,6 +2347,7 @@ def test_dispatch_result_message_returns_terminal():
     total_cost_usd=0.05,
     usage={"input_tokens": 100, "output_tokens": 200},
   )
+  before_result = len(bus.events)
   new_sid, terminal = dispatch_sdk_message(
     msg, bus, None, usage_state=usage_state,
   )
@@ -2361,9 +2372,10 @@ def test_dispatch_result_message_returns_terminal():
     "provider_usage": {"input_tokens": 100, "output_tokens": 200},
     "provider_model_usage": None,
   }
-  # ResultMessage also fires usage + stop_reason side-channels.
-  types = [e["type"] for e in bus.events]
-  assert "usage" in types
+  # The turn aggregate is not context occupancy, so the result publishes no
+  # live context reading; stop_reason still fires.
+  types = [e["type"] for e in bus.events[before_result:]]
+  assert "context_usage" not in types
   assert "stop_reason" in types
 
 

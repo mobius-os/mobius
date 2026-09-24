@@ -27,6 +27,10 @@ _EVENT_LOG_MAX = 10_000
 # so consecutive 64 KiB text segments are wire-equivalent to one giant entry.
 _TEXT_LOG_SEGMENT_MAX = 64 * 1024
 
+# Events whose payload is a complete current reading (not a delta or a
+# chronology marker). The replay log keeps only the newest of each type.
+_LATEST_STATE_EVENT_TYPES = frozenset({"context_usage"})
+
 # Global registry of active broadcasts, keyed by chat_id.
 _broadcasts: dict[str, "ChatBroadcast"] = {}
 
@@ -183,6 +187,14 @@ class ChatBroadcast:
     elif event_type == "task_progress" and self._coalesce_task_progress(event):
       # The invariant is that the coalescer already appended the newest tick.
       pass
+    elif event_type in _LATEST_STATE_EVENT_TYPES:
+      # A whole-state reading supersedes every earlier one of its type, so a
+      # reconnect needs only the newest; one per model call would otherwise
+      # grow the log for the length of the turn.
+      self.event_log = [
+        prior for prior in self.event_log if prior.get("type") != event_type
+      ]
+      self.event_log.append(event)
     else:
       self.event_log.append(event)
       # Drop the oldest entry when the cap is exceeded to bound memory.

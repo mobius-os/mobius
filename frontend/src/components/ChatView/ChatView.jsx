@@ -1949,6 +1949,9 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
+    onContextUsage: reading => chatQueries.liveContext.set(
+      queryClient, chatId, reading,
+    ),
     onSteeredIntoTurn: ({
       ts,
       content,
@@ -4985,15 +4988,29 @@ export default function ChatView({
     }
   }, [chatId, queryClient, refreshContributionOverview])
 
+  const chatProvider = chatInfo?.provider || null
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
-      settingsQueries.providerUsage.invalidate(queryClient)
+      // Only this chat's provider spent allowance. Refreshing every provider
+      // on every pane's turn end multiplied reads of rate-limited services.
+      if (chatProvider) {
+        settingsQueries.providerUsage.invalidate(queryClient, chatProvider)
+      }
       chatQueries.usage.invalidate(queryClient, chatId)
-      chatQueries.currentUsage.invalidate(queryClient, chatId)
+      // The settled run now records what the live reading showed; drop the
+      // live one only once that record is in, so the gauge never steps back.
+      void chatQueries.currentUsage.invalidate(queryClient, chatId)
+        .finally(() => chatQueries.liveContext.clear(queryClient, chatId))
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, turnActive, queryClient])
+  }, [chatId, chatProvider, turnActive, queryClient])
+
+  // A live reading belongs to this mounted stream; a later remount must read
+  // the settled record rather than an old turn's reading.
+  useEffect(() => () => {
+    chatQueries.liveContext.clear(queryClient, chatId)
+  }, [chatId, queryClient])
 
   useEffect(() => {
     if (!turnActive) return

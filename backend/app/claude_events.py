@@ -51,7 +51,11 @@ from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_edit_preview import claude_edit_preview
 from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
-from app.usage_metrics import normalize_claude_usage
+from app.usage_metrics import (
+  claude_call_input_tokens,
+  context_usage_event,
+  normalize_claude_usage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -264,23 +268,6 @@ def _emit_unknown(bc, kind: str, raw: Any) -> None:
   event = unknown_event(kind, raw)
   if emit_unknown_enabled():
     bc.publish(event)
-
-
-def _usage_event(usage: dict[str, Any]) -> dict:
-  """Builds the wire-shape `usage` event from an SDK usage dict.
-
-  The SDK's usage shape evolves — we extract the fields we know
-  about today and pass the full dict through under ``raw`` so a
-  later UI can pick up newly-added counters without a runner change.
-  """
-  return {
-    "type": "usage",
-    "input_tokens": usage.get("input_tokens"),
-    "output_tokens": usage.get("output_tokens"),
-    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
-    "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
-    "raw": dict(usage),
-  }
 
 
 # Tools that are pure harness mechanics: they carry no owner-facing meaning, so
@@ -643,7 +630,9 @@ def dispatch_sdk_message(
         bc, f"assistant_block:{type(block).__name__}", block,
       )
     if sdk_msg.usage:
-      bc.publish(_usage_event(sdk_msg.usage))
+      bc.publish(context_usage_event(
+        "claude", claude_call_input_tokens(sdk_msg.usage),
+      ))
     if sdk_msg.stop_reason:
       bc.publish({
         "type": "stop_reason",
@@ -701,8 +690,6 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, ResultMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
-    if sdk_msg.usage:
-      bc.publish(_usage_event(sdk_msg.usage))
     if sdk_msg.stop_reason:
       bc.publish({
         "type": "stop_reason",

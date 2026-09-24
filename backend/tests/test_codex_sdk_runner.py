@@ -2545,6 +2545,45 @@ def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
   assert len(result["usage_metrics"]["model_calls"]) == 1
 
 
+def test_codex_turn_model_call_publishes_live_context_occupancy(monkeypatch):
+  """Each of this turn's model calls updates the composer's context gauge
+  with the same figure the settled run records for its last call."""
+  class TokenUsageUpdated:
+    def __init__(self, token_usage):
+      self.token_usage = token_usage
+
+  usage = SimpleNamespace(
+    last=SimpleNamespace(
+      input_tokens=200, cached_input_tokens=100, output_tokens=100,
+      reasoning_output_tokens=50, total_tokens=300,
+    ),
+    total=SimpleNamespace(
+      input_tokens=1_000, cached_input_tokens=400, output_tokens=100,
+      reasoning_output_tokens=50, total_tokens=1_100,
+    ),
+    model_context_window=200_000,
+  )
+  _result, bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=_mark_interrupted,
+    notifications=[
+      SimpleNamespace(
+        method="thread/tokenUsage/updated",
+        payload=TokenUsageUpdated(usage),
+      ),
+    ],
+    sdk_patch={"ThreadTokenUsageUpdatedNotification": TokenUsageUpdated},
+  )
+
+  assert [e for e in bc.events if e.get("type") == "context_usage"] == [{
+    "type": "context_usage",
+    "provider": "codex",
+    "input_tokens": 200,
+    "context_window": 200_000,
+  }]
+
+
 def test_run_codex_sdk_turn_unrequested_transport_death_stays_an_error(
   monkeypatch, caplog,
 ):
