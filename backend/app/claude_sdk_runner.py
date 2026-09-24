@@ -507,14 +507,11 @@ class ActiveClaudeClient:
     # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
-    # The CLI silently drops an interrupt that arrives before the query is
-    # generating (still connecting / loading the prompt). The steer still
-    # interrupts immediately; when that happened before generation, the runner
-    # repeats it once at the first streamed message so the cut is not lost
-    # behind the `_interrupt_in_flight` latch until the turn ends on its own.
+    # The CLI drops an interrupt sent before its query is generating, so a
+    # steer claims its cut at once but sends the interrupt only while the
+    # model is streaming; `mark_generating` sends a cut claimed earlier.
     self._generating = False
-    self._interrupt_sent_early = False
-    self._early_interrupt_repeat: asyncio.Task[None] | None = None
+    self._steer_interrupt: asyncio.Task[None] | None = None
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -593,35 +590,25 @@ class ActiveClaudeClient:
     if not self._interrupt_in_flight and not self._finished.done():
       self._interrupt_in_flight = True
       self._interrupt_owner = self._interrupt_owner or "steer"
-      self._interrupt_sent_early = not self._generating
-      await self._client.interrupt()
+      if self._generating:
+        await self._client.interrupt()
     return True
 
   def mark_generating(self) -> None:
-    """Called per root model message; repeats a steer cut the CLI dropped."""
+    """Called per root model message; sends a steer cut claimed earlier."""
     if self._generating:
       return
     self._generating = True
-    if self._interrupt_sent_early:
-      self._interrupt_sent_early = False
+    if self._interrupt_in_flight and self.pending_steer:
       # Own task: the SDK reader that routes the control response can block
       # behind a full message buffer while the runner loop awaits.
-      self._early_interrupt_repeat = asyncio.create_task(
-        self._repeat_early_interrupt(),
-      )
+      self._steer_interrupt = asyncio.create_task(self._send_steer_interrupt())
 
-  async def _repeat_early_interrupt(self) -> None:
-    # A terminal already closed the cut (take_steer_for_requery) or the turn
-    # finished: repeating now could abort the steer's own requery.
-    if not self._interrupt_in_flight or self._finished.done():
-      return
-    try:
+  async def _send_steer_interrupt(self) -> None:
+    # A terminal may have drained the steer first; interrupting now would
+    # abort its requery instead.
+    if self._interrupt_in_flight and self.pending_steer:
       await self._client.interrupt()
-    except Exception:
-      log.warning(
-        "repeated steer interrupt failed chat_id=%s", self.chat_id,
-        exc_info=True,
-      )
 
   def take_steer_for_requery(self, *, interrupt_landed: bool) -> list[str]:
     """Drain buffered steer texts at a terminal; close a landed steer cut.
@@ -636,7 +623,6 @@ class ActiveClaudeClient:
     """
     self._interrupt_in_flight = False
     self._generating = False  # a requery starts a new generation window
-    self._interrupt_sent_early = False
     if interrupt_landed and self._interrupt_owner == "steer":
       self._interrupt_owner = None
     texts, self.pending_steer = self.pending_steer, []

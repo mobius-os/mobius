@@ -374,6 +374,7 @@ async def test_steer_into_active_turn_interrupts_immediately():
       calls.append("interrupt")
 
   handle = ActiveClaudeClient(_Client(), chat_id="claude-steer")
+  handle.mark_generating()
   registry.register(handle)
   try:
     assert await steer_into_active_turn("claude-steer", "use blue") is True
@@ -393,23 +394,25 @@ async def test_steer_into_active_turn_interrupts_immediately():
 
 
 @pytest.mark.asyncio
-async def test_steer_before_generation_repeats_the_dropped_interrupt(
+async def test_steer_before_generation_interrupts_once_streaming(
   monkeypatch,
 ):
-  """The CLI drops an interrupt sent before the query is generating. Such a
-  steer still interrupts at once, then repeats the cut at the first streamed
-  message — otherwise it latched and landed only when the turn ended."""
+  """The CLI drops an interrupt sent before its query is generating, which
+  used to latch the cut so the steer landed only at natural turn end. A steer
+  in that window must interrupt exactly once, when the model starts streaming."""
+  trace: list[int] = []
+
   class _Client(_FakeClient):
     async def query(self, prompt):
       await super().query(prompt)
       if len(self.queries) == 1:
         assert await steer_into_active_turn("early-chat", "use blue") is True
+        trace.append(self.interrupts)
 
     async def receive_response(self):
       if len(self.queries) == 1:
         yield _stream_delta("text_delta", text="starting")
-        # The pre-generation interrupt was dropped; only the repeat cuts.
-        while self.interrupts < 2:
+        while self.interrupts < 1:
           await asyncio.sleep(0)
         yield _interrupt_result()
         return
@@ -422,7 +425,8 @@ async def test_steer_before_generation_repeats_the_dropped_interrupt(
   )
 
   client = clients[0]
-  assert client.interrupts == 2
+  assert trace == [0]
+  assert client.interrupts == 1
   assert len(client.queries) == 2
   assert "use blue" in client.queries[1]
   assert result["error"] is None
@@ -804,12 +808,14 @@ async def test_owner_card_still_ends_the_turn_after_an_earlier_steer():
 
   client = _Client()
   handle = ActiveClaudeClient(client, chat_id="steer-then-card")
+  handle.mark_generating()
   assert await handle.steer("peer note") is True
   assert handle.claim_owner_card_end() is False  # the steer owns this cut
 
   # A clean terminal that won the race leaves the stray interrupt owned.
   assert handle.take_steer_for_requery(interrupt_landed=False) == ["peer note"]
   assert handle.claim_owner_card_end() is False
+  handle.mark_generating()  # the requery is streaming
   await handle.steer("second note")
   assert handle.take_steer_for_requery(interrupt_landed=True) == ["second note"]
   assert handle.pending_steer == []
@@ -1420,6 +1426,7 @@ async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
         assert await steer_into_active_turn("multi-chat", "use blue") is True
         assert await steer_into_active_turn("multi-chat", "and bold") is True
         yield _assistant_text("first block")
+        await asyncio.sleep(0)  # the claimed cut is sent once streaming
         # The SDK may still emit trailing completed blocks in the drain
         # window before the interrupt's terminal lands. They must NOT cause
         # a second interrupt.
@@ -1487,6 +1494,7 @@ async def test_stop_drops_buffered_steer(monkeypatch):
       calls.append("interrupt")
 
   handle = ActiveClaudeClient(_Client(), chat_id="stop-chat")
+  handle.mark_generating()
   registry.register(handle)
   try:
     # Steer buffers the text and fires its soft interrupt immediately.
