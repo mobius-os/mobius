@@ -26,7 +26,7 @@ def _agent(chat):
   )}
 
 
-def _save(client, headers, checkpoint="first", revision=0, **extra):
+def _save(client, headers, checkpoint="first", **extra):
   return client.post("/api/chat/continuity/checkpoints", headers=headers, json={
     "checkpoint_id": checkpoint,
     "digest": "New milestone, not a claim about earlier uncovered work.",
@@ -81,7 +81,7 @@ def test_missing_delivery_preserves_coverage_and_retry_is_current(
     chat_id=chat.id, run_token="review-run",
     message_count=count, prefix_hash=proof,
   )).result(timeout=5)
-  second = _save(client, headers, "catch-up", 1,
+  second = _save(client, headers, "catch-up",
     digest="Caught up: preserve the earlier requirement.",
     summary="Working with the earlier requirement.")
   assert second.status_code == 200, second.text

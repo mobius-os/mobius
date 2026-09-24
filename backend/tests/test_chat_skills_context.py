@@ -153,6 +153,406 @@ def test_core_prompt_requires_truncated_skill_reads_to_continue():
   assert "until every part has been received" in core
 
 
+def test_core_prompt_owns_freshness_and_source_policy():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+
+  assert "## Freshness and sources" in core
+  assert "the partner asks you to search" in core
+  assert "could plausibly have changed" in core
+  assert "When in doubt, search" in core
+  assert "Prefer primary and official sources" in core
+  assert "Cite the supporting link close to the claim" in core
+
+
+def test_core_prompt_requires_approval_before_changing_guarded_invariants():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "**Treat guards as evidence, not obstacles.**" in core
+  assert "first determine why that guard exists" in normalized
+  assert "Do not relax it merely to make the new behavior pass" in normalized
+  assert "explain the conflict and its user impact" in normalized
+  assert "ask the partner before changing it" in normalized
+  assert "preserves the same contract does not require escalation" in normalized
+
+
+def test_core_opens_with_narrow_continuation_handoff_contract():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  )
+  normalized = " ".join(core.split())
+  handoff = normalized.split(
+    "**Continuation handoff for owner chats.**", 1,
+  )[1].split("The stable constitution:", 1)[0]
+
+  assert core.index("**Continuation handoff for owner chats.**") \
+    < core.index("The stable constitution:")
+  assert "deliverable can be complete while its established workstream is not" in handoff
+  assert "specific, in-scope, materially useful continuation" in handoff
+  assert "same requested workstream" in handoff
+  assert "can start now" in handoff
+  assert "owner's decision is unsettled" in handoff
+  assert "This includes plans and read-only work" in handoff
+  assert "excludes factual answers and invented adjacent work" in handoff
+  assert "one contextual saved card as the final action" in handoff
+  assert "**Apply/implement it (Recommended)** and **Not now**" in handoff
+  assert "The **Not now** answer must resume first" in handoff
+  assert 'not a terminal `on_answer: "close"` choice' in handoff
+  assert "release the approval's work claim" in handoff
+  assert "`finish_agent_work(..., release=true)`" in handoff
+  assert "`request_question` for an ordinary choice" in handoff
+  assert "`request_approval` for permission" in handoff
+  assert "`request_restart` for a restart" in handoff
+  assert "If already authorized, proceed without asking again" in handoff
+  assert "if explicitly declined or no qualifying continuation exists, finish declaratively" \
+    in handoff
+  assert "Never substitute a prose question or declarative close" in handoff
+  assert "**Mandatory final-action decision for owner chats.**" not in handoff
+  assert normalized.count("specific, in-scope, materially useful continuation") == 1
+
+
+def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  planning = (
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8")
+  core_normalized = " ".join(core.split())
+  planning_normalized = " ".join(planning.split())
+
+  assert "Before the first material tool call" in core_normalized
+  assert "read the complete `goal-planning` skill" in core_normalized
+  assert "honestly bounded one-turn work standard" in core_normalized
+  assert "## The execution loop — read this first" in planning
+  assert "Finish the read before material work" in planning_normalized
+  assert len(planning.encode("utf-8")) < 4_000
+  assert "A Goal is durable intent" in planning_normalized
+  assert "ready independent sibling leaves concurrently" in planning_normalized
+  assert "Parallelism itself is not the saving" in planning_normalized
+  assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
+  assert "goal_plan.py check-complete" in planning_normalized
+  assert "complete --result 'Verified evidence'" in planning_normalized
+  assert "no separate preflight is required" in planning_normalized
+  assert "optional read-only task diagnostic" in planning_normalized
+  completion_example = planning.split("After verifying the original outcome:", 1)[1].split("```", 2)[1]
+  assert "complete --result" in completion_example
+  assert "check-complete" not in completion_example
+  assert "not a keyword trigger" in planning_normalized
+  assert "first-class `promote_goal` tool" in planning_normalized
+  assert "resilience, not an equivalent convenience path" in planning_normalized
+  assert "an attempted tool call returns a failure" in planning_normalized
+  assert "Terminal settlement continues the exact Goal" in planning_normalized
+  assert "turns are not a budget" in planning_normalized
+  assert "context --task ID" in planning_normalized
+  assert "Do not end a run merely to refresh context" in planning_normalized
+
+
+def test_goal_waits_always_name_a_durable_owner_interaction():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  planning = (
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8")
+  waiting = (
+    repo / "backend" / "scripts" / "seed-skills" / "waiting.md"
+  ).read_text(encoding="utf-8")
+  core_normalized = " ".join(core.split())
+  planning_normalized = " ".join(planning.split())
+  waiting_normalized = " ".join(waiting.split())
+
+  assert "**Never leave an invisible wait.**" in core
+  assert "declare a durable monitor" in core_normalized
+  assert "use the saved owner-input card as the final action" in core_normalized
+  assert "Done**, **Need help**, and **Not now" in core_normalized
+  assert "Never rely on a paused Goal" in core_normalized
+  assert "### Make every unfinished wait explicit" in planning
+  assert "create exactly one owning interaction" in planning_normalized
+  assert "keeps the Goal marked **Waiting for you**" in planning_normalized
+  assert "Never end with “tell me when…”" in planning_normalized
+  assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting
+  assert "`--owner` is required for command waits" in waiting_normalized
+  assert "exit **0 exactly when the condition is met**" in waiting_normalized
+  assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
+
+
+def test_core_question_fallback_shows_the_minimal_valid_shape():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+
+  assert "owner_approval.py --questions-json" in core
+  assert '[{"question":"...","options":[' in core
+  assert "<question array>" not in core
+
+
+def test_core_requires_one_claim_for_convergent_cross_chat_work():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "**Claim convergent work once.**" in core
+  assert "The first atomic claimant owns it" in core
+  assert "must not duplicate its approval, mutation, or monitor" in core
+  assert "Claims coordinate agents; they never grant the owner's authority" in core
+
+
+def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "An in-turn fleet dies with the turn" in normalized
+  assert "durable background delegation may outlive the turn" in normalized
+  assert "installed capability explicitly owns that lifecycle" in normalized
+  assert "Contribution preparation is owner-initiated" in normalized
+  assert "leave local changes local without adding an approval card" in normalized
+  assert "offer once through the clarifying-question tool" not in core
+
+
+def test_owner_policy_and_card_access_stay_simple_and_explicit():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  maintenance = (
+    repo / "backend" / "scripts" / "seed-skills" / "platform-maintenance.md"
+  ).read_text(encoding="utf-8")
+  normalized_core = " ".join(core.split())
+  normalized_maintenance = " ".join(maintenance.split())
+
+  assert "Möbius policy and local safeguards are owner-controlled" in core
+  assert "not permanent limits on the owner" in normalized_core
+  assert "the rule being changed or crossed cannot veto that choice" in (
+    normalized_core
+  )
+  assert "exact non-destructive action counts as approval" in normalized_core
+  assert "obtain one exact saved approval" in normalized_core
+  assert "unless the same exact action is already approved" in normalized_core
+  assert "never ask twice" in normalized_core
+  assert "least-exposing method" in normalized_core
+  assert "do not reveal secret bytes incidentally" in normalized_core
+  assert "do not expand an external provider's or host's capabilities" in (
+    normalized_core
+  )
+  assert "Card access is deliberately uniform" in core
+  assert "any authenticated participant that can read" in normalized_core
+  assert "do not add a second card-answer role or token hierarchy" in normalized_core
+  assert "An explicit partner request may create the card" in normalized_core
+  assert "platform-owned dispatch" in normalized_core
+  assert "agents never issue or replay the shell command" in normalized_core
+  assert "## Choose the smallest activation action" in maintenance
+  assert "No shell rebuild or server restart" in maintenance
+  assert "No server restart" in maintenance
+  assert "### Dependencies — live first, durable second" in maintenance
+  assert "install only the named dependency" in maintenance
+  assert "Do not run blanket upgrades or ad-hoc remote installers" in (
+    normalized_maintenance
+  )
+  assert "a global Node install does not satisfy a project's imports" in (
+    normalized_maintenance
+  )
+  assert "not for ordinary writes under `/data`" in maintenance
+  assert "the owning manifest and lockfile" in maintenance
+  assert "These declarations are durability metadata, not an activation action" in (
+    normalized_maintenance
+  )
+  assert "Treat a container rebuild as a last resort" in maintenance
+  assert "do not require an immediate rebuild" in maintenance
+  assert "Do not restart between iterations" in maintenance
+  assert "For a constitution-only change, default to leaving it pending" in (
+    normalized_maintenance
+  )
+  assert "Its receipt confirms only that the card was saved" in normalized_maintenance
+  assert "end the turn with no further text or tools" in (
+    normalized_maintenance
+  )
+  assert "Any authenticated participant that can read the card may answer it" in (
+    normalized_maintenance
+  )
+  assert "Do not use `request_approval`" in normalized_maintenance
+  assert "unavailable for tens of seconds" in normalized_maintenance
+  assert "separate card-answer role" not in core + maintenance
+
+
+def test_owner_can_approve_scoped_access_to_protected_local_state():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "protected by default, not inaccessible to the owner" in core
+  assert "exact owner request may authorize read-only or metadata-only" in core
+  assert "ensure that exact action has one saved approval" in core
+  assert "if it already does, do not ask again" in core
+  assert "perform only that approved operation" in core
+  assert "minimize the paths and bytes inspected" in core
+  assert "avoid displaying secret bytes" in core
+  assert "does not by itself authorize disclosing the stored values" in core
+  assert "Never read or write `/data/cli-auth/`" not in core
+
+
+def test_saved_secure_input_is_a_terminal_agent_action():
+  repo = Path(__file__).resolve().parents[2]
+  guidance = (
+    repo / "backend" / "scripts" / "seed-skills" / "secure-input.md"
+  ).read_text(encoding="utf-8")
+  normalized = " ".join(guidance.split())
+
+  assert (
+    "The card is the final action of the turn, exactly like Möbius's saved "
+    "Q&A and approval cards."
+  ) in normalized
+  assert (
+    "On a confirmed receipt, end the turn with **no further text or tools**."
+  ) in normalized
+
+
+def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+
+  def summary(name: str) -> str:
+    text = (seed_dir / name).read_text(encoding="utf-8")
+    return next(
+      paragraph.replace("\n", " ")
+      for paragraph in text.split("\n\n")
+      if paragraph.strip() and not paragraph.startswith("#")
+    )
+
+  quickstart = summary("building-apps-quickstart.md")
+  advanced = summary("building-apps.md")
+  shapes = summary("app-component-shapes.md")
+  visual = summary("visual-testing.md")
+  cron = summary("cron.md")
+
+  assert len(quickstart) <= 300
+  assert "visual-testing.md" in quickstart
+  assert "building-apps.md" in quickstart
+  assert "cron.md" in quickstart
+  assert "app-component-shapes.md" in quickstart
+
+  for extension in (advanced, shapes, cron):
+    assert len(extension) <= 300
+    assert "building-apps-quickstart.md" in extension
+    assert "visual-testing.md" in extension
+
+  assert len(visual) <= 300
+  assert "building-apps-quickstart.md" in visual
+  assert "theming.md" in visual
+
+
+def test_visual_testing_selector_guidance_requires_observed_evidence():
+  repo = Path(__file__).resolve().parents[2]
+  visual = (
+    repo / "backend" / "scripts" / "seed-skills" / "visual-testing.md"
+  ).read_text(encoding="utf-8")
+
+  assert "verified in the current DOM or source" in visual
+  assert "an accessible name, not evidence" in visual
+  assert 'button[aria-label="..."]' not in visual
+  assert '[data-testid="..."]' not in visual
+  assert "**Served before spoken.**" in visual
+  assert "## Close the browser session when you are done" in visual
+
+
+def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  quickstart = (seed_dir / "building-apps-quickstart.md").read_text()
+  resolving = (seed_dir / "resolving-app-git.md").read_text()
+  theming = (seed_dir / "theming.md").read_text()
+
+  assert "preview_app.sh" in quickstart
+  assert "--review" in resolving
+  assert "--finalize --reviewed-tree" in resolving
+  assert "deployment's external Recovery action" in theming
+  assert "`/recover` →" not in theming
+  assert "`/recover/chat`" not in theming
+
+
+def test_core_routes_operational_recipes_to_their_owning_skills():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text()
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  maintenance = (seed_dir / "platform-maintenance.md").read_text()
+  notifications = (seed_dir / "notifications.md").read_text()
+
+  assert "/api/debug/status" not in core
+  assert '"type":"open_item"' not in core
+  assert "/api/debug/status" in maintenance
+  assert "/api/debug/memory" in maintenance
+  assert "/api/debug/logs" in maintenance
+  assert '"type":"open_item"' in notifications
+  assert "Default `activation` to `background`" in notifications
+
+
+def test_advanced_app_skill_does_not_duplicate_the_component_catalog():
+  repo = Path(__file__).resolve().parents[2]
+  advanced = (
+    repo / "backend" / "scripts" / "seed-skills" / "building-apps.md"
+  ).read_text()
+
+  assert "## UI conventions stay in the base workflow" in advanced
+  assert "## Design conventions" not in advanced
+  assert "### The AppShell skeleton" not in advanced
+  assert "/* mobius-ui:Button" not in advanced
+
+
+def test_agent_coaching_is_the_single_neutral_coaching_skill():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
+
+  assert not (seed_dir / "manager-session.md").exists()
+  assert "neutral learning conversation" in coaching
+  assert "what the agent did well" in coaching
+  assert "what could improve" in coaching
+  assert "What is the most general lesson" in coaching
+  assert "platform primitive" in coaching
+  assert "exact_session_fork" in coaching
+  assert "transcript_reseed" not in coaching
+  assert "reconstructive coaching" not in coaching
+  assert "evidence-only fallback" not in coaching
+  assert "<claude|codex> <session_id>" in coaching
+
+
+def test_image_skill_returns_tool_result_without_touching_protected_storage():
+  repo = Path(__file__).resolve().parents[2]
+  images = (
+    repo / "backend" / "scripts" / "seed-skills" / "images.md"
+  ).read_text(encoding="utf-8")
+
+  assert "generated-image result directly" in images
+  assert "inspect, locate, or republish a backing file" in images
+  assert "/data/cli-auth/" not in images
+  assert "publish_chat_image.py" not in images
+
+
+def test_quickstart_reuses_apply_receipt_id_without_relisting():
+  repo = Path(__file__).resolve().parents[2]
+  quickstart = (
+    repo / "backend" / "scripts" / "seed-skills"
+    / "building-apps-quickstart.md"
+  ).read_text(encoding="utf-8")
+
+  assert "compact receipt with `app_id`" in quickstart
+  assert "do not list apps again after a successful apply" in quickstart
+
+
+def test_advanced_app_skill_deletes_by_id_and_retains_recovery_receipt():
+  repo = Path(__file__).resolve().parents[2]
+  advanced = (
+    repo / "backend" / "scripts" / "seed-skills" / "building-apps.md"
+  ).read_text(encoding="utf-8")
+
+  summary = advanced.split("\n\n", 2)[1]
+  assert "app deletion/recovery" in summary
+  assert "delete_app.py" in advanced
+  assert "Exact-name lookup can return several apps" in advanced
+  assert "returns the recovery receipt" in advanced
+
+
 def test_core_prompt_requires_agent_authored_current_continuity():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
