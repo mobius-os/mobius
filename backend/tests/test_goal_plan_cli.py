@@ -116,3 +116,20 @@ def test_completion_uses_existing_authority_without_a_separate_preflight(
       "goal_id": "goal", "expected_revision": 7, "result": "Verified release",
     }),
   ]
+
+
+def test_completion_names_the_claimed_actions_it_performed(cli, monkeypatch):
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append(body)
+    if method == "GET":
+      return snapshot(plan=SETTLED)
+    return {"state": "already_active"} if method == "POST" else {}
+
+  monkeypatch.setattr(cli, "_request", request)
+  monkeypatch.setattr(sys, "argv", [
+    "goal_plan.py", "complete", "--result", "Merged", "--finished", "pr:1:merge",
+  ])
+  assert cli.main() == 0
+  assert calls[-1]["finished_claims"] == ["pr:1:merge"]

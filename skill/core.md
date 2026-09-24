@@ -238,10 +238,10 @@ only for convergent work that needs no approval. The first atomic claimant owns
 it; a losing caller gets the owner's claim back instead of a card, keeps its
 turn, and follows that claim: it must not duplicate its approval, mutation, or
 monitor. Claims settle with their owner: completing the owning Goal completes
-its open claims with the Goal result, and Stop, dismissal, or chat deletion
-releases them, waking followers. Call `finish_agent_work` only to settle
-earlier, for a claim taken outside a Goal, or to release an action the Goal will
-not perform (such as a declined one) before completing. Transfer only for a
+the claims it names with `complete --finished WORK_KEY` and releases the rest
+(such as a declined action), and Stop, dismissal, or chat deletion releases
+them, waking followers. Call `finish_agent_work` only to settle earlier or for
+a claim taken outside a Goal. Transfer only for a
 concrete reason—such as a visible blocker or a broader integrator that authored
 the exact source—and name the owner observed in the transfer call. Claims coordinate agents; they
 never grant the owner's authority for the underlying action, and following one

@@ -244,7 +244,7 @@ def _claim_row(db):
   return db.query(models.AgentWorkClaim).filter_by(work_key=KEY).one()
 
 
-def test_goal_completion_completes_its_open_claims_with_the_verified_result(db):
+def test_goal_completion_completes_the_claims_it_names_with_the_result(db):
   from app.agent_work_claims import pending_settlement_notices
   from app.goals import update_goal_record
 
@@ -252,7 +252,8 @@ def test_goal_completion_completes_its_open_claims_with_the_verified_result(db):
   run = db.get(models.ChatRun, "claim-run-first")
   goal = db.get(models.ChatGoal, "claim-goal-first")
 
-  update_goal_record(db, run, goal, 1, result="Merged as 0b44dc9d; CI green")
+  update_goal_record(db, run, goal, 1, result="Merged as 0b44dc9d; CI green",
+                     finished_claims=[KEY])
 
   row = _claim_row(db)
   assert row.completed_at is not None and row.released_at is None
@@ -407,3 +408,46 @@ def test_racing_first_claims_leave_one_owner_and_one_follower(db):
   assert (lost["state"], lost["owner_chat_id"]) == ("held_by_peer", first.id)
   assert db.query(models.AgentWorkClaim).count() == 1
   assert db.query(models.AgentWorkInterest).one().chat_id == second.id
+
+
+def test_goal_completion_releases_a_declined_action_it_did_not_name(db):
+  """A declined approval's claim must not read as done: completed is terminal."""
+  from app.agent_work_claims import pending_settlement_notices
+  from app.goals import update_goal_record
+
+  owner, first, second = _owned_goal_claim(db)
+  update_goal_record(
+    db, db.get(models.ChatRun, "claim-run-first"),
+    db.get(models.ChatGoal, "claim-goal-first"), 1,
+    result="Owner declined the merge; the PR stays open for review.",
+  )
+
+  row = _claim_row(db)
+  assert row.completed_at is None and row.released_at is not None
+  assert row.outcome.startswith(
+    "Owning Goal completed without recording this action as done: Owner declined"
+  )
+  [pending] = pending_settlement_notices(db, first.id)
+  assert pending.state == "released"
+  taken = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=KEY, summary="Merge once the owner approves",
+  )
+  assert (taken["state"], taken["owner_chat_id"]) == ("claimed", second.id)
+
+
+def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
+  from app.goal_plans import GoalPlanError
+  from app.goals import update_goal_record
+
+  _owned_goal_claim(db)
+  with pytest.raises(GoalPlanError, match="Not an open work claim"):
+    update_goal_record(
+      db, db.get(models.ChatRun, "claim-run-first"),
+      db.get(models.ChatGoal, "claim-goal-first"), 1,
+      result="Merged", finished_claims=[KEY + ":typo"],
+    )
+  db.expire_all()
+  assert db.get(models.ChatGoal, "claim-goal-first").status == "open"
+  row = _claim_row(db)
+  assert row.completed_at is None and row.released_at is None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import re
 import uuid
@@ -346,46 +347,68 @@ def stage_release_claims_for_chat(
   return released
 
 
-def _goal_outcome(status: str, result: str | None) -> tuple[bool, str]:
-  """Map an ended Goal to (complete, outcome) for the claims it still owns."""
-  if status == "completed":
-    text = " ".join(str(result or "").split())
+def _goal_outcome(
+  status: str, result: str | None, finished: bool,
+) -> tuple[bool, str]:
+  """Map an ended Goal to (complete, outcome) for one claim it still owns.
+
+  Only a claim the completing Goal names as finished completes. A completed
+  claim is terminal for its key, so an unnamed one (declined, deferred, or
+  simply not done) is released with the Goal result for followers to judge.
+  """
+  text = " ".join(str(result or "").split())
+  if status == "completed" and finished:
     return True, f"Owning Goal completed: {text}" if text else (
       "Owning Goal completed."
+    )
+  if status == "completed":
+    return False, (
+      "Owning Goal completed without recording this action as done"
+      + (f": {text}" if text else ".")
     )
   return False, f"Owning Goal was {status} before this action finished."
 
 
 def stage_settle_goal_claims(
   db: Session, *, chat_id: str, goal_id: str, status: str,
-  result: str | None = None,
+  result: str | None = None, finished_keys: Iterable[str] = (),
 ) -> list[ReleasedClaim]:
   """Settle one ended Goal's still-open claims in the caller's transaction.
 
   Called by every lifecycle write that moves a Goal out of ``open`` so the
   claim and the Goal end atomically; a restart can never observe an ended
-  Goal that still owns an open exact action. A completed Goal verified its
-  whole outcome, so its claims complete with the Goal result. A stopped or
-  dismissed Goal left the action unfinished, so its claims are released and
-  followers may reclaim them. The caller delivers follower notices after
-  commit (``pending_settlement_notices``).
+  Goal that still owns an open exact action. A completing Goal completes only
+  the claims it names in ``finished_keys``; every other open claim, and every
+  claim of a stopped or dismissed Goal, is released so followers may reclaim
+  it. The caller delivers follower notices after commit
+  (``pending_settlement_notices``).
   """
   if not goal_id or status == "open":
     return []
-  complete, outcome = _goal_outcome(status, result)
-  settled = [
-    item for row in db.query(models.AgentWorkClaim).filter(
-      models.AgentWorkClaim.owner_chat_id == chat_id,
-      models.AgentWorkClaim.owner_goal_id == goal_id,
-      models.AgentWorkClaim.completed_at.is_(None),
-      models.AgentWorkClaim.released_at.is_(None),
-    ).all()
-    if (item := _stage_settle(
-      db, row, complete=complete, outcome=outcome,
-    )) is not None
-  ]
+  finished = set(finished_keys)
+  settled = []
+  for row in db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    models.AgentWorkClaim.owner_goal_id == goal_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).all():
+    complete, outcome = _goal_outcome(status, result, row.work_key in finished)
+    item = _stage_settle(db, row, complete=complete, outcome=outcome)
+    if item is not None:
+      settled.append(item)
   db.flush()
   return settled
+
+
+def open_goal_claim_keys(db: Session, *, chat_id: str, goal_id: str) -> set[str]:
+  """Exact actions this Goal still owns, for validating a completion's names."""
+  return {key for (key,) in db.query(models.AgentWorkClaim.work_key).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    models.AgentWorkClaim.owner_goal_id == goal_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).all()}
 
 
 def stage_settle_claims_with_owner(

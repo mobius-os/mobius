@@ -770,11 +770,11 @@ _TOOL_DEFINITIONS = {
     "name": FINISH_AGENT_WORK_TOOL,
     "description": (
       "Complete or release a claim this chat owns; followers wake with the "
-      "outcome. Usually unnecessary: completing the owning Goal completes its "
-      "open claims with the Goal result, and Stop, dismissal, or chat deletion "
-      "releases them. Call it to settle earlier, for claims taken outside a "
-      "Goal, or with release=true before completing a Goal that did not "
-      "perform a claimed action (for example, a declined approval)."
+      "outcome. Usually unnecessary inside a Goal: `goal_plan.py complete "
+      "--finished WORK_KEY` completes the claims the Goal performed and "
+      "releases the rest (for example, a declined approval), and Stop, "
+      "dismissal, or chat deletion releases them. Call it to settle earlier "
+      "or for claims taken outside a Goal."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,

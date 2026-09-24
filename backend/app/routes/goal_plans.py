@@ -307,9 +307,12 @@ class GoalRecordUpdate(BaseModel):
   checkpoint: str | None = Field(default=None, max_length=4000)
   next_action: str | None = Field(default=None, max_length=2000)
   result: str | None = Field(default=None, min_length=1, max_length=4000)
+  finished_claims: list[str] = Field(default_factory=list, max_length=50)
 
   @model_validator(mode="after")
   def require_operation(self):
+    if self.finished_claims and self.result is None:
+      raise ValueError("Only a completion can name finished claims.")
     if self.result is not None:
       if self.checkpoint is not None or self.next_action is not None:
         raise ValueError("Complete or checkpoint, not both.")
@@ -339,6 +342,7 @@ async def patch_goal_record(
       result = update_goal_record(
         db, run, goal, body.expected_revision, checkpoint=body.checkpoint,
         next_action=body.next_action, result=body.result,
+        finished_claims=body.finished_claims,
       )
     except GoalPlanError as exc:
       raise HTTPException(status_code=422, detail=str(exc)) from exc

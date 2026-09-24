@@ -243,7 +243,7 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   assert "your turn continues" in approval
   assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
   finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
-  assert "Usually unnecessary" in finish and "declined approval" in finish
+  assert "Usually unnecessary" in finish and "--finished WORK_KEY" in finish
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,

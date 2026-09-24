@@ -159,6 +159,10 @@ def main() -> int:
   checkpoint_parser.add_argument("--next-action", required=True)
   complete_parser = sub.add_parser("complete", help="validate and record the verified outcome; no preflight required")
   complete_parser.add_argument("--result", required=True)
+  complete_parser.add_argument(
+    "--finished", action="append", default=[], metavar="WORK_KEY",
+    help="an exact claimed action this Goal performed; other claims are released",
+  )
   update_parser = sub.add_parser("update", help="advance one task")
   update_parser.add_argument("task_id")
   update_parser.add_argument(
@@ -191,6 +195,8 @@ def main() -> int:
     body = {"goal_id": goal["id"], "expected_revision": goal["revision"]}
     if args.command == "complete":
       body["result"] = args.result
+      if args.finished:
+        body["finished_claims"] = args.finished
     else:
       body.update(checkpoint=args.summary, next_action=args.next_action)
     print(json.dumps(_request("PATCH", f"/api/chats/{chat_id}/goal", body)))

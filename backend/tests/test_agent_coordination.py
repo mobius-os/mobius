@@ -1664,7 +1664,8 @@ def test_goal_completion_wakes_claim_followers_without_a_finish_call(
     "/api/chats/claim-owner/goal",
     headers=_top_level_auth(db, "claim-owner", "claim-owner-run"),
     json={"goal_id": "claim-owner-goal", "expected_revision": 0,
-          "result": "Merged as 0b44dc9d; CI green"},
+          "result": "Merged as 0b44dc9d; CI green",
+          "finished_claims": [CLAIM_KEY]},
   )
 
   assert completed.status_code == 200, completed.text
