@@ -604,6 +604,7 @@ def _public_host(host: dict) -> dict:
   )
   runner_release = _reported_runner_release(host.get("runner_release"))
   paired = bool(host.get("token_sha256"))
+  managed_by_mobius = host.get("runner_managed") == "mobius"
   runner_update_available = bool(
     paired and (
       int(runner_protocol or 0) != _RUNNER_PROTOCOL_VERSION
@@ -623,8 +624,10 @@ def _public_host(host: dict) -> dict:
     "runner_release": runner_release,
     "runner_update_available": runner_update_available,
     "update_command": (
-      _update_command(_base_url()) if runner_update_available else None
+      _update_command(_base_url())
+      if runner_update_available and not managed_by_mobius else None
     ),
+    "runner_managed": host.get("runner_managed"),
     "last_seen": host.get("last_seen"),
     "created_at": host.get("created_at"),
     "platform": host.get("platform"),
@@ -1122,6 +1125,11 @@ async def stream(request: Request) -> StreamingResponse:
   host["runner_protocol"] = protocol_version or None
   host["runner_release"] = runner_release
   host["runner_transport"] = "sse"
+  # A runner supervised by another Möbius is updated by that Möbius when it
+  # relaunches the runner, never by the service install command.
+  host["runner_managed"] = (
+    "mobius" if request.query_params.get("managed") == "mobius" else None
+  )
   plat = request.query_params.get("platform")
   if plat:
     host["platform"] = plat[:80]

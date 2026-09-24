@@ -71,6 +71,9 @@ STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
 # before one heartbeat interval still take the ordinary retry backoff so a
 # broken intermediary cannot create a tight reconnect loop.
 STREAM_HEALTHY_SECONDS = STREAM_HEARTBEAT_SECONDS
+# Set by a Mobius that supervises this runner (a Mobius-to-Mobius connection).
+# Such a runner is updated by its supervisor, not by an install command.
+SUPERVISOR_ENV = "CONNECT_RUNNER_SUPERVISOR"
 RUNNER_USER_AGENT = (
     "mobius-connect/%s (protocol/%s; +https://github.com/mobius-os/mobius)"
     % (RUNNER_RELEASE, RUNNER_PROTOCOL_VERSION)
@@ -855,6 +858,8 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                 ("pending_result_id", request_id)
                 for request_id in pending_ids
             )
+            if os.environ.get(SUPERVISOR_ENV) == "mobius":
+                query.append(("managed", "mobius"))
             stream_url = base + "/api/connect/stream?" + urllib.parse.urlencode(
                 query,
             )
