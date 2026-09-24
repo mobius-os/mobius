@@ -747,20 +747,16 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] .connection-status')).toBeVisible({
       timeout: 25000,
     })
-    // Settle the reserved composer height before measuring overlap. Compare
-    // NUMERICALLY within a pixel rather than by exact string: useScrollMode
-    // writes --composer-h only when its layout pass actually runs, and a wake
-    // failure keeps re-rendering the footer underneath it (the status mounts,
-    // the repair restarts the stream), so an exact match can be momentarily
-    // stale even though the reservation is correct. The overlap assertions
-    // below are what this case is for.
-    await page.waitForFunction(() => {
-      const chat = document.querySelector('[data-chat-surface="painted"] .chat')
-      const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
-      if (!chat || !foot) return false
-      const reserved = parseFloat(getComputedStyle(chat).getPropertyValue('--composer-h'))
-      return Number.isFinite(reserved) && Math.abs(reserved - foot.offsetHeight) <= 1
-    }, undefined, { timeout: 15000 })
+    // Settle on what the overlap measurement actually needs: the composer pill.
+    // The earlier gate compared --composer-h against the footer height, but
+    // useScrollMode writes that variable only when its layout pass runs, and a
+    // wake failure keeps re-rendering the footer beneath it -- so the
+    // reservation can be correct while the variable never matches in budget.
+    await expect(page.locator('[data-chat-surface="painted"] .chat__pill'))
+      .toBeVisible({ timeout: 15000 })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
 
     const diagnostics = await pillOverlapDiagnostics(page)
     expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
@@ -1214,7 +1210,12 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(detail),
+        // Re-spread runtimeState per request. `detail` captured it ONCE at
+        // declaration, so once the answer clears the parked question the detail
+        // read still advertised it -- runtime and detail then described different
+        // worlds and the composer resolved to neither Stop nor Send. Both owners
+        // must agree on one snapshot.
+        body: JSON.stringify({ ...detail, ...runtimeState }),
       })
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
