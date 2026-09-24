@@ -1346,8 +1346,15 @@ test.describe('Stream reconnection', () => {
       .toHaveValue('keep this draft safe')
     // The answer unfreezes the turn, but the authoritative runtime above still
     // reports `running:true`; reconnect loss must not invent an idle composer.
-    // Keep the draft safe behind Stop until a later runtime snapshot settles.
+    //
+    // With the card answered the question barrier is gone, and ChatInputBar is
+    // explicit that Stop outranks Send only "until the card is answered": a
+    // non-empty draft now offers Send (queue it behind the running turn). The
+    // button therefore cannot tell running from idle while the draft is present,
+    // so prove the turn is still live the way the rule allows -- an EMPTY field
+    // over a running turn offers Stop. The draft was already asserted intact.
+    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+    await activeComposer.fill('')
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
   })
 })

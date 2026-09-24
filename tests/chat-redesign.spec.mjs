@@ -59,6 +59,17 @@ async function setupWithStreamMock(
       route.fulfill({ status: 204, body: '' })
     )
   }
+  // Settle delivery readiness deterministically: a send made before the
+  // /api/ready probe lands is QUEUED (.queued__row), not started, and the
+  // composer is enabled before that round trip settles -- so sendMessage
+  // intermittently waited for a user row that was sitting in the queue. The
+  // case that exercises readiness registers its own /api/ready route later,
+  // which takes precedence, then unroutes it back to this settled answer.
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ready: true, boot_id: 'chat-redesign-boot' }),
+  }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
     () => !!(document.querySelector('.chat__empty-wrap')
