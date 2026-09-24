@@ -454,7 +454,7 @@ def test_approval_without_action_identity_is_rejected_before_card_creation(
   assert _row(chat.id)[0] is None
 
 
-def test_unsaved_card_releases_its_claim_and_leaves_no_receipt_or_orphan(
+def test_unsaved_card_keeps_its_claim_for_the_identical_retry(
   client, chat, approval_run, monkeypatch, db,
 ):
   writer = get_writer()
@@ -467,18 +467,13 @@ def test_unsaved_card_releases_its_claim_and_leaves_no_receipt_or_orphan(
   res = _ask(client, chat, approval_run)
   assert res.status_code == 503
   assert _row(chat.id)[0] is None
-  # The card provably never saved, so the claim this call took is released
-  # rather than stranded; peers may take the action and a retry reclaims it.
-  db.expire_all()
+  # Admission succeeded, so exact-action ownership remains reserved for the
+  # identical retry even though the card acknowledgement failed.
   claim = db.query(models.AgentWorkClaim).one()
-  assert claim.released_at is not None
-  assert "not saved" in claim.outcome
+  assert (claim.owner_chat_id, claim.released_at) == (chat.id, None)
   assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
   monkeypatch.setattr(writer, "_persist_question_required", original)
   assert _ask(client, chat, approval_run).status_code == 200
-  db.expire_all()
-  claim = db.query(models.AgentWorkClaim).one()
-  assert (claim.owner_chat_id, claim.released_at) == (chat.id, None)
 
 
 def test_finished_approval_remains_answerable_and_late_answer_starts_once(

@@ -457,28 +457,6 @@ def pending_settlement_notices(
   ]
 
 
-def release_unsaved_approval_claim(
-  db: Session, *, claim_id: str, revision: int, chat_id: str,
-) -> bool:
-  """Release a claim that ``request_approval`` took for a card that never saved.
-
-  Fenced by the exact revision the failed call acquired, so a claim that has
-  since been refreshed, transferred, or settled is left alone. Commits.
-  """
-  row = db.get(models.AgentWorkClaim, claim_id)
-  if row is None or row.revision != revision or row.owner_chat_id != chat_id:
-    return False
-  settled = _stage_settle(
-    db, row, complete=False,
-    outcome="The approval card for this action was not saved; it was released.",
-  )
-  if settled is None:
-    db.rollback()
-    return False
-  db.commit()
-  return True
-
-
 def finish_work(
   db: Session,
   *,
@@ -500,47 +478,21 @@ def finish_work(
     raise ValueError("No work claim exists for this key.")
   if row.owner_chat_id != chat_id:
     raise ValueError("Only the current claim owner can finish or release it.")
-  if row.completed_at is None and row.released_at is None:
-    now = now_naive_utc()
-    previous_revision = row.revision
-    values = {
-      models.AgentWorkClaim.outcome: clean_outcome,
-      models.AgentWorkClaim.updated_at: now,
-      models.AgentWorkClaim.revision: previous_revision + 1,
-      (
-        models.AgentWorkClaim.released_at if release
-        else models.AgentWorkClaim.completed_at
-      ): now,
-    }
-    changed = db.query(models.AgentWorkClaim).filter(
-      models.AgentWorkClaim.id == row.id,
-      models.AgentWorkClaim.owner_chat_id == chat_id,
-      models.AgentWorkClaim.revision == previous_revision,
-      models.AgentWorkClaim.completed_at.is_(None),
-      models.AgentWorkClaim.released_at.is_(None),
-    ).update(values, synchronize_session=False)
-    if changed != 1:
-      db.rollback()
-      raise ValueError("The claim changed while finishing; inspect it before retrying.")
-    db.expire(row)
-    db.refresh(row)
-  interests = db.query(models.AgentWorkInterest).join(
-    models.Chat, models.Chat.id == models.AgentWorkInterest.chat_id,
-  ).filter(
-    models.AgentWorkInterest.claim_id == row.id,
-    models.AgentWorkInterest.resolved_at.is_(None),
-    models.Chat.deleted_at.is_(None),
-  ).all()
-  recipients = []
-  for interest in interests:
-    if interest.chat_id != chat_id:
-      recipients.append(interest.chat_id)
+  if (
+    row.completed_at is None and row.released_at is None
+    and _stage_settle(
+      db, row, complete=not release, outcome=clean_outcome,
+    ) is None
+  ):
+    db.rollback()
+    raise ValueError("The claim changed while finishing; inspect it before retrying.")
+  recipients = _live_follower_ids(db, row.id, chat_id)
   db.commit()
   db.refresh(row)
   state = "completed" if row.completed_at is not None else "released"
   return FinishedClaim(
     claim=_serialize(db, row, state),
-    interested_chat_ids=list(dict.fromkeys(recipients)),
+    interested_chat_ids=recipients,
   )
 
 
