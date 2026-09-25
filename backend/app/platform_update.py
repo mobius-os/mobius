@@ -2328,6 +2328,10 @@ def _reconcile_pass(
   # the tree, so we reconcile from the committed pre-crash tip.
   _abort_interrupted(repo)
   pre = _rev(repo, local)
+  if _read_late_snapshot(repo) is not None:
+    return ReconcileResult.unchanged(
+      "error", pre, error="saved_work_recovery_pending",
+    )
 
   if not _has_origin(repo):
     return ReconcileResult.unchanged("skipped", pre, error="no_origin")
@@ -2590,8 +2594,7 @@ def _finalize_update(
     overlay=overlay,
   )
   if not touched_frontend:
-    app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-    CONFLICT_FLAG.unlink(missing_ok=True)
+    _retire_finished_candidate(repo)
     return result
   # Source moved without a watcher event. Dropping the build stamp makes the
   # watcher's startup check (and /api/version's freshness fact) see the
@@ -2613,9 +2616,20 @@ def _finalize_update(
       repo, result, previous_upstream_sha, exc,
       frontend_changed=frontend_changed,
     )
-  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-  CONFLICT_FLAG.unlink(missing_ok=True)
+  _retire_finished_candidate(repo)
   return result
+
+
+def _retire_finished_candidate(repo: Path) -> None:
+  """Do not turn post-activation cleanup into a failed update report."""
+  try:
+    app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+  except Exception:
+    log.warning("platform: could not retire finished candidate worktree", exc_info=True)
+  try:
+    CONFLICT_FLAG.unlink(missing_ok=True)
+  except OSError:
+    log.warning("platform: could not retire finished conflict marker", exc_info=True)
 
 
 def _invalidate_frontend_build_stamp(repo: Path) -> None:
@@ -2898,6 +2912,12 @@ def _pending_late_changes(repo: Path) -> dict | None:
   # -s ours` makes the ref an ancestor while deliberately discarding its bytes.
   # Keep the recovery notice until the owner explicitly retires the saved ref.
   if _rev(repo, ref) != late:
+    return None
+  # An interrupted activation may have rolled back to the exact committed
+  # source that this record saved. In that case the work is still live, not a
+  # missing post-release layer. An unresolved dirty snapshot, if any, remains
+  # visible through restore_pending below.
+  if _rev(repo, _local_branch(repo)) == record.get("committed_sha"):
     return None
   return record
 

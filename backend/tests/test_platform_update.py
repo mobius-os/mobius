@@ -772,7 +772,7 @@ def test_another_late_edit_cannot_replace_an_unresolved_recovery_record(clone_en
   assert not pu.LATE_SNAPSHOT_FLAG.exists()
 
 
-def test_interrupted_late_activation_keeps_the_newer_dirty_recovery_pin(
+def test_failed_post_activation_cleanup_keeps_the_newer_dirty_recovery_pin(
   clone_env, monkeypatch,
 ):
   origin, platform = clone_env
@@ -797,8 +797,9 @@ def test_interrupted_late_activation_keeps_the_newer_dirty_recovery_pin(
     raise TimeoutError("candidate cleanup interrupted after activation")
 
   monkeypatch.setattr(app_git, "remove_overlay_worktree", fail_cleanup)
-  with pytest.raises(TimeoutError, match="candidate cleanup interrupted"):
-    pu.continue_platform_overlay_update(platform)
+  assert pu.continue_platform_overlay_update(platform) == (
+    "updated_late_changes_pending"
+  )
 
   assert dirty.read_text() == "VALUE = 'BEFORE APPLY'\n"
   pending = pu.platform_status(platform)["late_changes"]
@@ -807,6 +808,33 @@ def test_interrupted_late_activation_keeps_the_newer_dirty_recovery_pin(
     "VALUE = 'AFTER APPLY'\n"
   )
   assert not pu.LATE_SNAPSHOT_FLAG.exists()
+
+
+def test_boot_rollback_does_not_claim_committed_late_work_is_missing(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  late = _local_commit(platform, edits={"backend/app/late.py": "LATE = 1\n"})
+  original_probe = pu._import_probe
+
+  def crash_after_activation(_repo):
+    raise SystemExit("interrupted after branch activation")
+
+  monkeypatch.setattr(pu, "_import_probe", crash_after_activation)
+  with pytest.raises(SystemExit, match="interrupted after branch activation"):
+    pu.continue_platform_overlay_update(platform)
+  assert pu.platform_status(platform)["late_changes"]["state"] == "needs_merge"
+
+  pu.boot_guard_clean_served_tree(platform)
+  assert _served_sha(platform) == late
+  assert pu.platform_status(platform)["late_changes"] is None
+
+  monkeypatch.setattr(pu, "_import_probe", original_probe)
+  assert pu.continue_platform_overlay_update(platform) == (
+    "updated_late_changes_pending"
+  )
+  assert pu.platform_status(platform)["late_changes"]["late_sha"] == late
 
 
 def test_unresolved_crash_snapshot_cannot_be_overwritten_by_another_continuation(
@@ -827,6 +855,28 @@ def test_unresolved_crash_snapshot_cannot_be_overwritten_by_another_continuation
   )
   assert _git(platform, "show", f"{pu._LATE_CHANGES_REF_PREFIX}{carried.pre}:backend/app/foo.py").stdout == (
     "VALUE = 'SAVED'\n"
+  )
+
+
+def test_ordinary_apply_cannot_hide_an_unrecovered_snapshot(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  (platform / "backend/app/foo.py").write_text("VALUE = 'SAVED'\n")
+  carried = pu._snapshot_late_working_edits(platform, "main")
+  pu._write_late_snapshot(carried)
+  marker = pu.LATE_SNAPSHOT_FLAG.read_text()
+  _advance_origin(origin, edits={"backend/app/main.py": _MAIN_PY.replace(
+    "LINE_C = 3", "LINE_C = 4",
+  )})
+
+  result = pu.reconcile_clone(platform)
+  assert result.status == "error"
+  assert result.error == "saved_work_recovery_pending"
+  assert _served_sha(platform) == before
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'SAVED'\n"
+  assert pu.LATE_SNAPSHOT_FLAG.read_text() == marker
+  assert pu.platform_status(platform)["late_changes"]["state"] == (
+    "restore_pending"
   )
 
 
