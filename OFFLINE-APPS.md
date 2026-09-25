@@ -50,66 +50,33 @@ Packaged nested documents under `/app-embeds/` do not inherit a recursive
 static-asset offline guarantee. Their subresources need an explicit future
 warm contract; until then, keep an app that depends on them online-only.
 
-## Read models
+## Storage invariants
 
-Use `window.mobius.storage`, not raw storage `fetch` calls. The two read modes
-serve different purposes:
+The exact storage API recipes live in the seeded
+[`building-apps`](backend/scripts/seed-skills/building-apps.md) guide. An app
+that promises offline behavior must preserve these boundaries:
 
-- `get()`, `getText()`, `getBlob()`, and subscriptions are product reads. They
-  may return the last cached server value with queued local writes overlaid.
-  This provides fast reads and read-your-writes behavior.
-- `getWithVersion()` is a merge-base read. While online, it returns the
-  authoritative server value and its matching version, bypassing both queued
-  overlays and a stale ordinary-read HTTP cache. While offline it returns the
-  best cached value/version with `offline: true`, which is useful for queuing a
-  conditional write but is not proof of current server state.
+- use `window.mobius.storage`, not raw storage `fetch` calls, so ordinary reads
+  can overlay queued writes and retain read-your-writes behavior;
+- use `getWithVersion()` only as an authoritative merge base when
+  `runtimeFeatures.authoritativeVersionedReads === true` and its result is not
+  marked `offline`;
+- treat `listWithStatus().complete === false` as partial or unavailable
+  knowledge, never proof that a collection is empty; and
+- subscribe to paths that the agent, a job, or another frame can update.
 
-Conflict recovery that depends on the online guarantee must require
-`window.mobius.runtimeFeatures.authoritativeVersionedReads === true`. On an
-older runtime, leave the conflict unhandled rather than merging against an
-ambiguous value/version pair.
+A complete listing proves membership, not that every record body is available.
+Preserve the last authoritative UI state and stop safely when a required body
+cannot be loaded.
 
-Views that the agent, a job, or another frame can update must subscribe to the
-relevant path instead of loading only on mount.
+## Conflict recovery
 
-## Collection completeness
-
-Use `storage.listWithStatus(prefix, { includeContent: true })` when behavior
-depends on complete membership.
-
-- `complete: false` means partial or unavailable knowledge. It is never proof
-  that the collection is empty. Preserve the last authoritative UI state and
-  do not seed defaults, delete records, or rewrite an index from it.
-- `complete: true` proves membership, not body availability. Content can be
-  omitted by byte limits or be absent from the offline cache. If an operation
-  needs every body, fetch each missing body and stop safely if any remain
-  unavailable.
-- `list()` is an entries-only best-known view. Use it for non-authoritative
-  display, not cleanup or reconciliation.
-
-The runtime option is `includeContent: true`; the equivalent raw HTTP query is
-`include_content=true`.
-
-## Writes and conflicts
-
-Prefer one file per independently edited record. Ordinary `set()` writes are
-last-write-wins per path and are appropriate when that is the intended policy.
-Use compare-and-swap only for a document that genuinely has multiple writers.
-
-For a conditional write:
-
-1. Read with `getWithVersion()`.
-2. Apply the app-owned change to that value.
-3. Call `durableWrite()` with `ifMatch: version`, or `ifNoneMatch: true` for a
-   create-only write.
-4. If the write conflicts, re-read the authoritative value, merge, and retry
-   with a finite policy owned by the app.
-
-An offline conditional write should include a small `conflictContext` that
-describes mutation intent, not only the resulting whole document. When several
-writes to one path coalesce, the runtime retains those opaque intents in order.
-Recover with `storage.conflictContextItems()` so every retained intent is
-applied.
+Prefer one file per independently edited record; use compare-and-swap only for
+a document that genuinely has multiple writers. The general CAS mechanics are
+covered in `building-apps.md`. An offline conditional write adds one requirement:
+include a small `conflictContext` that describes mutation intent, not only the
+resulting whole document. When several writes to one path coalesce, the runtime
+retains those opaque intents in order.
 
 ```js
 const { storage } = window.mobius
@@ -127,7 +94,10 @@ if (canRecover) {
       ? { ifMatch: current.version }
       : { ifNoneMatch: true }
     try {
-      const result = await storage.durableWrite(conflict.path, merged, guard)
+      const result = await storage.durableWrite(conflict.path, merged, {
+        ...guard,
+        conflictContext: conflict.conflictContext,
+      })
       return result?.durability === 'synced'
     } catch (error) {
       if (error?.code === 'conflict') return false
@@ -138,11 +108,17 @@ if (canRecover) {
 ```
 
 The callback's result is a durability decision: truthy retires the original
-conflict, while `false` preserves it for replay, including after an app-frame
-remount. A result with `durability: "queued"` is not server acceptance. Do not
-acknowledge it, and do not use a separate `pendingCount()` check as proof: a
-different frame can enqueue between that check and a later read. The
-authoritative versioned read is the merge boundary.
+conflict, while `false` preserves it. A preserved conflict is replayed when an
+`onConflict` listener registers again, normally on the next app-frame load or
+remount; reconnect alone does not redispatch it. A result with
+`durability: "queued"` is not server acceptance. Do not acknowledge it, and do
+not use a separate `pendingCount()` check as proof: a different frame can
+enqueue between that check and a later read. The authoritative versioned read
+is the merge boundary.
+
+Carry the original `conflictContext` onto the recovery write. Connectivity can
+drop between the authoritative read and that write; if the queued recovery
+later conflicts, the app still needs the retained intent to recover safely.
 
 Keep conflict contexts bounded and deterministic. If applying the same intent
 twice would duplicate or corrupt data, make the intent idempotent or record a
