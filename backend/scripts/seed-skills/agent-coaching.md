@@ -61,9 +61,8 @@ timeout 150 /data/platform/backend/scripts/fork-chat.sh --json \
   <chat_id> "<focused coaching prompt>"
 ```
 
-Give the outer tool call more time than the inner limit (normally 170 seconds;
-up to 300/280 seconds for one genuinely giant, high-value chat). The original
-chat and transcript are never modified.
+Allow the outer tool call about 20 seconds beyond the inner `timeout`. The
+original chat and transcript are never modified.
 
 Success has exactly one provenance: `method: session_fork` and
 `exact_session_fork: true`. The named Claude or Codex provider session was
@@ -99,10 +98,10 @@ a frame, not a questionnaire that must be repeated word-for-word:
    reconsidered, or done differently? What made that difficult at the time?
 4. **Extract the lesson.** What is the most general lesson another agent should
    carry into similar work?
-5. **Translate it.** Would that lesson be best encoded in a skill, governing
-   prompt, tool or script, platform primitive, app workflow, Memory, or nowhere
-   durable? What is the smallest change that would have helped without adding
-   a workaround or a second mechanism?
+5. **Translate it.** Would that lesson be best encoded in a skill, app
+   workflow, Memory, tool or script, governing prompt, platform primitive, or
+   nowhere durable? What is the smallest change that would have helped without
+   adding a workaround or a second mechanism?
 
 Ask the agent to distinguish what it remembers or observes from what it is
 inferring now, and to cite checkable evidence for consequential claims. During
@@ -126,10 +125,10 @@ Synthesize three things:
 2. the specific improvement and general lesson; and
 3. the proposed durable change, if one is earned.
 
-Inspect every plausible owning surface—skills, governing prompt, scripts/tools,
-platform primitive, app workflow, and Memory—but change only the one that owns
-the cause. If several agents expose the same handoff or primitive problem,
-name the cross-cutting lesson after keeping each agent's feedback distinct.
+Inspect every plausible owning surface—skills, app workflows, Memory,
+scripts/tools, governing prompt, and platform primitive—but change only the one
+that owns the cause. If several agents expose the same handoff or primitive
+problem, name the cross-cutting lesson after keeping each agent's feedback distinct.
 
 Co-design the fix from the agent's suggestion, then apply the smallest durable
 version. Follow the normal approval rules: a partner-initiated coaching request

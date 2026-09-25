@@ -1,7 +1,7 @@
 # Undo and restore
 
-Use this for path-scoped Git undo, accidental chat deletion, app restoration,
-and deciding when a full owner-data backup restore is actually required.
+Use this for path-scoped Git undo in `/data` or `/data/platform`, accidental
+chat deletion, app restoration, and deciding when a full owner-data backup restore is actually required.
 
 ---
 

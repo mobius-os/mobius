@@ -130,9 +130,7 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 Use `snapshot --delta` for repeated structural inspection: the first response
 is a baseline and later responses contain changes. Use `snapshot --delta --full` when a fresh
 baseline is needed. This is not a replacement for rendered verification.
-Do not add `screenshot --if-changed` to the authenticated capture helper:
-unchanged captures intentionally omit the output, whereas the helper promises
-a freshly verified, atomic image. Use fewer purposeful captures instead.
+Take fewer, purposeful captures rather than many near-identical ones.
 A timed-out `--current-page` capture cleans up its poisoned browser but cannot
 restore injected CSS or unsaved page state; prepare that state again explicitly.
 

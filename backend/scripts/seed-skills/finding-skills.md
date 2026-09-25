@@ -43,17 +43,17 @@ Never silently install a skill mid-task because it seemed useful; surface it.
 
 ## Installing
 
-`POST /api/skills/install` with your token. Two forms:
+`POST /api/skills/install` through `mapi`. Two forms:
 
 ```bash
 # A skill DIRECTORY in a GitHub repo (SKILL.md + resources):
-curl -sS -X POST http://localhost:8000/api/skills/install \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+mapi -X POST /api/skills/install \
+  -H 'Content-Type: application/json' \
   -d '{"repo": "anthropics/skills", "path": "document-skills/pdf", "ref": "main"}'
 
 # A single markdown file by raw URL (becomes that skill's SKILL.md):
-curl -sS -X POST http://localhost:8000/api/skills/install \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+mapi -X POST /api/skills/install \
+  -H 'Content-Type: application/json' \
   -d '{"url": "https://raw.githubusercontent.com/owner/repo/main/some-skill.md", "name": "some-skill"}'
 ```
 
@@ -69,8 +69,7 @@ by the install response.
 ## Uninstalling
 
 ```bash
-curl -sS -X DELETE "http://localhost:8000/api/skills/<name>" \
-  -H "Authorization: Bearer $TOKEN"
+mapi -X DELETE "/api/skills/<name>"
 ```
 
 Only skills installed through this API can be removed here (the server snapshots their bytes into the `/data` git history first, so removal is reversible via git). Seed skills and skills you authored yourself are ordinary files — edit or delete them directly like any of your files. App-owned skills follow their app's install/uninstall lifecycle.

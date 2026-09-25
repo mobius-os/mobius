@@ -338,9 +338,12 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
   assert "do not expand an external provider's or host's capabilities" in (
     normalized_core
   )
-  assert "Card access is deliberately uniform" in core
+  development = " ".join((
+    repo / "backend" / "scripts" / "seed-skills" / "mobius-development.md"
+  ).read_text(encoding="utf-8").split())
   assert "any authenticated participant that can read" in normalized_core
-  assert "do not add a second card-answer role or token hierarchy" in normalized_core
+  assert "Card access is deliberately uniform" in development
+  assert "do not add a second card-answer role or token hierarchy" in development
   assert "An explicit partner request may create the card" in normalized_core
   assert "platform-owned dispatch" in normalized_core
   assert "agents never issue or replay the shell command" in normalized_core
