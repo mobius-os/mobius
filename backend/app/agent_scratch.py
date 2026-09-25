@@ -11,8 +11,12 @@ host: it takes durable data down with it. This module owns the lifecycle
 that makes the move safe.
 
 Scratch is keyed per chat, matching the per-chat agent-browser profile it
-sits beside in the runner. A chat with no run in flight cannot be using its
-scratch, so that is the deletion rule.
+sits beside in the runner, and it persists across that chat's turns: an agent
+routinely prepares files, ends its turn on an owner question, and continues
+from them next turn. The hourly sweep releases a chat's scratch only once no
+run is in flight and nothing in it has changed for a day, and it clears loose
+files left in the scratch root on the same schedule. When disk pressure
+blocks a new turn, admission sweeps once with the short start-race grace.
 """
 
 import asyncio
@@ -31,11 +35,13 @@ from app.runner_registry import registry
 
 log = logging.getLogger(__name__)
 
+# A chat's scratch outlives its turns; it is released after this long with
+# no change anywhere inside it and no run in flight.
+IDLE_RETENTION_SECONDS = 24 * 60 * 60
 # A run's row is created around the same moment its scratch is, and the two
-# are not ordered against each other. Without a grace period a sweep driven
-# by one starting run could delete the scratch of another that had not yet
-# registered. Comfortably longer than that gap, far shorter than a turn.
-_SWEEP_GRACE_SECONDS = 15 * 60
+# are not ordered against each other, so even the disk-pressure sweep spares
+# scratch touched this recently: a starting run may not have registered yet.
+START_RACE_GRACE_SECONDS = 15 * 60
 _RELEASED_DIR = re.compile(
   r"^\.[A-Za-z0-9_-]+\.released-[0-9a-f]{32}$"
 )
@@ -121,22 +127,47 @@ async def release_if_idle(chat_id: str) -> int | None:
     return None
 
 
-async def sweep_idle_scratch(*, now: float | None = None) -> dict:
-  """Delete scratch belonging to chats with no run still in flight.
+def _last_change(path: Path) -> float:
+  """Newest modification time anywhere under ``path`` (scratch is small)."""
+  newest = path.lstat().st_mtime
+  for candidate in path.rglob("*"):
+    try:
+      newest = max(newest, candidate.lstat().st_mtime)
+    except OSError:
+      pass
+  return newest
 
-  Returns a summary so the runtime retention supervisor can report what it
-  reclaimed. Failure to remove one directory must not prevent the rest, so
-  errors are collected rather than aborting the sweep.
+
+async def sweep_idle_scratch(
+  *, now: float | None = None, idle_seconds: float = IDLE_RETENTION_SECONDS,
+) -> dict:
+  """Delete scratch unchanged for ``idle_seconds`` whose chat has no run in flight.
+
+  Loose files in the scratch root follow the same age rule. Returns a summary
+  so the runtime retention supervisor can report what it reclaimed. Failure
+  to remove one entry must not prevent the rest, so errors are logged rather
+  than aborting the sweep.
   """
   root = agent_scratch_root()
   if not root.is_dir():
     return {"removed": 0, "bytes": 0, "kept_recent": 0}
 
-  cutoff = (time.time() if now is None else now) - _SWEEP_GRACE_SECONDS
+  cutoff = (time.time() if now is None else now) - idle_seconds
   removed = reclaimed = kept_recent = 0
 
   for entry in list(root.iterdir()):
-    if not entry.is_dir():
+    if not entry.is_dir() or entry.is_symlink():
+      try:
+        stat = entry.lstat()
+        if stat.st_mtime > cutoff:
+          kept_recent += 1
+          continue
+        entry.unlink()
+      except OSError as exc:
+        log.warning("agent scratch sweep skipped %s: %s", entry.name, exc)
+        continue
+      removed += 1
+      reclaimed += stat.st_size
       continue
     if _RELEASED_DIR.fullmatch(entry.name):
       try:
@@ -147,7 +178,7 @@ async def sweep_idle_scratch(*, now: float | None = None) -> dict:
       removed += 1
       continue
     try:
-      if entry.stat().st_mtime > cutoff:
+      if await asyncio.to_thread(_last_change, entry) > cutoff:
         kept_recent += 1
         continue
     except OSError as exc:

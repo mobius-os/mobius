@@ -2717,15 +2717,6 @@ def _publish_chat_run_finished(chat_id: str) -> None:
     })
 
 
-def _publish_chat_scratch_releasable(chat_id: str) -> None:
-  """Hint that physical turn cleanup finished; consumers recheck ownership."""
-  if chat_id:
-    get_system_broadcast().publish({
-      "type": "chat_scratch_releasable",
-      "chatId": chat_id,
-    })
-
-
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
   if registry.is_alive(chat_id):
@@ -4618,23 +4609,6 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
-    if runtime_settled and chat_id:
-      # chat_run_finished is intentionally earlier for responsive shell UI.
-      # Scratch needs a stricter physical boundary: _run_chat_impl has returned
-      # after browser cleanup, and a complete empty process inventory proves no
-      # detached Chromium session still inherits this turn's TMPDIR. The
-      # scratch owner rechecks both runtime and durable run identity again.
-      try:
-        browser_scan = await asyncio.to_thread(
-          browser_profiles.browser_session_targets_for_chat, chat_id,
-        )
-        if browser_scan.idle:
-          _publish_chat_scratch_releasable(chat_id)
-      except Exception:
-        _get_logger().debug(
-          "agent scratch release hint skipped chat_id=%s",
-          chat_id, exc_info=True,
-        )
     # Parent progress must not wait on optional summary generation.
     try:
       if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:

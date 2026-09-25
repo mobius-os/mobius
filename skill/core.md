@@ -373,6 +373,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 - `$API_BASE_URL` — backend URL
 - `$SCRIPTS_DIR` — helper scripts directory
 - `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT` — the partner's actual app viewport (set when the shell sends it; required for screenshots)
+- `$TMPDIR` — this chat's scratch folder. It persists across the chat's turns (files prepared before an owner question are still there after the answer) and is swept after a day without changes. Delete what you no longer need; keep durable work elsewhere under `/data`.
 - **System packages and root work**: full in-container root is available by default, but first run `sudo -n true` and use `sudo` deliberately for system-owned locations. Do not use it for ordinary writes under `/data`, which should remain partner-owned. Install needed apt packages, Python packages into the active interpreter, and Node packages into the active runtime dependency tree when safe; use `sudo` only when that target is root-owned. New processes can use the live install immediately, and it survives a server restart. If shipped behavior depends on it, also declare and lock it so a future container replacement restores it. Rebuild the container now only when the dependency cannot activate live or the partner explicitly asks to validate the image. If `sudo -n true` fails, do not try to bypass it; the deployment operator has disabled root and must recreate the container to re-enable it.
 
 ### Calling this instance's backend — use `mapi`

@@ -7,6 +7,7 @@ a lifecycle would take durable data down with it. These cover both halves.
 """
 
 import asyncio
+import os
 import threading
 import time
 
@@ -208,7 +209,7 @@ async def test_sweep_reclaims_scratch_for_a_chat_with_no_run_in_flight(
   (idle / "leftover.bin").write_bytes(b"x" * 2048)
 
   result = await agent_scratch.sweep_idle_scratch(
-    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
+    now=time.time() + agent_scratch.IDLE_RETENTION_SECONDS + 1
   )
 
   assert not idle.exists()
@@ -232,7 +233,7 @@ async def test_sweep_never_deletes_scratch_of_a_run_still_in_fight(
   live = agent_scratch.scratch_for_chat(chat_id)
 
   result = await agent_scratch.sweep_idle_scratch(
-    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
+    now=time.time() + agent_scratch.IDLE_RETENTION_SECONDS + 1
   )
 
   assert live.is_dir()
@@ -254,7 +255,7 @@ async def test_crash_recovery_sweep_reclaims_parked_scratch(
   scratch = agent_scratch.scratch_for_chat(chat_id)
 
   result = await agent_scratch.sweep_idle_scratch(
-    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1,
+    now=time.time() + agent_scratch.IDLE_RETENTION_SECONDS + 1,
   )
 
   assert not scratch.exists()
@@ -286,3 +287,70 @@ async def test_sweep_reports_zero_before_any_scratch_exists(
   _pin_data_dir(monkeypatch, tmp_path / "never-written")
 
   assert (await agent_scratch.sweep_idle_scratch())["removed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scratch_outlives_its_turns_until_a_day_without_changes(
+  monkeypatch, tmp_path, db
+):
+  """A turn that ends on an owner question comes back to its prepared files."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  paused = agent_scratch.scratch_for_chat("paused-chat")
+  prepared = paused / "pr" / "body.md"
+  prepared.parent.mkdir()
+  prepared.write_text("prepared before asking the owner")
+  hour_ago = time.time() - 3600
+  os.utime(paused, (hour_ago, hour_ago))  # only a nested file changed since
+
+  result = await agent_scratch.sweep_idle_scratch()
+
+  assert prepared.read_text() == "prepared before asking the owner"
+  assert result["removed"] == 0
+  result = await agent_scratch.sweep_idle_scratch(
+    now=time.time() + agent_scratch.IDLE_RETENTION_SECONDS + 1,
+  )
+  assert not paused.exists()
+
+
+@pytest.mark.asyncio
+async def test_sweep_reclaims_old_loose_files_in_the_scratch_root(
+  monkeypatch, tmp_path, db
+):
+  _pin_data_dir(monkeypatch, tmp_path)
+  root = agent_scratch.scratch_for_chat("any-chat").parent
+  old = root / "old-preview.png"
+  old.write_bytes(b"x" * 512)
+  stale = time.time() - agent_scratch.IDLE_RETENTION_SECONDS - 60
+  os.utime(old, (stale, stale))
+  fresh = root / "fresh.log"
+  fresh.write_text("in use")
+
+  result = await agent_scratch.sweep_idle_scratch()
+
+  assert not old.exists()
+  assert fresh.exists()
+  assert result["bytes"] >= 512
+
+
+@pytest.mark.asyncio
+async def test_disk_pressure_admission_sweeps_with_the_start_race_grace(
+  monkeypatch, tmp_path
+):
+  from app import agent_admission
+
+  seen = []
+
+  async def sweep(**kwargs):
+    seen.append(kwargs)
+    return {"removed": 0, "bytes": 0, "kept_recent": 0}
+
+  monkeypatch.setattr(agent_scratch, "sweep_idle_scratch", sweep)
+  statuses = iter([{"critical": True}, {}])
+  monkeypatch.setattr(
+    agent_admission, "_deferral",
+    lambda status: RuntimeError("full") if status.get("critical") else None,
+  )
+  await agent_admission.require_agent_turn_admission(
+    tmp_path, status_reader=lambda _d: next(statuses),
+  )
+  assert seen == [{"idle_seconds": agent_scratch.START_RACE_GRACE_SECONDS}]

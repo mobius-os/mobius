@@ -110,8 +110,11 @@ async def require_agent_turn_admission(
   if _deferral(status_reader(data_dir)) is None:
     return
   if scratch_sweeper is None:
-    from app.agent_scratch import sweep_idle_scratch
-    scratch_sweeper = sweep_idle_scratch
+    from app.agent_scratch import START_RACE_GRACE_SECONDS, sweep_idle_scratch
+
+    async def scratch_sweeper():
+      # Disk pressure outranks keeping paused chats' scratch for a day.
+      return await sweep_idle_scratch(idle_seconds=START_RACE_GRACE_SECONDS)
   try:
     await scratch_sweeper()
   except OSError:
