@@ -34,7 +34,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
@@ -1952,42 +1952,14 @@ def _is_chat_contribution(record: dict | None) -> bool:
   )
 
 
-class _ChatLedgerEntry(NamedTuple):
-  """The ledger fields a chat lookup filters on, for one record file."""
-
-  signature: tuple[int, int, int]  # (inode, mtime_ns, size)
-  eligible: bool
-  chat_ids: tuple[str, ...]
-  stack_key: tuple[str, str] | None
-
-
-# Every chat open looks up that chat's contributions, while the ledger only
-# grows (mostly merged records). Re-parsing every record per lookup made each
-# open cost a full ledger parse. This per-app index, keyed by record path, is
-# revalidated by signature: record writes are atomic replaces, so any change
-# alters it. Holding only these projections keeps memory small and never
-# shares a mutable record between requests. Each scan swaps in a fresh
-# per-app dict, so deleted records drop out and concurrent scans cannot
-# corrupt it.
-_chat_ledger_index: dict[int, dict[Path, _ChatLedgerEntry]] = {}
-
-
-def _chat_ledger_entry(
-  path: Path, cached: _ChatLedgerEntry | None,
-) -> _ChatLedgerEntry | None:
-  try:
-    info = path.stat()
-  except OSError:
-    return None
-  signature = (info.st_ino, info.st_mtime_ns, info.st_size)
-  if cached is not None and cached.signature == signature:
-    return cached
-  record = _read_record_tolerant(path)
-  if not _is_chat_contribution(record):
-    return _ChatLedgerEntry(signature, False, (), None)
-  return _ChatLedgerEntry(
-    signature, True, _contribution_chat_ids(record), _chat_stack_key(record),
-  )
+# Every chat open looks up that chat's contributions, but the ledger is keyed
+# by record, not chat, and only grows. Parsing every record per lookup made
+# each open cost a full ledger parse. Per app, this index maps each record
+# path to its (inode, mtime_ns, size) signature and, for a chat-visible
+# record, its (chat ids, stack key); record writes are atomic replaces, so a
+# changed record changes its signature. Each scan swaps in a fresh dict, so
+# deleted records drop out and concurrent scans cannot corrupt it.
+_chat_ledger_index: dict[int, dict[Path, tuple]] = {}
 
 
 def _read_chat_related_records(
@@ -1996,30 +1968,36 @@ def _read_chat_related_records(
   """Return (the chat's records plus their stack-mates, the chat's records).
 
   Blocking file I/O: callers run it off the event loop. Only matching records
-  are parsed in full, and each is re-validated since it may have changed
-  after its index entry was taken.
+  are parsed in full, and re-checked, since each may have changed after its
+  index entry was taken.
   """
   previous = _chat_ledger_index.get(app_id, {})
-  index: dict[Path, _ChatLedgerEntry] = {}
+  index: dict[Path, tuple] = {}
   for path in contribution_paths:
-    entry = _chat_ledger_entry(path, previous.get(path))
-    if entry is not None:
-      index[path] = entry
+    try:
+      info = path.stat()
+    except OSError:
+      continue
+    signature = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = previous.get(path)
+    if cached is None or cached[0] != signature:
+      record = _read_record_tolerant(path)
+      cached = (signature, (
+        (_contribution_chat_ids(record), _chat_stack_key(record))
+        if _is_chat_contribution(record) else None
+      ))
+    index[path] = cached
   _chat_ledger_index[app_id] = index
 
+  visible = {path: fields for path, (_sig, fields) in index.items() if fields}
   stack_keys = {
-    entry.stack_key for entry in index.values()
-    if entry.eligible and chat_id in entry.chat_ids
-    and entry.stack_key is not None
+    stack_key for chat_ids, stack_key in visible.values()
+    if chat_id in chat_ids and stack_key is not None
   }
-  related_paths = [
-    path for path, entry in index.items()
-    if entry.eligible
-    and (chat_id in entry.chat_ids or entry.stack_key in stack_keys)
-  ]
   related_records = [
-    record for path in related_paths
-    if _is_chat_contribution(record := _read_record_tolerant(path))
+    record for path, (chat_ids, stack_key) in visible.items()
+    if (chat_id in chat_ids or stack_key in stack_keys)
+    and _is_chat_contribution(record := _read_record_tolerant(path))
   ]
   records = [
     record for record in related_records
