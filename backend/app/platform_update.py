@@ -870,7 +870,6 @@ def _write_frozen_release(
   """
   worktree = _overlay_candidate_path(repo)
   _git("merge", "--quit", repo=worktree, check=False)
-  _git("reset", "-q", "--hard", working_release or release, repo=worktree)
   frozen = {
     **parked,
     "ready": True,
@@ -885,6 +884,10 @@ def _write_frozen_release(
     "remaining": [],
   }
   _write_conflict_flag(target, [], chat_id, overlay=frozen)
+  # Publish the frozen identity before changing the candidate HEAD. A crash
+  # between these steps must fail closed on retry, not reclassify the already
+  # combined working tree as the committed resolver answer.
+  _git("reset", "-q", "--hard", working_release or release, repo=worktree)
   return frozen
 
 
@@ -2165,6 +2168,11 @@ def _snapshot_late_working_edits(repo: Path, local: str) -> _Carried:
   any checkout can replace these bytes; a crash or rejected activation still
   leaves an explicit recovery object instead of an unreachable loose commit.
   """
+  if _read_late_snapshot(repo) is not None:
+    raise PlatformUpdateError(
+      "Working edits from an earlier interrupted update still need recovery. "
+      "Resolve them before continuing this update."
+    )
   served = _rev(repo, local)
   if not served:
     raise PlatformUpdateError("The served platform commit is unavailable.")
@@ -2868,7 +2876,9 @@ def _activate_frozen_release(
     activated = result.status == "updated"
     return result
   finally:
-    if late is not None and not activated:
+    # Candidate cleanup can fail after main has moved. Keep the recovery
+    # record whenever the frozen tip is still served, even without a result.
+    if late is not None and not activated and _rev(repo, local) != planned.tip:
       LATE_CHANGES_FLAG.unlink(missing_ok=True)
 
 
@@ -2955,7 +2965,8 @@ def _resolved_release(
       if dirty.status == "conflict":
         raise PlatformUpdateError(
           "The working edits present before Apply also conflict with the "
-          "resolved release. Resolve them before this update can activate."
+          "resolved release. Abandon this parked update, settle those working "
+          "edits in the live checkout, then review and Apply again."
         )
       if not dirty.merged_tree_oid:
         raise PlatformUpdateError("The original working edits could not be merged.")

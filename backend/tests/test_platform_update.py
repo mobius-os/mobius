@@ -772,6 +772,64 @@ def test_another_late_edit_cannot_replace_an_unresolved_recovery_record(clone_en
   assert not pu.LATE_SNAPSHOT_FLAG.exists()
 
 
+def test_interrupted_late_activation_keeps_the_newer_dirty_recovery_pin(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'"),
+  })
+  dirty = platform / "backend/app/foo.py"
+  dirty.write_text("VALUE = 'BEFORE APPLY'\n")
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
+  })
+  parked = pu.reconcile_clone(platform)
+  assert parked.status == "conflict"
+  worktree = Path(parked.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+  dirty.write_text("VALUE = 'AFTER APPLY'\n")
+
+  def fail_cleanup(_repo, _worktree):
+    raise TimeoutError("candidate cleanup interrupted after activation")
+
+  monkeypatch.setattr(app_git, "remove_overlay_worktree", fail_cleanup)
+  with pytest.raises(TimeoutError, match="candidate cleanup interrupted"):
+    pu.continue_platform_overlay_update(platform)
+
+  assert dirty.read_text() == "VALUE = 'BEFORE APPLY'\n"
+  pending = pu.platform_status(platform)["late_changes"]
+  assert pending["state"] == "needs_merge"
+  assert _git(platform, "show", f"{pending['ref']}:backend/app/foo.py").stdout == (
+    "VALUE = 'AFTER APPLY'\n"
+  )
+  assert not pu.LATE_SNAPSHOT_FLAG.exists()
+
+
+def test_unresolved_crash_snapshot_cannot_be_overwritten_by_another_continuation(
+  clone_env,
+):
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  (platform / "backend/app/foo.py").write_text("VALUE = 'SAVED'\n")
+  carried = pu._snapshot_late_working_edits(platform, "main")
+  pu._write_late_snapshot(carried)
+  marker = pu.LATE_SNAPSHOT_FLAG.read_text()
+
+  with pytest.raises(pu.PlatformUpdateError, match="earlier interrupted update"):
+    pu.continue_platform_overlay_update(platform)
+  assert pu.LATE_SNAPSHOT_FLAG.read_text() == marker
+  assert pu.platform_status(platform)["late_changes"]["state"] == (
+    "restore_pending"
+  )
+  assert _git(platform, "show", f"{pu._LATE_CHANGES_REF_PREFIX}{carried.pre}:backend/app/foo.py").stdout == (
+    "VALUE = 'SAVED'\n"
+  )
+
+
 def test_saved_late_work_remains_visible_after_another_release(clone_env):
   origin, platform = clone_env
   _served, _target, _worktree = _park_resolved_line_a_conflict(platform, origin)
@@ -1266,12 +1324,54 @@ def test_original_dirty_edit_conflicting_with_resolution_stops_before_activation
   )
   _git(worktree, "add", "backend/app/main.py")
 
-  with pytest.raises(pu.PlatformUpdateError, match="working edits present before Apply"):
+  with pytest.raises(pu.PlatformUpdateError, match="Abandon this parked update"):
     pu.continue_platform_overlay_update(platform)
   assert _served_sha(platform) == pre
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'BEFORE APPLY'\n"
   assert pu.platform_status(platform)["late_changes"] is None
   assert worktree.exists() and pu.CONFLICT_FLAG.exists()
+  assert pu.abandon_platform_overlay_update(platform) == "abandoned"
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'BEFORE APPLY'\n"
+  assert not pu.CONFLICT_FLAG.exists()
+
+
+def test_interrupted_freeze_cannot_reclassify_original_dirty_as_committed(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'"),
+  })
+  dirty = platform / "backend/app/foo.py"
+  dirty.write_text("VALUE = 'BEFORE APPLY'\n")
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
+  })
+  parked = pu.reconcile_clone(platform)
+  worktree = Path(parked.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+  served = _served_sha(platform)
+  original_git = pu._git
+
+  def fail_candidate_reset(*args, **kwargs):
+    if args[:3] == ("reset", "-q", "--hard") and kwargs.get("repo") == worktree:
+      raise TimeoutError("freeze interrupted before candidate reset")
+    return original_git(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_git", fail_candidate_reset)
+  with pytest.raises(TimeoutError, match="freeze interrupted"):
+    pu.continue_platform_overlay_update(platform)
+  monkeypatch.setattr(pu, "_git", original_git)
+  with pytest.raises(pu.PlatformUpdateError, match="prepared release is incomplete"):
+    pu.continue_platform_overlay_update(platform)
+  assert _served_sha(platform) == served
+  assert dirty.read_text() == "VALUE = 'BEFORE APPLY'\n"
+  assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
+    " M backend/app/foo.py",
+  ]
 
 def test_uncommitted_edits_come_back_uncommitted(clone_env):
   origin, platform = clone_env

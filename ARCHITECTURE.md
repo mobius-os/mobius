@@ -137,6 +137,9 @@ target, and keeps the previous local tip reachable for recovery. A conflict
 stays in an isolated worktree while the old checkout remains served. Working
 edits present before Apply are carried separately and returned uncommitted;
 edits made while a conflict is being resolved are saved for post-update review.
+If those original working edits themselves conflict with the resolved committed
+tree, activation stops; the owner settles them in the live checkout and starts
+a new reviewed Apply rather than silently committing or discarding them.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
