@@ -23,6 +23,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import { PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
+import { settledBox } from './_geometry.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
@@ -875,44 +876,6 @@ async function expectCaretAligned(page, caret, target, label) {
     .toBeCloseTo(targetGeometry.stripY + 5 * zoom, 0)
   expect(caretBox.width, `${label} has a real fixed-space width`).toBeGreaterThan(0)
   expect(caretBox.height, `${label} has a real fixed-space height`).toBeGreaterThan(0)
-}
-
-/** Measure an element only once its geometry has stopped moving.
- *
- *  Tab strips reflow after the panes are up: a tab is laid out at an empty
- *  ~36px width and grows to its full ~120px once the chat title resolves,
- *  shifting every tab after it. A box read during that window is stale by the
- *  time the gesture presses, so the press lands on a neighbouring tab or on
- *  bare strip background. Neither starts a drag session, and the failure
- *  surfaces far away as a drag chip that never mounts -- on whichever case
- *  happened to measure mid-reflow, which is why the victim moved run to run.
- *
- *  Frames rather than a sleep: this is a layout settle, not a duration. The
- *  cap keeps a genuinely animating element from hanging the case; it returns
- *  the last reading so the caller still fails on its own assertion. */
-async function settledBox(locator, { frames = 3, maxFrames = 180 } = {}) {
-  await locator.scrollIntoViewIfNeeded()
-  const box = await locator.evaluate((element, settings) => (
-    new Promise((resolve) => {
-      let previous = null
-      let stable = 0
-      let seen = 0
-      const read = () => {
-        const rect = element.getBoundingClientRect()
-        const now = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-        const same = previous
-          && now.x === previous.x && now.y === previous.y
-          && now.width === previous.width && now.height === previous.height
-        stable = same ? stable + 1 : 0
-        previous = now
-        seen += 1
-        if (stable >= settings.frames || seen >= settings.maxFrames) resolve(now)
-        else requestAnimationFrame(read)
-      }
-      requestAnimationFrame(read)
-    })
-  ), { frames, maxFrames })
-  return box
 }
 
 /** Press on a source element, arm past slop, glide to a target point, release —

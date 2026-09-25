@@ -17,6 +17,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { waitForComposerSendable } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { settledBox } from './_geometry.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const APP_ID = 990001
@@ -237,37 +238,6 @@ async function seedSingleModeChat(page, chatId) {
       localStorage.setItem(workspaceKey, workspaceRaw)
     } catch { /* private mode */ }
   }, [paneModel.STORAGE_KEY, workspace])
-}
-
-/** Measure an element only once its geometry has stopped moving.
- *
- *  Tab strips reflow after the panes are up: a tab is laid out near-empty and
- *  grows to its full width once its title resolves, shifting every tab after
- *  it. A box read during that window is stale by the time the gesture presses,
- *  so the press lands on a neighbour or on bare strip background -- neither
- *  starts a drag session, and the drop silently never happens. */
-async function settledBox(locator, { frames = 3, maxFrames = 180 } = {}) {
-  await locator.scrollIntoViewIfNeeded()
-  return locator.evaluate((element, settings) => (
-    new Promise((resolve) => {
-      let previous = null
-      let stable = 0
-      let seen = 0
-      const read = () => {
-        const rect = element.getBoundingClientRect()
-        const now = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-        const same = previous
-          && now.x === previous.x && now.y === previous.y
-          && now.width === previous.width && now.height === previous.height
-        stable = same ? stable + 1 : 0
-        previous = now
-        seen += 1
-        if (stable >= settings.frames || seen >= settings.maxFrames) resolve(now)
-        else requestAnimationFrame(read)
-      }
-      requestAnimationFrame(read)
-    })
-  ), { frames, maxFrames })
 }
 
 async function mouseDrag(page, sourceLocator, toX, toY) {
