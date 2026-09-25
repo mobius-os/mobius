@@ -220,7 +220,7 @@ def sign_out_everywhere(
   the next request on any old token 401s and the frontend clears it
   back to login; the owner signs back in to mint a fresh-epoch token.
   The on-disk service token stays stale until re-minted (entrypoint
-  refresh on the next container restart, or first-boot setup).
+  refresh on the next container restart, or a reviewed container rebuild).
   """
   owner.token_epoch += 1
   db.add(owner)

@@ -9,7 +9,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from app import memory, models, questions
+from app import memory, models, questions, schema_migrations
 from app.pending_questions import PendingQuestion
 from app.recovery_notifications import recovery_resource_generation
 from sqlalchemy import event
@@ -747,10 +747,11 @@ def test_chat_list_projects_summaries_without_hydrating_transcripts(
   def on_load(chat, _context):
     hydrated_chat_ids.append(chat.id)
 
-  def capture_sql(_conn, _cursor, statement, _parameters, _context, _many):
+  def capture_sql(_conn, _cursor, statement, parameters, _context, _many):
     if "FROM chats" in statement:
-      drawer_selects.append(statement)
+      drawer_selects.append((statement, parameters))
 
+  schema_migrations._add_chat_drawer_covering_index(db.get_bind())
   event.listen(models.Chat, "load", on_load)
   event.listen(db.get_bind(), "before_cursor_execute", capture_sql)
   try:
@@ -765,12 +766,19 @@ def test_chat_list_projects_summaries_without_hydrating_transcripts(
   assert hydrated_chat_ids == [], (
     "the drawer list must not instantiate Chat objects and decode messages"
   )
-  drawer_query = next(
-    statement for statement in drawer_selects
+  drawer_query, drawer_parameters = next(
+    (statement, parameters) for statement, parameters in drawer_selects
     if "ORDER BY" in statement and "chats.has_messages" in statement
   )
   assert "chats.messages AS" not in drawer_query, (
     "the drawer list must not read the transcript blob"
+  )
+  plan = db.connection().exec_driver_sql(
+    f"EXPLAIN QUERY PLAN {drawer_query}", drawer_parameters,
+  ).fetchall()
+  assert any("COVERING INDEX ix_chats_drawer" in row[-1] for row in plan), (
+    "every drawer column must come from ix_chats_drawer; SQLite stores the "
+    "transcript inline, so reading the chat row walks its whole history"
   )
 
 

@@ -5291,6 +5291,35 @@ def _retire_chat_continuity_journal(eng) -> None:
         os.replace(temporary, path)
 
 
+def _add_chat_drawer_covering_index(eng) -> None:
+  """Serve the drawer's chat list from an index instead of chat rows.
+
+  SQLite stores each row's transcript JSON inline, before the drawer columns,
+  so reading any later column walks that row's whole overflow chain. Covering
+  every column the list reads keeps it off the transcript pages entirely.
+  Other databases store large values out of line and need no such index; the
+  index is only an optimization, so a schema lacking a column skips it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  covered = (
+    "deleted_at", "id", "title", "updated_at", "activity_at", "pinned_at",
+    "created_by_app_id", "has_messages", "pending_question_id", "project_id",
+    "agent_settings_json",
+  )
+  if eng.dialect.name != "sqlite":
+    return
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  if not set(covered) <= {c["name"] for c in inspector.get_columns("chats")}:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      f"CREATE INDEX IF NOT EXISTS ix_chats_drawer ON chats ({', '.join(covered)})"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5367,6 +5396,7 @@ _SCHEMA_MIGRATIONS = (
   ("0064_chat_continuity_journal", _add_chat_continuity_journal),
   ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
   ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
+  ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
 )
 
 

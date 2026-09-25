@@ -1053,6 +1053,31 @@ def test_identical_plan_write_is_a_cas_noop_and_stale_writer_conflicts(
   assert stale_identical.status_code == 409, stale_identical.text
 
 
+def test_unreadable_plan_is_reported_and_replaced_at_the_goal_revision(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  tasks = [{"id": "audit", "title": "Run the audit", "status": "running"}]
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  goal = db.query(models.ChatGoal).filter(models.ChatGoal.id == "goal-1").one()
+  goal.plan_json = {"version": 1, "tasks": [{"id": "broken"}]}
+  db.commit()
+
+  damaged = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()
+  assert damaged["plan"] is None and damaged["plan_unreadable"] is True
+  repaired = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": damaged["goal"]["revision"], "tasks": tasks},
+    headers=auth,
+  )
+  assert repaired.status_code == 200, repaired.text
+  after = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()
+  assert after["plan"]["revision"] == 2 and after["plan_unreadable"] is False
+
 def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
   client, owner_token, db,
 ):

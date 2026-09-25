@@ -14,7 +14,6 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app import auth, models
 from app.database import SessionLocal
-from app.routes.auth import _write_service_token
 
 
 def main() -> int:
@@ -63,7 +62,7 @@ def main() -> int:
     db.close()
 
   try:
-    _write_service_token(new_username, epoch)
+    auth.write_service_token(new_username, epoch)
   except OSError:
     return 10
   return 0
