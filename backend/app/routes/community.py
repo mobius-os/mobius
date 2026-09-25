@@ -106,10 +106,9 @@ class ExistingGitHubRevisionIn(BaseModel):
     pattern=r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$",
   )
   commit_sha: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
-  manifest_path: str = Field(
-    default="mobius.json", min_length=1, max_length=256,
-    pattern=r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
-  )
+  # Every app has one source contract: a root manifest at an exact commit.
+  # That is the only shape Git-backed installs and updates can follow.
+  manifest_path: Literal["mobius.json"] = "mobius.json"
   public_identity: _PUBLIC_IDENTITY = "anonymous"
   contribution_id: str = Field(default="", max_length=200)
 
