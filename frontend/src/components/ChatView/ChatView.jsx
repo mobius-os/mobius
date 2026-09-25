@@ -1,6 +1,6 @@
 import { LocalAnswersContext } from './localAnswersContext.js'
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -41,13 +41,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus, { useDeliveryReady, useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useDeliveryReady } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
-  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -458,7 +457,6 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
-  const reachabilityPhase = useReachabilityPhase()
   const deliveryReady = useDeliveryReady()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
@@ -6118,15 +6116,6 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError
-            error={peerTimeline.error}
-            recoveryActive={
-              peerTimeline.recoveryActive
-              || restartPending
-              || reachabilityPhase !== ReachabilityPhase.ONLINE
-            }
-            onRetry={peerTimeline.retry}
-          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable

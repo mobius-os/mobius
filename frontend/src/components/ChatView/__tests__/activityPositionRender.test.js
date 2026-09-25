@@ -3,13 +3,12 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { createServer } from 'vite'
 globalThis.window = { location: { origin: 'http://localhost', href: 'http://localhost/shell/' }, innerWidth: 420 }
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: Active } = await vite.ssrLoadModule('/src/components/ChatView/ActiveAssistantSurface.jsx')
 const { default: Message } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
-const { PeerTimelineLoadError, PeerTimelineRows } = await vite.ssrLoadModule('/src/components/ChatView/PeerTimeline.jsx')
+const { PeerTimelineRows } = await vite.ssrLoadModule('/src/components/ChatView/PeerTimeline.jsx')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { _resetDisclosureStateForTests, persistDisclosureOpen } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
 after(() => vite.close())
@@ -101,28 +100,6 @@ test('later peer messages share one high-level exchange and list each message in
   assert.match(html, /Received from Build agent/)
   assert.match(html, /First finding/)
   assert.match(html, /Second finding/)
-})
-
-test('activity load errors stay quiet while restart recovery is active', () => {
-  assert.equal(renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, { error: false, onRetry: () => {} },
-  )), '')
-  assert.equal(renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, {
-      error: true, recoveryActive: true, onRetry: () => {},
-    },
-  )), '')
-})
-
-test('a settled activity load failure retains a manual retry', () => {
-  const html = renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, {
-      error: true, recoveryActive: false, onRetry: () => {},
-    },
-  ))
-  assert.match(html, /role="status"/)
-  assert.match(html, /Chat activity couldn’t refresh/)
-  assert.match(html, /<button type="button">Try again<\/button>/)
 })
 
 test('a cached compact Restart tool stays hidden without undercounting steps', () => {
@@ -319,61 +296,4 @@ test('a later standalone Restart request owns the card before legacy activity', 
 
   assert.match(html, /\(3 steps\)/)
   assert.doesNotMatch(html, /standalone-success/)
-})
-
-test('a retained activity error stays quiet through reconnect refetch, then reports only a settled failure', async (t) => {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  t.after(() => client.clear())
-  const key = ['chat-activity', 'restart-transition']
-  let outcome = 'success'
-  let releaseRecovery
-  const observer = new QueryObserver(client, {
-    queryKey: key,
-    retry: false,
-    staleTime: Infinity,
-    queryFn: async () => {
-      if (outcome === 'failure') throw new Error('restart gap')
-      if (outcome === 'recovering') {
-        await new Promise(resolve => { releaseRecovery = resolve })
-      }
-      return { events: [], next_before: null }
-    },
-  })
-  const unsubscribe = observer.subscribe(() => {})
-  t.after(unsubscribe)
-
-  await observer.refetch()
-  outcome = 'failure'
-  await client.invalidateQueries({ queryKey: key })
-  assert.equal(observer.getCurrentResult().isError, true)
-
-  outcome = 'recovering'
-  const recovery = client.invalidateQueries({ queryKey: key })
-  await new Promise(resolve => setImmediate(resolve))
-  const recovering = observer.getCurrentResult()
-  assert.equal(recovering.isError, true)
-  assert.equal(recovering.isFetching, true)
-  assert.equal(renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, {
-      error: recovering.isError,
-      recoveryActive: recovering.isFetching,
-      onRetry: () => {},
-    },
-  )), '')
-
-  releaseRecovery()
-  await recovery
-  assert.equal(observer.getCurrentResult().isError, false)
-
-  outcome = 'failure'
-  await client.invalidateQueries({ queryKey: key })
-  const settledFailure = observer.getCurrentResult()
-  assert.equal(settledFailure.isFetching, false)
-  assert.match(renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, {
-      error: settledFailure.isError,
-      recoveryActive: settledFailure.isFetching,
-      onRetry: () => {},
-    },
-  )), /Try again/)
 })
