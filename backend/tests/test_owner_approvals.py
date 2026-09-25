@@ -322,24 +322,20 @@ def test_identical_creation_retry_returns_same_card_and_different_request_confli
   assert changed.status_code == 409
 
 
-def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
-  client, chat, approval_run, db,
-):
-  keyed = {
-    **PROMPT,
-    "work_key": "github:mobius-os/mobius:pr:1079:3134e050:merge",
-  }
-  first = _ask(client, chat, approval_run, keyed)
-  assert first.status_code == 200, first.text
+SHARED_KEY = "github:mobius-os/mobius:pr:1079:3134e050:merge"
 
-  other = models.Chat(
-    id="other-approval-chat", title="Duplicate integrator", messages=[],
-  )
+
+def _second_approval_chat(db, chat_id="other-approval-chat"):
+  """Another running chat with its own Goal and saved-card sink."""
+  other = models.Chat(id=chat_id, title="Duplicate integrator", messages=[])
   other_run = models.ChatRun(
-    id="other-approval-run", root_run_id="other-approval-run",
-    chat_id=other.id, status="running", provider="codex",
+    id=f"{chat_id}-run", root_run_id=f"{chat_id}-run", chat_id=other.id,
+    goal_id=f"{chat_id}-goal", goal_objective="Integrate the PR",
+    status="running", provider="codex",
   )
-  db.add_all([other, other_run])
+  db.add_all([other, other_run, models.ChatGoal(
+    id=f"{chat_id}-goal", chat_id=other.id, objective="Integrate the PR",
+  )])
   db.commit()
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
@@ -347,22 +343,106 @@ def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
     token_epoch=owner.token_epoch, run_id=other_run.id,
     expires_delta=timedelta(minutes=5),
   )
-  other_sink = ChatEventSink(
+  sink = ChatEventSink(
     create_broadcast(other.id), other.id, run_token=other_run.id,
   )
-  register_active_sink(other.id, other_sink)
+  return other, sink, {"Authorization": f"Bearer {token}"}
+
+
+def _ask_as(client, other, sink, headers, prompt):
+  register_active_sink(other.id, sink)
   try:
-    duplicate = client.post(
-      f"/api/chats/{other.id}/approval", json=keyed,
-      headers={"Authorization": f"Bearer {token}"},
+    return client.post(
+      f"/api/chats/{other.id}/approval", json=prompt, headers=headers,
     )
   finally:
-    unregister_active_sink(other.id, other_sink)
+    unregister_active_sink(other.id, sink)
 
-  assert duplicate.status_code == 409
-  assert "no duplicate card was created" in duplicate.text
+
+def test_request_approval_claims_an_unclaimed_key_in_one_call(
+  client, chat, approval_run, db,
+):
+  saved = _ask(client, chat, approval_run, {**PROMPT, "work_key": SHARED_KEY})
+
+  assert saved.status_code == 200, saved.text
+  assert saved.json()["state"] == "waiting_for_owner"
+  claim = db.query(models.AgentWorkClaim).one()
+  assert (claim.work_key, claim.owner_chat_id) == (SHARED_KEY, chat.id)
+  assert claim.completed_at is None and claim.released_at is None
+
+
+def test_losing_approval_request_follows_the_owner_without_a_card(
+  client, chat, approval_run, db,
+):
+  keyed = {**PROMPT, "work_key": SHARED_KEY}
+  first = _ask(client, chat, approval_run, keyed)
+  assert first.status_code == 200, first.text
+  other, sink, headers = _second_approval_chat(db)
+
+  follower = _ask_as(client, other, sink, headers, keyed)
+
+  # Same result claim_agent_work returns, not an error: the turn continues.
+  assert follower.status_code == 200, follower.text
+  body = follower.json()
+  assert (body["state"], body["owner_chat_id"]) == ("held_by_peer", chat.id)
+  assert "question_id" not in body
+  assert "No approval card was saved and your turn continues" in body["next_action"]
   assert db.query(models.AgentWorkClaim).count() == 1
+  assert db.query(models.AgentWorkInterest).one().chat_id == other.id
   assert _row(other.id)[0] is None
+
+  from app.agent_work_claims import finish_work
+  finish_work(db, owner_id=db.query(models.Owner).first().id, chat_id=chat.id,
+              work_key=SHARED_KEY, outcome="Merged as 0b44dc9d", release=False)
+  done = _ask_as(client, other, sink, headers, keyed)
+  assert done.status_code == 200, done.text
+  assert done.json()["state"] == "completed"
+  assert "do not repeat it" in done.json()["next_action"]
+  assert _row(other.id)[0] is None
+
+
+def approval_run_id(chat):
+  return f"approval-{chat.id}"
+
+
+def test_racing_approval_requests_on_one_key_save_exactly_one_card(
+  client, chat, approval_run, db,
+):
+  """The other chat's claim lands between this request's check and insert."""
+  from sqlalchemy import event
+  from sqlalchemy.orm import Session
+  from app.agent_work_claims import claim_work
+
+  other, sink, headers = _second_approval_chat(db)
+  owner_id = db.query(models.Owner).first().id
+  raced = []
+
+  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
+    if raced or not any(
+      isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == other.id
+      for row in session.new
+    ):
+      return
+    raced.append(True)
+    with SessionLocal() as competing:
+      claim_work(competing, owner_id=owner_id, chat_id=chat.id,
+                 run_id=approval_run_id(chat), work_key=SHARED_KEY,
+                 summary="Merge the reviewed PR")
+
+  keyed = {**PROMPT, "work_key": SHARED_KEY}
+  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
+  try:
+    lost = _ask_as(client, other, sink, headers, keyed)
+  finally:
+    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+  won = _ask(client, chat, approval_run, keyed)
+
+  assert raced == [True]
+  assert lost.json()["state"] == "held_by_peer", lost.text
+  assert won.json()["state"] == "waiting_for_owner", won.text
+  assert _row(other.id)[0] is None
+  assert _row(chat.id)[0] == won.json()["question_id"]
+  assert db.query(models.AgentWorkClaim).count() == 1
 
 
 def test_approval_without_action_identity_is_rejected_before_card_creation(
@@ -376,7 +456,7 @@ def test_approval_without_action_identity_is_rejected_before_card_creation(
   assert _row(chat.id)[0] is None
 
 
-def test_creation_failure_has_no_receipt_or_orphan_card(
+def test_unsaved_card_keeps_its_claim_for_the_identical_retry(
   client, chat, approval_run, monkeypatch, db,
 ):
   writer = get_writer()
@@ -391,7 +471,8 @@ def test_creation_failure_has_no_receipt_or_orphan_card(
   assert _row(chat.id)[0] is None
   # Admission succeeded, so exact-action ownership remains reserved for the
   # identical retry even though the card acknowledgement failed.
-  assert db.query(models.AgentWorkClaim).count() == 1
+  claim = db.query(models.AgentWorkClaim).one()
+  assert (claim.owner_chat_id, claim.released_at) == (chat.id, None)
   assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
   monkeypatch.setattr(writer, "_persist_question_required", original)
   assert _ask(client, chat, approval_run).status_code == 200
@@ -565,6 +646,46 @@ def test_control_tool_to_helper_to_saved_card_returns_receipt_not_permission(
   assert receipt["state"] == "waiting_for_owner"
   assert _row(chat.id)[0] == receipt["question_id"]
   assert "not approval" in receipt["next_action"]
+
+
+def test_control_tool_returns_follower_claim_to_the_losing_chat(
+  client, chat, approval_run, db, monkeypatch,
+):
+  """The losing request_approval is one successful call, not an error to retry."""
+  import io
+  import json
+  from tests.test_platform_tools import _control_module
+
+  keyed = {**PROMPT, "work_key": SHARED_KEY}
+  assert _ask(client, chat, approval_run, keyed).status_code == 200
+  other, sink, headers = _second_approval_chat(db)
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+  monkeypatch.setenv("CHAT_ID", other.id)
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", sink.run_token)
+  monkeypatch.setenv("AGENT_TOKEN", headers["Authorization"].removeprefix("Bearer "))
+
+  def open_request(request, timeout):
+    response = client.post(
+      request.full_url, content=request.data, headers=dict(request.header_items()),
+    )
+    assert response.status_code == 200, response.text
+    return io.BytesIO(response.content)
+
+  monkeypatch.setattr(control._APPROVALS, "urlopen", open_request)
+  register_active_sink(other.id, sink)
+  try:
+    result = control._dispatch_message({
+      "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+      "params": {"name": "request_approval", "arguments": keyed},
+    })["result"]
+  finally:
+    unregister_active_sink(other.id, sink)
+
+  assert not result["isError"]
+  follower = json.loads(result["content"][0]["text"])
+  assert (follower["state"], follower["owner_chat_id"]) == ("held_by_peer", chat.id)
+  assert _row(other.id)[0] is None
 
 
 def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):

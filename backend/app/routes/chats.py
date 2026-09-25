@@ -2418,47 +2418,14 @@ async def delete_chat(
   # best-effort delivery layer; failure cannot roll back an owner-requested
   # deletion, and the released claim itself remains reclaimable by exact key.
   if released_claims:
-    from app.agent_coordination import (
-      DELIVERY_INTERRUPT,
-      deliver_peer_recipients,
-      send_work_claim_notice,
-    )
-    from app.agent_work_claims import acknowledge_notice
-    wake_recipients: list[str] = []
-    for released in released_claims:
-      if not released.interested_chat_ids:
-        continue
-      try:
-        send_work_claim_notice(
-          db,
-          owner_id=owner.id,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          sender_chat_id=chat_id,
-          recipients=released.interested_chat_ids,
-          body=(
-            f"Work claim {released.work_key} was released because its owning "
-            "chat was deleted. Reconcile the exact action with your Goal."
-          ),
-        )
-        acknowledge_notice(
-          db,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          resolve_interests=True,
-        )
-        wake_recipients.extend(released.interested_chat_ids)
-      except Exception:
-        log.exception(
-          "Chat %s was deleted but claim %s followers were not notified",
-          chat_id,
-          released.claim_id,
-        )
-    if wake_recipients:
-      await deliver_peer_recipients(
-        recipients=list(dict.fromkeys(wake_recipients)),
-        delivery=DELIVERY_INTERRUPT, kind="handoff",
-        sender_chat_id=chat_id,
+    from app.agent_coordination import notify_settled_claims
+    try:
+      await notify_settled_claims(
+        db, owner_id=owner.id, sender_chat_id=chat_id, settled=released_claims,
+      )
+    except Exception:
+      log.exception(
+        "Chat %s was deleted but claim followers were not notified", chat_id,
       )
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.

@@ -76,7 +76,7 @@ def resume_context(db, run_id):
 
 
 def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
-                       next_action=None, result=None):
+                       next_action=None, result=None, finished_claims=()):
   from app.goal_plans import GoalPlanConflict, GoalPlanError, serialize_plan
   if (goal.status == "completed" and result is not None
       and goal.result == result.strip() and goal.revision == expected_revision + 1):
@@ -97,6 +97,14 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
       raise GoalPlanError("Goal still owns a pending handoff")
     if not result.strip():
       raise GoalPlanError("Completion requires a verification result")
+    from app.agent_work_claims import open_goal_claim_keys
+    unknown = set(finished_claims) - open_goal_claim_keys(
+      db, chat_id=goal.chat_id, goal_id=goal.id,
+    )
+    if unknown:
+      raise GoalPlanError(
+        "Not an open work claim of this Goal: " + ", ".join(sorted(unknown))
+      )
     values.update(status="completed", result=result.strip(),
                   completed_at=datetime.now(UTC))
   else:
@@ -108,6 +116,15 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   if changed.rowcount != 1:
     db.rollback()
     raise GoalPlanConflict("Goal changed; fetch it and retry")
+  if result is not None:
+    # Completion settles the Goal's still-open exact-action claims in the same
+    # commit: the ones it names as finished complete with the verified result,
+    # the rest are released, so a declined action never reads as done.
+    from app.agent_work_claims import stage_settle_goal_claims
+    stage_settle_goal_claims(
+      db, chat_id=goal.chat_id, goal_id=goal.id, status="completed",
+      result=values["result"], finished_keys=finished_claims,
+    )
   db.commit()
   db.refresh(goal)
   return {"goal_id": goal.id, "status": goal.status, "revision": goal.revision}
