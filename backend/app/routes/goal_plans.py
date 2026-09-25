@@ -92,14 +92,21 @@ def _require_owner(principal: Principal) -> None:
 def _active_rows_or_409(db: Session, chat_id: str, principal=None):
   rows = active_goal_rows(db, chat_id)
   if rows is None:
-    raise HTTPException(
-      status_code=409, detail="This chat has no active Goal to plan."
-    )
+    raise HTTPException(status_code=409, detail={
+      "code": "no_active_goal", "message": "This chat has no active Goal to plan.",
+    })
   if principal is not None and principal.run_id is not None and (
     rows[0].id != principal.run_id or rows[0].status != "running"
   ):
     raise HTTPException(status_code=409, detail="This execution attempt no longer owns the Goal.")
   return rows
+
+
+def _plan_refusal(exc: GoalPlanError) -> HTTPException:
+  """A typed 422: stable code and facts beside the client-neutral message."""
+  return HTTPException(status_code=422, detail={
+    **exc.facts, "code": exc.code, "message": str(exc),
+  })
 
 
 def _publish(chat_id: str, plan: dict[str, Any]) -> None:
@@ -221,6 +228,10 @@ async def clear_presented_goal(
     )
   if result["status"] == "missing":
     return {"cleared": False, "goal": None}
+  # Dismissal released the Goal's open work claims in its own commit; wake
+  # the followers so they may take the exact action over.
+  from app.agent_coordination import settle_claims_with_owner
+  await settle_claims_with_owner(chat_id)
   broadcast = get_broadcast(chat_id)
   if broadcast is not None and broadcast.running:
     broadcast.publish({
@@ -252,7 +263,7 @@ async def put_goal_plan(
         expected_revision=body.expected_revision, tasks=body.tasks,
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)
@@ -289,7 +300,7 @@ async def patch_goal_task(
         },
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)
@@ -303,9 +314,12 @@ class GoalRecordUpdate(BaseModel):
   checkpoint: str | None = Field(default=None, max_length=4000)
   next_action: str | None = Field(default=None, max_length=2000)
   result: str | None = Field(default=None, min_length=1, max_length=4000)
+  finished_claims: list[str] = Field(default_factory=list, max_length=50)
 
   @model_validator(mode="after")
   def require_operation(self):
+    if self.finished_claims and self.result is None:
+      raise ValueError("Only a completion can name finished claims.")
     if self.result is not None:
       if self.checkpoint is not None or self.next_action is not None:
         raise ValueError("Complete or checkpoint, not both.")
@@ -335,12 +349,19 @@ async def patch_goal_record(
       result = update_goal_record(
         db, run, goal, body.expected_revision, checkpoint=body.checkpoint,
         next_action=body.next_action, result=body.result,
+        finished_claims=body.finished_claims,
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, serialize_plan(db, run, goal))
+  if result.get("status") == "completed":
+    # Completion settled the Goal's open work claims with its verified result
+    # in the same commit; wake the followers, so the owner needs no trailing
+    # finish_agent_work call.
+    from app.agent_coordination import settle_claims_with_owner
+    await settle_claims_with_owner(chat_id)
   return result
 
 
@@ -368,7 +389,7 @@ async def add_goal_task(
                           expected_revision=body.expected_revision,
                           tasks=[*tasks, body.task])
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)

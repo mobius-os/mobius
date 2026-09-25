@@ -1547,10 +1547,9 @@ async def patch_chat(
       db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
-      # Manual rename and compatibility callers share this projection path.
-      # The normal summary publisher commits in-process through
-      # `_sync_generated_chat_title`; publish only committed route truth here
-      # so older callers update every open drawer and tab without a later poll.
+      # Manual renames publish committed route truth here so every open
+      # drawer and tab updates without a later poll. Agent-chosen names are
+      # published by the continuity checkpoint route.
       get_system_broadcast().publish(renamed_event(chat))
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
@@ -2092,9 +2091,9 @@ def get_chat_agent_context(
     _latest_compaction_brief,
     _read_skill_text,
   )
+  from app.compaction import load_cumulative_summary
   from app.providers import get_skill_origin
   from app.system_prompts import prompt_for_chat
-  from app.compaction import load_cumulative_summary
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -2109,18 +2108,8 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
-  continuity = db.get(models.ChatContinuity, chat_id)
-  chat_summary = (
-    continuity.current_summary if continuity is not None
-    else load_cumulative_summary(data_dir, chat_id)
-  )
-  if continuity is not None:
-    chat_summary_metadata = {
-      "description": chat.title,
-      "digest": continuity.current_summary,
-    }
-  else:
-    chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
+  chat_summary = load_cumulative_summary(data_dir, chat_id)
+  chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
   ordered_chat_ids = [
     row[0]
     for row in db.query(models.Chat.id).filter(
@@ -2128,14 +2117,11 @@ def get_chat_agent_context(
     ).order_by(
       func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
       models.Chat.id.desc(),
-    ).limit(memory.RECENT_CHAT_NOTES).all()
+    ).all()
   ]
   recent_chat_block = memory.build_memory_block(
     data_dir,
     ordered_chat_ids=ordered_chat_ids,
-    continuity_by_chat_id=memory.recent_continuity_metadata(
-      db, ordered_chat_ids,
-    ),
   )
   recent_chats = recent_chat_block.text or None
   return {
@@ -2280,10 +2266,20 @@ def get_current_chat_usage(
     .first()
   )
   if run is None:
+    # Before this chat has settled any turn with the provider, its context is
+    # genuinely empty so far (live readings take over at the first model
+    # call). After one, missing usage stays unknown rather than claiming zero.
+    has_settled_turn = db.query(
+      db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.provider == provider,
+        models.ChatRun.status.notin_(models.NONTERMINAL_RUN_STATUSES),
+      ).exists()
+    ).scalar()
     return {
       "provider": provider,
       "provider_session_id": provider_session_id,
-      "input_tokens": None,
+      "input_tokens": None if has_settled_turn else 0,
       "context_window": None,
     }
   return {
@@ -2432,47 +2428,14 @@ async def delete_chat(
   # best-effort delivery layer; failure cannot roll back an owner-requested
   # deletion, and the released claim itself remains reclaimable by exact key.
   if released_claims:
-    from app.agent_coordination import (
-      DELIVERY_INTERRUPT,
-      deliver_peer_recipients,
-      send_work_claim_notice,
-    )
-    from app.agent_work_claims import acknowledge_notice
-    wake_recipients: list[str] = []
-    for released in released_claims:
-      if not released.interested_chat_ids:
-        continue
-      try:
-        send_work_claim_notice(
-          db,
-          owner_id=owner.id,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          sender_chat_id=chat_id,
-          recipients=released.interested_chat_ids,
-          body=(
-            f"Work claim {released.work_key} was released because its owning "
-            "chat was deleted. Reconcile the exact action with your Goal."
-          ),
-        )
-        acknowledge_notice(
-          db,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          resolve_interests=True,
-        )
-        wake_recipients.extend(released.interested_chat_ids)
-      except Exception:
-        log.exception(
-          "Chat %s was deleted but claim %s followers were not notified",
-          chat_id,
-          released.claim_id,
-        )
-    if wake_recipients:
-      await deliver_peer_recipients(
-        recipients=list(dict.fromkeys(wake_recipients)),
-        delivery=DELIVERY_INTERRUPT, kind="handoff",
-        sender_chat_id=chat_id,
+    from app.agent_coordination import notify_settled_claims
+    try:
+      await notify_settled_claims(
+        db, owner_id=owner.id, sender_chat_id=chat_id, settled=released_claims,
+      )
+    except Exception:
+      log.exception(
+        "Chat %s was deleted but claim followers were not notified", chat_id,
       )
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.
@@ -2562,11 +2525,11 @@ async def switch_chat_provider(
 ):
   """Have the incoming provider prepare and atomically commit a handoff.
 
-  A structured checkpoint journal plus every transcript row not proven covered
-  becomes the portable handoff directly when it fits. Only oversized sources
-  use the incoming provider's guarded progressive synthesis. The writer then
-  appends that handoff, changes provider/settings, and clears the outgoing
-  session in one transaction.
+  The selected provider reads the detailed per-chat ``## Summary`` plus the
+  complete visible transcript and synthesizes its own compact starting context
+  in bounded disposable sessions. The writer then appends that context, changes
+  provider/settings, and clears the outgoing session in one transaction. Any
+  synthesis or contention failure leaves every durable field unchanged.
   """
   from app.chat_queue import get_transition_lock
 
@@ -2585,8 +2548,7 @@ async def _compact_chat_locked(
     messages_fingerprint,
   )
   from app.compaction import (
-    CompactionError, build_portable_source, portable_source_fits,
-    summarize_chat,
+    CompactionError, load_cumulative_summary, summarize_chat,
   )
 
   chat = get_active_chat_or_404(db, chat_id)
@@ -2675,24 +2637,21 @@ async def _compact_chat_locked(
 
   messages = list(chat.messages or [])
   source_messages_hash = messages_fingerprint(messages)
-  source_summary = build_portable_source(db, data_dir, chat_id, messages)
+  source_summary = load_cumulative_summary(data_dir, chat_id)
   source_summary_hash = (
     hashlib.sha256(source_summary.encode("utf-8")).hexdigest()
     if source_summary is not None
     else None
   )
   try:
-    if portable_source_fits(source_summary):
-      summary = source_summary
-    else:
-      summary = await summarize_chat(
-        [],
-        data_dir=data_dir,
-        provider_id=body.provider,
-        source_summary=source_summary,
-        model=settings_patch.get("model"),
-        effort=settings_patch.get("effort"),
-      )
+    summary = await summarize_chat(
+      messages,
+      data_dir=data_dir,
+      provider_id=body.provider,
+      source_summary=source_summary,
+      model=settings_patch.get("model"),
+      effort=settings_patch.get("effort"),
+    )
   except CompactionError as exc:
     raise HTTPException(status_code=422, detail=str(exc))
   except Exception as exc:
@@ -2704,9 +2663,10 @@ async def _compact_chat_locked(
       detail="The incoming provider could not prepare the chat.",
     )
 
-  # Check the DB-authoritative journal as well as transcript source before
-  # committing a handoff prepared outside the writer actor.
-  latest_summary = build_portable_source(db, data_dir, chat_id, messages)
+  # The note is a separate file the agent saves as it works. If it was
+  # rewritten while synthesis ran, retry from the fresh detailed source rather
+  # than committing a handoff the incoming provider derived from stale data.
+  latest_summary = load_cumulative_summary(data_dir, chat_id)
   latest_hash = (
     hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
     if latest_summary is not None
@@ -2809,7 +2769,7 @@ async def compact_chat(
     messages_fingerprint,
   )
   from app.compaction import (
-    CompactionError, build_portable_source, summarize_chat,
+    CompactionError, load_cumulative_summary, summarize_chat,
   )
 
   async with get_transition_lock(chat_id):
@@ -2835,16 +2795,16 @@ async def compact_chat(
     messages = list(chat.messages or [])
     data_dir = get_settings().data_dir
     try:
-      source_summary = build_portable_source(
-        db, data_dir, chat_id, messages,
-      )
+      source_summary = load_cumulative_summary(data_dir, chat_id)
       instructions = body.instructions if body is not None else None
-      # Unlike an automatic provider handoff, explicit /compact asks to shrink
-      # context. Synthesize the already-complete portable source even when it
-      # would fit directly; custom owner guidance remains meaningful here.
+      # The agent-saved cumulative summary is best-effort and can lag the
+      # latest turn. Manual compaction retires the provider session, so always
+      # synthesize from the current transcript and use that summary only as an
+      # additional seed; copying it verbatim could drop the newest decisions
+      # from the fresh session that follows.
       settings_obj = chat.agent_settings_json or {}
       summary = await summarize_chat(
-        [],
+        messages,
         data_dir=data_dir,
         provider_id=source_provider,
         source_summary=source_summary,

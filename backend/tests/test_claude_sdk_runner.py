@@ -108,28 +108,6 @@ class _FakeClient:
     yield _success_result()
 
 
-@pytest.mark.asyncio
-async def test_delivered_input_callback_follows_successful_query(monkeypatch):
-  clients = _install_fake_client(monkeypatch)
-  observed = []
-
-  async def delivered():
-    assert clients[0].queries == ["hello"]
-    observed.append("accepted")
-
-  await _run_turn("delivery-order", on_input_delivered=delivered)
-  assert observed == ["accepted"]
-
-  class _RejectQuery(_FakeClient):
-    async def query(self, message):
-      raise RuntimeError("not delivered")
-
-  _install_fake_client(monkeypatch, _RejectQuery)
-  observed.clear()
-  await _run_turn("delivery-rejected", on_input_delivered=delivered)
-  assert observed == []
-
-
 def _install_fake_client(monkeypatch, client_cls=_FakeClient) -> list:
   """Patch the runner's client class; returns the list of created clients."""
   clients: list = []
@@ -396,6 +374,7 @@ async def test_steer_into_active_turn_interrupts_immediately():
       calls.append("interrupt")
 
   handle = ActiveClaudeClient(_Client(), chat_id="claude-steer")
+  handle.mark_generating()
   registry.register(handle)
   try:
     assert await steer_into_active_turn("claude-steer", "use blue") is True
@@ -412,6 +391,45 @@ async def test_steer_into_active_turn_interrupts_immediately():
     assert calls == ["interrupt"]
   finally:
     registry.unregister("claude-steer", handle.kind)
+
+
+@pytest.mark.asyncio
+async def test_steer_before_generation_interrupts_once_streaming(
+  monkeypatch,
+):
+  """The CLI drops an interrupt sent before its query is generating, which
+  used to latch the cut so the steer landed only at natural turn end. A steer
+  in that window must interrupt exactly once, when the model starts streaming."""
+  trace: list[int] = []
+
+  class _Client(_FakeClient):
+    async def query(self, prompt):
+      await super().query(prompt)
+      if len(self.queries) == 1:
+        assert await steer_into_active_turn("early-chat", "use blue") is True
+        trace.append(self.interrupts)
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="starting")
+        while self.interrupts < 1:
+          await asyncio.sleep(0)
+        yield _interrupt_result()
+        return
+      yield _stream_delta("text_delta", text="blue done")
+      yield _success_result()
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await asyncio.wait_for(
+    _run_turn("early-chat", prompt="start task"), timeout=5,
+  )
+
+  client = clients[0]
+  assert trace == [0]
+  assert client.interrupts == 1
+  assert len(client.queries) == 2
+  assert "use blue" in client.queries[1]
+  assert result["error"] is None
 
 
 @pytest.mark.asyncio
@@ -774,6 +792,49 @@ async def test_child_agent_card_receipt_still_interrupts_through_the_sink_path()
   await interrupt
   assert client.interrupts == 1
   # The hook arriving afterwards must not fire a second cut.
+  assert handle.claim_owner_card_end() is False
+
+
+@pytest.mark.asyncio
+async def test_owner_card_still_ends_the_turn_after_an_earlier_steer():
+  """A steer's cut closes at its terminal; a later saved card must still end
+  the turn instead of letting post-card text persist below the card."""
+  class _Client:
+    def __init__(self):
+      self.interrupts = 0
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+  client = _Client()
+  handle = ActiveClaudeClient(client, chat_id="steer-then-card")
+  handle.mark_generating()
+  assert await handle.steer("peer note") is True
+  assert handle.claim_owner_card_end() is False  # the steer owns this cut
+
+  # A clean terminal that won the race leaves the stray interrupt owned.
+  assert handle.take_steer_for_requery(interrupt_landed=False) == ["peer note"]
+  assert handle.claim_owner_card_end() is False
+  handle.mark_generating()  # the requery is streaming
+  await handle.steer("second note")
+  assert handle.take_steer_for_requery(interrupt_landed=True) == ["second note"]
+  assert handle.pending_steer == []
+  assert handle.claim_owner_card_end() is True
+  assert handle.owner_card_end is True
+  assert client.interrupts == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_stays_sticky_across_a_steer_requery_boundary():
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="stop-sticky")
+  await handle.steer("note")
+  await handle.interrupt()
+  assert handle.take_steer_for_requery(interrupt_landed=True) == []
+  assert handle.interrupt_requested is True
   assert handle.claim_owner_card_end() is False
 
 
@@ -1365,6 +1426,7 @@ async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
         assert await steer_into_active_turn("multi-chat", "use blue") is True
         assert await steer_into_active_turn("multi-chat", "and bold") is True
         yield _assistant_text("first block")
+        await asyncio.sleep(0)  # the claimed cut is sent once streaming
         # The SDK may still emit trailing completed blocks in the drain
         # window before the interrupt's terminal lands. They must NOT cause
         # a second interrupt.
@@ -1432,6 +1494,7 @@ async def test_stop_drops_buffered_steer(monkeypatch):
       calls.append("interrupt")
 
   handle = ActiveClaudeClient(_Client(), chat_id="stop-chat")
+  handle.mark_generating()
   registry.register(handle)
   try:
     # Steer buffers the text and fires its soft interrupt immediately.
@@ -1538,24 +1601,6 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
   finally:
     db.close()
 
-
-
-def test_native_context_hook_death_is_logged_without_payload(monkeypatch, caplog):
-  from claude_agent_sdk.types import HookEventMessage
-
-  class _Client(_FakeClient):
-    async def receive_response(self):
-      yield HookEventMessage(subtype="hook_response", hook_event_name="SessionStart", data={
-        "hook_event": "SessionStart", "outcome": "error", "exit_code": 1,
-        "stderr": "sensitive hook payload", "session_id": "phantom",
-      })
-      yield _success_result("sess-hook")
-
-  _install_fake_client(monkeypatch, _Client)
-  result = asyncio.run(_run_turn("claude-hook-death"))
-  assert "SessionStart context hook failed" in caplog.text
-  assert "sensitive hook payload" not in caplog.text
-  assert result["session_id"] == "sess-hook"
 
 def test_dispatch_text_delta_emits_text():
   bus = _Bus()
@@ -1979,18 +2024,28 @@ def test_dispatch_assistant_empty_text_block_is_silent():
   assert bus.events == []
 
 
-def test_dispatch_assistant_usage_emits_usage_event():
+def test_each_root_model_call_publishes_its_live_context_occupancy():
   bus = _Bus()
   msg = AssistantMessage(
     content=[],
     model="claude-opus",
-    usage={"input_tokens": 10, "output_tokens": 5},
+    usage={
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 200,
+      "cache_read_input_tokens": 3_000,
+      "output_tokens": 5,
+    },
   )
   dispatch_sdk_message(msg, bus, None)
-  usages = [e for e in bus.events if e["type"] == "usage"]
-  assert len(usages) == 1
-  assert usages[0]["input_tokens"] == 10
-  assert usages[0]["output_tokens"] == 5
+  context = [e for e in bus.events if e["type"] == "context_usage"]
+  # Uncached + cache-write + cache-read: the same figure the settled run
+  # records as latest_model_input_tokens.
+  assert context == [{
+    "type": "context_usage",
+    "provider": "claude",
+    "input_tokens": 3_210,
+    "context_window": None,
+  }]
 
 
 def test_dispatch_assistant_stop_reason():
@@ -2337,6 +2392,7 @@ def test_dispatch_result_message_returns_terminal():
     total_cost_usd=0.05,
     usage={"input_tokens": 100, "output_tokens": 200},
   )
+  before_result = len(bus.events)
   new_sid, terminal = dispatch_sdk_message(
     msg, bus, None, usage_state=usage_state,
   )
@@ -2361,9 +2417,10 @@ def test_dispatch_result_message_returns_terminal():
     "provider_usage": {"input_tokens": 100, "output_tokens": 200},
     "provider_model_usage": None,
   }
-  # ResultMessage also fires usage + stop_reason side-channels.
-  types = [e["type"] for e in bus.events]
-  assert "usage" in types
+  # The turn aggregate is not context occupancy, so the result publishes no
+  # live context reading; stop_reason still fires.
+  types = [e["type"] for e in bus.events[before_result:]]
+  assert "context_usage" not in types
   assert "stop_reason" in types
 
 

@@ -229,6 +229,29 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
   assert "agents in other Möbius chats" not in instructions
 
 
+def test_peer_tool_descriptions_cut_coordination_calls():
+  """Descriptions steer agents to paths, quiet delivery, and one-call approval."""
+  control = _control_module()
+  tools = control._TOOL_DEFINITIONS
+  send = tools[control.SEND_AGENT_MESSAGE_TOOL]
+  assert "by absolute path" in send["description"]
+  assert "never paste or chunk" in send["description"]
+  assert "unreachable" in send["description"]
+  assert "never paste" in send["inputSchema"]["properties"]["body"]["description"]
+  approval = tools[control.REQUEST_APPROVAL_TOOL]["description"]
+  assert "do not call claim_agent_work first" in approval
+  assert "your turn continues" in approval
+  assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
+  finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
+  assert "Usually unnecessary" in finish and "--finished WORK_KEY" in finish
+  for name in (
+    control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
+    control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
+    control.LIST_AGENT_PEERS_TOOL,
+  ):
+    assert len(tools[name]["description"]) <= 1000, name
+
+
 def test_constitution_routes_each_agent_network_to_its_owner():
   core = (
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
@@ -691,64 +714,3 @@ def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
 
   assert result.returncode == 2
   assert "usage: mobius_control_mcp.py call" in result.stderr
-
-
-def test_continuity_tools_available_to_owner_and_delegated_runs():
-  control = _control_module()
-  names = {"checkpoint_chat"}
-  assert "read_chat_continuity" not in control.OWNER_TOOLS
-  assert names <= set(control.OWNER_TOOLS)
-  assert names <= set(control.DELEGATED_TOOLS)
-  assert names <= set(platform_tools.DELEGATED_CONTROL_TOOL_NAMES)
-  assert names <= set(platform_tools.OWNER_CONTROL_TOOL_NAMES)
-
-
-def test_checkpoint_content_only_and_small_ack(monkeypatch):
-  control = _control_module()
-  calls = []
-  def call(method, path, payload=None):
-    calls.append((method, path, payload))
-    return {"status": "committed", "revision": 4}
-  monkeypatch.setattr(control, "_agent_api_call", call)
-  payload = {"summary": "Fixing the reproducible failure."}
-  assert control._call_checkpoint_chat(payload, invocation_id="transport-1") == "Saved."
-  assert calls == [("POST", "/api/chat/continuity/checkpoints", {
-    **payload, "checkpoint_id": "transport-1",
-  })]
-  assert "expected_revision" not in calls[-1][2]
-
-
-def test_checkpoint_transport_retries_keep_identity(monkeypatch):
-  control = _control_module()
-  monkeypatch.setattr(control, "_available_tool_names", lambda: ("checkpoint_chat",))
-  calls = []
-  monkeypatch.setattr(control, "_agent_api_call", lambda *a: calls.append(a) or {"status":"committed"})
-  message = {"jsonrpc":"2.0", "id":19, "method":"tools/call", "params":{
-    "name":"checkpoint_chat", "arguments":{"digest":"Same request"},
-  }}
-  control._dispatch_message(message)
-  control._dispatch_message(message)
-  control._dispatch_message({**message,"id":20})
-  assert calls[0][2]["checkpoint_id"] == calls[1][2]["checkpoint_id"]
-  assert calls[2][2]["checkpoint_id"] != calls[0][2]["checkpoint_id"]
-
-
-@pytest.mark.parametrize("arguments", [
-  {"checkpoint_id": "x", "expected_revision": True, "digest": "fact"},
-  {"checkpoint_id": "x", "expected_revision": 0, "digest": " "},
-  {"checkpoint_id": "x", "expected_revision": 0, "digest": "fact", "chat_id": "another-chat"},
-  {"checkpoint_id": "x", "expected_revision": 0, "digest": "fact", "source_cursor": {"message_count": 2}},
-])
-def test_continuity_tool_rejects_malformed_or_cross_chat_payload(arguments, monkeypatch):
-  control = _control_module()
-  monkeypatch.setattr(control, "_agent_api_call", lambda *a, **kw: pytest.fail("unexpected API call"))
-  with pytest.raises(ValueError):
-    control._call_checkpoint_chat(arguments)
-
-
-def test_checkpoint_does_not_invent_success(monkeypatch):
-  control = _control_module()
-  monkeypatch.setattr(control, "_agent_api_call", lambda *a: {})
-  import pytest
-  with pytest.raises(RuntimeError, match="durable acknowledgement"):
-    control._call_checkpoint_chat({"summary": "Goal remains open."})

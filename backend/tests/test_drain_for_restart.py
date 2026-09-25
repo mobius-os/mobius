@@ -27,7 +27,6 @@ from app.chat_writer import Barrier, get_writer
 from app.chat_transcript import materialized_messages
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 class _Handle:
@@ -112,7 +111,7 @@ def _live_turn(chat_id: str, *, pending=None, partial="partial answer"):
   accumulated INTO the sink so the drain's finalize can preserve it)."""
   _seed(chat_id, pending=pending)
   bc = create_broadcast(chat_id)
-  sink = chat_mod._ChatEventSink(bc, chat_id, run_token=f"rt-{chat_id}", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat_id, run_token=f"rt-{chat_id}")
   chat_mod.register_active_sink(chat_id, sink)
   if partial:
     sink.publish({"type": "text", "content": partial})
@@ -338,7 +337,7 @@ def test_drain_stop_timeout_keeps_authenticated_restart_intent():
   _seed(cid)
   bc = create_broadcast(cid)
   sink = chat_mod._ChatEventSink(
-    bc, cid, run_token=f"rt-{cid}", recall_binding=EMPTY_RECALL_BINDING)
+    bc, cid, run_token=f"rt-{cid}")
   chat_mod.register_active_sink(cid, sink)
   handle = _Handle(cid, stops=False)
   registry.register(handle)
@@ -416,7 +415,7 @@ def test_drain_without_exact_run_token_stays_manual():
   cid = "drain-no-token"
   _seed(cid)
   bc = create_broadcast(cid)
-  sink = chat_mod._ChatEventSink(bc, cid, run_token=None, recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, cid, run_token=None)
   chat_mod.register_active_sink(cid, sink)
   handle = _Handle(cid)
   registry.register(handle)
@@ -718,7 +717,7 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
   # The upgrade also stamps the benign pause descriptor so a drain note
   # persisted before it existed (or whose live event never landed) renders
   # in the calm "Paused" family, not danger-red.
-  assert errors[0]["pause"] == {"kind": "restart"}
+  assert errors[0]["pause"] == {"kind": "restart", "manual": True}
 
 
 def test_reconcile_crash_note_is_resumable():
@@ -848,7 +847,7 @@ def test_reconcile_restart_note_normalizes_before_open_question():
     "text", "error", "question",
   ]
   assert not blocks[1].get("resumable")
-  assert blocks[1]["pause"] == {"kind": "restart"}
+  assert blocks[1]["pause"] == {"kind": "restart", "manual": True}
 
 
 def test_historical_restart_note_does_not_mask_a_newer_crash():
@@ -1096,7 +1095,6 @@ def test_restart_continues_a_then_normal_completion_delivers_queued_b(
   bc = create_broadcast(cid)
   sink = chat_mod._ChatEventSink(
     bc, cid, run_token=resumed_token,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Answer A finished"})
 

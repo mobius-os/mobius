@@ -32,18 +32,18 @@ import logging
 import os
 import signal
 import shutil
+import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app import generated_files
 from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
   install_approval_handler,
-  start_turn_for_handle,
 )
 
 from app.codex_events import (
@@ -83,7 +83,12 @@ from app.question_bridge import (
   park_question,
 )
 from app.runtime_types import RunnerResult
-from app.usage_metrics import codex_cost_usd, normalize_codex_usage
+from app.usage_metrics import (
+  codex_call_input_tokens,
+  codex_cost_usd,
+  context_usage_event,
+  normalize_codex_usage,
+)
 from app.runner_registry import RunnerKind, registry
 from app.memory_observability import record_memory_checkpoint_once
 
@@ -133,11 +138,7 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
   return raw.strip().lower() not in ("off", "0", "false", "no", "")
 
 
-def _codex_config_overrides(
-  *,
-  allow_multi_agent: bool = True,
-  delegated_read_sandbox: bool = False,
-) -> list[str]:
+def _codex_config_overrides() -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
   Prompt-control overrides are unconditional: per-chat ``base_instructions``
@@ -169,112 +170,63 @@ def _codex_config_overrides(
   overrides.append("tools.experimental_request_user_input.enabled=false")
   # One provider turn per Möbius admission; never enable a competing loop.
   overrides.append("features.goals=false")
-  if (
-    allow_multi_agent
-    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
-  ):
+  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",
       "suppress_unstable_features_warning=true",
     ]
-  if delegated_read_sandbox:
-    # The production container blocks the user/mount namespaces required by
-    # Codex's default bubblewrap backend. Read Delegations still need a real
-    # filesystem boundary, so use Codex's own Landlock backend rather than
-    # retrying a failed command outside the sandbox. Do not use this legacy
-    # backend for workspace-write policies: the pinned CLI rejects that
-    # combination instead of enforcing it.
-    overrides += [
-      "features.use_legacy_landlock=true",
-      "features.network_proxy.enabled=true",
-      'features.network_proxy.domains={ "localhost" = "allow", '
-      '"127.0.0.1" = "allow", "::1" = "allow" }',
-    ]
   return overrides
 
 
-async def _start_codex_turn(
-  thread: Any,
-  user_message: str,
-  *,
-  cwd: str,
-  model: str | None,
-  effort: Any,
-  summary: Any,
-  delegated_read: bool,
-  approval_mode: Any,
-) -> Any:
-  """Start one turn, admitting only loopback network for read Delegations.
+# Landlock rights for a read Delegation's app-server. Everything may be read
+# and executed; only the writable roots below may change, and ``/dev`` keeps
+# the device writes a shell needs (/dev/null, PTYs).
+_READ_ONLY_RIGHTS = "read-file,read-dir,execute"
+_WRITABLE_RIGHTS = (
+  "execute,write-file,read-file,read-dir,remove-dir,remove-file,make-char,"
+  "make-dir,make-reg,make-sock,make-fifo,make-sym,refer,truncate"
+)
 
-  The public Python SDK's ``Sandbox.read_only`` preset fixes
-  ``networkAccess`` to false. Recursive Delegations need one narrower thing:
-  access to Möbius's loopback-only delegation API. The app-server network
-  proxy above allowlists only localhost; this turn-level policy enables that
-  already-filtered path without adding filesystem writes or permitting an
-  unsandboxed retry.
 
-  This uses the SDK's generated protocol seam until its public sandbox preset
-  can express read-only plus network. `_sdk_imports` already contract-tests
-  generated symbols for the same reason.
+class CodexReadConfinementUnavailable(RuntimeError):
+  """A read Delegation cannot be confined, so it must not start."""
+
+
+def _landlock_read_only_prefix(writable_roots: list[str]) -> list[str]:
+  """Return a ``setpriv`` prefix that makes the whole app-server read-only.
+
+  Codex's own read-only sandbox needs bubblewrap, whose user namespace the
+  Docker default seccomp profile blocks, and Codex 0.156+ refuses its legacy
+  Landlock backend because a command confined that way could still drive the
+  unconfined app-server through its control sockets (openai/codex#45984).
+  Confining the app-server process itself removes that escape: Landlock is
+  inherited by every tool command and MCP child and can never be lifted, so
+  there is no unconfined process left to reach. Landlock is unprivileged and
+  allowed by the default seccomp profile, so no container change is needed.
   """
-  if not delegated_read:
-    return await thread.turn(
-      user_message,
-      cwd=cwd,
-      model=model,
-      effort=effort,
-      summary=summary,
+  setpriv = shutil.which("setpriv")
+  if not setpriv:
+    raise CodexReadConfinementUnavailable(
+      "setpriv is unavailable, so a read Delegation cannot be kept read-only"
     )
-
-  from openai_codex.api import (
-    AsyncTurnHandle,
-    _approval_mode_override_settings,
-    _normalize_run_input,
-    _to_wire_input,
-  )
-  from openai_codex.generated.v2_all import (
-    ReadOnlySandboxPolicy,
-    SandboxPolicy,
-    TurnStartParams,
-  )
-
-  await thread._codex._ensure_initialized()
-  wire_input = _to_wire_input(_normalize_run_input(user_message))
-  approval_policy, approvals_reviewer = (
-    _approval_mode_override_settings(approval_mode)
-  )
-  params = TurnStartParams(
-    thread_id=thread.id,
-    input=wire_input,
-    approval_policy=approval_policy,
-    approvals_reviewer=approvals_reviewer,
-    cwd=cwd,
-    effort=effort,
-    model=model,
-    sandbox_policy=SandboxPolicy(root=ReadOnlySandboxPolicy(
-      type="readOnly",
-      network_access=True,
-    )),
-    summary=summary,
-  )
-  started, subscription = await start_turn_for_handle(
-    thread._codex,
-    thread.id,
-    wire_input,
-    params=params,
-  )
-  return AsyncTurnHandle(
-    thread._codex,
-    thread.id,
-    started.turn.id,
-    _subscription=subscription,
-  )
+  args = [
+    setpriv,
+    "--landlock-access", "fs",
+    "--landlock-rule", f"path-beneath:{_READ_ONLY_RIGHTS}:/",
+    "--landlock-rule", "path-beneath:read-file,write-file,truncate:/dev",
+  ]
+  for root in writable_roots:
+    if os.path.isdir(root):
+      args += ["--landlock-rule", f"path-beneath:{_WRITABLE_RIGHTS}:{root}"]
+  return [*args, "--"]
 
 
 def _codex_app_server_launch_args(
   codex_bin: str | None,
   config_overrides: list[str],
+  *,
+  read_only_writable_roots: list[str] | None = None,
 ) -> list[str] | None:
   """Build an app-server command isolated in its own Unix session.
 
@@ -293,8 +245,15 @@ def _codex_app_server_launch_args(
   """
   setsid_bin = shutil.which("setsid")
   if not codex_bin or not setsid_bin:
+    if read_only_writable_roots is not None:
+      raise CodexReadConfinementUnavailable(
+        "the Codex app-server cannot be launched confined on this host"
+      )
     return None
-  args = [setsid_bin, codex_bin]
+  args = [setsid_bin]
+  if read_only_writable_roots is not None:
+    args += _landlock_read_only_prefix(read_only_writable_roots)
+  args.append(codex_bin)
   for override in config_overrides:
     args.extend(["--config", override])
   args.extend(["app-server", "--listen", "stdio://"])
@@ -1473,7 +1432,6 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1614,16 +1572,23 @@ async def _run_codex_sdk_turn(
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
   )
-  config_overrides = _codex_config_overrides(
-    allow_multi_agent=True,
-    delegated_read_sandbox=(
-      delegated and run_policy.scope == "read"
+  config_overrides = _codex_config_overrides()
+  config_overrides.extend(get_provider(provider_id).codex_config_overrides())
+  # A read Delegation may write only Codex's own state, its deliverable
+  # directory, and scratch space; the rest of /data stays read-only.
+  launch_args = _codex_app_server_launch_args(
+    codex_bin,
+    config_overrides,
+    read_only_writable_roots=(
+      [
+        env["CODEX_HOME"],
+        str(generated_dir),
+        env.get("TMPDIR") or tempfile.gettempdir(),
+      ]
+      if delegated and run_policy.scope == "read"
+      else None
     ),
   )
-  config_overrides.extend(get_provider(provider_id).codex_config_overrides())
-  from app.platform_tools import codex_continuity_overrides
-  config_overrides.extend(codex_continuity_overrides())
-  launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
     cwd=cwd,
@@ -1786,38 +1751,19 @@ async def _run_codex_sdk_turn(
 
       # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
       # maps to `approvalPolicy=on_request` with an automatic reviewer.
-      # Delegations deny provider-side escalation. Read-only app-servers use
-      # the Landlock override above, so inspection stays mechanically bounded.
-      # Write delegations deliberately use the container boundary below: their
-      # workspace is /data, so workspace_write would not narrow the partner's
-      # data surface, while its bwrap backend cannot start under the normal
-      # container seccomp policy and would make every write helper a no-op.
+      # Delegations deny provider-side escalation.
       approval_mode = (
         sdk["ApprovalMode"].deny_all
         if delegated
         else sdk["ApprovalMode"].auto_review
       )
 
-      # Sandbox.full_access maps to wire SandboxMode.danger_full_access
-      # and disables bwrap. Möbius runs
-      # inside a Docker container where the default bwrap-based
-      # workspace_write sandbox fails with `bwrap: No permissions to
-      # create a new namespace, likely because the kernel does not
-      # allow non-privileged user namespaces` (the docker default
-      # seccomp profile blocks CLONE_NEWUSER even when the host
-      # allows it). That blocked every tool that spawned a
-      # sub-process — including the Read tool reading PNGs, which
-      # silently broke the agent's ability to verify its own
-      # screenshots. Full access here follows the same reasoning, and
-      # Möbius's design philosophy
-      # ("trust the agent; container is the sandbox") is consistent. The
-      # delegated prompt and tool policy still carry the exact project scope;
-      # this only avoids a second sandbox that cannot function in-container.
-      _sandbox = (
-        sdk["Sandbox"].read_only
-        if delegated and run_policy.scope == "read"
-        else sdk["Sandbox"].full_access
-      )
+      # Codex's own filesystem-restricted policies need bubblewrap, whose user
+      # namespace the Docker default seccomp profile blocks. Every Codex run
+      # therefore turns Codex's sandbox off; a read Delegation is instead kept
+      # read-only by the Landlock wrapper around its whole app-server
+      # (_landlock_read_only_prefix).
+      _sandbox = sdk["Sandbox"].full_access
       # Upgrade existing native goals before resume: Möbius now owns intent
       # and schedules exactly one provider turn per admitted attempt. Clearing
       # the obsolete provider controller preserves conversation history.
@@ -1921,20 +1867,13 @@ async def _run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
-      turn = await _start_codex_turn(
-        thread,
+      turn = await thread.turn(
         user_message,
         cwd=cwd,
         model=model,
         effort=effort,
         summary=reasoning_summary,
-        delegated_read=(
-          delegated and run_policy.scope == "read"
-        ),
-        approval_mode=approval_mode,
       )
-      if on_input_delivered is not None:
-        await on_input_delivered()
       if abort_requested():
         try:
           await turn.interrupt()
@@ -2016,15 +1955,6 @@ async def _run_codex_sdk_turn(
 
       async for notification in turn.stream():
         payload = notification.payload
-
-        if notification.method == "hook/completed":
-          hook_run = getattr(payload, "run", None)
-          event_name = getattr(hook_run, "event_name", None)
-          status = getattr(hook_run, "status", None)
-          if getattr(event_name, "value", event_name) == "sessionStart" and getattr(
-            status, "value", status,
-          ) in {"failed", "blocked", "stopped"}:
-            log.warning("SessionStart context hook failed chat_id=%s", chat_id)
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           item_id = str(getattr(payload, "item_id", None) or "")
@@ -2200,9 +2130,13 @@ async def _run_codex_sdk_turn(
             str(getattr(payload, "turn_id", ""))
             == str(getattr(turn, "id", ""))
           ):
-            call_token_usages.append(
-              getattr(payload.token_usage, "last", None)
-            )
+            last_call = getattr(payload.token_usage, "last", None)
+            call_token_usages.append(last_call)
+            bc.publish(context_usage_event(
+              provider_id,
+              codex_call_input_tokens(last_call),
+              getattr(payload.token_usage, "model_context_window", None),
+            ))
           continue
 
         if isinstance(
@@ -2478,7 +2412,6 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2514,7 +2447,6 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
-      on_input_delivered=on_input_delivered,
     )
   finally:
     ownership.release()

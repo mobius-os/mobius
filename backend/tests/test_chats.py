@@ -486,9 +486,16 @@ def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
   }
 
 
-def test_current_chat_usage_returns_unknown_for_a_fresh_session(
-  client, auth, chat,
+def test_current_chat_usage_reports_empty_context_before_the_first_settled_turn(
+  client, auth, chat, db,
 ):
+  # The first turn is still running: its row has no session stamp yet.
+  db.add(make_goal_run(db,
+    id="first-turn", chat_id=chat.id, status="running", provider="claude",
+    started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
     params={
@@ -502,9 +509,27 @@ def test_current_chat_usage_returns_unknown_for_a_fresh_session(
   assert response.json() == {
     "provider": "claude",
     "provider_session_id": "session-without-a-turn",
-    "input_tokens": None,
+    "input_tokens": 0,
     "context_window": None,
   }
+
+
+def test_current_chat_usage_stays_unknown_when_a_settled_turn_lacks_usage(
+  client, auth, chat, db,
+):
+  db.add(make_goal_run(db,
+    id="interrupted-turn", chat_id=chat.id, status="interrupted",
+    provider="claude", started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    params={"provider": "claude", "provider_session_id": "claude-session"},
+    headers=auth,
+  )
+
+  assert response.json()["input_tokens"] is None
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

@@ -33,7 +33,6 @@ from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
     decode_tool_output,
 )
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _flush_writer():
@@ -104,7 +103,6 @@ def test_sink_stashes_full_edit_diff_and_keeps_private_text_off_wire(db):
         bus,
         "chat-edit",
         agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
-      recall_binding=EMPTY_RECALL_BINDING,
     )
     full = "diff --git a/a b/a\n" + ("+large line\n" * 2500)
     event = {
@@ -584,7 +582,6 @@ def _sink(chat_id="c-sink", agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING)
     return _ChatEventSink(
       _FakeBC(), chat_id, run_token="rt",
       agent_activity_binding=agent_activity_binding,
-      recall_binding=EMPTY_RECALL_BINDING,
     )
 
 

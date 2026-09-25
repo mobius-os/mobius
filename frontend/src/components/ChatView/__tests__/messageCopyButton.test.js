@@ -52,7 +52,7 @@ test('the copy button is a plain tap target on the shared clipboard helper', () 
 })
 
 test('only owner messages offer copy actions', () => {
-  assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(msg\) : ''/)
+  assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(renderedMsg\) : ''/)
   assert.doesNotMatch(chatView, /speechText=|speechKey=|speechChatId=/)
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })

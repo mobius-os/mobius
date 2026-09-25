@@ -1785,7 +1785,7 @@ def codex_subscription_type(data_dir: str) -> str | None:
   return value if isinstance(value, str) and value.strip() else None
 
 
-async def _fetch_claude_models(data_dir: str) -> list[dict[str, str]]:
+async def _fetch_claude_models(data_dir: str) -> list[dict[str, Any]]:
   """Calls Anthropic's /v1/models with the stored OAuth access token.
 
   Raises on any non-2xx or missing credentials so the caller can fall
@@ -1813,17 +1813,22 @@ async def _fetch_claude_models(data_dir: str) -> list[dict[str, str]]:
     )
     resp.raise_for_status()
     payload = resp.json()
-  models: list[dict[str, str]] = []
+  models: list[dict[str, Any]] = []
   for entry in payload.get("data", []):
     if not isinstance(entry, dict):
       continue
     mid = entry.get("id")
     if not isinstance(mid, str):
       continue
-    model = {"id": mid}
+    model: dict[str, Any] = {"id": mid}
     display_name = entry.get("display_name")
     if isinstance(display_name, str) and display_name.strip():
       model["label"] = display_name.strip()
+    # Like the Codex catalog, the provider states each model's context size;
+    # MODEL_CONTEXT_WINDOWS is only the offline fallback and lags new models.
+    max_input = entry.get("max_input_tokens")
+    if isinstance(max_input, int) and not isinstance(max_input, bool):
+      model["context_window"] = max_input
     models.append(model)
   return models
 

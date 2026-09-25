@@ -183,6 +183,13 @@ class ChatBroadcast:
     elif event_type == "task_progress" and self._coalesce_task_progress(event):
       # The invariant is that the coalescer already appended the newest tick.
       pass
+    elif event_type == "context_usage":
+      # A whole reading supersedes every earlier one, so a reconnect needs only
+      # the newest; one per model call would otherwise grow the log all turn.
+      self.event_log = [
+        prior for prior in self.event_log if prior.get("type") != event_type
+      ]
+      self.event_log.append(event)
     else:
       self.event_log.append(event)
       # Drop the oldest entry when the cap is exceeded to bound memory.

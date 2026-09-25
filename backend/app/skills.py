@@ -669,6 +669,25 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         dirty = True
         repaired.append(str(name))
 
+    # A reviewed launcher can reach disk without its execute bit. Restore only
+    # recorded launcher bits, and only while every byte matches the record.
+    recorded = None if rec.get("status") else record_tree_identity(rec)
+    target = _safe_child(root, str(name))
+    state = disk_tree(target) if recorded and target else None
+    if (
+      state and state.identity and state.identity.digest == recorded.digest
+      and state.identity.executables < recorded.executables
+    ):
+      missing = sorted(recorded.executables - state.identity.executables)
+      # Logged so the next occurrence leaves a timestamp to trace its cause.
+      log.warning("skill %s lost launcher execute bits %s; restoring", name, missing)
+      try:
+        for rel in missing:
+          os.chmod(target / rel, 0o775)
+        repaired.append(str(name))
+      except OSError:
+        log.warning("could not restore launcher mode for skill %s", name)
+
     if rec.get("status") == "updating":
       target = _safe_child(root, str(name))
       staging = _safe_child(root, str(rec.get("staging") or ""))
@@ -882,7 +901,10 @@ def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
         name=name,
         description=description,
         provenance=_provenance(
-          sidecar_key, base_name, app_owned, installed, seed_names,
+          # An app folder skill records its members; SKILL.md stands for it.
+          f"{base_name}/SKILL.md"
+          if is_dir and f"{base_name}/SKILL.md" in app_owned else sidecar_key,
+          base_name, app_owned, installed, seed_names,
         ),
         read_path=read_path,
         is_dir=is_dir,

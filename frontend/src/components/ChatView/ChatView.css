@@ -595,6 +595,17 @@
   white-space: pre-wrap;
 }
 
+/* Boundary between owner messages delivered together in one bubble: a
+   wavy cut in the page background spanning the bubble edge to edge
+   (negative margins cancel .chat__text--user's 16px side padding). */
+.chat__batch-squiggle {
+  display: block;
+  height: 6px;
+  margin: 10px -16px;
+  background: var(--bg);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='6' viewBox='0 0 16 6'%3E%3Cpath d='M0 3 Q4 0 8 3 T16 3' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E") repeat-x left center / 16px 6px;
+}
+
 .chat__goal-message {
   display: inline;
 }
@@ -4434,8 +4445,6 @@
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
-.chat__peer-load-error { font-size: 12px; color: var(--muted); }
-.chat__peer-load-error button { font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }
 
 /* A rejected outbox row keeps its original content and a visible next action. */
 .queued__rejection {

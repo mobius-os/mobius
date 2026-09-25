@@ -93,8 +93,8 @@ class TerminalDisposition(enum.Enum):
   # all inside the one bounded lock (clear-before-forget ordering).
   PROVIDER_FREE_COMPLETED = "provider_free_completed"
   # Same durable empty-queue terminal as EMPTY_TERMINAL_CLEARED, but the
-  # response was produced without a provider. Turn-end summaries must stay
-  # deterministic so this completion cannot re-enter the unavailable agent.
+  # response was produced without a provider, so nothing may re-enter the
+  # unavailable agent after this completion.
   STOP_HANDOFF_CLEARED = "stop_handoff_cleared"
   # A Stop-bumped generation reached terminal persistence and cleared the
   # marker for the immediate successor generation it still owns.
@@ -269,6 +269,11 @@ async def promote_pending_messages_locked(
   result = await await_ack(ack)
   if isinstance(result, PromotePendingBlocked):
     raise PendingAdmissionBlocksPromotion(result)
+  if ending_status == "stopped":
+    # The superseded run's Goal was stopped in this commit, releasing its
+    # work claims; wake their followers off this locked path.
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
   promoted = result["promoted"]
   if promoted is None:
     # Empty queue — nothing to promote (the actor returned promoted=None

@@ -64,7 +64,7 @@ import signal
 import shutil
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -192,7 +192,7 @@ async def _await_control_mcp_ready(
 # register: appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -507,6 +507,11 @@ class ActiveClaudeClient:
     # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
+    # The CLI drops an interrupt sent before its query is generating, so a
+    # steer claims its cut at once but sends the interrupt only while the
+    # model is streaming; `mark_generating` sends a cut claimed earlier.
+    self._generating = False
+    self._steer_interrupt: asyncio.Task[None] | None = None
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -585,8 +590,43 @@ class ActiveClaudeClient:
     if not self._interrupt_in_flight and not self._finished.done():
       self._interrupt_in_flight = True
       self._interrupt_owner = self._interrupt_owner or "steer"
-      await self._client.interrupt()
+      if self._generating:
+        await self._client.interrupt()
     return True
+
+  def mark_generating(self) -> None:
+    """Called per root model message; sends a steer cut claimed earlier."""
+    if self._generating:
+      return
+    self._generating = True
+    if self._interrupt_in_flight and self.pending_steer:
+      # Own task: the SDK reader that routes the control response can block
+      # behind a full message buffer while the runner loop awaits.
+      self._steer_interrupt = asyncio.create_task(self._send_steer_interrupt())
+
+  async def _send_steer_interrupt(self) -> None:
+    # A terminal may have drained the steer first; interrupting now would
+    # abort its requery instead.
+    if self._interrupt_in_flight and self.pending_steer:
+      await self._client.interrupt()
+
+  def take_steer_for_requery(self, *, interrupt_landed: bool) -> list[str]:
+    """Drain buffered steer texts at a terminal; close a landed steer cut.
+
+    Once the steer's own interrupt has produced its terminal, the requery that
+    delivers the steer is fresh model work in the same turn. A "steer" owner
+    left sticky past that point made `claim_owner_card_end` refuse every later
+    card in the turn, so text written after a saved card persisted below it.
+    When the interrupt has NOT landed (a clean terminal won the race), it can
+    still abort the requery segment, so ownership stays to defuse that stray
+    cut. A Stop stays sticky; it always wins.
+    """
+    self._interrupt_in_flight = False
+    self._generating = False  # a requery starts a new generation window
+    if interrupt_landed and self._interrupt_owner == "steer":
+      self._interrupt_owner = None
+    texts, self.pending_steer = self.pending_steer, []
+    return texts
 
   def claim_owner_card_end(self) -> bool:
     """Own this turn's end at the saved owner card, cutting no generation yet.
@@ -1086,7 +1126,6 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
-  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1424,7 +1463,6 @@ async def run_claude_sdk_turn(
       ],
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
-      "include_hook_events": True,
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
@@ -1467,8 +1505,6 @@ async def run_claude_sdk_turn(
     # binary-only `workflowKeywordTriggerEnabled`, which we deliberately avoid.
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
-    from app.platform_tools import continuity_start_hooks
-    _cli_settings["hooks"] = {"SessionStart": continuity_start_hooks()}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
 
     # A dict-valued SDK mcp_servers option is serialized directly into the CLI
@@ -1569,8 +1605,6 @@ async def run_claude_sdk_turn(
       )
       active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
-      if on_input_delivered is not None:
-        await on_input_delivered()
 
       # At most one automatic re-query per turn (see the synthetic-resume
       # recovery in the terminal branch below), so a genuinely-empty resume
@@ -1587,14 +1621,6 @@ async def run_claude_sdk_turn(
       usage_state: dict[str, Any] = {}
       while True:
         async for sdk_msg in client.receive_response():
-          # Native hooks fail open. Preserve a bounded diagnostic when the
-          # helper itself dies; never log its context payload or credentials.
-          if getattr(sdk_msg, "subtype", None) == "hook_response":
-            hook_data = getattr(sdk_msg, "data", {})
-            if hook_data.get("hook_event") == "SessionStart" and (
-              hook_data.get("exit_code", 0) != 0 or hook_data.get("outcome") == "error"
-            ):
-              log.warning("SessionStart context hook failed chat_id=%s", chat_id)
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -1614,6 +1640,10 @@ async def run_claude_sdk_turn(
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
               await _persist_session_id(db, chat_id, incoming_session_id)
+          if isinstance(
+            sdk_msg, (StreamEvent, AssistantMessage),
+          ) and is_root_conversation_message(sdk_msg):
+            active_client.mark_generating()
           if isinstance(sdk_msg, RateLimitEvent):
             _resets = getattr(sdk_msg.rate_limit_info, "resets_at", None)
             if _resets is not None:
@@ -1662,15 +1692,18 @@ async def run_claude_sdk_turn(
               if not active_client.interrupt_requested:
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
-          # fresh boundary cut may fire on a later turn.
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # fresh boundary cut or a saved owner card may end a later segment.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
+              sdk_msg.stop_reason == "interrupt"
+              or sdk_msg.subtype == "error_during_execution"
+            ),
+          )
           if steer_texts:
             # Seal A1 + append the steered row(s) BEFORE the requery so the
             # answer (A2) lands as a fresh message. The turn-end finally is the
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -1731,13 +1764,14 @@ async def run_claude_sdk_turn(
           # fired — e.g. a tool-only turn with no AssistantMessage text
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
-          active_client._interrupt_in_flight = False
-          steer_texts = active_client.pending_steer
+          # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_texts = active_client.take_steer_for_requery(
+            interrupt_landed=False,
+          )
           if steer_texts:
             # Seal A1 before the requery (see the terminal-result branch); the
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
-            active_client.pending_steer = []
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )

@@ -97,7 +97,6 @@ from app.chat_writer import (
   PrepareAutoResume,
   PrepareRestartIntents,
   RecordRunMetrics,
-  RecordDeliveredInput,
   ReconcileStartupChat,
   RecoverWedgedRun,
   ResolvePark,
@@ -584,6 +583,19 @@ async def _finish_run(
       "FinishRun did not persist chat_id=%s (reconciliation will repair)",
       chat_id, exc_info=True,
     )
+    return
+  _after_terminal_status(chat_id, terminal_status)
+
+
+def _after_terminal_status(chat_id: str, terminal_status: str) -> None:
+  """Post-commit follow-up for a durable Stop of this chat's work.
+
+  FinishRun released the stopped Goal's work claims in its own commit; the
+  followers are woken off this lifecycle path, which may still hold locks.
+  """
+  if terminal_status == "stopped":
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
 
 
 async def _record_run_metrics(
@@ -657,6 +669,7 @@ async def _finish_run_strict(
     )
   )
   await _await_ack(ack)
+  _after_terminal_status(chat_id, terminal_status)
 
 
 async def _recover_wedged_run_strict(
@@ -894,8 +907,12 @@ def reconcile_startup_chats(
       # `pause.kind='restart'` marks this as a benign restart pause (not a
       # failure) so the card renders in the calm "Paused" family rather than
       # the danger-red error styling — a restart is a maintenance event, not
-      # something the turn did wrong.
-      err_block = _pause_note(note, kind="restart")
+      # something the turn did wrong. A crash or an ineligible restart is
+      # stamped `manual` so the card does not promise a continuation.
+      restart_pause = {"kind": "restart"}
+      if not restart_eligible:
+        restart_pause["manual"] = True
+      err_block = {**_pause_note(note, kind="restart"), "pause": restart_pause}
       live_id = (
         chat.live_assistant.get("id")
         if isinstance(chat.live_assistant, dict) else None
@@ -967,7 +984,7 @@ def reconcile_startup_chats(
             if block.get("type") != "question" or block.get("answers"):
               break
             trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
+          paused["pause"] = dict(restart_pause)
           if trailing_open_start < len(blocks):
             paused.pop("resumable", None)
             blocks.insert(trailing_open_start, paused)
@@ -5001,25 +5018,6 @@ async def _run_chat_impl_with_db(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
-  # Freeze source before any SDK call or mid-turn steer. The provider runner
-  # invokes the recorder only after the initial prepared input is accepted.
-  from app.chat_continuity import delivered_input_prefix
-  delivery_count, delivery_hash = delivered_input_prefix(
-    chat_row.messages or [] if chat_row else [], run_token, raw_user_message,
-  )
-
-  async def record_delivered_input() -> None:
-    if not chat_id:
-      return
-    try:
-      await _await_ack(get_writer().submit(RecordDeliveredInput(
-        chat_id=chat_id, run_token=run_token,
-        message_count=delivery_count, prefix_hash=delivery_hash,
-      )))
-    except Exception:
-      # The input reached the SDK, but no durable proof exists. A checkpoint
-      # must preserve earlier coverage rather than inventing this delivery.
-      log.exception("delivered-input proof failed chat_id=%s", chat_id)
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
   provider = get_provider(provider_id)
@@ -5070,19 +5068,18 @@ async def _run_chat_impl_with_db(
   startup_context = ""
   if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
-    ordered_chat_ids = [row[0] for row in db.query(models.Chat.id).filter(
+    ordered_chat_ids = [
+      row[0]
+      for row in db.query(models.Chat.id).filter(
         models.Chat.deleted_at.is_(None),
       ).order_by(
         func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
         models.Chat.id.desc(),
-      ).limit(memory.RECENT_CHAT_NOTES).all()]
-    continuity_by_chat_id = memory.recent_continuity_metadata(
-      db, ordered_chat_ids,
-    )
+      ).all()
+    ]
     block = memory.build_memory_block(
       settings.data_dir,
       ordered_chat_ids=ordered_chat_ids,
-      continuity_by_chat_id=continuity_by_chat_id,
     )
     ctx = block.text
     # Observability only. Chat-summary injection is core continuity, not graph
@@ -5460,8 +5457,6 @@ async def _run_chat_impl_with_db(
   # the provider's path.
   from app.agent_activity_provider import resolve_agent_activity_binding
   agent_activity_binding = resolve_agent_activity_binding(db)
-  from app.memory_provider import resolve_recall_binding
-  recall_binding = resolve_recall_binding(db)
 
   # Snapshot owner-managed MCP connections while this request session is still
   # live. Provider turns can wait for hours, so neither runner may query the
@@ -5571,7 +5566,6 @@ async def _run_chat_impl_with_db(
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
       sink = _ChatEventSink(
         bc, chat_id, run_token=run_token,
-        recall_binding=recall_binding,
         agent_activity_binding=agent_activity_binding,
       )
       register_active_sink(chat_id, sink)
@@ -5624,7 +5618,6 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
       agent_activity_binding=agent_activity_binding,
     )
     register_active_sink(chat_id, sink)
@@ -5666,7 +5659,6 @@ async def _run_chat_impl_with_db(
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        on_input_delivered=record_delivered_input,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5786,7 +5778,6 @@ async def _run_chat_impl_with_db(
         from app.delegations import REVIEW_REQUIRED_MARKER
         sink = _ChatEventSink(
           bc, chat_id, run_token=run_token,
-          recall_binding=recall_binding,
           agent_activity_binding=agent_activity_binding,
         )
         register_active_sink(chat_id, sink)
@@ -5823,7 +5814,6 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
       agent_activity_binding=agent_activity_binding,
     )
     register_active_sink(chat_id, sink)
@@ -5859,7 +5849,6 @@ async def _run_chat_impl_with_db(
         run_policy=run_policy,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        on_input_delivered=record_delivered_input,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

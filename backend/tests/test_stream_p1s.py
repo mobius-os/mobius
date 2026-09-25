@@ -18,7 +18,6 @@ from app.broadcast import (
   _EVENT_LOG_MAX,
   _TEXT_LOG_SEGMENT_MAX,
 )
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +58,6 @@ def _make_sink(chat_id="chat1", run_token="tok1"):
   bc = _FakeBroadcast()
   sink = ChatEventSink(
     bc, chat_id=chat_id, run_token=run_token,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   return sink, bc
 
@@ -271,3 +269,19 @@ def test_subscribe_catch_up_after_coalesce():
   catch_up, _ = bc.subscribe()
   assert len(catch_up) == 1
   assert catch_up[0]["content"] == "hello world"
+
+
+def test_replay_log_keeps_only_the_newest_context_reading():
+  """A long turn publishes one context reading per model call; a reconnect
+  needs only the latest, at its true chronological position."""
+  bc = ChatBroadcast("chat-context")
+  bc.publish({"type": "context_usage", "provider": "claude", "input_tokens": 1})
+  bc.publish({"type": "tool_start", "tool_use_id": "t1"})
+  bc.publish({"type": "context_usage", "provider": "claude", "input_tokens": 2})
+  bc.publish({"type": "tool_end", "tool_use_id": "t1"})
+  bc.publish({"type": "context_usage", "provider": "claude", "input_tokens": 3})
+
+  assert [event["type"] for event in bc.event_log] == [
+    "tool_start", "tool_end", "context_usage",
+  ]
+  assert bc.event_log[-1]["input_tokens"] == 3

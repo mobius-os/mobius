@@ -200,6 +200,8 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "answers_applied",
   "app_updated",
   "build_phase",
+  # A complete current reading; the log keeps only the newest.
+  "context_usage",
   "goal_plan_updated",
   "goal_activated",
   "chat_run_finished",

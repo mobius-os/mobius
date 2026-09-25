@@ -79,8 +79,6 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   run_migrations(eng)
 
   assert migrations.mapped_schema_gaps(eng) == []
-  run_columns = {column["name"] for column in inspect(eng).get_columns("chat_runs")}
-  assert {"delivered_message_count", "delivered_prefix_hash"} <= run_columns
   assert schema_migration_history(eng) == first_history
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
@@ -1726,6 +1724,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0064_require_git_app_sources",
     "0064_chat_continuity_journal",
     "0065_run_delivered_input_boundary",
+    "0066_retire_chat_continuity_journal",
   ]
   assert second == first
 

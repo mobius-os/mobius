@@ -55,10 +55,11 @@ class QuestionSpec(BaseModel):
   options: list[ApprovalOption] = Field(default_factory=list, max_length=3)
 
   @model_validator(mode="after")
-  def unambiguous_quiet_options(self):
-    if (any(option.on_answer == "close" for option in self.options)
-        and len({option.label for option in self.options}) != len(self.options)):
-      raise ValueError("quiet-answer options must have distinct labels")
+  def distinct_option_labels(self):
+    # A saved answer is the chosen label text bound to its option identity, so
+    # two options with one label would make the answer ambiguous.
+    if len({option.label for option in self.options}) != len(self.options):
+      raise ValueError("question options must have distinct labels")
     return self
 
 
@@ -216,13 +217,13 @@ async def save_owner_question(
   question_id = str(uuid5(NAMESPACE_URL, json.dumps(
     [chat_id, principal.run_id, identity_payload if identity_payload is not None else payload], sort_keys=True,
   )))
-  # Stable identities belong to the saved card, never label inference in the
-  # answer route. Keep legacy cards byte-for-byte unchanged.
+  # Every answer path (owner tap, another agent, a quiet close) names an exact
+  # saved option rather than inferring it from label text. Platform-derived
+  # identities such as Restart's action-bound option are kept.
   payload = deepcopy(payload)
-  if activation_requirement is None and questions.has_quiet_options(payload):
-    for question in payload.get("questions", []):
-      for index, option in enumerate(question.get("options", [])):
-        option["id"] = str(index)
+  for question in payload.get("questions", []):
+    for index, option in enumerate(question.get("options", [])):
+      option.setdefault("id", str(index))
   activation_wait = None
   if activation_requirement is not None:
     wait_id = f"activation-{question_id}"
@@ -270,7 +271,10 @@ async def save_owner_question(
         raise HTTPException(status_code=409, detail="Answer the open question before asking another.")
       # A rejected/stale card must not mutate workspace ownership. Claim only
       # after the exact run, sink, retry identity, and single-card admission
-      # have all passed under the same lifecycle locks.
+      # have all passed under the same lifecycle locks. The first chat saves
+      # the sole card; a later caller follows the claim and continues cardless.
+      # A failed save keeps the claim for the identical retry; the owning
+      # Goal's end or chat deletion settles it if no retry comes.
       if approval_work_key is not None:
         try:
           claim = claim_work(
@@ -283,19 +287,9 @@ async def save_owner_question(
           )
         except ValueError as exc:
           raise HTTPException(409, str(exc)) from exc
-        if claim["state"] == "completed":
-          raise HTTPException(
-            409,
-            "This exact work already completed: "
-            f"{claim.get('outcome') or approval_work_key}",
-          )
-        if claim["owner_chat_id"] != principal.chat_id:
-          raise HTTPException(
-            409,
-            "This approval is already owned by "
-            f"{claim['owner_name']} ({claim['owner_chat_id']}); "
-            "no duplicate card was created.",
-          )
+        if (claim["state"] == "completed"
+            or claim["owner_chat_id"] != principal.chat_id):
+          return _approval_follower_result(claim)
       try:
         await sink.publish_question({
           "type": "question",
@@ -318,6 +312,25 @@ async def save_owner_question(
         "waiting_for_owner", question_id,
         platform_restart=activation_requirement is not None,
       )
+
+
+def _approval_follower_result(claim: dict) -> dict:
+  """No card: another chat owns this exact action, or it already completed."""
+  if claim["state"] == "completed":
+    claim["next_action"] = (
+      "No approval card was saved and your turn continues. This exact action "
+      "already completed; do not repeat it. Reconcile your Goal with the "
+      "recorded outcome."
+    )
+  else:
+    claim["next_action"] = (
+      "No approval card was saved and your turn continues. "
+      f"{claim['owner_name']} owns this exact action and its approval; you now "
+      "follow it and will be notified when it completes or is released. Do "
+      "not request approval for or perform it yourself. Continue independent "
+      "work and settle the overlapping plan task; your Goal stays yours."
+    )
+  return claim
 
 
 def _receipt(

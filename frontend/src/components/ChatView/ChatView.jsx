@@ -1,6 +1,6 @@
 import { LocalAnswersContext } from './localAnswersContext.js'
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -41,13 +41,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus, { useDeliveryReady, useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useDeliveryReady } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
-  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -199,6 +198,8 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  combineOwnerMessagesForDisplay,
+  ownerMessageBatch,
   jumpToLatestShown,
   runtimeSnapshot,
   runtimeSnapshotTransition,
@@ -456,7 +457,6 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
-  const reachabilityPhase = useReachabilityPhase()
   const deliveryReady = useDeliveryReady()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
@@ -1784,6 +1784,9 @@ export default function ChatView({
     setChatInfo(newChatSession.chatInfo)
   }, [newChatSession?.chatInfo, newChatSession?.materialized, setChatInfo])
 
+  // The running turn's latest context reading. The pane is keyed by chat, so
+  // it never outlives this chat's stream.
+  const [liveContext, setLiveContext] = useState(null)
   const {
     streamItems,
     latestItemsRef,
@@ -1949,6 +1952,7 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
+    onContextUsage: setLiveContext,
     onSteeredIntoTurn: ({
       ts,
       content,
@@ -2837,10 +2841,14 @@ export default function ChatView({
       // activity, and report blocks. React cannot interrupt one DOM commit, so
       // prepare that hidden destination in prefix-complete frame-sized slices.
       // Each await yields a real paint opportunity to the outgoing chat and
-      // drawer. Only the final authoritative frame settles loading/readiness,
-      // preserving the existing hide-then-reveal scroll contract.
+      // drawer. Every commit also pays a fixed cost (the whole view renders),
+      // so while commits stay under ~48ms each one skips twice as many planned
+      // frames as the last. Only the final authoritative frame settles
+      // loading/readiness, preserving the existing hide-then-reveal contract.
       setInitialEntryPhase('preparing')
-      for (const frame of renderFrames) {
+      const lastFrame = renderFrames.length - 1
+      let stride = 1
+      for (let frameIndex = 0; ; frameIndex = Math.min(lastFrame, frameIndex + stride)) {
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
@@ -2850,7 +2858,12 @@ export default function ChatView({
         // React may batch state updates across async task yields and discard
         // every intermediate prefix. Commit each hidden slice explicitly; the
         // flush is scoped to this cold, off-screen preparation path only.
-        flushSync(() => applyMessagesToView(frame, refreshed.offset))
+        const commitStartedAt = performance.now()
+        flushSync(() => applyMessagesToView(
+          renderFrames[frameIndex], refreshed.offset,
+        ))
+        if (frameIndex === lastFrame) break
+        if (performance.now() - commitStartedAt < 48) stride *= 2
       }
       settleRuntime(runtime, refreshed.messages)
     }
@@ -3024,21 +3037,11 @@ export default function ChatView({
       })
   }
 
-  // A tall viewport or an unusually compact page can have older history but no
-  // scroll range. Fill only until scrolling becomes possible; subsequent pages
-  // remain user-driven and bounded.
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el || loadingOlder.current || loading || offset <= 0) return
-    if (olderHistoryShouldLoad(el)) loadOlderMessages()
-  })
-
   // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
   // writes scrollTop, so it lives outside the scroll controller's ownership
-  // gates. Recomputed from every scroll event (gesture or programmatic) and
-  // from every commit via the dependency-less layout effect below: a stream
-  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
-  // tick re-renders this component. The guarded setState keeps those
+  // gates. Recomputed from every scroll event and from the transcript
+  // ResizeObserver below: a stream growing beneath a held ANCHOR_AT emits no
+  // scroll event, but it does resize the list. The guarded setState keeps
   // recomputes render-free until the boolean actually flips.
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
@@ -3046,7 +3049,6 @@ export default function ChatView({
     const away = !!el && !isNearPhysicalBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
-  useLayoutEffect(updateJumpToLatest)
 
   function handleScroll() {
     updateJumpToLatest()
@@ -4985,15 +4987,23 @@ export default function ChatView({
     }
   }, [chatId, queryClient, refreshContributionOverview])
 
+  const chatProvider = chatInfo?.provider || null
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
-      settingsQueries.providerUsage.invalidate(queryClient)
+      // Only this chat's provider spent allowance. Refreshing every provider
+      // on every pane's turn end multiplied reads of rate-limited services.
+      if (chatProvider) {
+        settingsQueries.providerUsage.invalidate(queryClient, chatProvider)
+      }
       chatQueries.usage.invalidate(queryClient, chatId)
-      chatQueries.currentUsage.invalidate(queryClient, chatId)
+      // The settled run now records what the live reading showed; drop the
+      // live one only once that record is in, so the gauge never steps back.
+      void chatQueries.currentUsage.invalidate(queryClient, chatId)
+        .finally(() => setLiveContext(null))
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, turnActive, queryClient])
+  }, [chatId, chatProvider, turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -5236,6 +5246,31 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
+  // Transcript geometry reads force a synchronous layout of the whole
+  // transcript, so they follow its size (content, spacer, and viewport) rather
+  // than running after every commit. A tall viewport or an unusually compact
+  // page can have older history but no scroll range: fill only until
+  // scrolling becomes possible; later pages remain user-driven and bounded.
+  // Observation reports an initial size, so re-subscribing when loading or
+  // the loaded page changes re-checks both.
+  const hasTranscript = !showEmpty && !showLoadError
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) {
+      updateJumpToLatest()
+      return
+    }
+    const observer = new ResizeObserver(() => {
+      updateJumpToLatest()
+      if (!loadingOlder.current && !loading && offset > 0
+          && olderHistoryShouldLoad(el)) loadOlderMessages()
+    })
+    observer.observe(el)
+    observer.observe(el.querySelector('.chat__list'))
+    observer.observe(spacerRef.current)
+    return () => observer.disconnect()
+  }, [chatId, hasTranscript, loading, offset]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
   // the saved-coordinate coverage check above. The display-ready gate below
@@ -5272,7 +5307,8 @@ export default function ChatView({
       messageMatchesKey(message, offset + index, searchReveal.anchorKey)
     ))
     if (localIndex < 0) return
-    const canonicalKey = messageKey(messages[localIndex], offset + localIndex)
+    const renderIndex = ownerMessageBatch(messages, localIndex)?.start ?? localIndex
+    const canonicalKey = messageKey(messages[renderIndex], offset + renderIndex)
     const row = [...(scrollRef.current?.querySelectorAll('.chat__msg[data-key]') || [])]
       .find(element => element.dataset.key === canonicalKey)
     if (!canonicalKey || !row) return
@@ -5648,7 +5684,7 @@ export default function ChatView({
         ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
         : 'Usage limit reached. Automatic continuation available.'
     }
-    if (pendingResumeBlock.pause?.kind === 'restart') {
+    if (pendingResumeBlock.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual) {
       return 'Response paused for restart. Möbius will continue automatically.'
     }
     return 'Turn paused — Resume available.'
@@ -5772,6 +5808,9 @@ export default function ChatView({
     setActive: setFileDropActive,
     onFiles: handleComposerAddFiles,
   })
+  const reservedSteerMessage = combineOwnerMessagesForDisplay(
+    pendingQueue.steerReservedMessages,
+  )
 
   return (
     <div
@@ -5929,8 +5968,16 @@ export default function ChatView({
             const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
             const projectedMsg = peerTimeline.messages[i] || msg
             if (projectedMsg.hidden) return [peerRows]
+            const ownerBatch = ownerMessageBatch(displayedMessages, i)
+            if (ownerBatch && !ownerBatch.first) return [peerRows]
+            const renderedMsg = ownerBatch
+              ? combineOwnerMessagesForDisplay(
+                  peerTimeline.messages.slice(ownerBatch.start, ownerBatch.end + 1),
+                )
+              : projectedMsg
             const continuationMarker = isContinuationMessage(msg)
-            const isLastMsg = i === lastVisibleMessageIndex
+            const renderedEndIndex = ownerBatch?.end ?? i
+            const isLastMsg = renderedEndIndex === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
             // that row; unrelated assistant history remains in this map.
@@ -5978,26 +6025,26 @@ export default function ChatView({
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the revealed metadata row.
-            const ownerUserMessage = isOwnerUserMessage(msg)
-            const userCid = ownerUserMessage ? cidOf(msg) : null
-            const copyText = ownerUserMessage ? messageCopyText(msg) : ''
-            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
+            const ownerUserMessage = isOwnerUserMessage(renderedMsg)
+            const userCid = ownerUserMessage ? cidOf(renderedMsg) : null
+            const copyText = ownerUserMessage ? messageCopyText(renderedMsg) : ''
+            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && renderedMsg.ts))
             return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
               tabIndex={-1}
-              ref={i === lastUserIdx ? setLastUserMsgRef : null}
+              ref={renderedEndIndex === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-anchor-key={anchorKey === dataKey ? undefined : anchorKey}
               data-cid={userCid || undefined}
-              data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
+              data-ts={ownerUserMessage && renderedMsg.ts ? String(renderedMsg.ts) : undefined}
               onClick={hasMessageMeta
                 ? (event) => showMessageMeta(event, dataKey)
                 : undefined}
             >
               <MsgContent
-                msg={peerTimeline.messages[i]}
+                msg={renderedMsg}
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
@@ -6031,7 +6078,7 @@ export default function ChatView({
                 resumeCardRef={resumeCardRef}
               />
               <MessageMetaRow
-                timestamp={ownerUserMessage ? msg.ts : null}
+                timestamp={ownerUserMessage ? renderedMsg.ts : null}
                 copyText={copyText}
                 visible={visibleMessageMetaKey === dataKey}
               />
@@ -6104,15 +6151,6 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError
-            error={peerTimeline.error}
-            recoveryActive={
-              peerTimeline.recoveryActive
-              || restartPending
-              || reachabilityPhase !== ReachabilityPhase.ONLINE
-            }
-            onRetry={peerTimeline.retry}
-          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
@@ -6120,10 +6158,10 @@ export default function ChatView({
               after the active assistant segment. The authoritative cut seals
               that segment and replaces these provisional rows with the same
               cid-keyed messages, so provider latency never hides owner text. */}
-          {pendingQueue.steerReservedMessages.map((msg, i) => {
-            const cid = cidOf(msg)
-            const dataKey = `steer-pending-${cid || i}`
-            const copyText = messageCopyText(msg)
+          {reservedSteerMessage && (() => {
+            const cid = cidOf(reservedSteerMessage)
+            const dataKey = `steer-pending-${cid || 'batch'}`
+            const copyText = messageCopyText(reservedSteerMessage)
             return (
               <li
                 key={cid || dataKey}
@@ -6131,25 +6169,25 @@ export default function ChatView({
                 tabIndex={-1}
                 data-key={dataKey}
                 data-cid={cid || undefined}
-                data-ts={msg.ts ? String(msg.ts) : undefined}
+                data-ts={reservedSteerMessage.ts ? String(reservedSteerMessage.ts) : undefined}
                 data-steer-pending="true"
                 onClick={copyText
                   ? event => showMessageMeta(event, dataKey)
                   : undefined}
               >
                 <MsgContent
-                  msg={msg}
+                  msg={reservedSteerMessage}
                   chatId={chatId}
                   messageKey={dataKey}
                 />
                 <MessageMetaRow
-                  timestamp={msg.ts || null}
+                  timestamp={reservedSteerMessage.ts || null}
                   copyText={copyText}
                   visible={visibleMessageMetaKey === dataKey}
                 />
               </li>
             )
-          })}
+          })()}
         </ul>
         </PeerTimelineContext.Provider>
         </LocalAnswersContext.Provider>
@@ -6220,7 +6258,7 @@ export default function ChatView({
                           : limitResetElapsed
                             ? 'Usage available — tap to continue'
                             : 'Usage limit reached — continuation available'
-                        : pendingResumeBlock?.pause?.kind === 'restart'
+                        : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
                           : 'Turn paused — tap to resume'}
                     </button>
@@ -6327,6 +6365,7 @@ export default function ChatView({
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
+              liveContext={liveContext}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover

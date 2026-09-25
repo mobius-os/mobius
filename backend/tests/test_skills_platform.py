@@ -2498,3 +2498,39 @@ def test_codex_usage_counts_directory_entry_by_id(skills_dir):
   assert _skill_names_in_command(
     f"cat {data_dir}/shared/skills/pdf/reference.md", data_dir,
   ) == []
+
+
+def _launcher_tree(skills_dir, *, launcher_mode):
+  target = skills_dir / "demo"
+  (target / "scripts").mkdir(parents=True)
+  (target / "SKILL.md").write_bytes(b"# demo\n")
+  launcher = target / "scripts" / "demo"
+  launcher.write_bytes(b"#!/bin/sh\necho demo\n")
+  launcher.chmod(launcher_mode)
+  digest = skills_mod.tree_digest_on_disk(target)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": "1" * 40, "tree_digest": digest,
+      "executables": ["scripts/demo"],
+    },
+  }))
+  return launcher
+
+
+def test_reconcile_restores_a_recorded_launcher_bit_on_unchanged_bytes(skills_dir):
+  launcher = _launcher_tree(skills_dir, launcher_mode=0o664)
+
+  assert "demo" in skills_mod.reconcile_installed(skills_dir)
+
+  assert launcher.stat().st_mode & 0o111
+  assert not (skills_dir / "demo" / "SKILL.md").stat().st_mode & 0o111
+
+
+def test_reconcile_leaves_launcher_mode_alone_when_bytes_changed(skills_dir):
+  launcher = _launcher_tree(skills_dir, launcher_mode=0o664)
+  launcher.write_bytes(b"#!/bin/sh\necho local edit\n")
+
+  assert "demo" not in skills_mod.reconcile_installed(skills_dir)
+
+  assert not launcher.stat().st_mode & 0o111

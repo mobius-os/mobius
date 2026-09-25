@@ -521,6 +521,42 @@ def test_store_managed_apply_refreshes_only_previously_approved_skills(
   assert updated.json()["warnings"] == []
 
 
+def test_store_managed_apply_keeps_every_member_of_an_approved_folder_skill(
+  client, auth, db,
+):
+  """A local apply supplies no manifest authority, so an approved `<id>/`
+  skill takes its members from the accepted source folder rather than
+  retiring everything but SKILL.md."""
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["skills"] = ["guide/"]
+  manifest["source_files"] = ["guide/SKILL.md", "guide/publish.md"]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide").mkdir()
+  (source / "guide" / "SKILL.md").write_text("# Core\n")
+  (source / "guide" / "publish.md").write_text("# Publish\n")
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.manifest_url = "https://example.test/demo/mobius.json"
+  contract = dict(row.capability_contract or {})
+  contract["agent"] = {**(contract.get("agent") or {}), "skills": ["guide/"]}
+  row.capability_contract = contract
+  db.commit()
+  (source / "guide" / "publish.md").write_text("# Publish, revised\n")
+  (source / "guide" / "notes.md").write_text("# Notes\n")
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert updated.json()["warnings"] == []
+  folder = Path(get_settings().data_dir) / "shared" / "skills" / "guide"
+  assert (folder / "SKILL.md").read_text() == "# Core\n"
+  assert (folder / "publish.md").read_text() == "# Publish, revised\n"
+  assert (folder / "notes.md").read_text() == "# Notes\n"
+
+
 def test_startup_retires_integrated_app_provenance(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)

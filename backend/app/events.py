@@ -67,6 +67,7 @@ EventType = Literal[
   "thinking",
   "text_boundary",
   "context_compacted",
+  "context_usage",
   "tool_start",
   "tool_input",
   "tool_output",
@@ -261,7 +262,7 @@ def _persisted_block(block: dict) -> dict:
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
 #  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
 #    `ping`, `signature_delta`, `content_block_stop`, `input_json_delta`), plus
-#    usage / session_init / done / catch_up_done / queued_turn_starting. These
+#    context_usage / session_init / done / catch_up_done / queued_turn_starting. These
 #    interleave BETWEEN successive thinking_delta events; closing the run on them
 #    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
 #    second" blocks (even splitting mid-word). They change no block, so they must
