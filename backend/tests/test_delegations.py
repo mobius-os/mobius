@@ -2165,3 +2165,32 @@ def test_migration_adds_wake_columns_idempotently(db):
   cols = {c["name"] for c in sa_inspect(engine).get_columns("delegations")}
   assert "notify_parent_on_complete" in cols
   assert "parent_woken_at" in cols
+
+
+def test_helper_result_admitted_to_a_live_parent_run_no_longer_owns_the_goal(db):
+  """The turn incorporating a helper's result owns the Goal's next move.
+
+  Finalize latches parent_woken_at only when that turn ends, so without this
+  the incorporating turn itself could never complete the Goal.
+  """
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db, suffix="being-delivered", child_status="completed",
+  )
+  assert background_helper_goal_ids(db, parent_id) == {"root-being-delivered"}
+
+  db.add(make_goal_run(db,
+    id="parent-wake-run", root_run_id="root-being-delivered",
+    chat_id=parent_id, status="running", provider="claude",
+    started_at=now_naive_utc(),
+    activity_delivery_json={
+      "delegation_ids": [delegation_id],
+      "delivery_contract": "finalize_atomic_v1",
+    },
+  ))
+  db.commit()
+  assert background_helper_goal_ids(db, parent_id) == set()
+
+  # A delivery that stopped before Finalize hands ownership back to the helper.
+  db.get(models.ChatRun, "parent-wake-run").status = "stopped"
+  db.commit()
+  assert background_helper_goal_ids(db, parent_id) == {"root-being-delivered"}
