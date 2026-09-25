@@ -80,6 +80,13 @@ def test_diagnostic_does_not_claim_absent_goal_is_ready(cli, monkeypatch):
     cli.main()
 
 
+def test_diagnostic_names_an_unreadable_plan_instead_of_inviting_completion(
+  cli, monkeypatch,
+):
+  invoke(cli, monkeypatch, ["check-complete"], snapshot() | {"plan_unreadable": True})
+  with pytest.raises(SystemExit, match="unreadable.*Replace the complete plan"):
+    cli.main()
+
 def test_diagnostic_reports_task_and_delegation_blockers(cli, monkeypatch):
   plan = {
     "tasks": [{"id": "audit", "title": "Verify release", "status": "pending"}],
@@ -173,6 +180,22 @@ def test_one_update_finishes_a_task_starts_the_next_and_leaves_a_handoff(
   assert writes[2][2]["next_action"] == "Build b"
   assert "Goal plan revision 6" in capsys.readouterr().out
 
+
+def test_set_repairs_an_unreadable_plan_at_the_goal_revision(cli, monkeypatch):
+  writes = []
+
+  def request(method, path, body=None):
+    if method == "GET":
+      return snapshot() | {"plan_unreadable": True}
+    if path.endswith("/goal/resume"):
+      return {}
+    writes.append((method, body["expected_revision"]))
+    return {"plan": {"revision": 8, "summary": {}}}
+
+  monkeypatch.setattr(cli, "_request", request)
+  monkeypatch.setattr(sys, "argv", ["goal_plan.py", "set", "--task", "a|Redo A"])
+  assert cli.main() == 0
+  assert writes == [("PUT", 7)]
 
 def test_checkpoint_needs_only_the_next_action(cli, monkeypatch):
   [(method, target, body)] = record_writes(

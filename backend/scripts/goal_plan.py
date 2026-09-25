@@ -237,6 +237,11 @@ def main() -> int:
     if goal is None:
       raise SystemExit("No Goal record to check.")
     print(f"Goal status: {goal['status']} (read-only; unchanged).")
+    if payload.get("plan_unreadable"):
+      raise SystemExit(
+        "The saved todo plan is unreadable, so the Goal cannot complete. "
+        "Replace the complete plan with `set`."
+      )
     blockers = _completion_blockers(current)
     if blockers:
       raise SystemExit(
@@ -288,8 +293,8 @@ def main() -> int:
       parser.error("update needs --status, --note, --result, or --progress")
 
   payload = _attach_for_write(chat_id)
-  current = payload.get("plan") if isinstance(payload, dict) else None
-  revision = int((current or {}).get("revision", 0))
+  # The Goal record carries the revision even when its saved plan is unreadable.
+  revision = int(payload["goal"]["revision"])
   if args.command == "set":
     result = _request(
       "PUT", f"/api/chats/{chat_id}/goal-plan",

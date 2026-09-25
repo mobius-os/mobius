@@ -135,8 +135,14 @@ def get_goal_plan(
     if run is None:
       raise HTTPException(status_code=404, detail="Goal not found in this chat.")
     rows = _goal_rows_for_physical(db, run)
+  plan = serialize_plan(db, *rows) if rows is not None else None
   return {
-    "plan": serialize_plan(db, *rows) if rows is not None else None,
+    "plan": plan,
+    # A saved plan that no longer validates serializes as None, like no plan.
+    # Name it so callers repair it instead of treating the Goal as unplanned.
+    "plan_unreadable": (
+      rows is not None and rows[1].plan_json is not None and plan is None
+    ),
     "goal": ({"id": rows[1].id, "revision": rows[1].revision,
               "status": rows[1].status, "objective": rows[1].objective,
               "checkpoint": rows[1].checkpoint, "next_action": rows[1].next_action}
