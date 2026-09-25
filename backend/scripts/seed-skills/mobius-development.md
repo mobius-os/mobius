@@ -55,10 +55,11 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
   activation-independent invariants, safety, privacy, and state boundaries; put
   procedures in skills. Tests pin many of its phrases: move a pinned rule
   together with its test so its protection moves too.
-- Seed skills live in `backend/scripts/seed-skills/` and reach existing
-  installations on the next image replacement. To use an edit here now, write
-  identical bytes to `/data/shared/skills/<name>.md`; boot then records the
-  copy as current instead of locally modified.
+- Seed skills live in `backend/scripts/seed-skills/`; the server reconciles the
+  served templates into installed skills at its next restart, so a template edit
+  reaches installations on that restart rather than on an image replacement. To
+  use an edit here now, write identical bytes to `/data/shared/skills/<name>.md`;
+  boot then records the copy as current instead of locally modified.
 - Write general guidance generally. A public owner may be non-technical and
   never touch this repository, so Möbius-development specifics belong here, not
   in general skills. State the rule an incident taught, not the incident.
