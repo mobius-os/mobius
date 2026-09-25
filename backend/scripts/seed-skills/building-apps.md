@@ -324,6 +324,9 @@ Persist app data through `window.mobius.storage` — injected into EVERY mini-ap
 
 **Boundary:** Every app owns its data model. Offline support is a product choice, not a default requirement; choose it when it materially benefits the app's use case or preserves an existing product promise. Möbius supplies isolated cached storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. When offline behavior is part of the app's contract, the app chooses what to warm, whether partial data is safe, how conflicts reconcile, and its offline UI. Keep domain merge logic out of the platform.
 
+The public rationale and full verification matrix are in
+`/data/platform/OFFLINE-APPS.md` (`OFFLINE-APPS.md` at the repository root).
+
 ```jsx
 // read: your data, or null if the path is absent (never written/removed/404).
 const notes = (await window.mobius.storage.get('notes.json')) || []

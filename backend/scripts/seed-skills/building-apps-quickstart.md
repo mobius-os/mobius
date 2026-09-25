@@ -156,6 +156,9 @@ decisions, reconciliation, and UI. If offline logic depends on complete
 collection membership, use `storage.listWithStatus()` and treat
 `complete:false` as unavailable, not empty.
 
+The public rationale and full verification matrix are in
+`/data/platform/OFFLINE-APPS.md` (`OFFLINE-APPS.md` at the repository root).
+
 ### 3. Apply once early, then after each coherent revision
 
 As soon as the first slice compiles and contains one real feature:

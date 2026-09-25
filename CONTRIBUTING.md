@@ -299,6 +299,8 @@ events; `touch` a changed file to force a rebuild).
 
 Read `ARCHITECTURE.md` first — it covers the backend/frontend module map, the
 mini-app contract, the SSE streaming model, and the chat persistence actor. The
+cross-surface contract for offline-capable apps, storage conflicts, and the
+online → offline → reload → reconnect test matrix is in `OFFLINE-APPS.md`. The
 feature backlog lives in `.pm/` (a gitignored, local-only kanban: one markdown
 file per feature with YAML frontmatter, viewed via `.pm/bin/pm board`); it is
 intentionally not part of the public repo, so a fresh clone does not include
