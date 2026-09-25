@@ -64,7 +64,6 @@ export function platformUpdateStatusLabel(platform) {
     return 'Update status unavailable'
   }
   if (state === 'conflict') return 'Update blocked'
-  if (platform?.unfinished_update?.stage === 'apply') return 'Update not finished'
   if (state === 'rolled_back') return 'Update needs repair'
   if (requiresAgentActivation(platform?.activation)) return 'Update needs help'
   if (activationLevel !== 'live' && available) return 'More updates available'

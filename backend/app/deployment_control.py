@@ -365,9 +365,14 @@ async def applied_release_digest(target_sha: str) -> str:
   """Recover an applied release's immutable image identity without retargeting.
 
   The account service exposes latest-release discovery, not historical lookup.
-  Its durable operation receipt can identify a failed or completed exact target;
-  otherwise discovery is useful only when it names the same applied revision.
+  The update's own progress record keeps the image it reviewed; the durable
+  operation receipt can identify a failed or completed exact target; otherwise
+  discovery is useful only when it names the same applied revision.
   """
+  progress = platform_update.platform_update_progress()
+  digest = str(progress.get("image_digest") or "")
+  if progress.get("target_sha") == target_sha and _DIGEST_RE.fullmatch(digest):
+    return digest
   status = await read_rebuild_status()
   digest = str(status.get("image_digest") or "")
   if status.get("expected_sha") == target_sha and _DIGEST_RE.fullmatch(digest):

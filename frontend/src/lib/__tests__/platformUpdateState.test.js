@@ -227,10 +227,3 @@ test('routine image replacement requires complete action evidence without extern
   assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild' } }), false)
   assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild', required_actions: ['server_restart', 'image_rebuild'] } }), true)
 })
-
-test('an update that stopped before installing is named as unfinished, not as a new update', () => {
-  assert.equal(platformUpdateStatusLabel({
-    state: 'available', available: false,
-    unfinished_update: { target_sha: 'pinned', stage: 'apply', image_digest: null },
-  }), 'Update not finished')
-})

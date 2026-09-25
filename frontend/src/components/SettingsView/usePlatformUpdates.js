@@ -297,20 +297,11 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     finally { pending.current = false; setPhase('idle') }
   }
 
-  async function cancelUnfinished() {
-    if (pending.current || busy) return false
-    try {
-      await responseBody(await api.platform.cancelUnfinishedUpdate())
-      await refreshPlatform()
-      return true
-    } catch (cause) { setError(cause.message || 'Could not cancel this update.'); return false }
-  }
-
   const clearError = useCallback(() => { setError(''); setErrorCode('') }, [])
 
   return {
     platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
     progress, reconnecting: !!reconnect, observingKind: reconnect?.kind, slow, check, execute, restart, resolve,
-    cancelUnfinished, clearError,
+    clearError,
   }
 }

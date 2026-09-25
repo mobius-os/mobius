@@ -30,7 +30,7 @@ function blockingPathLabel(path) {
 }
 
 export default function UpdateReviewModal({
-  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve, onCancelUpdate,
+  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
   restoreFocusRef, inertBoundaryRef,
 }) {
@@ -68,6 +68,21 @@ export default function UpdateReviewModal({
     onClose: requestClose, closeOnEscape: !inFlight, modal: false, lockScroll: false,
     inertBoundaryRef })
 
+  // Blockers are resolved on a frozen copy of the merged update, never on the
+  // live checkout: park the update, then open its resolver chat.
+  const [fixError, setFixError] = useState('')
+  async function handleFixBlockers() {
+    setFixError('')
+    const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
+      current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      setFixError(body?.detail?.message || 'Couldn’t prepare this update for an agent. Try again.')
+      return
+    }
+    onResolve()
+  }
+
   async function handleApply() {
     applyAttemptedRef.current = true
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
@@ -85,7 +100,6 @@ export default function UpdateReviewModal({
   const activation = preview?.activation
   const rebuildUpdate = reviewedUpdateUsesContainerRebuild(preview)
   const finish = preview?.operation === 'finish' || intent === 'finish'
-  const cancellable = platform?.unfinished_update?.stage === 'apply' && !!onCancelUpdate
   const hasResult = ['conflict', 'rolled_back'].includes(resultState)
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
@@ -181,14 +195,15 @@ export default function UpdateReviewModal({
                 </>}
           {busy && <p className="urm__notice" role="status">{progressLabel}</p>}
         </div>
+        {fixError && <div className="urm__error"><Alert color="danger" variant="soft" description={fixError} /></div>}
         {applyError && <div className="urm__error">{repairReason
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
-          {cancellable && !busy && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline"
-            onClick={async () => { if (await onCancelUpdate()) onClose() }}>Cancel update</button>}
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
+          : containerBlockers && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
+            onClick={handleFixBlockers} disabled={busy || loading}>{resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
           : repairReason ? <>
             <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" label="Fix with an agent" />
           </>

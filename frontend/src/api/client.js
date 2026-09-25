@@ -1379,11 +1379,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(plan),
     }),
-    startUnfinishedUpdate: (plan) => apiFetch('/platform/unfinished-update', {
+    parkForAgent: (plan) => apiFetch('/platform/park-for-agent', {
       method: 'POST',
       body: JSON.stringify(plan),
     }),
-    cancelUnfinishedUpdate: () => apiFetch('/platform/unfinished-update', { method: 'DELETE' }),
     conflictResolverChat: () => apiFetch('/platform/conflict-resolver-chat', {
       method: 'POST',
     }),

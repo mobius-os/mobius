@@ -111,7 +111,6 @@ test('repair handoff carries evidence and preserves review, skill ownership and 
   assert.match(prompt, /\/api\/platform\/rebuild/)
   assert.match(prompt, /Never use a plain restart in place of the rebuild/)
   assert.match(prompt, /existing update controller/i)
-  assert.match(prompt, /Settings keeps offering Finish update/i)
   assert.ok(prompt.includes('    "error":'))
 })
 

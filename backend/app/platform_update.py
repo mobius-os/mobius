@@ -206,8 +206,8 @@ class PlatformUpdateProgress(TypedDict):
 
   plan_id: str | None
   target_sha: str | None
-  # Managed deployments pin the reviewed image with the release, so an update
-  # left unfinished can still be finished after a newer image is published.
+  # The reviewed image for ``target_sha`` on a managed deployment, so Finish
+  # can still name it after a newer release is published.
   image_digest: str | None
   phase: str
   active: bool
@@ -216,16 +216,16 @@ class PlatformUpdateProgress(TypedDict):
 
 
 class UnfinishedUpdate(TypedDict):
-  """The one owner-started update that must finish before another starts.
+  """The one update that must finish before another starts.
 
-  ``resolve``: its merge is parked for a resolver. ``apply``: it stopped
-  before installing (blocked, failed or handed to an agent). ``finish``: it
-  installed, and its restart or container replacement is still owed.
+  ``resolve``: it is parked in the isolated candidate for a resolver.
+  ``finish``: it installed, and its container replacement is still owed, so
+  its source would otherwise keep running on the old image. A pending
+  restart alone does not count: several updates may share one restart.
   """
 
   target_sha: str
-  stage: Literal["resolve", "apply", "finish"]
-  image_digest: str | None
+  stage: Literal["resolve", "finish"]
 
 
 _UPDATE_PROGRESS = PlatformUpdateProgress(
@@ -2506,6 +2506,53 @@ def _park_net_conflict(
   )
 
 
+def _park_for_repair(
+  repo: Path, target: str, blockers: list[str], image_digest: str | None,
+) -> None:
+  """Open the reviewed release in the isolated candidate for an agent.
+
+  The agent works on this frozen copy of the merged update instead of the
+  live checkout. Finishing goes through ``continue_platform_overlay_update``,
+  which merges any live edits made meanwhile in one short locked step just
+  before the switch.
+  """
+  source = _rev(repo, _local_branch(repo))
+  carried = _Carried(served=source, pre=source, working=None)
+  merged = (
+    app_git.merge_with_equivalent_changes(repo, source, target)
+    or app_git.merge_refs(repo, source, target)
+  )
+  base = merged.merge_base_oid or _git(
+    "merge-base", source, target, repo=repo, check=False,
+  ).stdout.strip()
+  if merged.status == "conflict":
+    _park_net_conflict(
+      repo, carried, target, source=source, right=target, base=base,
+      stage="committed", reconciliation=app_git.ReconciliationReceipt(),
+    )
+    flag = _read_conflict_flag() or {}
+    parked = {
+      **(flag.get("overlay") or {}), "blockers": blockers,
+      "image_digest": image_digest,
+    }
+    _write_conflict_flag(target, list(flag.get("paths") or []), overlay=parked)
+    return
+  worktree = _overlay_candidate_path(repo)
+  app_git.remove_overlay_worktree(repo, worktree)
+  _git("worktree", "add", "--detach", "-q", str(worktree), source, repo=repo)
+  # Leave the clean merge open so the agent's staged answer is picked up by
+  # the same continue step a conflict resolution uses.
+  app_git._run(worktree, "merge", "--no-commit", "--no-ff", "-q", target, check=False)
+  _git("update-ref", _CONFLICT_RIGHT_REF, target, repo=repo)
+  paths = _unmerged_paths(worktree)
+  parked = {
+    "mode": "net", "worktree": str(worktree), "served": source, "pre": source,
+    "target": target, "paths": paths, "stage": "committed", "base": base,
+    "right": target, "blockers": blockers, "image_digest": image_digest,
+  }
+  _write_conflict_flag(target, paths, overlay=parked)
+
+
 def _net_overlay_commit(repo: Path, target: str, tree: str, source: str) -> str:
   """Make the one local commit after upstream; never rewrite the live branch."""
   target_tree = _commit_tree_oid(repo, target)
@@ -2534,6 +2581,25 @@ def _working_overlay_commit(repo: Path, parent: str, tree: str) -> str:
       unit=app_git.OVERLAY_WORKING_UNIT, disposition="wip",
     ),
   ).stdout.strip()
+
+
+def _record_update_activation(
+  repo: Path, head: str | None, target: str | None,
+) -> PlatformActivationImpact:
+  """Record what the running process still owes for the release at ``head``.
+
+  Compare what this process imported to the new head, not only the incoming
+  target: local commits made while uvicorn ran are part of the same remainder.
+  """
+  served = _served_platform_sha()
+  changed_paths = _activation_paths_between(repo, served, head)
+  changed_paths = _paths_already_active_in_image(repo, changed_paths)
+  incoming_impact = platform_activation.classify_activation(changed_paths)
+  if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
+    mark_activation_needed(
+      head or "", changed_paths, upstream_sha=target, repo=repo,
+    )
+  return _platform_activation_impact(repo, served_to_head=changed_paths)
 
 
 def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
@@ -2590,11 +2656,21 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
         # cannot validate source that imports its newly declared packages.
         # Leave the parked candidate untouched for a reviewed image operation.
         raise PlatformUpdateError("image_rebuild_required")
-      return _finalize_update(
+      result = _finalize_update(
         repo, local, pre=carried.pre, tip=outcome.tip, target=target,
         progress=None, reconciliation=outcome.reconciliation,
         overlay=outcome.overlay,
-      ).status
+      )
+      if result.status == "updated":
+        # Complete the update exactly as an Apply does: its owed activation
+        # keeps it unfinished until the restart or replacement happens, and
+        # the reviewed image stays nameable for Finish.
+        _record_update_activation(repo, result.new_sha, target)
+        _set_update_progress(
+          PlatformUpdatePhase.COMPLETE, plan_id=None, target_sha=target,
+          image_digest=parked.get("image_digest"), active=False,
+        )
+      return result.status
     finally:
       _restore_working_edits(repo, local)
 
@@ -2800,51 +2876,25 @@ def boot_guard_sync() -> str:
 
 
 def unfinished_update(repo: Path = PLATFORM_REPO) -> UnfinishedUpdate | None:
-  """The owner-started update that is not finished yet, if any.
+  """The update that must finish before another starts, if any.
 
-  Derived from the records the updater already keeps: the parked conflict,
-  the activation remainder an Apply recorded for its release, and the
-  progress record of the last started update.
+  Derived from records the updater already keeps: the parked merge and the
+  activation remainder an update recorded for its release.
   """
   flag = _read_conflict_flag() if CONFLICT_FLAG.exists() else None
   if flag and flag.get("upstream"):
-    return UnfinishedUpdate(
-      target_sha=str(flag["upstream"]), stage="resolve", image_digest=None,
-    )
-  progress = platform_update_progress()
+    return UnfinishedUpdate(target_sha=str(flag["upstream"]), stage="resolve")
   marker = _read_activation_marker()
-  if marker and marker["upstream_sha"]:
-    # Only work this release's own finish can do: its official-image paths
-    # and restart-level paths. Local-only image changes are not the update's.
-    owed = set(marker["image_paths"]) | {
-      path for path in marker["paths"]
-      if platform_activation.classify_activation([path])["level"]
-      == platform_activation.ActivationLevel.SERVER_RESTART.value
-    }
-    if owed:
-      target = marker["upstream_sha"]
-      return UnfinishedUpdate(
-        target_sha=target, stage="finish",
-        image_digest=(
-          progress["image_digest"] if progress["target_sha"] == target else None
-        ),
-      )
-  target = progress["target_sha"] or ""
-  if (
-    not progress["active"]
-    and progress["phase"] in {
-      PlatformUpdatePhase.BLOCKED.value, PlatformUpdatePhase.FAILED.value,
-    }
-    and re.fullmatch(r"[0-9a-f]{40}", target)
-    and not _is_ancestor(repo, target, _rev(repo, "HEAD") or "HEAD")
+  if marker and marker["upstream_sha"] and any(
+    platform_activation.classify_activation([path])["level"]
+    == platform_activation.ActivationLevel.IMAGE_REBUILD.value
+    for path in marker["image_paths"]
   ):
-    return UnfinishedUpdate(
-      target_sha=target, stage="apply", image_digest=progress["image_digest"],
-    )
+    return UnfinishedUpdate(target_sha=marker["upstream_sha"], stage="finish")
   return None
 
 
-def start_unfinished_update(
+def park_update_for_agent(
   *,
   plan_id: str,
   current_sha: str,
@@ -2852,11 +2902,11 @@ def start_unfinished_update(
   image_digest: str | None = None,
   repo: Path = PLATFORM_REPO,
 ) -> UnfinishedUpdate:
-  """Record that the owner started this reviewed update without installing it.
+  """Hand a reviewed, blocked update to an agent on a frozen copy.
 
-  Used when a review hands the update to an agent (for example to preserve
-  local changes first), so Settings keeps offering Finish update for exactly
-  this release until it is installed or cancelled.
+  The update is parked in the isolated candidate (see ``_park_for_repair``)
+  so the agent never edits the live checkout, and it stays the one update to
+  finish until the resolver continues it or abandons it.
   """
   with _reconcile_flock():
     _validate_update_plan(
@@ -2864,28 +2914,16 @@ def start_unfinished_update(
       target_sha=target_sha, image_digest=image_digest,
     )
     if not unfinished_update(repo):
-      _set_update_progress(
-        PlatformUpdatePhase.BLOCKED, plan_id=plan_id, target_sha=target_sha,
-        image_digest=image_digest, active=False,
-        error="This update is waiting for its blockers to be resolved.",
-      )
+      base = _git(
+        "merge-base", current_sha, target_sha, repo=repo, check=False,
+      ).stdout.strip() or current_sha
+      _park_for_repair(repo, target_sha, container_replacement_blockers(
+        target_sha, repo, local_change_base=base,
+      ), image_digest)
     pending = unfinished_update(repo)
-    if not pending:
+    if not pending or pending["target_sha"] != target_sha:
       raise PlatformUpdateError("update_plan_stale")
     return pending
-
-
-def cancel_unfinished_update(repo: Path = PLATFORM_REPO) -> None:
-  """Stop tracking an update that never installed; installed ones must finish."""
-  with _reconcile_flock():
-    pending = unfinished_update(repo)
-    if pending is None:
-      return
-    if pending["stage"] != "apply":
-      raise PlatformUpdateError("unfinished_update_installed")
-    _set_update_progress(
-      PlatformUpdatePhase.IDLE, plan_id=None, target_sha=None, active=False,
-    )
 
 
 def platform_status(
@@ -3502,18 +3540,7 @@ def _apply_platform_update_sync(
       chat_id: str | None = None
 
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
-        served = _served_platform_sha()
-        changed_paths = _activation_paths_between(repo, served, head)
-        changed_paths = _paths_already_active_in_image(repo, changed_paths)
-        incoming_impact = platform_activation.classify_activation(changed_paths)
-        if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
-          mark_activation_needed(
-            head or "",
-            changed_paths,
-            upstream_sha=res.target_sha,
-            repo=repo,
-          )
-        return _platform_activation_impact(repo, served_to_head=changed_paths)
+        return _record_update_activation(repo, head, res.target_sha)
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
@@ -3666,9 +3693,25 @@ def _platform_conflict_resolver_message(
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
   if overlay and overlay.get("mode") == "net":
-    return (
+    blockers = list(overlay.get("blockers") or [])
+    opening = (
       "The platform update compared the final local source with the reviewed "
       "upstream source once. Both changed these paths: " + files + ".\n\n"
+      if conflict_paths else
+      "The owner asked you to finish a platform update that local changes "
+      "block.\n\n"
+    )
+    if blockers:
+      opening += (
+        "These image-owned files differ from the reviewed release, so its "
+        "official container image would drop what they do: "
+        + ", ".join(blockers) + ". In the candidate below, keep any behavior "
+        "that still matters through its proper owner (an upstream pull "
+        "request, the installed skill, or an app), then make each file match "
+        f"the release with `git checkout {target_sha} -- <path>` (or `git rm` "
+        "it when the release does not have it).\n\n"
+      )
+    return opening + (
       "The running platform is untouched. Resolve all marked files together "
       f"in the isolated candidate at `{overlay.get('worktree')}`; preserve "
       "the intended local behavior and the incoming upstream behavior. Stage "

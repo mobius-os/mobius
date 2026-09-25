@@ -191,12 +191,6 @@ def clone_env(tmp_path, monkeypatch):
     "UPDATE_PROGRESS_PATH",
     tmp_path / ".update-progress.json",
   )
-  # The reader falls back to the last in-process record; start each clone clean.
-  monkeypatch.setattr(pu, "_UPDATE_PROGRESS", pu.PlatformUpdateProgress(
-    plan_id=None, target_sha=None, image_digest=None,
-    phase=pu.PlatformUpdatePhase.IDLE.value, active=False, error=None,
-    updated_at=0.0,
-  ))
   monkeypatch.setenv("BUILD_SHA", "test-sha")
   origin = _make_origin(tmp_path)
   platform = _clone_platform(tmp_path, origin)
@@ -4410,45 +4404,86 @@ def test_finish_refuses_a_branch_reset_below_the_installed_release(clone_env):
     pu.applied_release_sha(platform)
 
 
-def test_a_started_update_stays_the_only_one_until_it_installs(clone_env):
+def test_a_parked_update_is_the_only_one_until_it_finishes(clone_env):
   origin, platform = clone_env
+  _local_commit(platform, edits={"backend/scripts/init_chat_summaries.py": "local\n"})
   current = _served_sha(platform)
   pinned = _advance_origin(origin, edits={"release.txt": "pinned\n"})
   pu._fetch(platform)
   plan = _apply_plan(current, pinned, platform)
   plan.pop("repo")
 
-  pending = pu.start_unfinished_update(**plan, repo=platform)
-  assert pending == {"target_sha": pinned, "stage": "apply", "image_digest": None}
-  assert pu.platform_status(platform)["unfinished_update"] == pending
+  assert pu.park_update_for_agent(**plan, repo=platform) == {
+    "target_sha": pinned, "stage": "resolve",
+  }
+  assert pu.platform_status(platform)["unfinished_update"]["target_sha"] == pinned
 
-  # A newer release is neither reviewed nor accepted until this one finishes.
   newer = _advance_origin(origin, edits={"release.txt": "newer\n"})
   pu._fetch(platform)
-  preview = pu.platform_update_preview(platform, target_sha=newer)
   with pytest.raises(pu.PlatformUpdateError, match="finish_update_first"):
     pu._validate_update_plan(
-      platform, plan_id=preview["plan_id"], current_sha=current,
-      target_sha=newer,
+      platform, plan_id=pu._update_plan_id(current, newer, None),
+      current_sha=current, target_sha=newer,
     )
-
-  pu.cancel_unfinished_update(platform)
+  assert pu.abandon_platform_overlay_update(platform) == "abandoned"
   assert pu.unfinished_update(platform) is None
 
 
-def test_an_installed_update_owes_its_finish_until_the_restart(clone_env):
+def test_only_an_owed_container_replacement_blocks_newer_updates(clone_env):
   origin, platform = clone_env
-  target = _advance_origin(origin, edits={"backend/app/main.py":
-    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300")})
+  script = "backend/scripts/init_chat_summaries.py"
+  target = _advance_origin(origin, edits={
+    script: "release boot\n",
+    "backend/app/main.py": _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300"),
+  })
   assert pu.reconcile_clone(platform).status == "updated"
-  pu.mark_activation_needed(
-    _served_sha(platform), ["backend/app/main.py"],
-    upstream_sha=target, repo=platform,
-  )
 
-  assert pu.unfinished_update(platform)["stage"] == "finish"
-  with pytest.raises(pu.PlatformUpdateError, match="unfinished_update_installed"):
-    pu.cancel_unfinished_update(platform)
+  # A pending restart alone never blocks: several updates may share one.
+  pu.mark_activation_needed(
+    _served_sha(platform), ["backend/app/main.py"], upstream_sha=target,
+    repo=platform,
+  )
+  assert pu.unfinished_update(platform) is None
+
+  pu.mark_activation_needed(
+    _served_sha(platform), [script], upstream_sha=target, repo=platform,
+  )
+  assert pu.unfinished_update(platform) == {"target_sha": target, "stage": "finish"}
+
+
+def test_blockers_are_fixed_on_a_frozen_copy_and_late_edits_join_at_the_switch(
+  clone_env,
+):
+  origin, platform = clone_env
+  script = "backend/scripts/init_chat_summaries.py"
+  _local_commit(platform, edits={script: "local boot tweak\n"})
+  current = _served_sha(platform)
+  target = _advance_origin(origin, edits={"release.txt": "reviewed\n"})
+  pu._fetch(platform)
+  plan = _apply_plan(current, target, platform)
+  plan.pop("repo")
+
+  pending = pu.park_update_for_agent(**plan, repo=platform)
+
+  assert pending["stage"] == "resolve"
+  parked = pu._read_conflict_flag()["overlay"]
+  assert parked["blockers"] == [script]
+  worktree = Path(parked["worktree"])
+  # The live checkout is untouched while the agent works on the frozen copy.
+  assert _served_sha(platform) == current
+  assert (platform / script).read_text() == "local boot tweak\n"
+  content = pu._platform_conflict_resolver_message(target, [], parked)
+  assert script in content and f"git checkout {target} -- <path>" in content
+
+  _git(worktree, "rm", "-q", script)  # the release does not ship this file
+  # Another chat keeps working on the live checkout meanwhile.
+  _local_commit(platform, edits={"notes.txt": "late live edit\n"})
+
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  assert (platform / "notes.txt").read_text() == "late live edit\n"
+  assert (platform / "release.txt").read_text() == "reviewed\n"
+  assert not (platform / script).exists()
+  assert pu._is_ancestor(platform, target, _served_sha(platform))
 
 
 def test_finish_can_prove_applied_source_without_a_recorded_marker(clone_env):

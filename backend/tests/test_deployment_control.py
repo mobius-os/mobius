@@ -1253,6 +1253,22 @@ async def test_finish_uses_durable_exact_digest_without_discovering_new_release(
 
 
 @pytest.mark.asyncio
+async def test_finish_names_the_reviewed_image_after_a_newer_release(monkeypatch):
+  # A parked or applied update records the image it reviewed, so Finish still
+  # names it after the account service moves on to a newer latest release.
+  monkeypatch.setattr(dc.platform_update, "platform_update_progress", lambda: {
+    "target_sha": "a" * 40, "image_digest": _TEST_DIGEST,
+  })
+
+  async def must_not_look_elsewhere():
+    raise AssertionError("the recorded review already names the image")
+
+  monkeypatch.setattr(dc, "read_rebuild_status", must_not_look_elsewhere)
+  monkeypatch.setattr(dc, "latest_official_release", must_not_look_elsewhere)
+  assert await dc.applied_release_digest("a" * 40) == _TEST_DIGEST
+
+
+@pytest.mark.asyncio
 async def test_finish_refuses_to_substitute_latest_image(monkeypatch):
   async def status():
     return {"expected_sha": "b" * 40, "image_digest": _TEST_DIGEST}
