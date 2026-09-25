@@ -904,10 +904,6 @@ export function upsertTerminalErrorItem(prev, event = {}) {
 //                                   startedAt, lastAt} }
 // status ∈ 'running' | 'done' | 'failed' | 'killed' | 'stopped'.
 
-// The tool blocks a helper attaches to. A Set so lookups never walk the
-// prototype chain.
-const SUBAGENT_TOOLS = new Set(['Task', 'Agent'])
-
 // A helper is terminal once it reaches any of these; a late or replayed
 // task_start / task_progress must never move it back to 'running'.
 const TERMINAL_TASK_STATUSES = new Set(['done', 'failed', 'killed', 'stopped'])
@@ -1001,7 +997,7 @@ function mergeSubagentHelper(existing, event, now) {
  *      first: Claude's terminal TaskUpdatedMessage emits tool_use_id:null
  *      (claude_sdk_runner.py), so a task_done may have no tool_use_id and can
  *      only be routed through the helper it already created.
- *   2. by tool_use_id — the parent Task/Agent tool block. This is how a
+ *   2. by tool_use_id — the tool block that started it. This is how a
  *      task_start finds its block, and how a task_done materializes a helper
  *      whose task_start was missed.
  * No host tool block for either key → a no-op (nothing to annotate).
@@ -1022,10 +1018,11 @@ export function applyTaskEvent(items, event, now = Date.now()) {
       && Object.prototype.hasOwnProperty.call(it.subagent, taskId)
   )
   if (idx === -1 && toolUseId != null) {
+    // Any tool that started the task hosts it, exactly as the backend persists
+    // it: an agent helper on Task/Agent, a shell task on its Bash call (which is
+    // how a live command row learns it went to the background — toolTasks.js).
     idx = items.findIndex(
-      it => it.type === 'tool'
-        && SUBAGENT_TOOLS.has(it.tool)
-        && it.tool_use_id === toolUseId
+      it => it.type === 'tool' && it.tool_use_id === toolUseId
     )
   }
 

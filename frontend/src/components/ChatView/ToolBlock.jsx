@@ -13,6 +13,7 @@ import {
   effectiveToolName,
 } from './toolActivityLabel.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
+import { elapsedLabel, runningBackgroundTask } from './toolTasks.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
 import MemoryRecallCard from './MemoryRecallCard.jsx'
@@ -131,6 +132,10 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // effectiveToolName intentionally classifies the collapsed row as Skill.
   const isShell = t?.tool === 'Bash' || t?.tool === 'shell'
   const label = toolCallLabel(t)
+  // A command sent (or auto-moved) to the background is still running after
+  // its tool call returned: the row says so and times it until it finishes.
+  const backgroundTask = runningBackgroundTask(t)
+  const running = t.status === 'running' || !!backgroundTask
   const iconKind = toolActivityIcon(effectiveName)
   const isImageTool = effectiveName === 'ViewImage'
   const hasEditPreview = typeof t.edit_preview?.diff === 'string'
@@ -413,7 +418,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const headerContent = (
     <>
       <span
-        className={`chat__tool-icon${t.status === 'running' ? ' chat__tool-icon--running' : ''}`}
+        className={`chat__tool-icon${running ? ' chat__tool-icon--running' : ''}`}
         data-tool-kind={iconKind}
         aria-hidden="true"
       >
@@ -422,8 +427,9 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
       {/* The group header names the category ("Ran commands"); each child row
           names the concrete operation ("Ran git status -sb"). */}
       <span className="chat__tool-name" title={label}>
-        {label}{t.status === 'running' || opening ? '…' : ''}
+        {label}{running || opening ? '…' : ''}
       </span>
+      {backgroundTask && <BackgroundClock startedAt={backgroundTask.startedAt} />}
       {/* A direct compact row IS the collapsed transcript overview, so its
           technical code waits inside the disclosed result. A grouped child is
           already behind the activity disclosure and can carry the diagnostic
@@ -608,6 +614,24 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
         </div>
       )}
     </div>
+  )
+}
+
+// A live elapsed clock, only while the background command runs; a finished
+// command carries no duration. The running verb plus a ticking clock already
+// says "still going in the background", so no extra label. The clock is not a
+// live region, so assistive tech is not re-announced every tick.
+function BackgroundClock({ startedAt }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  if (!Number.isFinite(startedAt)) return null
+  return (
+    <span className="chat__tool-elapsed">
+      {elapsedLabel(now - startedAt)}
+    </span>
   )
 }
 

@@ -568,6 +568,29 @@ def test_detail_projection_keeps_excerpt_when_sidecar_is_missing():
     ) is messages
 
 
+def test_historical_read_never_shows_a_task_still_running():
+    """A turn that ended first lost the task's terminal fact; live keeps it."""
+    def bash(task_status):
+        return {"role": "assistant", "blocks": [{
+            "type": "tool", "tool": "Bash", "status": "done",
+            "subagent": {
+                "b1a2b3c4d": {"task_type": "local_bash", "status": task_status},
+                "a1": {"task_type": "local_agent", "status": "done"},
+            },
+        }]}
+    messages = [bash("running"), bash("running")]
+
+    projected = project_messages_for_detail(
+        messages, fetchable_tool_output_ids=set(), live_message=messages[1],
+    )
+
+    tasks = projected[0]["blocks"][0]["subagent"]
+    assert tasks["b1a2b3c4d"]["status"] == "stopped"
+    assert tasks["a1"]["status"] == "done"
+    assert messages[0]["blocks"][0]["subagent"]["b1a2b3c4d"]["status"] == "running"
+    assert projected[1] is messages[1]
+
+
 # -- sink reduction + stash ----------------------------------------------
 class _FakeBC:
     def __init__(self):
