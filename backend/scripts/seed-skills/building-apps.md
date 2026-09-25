@@ -547,16 +547,24 @@ Online-only apps may still use an explicit `https://esm.sh/...` dynamic import w
 
 ## Offline-capable apps (opt-in)
 
-Offline support is an app-level product choice. Before implementing it, read
-the canonical contract at `/data/platform/OFFLINE-APPS.md`; it defines the
-platform/app ownership boundary, UI states, and verification matrix. The
-storage mechanics stay here, including the offline conflict contract above.
+Offline support is an app-level product choice, not a requirement. Möbius supplies the generic primitives: an isolated read-through cache and durable write queue per app, read-your-writes for ordinary reads, connectivity state and queue drain after reconnect, complete/incomplete listing status, authoritative value/version pairs, bounded intent retention with conflict replay, and host loading/error boundaries. The app owns its data model and product policy: which data to warm, whether partial data is safe to show or act on, how domain edits merge (the [offline conflict contract](#offline-conflict-contract) above), its conflict and recovery UI, and whether offline use is worth promising at all. Keep domain merge rules in the app; never add app-specific sync to the platform or a second cache/queue beside `window.mobius.storage`.
 
-Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json` only after running the contract's cold-reload verification for every surface the app claims to support; `apply_app.py` applies it with the accepted source revision.
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior work through a cold offline reload. Set it in `mobius.json` only after the verification below passes for every surface the app claims to support; `apply_app.py` applies it with the accepted source revision. Packaged nested documents under `/app-embeds/` have no recursive offline guarantee yet, so an app that depends on them stays online-only.
 
 A network-dependent app marked offline-capable can reopen into stale or empty state and look broken. Keep the flag false unless the product promise is real.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
+
+**Verify behavior, not the flag.** For each claimed surface (workspace and standalone):
+
+1. Open online and warm every required code and data path.
+2. Go fully offline (page, frame, and service-worker network paths) and reload.
+3. Confirm complete cached views stay intact and incomplete reads never erase prior state.
+4. Make offline writes, reload, and confirm they remain visible and queued.
+5. Reconnect and wait for actual server synchronization.
+6. Introduce a disjoint remote edit and confirm recovery keeps the remote change and every retained local intent, including after a frame remount and under reversed async completion order.
+
+Browser automation covers workspace and standalone documents, frames, and the service worker; OS-installed-PWA launch and device install UI remain device-only and must not be implied by a browser pass.
 
 ---
 

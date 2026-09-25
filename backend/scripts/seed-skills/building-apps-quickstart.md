@@ -143,15 +143,13 @@ uses:
 ```
 
 List every imported sibling source file in `source_files`. Keep
-`offline_capable` false for a new ordinary app. When updating an existing app,
-preserve its accepted offline promise unless you deliberately change it after
-following the canonical contract in `/data/platform/OFFLINE-APPS.md`. If
-offline use materially benefits a new product, switch to `building-apps.md`
-and follow that contract before setting the flag true. The manifest's `icon` is
-the package-artwork source of truth: apply validates and materializes that
-exact accepted file, so do not upload a second copy after applying. The apply
-helper also applies the offline flag and versioned `capabilities` object; do
-not patch the app row separately.
+`offline_capable` false for a new app and preserve an existing app's value on
+update; see `building-apps.md` if offline use is a real product promise.
+
+The manifest's `icon` is the package-artwork source of truth: apply validates
+and materializes that exact accepted file, so do not upload a second copy after
+applying. The apply helper also applies the offline flag and versioned
+`capabilities` object; do not patch the app row separately.
 
 ### 3. Apply once early, then after each coherent revision
 
