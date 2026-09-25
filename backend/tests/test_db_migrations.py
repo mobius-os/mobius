@@ -4445,6 +4445,8 @@ def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
   eng = create_engine(f"sqlite:///{tmp_path / 'rename.db'}")
   with eng.begin() as conn:
     conn.execute(text("CREATE TABLE chats (id TEXT PRIMARY KEY, agent_settings_json JSON)"))
+    conn.execute(text("CREATE TABLE delegations (id TEXT PRIMARY KEY, model TEXT)"))
+    conn.execute(text("INSERT INTO delegations VALUES ('h1', 'inkling'), ('h2', 'spark')"))
     for chat_id, value in (
       ("a", {"model": "inkling", "effort": "low"}),
       ("b", {"model": "spark"}),
@@ -4460,6 +4462,9 @@ def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
   assert _json.loads(stored["a"]) == {"model": "evolve", "effort": "low"}
   assert _json.loads(stored["b"]) == {"model": "spark"}
   assert _json.loads(stored["c"]) == {"model": "claude-opus-4-8", "note": "inkling"}
+  with eng.begin() as conn:
+    helpers = dict(conn.execute(text("SELECT id, model FROM delegations")).fetchall())
+  assert helpers == {"h1": "evolve", "h2": "spark"}
   assert _json.loads((shared / "agent-settings.json").read_text()) == {
     "model": "evolve",
     "background_agents": {"providers": [

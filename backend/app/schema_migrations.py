@@ -5296,8 +5296,9 @@ def _rename_inkling_to_evolve(eng) -> None:
 
   The service now serves Evolve (Qwen3.8 Max) as ``evolve`` and rejects the
   old ``inkling`` id, so a saved choice still naming it could not run. Only a
-  ``model`` field exactly equal to ``inkling`` changes, in chat settings and
-  the shared agent settings (including background-agent providers).
+  ``model`` field exactly equal to ``inkling`` changes, in chat settings, the
+  shared agent settings (including background-agent providers), and a
+  helper's stored model.
   """
   import json as _json
   import os as _os
@@ -5337,6 +5338,14 @@ def _rename_inkling_to_evolve(eng) -> None:
             text("UPDATE chats SET agent_settings_json = :value WHERE id = :id"),
             {"value": _json.dumps(settings), "id": chat_id},
           )
+  # A helper's stored model overrides its chat's settings on every later run.
+  if "delegations" in inspector.get_table_names() and "model" in {
+    c["name"] for c in inspector.get_columns("delegations")
+  }:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE delegations SET model = 'evolve' WHERE model = 'inkling'"
+      ))
   shared = _Path(_os.environ.get("DATA_DIR", "/data")) / "shared" / "agent-settings.json"
   try:
     settings = _json.loads(shared.read_text(encoding="utf-8"))
