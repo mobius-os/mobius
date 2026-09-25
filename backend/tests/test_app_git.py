@@ -4452,3 +4452,33 @@ def test_path_scoped_dirty_check_ignores_unrelated_work_but_not_reviewed_paths(
   (repo / "new" / "added.js").write_text("untracked reviewed file\n")
   assert app_git.worktree_dirty(repo, reviewed)
   assert app_git.worktree_dirty(repo, []) is app_git.worktree_dirty(repo)
+
+
+def test_read_ref_tree_returns_every_blob_byte_for_byte(tmp_path):
+  """One batched read returns exactly the committed bytes of every file."""
+  repo = tmp_path / "tree-read"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  files = {
+    "index.jsx": b"export default () => null\n",
+    "empty.txt": b"",
+    "icon.bin": bytes(range(256)) * 4,
+    "with space/nested file.js": b"x\n",
+    "no-newline": b"tail",
+  }
+  for rel, data in files.items():
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+  os.symlink("index.jsx", repo / "link.jsx")
+  subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+      "commit", "-q", "-m", "tree",
+    ],
+    check=True,
+  )
+
+  assert app_git.read_ref_tree(repo, "HEAD") == {
+    **files, "link.jsx": b"index.jsx",
+  }

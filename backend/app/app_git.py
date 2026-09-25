@@ -3270,23 +3270,43 @@ def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
   `MergeResult.merged_tree_oid` here and writes it back, so one and many files
   share one path. Paths are repo-relative POSIX; bytes are read binary-faithful
   (no text decode). `-z` keeps paths NUL-separated so names with spaces or
-  newlines survive.
+  newlines survive. All blobs stream through one `cat-file --batch` process:
+  update checks and installs read several trees each, and one subprocess per
+  file dominated their cost. Gitlinks have no blob in this repository and are
+  skipped.
   """
   repo = Path(source_dir)
   listing = subprocess.run(
-    ["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", tree_oid],
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", tree_oid],
     capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
   )
-  files: dict[str, bytes] = {}
-  for rel in listing.stdout.decode().split("\0"):
-    if not rel:
+  entries: list[tuple[str, str]] = []
+  for record in listing.stdout.split(b"\0"):
+    if not record:
       continue
-    blob = subprocess.run(
-      ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:{rel}"],
-      capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
-    )
-    if blob.returncode == 0:
-      files[rel] = blob.stdout
+    meta, rel = record.split(b"\t", 1)
+    _mode, kind, oid = meta.split()
+    if kind == b"blob":
+      entries.append((rel.decode(), oid.decode()))
+  if not entries:
+    return {}
+  batch = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "--batch"],
+    input="".join(f"{oid}\n" for _rel, oid in entries).encode(),
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  )
+  out = batch.stdout
+  files: dict[str, bytes] = {}
+  offset = 0
+  for rel, oid in entries:
+    header_end = out.index(b"\n", offset)
+    header = out[offset:header_end].split()
+    if len(header) != 3 or header[0].decode() != oid:
+      raise RuntimeError(f"git cat-file --batch could not read {rel}")
+    start = header_end + 1
+    end = start + int(header[2])
+    files[rel] = out[start:end]
+    offset = end + 1
   return files
 
 
