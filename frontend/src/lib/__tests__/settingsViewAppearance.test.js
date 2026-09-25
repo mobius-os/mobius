@@ -63,7 +63,9 @@ test('update versions paint from the persisted status cache without an Unknown f
 
 test('restart confirms on the same button for four seconds without a cancel button', () => {
   assert.match(updates, /setTimeout\(\(\) => setConfirmRestart\(null\), 4000\)/)
-  assert.match(updates, /if \(confirmRestart !== source\) return setConfirmRestart\(source\)[\s\S]*?update\.restart\(\)/)
+  assert.match(updates, /if \(confirmRestart !== source\) \{[\s\S]*?return setConfirmRestart\(source\)[\s\S]*?update\.restart\(\)/)
+  // A double-click must not arm and confirm in one gesture.
+  assert.match(updates, /if \(performance\.now\(\) - armedAt\.current < RESTART_CONFIRM_MIN_MS\) return[\s\S]*?update\.restart\(\)/)
   assert.match(updates, /act: \(\) => pressRestart\('primary'\)/)
   assert.match(updates, /onClick=\{\(\) => pressRestart\('dedicated'\)\}/)
   assert.doesNotMatch(updates, /Not now|Restart server/)

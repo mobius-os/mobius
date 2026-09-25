@@ -11,6 +11,8 @@ import UpdateRepairAction from './UpdateRepairAction.jsx'
 import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import './PlatformUpdates.css'
 
+const RESTART_CONFIRM_MIN_MS = 500
+
 export default function PlatformUpdates({ active, refreshToken, onOpenChat, inertBoundaryRef }) {
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
   const { platform, cachedPlatform, rebuild, version, phase, busy } = update
@@ -18,6 +20,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const [confirmRestart, setConfirmRestart] = useState(null)
   const actionRef = useRef(null)
   const restoreFocus = useRef(false)
+  const armedAt = useRef(0)
   const level = platformActivationLevel(platform)
   const restartNeeded = level === 'server_restart'
   const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
@@ -60,9 +63,14 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
     actionRef.current?.focus({ preventScroll: true })
   }
   // The first press arms that button as its own confirmation; the second restarts.
+  // A press right after arming is the same double-click, not a confirmation.
   function pressRestart(source) {
     update.clearError()
-    if (confirmRestart !== source) return setConfirmRestart(source)
+    if (confirmRestart !== source) {
+      armedAt.current = performance.now()
+      return setConfirmRestart(source)
+    }
+    if (performance.now() - armedAt.current < RESTART_CONFIRM_MIN_MS) return
     setConfirmRestart(null)
     update.restart()
   }
