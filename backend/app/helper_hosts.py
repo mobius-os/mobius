@@ -56,7 +56,8 @@ HOST_MAX_AGE_SECONDS = 12 * 60 * 60
 # one while waiting on its thread's notifications.
 CODEX_HOST_WORKERS = 64
 # Marks every host process so a host orphaned by a server crash can be found
-# and ended at the next boot. Its value is the host key digest (non-secret).
+# and ended at the next boot. Its value names the owning server incarnation and
+# the host key digest (non-secret): see host_marker.
 HOST_MARKER_ENV = "MOBIUS_HELPER_HOST"
 # Env entries that describe the run rather than the host. They are passed per
 # helper turn, never baked into the shared host process.
@@ -296,8 +297,29 @@ class HostManager:
 MANAGER = HostManager()
 
 
+def host_marker(digest: str) -> str:
+  """Marker value for a host this server starts: ``<pid>:<start ticks>:<digest>``.
+
+  Naming the owning server incarnation lets boot cleanup end only hosts whose
+  server is gone, never hosts a still-running server owns (an overlapping
+  server during replacement, or a test run on a live instance).
+  """
+  from app.process_groups import _start_ticks
+  own = os.getpid()
+  return f"{own}:{_start_ticks(own)}:{digest}"
+
+
+def _owner_alive(marker: bytes) -> bool:
+  from app.process_groups import _start_ticks
+  try:
+    pid, ticks, _digest = marker.split(b":", 2)
+    return _start_ticks(int(pid)) == int(ticks)
+  except (OSError, ProcessLookupError, ValueError, IndexError):
+    return False
+
+
 def end_orphaned_hosts() -> int:
-  """At boot: end host processes a previous server process left behind."""
+  """At boot: end host processes whose owning server is no longer running."""
   from app.process_groups import _signal_same_process, _start_ticks
   ended = 0
   needle = f"{HOST_MARKER_ENV}=".encode()
@@ -308,8 +330,12 @@ def end_orphaned_hosts() -> int:
     pid = int(entry)
     try:
       with open(f"/proc/{pid}/environ", "rb") as handle:
-        if not any(v.startswith(needle) for v in handle.read().split(b"\0")):
-          continue
+        marker = next(
+          (v[len(needle):] for v in handle.read().split(b"\0") if v.startswith(needle)),
+          None,
+        )
+      if marker is None or _owner_alive(marker):
+        continue
       ticks = _start_ticks(pid)
     except (OSError, ProcessLookupError, ValueError, IndexError):
       continue

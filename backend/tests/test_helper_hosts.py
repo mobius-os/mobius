@@ -236,19 +236,32 @@ def test_host_helper_sessions_round_trip():
   assert claude_host.agent_type_for(None) == "mobius-helper"
 
 
-def test_boot_ends_host_processes_a_crashed_server_left_behind():
+def test_boot_ends_only_hosts_whose_server_is_gone():
   import subprocess
+  gone = subprocess.Popen(["true"])
+  gone.wait()
   orphan = subprocess.Popen(
     ["sleep", "60"], start_new_session=True,
-    env=dict(os.environ, **{helper_hosts.HOST_MARKER_ENV: "host-digest"}),
+    env=dict(os.environ, **{
+      helper_hosts.HOST_MARKER_ENV: f"{gone.pid}:1:host-digest",
+    }),
+  )
+  # A live server's host (here: owned by this test process) is never touched,
+  # so running this test on a live instance cannot end its real hosts.
+  owned = subprocess.Popen(
+    ["sleep", "60"], start_new_session=True,
+    env=dict(os.environ, **{
+      helper_hosts.HOST_MARKER_ENV: helper_hosts.host_marker("live-digest"),
+    }),
   )
   bystander = subprocess.Popen(["sleep", "60"], start_new_session=True)
   try:
     assert helper_hosts.end_orphaned_hosts() >= 1
     orphan.wait(timeout=2)
+    assert owned.poll() is None
     assert bystander.poll() is None
   finally:
-    for proc in (orphan, bystander):
+    for proc in (orphan, owned, bystander):
       proc.kill()
       proc.wait()
 

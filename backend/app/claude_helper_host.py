@@ -558,7 +558,7 @@ async def run_claude_host_turn(
   from app.runner_registry import registry, RunnerKind
 
   host_env, turn_env = helper_hosts.split_env(base_env)
-  host_env[helper_hosts.HOST_MARKER_ENV] = helper_host_key.digest
+  host_env[helper_hosts.HOST_MARKER_ENV] = helper_hosts.host_marker(helper_host_key.digest)
   marker = turn_env.get(RUN_MARKER_ENV, "")
   env_file = TurnEnvFile(Path(turn_env.get("TMPDIR") or data_dir), marker, turn_env)
   settings = agent_settings or {}

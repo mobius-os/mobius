@@ -1601,7 +1601,7 @@ async def _run_codex_sdk_turn(
   if helper_host_key is not None:
     from app import helper_hosts
     host_env, turn_env = helper_hosts.split_env(env)
-    host_env[helper_hosts.HOST_MARKER_ENV] = helper_host_key.digest
+    host_env[helper_hosts.HOST_MARKER_ENV] = helper_hosts.host_marker(helper_host_key.digest)
     config_kwargs["env"] = host_env
     turn_env_file = helper_hosts.TurnEnvFile(
       Path(turn_env.get("TMPDIR") or runtime_data_dir),
