@@ -333,7 +333,7 @@
         // needs guarding for any framed route, not just the embed path above.
         try {
           navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {})
-        } catch (error) { /* sandboxed: no worker is possible or wanted here */ }
+        } catch { /* sandboxed: no worker is possible or wanted here */ }
       }
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
