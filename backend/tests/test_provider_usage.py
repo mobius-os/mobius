@@ -340,12 +340,18 @@ _READY_CLAUDE_PAYLOAD = {
 
 
 def _claude_usage_http(monkeypatch, provider_usage, responses):
-  """Serve ``responses`` (status, json) in order to the Claude usage read."""
+  """Serve each ``(status, json)`` in order to one Claude usage read attempt.
+
+  An attempt is the ordinary read plus the reset-offer read; both get the
+  attempt's response unless it is a ``{"usage": ..., "reset": ...}`` pair.
+  """
   seen = []
 
   def handler(request):
-    seen.append(request.url)
-    status, body = responses.pop(0)
+    kind = "reset" if "cedar_ember" in str(request.url) else "usage"
+    attempt = responses[sum(1 for prior in seen if prior == kind)]
+    seen.append(kind)
+    status, body = attempt[kind] if isinstance(attempt, dict) else attempt
     return httpx.Response(status, json=body, headers={"retry-after": "0"})
 
   real_client = httpx.AsyncClient
@@ -378,8 +384,36 @@ async def test_cold_claude_read_with_no_windows_is_retried(
 
   result = await provider_usage._fetch_claude_usage(str(tmp_path))
 
-  assert len(seen) == 2
+  assert len(seen) == 4
   assert result["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_claude_usage_keeps_paid_extra_usage_beside_the_reset_offer(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  _claude_usage_http(monkeypatch, provider_usage, [{
+    "usage": (200, {
+      **_READY_CLAUDE_PAYLOAD,
+      "extra_usage": {"is_enabled": True, "utilization": 25},
+    }),
+    "reset": (200, {
+      **_READY_CLAUDE_PAYLOAD,
+      "cedar_ember": {"eligible": False, "grants": []},
+    }),
+  }])
+
+  snapshot = await provider_usage._fetch_claude_usage(str(tmp_path))
+
+  assert snapshot["extra_usage"] == {
+    "enabled": True,
+    "available": True,
+    "used_percent": 25.0,
+    "manageable": True,
+  }
+  assert snapshot["reset_credits"]["eligible"] is False
 
 
 @pytest.mark.asyncio
@@ -396,7 +430,7 @@ async def test_rate_limited_claude_read_is_refused_without_immediate_retry(
   with pytest.raises(provider_usage.ProviderUsageRefused) as refused:
     await provider_usage._fetch_claude_usage(str(tmp_path))
 
-  assert len(seen) == 1
+  assert len(seen) == 2
   # Claude sends "Retry-After: 0", which is not a usable backoff.
   assert refused.value.retry_after is None
 

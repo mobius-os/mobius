@@ -37,6 +37,7 @@ _CLAUDE_EXTRA_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/organizations/"
   "{organization_uuid}/overage_spend_limit"
 )
+_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_RESET_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 )
@@ -560,12 +561,21 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     for delay in (0.0, *_CLAUDE_COLD_RETRY_DELAYS):
       if delay:
         await asyncio.sleep(delay)
-      response = await client.get(_CLAUDE_RESET_USAGE_URL, headers=headers)
-      if response.status_code == 429:
-        raise ProviderUsageRefused("claude", _retry_after_seconds(response))
-      response.raise_for_status()
+      # The reset-offer read skips spend data, so paid extra usage comes from
+      # the ordinary read; the reset read contributes only its offer.
+      responses = await asyncio.gather(
+        client.get(_CLAUDE_USAGE_URL, headers=headers),
+        client.get(_CLAUDE_RESET_USAGE_URL, headers=headers),
+      )
+      for response in responses:
+        if response.status_code == 429:
+          raise ProviderUsageRefused("claude", _retry_after_seconds(response))
+        response.raise_for_status()
+      usage, reset = (response.json() for response in responses)
+      if isinstance(usage, dict) and isinstance(reset, dict):
+        usage = {**usage, "cedar_ember": reset.get("cedar_ember")}
       snapshot = normalize_claude_usage(
-        response.json(),
+        usage,
         subscription_type=subscription_type,
       )
       if snapshot.get("state") != "unavailable":
