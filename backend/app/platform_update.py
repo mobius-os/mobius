@@ -2651,7 +2651,13 @@ def _prepare(
   if _changes_python_dependencies(repo, snapshot, prepared):
     # The running image cannot check source that imports new packages.
     raise PlatformUpdateError("image_rebuild_required")
-  impact = _incoming_activation_impact(repo, snapshot, prepared)
+  # The image is owed for this release's changes and for any activation the
+  # running image still owes (a Finish after the source already contains the
+  # release has no incoming changes but still needs its image).
+  impact = platform_activation.classify_activation([
+    *_pending_activation_paths(repo),
+    *_activation_paths_between(repo, snapshot, prepared),
+  ])
   requires_image = (
     platform_activation.ActivationLevel.IMAGE_REBUILD.value
     in impact["required_actions"]
