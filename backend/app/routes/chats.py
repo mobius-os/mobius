@@ -35,7 +35,7 @@ from app.chat_visibility import (
   visible_in_owner_drawer,
 )
 from app.chat_event_sink import active_sink_assistant_message_id
-from app.chat_activity import chat_activity_page, helper_causes_by_run_id
+from app.chat_activity import chat_activity_page
 from app.chat_waits import (
   armed_wait_chat_ids,
   armed_waits_for_chat,
@@ -696,17 +696,6 @@ def _chat_detail_response(
         continue
       next_page[relative_index] = {**message, "continuation_reason": reason}
     page = next_page
-  helper_causes = helper_causes_by_run_id(db, chat.id, [
-    message["id"] for message in page
-    if message.get("role") == "assistant" and isinstance(message.get("id"), str)
-  ])
-  if helper_causes:
-    page = [
-      {**message, "helper_causes": helper_causes[message["id"]]}
-      if message.get("role") == "assistant" and message.get("id") in helper_causes
-      else message
-      for message in page
-    ]
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   # The picker's current model must match what a message would actually use. A

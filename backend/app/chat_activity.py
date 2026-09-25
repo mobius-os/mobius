@@ -112,8 +112,7 @@ def _helper_row_events(
 
   While the helper works the row carries its current step; once it settles the
   same row carries its final status and duration. Its result is read in the
-  helper's own conversation, and an answer that began by receiving it names it
-  as its cause (``helper_causes_by_run_id``), so there is no second row.
+  helper's own conversation, so there is no second row.
   """
   event_id = literal("delegation:") + models.Delegation.id + literal(":running")
   query = db.query(models.Delegation).filter(
@@ -173,52 +172,6 @@ def _helper_consumption(row: models.Delegation, run) -> str:
   ):
     return "available"
   return "unknown"
-
-
-def helper_causes_by_run_id(
-  db: Session, chat_id: str, run_ids: list[str],
-) -> dict[str, list[dict]]:
-  """Helpers whose results each run received as it started.
-
-  A run records the helper results it was handed in ``activity_delivery_json``
-  (results steered into a turn already running are not recorded there), so an
-  answer written by such a run was started by those helpers finishing.
-  """
-  if not run_ids:
-    return {}
-  runs = db.query(models.ChatRun.id, models.ChatRun.activity_delivery_json).filter(
-    models.ChatRun.chat_id == chat_id,
-    models.ChatRun.id.in_(run_ids),
-    models.ChatRun.activity_delivery_json.is_not(None),
-  ).all()
-  wanted = {
-    run_id: [value for value in envelope.get("delegation_ids") or [] if isinstance(value, str)]
-    for run_id, envelope in runs
-    if isinstance(envelope, dict)
-  }
-  ids = {value for values in wanted.values() for value in values}
-  if not ids:
-    return {}
-  rows = {
-    row.id: row for row in db.query(models.Delegation).filter(
-      models.Delegation.id.in_(ids),
-      models.Delegation.parent_chat_id == chat_id,
-    ).all()
-  }
-  causes: dict[str, list[dict]] = {}
-  for run_id, values in wanted.items():
-    helpers = []
-    for value in values:
-      row = rows.get(value)
-      if row is None:
-        continue
-      status, _run, _result = derived_status(db, row, load_result=False)
-      helpers.append({
-        "delegation_id": row.id, "task_key": row.task_key, "status": status,
-      })
-    if helpers:
-      causes[run_id] = helpers
-  return causes
 
 
 def chat_activity_page(

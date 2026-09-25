@@ -20,7 +20,6 @@ import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
-import HelperCauseCard from './HelperCauseCard.jsx'
 import { isContinuationMessage } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
@@ -122,18 +121,15 @@ function GoalHistory({ msg }) {
 }
 
 // Whatever started this answer leads it and stays visible while it streams:
-// a recovery resume (projected from its run), a wait that woke the chat, or
-// helpers whose results it began by receiving.
+// a recovery resume (projected from its run) or a wait that woke the chat.
 function AnswerCause({ msg }) {
   if (msg.role !== 'assistant') return null
   const waits = (msg.wait_summaries || []).filter(waitWokeItsAnswer)
-  const helpers = Array.isArray(msg.helper_causes) ? msg.helper_causes : []
-  if (!msg.continuation_reason && !waits.length && !helpers.length) return null
+  if (!msg.continuation_reason && !waits.length) return null
   return (
     <div className="chat__answer-cause">
       {msg.continuation_reason && <ContinuationCard msg={msg} />}
       {waits.map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)}
-      {helpers.length > 0 && <HelperCauseCard causes={helpers} />}
     </div>
   )
 }

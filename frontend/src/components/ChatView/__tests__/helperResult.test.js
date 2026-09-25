@@ -6,7 +6,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: Card } = await vite.ssrLoadModule('/src/components/ChatView/HelperResultCard.jsx')
-const { default: HelperCauseCard } = await vite.ssrLoadModule('/src/components/ChatView/HelperCauseCard.jsx')
 const priorWindow = globalThis.window
 globalThis.window = { location: new URL('https://mobius.test/shell') }
 after(() => { globalThis.window = priorWindow; return vite.close() })
@@ -39,20 +38,4 @@ test('failed, reviewable and stopped helpers say how they ended', () => {
   assert.match(render({ status: 'needs_review' }), /· Needs review/)
   assert.match(render({ status: 'cancelled' }), /· Stopped/)
   assert.match(render({ status: 'failed' }), /chat__subagent-dot--failed/)
-})
-
-test('an answer woken by helper results names them in one line', () => {
-  const one = renderToStaticMarkup(React.createElement(HelperCauseCard, {
-    causes: [{ delegation_id: 'one', task_key: 'Review', status: 'completed' }],
-  }))
-  assert.match(one, /Helper finished/)
-  assert.match(one, /Review/)
-  const two = renderToStaticMarkup(React.createElement(HelperCauseCard, {
-    causes: [
-      { delegation_id: 'one', task_key: 'Review', status: 'completed' },
-      { delegation_id: 'two', task_key: 'Audit', status: 'failed' },
-    ],
-  }))
-  assert.match(two, /Helpers settled/)
-  assert.match(two, /Review, Audit/)
 })

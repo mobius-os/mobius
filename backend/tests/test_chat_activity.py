@@ -346,29 +346,3 @@ def test_a_helper_settled_before_launch_rows_keeps_its_recorded_place(db):
   assert event['id'] == 'delegation:helper-legacy:running'
   assert event['display_position'] == {'assistant_message_id': 'old-answer', 'block_index': 2}
 
-
-def test_an_answer_names_the_helpers_whose_results_started_it(client, auth, db):
-  stamp = datetime(2026, 9, 9, 4, 0)
-  db.add(models.Chat(id="cause-parent", title="Cause", messages=[
-    {"id": "run-woken", "role": "assistant", "content": "Both reviews are in.", "ts": 1},
-    {"id": "run-plain", "role": "assistant", "content": "Earlier answer.", "ts": 0},
-  ]))
-  _helper(db, suffix="cause", parent_chat_id="cause-parent", created_at=stamp)
-  db.add(models.ChatRun(
-    id="run-woken", root_run_id="run-woken", chat_id="cause-parent",
-    status="completed",
-    activity_delivery_json={"delegation_ids": ["helper-cause"]},
-  ))
-  db.add(models.ChatRun(
-    id="run-plain", root_run_id="run-plain", chat_id="cause-parent",
-    status="completed",
-  ))
-  db.commit()
-
-  response = client.get("/api/chats/cause-parent", headers=auth)
-  assert response.status_code == 200, response.text
-  messages = {m.get("id"): m for m in response.json()["messages"]}
-  assert messages["run-woken"]["helper_causes"] == [
-    {"delegation_id": "helper-cause", "task_key": "task-cause", "status": "completed"},
-  ]
-  assert "helper_causes" not in messages["run-plain"]
