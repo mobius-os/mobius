@@ -260,8 +260,7 @@ def _persisted_block(block: dict) -> dict:
 # context_compacted, tool_start, error, question, secure_input_request.
 #
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
-#  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
-#    `ping`, `signature_delta`, `content_block_stop`), plus
+#  - Bookkeeping events such as
 #    context_usage / session_init / done / catch_up_done / queued_turn_starting. These
 #    interleave BETWEEN successive thinking_delta events; closing the run on them
 #    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
@@ -1007,7 +1006,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return False
 
   # Only a NEW visible content block ends a thinking run. Closing on transparent
-  # bookkeeping events (unknown_sdk_event/ping/signature_delta, usage, done, …)
+  # bookkeeping events (usage, done, …)
   # is what fragmented one reasoning pass into dozens of tiny blocks.
   if event_type in _THINKING_INTERRUPTING_TYPES:
     _close_trailing_thinking(assistant_blocks)
