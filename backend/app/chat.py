@@ -4614,7 +4614,7 @@ async def run_chat(
         )
     # Parent progress must not wait on optional summary generation.
     try:
-      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+      if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
         from app.delegations import wake_parent_after_child_settled
         await wake_parent_after_child_settled(chat_id)
     except Exception:
@@ -4657,11 +4657,15 @@ async def run_chat(
 
 # The durable, settled, non-resuming terminals where a delegation child's
 # result is final and its ChatRun terminal status has committed (FinishRun ran
-# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
-# is excluded — the terminal isn't durable there; the boot reconcile covers it.
-_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+# inside drain_and_release before the disposition returned). A Stop is final
+# too: the settle hook records where the parent was, and its own status guard
+# decides whether to wake. FAILED_LEAVE_MARKER is excluded — the terminal
+# isn't durable there; the boot reconcile covers it. Parked children remain
+# resumable, not settled.
+_DELEGATION_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
 })
 
 # Reclaim caches only after this exact physical run reached a settled boundary.

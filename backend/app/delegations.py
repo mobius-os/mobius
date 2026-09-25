@@ -1226,7 +1226,11 @@ async def _cancel_delegation_execution_locked(
     if durable_active or is_chat_running(row.child_chat_id):
       return False
     mark_cancelled(db, row)
-    return True
+  # Cancellation is a settle transition that bypasses run_chat's finally when
+  # the child was not running. The hook's first-observation latch keeps an
+  # earlier Stop's frontier; its cancelled guard never wakes the parent.
+  await wake_parent_after_child_settled(child_id)
+  return True
 
 
 # --- Parent activity delivery on child completion ---------------------------
@@ -2237,8 +2241,12 @@ def claim_scheduled_parent_wake(chat_id: str, message: object) -> bool:
 
 
 async def wake_parent_after_child_settled(child_chat_id: str) -> None:
-  """Live hook (run_chat's finally): if this settled chat is a delegation child
-  whose parent opted in and hasn't been woken, wake the parent. Best-effort."""
+  """Observe a delegation child's settle transition. Best-effort.
+
+  Callers: run_chat's finally for settled dispositions, and cancellation. A
+  terminal result records the parent's live frontier once and refreshes the
+  parent's activity surfaces; only an opted-in, unwoken, wake-eligible result
+  also wakes the parent."""
   from app.database import SessionLocal
 
   try:

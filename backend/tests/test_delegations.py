@@ -1958,6 +1958,42 @@ def test_cancelling_an_owner_settles_descendants_before_the_parent(db):
   assert leaf.cancelled_at <= owner.cancelled_at
 
 
+def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypatch):
+  from app.chat_activity import chat_activity_page
+
+  parent_id, _child, delegation_id = _seed_delegation(
+    db, suffix="cancel-position", child_status="parked",
+  )
+  frontier = {"assistant_message_id": "parent-turn", "block_index": 7}
+  monkeypatch.setattr(
+    "app.chat_event_sink.active_sink_activity_position",
+    lambda chat_id: frontier if chat_id == parent_id else None,
+  )
+  published = []
+  monkeypatch.setattr(
+    delegations_mod, "publish_chat_activity_changed", published.append,
+  )
+  starts = _capture_activity_starts(monkeypatch)
+
+  assert asyncio.run(
+    delegations_mod.cancel_delegation_execution(delegation_id)
+  ) is True
+  frontier = {"assistant_message_id": "parent-turn", "block_index": 99}
+  asyncio.run(delegations_mod.cancel_delegation_execution(delegation_id))
+
+  db.expire_all()
+  [event] = [
+    event for event in chat_activity_page(db, parent_id)["events"]
+    if event["delegation_id"] == delegation_id
+  ]
+  assert event["status"] == "cancelled"
+  assert event["display_position"] == {
+    "assistant_message_id": "parent-turn", "block_index": 7,
+  }
+  assert parent_id in published
+  assert starts == []
+
+
 def test_non_wake_terminal_and_inline_results_never_start_activity(
   db, monkeypatch,
 ):
@@ -2131,18 +2167,17 @@ def test_recovery_times_out_one_parent_without_starving_the_next(
   }
 
 
-def test_wake_disposition_gate_excludes_non_durable_terminals():
+def test_settle_gate_includes_final_stops_and_excludes_resumable_or_non_durable():
   import app.chat_queue as chat_queue
-  from app.chat import _DELEGATION_WAKE_DISPOSITIONS
+  from app.chat import _DELEGATION_SETTLED_DISPOSITIONS
 
-  assert (
-    chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
-    in _DELEGATION_WAKE_DISPOSITIONS
-  )
-  assert (
-    chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
-    in _DELEGATION_WAKE_DISPOSITIONS
-  )
+  for included in (
+    chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+    chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+    # A stopped helper is final; its parent must still record where it ended.
+    chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
+  ):
+    assert included in _DELEGATION_SETTLED_DISPOSITIONS
   for excluded in (
     chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER,
     chat_queue.TerminalDisposition.LIMIT_PARKED,
@@ -2150,7 +2185,7 @@ def test_wake_disposition_gate_excludes_non_durable_terminals():
     chat_queue.TerminalDisposition.STALE_NO_ACTION,
     chat_queue.TerminalDisposition.DRAINED_FOR_RESTART,
   ):
-    assert excluded not in _DELEGATION_WAKE_DISPOSITIONS
+    assert excluded not in _DELEGATION_SETTLED_DISPOSITIONS
 
 
 def test_migration_adds_wake_columns_idempotently(db):
