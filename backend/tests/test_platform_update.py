@@ -636,6 +636,44 @@ def _park_resolved_line_a_conflict(platform: Path, origin: Path) -> tuple[str, s
   return served, target, worktree
 
 
+def test_aborted_parked_merge_cannot_be_committed_as_an_update(clone_env):
+  origin, platform = clone_env
+  served, _target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  _git(worktree, "merge", "--abort")
+
+  with pytest.raises(pu.PlatformUpdateError, match="parked merge is no longer"):
+    pu.continue_platform_overlay_update(platform)
+  assert _served_sha(platform) == served
+  assert pu._read_conflict_flag()["overlay"].get("ready") is not True
+
+
+def test_resolver_merge_commit_is_an_accepted_resolution(clone_env):
+  origin, platform = clone_env
+  _served, _target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  _git(worktree, "commit", "-q", "-m", "resolve both sides")
+
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  assert "LINE_A = 'RESOLVED'" in (platform / "backend/app/main.py").read_text()
+
+
+def test_committed_resolution_with_conflict_markers_is_rejected(clone_env):
+  origin, platform = clone_env
+  served, _target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace(
+      "LINE_A = 1",
+      "<<<<<<< ours\nLINE_A = 'LOCAL'\n=======\nLINE_A = 'UPSTREAM'\n>>>>>>> theirs",
+    )
+  )
+  _git(worktree, "add", "backend/app/main.py")
+  _git(worktree, "commit", "-q", "-m", "incorrectly accept markers")
+
+  with pytest.raises(pu.PlatformUpdateError, match="Conflict markers remain"):
+    pu.continue_platform_overlay_update(platform)
+  assert _served_sha(platform) == served
+  assert pu._read_conflict_flag()["overlay"].get("ready") is not True
+
+
 def test_resolver_refuses_unstaged_final_bytes_without_losing_them(clone_env):
   origin, platform = clone_env
   _served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
@@ -1071,6 +1109,111 @@ def test_edit_after_frozen_snapshot_cannot_be_overwritten_by_activation(
   assert worktree.exists()
   assert pu._read_conflict_flag()["overlay"]["ready"] is True
   assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
+def test_failed_activation_does_not_erase_restored_edits_on_next_boot(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  served, _target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  dirty = platform / "backend/app/foo.py"
+  dirty.write_text("VALUE = 'KEEP ME'\n")
+  original_git = pu._git
+  failed = False
+
+  def fail_first_served_reset(*args, **kwargs):
+    nonlocal failed
+    if (
+      not failed and kwargs.get("repo") == platform
+      and args[:2] == ("reset", "--hard")
+      and args[2] != served
+    ):
+      failed = True
+      raise RuntimeError("candidate reset failed after the branch moved")
+    return original_git(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_git", fail_first_served_reset)
+  with pytest.raises(RuntimeError, match="candidate reset failed"):
+    pu.continue_platform_overlay_update(platform)
+
+  assert failed
+  assert _served_sha(platform) == served
+  assert dirty.read_text() == "VALUE = 'KEEP ME'\n"
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+  pu.boot_guard_clean_served_tree(platform)
+  assert dirty.read_text() == "VALUE = 'KEEP ME'\n"
+
+
+def test_untracked_file_does_not_leave_a_reset_marker_after_rollback(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  served, _target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  dirty = platform / "backend/app/foo.py"
+  dirty.write_text("VALUE = 'KEEP ME'\n")
+  new_file = platform / "backend/app/new_mod.py"
+  new_file.write_text("NEW = True\n")
+  original_git = pu._git
+  failed = False
+
+  def fail_first_served_reset(*args, **kwargs):
+    nonlocal failed
+    if (
+      not failed and kwargs.get("repo") == platform
+      and args[:2] == ("reset", "--hard") and args[2] != served
+    ):
+      failed = True
+      raise RuntimeError("candidate reset failed after the branch moved")
+    return original_git(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_git", fail_first_served_reset)
+  with pytest.raises(RuntimeError, match="candidate reset failed"):
+    pu.continue_platform_overlay_update(platform)
+
+  assert failed
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+  assert new_file.read_text() == "NEW = True\n"
+  pending = pu.platform_status(platform)["late_changes"]
+  assert pending["state"] == "restore_pending"
+  assert _git(platform, "show", f"{pending['ref']}:backend/app/foo.py").stdout == (
+    "VALUE = 'KEEP ME'\n"
+  )
+  # The pinned snapshot remains reviewable if rollback restored only tracked
+  # files. A fresh owner edit must not be reset at the next boot.
+  dirty.write_text("VALUE = 'FRESH AFTER FAILURE'\n")
+  pu.boot_guard_clean_served_tree(platform)
+  assert dirty.read_text() == "VALUE = 'FRESH AFTER FAILURE'\n"
+  assert new_file.read_text() == "NEW = True\n"
+
+
+def test_incomplete_activation_rollback_keeps_dirty_snapshot_for_boot(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  served, _target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  dirty = platform / "backend/app/foo.py"
+  dirty.write_text("VALUE = 'KEEP ME'\n")
+  original_git = pu._git
+
+  def fail_activation_and_rollback(*args, **kwargs):
+    if kwargs.get("repo") == platform and args[:2] == ("reset", "--hard"):
+      if args[2] != served:
+        dirty.write_text("VALUE = 'PARTIAL CHECKOUT'\n")
+        raise RuntimeError("activation reset failed")
+      return SimpleNamespace(returncode=1, stdout="", stderr="reset blocked")
+    return original_git(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_git", fail_activation_and_rollback)
+  with pytest.raises(RuntimeError, match="activation reset failed"):
+    pu.continue_platform_overlay_update(platform)
+
+  assert pu.RECONCILE_PRE_FLAG.exists()
+  assert pu.LATE_SNAPSHOT_FLAG.exists()
+  assert _served_sha(platform) == served
+  monkeypatch.setattr(pu, "_git", original_git)
+  assert "late=restored" in pu.boot_guard_clean_served_tree(platform)
+  assert dirty.read_text() == "VALUE = 'KEEP ME'\n"
+  assert not pu.LATE_SNAPSHOT_FLAG.exists()
 
 
 def test_concurrent_branch_move_keeps_frozen_release_for_one_late_commit(

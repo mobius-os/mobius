@@ -869,7 +869,6 @@ def _write_frozen_release(
   depends on the live branch, so later edits cannot invalidate it.
   """
   worktree = _overlay_candidate_path(repo)
-  _git("merge", "--quit", repo=worktree, check=False)
   frozen = {
     **parked,
     "ready": True,
@@ -926,7 +925,19 @@ def _activate_candidate(
     _git("checkout", "-q", local, repo=repo)
     _git("reset", "--hard", tip, repo=repo)
   except Exception:
-    _restore_candidate(repo, local, tip, pre_sha)
+    restored = _restore_candidate(repo, local, tip, pre_sha)
+    if restored and _rev(repo, local) == pre_sha:
+      # The boot guard treats this marker as permission to hard-reset PRE.
+      # Retire it only when rollback left the captured original tree or all
+      # tracked paths at PRE. Untracked files survive git reset --hard, so
+      # their presence alone must not arm a later reset of restored edits.
+      # Otherwise keep the dirty snapshot pinned for boot recovery.
+      tree = _working_tree_oid(repo, pre_sha)
+      tracked_clean = _git(
+        "diff", "--quiet", pre_sha, "--", repo=repo, check=False,
+      ).returncode == 0
+      if tree == expected_working_tree or tracked_clean:
+        _clear_reconcile_pre()
     raise
 
 
@@ -2294,6 +2305,10 @@ def _settle_late_snapshot(
   repo: Path, local: str, carried: _Carried, *, activated_clean: bool = False,
 ) -> bool:
   """Restore dirty edits or retire a proven, fully integrated snapshot."""
+  if _read_reconcile_pre()[0]:
+    # Boot still owns a possible hard reset. Leave the snapshot and its ref
+    # intact until that reset has completed; restored bytes would be unsafe.
+    return False
   restored_on_release = _restore_working_edits(repo, local)
   restored_on_old = (
     False if restored_on_release
@@ -2661,6 +2676,10 @@ def reconcile_clone(
   )
   if result.status == "skipped":
     return result
+  if _read_reconcile_pre()[0]:
+    # An interrupted activation is still boot-owned. Do not unwind its
+    # transient working commit onto a tree the boot guard may hard-reset.
+    return result
   local = _local_branch(repo)
   if _restore_working_edits(repo, local) and result.status == "updated":
     result = replace(result, new_sha=_rev(repo, local) or result.new_sha)
@@ -2965,8 +2984,34 @@ def _resolved_release(
   repo: Path, parked: dict, worktree: Path, *, target: str, source: str,
 ) -> dict:
   """Turn the resolver's staged tree into frozen release commits (no refs move)."""
+  left = str(parked.get("pre") if parked.get("stage") == "working" else source)
+  right = str(parked.get("right") or "")
+  merging = app_git.merge_in_progress(worktree)
+  active_merge = (
+    merging and _rev(worktree, "HEAD") == left
+    and _rev(worktree, "MERGE_HEAD") == right
+  )
+  committed_merge = (
+    not merging and _rev(worktree, "HEAD^1") == left
+    and _rev(worktree, "HEAD^2") == right
+  )
+  if not (active_merge or committed_merge):
+    raise PlatformUpdateError(
+      "The parked merge is no longer in progress against its reviewed source. "
+      "Abandon this resolution and review the update again."
+    )
   if app_git.has_unresolved_conflicts(worktree):
     raise PlatformUpdateError("Unresolved files remain in the candidate worktree.")
+  if committed_merge:
+    # Git removes MERGE_HEAD after commit, so the ordinary unresolved check
+    # cannot see markers that were mistakenly committed as the resolution.
+    markers = _git(
+      "grep", "-lE", r"^(<<<<<<< |>>>>>>> )", repo=worktree, check=False,
+    )
+    if markers.returncode != 1:
+      raise PlatformUpdateError(
+        "Conflict markers remain in the committed candidate resolution."
+      )
   # write-tree reads the index, but a resolver can fix staged markers or add
   # files without staging the final bytes. Never freeze a stale index or
   # silently publish an untracked scratch file: require an explicit git add.
