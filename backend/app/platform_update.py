@@ -1598,6 +1598,16 @@ def _build_info() -> dict:
   return data if isinstance(data, dict) else {}
 
 
+def image_reconciles_skills() -> bool:
+  """Whether the running image's entrypoint still reconciles platform skills.
+
+  Images record their inputs in ``build-info.json``; one that still lists the
+  skill reconciler predates the served startup step and owns the job itself.
+  """
+  baked = _build_info().get("image_inputs")
+  return isinstance(baked, dict) and "backend/scripts/init_skills.py" in baked
+
+
 def image_input_drift(repo: Path = PLATFORM_REPO) -> list[str] | None:
   """Image inputs whose served source no longer matches the running image.
 

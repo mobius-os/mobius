@@ -84,7 +84,6 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
   "backend/scripts/init_agent_context.py",
   "backend/scripts/init_chat_summaries.py",
   "backend/scripts/init_data_repo.py",
-  "backend/scripts/init_skills.py",
   "backend/scripts/migrate-app-rename.sh",
   "backend/scripts/self-reminders-dispatch.sh",
 )
@@ -184,10 +183,17 @@ _RULES = (
     "Baked scripts, supervisors, or protected-file rules changed.",
     exact=("protected-files.txt", "backend/runtime", *IMAGE_BOOTSTRAP_SCRIPTS),
     prefixes=(
-      "backend/scripts/seed-skills/",
       "backend/runtime/",
       "backend/static/",
     ),
+  ),
+  _Rule(
+    "platform_skill_templates",
+    ActivationLevel.SERVER_RESTART,
+    "Platform skill templates changed; the server applies them to installed "
+    "skills when it starts.",
+    exact=("backend/scripts/init_skills.py",),
+    prefixes=("backend/scripts/seed-skills/",),
   ),
   _Rule(
     "self_hosted_topology_source",

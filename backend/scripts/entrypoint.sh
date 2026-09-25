@@ -883,10 +883,8 @@ fi
 # system app; base boot must not activate them.
 python3 /app/scripts/init_chat_summaries.py
 
-# Reconcile platform-owned skills against their recorded baseline. Untouched
-# copies advance with the image; owner-edited copies remain in place for review.
-# The system prompt (skill/core.md) points at this mixed ownership directory.
-python3 /app/scripts/init_skills.py
+# Platform-owned skills are reconciled by the served server at startup
+# (app/startup.py), so they follow the running source rather than this image.
 
 # Theme: no starter file written here. /api/theme reads
 # /data/shared/theme.css when present, otherwise falls through to

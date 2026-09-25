@@ -214,6 +214,41 @@ def _configure_claude_settings_defaults(context: StartupContext) -> None:
     context.logger.info("set Claude settings defaults: %s", ", ".join(added))
 
 
+_SKILL_RECONCILER = Path(__file__).resolve().parents[1] / "scripts" / "init_skills.py"
+
+
+async def _reconcile_platform_skills(context: StartupContext) -> None:
+  """Apply the running checkout's skill templates to the installed skills.
+
+  Templates follow the served source, so a release that only changes them
+  needs a restart rather than a new container image. Local edits stay put and
+  are marked for review by the reconciler itself.
+  """
+  import asyncio
+  import subprocess
+  import sys
+
+  from app.platform_update import image_reconciles_skills
+
+  if image_reconciles_skills():
+    # An image built before this handoff still runs its own reconciler from
+    # the entrypoint with its baked seeds. Running both would let the older
+    # one retire and revert templates this checkout adds on every restart, so
+    # the served step takes over only once the container is replaced.
+    context.logger.info("platform skills stay with this image until it is replaced")
+    return
+  result = await asyncio.to_thread(
+    subprocess.run,
+    [sys.executable, str(_SKILL_RECONCILER)],
+    capture_output=True, text=True, timeout=120,
+  )
+  for line in (result.stdout + result.stderr).splitlines():
+    if line.strip():
+      context.logger.info("%s", line)
+  if result.returncode != 0:
+    raise RuntimeError(f"skill reconciler exited {result.returncode}")
+
+
 def _initialize_database(context: StartupContext) -> None:
   try:
     context.database_boot = context.init_db()
@@ -553,6 +588,7 @@ PROCESS_STARTUP_TASKS = (
     "configure Claude settings defaults",
     _configure_claude_settings_defaults,
   ),
+  StartupTask("reconcile platform skills", _reconcile_platform_skills),
   StartupTask(
     "initialize database",
     _initialize_database,

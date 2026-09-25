@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Reconcile platform-owned skills at boot without a hand-maintained digest list.
+"""Reconcile platform-owned skills when the server starts.
 
-The sidecar records the last platform version applied to each flat skill. Local
-edits or deletions remain in place and are marked for review. An installation
-predating the sidecar is adopted only when its bytes match a seed blob in the
-image revision's Git ancestry; uncertain copies are never overwritten. A
-retired seed is archived outside discovery before its active path is removed.
+Seeds come from the platform checkout that contains this script, so installed
+skills follow the source the server is running rather than the container
+image. The sidecar records the last platform version applied to each flat
+skill. Local edits or deletions remain in place and are marked for review. An
+installation predating the sidecar is adopted only when its bytes match a seed
+blob in that checkout's Git ancestry; uncertain copies are never overwritten. A
+retired seed is archived outside discovery before its active path is removed,
+and is installed again if a later source brings it back.
 """
 
 from __future__ import annotations
@@ -29,14 +32,12 @@ from app.storage_io import atomic_write  # noqa: E402
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
-PLATFORM_REPO = DATA_DIR / "platform"
-BUILD_SHA = os.environ.get("BUILD_SHA", "")
+# The checkout this script belongs to: the served platform, or the baked
+# fallback platform when that is what the server is running.
+PLATFORM_REPO = Path(__file__).resolve().parents[2]
 SIDECAR = ".seed-skills.json"
 SEED_PATH = "backend/scripts/seed-skills"
-_SEED_CANDIDATES = (
-  Path("/app/scripts/seed-skills"),
-  Path(__file__).resolve().parent / "seed-skills",
-)
+_SEED_CANDIDATES = (Path(__file__).resolve().parent / "seed-skills",)
 
 # Two exact owner-curated legacy copies were deliberately migrated by the old
 # registry because their instructions crossed a safety boundary. They are not
@@ -119,25 +120,46 @@ def _read_records(path: Path, *, platform: bool = False) -> dict | None:
   return records
 
 
-def _git_history() -> dict[str, set[str]] | None:
-  """Historical seed bytes reachable from this image's exact source revision.
-
-  The image's baked checkout may be shallow. The persistent platform checkout
-  carries history, but may also have advanced past the image. Pin to BUILD_SHA
-  so a future-only or locally-authored seed cannot authorize a boot rewrite.
-  """
-  if len(BUILD_SHA) != 40 or any(c not in "0123456789abcdef" for c in BUILD_SHA):
-    return None
-  if not (PLATFORM_REPO / ".git").exists():
-    return None
-  env = {k: v for k, v in os.environ.items() if k not in {
+def _git_env() -> dict[str, str]:
+  return {k: v for k, v in os.environ.items() if k not in {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
     "GIT_COMMON_DIR", "GIT_NAMESPACE",
   }}
-  base = ["git", "-c", f"safe.directory={PLATFORM_REPO}", "-C", str(PLATFORM_REPO)]
+
+
+def _git_base() -> list[str]:
+  return ["git", "-c", f"safe.directory={PLATFORM_REPO}", "-C", str(PLATFORM_REPO)]
+
+
+def _source_revision() -> str | None:
+  """The committed revision of the checkout whose seeds are being applied."""
+  if not (PLATFORM_REPO / ".git").exists():
+    return None
+  try:
+    sha = subprocess.run(
+      [*_git_base(), "rev-parse", "--verify", "-q", "HEAD^{commit}"],
+      capture_output=True, check=True, timeout=30, env=_git_env(),
+    ).stdout.decode().strip()
+  except (OSError, subprocess.SubprocessError, UnicodeError):
+    return None
+  return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None
+
+
+def _git_history() -> dict[str, set[str]] | None:
+  """Historical seed bytes reachable from the applied checkout's revision.
+
+  Pin to the same checkout the seeds come from, so a seed only another
+  revision carries cannot authorize a rewrite. A shallow baked checkout simply
+  proves less, which keeps uncertain copies untouched.
+  """
+  revision = _source_revision()
+  if revision is None:
+    return None
+  env = _git_env()
+  base = _git_base()
   try:
     listed = subprocess.run(
-      [*base, "log", "--raw", "--no-abbrev", "--no-renames", "--format=", BUILD_SHA, "--", SEED_PATH],
+      [*base, "log", "--raw", "--no-abbrev", "--no-renames", "--format=", revision, "--", SEED_PATH],
       capture_output=True, check=True, timeout=30, env=env,
     ).stdout
     objects: list[tuple[str, str]] = []
@@ -270,6 +292,11 @@ def init() -> None:
     upstream = source.read_bytes()
     upstream_sha = _sha(upstream)
     record = records.get(name)
+    if record is not None and record.get("status") == "retired":
+      # An older source (a previous image or the baked fallback) retired this
+      # seed; the source now running ships it again, so treat it as new.
+      records.pop(name)
+      record = None
     if target.is_symlink() or (target.exists() and not _plain_file(target)):
       print(f"init_skills: {name} has unexpected file type; left untouched")
       continue
