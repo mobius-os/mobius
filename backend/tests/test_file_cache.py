@@ -1,6 +1,5 @@
 import mmap
 import os
-from pathlib import Path
 
 from app import file_cache
 
@@ -46,21 +45,37 @@ def test_provider_tool_paths_rejects_unknown_provider():
 
 
 def test_settled_turn_paths_excludes_owner_data_and_credentials(tmp_path):
-  (tmp_path / "platform" / ".git").mkdir(parents=True)
-  (tmp_path / "platform" / "frontend" / "node_modules").mkdir(parents=True)
-  (tmp_path / "contrib" / "candidate" / ".git").mkdir(parents=True)
-  (tmp_path / "apps" / "example" / ".git").mkdir(parents=True)
+  for repo in ("platform", "contrib/candidate", "worktrees/candidate", "apps/example"):
+    (tmp_path / repo / ".git" / "objects" / "pack").mkdir(parents=True)
   paths = file_cache.settled_turn_paths(tmp_path, "chat-1")
 
-  assert tmp_path / "platform" / ".git" in paths
-  assert tmp_path / "platform" / "backend" in paths
-  assert tmp_path / "platform" / "frontend" / "dist" in paths
-  assert tmp_path / "contrib" / "candidate" / ".git" in paths
-  assert tmp_path / "apps" / "example" / ".git" in paths
-  assert Path("/usr") not in paths
-  assert Path("/opt") not in paths
+  assert set(paths) == {
+    tmp_path / "agent-browser-profiles" / "chat-chat-1",
+    *(tmp_path / repo / ".git" / "objects" / "pack" for repo in (
+      "platform", "contrib/candidate", "worktrees/candidate", "apps/example",
+    )),
+  }
   assert all("cli-auth" not in str(path) for path in paths)
   assert all(str(tmp_path / "db") not in str(path) for path in paths)
+
+
+def test_settled_cleanup_advises_git_packs_without_walking_checkout_source(
+  tmp_path, monkeypatch,
+):
+  """A per-turn walk of every checkout cost seconds of server CPU per turn."""
+  pack = tmp_path / "platform" / ".git" / "objects" / "pack" / "pack-1.pack"
+  pack.parent.mkdir(parents=True)
+  pack.write_bytes(b"p" * 4096)
+  for source in ("platform/backend/app.py", "platform/.git/objects/ab/cdef",
+                 "contrib/review/worktree/frontend/src/App.jsx"):
+    (tmp_path / source).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / source).write_bytes(b"s" * 4096)
+  advised = []
+  monkeypatch.setattr(
+    os, "posix_fadvise", lambda fd, *args: advised.append(os.fstat(fd).st_ino),
+  )
+  file_cache.reclaim_file_cache(file_cache.settled_turn_paths(tmp_path, "chat"))
+  assert advised == [pack.stat().st_ino]
 
 
 def test_advised_size_is_not_reported_as_reclaimed_memory(tmp_path, monkeypatch):
@@ -113,25 +128,12 @@ def test_missing_root_and_unsupported_advice_are_optional(tmp_path, monkeypatch)
   assert file_cache.reclaim_file_cache([tmp_path])['supported'] is False
 
 
-def test_settled_paths_cover_managed_worktrees_without_system_walk(tmp_path):
-  work = tmp_path / 'worktrees' / 'candidate'
-  work.mkdir(parents=True)
-  (work / '.git').write_text('gitdir: elsewhere')
-  paths = file_cache.settled_turn_paths(tmp_path, 'test')
-  assert work / '.git' in paths
-  assert work / 'backend' in paths
-  assert work / 'frontend' / 'src' in paths
-  assert tmp_path / 'platform' / 'frontend' / 'node_modules' not in paths
-  assert not any(str(p) in ('/usr', '/opt') for p in paths)
-  assert tmp_path / 'apps' not in paths
-
-
 def test_settled_cleanup_separates_tool_and_source_mapping_policy(tmp_path, monkeypatch):
   calls = []
   monkeypatch.setattr(file_cache, 'settled_tool_paths', lambda: ('tool',))
   monkeypatch.setattr(file_cache, 'settled_turn_paths', lambda *args: ('source',))
   monkeypatch.setattr(file_cache, 'reclaim_file_cache', lambda paths, **kw: calls.append((paths, kw)))
-  file_cache._sweep_settled_cache(tmp_path, 'chat')
+  file_cache.reclaim_settled_cache(tmp_path, 'chat')
   assert calls == [(('tool',), {'skip_mapped': False}), (('source',), {})]
 
 
@@ -167,16 +169,6 @@ def test_build_cleanup_follows_owned_dependency_symlink(tmp_path, monkeypatch):
   assert result['files'] == 1
 
 
-def test_contribution_checkout_sources_are_covered(tmp_path):
-  checkout = tmp_path / 'contrib' / 'review' / 'worktree'
-  checkout.mkdir(parents=True)
-  (checkout / '.git').write_text('gitdir: elsewhere')
-  paths = file_cache.settled_turn_paths(tmp_path, 'test')
-  assert all(checkout / relative in paths for relative in (
-    '.git', 'backend', 'frontend/src', 'frontend/dist',
-  ))
-
-
 def test_symlinked_directory_is_not_traversed(tmp_path, monkeypatch):
   source = tmp_path / 'source'
   outside = tmp_path / 'outside'
@@ -188,44 +180,3 @@ def test_symlinked_directory_is_not_traversed(tmp_path, monkeypatch):
   monkeypatch.setattr(os, 'posix_fadvise', lambda *args: calls.append(args))
   assert file_cache.reclaim_file_cache([source])['files'] == 0
   assert calls == []
-
-
-def test_settled_sweep_runs_in_a_low_priority_process_not_the_server(
-  tmp_path, monkeypatch,
-):
-  """The sweep walks every managed checkout; inside the server it starved
-  requests of the interpreter."""
-  runs = []
-  monkeypatch.setattr(
-    file_cache.subprocess, 'run', lambda args, **kw: runs.append(args),
-  )
-  assert file_cache.reclaim_settled_cache(tmp_path, 'chat') is True
-  assert runs[0][1:] == [str(Path(file_cache.__file__).resolve()), 'settled',
-                         str(tmp_path), 'chat']
-
-
-def test_overlapping_settled_sweeps_are_skipped_not_stacked(tmp_path, monkeypatch):
-  """Many agents finishing together used to run a full sweep each, at once."""
-  runs = []
-  monkeypatch.setattr(
-    file_cache.subprocess, 'run', lambda args, **kw: runs.append(args),
-  )
-  assert file_cache._settled_sweep_lock.acquire(blocking=False)
-  try:
-    assert file_cache.reclaim_settled_cache(tmp_path, 'chat') is False
-  finally:
-    file_cache._settled_sweep_lock.release()
-  assert runs == []
-  assert file_cache.reclaim_settled_cache(tmp_path, 'chat') is True
-
-
-def test_settled_sweep_script_runs_without_the_application(tmp_path):
-  import subprocess
-  import sys
-  (tmp_path / 'apps').mkdir()
-  result = subprocess.run(
-    [sys.executable, str(Path(file_cache.__file__).resolve()), 'settled',
-     str(tmp_path), 'chat'],
-    capture_output=True, text=True, timeout=120, env={'PATH': '/usr/bin:/bin'},
-  )
-  assert result.returncode == 0, result.stderr
