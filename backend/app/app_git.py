@@ -586,12 +586,21 @@ def is_repo(source_dir: str | Path) -> bool:
   return (Path(source_dir) / ".git").exists()
 
 
-def worktree_dirty(source_dir: str | Path) -> bool:
-  """Whether tracked/untracked accepted-source paths differ from ``main``."""
+def worktree_dirty(
+  source_dir: str | Path, paths: Iterable[str] = (),
+) -> bool:
+  """Whether tracked/untracked accepted-source paths differ from ``HEAD``.
+
+  ``paths`` narrows the check to those literal paths, so a proof about one
+  change is not blocked by unrelated in-progress edits. No paths means the
+  whole tree.
+  """
   if not is_repo(source_dir):
     return False
+  pathspec = [f":(literal){path}" for path in sorted(set(paths))]
   return bool(_run(
     Path(source_dir), "status", "--porcelain",
+    *(("--untracked-files=all", "--", *pathspec) if pathspec else ()),
     read_only=True,
   ).stdout.strip())
 

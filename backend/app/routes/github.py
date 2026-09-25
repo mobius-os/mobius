@@ -137,6 +137,7 @@ from app.github_contributions import (
   _assert_pending_equivalence_preflight,
   _assert_pending_equivalence_before_publication,
   _record_prepublication_source_continuity,
+  _reviewed_paths_dirty,
   _reviewed_source_identity,
   _personal_publication_input,
   _personal_publication_input_sha256,
@@ -1520,9 +1521,12 @@ async def attest_contribution_source_continuity(
         await asyncio.to_thread(
           _assert_fresh, record, diff_path, review_repo, branch,
         )
-        if await asyncio.to_thread(app_git.worktree_dirty, source_repo):
+        if await asyncio.to_thread(
+          _reviewed_paths_dirty,
+          source_repo, review_repo, str(body.base_sha), str(body.head_sha),
+        ):
           raise ContributionSubmitError(
-            "The installed source has uncommitted changes."
+            "The installed source has uncommitted changes to reviewed files."
           )
         current_source = await asyncio.to_thread(
           app_git.head_sha, source_repo, "HEAD",
