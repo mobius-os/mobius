@@ -65,6 +65,21 @@ def agent_type_for(effort: str | None) -> str:
   return f"mobius-helper-{effort}" if effort in EFFORTS else "mobius-helper"
 
 
+def resume_reference(host_session_id: str | None, turn: "HelperTurn") -> str:
+  """The session reference a helper's next follow-up resumes from.
+
+  A helper lost with its host keeps no agent: messaging that agent in a new
+  host would start it fresh without its task, so the follow-up instead
+  reseeds it from its own durable chat history.
+  """
+  if turn.host_lost:
+    return f"{SESSION_PREFIX}{host_session_id or ''}::"
+  return (
+    f"{SESSION_PREFIX}{host_session_id or ''}:{turn.agent_id or ''}"
+    f":{turn.launch_tool_use_id or ''}"
+  )
+
+
 def parse_session(
   session_id: str | None,
 ) -> tuple[str | None, str | None, str | None]:
@@ -95,6 +110,8 @@ class HelperTurn:
   summary: str | None = None
   usage: dict | None = None
   dispatch_error: str | None = None
+  # The host process died under this turn: its agent cannot be resumed.
+  host_lost: bool = False
   started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
@@ -320,8 +337,14 @@ class ClaudeHelperHost(Host):
           "Claude helper host exited key=%s stderr=%s",
           self.key.digest, " | ".join(self.stderr_tail[-8:]),
         )
-      for turn in list(self._turn_by_dispatch.values()):
-        turn.finish("failed", "The helper host stopped unexpectedly.")
+      self._fail_open_turns()
+
+  def _fail_open_turns(self) -> None:
+    """The host process is gone: fail its open turns, whose agents died with it."""
+    for turn in list(self._turn_by_dispatch.values()):
+      if not turn.done.is_set():
+        turn.host_lost = True
+      turn.finish("failed", "The helper host stopped unexpectedly.")
 
   def _turn_for_parent(self, tool_use_id: str) -> HelperTurn | None:
     agent = self._agent_of_tool_use.get(tool_use_id)
@@ -584,11 +607,24 @@ async def run_claude_host_turn(
       launch_tool_use_id=launch_tool_use_id,
     )
   else:
-    # A first turn, or a helper whose earlier turns ran outside a host:
-    # start it here with its own history as context.
+    # A first turn, or a helper whose agent is gone (lost with its host, or
+    # run outside a host): start it here with its own history as context.
     prompt = user_message
     if session_id and resumed_context:
       prompt = f"{resumed_context}\n\n{user_message}"
+    elif session_id and run_policy is not None and not run_policy.allow_session_reseed:
+      # Earlier history exists but may not be replayed (write helpers):
+      # starting from the follow-up alone would lose the helper's task.
+      from app.delegations import REVIEW_REQUIRED_MARKER
+      return {
+        "session_id": session_id, "cost_usd": None,
+        "error": (
+          f"{REVIEW_REQUIRED_MARKER}: This write helper's session could not "
+          "be resumed. Its durable history is intact, but Möbius will not "
+          "replay write work automatically; start a new helper if another "
+          "pass is needed."
+        ),
+      }
     turn = HelperTurn(
       dispatch_id=dispatch_id, kind="spawn", spec=spawn_spec(prompt),
       sink=bc, env_file=env_file, read_only=read_only,
@@ -642,10 +678,7 @@ async def run_claude_host_turn(
           "error": "The helper host could not start this helper.",
         }
       result: dict[str, Any] = {
-        "session_id": (
-          f"{SESSION_PREFIX}{host.session_id or ''}:{turn.agent_id}"
-          f":{turn.launch_tool_use_id or ''}"
-        ),
+        "session_id": resume_reference(host.session_id, turn),
         "cost_usd": None,
         "error": None,
       }

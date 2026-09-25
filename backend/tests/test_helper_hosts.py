@@ -225,6 +225,23 @@ def test_a_resumed_helper_reports_to_its_current_follow_up_turn(tmp_path):
   assert host._turn_for_parent("toolu_launch") is follow_up
 
 
+def test_a_helper_lost_with_its_host_is_reseeded_not_messaged(tmp_path):
+  lost = _turn(tmp_path, dispatch_id="d1")
+  lost.agent_id, lost.launch_tool_use_id = "agent-1", "toolu_1"
+  kept = _turn(tmp_path, dispatch_id="d2")
+  kept.agent_id, kept.launch_tool_use_id = "agent-2", "toolu_2"
+  kept.finish("completed")
+  host = _claude_host(tmp_path)
+  host._turn_by_dispatch = {"d1": lost, "d2": kept}
+  host._fail_open_turns()  # its process died under the open turn
+  assert claude_host.parse_session(
+    claude_host.resume_reference("sess-1", lost),
+  ) == ("sess-1", None, None)
+  assert claude_host.parse_session(
+    claude_host.resume_reference("sess-1", kept),
+  ) == ("sess-1", "agent-2", "toolu_2")
+
+
 def test_host_helper_sessions_round_trip():
   assert claude_host.parse_session("claude-host:sess-1:agent-9:toolu_1") == (
     "sess-1", "agent-9", "toolu_1",
