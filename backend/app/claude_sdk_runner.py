@@ -507,6 +507,11 @@ class ActiveClaudeClient:
     # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
+    # The CLI drops an interrupt sent before its query is generating, so a
+    # steer claims its cut at once but sends the interrupt only while the
+    # model is streaming; `mark_generating` sends a cut claimed earlier.
+    self._generating = False
+    self._steer_interrupt: asyncio.Task[None] | None = None
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -585,8 +590,25 @@ class ActiveClaudeClient:
     if not self._interrupt_in_flight and not self._finished.done():
       self._interrupt_in_flight = True
       self._interrupt_owner = self._interrupt_owner or "steer"
-      await self._client.interrupt()
+      if self._generating:
+        await self._client.interrupt()
     return True
+
+  def mark_generating(self) -> None:
+    """Called per root model message; sends a steer cut claimed earlier."""
+    if self._generating:
+      return
+    self._generating = True
+    if self._interrupt_in_flight and self.pending_steer:
+      # Own task: the SDK reader that routes the control response can block
+      # behind a full message buffer while the runner loop awaits.
+      self._steer_interrupt = asyncio.create_task(self._send_steer_interrupt())
+
+  async def _send_steer_interrupt(self) -> None:
+    # A terminal may have drained the steer first; interrupting now would
+    # abort its requery instead.
+    if self._interrupt_in_flight and self.pending_steer:
+      await self._client.interrupt()
 
   def take_steer_for_requery(self, *, interrupt_landed: bool) -> list[str]:
     """Drain buffered steer texts at a terminal; close a landed steer cut.
@@ -600,6 +622,7 @@ class ActiveClaudeClient:
     cut. A Stop stays sticky; it always wins.
     """
     self._interrupt_in_flight = False
+    self._generating = False  # a requery starts a new generation window
     if interrupt_landed and self._interrupt_owner == "steer":
       self._interrupt_owner = None
     texts, self.pending_steer = self.pending_steer, []
@@ -1617,6 +1640,10 @@ async def run_claude_sdk_turn(
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
               await _persist_session_id(db, chat_id, incoming_session_id)
+          if isinstance(
+            sdk_msg, (StreamEvent, AssistantMessage),
+          ) and is_root_conversation_message(sdk_msg):
+            active_client.mark_generating()
           if isinstance(sdk_msg, RateLimitEvent):
             _resets = getattr(sdk_msg.rate_limit_info, "resets_at", None)
             if _resets is not None:

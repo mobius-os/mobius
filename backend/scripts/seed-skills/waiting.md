@@ -54,6 +54,11 @@ returns a failure. Both arm the same wait.
 }
 ```
 
+For a pull request's CI, use `/data/platform/scripts/pr-checks.sh owner/repo PR
+SHA` as the command. It fails at once when SHA is not the PR's public head (a
+rejected update was never published, or a newer commit replaced it) instead of
+waiting on checks that will never run.
+
 - The check command must be **read-only** and exit **0 exactly when the
   condition is met**. An ordinary unmet result is **exit 1 with no diagnostic
   output** (whitespace is ignored). Any other non-zero exit, diagnostic output

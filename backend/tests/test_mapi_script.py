@@ -499,14 +499,10 @@ def test_seed_guidance_uses_literal_payload_boundaries():
 
 
 def test_mapi_guidance_describes_the_safe_curl_subset():
+  """The constitution owns the mapi contract; no skill may restate a stale one."""
   platform = SCRIPT.parents[2]
-  guidance = [
-    (platform / "skill" / "core.md").read_text(encoding="utf-8"),
-    (SCRIPT.parent / "seed-skills" / "platform-maintenance.md").read_text(
-      encoding="utf-8",
-    ),
-  ]
-
-  for text in guidance:
-    assert "Supported safe curl options pass through" in text
-    assert "Everything else passes straight through to curl" not in text
+  core = (platform / "skill" / "core.md").read_text(encoding="utf-8")
+  assert "Supported safe curl options pass through" in core
+  for path in [platform / "skill" / "core.md", *(SCRIPT.parent / "seed-skills").glob("*.md")]:
+    text = path.read_text(encoding="utf-8")
+    assert "Everything else passes straight through to curl" not in text, path.name
