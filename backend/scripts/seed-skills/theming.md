@@ -8,7 +8,7 @@ The shell UI is fully editable. Source lives at `/data/platform/frontend/src/` (
 
 ## List the shell live — never trust a hardcoded file list
 
-Hand-written file tables go stale the moment a file is renamed and send you on dead-end searches (this caused a real bug — a claimed file that no longer existed). To see what lives in the shell, or any directory on the platform:
+Hand-written file tables go stale the moment a file is renamed and send you on dead-end searches. To see what lives in the shell, or any directory on the platform:
 
 ```bash
 python3 /app/scripts/describe-tree.py /data/platform/frontend/src/components/ --depth 1 --quiet
@@ -71,8 +71,7 @@ contract as part of onboarding, accessibility, or theme work.
 Mini-apps retain zoom where it is useful. Maps, images, canvases, diagrams, and
 documents implement zoom inside their own content surface with visible controls
 and local Pointer Events; the shared app frame itself stays free of a viewport
-scale lock. The paired `shellViewportZoom` tests enforce both halves, so a
-future policy change must be explicit rather than incidental.
+scale lock.
 
 After finishing a burst of shell edits, wait for the watcher build to land, then
 request the apply. This endpoint deliberately returns an empty `204` success, so
@@ -93,11 +92,11 @@ just added. A fresh `dist/` mtime alone can mislead (an incremental/cached build
 can rewrite the file without your change), which is how a "rebuilt" shell can
 still serve the old code — grep for the change, don't trust the timestamp.
 
-After a git/platform update, not a normal save, the watcher sees no edit event; kick it explicitly by touching a changed file under `/data/platform/frontend/src`, then restart if prompted. The updater does not auto-detect frontend changes by design, so run the step explicitly after frontend-touching platform updates.
+After a platform update (not a normal save) the watcher sees no edit event; touch a changed file under `/data/platform/frontend/src` to rebuild. `platform-maintenance` owns updates themselves.
 
 **Known ceiling — the Android system gesture/nav bar color.** In the installed PWA on Android, the OS draws the bottom gesture/nav bar and you cannot make it exactly match `--bg`: `<meta name="theme-color">` and `viewport-fit=cover` are hints the OS may honor partially, not controls. Set `theme-color` to the theme bg as a best effort, but don't chase an exact match past one attempt — the only stronger lever is fullscreen (which hides the bar entirely). Tell the partner it's an OS-owned surface rather than iterating on it.
 
-**If you're patching the same selector 3+ times in one chat, the component shape is probably wrong.** Extract a new component (e.g. a dedicated `ChatInputBar.jsx` for the composer) instead of stacking CSS overrides. Four failed in-place tries beats one extraction every time.
+**If you're patching the same selector 3+ times in one chat, the component shape is probably wrong.** Extract a dedicated component for that surface instead of stacking CSS overrides; one extraction beats repeated in-place patches.
 
 ---
 
@@ -111,22 +110,6 @@ import { ArrowUp, ChevronDown, Mic, Paperclip, X } from '@openai/apps-sdk-ui/com
 ```
 
 The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Install a needed dependency into the live runtime first when safe, and declare/lock it in the repo when shipped behavior depends on it; do not require an immediate container rebuild merely because the declaration changed.
-
----
-
-## Upstream changes
-
-When the platform is updated, shell source may change. Inspect the served clone:
-
-```bash
-cd /data/platform
-git status --short frontend/src frontend/public
-git diff -- frontend/src frontend/public | head -80
-touch /data/platform/frontend/src/path/to/changed-file.jsx
-```
-
-Pick up the changes through the platform-apply flow (merge the reviewed
-`origin/main` target) rather than hand-copying files — see `contributing.md`.
 
 ---
 

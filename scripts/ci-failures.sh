@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Summarize why GitHub Actions failed, without pulling whole logs into context.
 #
-#   scripts/ci-failures.sh <pr-number|run-id>
+#   scripts/ci-failures.sh <owner/repo> <pr-number|run-id>
 #
 # A PR number resolves to the PR's latest head commit and every failed run on
 # it; a run id (anything longer than 7 digits) names one run. For each failed
@@ -12,23 +12,27 @@
 # logs are saved to a temp file whose path is printed before the first job
 # and again at the end.
 #
-# Read-only: uses gh pr view, gh run list, and gh run view only.
-# Environment: CI_FAILURES_REPO (default mobius-os/mobius).
+# Read-only: uses gh pr view, gh run list, and gh run view only. The repository
+# is required so a PR number can never resolve against the wrong project.
 
 set -uo pipefail
 
-REPO="${CI_FAILURES_REPO:-mobius-os/mobius}"
 TAIL_LINES=40      # fallback lines per failed step
 MAX_LINES=80       # extracted lines printed per job
 LINE_CHARS=300     # longest printed line
 
 usage() {
-  echo "usage: scripts/ci-failures.sh <pr-number|run-id>" >&2
+  echo "usage: scripts/ci-failures.sh <owner/repo> <pr-number|run-id>" >&2
   exit 2
 }
 
-[ $# -eq 1 ] || usage
-target="${1#\#}"
+[ $# -eq 2 ] || usage
+REPO=$1
+case "$REPO" in
+  */*) ;;
+  *) usage ;;
+esac
+target="${2#\#}"
 case "$target" in
   ''|*[!0-9]*) usage ;;
 esac

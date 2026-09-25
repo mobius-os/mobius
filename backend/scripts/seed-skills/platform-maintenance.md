@@ -5,7 +5,9 @@ shell. Read this before editing backend Python, changing the image userspace, or
 asking for a server restart. Call this instance's API with `mapi` as the
 constitution describes. Rarer topics (the container's Docker boundary, external
 Recovery, host container replacement, file locations, and viewing apps directly)
-live in `platform-reference`.
+live in `platform-reference`. Changing Möbius's own source also needs
+`mobius-development`, which owns its code invariants, tests, and upstream
+validation.
 
 ---
 
@@ -21,28 +23,8 @@ sudo -n true
 Use `sudo` deliberately when the task needs it. If that check fails, stop: the
 operator disabled root with `MOBIUS_AGENT_SUDO=0`, and bypassing that choice is
 not part of the agent's authority. Package changes made only in a running
-container are ephemeral; declare them in the Dockerfile or lockfile and ship a
-new image when they must survive recreation.
-
-### Validation inside Möbius
-
-The app container has no Docker (see `platform-reference`), which is not a
-reason to hide or skip validation. Inside Möbius:
-
-- run `scripts/test.sh --fast` for the cheap hermetic contracts and
-  `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
-- if the worktree runner says the checkout lock differs from the image
-  runtime, treat those results as useful but not dependency-authoritative and
-  use a lock-matched environment or hosted checks for that contract; and
-- for concurrency or ordering, persistence, auth or security, migrations,
-  provider protocols, dependency/runtime changes, or broad cross-cutting work,
-  explicitly recommend opening or updating a **Draft PR** through Contribute,
-  letting its hosted checks run, and using **Request review** once they pass.
-
-`scripts/test.sh --backend` remains for a Docker-capable contributor host. The
-hosted pull-request checks give full-suite evidence for the exact reviewed
-commit without merging it, and the merge queue remains the unconditional
-authoritative gate.
+container are lost when the container is replaced; see the dependency steps
+below for making them durable.
 
 ---
 
@@ -58,8 +40,8 @@ Review the exact changed paths and use the smallest matching action:
 | `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
-| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. `platform_activation.py` is the source of truth for the exact bootstrap allowlist. |
-| `backend/runtime/identity_broker.py` | Served privileged source. The frozen `/app/runtime/served_runtime_launcher.py` validates it before the served platform starts and launches it from `/data/platform`; validation failure selects the complete baked platform for that boot. One server restart activates a valid broker edit. The other `backend/runtime` files above stay image-owned. |
+| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. |
+| `backend/runtime/identity_broker.py` | The one served privileged runtime file: one server restart activates a valid edit; an invalid one falls back to the baked platform for that boot. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
@@ -140,10 +122,9 @@ because `/data/platform` is the persistent served clone. The baked
   they can still conflict, and another installation will not receive a local fix. Ask
   whether it is a local overlay or needs a separate upstream handoff. Do not
   push or manage external repository workflow from inside Möbius.
-
-All chat-persistence writes must route through the `chat_writer` actor. Never
-assign `Chat.messages` or `Chat.pending_messages` directly; see `core.md` for
-the write-surface contract.
+- `/data/platform` is its own Git repository. The separate `/data` safety-net
+  repository ignores `platform/`, so a bare `/data` commit never records
+  platform source; never sweep platform source with `git add -A`.
 
 ### Backend-fix loop
 
@@ -179,30 +160,19 @@ the write-surface contract.
    this operation, ask plainly and leave activation pending; never fabricate
    a card or park a process waiting for an answer.
 
-   The card owns at-most-once admission for its exact action. A lost response,
-   duplicate click, or ambiguous process death must never cause an agent to
-   replay the restart. Any later ready Möbius boot resumes every linked
-   Restart-card chat independently; each resumed agent verifies whether its
-   changes loaded. Unrelated waits and queued work keep their existing
-   barriers. An uncertain outcome needs fresh,
-   specific selection rather than an automatic retry. A scheduled/background
-   agent cannot open a live card, but may answer an existing one it can access.
+   Never replay a restart after a lost response or uncertain outcome; that
+   needs a fresh, specific selection. After the restart, the chat resumes on
+   its own: verify that your changes loaded. A scheduled/background agent
+   cannot open a live card, but may answer an existing one it can access.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery (see
    `platform-reference`) if the interface itself is unavailable.
 5. Restart time varies with active work and boot time; the page reloads when
    healthy. Verify the fix in the original chat.
 
-## SQLite migrations
+## Database readiness
 
-SQLAlchemy `create_all` creates missing tables; it never adds a column to an
-existing table. A new model field therefore needs a new numbered, idempotent
-function at the append-only end of `backend/app/schema_migrations.py`; never
-edit a migration already present in the ledger. Test both a fresh database and
-the frozen previous-release upgrade fixture rather than assuming model metadata
-altered the latter.
-
-If `/api/ready` reports `reason: schema_mismatch` or
+Schema changes follow `mobius-development`. If `/api/ready` reports `reason: schema_mismatch` or
 `database_initialization_failed`, the process has deliberately skipped its
 writer, reconciliation, cron, and database supervisors. Recovery repairs the
 database externally, then the partner approves one normal restart so boot can

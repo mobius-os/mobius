@@ -7,8 +7,8 @@ SCRIPT = Path(__file__).parents[2] / "scripts" / "test.sh"
 HOST_RUNNER = Path(__file__).parents[2] / "scripts" / "wt-pytest.sh"
 CONFTEST = Path(__file__).parent / "conftest.py"
 CONTRIBUTING = Path(__file__).parents[2] / "CONTRIBUTING.md"
-PLATFORM_MAINTENANCE = (
-  Path(__file__).parents[1] / "scripts" / "seed-skills" / "platform-maintenance.md"
+MOBIUS_DEVELOPMENT = (
+  Path(__file__).parents[1] / "scripts" / "seed-skills" / "mobius-development.md"
 )
 
 
@@ -39,11 +39,11 @@ def test_full_backend_keeps_the_isolated_container_contract():
 
 def test_hosted_checks_documentation_uses_the_draft_pr_path():
   contributing = CONTRIBUTING.read_text()
-  maintenance = PLATFORM_MAINTENANCE.read_text()
+  development = MOBIUS_DEVELOPMENT.read_text()
   assert "opens or updates a draft pull request" in contributing
-  assert "opening or updating a **Draft PR**" in maintenance
+  assert "opening or updating a **Draft PR**" in development
   assert "Run GitHub checks" not in contributing
-  assert "Run GitHub checks" not in maintenance
+  assert "Run GitHub checks" not in development
 
 
 def test_host_runner_checks_backend_node_surface_not_full_frontend_tree():
