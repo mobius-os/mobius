@@ -103,7 +103,8 @@ from app.platform_tools import (
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
-  terminate_process_group,
+  RUN_MARKER_ENV,
+  terminate_agent_processes,
 )
 from app.question_bridge import (
   QuestionOverlapError,
@@ -202,9 +203,9 @@ For work finishing now, join the exact task with TaskOutput(block=true) and
 read its result before finishing; an empty output file is not completion.
 For an external condition that must outlive this turn, declare a durable
 Möbius Wait and confirm its saved receipt. Never end with "I'm waiting" on a
-Bash task, an output file, or ListAgents. Native Agent/Workflow work is also
-turn-local; join and synthesize it. Durable delegated work belongs to the
-installed Subagents capability, whose own receipt owns the later wake.
+Bash task, an output file, or ListAgents. Workflow work is also turn-local;
+join and synthesize it. Helpers started with the Möbius `spawn_agent` tool are
+durable: their results reach this chat by themselves, so never wait on them.
 """
 # Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
 # Provider-native schedulers cannot render its card, survive the same restart
@@ -234,6 +235,14 @@ _CLAUDE_UNUSED_BUILTINS = (
   "PushNotification",
 )
 
+# Helpers are Möbius's: agents delegate with the Möbius `spawn_agent` tool,
+# whose helpers run on any provider, outlive the turn, and share a helper host
+# (see helper_hosts). Claude's own helper tool (Agent, formerly Task) is off.
+# Workflows keep their own lifecycle for the owner's top effort tier.
+_CLAUDE_BUILTIN_HELPER_TOOLS = (
+  "Agent",
+  "Task",
+)
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
 # helper fallbacks, which print the same receipt. Naming them keeps the card-end
@@ -309,7 +318,7 @@ def _claude_process_was_force_stopped(error: ProcessError) -> bool:
   claude-agent-sdk 0.2.152 preserves ``ProcessError`` (and its structured
   ``ResultError`` subclass) through ``receive_response()``. Classifying the
   public exit code removes the old dependency on transport ``_exit_error``;
-  only the TERM/KILL signals sent by ``terminate_process_group`` are hidden.
+  only the TERM/KILL signals sent by ``terminate_agent_processes`` are hidden.
   """
   return (
     error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
@@ -345,9 +354,10 @@ def _process_error_with_stderr_tail(
   )
 
 
-def _terminate_claude_process_group(pgid: int | None) -> bool:
-  return terminate_process_group(
+def _terminate_claude_processes(pgid: int | None, run_marker: str | None) -> bool:
+  return terminate_agent_processes(
     pgid,
+    run_marker=run_marker,
     logger=log,
     label="Claude descendant",
   )
@@ -468,11 +478,15 @@ class ActiveClaudeClient:
   closed the broadcast for live SSE subscribers.
   """
 
-  def __init__(self, client: ClaudeSDKClient, chat_id: str):
+  def __init__(
+    self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
+  ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._process_group_id: int | None = None
+    # Names this turn's commands after the CLI (and its group) are gone.
+    self._run_marker = run_marker
     # Never signal a retained PGID twice; the kernel can eventually reuse it
     # after the first hard stop.
     self._force_stop_started = False
@@ -761,11 +775,11 @@ class ActiveClaudeClient:
   async def force_stop(self, timeout: float = 5.0) -> bool:
     """One-shot hard stop for this turn's verified private process group."""
     if not self._force_stop_started:
-      if self._process_group_id is None:
+      if self._process_group_id is None and not self._run_marker:
         return False
       self._force_stop_started = True
       await asyncio.to_thread(
-        _terminate_claude_process_group, self._process_group_id,
+        _terminate_claude_processes, self._process_group_id, self._run_marker,
       )
     try:
       await asyncio.wait_for(
@@ -1457,6 +1471,7 @@ async def run_claude_sdk_turn(
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
       "disallowed_tools": [
+        *_CLAUDE_BUILTIN_HELPER_TOOLS,
         *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
         *_CLAUDE_NATIVE_OWNER_INPUT_TOOLS,
         *_CLAUDE_UNUSED_BUILTINS,
@@ -1548,7 +1563,9 @@ async def run_claude_sdk_turn(
       connector_config_stack.close()
       raise
 
-    active_client = ActiveClaudeClient(client, chat_id=chat_id)
+    active_client = ActiveClaudeClient(
+      client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV),
+    )
     registry.register(active_client)
     # The root result reached while native helpers still owe a follow-up. Its
     # cost and usage are already spent, so any exit before the follow-up keeps
@@ -1873,16 +1890,19 @@ async def run_claude_sdk_turn(
       finally:
         connector_config_stack.close()
         # The SDK closes only its direct CLI PID. Reap the verified private
-        # group as a bounded backstop for tool children, and do not let a
-        # repeated task cancellation skip the SIGKILL worker once it starts.
+        # group and every command this run started in its own session as a
+        # bounded backstop, and do not let a repeated task cancellation skip
+        # the SIGKILL worker once it starts.
         deferred_cancel: asyncio.CancelledError | None = None
         if (
-          active_client._process_group_id is not None
+          (active_client._process_group_id is not None
+           or active_client._run_marker)
           and not active_client._force_stop_started
         ):
           reap_task = asyncio.create_task(asyncio.to_thread(
-            _terminate_claude_process_group,
+            _terminate_claude_processes,
             active_client._process_group_id,
+            active_client._run_marker,
           ))
           while not reap_task.done():
             try:

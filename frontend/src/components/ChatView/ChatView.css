@@ -583,7 +583,14 @@
 /* A helper's own conversation (HelperConversation) in the same dialog shell,
    at a fixed height so live updates never resize it. */
 .helper-convo { width: min(760px, 100%); height: min(820px, calc(100% - 16px)); }
-.helper-convo__heading { min-width: 0; }
+.helper-convo__heading { min-width: 0; flex: 1 1 auto; }
+.helper-convo__open {
+  flex: none;
+  align-self: center;
+  color: var(--accent); /* CONTRACT: link-coloured action in the dialog head */
+  font-size: 13px;
+  text-underline-offset: 3px;
+}
 .helper-convo__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .helper-convo__body {
   flex: 1 1 auto;
@@ -4042,6 +4049,8 @@
 .chat__wait-history { --lifecycle-tone: var(--accent); }
 .chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
 .chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
+/* A wake cause opens the answer it started, so its gap sits below it. */
+.chat__wait-history--lead { margin-top: 0; margin-bottom: 10px; }
 
 .chat__lifecycle-icon {
   display: inline-flex;
@@ -4507,6 +4516,16 @@
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.chat__peer-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent); /* CONTRACT: link-coloured action beside the chat link */
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
 
 /* A rejected outbox row keeps its original content and a visible next action. */
 .queued__rejection {

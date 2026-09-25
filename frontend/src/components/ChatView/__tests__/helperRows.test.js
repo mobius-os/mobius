@@ -1,4 +1,4 @@
-/* An agent helper row opens the helper's own conversation; a shell task row does not. */
+/* Helper rows open the helper's own conversation; a working Möbius helper shows engine, step, and clock. */
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
@@ -6,7 +6,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: SubagentChips } = await vite.ssrLoadModule('/src/components/ChatView/SubagentChips.jsx')
-after(() => vite.close())
+const { default: HelperResultCard, HelperResultGroupCard } = await vite.ssrLoadModule('/src/components/ChatView/HelperResultCard.jsx')
+const priorWindow = globalThis.window
+globalThis.window = { location: new URL('https://mobius.test/shell') }
+after(() => { globalThis.window = priorWindow; return vite.close() })
 
 const chips = (subagent, props = {}) => renderToStaticMarkup(
   React.createElement(SubagentChips, { subagent, chatId: 'chat', ...props }),
@@ -41,4 +44,67 @@ test('older rows without a recorded kind are told apart by their id', () => {
 
 test('without a parent chat a row stays plain status', () => {
   assert.doesNotMatch(chips({ a1: { description: 'x', status: 'done' } }, { chatId: undefined }), /<button/)
+})
+
+const working = {
+  id: 'delegation:d1:running', status: 'running', task_key: 'audit-login',
+  child_chat_id: 'child-1', created_at: 1000, body: '', consumption: 'unknown',
+}
+
+test('a working helper row shows its name, engine, current step, and clock', () => {
+  const started = new Date(Date.now() - 75_000).toISOString()
+  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+    chatId: 'chat',
+    event: {
+      ...working, delegation_id: 'd1', provider: 'codex', model: 'gpt-6-luna',
+      started_at: started, activity: { tool: 'shell', summary: 'npm test' },
+    },
+  }))
+  assert.match(html, /audit-login/)
+  assert.match(html, /Codex · gpt-6-luna · Running npm test/)
+  assert.match(html, /chat__subagent-elapsed">1m 1[45]s</)
+  assert.match(html, /<button[^>]*aria-haspopup="dialog"/)
+  assert.match(html, /chat__subagent--running/)
+  assert.doesNotMatch(html, /Helper finished/)
+})
+
+test('a working helper without a known step says it is working', () => {
+  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+    chatId: 'chat', event: { ...working, delegation_id: 'd1', provider: 'claude', model: 'claude-opus-4-8' },
+  }))
+  assert.match(html, /Claude · claude-opus-4-8 · Working/)
+})
+
+test('a finished helper names its engine and how long it took', () => {
+  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+    chatId: 'chat',
+    event: { ...working, id: 'delegation:d1:completed', status: 'completed', delegation_id: 'd1',
+             provider: 'claude', model: 'claude-opus-4-8', duration_ms: 12_000, body: 'Done.' },
+  }))
+  assert.match(html, /Helper finished · audit-login · Claude · claude-opus-4-8 · 12s/)
+})
+
+test('a group with working helpers says so instead of claiming they need attention', () => {
+  const html = renderToStaticMarkup(React.createElement(HelperResultGroupCard, {
+    chatId: 'chat',
+    events: [working, { ...working, id: 'delegation:d2:completed', status: 'completed' }],
+  }))
+  assert.match(html, /2 helpers · 1 working · 1 finished/)
+  assert.doesNotMatch(html, /need attention/)
+})
+
+test('a working Subagents-app helper inside a collapsed activity group counts as running and draws its row', async () => {
+  const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
+  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+    chatId: 'chat',
+    surfaceKey: 'm1',
+    entries: [
+      { idx: 0, item: { type: 'tool', tool: 'Bash', input: 'subagents.py run', status: 'done', tool_use_id: 't1' } },
+      { idx: 'h', item: { ...working, delegation_id: 'd1', type: 'helper_result', activityId: working.id } },
+    ],
+  }))
+  assert.match(html, /1 running/)
+  assert.match(html, /chat__helper-working/)
+  // The row opens the helper's conversation in a panel over this chat.
+  assert.match(html, /aria-label="audit-login: [^"]*Open its conversation"/)
 })

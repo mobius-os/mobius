@@ -11,7 +11,7 @@ import ToolBlock from './ToolBlock.jsx'
 // while the dialog is open. A settled helper is read once.
 const LIVE_REFRESH_MS = 3000
 
-const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex' }
+const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
 const STATUS_LABELS = { running: 'Working', done: 'Finished', failed: 'Failed' }
 
 async function readConversation(chatId, taskId, signal) {
@@ -22,7 +22,11 @@ async function readConversation(chatId, taskId, signal) {
   if (response.status === 404) return { phase: 'unavailable' }
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
   const data = await response.json()
-  return { phase: 'ready', blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider }
+  return {
+    phase: 'ready', blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider,
+    // A Möbius helper's conversation is its own chat; link to the full chat.
+    childChatId: data.child_chat_id || null,
+  }
 }
 
 // The dialog shell reuses the chat summary viewer's overlay (ChatView.css
@@ -86,6 +90,18 @@ export default function HelperConversation({
             <h2 id={titleId} className="chat-summary__title helper-convo__title">{name}</h2>
             <p className="chat-summary__subtitle">{subtitle}</p>
           </div>
+          {state.childChatId && (
+            <a
+              className="helper-convo__open"
+              href={`/shell?chat=${encodeURIComponent(state.childChatId)}`}
+              onClick={click => {
+                if (!onInternalNav || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return
+                click.preventDefault()
+                onClose()
+                onInternalNav(new URL(`/shell?chat=${encodeURIComponent(state.childChatId)}`, window.location.origin))
+              }}
+            >Open chat</a>
+          )}
           <button
             ref={closeRef}
             type="button"

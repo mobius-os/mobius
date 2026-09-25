@@ -21,7 +21,8 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
 import { mergePositionedActivityEntries } from './activityPosition.js'
 import { restartCardActivityEntries } from './streamReducers.js'
-import HelperResultCard from './HelperResultCard.jsx'
+import HelperResultCard, { WorkingHelperRow } from './HelperResultCard.jsx'
+import { isWorkingHelper } from './workingHelper.js'
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -312,14 +313,21 @@ function GroupedActivityStretch({
     .filter(it => it?.type === 'tool' && agentHelperEntries(it).length > 0)
   const subagentHelpers = subagentTools
     .flatMap(it => agentHelperEntries(it).map(([, helper]) => helper))
+  // A still-working Subagents-app helper launched in this stretch is a helper
+  // row like the Task/Agent ones: counted in the header, drawn with the rows.
+  const workingDelegations = entries
+    .map(e => e?.item)
+    .filter(isWorkingHelper)
   const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
+    + workingDelegations.length
   const failedHelpers = subagentHelpers.filter(
     h => h.status === 'failed' || h.status === 'killed' || h.status === 'stopped'
   ).length
-  const doneHelpers = subagentHelpers.length - runningHelpers - failedHelpers
+  const doneHelpers = subagentHelpers.length + workingDelegations.length
+    - runningHelpers - failedHelpers
   // Count successes and failures separately: a failed/killed helper is not
   // "done", and the header must not label a red-dotted row as done.
-  const subagentCount = subagentHelpers.length > 0
+  const subagentCount = subagentHelpers.length + workingDelegations.length > 0
     ? [
         runningHelpers > 0 ? `${runningHelpers} running` : null,
         doneHelpers > 0 ? `${doneHelpers} done` : null,
@@ -445,6 +453,14 @@ function GroupedActivityStretch({
             onInternalNav={onInternalNav}
           />
         ))}
+        {workingDelegations.map(item => (
+          <WorkingHelperRow
+            key={item.activityId || item.id}
+            event={item}
+            chatId={chatId}
+            onInternalNav={onInternalNav}
+          />
+        ))}
         {open && detailError && (
           <div className="chat__lazy-status">
             <span className="chat__reasoning-load" role="status" aria-live="polite">
@@ -476,6 +492,7 @@ function GroupedActivityStretch({
               />
             )
           }
+          if (isWorkingHelper(item)) return null
           if (item.type === 'helper_result') {
             return (
               <HelperResultCard

@@ -614,7 +614,7 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
     return {
       "type": "tool_start",
       "tool": tool_name or "mcp",
-      "input": _format_json(item.arguments),
+      "input": _mcp_input_summary(tool_name, item.arguments),
     }
   if isinstance(item, sdk["DynamicToolCallThreadItem"]):
     tool_name = item.tool
@@ -1051,3 +1051,11 @@ def _file_change_patch_summary(
 def _file_change_edit_preview(changes: list[Any]) -> dict | None:
   """Normalize SDK file changes into the shared bounded diff preview."""
   return codex_edit_preview([_model_dump(change) for change in changes])
+
+
+def _mcp_input_summary(tool_name: str | None, arguments: Any) -> str:
+  """Möbius helper tools read as their helper's name; others keep their JSON."""
+  from app.tool_summaries import _mobius_helper_tool, summarize_tool_input
+  if tool_name and _mobius_helper_tool(tool_name) and isinstance(arguments, dict):
+    return summarize_tool_input(tool_name, arguments)
+  return _format_json(arguments)

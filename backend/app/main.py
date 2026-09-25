@@ -265,6 +265,10 @@ def _assert_provider_defaults(provider_names) -> None:
 async def lifespan(app):
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
+  # Helper hosts belong to one server process. Any a crashed predecessor left
+  # behind are ended; their helpers' durable turns recover like any other.
+  from app import helper_hosts
+  helper_hosts.end_orphaned_hosts()
   from app.startup import (
     StartupContext,
     run_startup_plan,
@@ -319,6 +323,10 @@ async def lifespan(app):
     activity.flush_request_errors()
     from app.saved_secure_inputs import shutdown as stop_sealed_consumers
     await stop_sealed_consumers()
+    try:
+      await helper_hosts.MANAGER.close_all()
+    except Exception as exc:
+      _log.error("helper host shutdown failed: %s", exc, exc_info=True)
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
     # Do not leave a stopped owner published after lifespan exits. Re-entering

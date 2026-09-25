@@ -82,17 +82,12 @@ class RunPolicy:
     return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
-      "and return a clear result to the parent. You may use Möbius's installed "
-      "Subagents capability for bounded child work when parallelism or local "
-      "decomposition materially helps; you remain responsible for checking "
-      "your own completion condition after those children settle. Its guarded "
-      "helper is $MOBIUS_SUBAGENT_HELPER. Use: python3 "
-      "/data/apps/subagents/subagents.py run --provider claude|codex --name "
-      "stable-key --scope read|write --prompt 'one bounded contract'. A "
-      "read-only owner may create only read-only children. Use stable task "
-      "keys. Do not use "
-      "a provider CLI directly; provider-native helper tools and the guarded "
-      "Subagents helper are available for bounded decomposition. "
+      "and return a clear result to the parent. When parallelism or local "
+      "decomposition materially helps, start your own helpers with the Möbius "
+      "spawn_agent tool (stable names; a read-only helper may create only "
+      "read-only helpers); you remain responsible for checking your own "
+      "completion condition after they settle, and their results reach you by "
+      "themselves. Do not use a provider CLI directly. "
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
       "schedule work or wait after this child turn ends. If completion depends "
@@ -248,7 +243,19 @@ def create_or_attach_delegation(
     if row is None:
       raise ValueError("different delegation claimed the task key")
     return _attach_existing_delegation(db, row, intent)
+  # Anchor the parent's live "helper working" row where the launch happened.
+  from app.activity_position import record_activity_position
+  record_activity_position(
+    db, row.parent_chat_id, running_helper_activity_id(row.id),
+  )
+  db.commit()
+  publish_chat_activity_changed(row.parent_chat_id)
   return row, False
+
+
+def running_helper_activity_id(delegation_id: str) -> str:
+  """Activity id of a delegation's live row in its parent chat."""
+  return f"delegation:{delegation_id}:running"
 
 
 async def ensure_delegation_started(
@@ -1552,6 +1559,64 @@ def publish_parent_waiting_changed(parent_chat_id: str) -> None:
     _LOG.debug("background helper wait broadcast failed", exc_info=True)
 
 
+# Live "what is this helper doing" for parent rows: in memory only, because it
+# describes a running process. child chat id -> (tool, summary, monotonic time).
+_HELPER_ACTIVITY: dict[str, tuple[str, str, float]] = {}
+_HELPER_PARENT: dict[str, str | None] = {}
+_PARENT_ACTIVITY_PUBLISHED: dict[str, float] = {}
+HELPER_ACTIVITY_REFRESH_SECONDS = 4.0
+
+
+def note_helper_activity(child_chat_id: str, tool: object, summary: object) -> None:
+  """Record a helper's newest step and refresh its parent's rows, throttled.
+
+  Best-effort and cheap: the parent id is looked up once per child, and the
+  parent's activity feed refreshes at most every few seconds.
+  """
+  if not child_chat_id or not isinstance(tool, str) or not tool:
+    return
+  try:
+    import time as _time
+    parent = _HELPER_PARENT.get(child_chat_id, ...)
+    if parent is ...:
+      from app.database import SessionLocal
+      with SessionLocal() as db:
+        found = db.query(models.Delegation.parent_chat_id).filter(
+          models.Delegation.child_chat_id == child_chat_id,
+        ).first()
+      parent = found[0] if found else None
+      if len(_HELPER_PARENT) > 4096:
+        _HELPER_PARENT.clear()
+      _HELPER_PARENT[child_chat_id] = parent
+    if parent is None:
+      return
+    now = _time.monotonic()
+    text = summary[:160] if isinstance(summary, str) else ""
+    previous = _HELPER_ACTIVITY.get(child_chat_id)
+    if not text and previous is not None and previous[0] == tool:
+      # A bare repeat of the same tool keeps the text already known.
+      text = previous[1]
+    _HELPER_ACTIVITY[child_chat_id] = (tool, text, now)
+    # The step's text arriving just after its start is worth showing at once.
+    filled_in = bool(text) and previous is not None and not previous[1] and previous[0] == tool
+    if filled_in or (
+      now - _PARENT_ACTIVITY_PUBLISHED.get(parent, 0.0) >= HELPER_ACTIVITY_REFRESH_SECONDS
+    ):
+      _PARENT_ACTIVITY_PUBLISHED[parent] = now
+      publish_chat_activity_changed(parent)
+  except Exception:
+    _LOG.debug("helper activity note failed child=%s", child_chat_id, exc_info=True)
+
+
+def helper_current_activity(child_chat_id: str) -> dict | None:
+  """The newest step a running helper started, if this process saw one."""
+  noted = _HELPER_ACTIVITY.get(child_chat_id)
+  if noted is None:
+    return None
+  tool, summary, _at = noted
+  return {"tool": tool, "summary": summary}
+
+
 def publish_chat_activity_changed(parent_chat_id: str) -> None:
   """Hint that the exact-chat activity page has durable changes to refetch."""
   if not parent_chat_id:
@@ -2116,6 +2181,106 @@ async def _append_wake_pending(
     )
 
 
+async def steer_results_into_running_parent(
+  parent_chat_id: str, source_work_id: str,
+) -> bool:
+  """Hand finished helpers' results to a parent whose turn is still running.
+
+  The result travels as the same hidden delegation-result message a wake
+  would carry, steered straight into the live turn. Only an accepted steer
+  latches the rows as delivered (like an admitted wake); otherwise nothing is
+  stored and the normal after-turn delivery owns them. The accepted row lands
+  in the parent's transcript, which also keeps later wakes from repeating it.
+  """
+  import app.chat_queue as chat_queue
+  from app import questions
+  from app.chat import is_chat_running, is_draining
+  from app.chat_steering import has_live_steerable_turn, steer_into_active_turn
+  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  from app.database import SessionLocal
+
+  async with chat_queue.get_lock(parent_chat_id):
+    with SessionLocal() as db:
+      chat = db.query(models.Chat).filter(
+        models.Chat.id == parent_chat_id,
+        models.Chat.deleted_at.is_(None),
+      ).first()
+      if chat is None or not is_chat_running(parent_chat_id):
+        return False
+      if is_draining() or questions.is_waiting(parent_chat_id):
+        return False
+      provider = chat.provider or "claude"
+      if not has_live_steerable_turn(parent_chat_id, provider):
+        return False
+      # Never jump ahead of owner-authored or other queued work.
+      if list(chat.pending_messages or []):
+        return False
+      rows = _wake_eligible_rows_for_parent(db, parent_chat_id, source_work_id)
+      recorded = _recorded_parent_wake_ids(db, parent_chat_id)
+      rows = [row for row in rows if row.id not in recorded]
+      if not rows:
+        return False
+      ids = [row.id for row in rows]
+      content = _compose_wake_notice(db, rows)
+      _run_id, cid = _parent_wake_delivery_identity(rows)
+      carrier = {
+        "role": "user",
+        "content": content,
+        "ts": int(datetime.now().timestamp() * 1000),
+        "cid": cid,
+        "hidden": True,
+        "kind": DELEGATION_RESULT_MESSAGE_KIND,
+        "source_work_id": rows[0].parent_root_run_id,
+      }
+    try:
+      accepted = await steer_into_active_turn(
+        provider, parent_chat_id, content, [carrier], None,
+      )
+    except Exception:
+      _LOG.warning("helper result steer failed chat=%s", parent_chat_id, exc_info=True)
+      accepted = False
+    if accepted:
+      with SessionLocal() as db:
+        for row in db.query(models.Delegation).filter(
+          models.Delegation.id.in_(ids),
+          models.Delegation.parent_woken_at.is_(None),
+        ).all():
+          row.parent_woken_at = now_naive_utc()
+        db.commit()
+  publish_parent_waiting_changed(parent_chat_id)
+  return bool(accepted)
+
+
+async def deliver_results_after_parent_settled(parent_chat_id: str) -> None:
+  """Once a parent's turn ends, deliver helper results that finished meanwhile.
+
+  A result that settled while the parent was busy could not start a turn; the
+  periodic recovery sweep would find it eventually, but the parent should not
+  wait for that. Best-effort: the sweep remains the backstop.
+  """
+  from app.database import SessionLocal
+
+  try:
+    with SessionLocal() as db:
+      sources = [
+        source for (source,) in db.query(
+          models.Delegation.parent_root_run_id,
+        ).filter(
+          models.Delegation.parent_chat_id == parent_chat_id,
+          models.Delegation.notify_parent_on_complete.is_(True),
+          models.Delegation.cancelled_at.is_(None),
+          models.Delegation.parent_woken_at.is_(None),
+        ).distinct().all()
+      ]
+    for source in sources:
+      await _deliver_parent_wake(parent_chat_id, source)
+  except Exception:
+    _LOG.debug(
+      "helper results after parent settle skipped chat=%s",
+      parent_chat_id, exc_info=True,
+    )
+
+
 async def _deliver_parent_wake(
   parent_chat_id: str, source_work_id: str,
 ) -> bool:
@@ -2317,7 +2482,12 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
       if status not in WAKE_ELIGIBLE_STATUSES:
         return
       parent_chat_id = row.parent_chat_id
-    await _deliver_parent_wake(parent_chat_id, row.parent_root_run_id)
+      source_work_id = row.parent_root_run_id
+    from app.chat import is_chat_running
+    if is_chat_running(parent_chat_id):
+      await steer_results_into_running_parent(parent_chat_id, source_work_id)
+      return
+    await _deliver_parent_wake(parent_chat_id, source_work_id)
   except Exception:
     _LOG.debug(
       "delegation parent-wake hook failed child=%s",

@@ -1530,18 +1530,18 @@ async def test_stop_timeout_preserves_runner_completion_future():
 
 @pytest.mark.asyncio
 async def test_force_stop_signals_claude_group_only_once(monkeypatch):
-  calls: list[int] = []
+  calls: list[tuple[int, str]] = []
   monkeypatch.setattr(
     claude_sdk_runner,
-    "_terminate_claude_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_claude_processes",
+    lambda pgid, run_marker: calls.append((pgid, run_marker)) or True,
   )
 
   class _Client:
     async def interrupt(self):
       return None
 
-  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop", run_marker="run-1")
   handle.set_process_group_id(4321)
   first = asyncio.create_task(handle.force_stop(timeout=1))
   while not calls:
@@ -1550,7 +1550,7 @@ async def test_force_stop_signals_claude_group_only_once(monkeypatch):
 
   assert await first is True
   assert await handle.force_stop(timeout=1) is True
-  assert calls == [4321]
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
@@ -2653,10 +2653,13 @@ async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   assert "create_goal" in disallowed
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
   finite_tools = {
-    "Bash", "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows",
-    "Agent",
+    "Bash", "TaskOutput", "TaskStop", "Workflow", "Workflows",
   }
   assert not disallowed.intersection(finite_tools)
+  # Like its parent, a helper delegates with Möbius spawn_agent; Claude's own
+  # helper tool is off for every agent, so the child still inherits exactly
+  # the parent's tools.
+  assert set(claude_sdk_runner._CLAUDE_BUILTIN_HELPER_TOOLS) <= disallowed
 
   can_use_tool = captured["options"].can_use_tool
   for tool_name in finite_tools:

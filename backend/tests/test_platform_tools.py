@@ -30,6 +30,9 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
   assert set(codex_server["env_vars"]) == {
     "API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN",
     "MOBIUS_COORDINATION_ENABLED",
+    # Non-secret helper context: the agent's provider (spawn_agent default),
+    # its delegation, and the Subagents app helper.
+    "MOBIUS_AGENT_PROVIDER", "MOBIUS_DELEGATION_ID", "MOBIUS_SUBAGENT_HELPER",
   }
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {
@@ -143,8 +146,9 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   }
   instructions = initialized["result"]["instructions"]
   assert "agents in other Möbius chats" in instructions
-  assert "Provider-native subagent tools" in instructions
-  assert "temporary subagent tree" in instructions
+  # Möbius-owned helpers replace the providers' built-in helper tools.
+  assert "spawn_agent" in instructions
+  assert "arrive in this chat automatically" in instructions
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 2, "method": "tools/list",
@@ -223,8 +227,7 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
     "params": {"protocolVersion": "2025-06-18"},
   })
   instructions = initialized["result"]["instructions"]
-  assert "Provider-native subagent tools" in instructions
-  assert "temporary subagent tree" in instructions
+  assert "spawn_agent" in instructions
   assert "peer tools" not in instructions
   assert "agents in other Möbius chats" not in instructions
 
@@ -244,10 +247,12 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
   finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
   assert "Usually unnecessary" in finish and "--finished WORK_KEY" in finish
+  spawn = tools[control.SPAWN_AGENT_TOOL]["description"]
+  assert "never poll" in spawn and "does not see this" in spawn
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
-    control.LIST_AGENT_PEERS_TOOL,
+    control.LIST_AGENT_PEERS_TOOL, *control.HELPER_TOOLS,
   ):
     assert len(tools[name]["description"]) <= 1000, name
 
@@ -257,8 +262,9 @@ def test_constitution_routes_each_agent_network_to_its_owner():
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
   ).read_text(encoding="utf-8")
 
-  assert "provider-native subagent tools" in core
-  assert "`agents.*`, Task, or Agent" in core
+  # Helpers are Möbius-owned; built-in provider helper tools are off.
+  assert "`spawn_agent`" in core
+  assert "built-in helper tools" in core and "switched off" in core
   assert "other Möbius chats" in core
   assert core.index("`list_agent_peers`") < core.index("`send_agent_message`")
   assert "ordinary chat-message API" in core

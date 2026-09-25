@@ -636,8 +636,9 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   policy = policy_for_chat(db, child.id)
   assert policy is not None
   assert policy.allow_session_reseed is False
-  assert "$MOBIUS_SUBAGENT_HELPER" in policy.system_prompt
-  assert "provider-native helper tools" in policy.system_prompt
+  # Helpers delegate through Möbius, never provider-native helper tools.
+  assert "spawn_agent" in policy.system_prompt
+  assert "provider-native" not in policy.system_prompt
   assert "top-level parent owns any durable Möbius Wait" in policy.system_prompt
   assert "/data/cli-auth and /data/.secret-key as protected by default" in (
     policy.system_prompt
@@ -730,10 +731,12 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
   assert third.root_run_id == "physical-3"
 
 
-def test_delegated_codex_config_routes_questions_up_but_keeps_native_agents():
+def test_delegated_codex_config_routes_questions_up_and_delegates_through_mobius():
   overrides = _codex_config_overrides()
   assert "tools.experimental_request_user_input.enabled=false" in overrides
-  assert "features.multi_agent_v2.enabled=true" in overrides
+  # Helpers delegate with Möbius spawn_agent, never Codex's own helper tools.
+  assert "features.multi_agent=false" in overrides
+  assert "features.multi_agent_v2.enabled=false" in overrides
   assert "features.goals=false" in overrides
 
 

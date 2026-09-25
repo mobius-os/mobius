@@ -16,7 +16,12 @@ from app.agent_coordination import (
   chat_message_history_query,
   serialize_messages,
 )
-from app.delegations import TERMINAL_DELEGATION_STATUSES, derived_status
+from app.delegations import (
+  TERMINAL_DELEGATION_STATUSES,
+  derived_status,
+  helper_current_activity,
+  running_helper_activity_id,
+)
 
 
 DEFAULT_ACTIVITY_LIMIT = 50
@@ -57,6 +62,9 @@ def _parse_cursor(value: str | None) -> ActivityCursor | None:
   except (binascii.Error, KeyError, TypeError, ValueError) as exc:
     raise ValueError("Activity cursor is invalid.") from exc
   return ActivityCursor(created_at=created_at, event_id=event_id)
+
+
+_SETTLED_CHILD_RUN_STATUSES = ("completed", "failed", "stopped", "interrupted")
 
 
 def _latest_child_run_id():
@@ -158,6 +166,9 @@ def _helper_events(
       "created_at": created_at.isoformat(),
       "delegation_id": row.id,
       "task_key": row.task_key,
+      "provider": row.provider,
+      "model": row.model,
+      "duration_ms": _run_duration_ms(run),
       "status": status,
       "body": body[:HELPER_RESULT_BODY_LIMIT],
       "result_truncated": truncated,
@@ -185,6 +196,72 @@ def _helper_events(
   return events
 
 
+def _run_duration_ms(run) -> int | None:
+  """How long a helper's latest turn took, when it has both ends."""
+  if run is None or not run.started_at or not run.ended_at:
+    return None
+  return max(0, int((run.ended_at - run.started_at).total_seconds() * 1000))
+
+
+def _running_helper_events(
+  db: Session, chat_id: str, cursor: ActivityCursor | None, limit: int,
+) -> list[tuple[ActivityCursor, dict]]:
+  """One live row per helper still working, at the point it was launched.
+
+  The row shares the ``helper_result`` shape so the timeline places and groups
+  it like the result it becomes. Once the helper settles, this projection
+  stops emitting it and ``_helper_events`` emits the finished result instead.
+  """
+  run_id = _latest_child_run_id()
+  event_id = literal("delegation:") + models.Delegation.id + literal(":running")
+  query = db.query(models.Delegation).outerjoin(
+    models.ChatRun, models.ChatRun.id == run_id,
+  ).filter(
+    models.Delegation.parent_chat_id == chat_id,
+    models.Delegation.cancelled_at.is_(None),
+    or_(
+      models.ChatRun.id.is_(None),
+      models.ChatRun.status.not_in(_SETTLED_CHILD_RUN_STATUSES),
+    ),
+  )
+  if cursor is not None:
+    query = query.filter(or_(
+      models.Delegation.created_at < cursor.created_at,
+      and_(
+        models.Delegation.created_at == cursor.created_at,
+        event_id < cursor.event_id,
+      ),
+    ))
+  rows = query.order_by(
+    models.Delegation.created_at.desc(), event_id.desc(),
+  ).limit(limit).all()
+  events = []
+  for row in rows:
+    status, run, _result = derived_status(db, row, load_result=False)
+    if status in TERMINAL_DELEGATION_STATUSES:
+      continue
+    stable_id = running_helper_activity_id(row.id)
+    started = run.started_at if run is not None and run.started_at else row.created_at
+    events.append((ActivityCursor(row.created_at, stable_id), {
+      "id": stable_id,
+      "type": "helper_result",
+      "created_at": row.created_at.isoformat(),
+      "delegation_id": row.id,
+      "task_key": row.task_key,
+      "provider": row.provider,
+      "model": row.model,
+      "started_at": started.isoformat() if started else None,
+      "activity": helper_current_activity(row.child_chat_id),
+      "status": status,
+      "body": "",
+      "result_truncated": False,
+      "child_chat_id": row.child_chat_id,
+      "source_work_id": row.parent_root_run_id,
+      "consumption": "unknown",
+    }))
+  return events
+
+
 def chat_activity_page(
   db: Session,
   chat_id: str,
@@ -199,6 +276,7 @@ def chat_activity_page(
   events = [
     *_peer_events(db, chat_id, cursor, source_limit),
     *_helper_events(db, chat_id, cursor, source_limit),
+    *_running_helper_events(db, chat_id, cursor, source_limit),
   ]
   events.sort(key=lambda item: item[0], reverse=True)
   page = events[:bounded_limit]

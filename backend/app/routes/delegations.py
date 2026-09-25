@@ -417,6 +417,78 @@ async def cancel_delegation(
   return payload
 
 
+class DelegationMessage(BaseModel):
+  message: str = Field(min_length=1, max_length=200_000)
+
+  @field_validator("message")
+  @classmethod
+  def _clean_message(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("message must not be empty")
+    return value
+
+
+@router.post(
+  "/{delegation_id}/messages",
+  status_code=202,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def message_delegation(
+  delegation_id: str,
+  body: DelegationMessage,
+  principal: Principal = Depends(get_delegation_principal),
+  db: Session = Depends(get_db),
+):
+  """Give a settled helper a follow-up turn with its history intact.
+
+  Only the helper's own parent chat may message it. The follow-up is the
+  helper's next user turn; its result reaches the parent exactly like the
+  first one (live into a running parent turn, or by waking it), so the
+  one-shot wake latch is re-armed here. A helper that is still working is
+  refused rather than interrupted: the parent waits for its result or stops it.
+  """
+  row = _row_for_principal(db, delegation_id, principal)
+  if principal.chat_id and principal.chat_id != row.parent_chat_id:
+    raise HTTPException(
+      status_code=403, detail="Only the helper's parent chat may message it.",
+    )
+  status, _, _ = derived_status(db, row, load_result=False)
+  if status == "cancelled":
+    raise HTTPException(status_code=409, detail="This helper was stopped.")
+  if status in ACTIVE_DELEGATION_STATUSES:
+    raise HTTPException(
+      status_code=409,
+      detail="The helper is still working. Wait for its result, or stop it.",
+    )
+  from app import chat_queue
+  from app.chat_start import start_programmatic_chat_turn
+  async with chat_queue.get_transition_lock(row.child_chat_id):
+    db.rollback()
+    row = _row_for_principal(db, delegation_id, principal)
+    if row.cancelled_at is not None:
+      raise HTTPException(status_code=409, detail="This helper was stopped.")
+    row.notify_parent_on_complete = True
+    row.parent_woken_at = None
+    row.result_incorporated_at = None
+    db.commit()
+    started = await start_programmatic_chat_turn(
+      chat_id=row.child_chat_id,
+      title=f"Delegation · {row.task_key}",
+      content=body.message,
+      provider=row.provider,
+      initiated_by_app_id=row.app_id,
+    )
+  if not started:
+    raise HTTPException(
+      status_code=409, detail="The helper could not start a follow-up turn now.",
+    )
+  db.rollback()
+  row = _row_for_principal(db, delegation_id, principal)
+  publish_parent_waiting_changed(row.parent_chat_id)
+  return serialize_delegation(db, row, include_result=False)
+
+
 async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str]:
   """Cascade an explicit parent Stop without affecting restart draining."""
   rows = db.query(models.Delegation).filter(
