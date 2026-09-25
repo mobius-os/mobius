@@ -5296,9 +5296,8 @@ def _rename_inkling_to_evolve(eng) -> None:
 
   The service now serves Evolve (Qwen3.8 Max) as ``evolve`` and rejects the
   old ``inkling`` id, so a saved choice still naming it could not run. Only a
-  model value exactly equal to ``inkling`` changes: a ``model`` field, or a
-  ``model_by_provider`` entry, in chat settings and the shared agent settings
-  (including background-agent providers).
+  ``model`` field exactly equal to ``inkling`` changes, in chat settings and
+  the shared agent settings (including background-agent providers).
   """
   import json as _json
   import os as _os
@@ -5312,11 +5311,6 @@ def _rename_inkling_to_evolve(eng) -> None:
         if key == "model" and item == "inkling":
           value[key] = "evolve"
           changed = True
-        elif key == "model_by_provider" and isinstance(item, dict):
-          for provider, model in item.items():
-            if model == "inkling":
-              item[provider] = "evolve"
-              changed = True
         elif isinstance(item, (dict, list)):
           changed = renamed(item) or changed
     elif isinstance(value, list):

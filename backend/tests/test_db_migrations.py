@@ -4436,7 +4436,6 @@ def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
   shared.mkdir()
   (shared / "agent-settings.json").write_text(_json.dumps({
     "model": "inkling",
-    "model_by_provider": {"mobius": "inkling", "claude": "claude-opus-4-8"},
     "background_agents": {"providers": [
       {"provider": "mobius", "model": "inkling"},
       {"provider": "codex", "model": "gpt-5.6-terra"},
@@ -4463,7 +4462,6 @@ def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
   assert _json.loads(stored["c"]) == {"model": "claude-opus-4-8", "note": "inkling"}
   assert _json.loads((shared / "agent-settings.json").read_text()) == {
     "model": "evolve",
-    "model_by_provider": {"mobius": "evolve", "claude": "claude-opus-4-8"},
     "background_agents": {"providers": [
       {"provider": "mobius", "model": "evolve"},
       {"provider": "codex", "model": "gpt-5.6-terra"},
