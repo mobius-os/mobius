@@ -23,12 +23,8 @@ import { mergePositionedActivityEntries } from './activityPosition.js'
 import { restartCardActivityEntries } from './streamReducers.js'
 import HelperResultCard, { HelperRow } from './HelperResultCard.jsx'
 import { isWorkingHelper } from './workingHelper.js'
+import { helperLaunches } from './helperLaunches.js'
 
-// The helper a Möbius spawn_agent call started (its label input is the name).
-function spawnedHelperName(item) {
-  if (item?.type !== 'tool' || effectiveToolName(item) !== 'HelperSpawn') return null
-  return typeof item.input === 'string' ? item.input.trim() || null : null
-}
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -322,10 +318,6 @@ function GroupedActivityStretch({
   const helperRows = entries
     .map(e => e?.item)
     .filter(it => it?.type === 'helper_result')
-  const helperByName = new Map(helperRows.map(it => [it.task_key, it]))
-  const launchedHere = new Set(
-    entries.map(e => spawnedHelperName(e?.item)).filter(name => helperByName.has(name)),
-  )
   const workingRows = helperRows.filter(isWorkingHelper).length
   const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
     + workingRows
@@ -403,6 +395,9 @@ function GroupedActivityStretch({
           suppressLatestRestart,
         )
       : entries
+  // Pair launches with helpers across exactly the steps drawn below — the
+  // collapsed summary may sample only some of them.
+  const launches = helperLaunches(timelineEntries || [])
 
   function revealBeforeReady() {
     if (!userOpenRef.current || visibleOpenRef.current) return
@@ -485,8 +480,8 @@ function GroupedActivityStretch({
           }
           // A helper's one row stands where it was launched: its own spawn
           // call draws it, so its anchored event draws nothing more.
-          if (item.type === 'helper_result' && launchedHere.has(item.task_key)) return null
-          const launched = helperByName.get(spawnedHelperName(item))
+          if (item.type === 'helper_result' && launches.drawnAtLaunch.has(item)) return null
+          const launched = launches.rowAt.get(item)
           if (launched) {
             return (
               <HelperRow

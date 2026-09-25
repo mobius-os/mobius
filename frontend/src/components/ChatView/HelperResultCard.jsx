@@ -27,8 +27,10 @@ function helperStep(event) {
 }
 
 // One ticking clock while anything visible runs, from the helper's start time.
+// The server records that time in UTC without a zone suffix; read it as UTC,
+// never as the viewer's local time, or the clock is off by their UTC offset.
 function useElapsed(startedAt, running) {
-  const start = Date.parse(startedAt || '')
+  const start = peerTime(startedAt)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!running || !Number.isFinite(start)) return undefined

@@ -68,6 +68,24 @@ test('a working helper row shows its name, engine, current step, and clock', () 
   assert.doesNotMatch(html, /Helper finished/)
 })
 
+test('the clock reads the server start time as UTC, whatever the viewer\'s time zone', () => {
+  // The server stores UTC without a zone suffix. A fixed non-zero offset (no
+  // daylight saving) proves the clock never shifts by the viewer's offset.
+  const priorTz = process.env.TZ
+  process.env.TZ = 'Asia/Kolkata'
+  try {
+    const started = new Date(Date.now() - 75_000).toISOString().replace('Z', '')
+    const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+      chatId: 'chat',
+      event: { ...working, delegation_id: 'd1', provider: 'claude', model: 'claude-opus-4-8', started_at: started },
+    }))
+    assert.match(html, /chat__subagent-elapsed">1m 1[45]s</)
+  } finally {
+    if (priorTz === undefined) delete process.env.TZ
+    else process.env.TZ = priorTz
+  }
+})
+
 test('a working helper without a known step says it is working', () => {
   const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
     chatId: 'chat', event: { ...working, delegation_id: 'd1', provider: 'claude', model: 'claude-opus-4-8' },
@@ -151,4 +169,38 @@ test('a finished helper stays its launch step: one settled row, counted as done'
   assert.doesNotMatch(html, /Started helper audit-login/)
   assert.match(html, /Finished/)
   _resetDisclosureStateForTests()
+})
+
+test('a failed launch stays a failed step; only the retry that started the helper is its row', async () => {
+  const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
+  const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'm4:activity:t0', true)
+  const spawn = (id, extra) => ({ type: 'tool', tool: 'mcp__mobius_control__spawn_agent', input: 'audit-login', status: 'done', tool_use_id: id, ...extra })
+  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+    chatId: 'chat',
+    surfaceKey: 'm4',
+    entries: [
+      { idx: 0, item: { type: 'tool', tool: 'Bash', input: 'git status', status: 'done', tool_use_id: 't0' } },
+      { idx: 1, item: spawn('t1', { output: "Unknown helper provider 'Claude Code'.", output_exit_code: 1 }) },
+      { idx: 2, item: spawn('t2', { output: '{"helper":"audit-login","helper_id":"d1","status":"running"}' }) },
+      { idx: 'h', item: { ...working, delegation_id: 'd1', type: 'helper_result', activityId: working.id } },
+    ],
+  }))
+  assert.equal(html.match(/chat__helper-row/g)?.length, 1, 'one row per helper')
+  assert.match(html, /1 running/)
+  _resetDisclosureStateForTests()
+})
+
+test('a relaunch under the same name pairs each launch with the exact helper it started', async () => {
+  const { helperLaunches } = await vite.ssrLoadModule('/src/components/ChatView/helperLaunches.js')
+  const spawn = (id, helperId) => ({ type: 'tool', tool: 'mcp__mobius_control__spawn_agent', input: 'audit-login', status: 'done', tool_use_id: id, output: `{"helper":"audit-login","helper_id":"${helperId}"}` })
+  const first = spawn('t1', 'd1')
+  const second = spawn('t2', 'd2')
+  const older = { ...working, type: 'helper_result', delegation_id: 'd1', status: 'completed' }
+  const newer = { ...working, type: 'helper_result', delegation_id: 'd2' }
+  const { rowAt, drawnAtLaunch } = helperLaunches([first, older, second, newer].map((item, idx) => ({ idx, item })))
+  assert.equal(rowAt.get(first), older)
+  assert.equal(rowAt.get(second), newer)
+  assert.equal(drawnAtLaunch.size, 2)
 })
