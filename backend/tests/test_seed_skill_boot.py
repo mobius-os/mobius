@@ -68,13 +68,13 @@ def _records(skills):
 def test_fresh_seed_records_baseline_and_updates_clean_copy(boot):
   module, seed, skills, _, repo = boot
   (seed / "sample.md").write_text("v1")
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   module.init()
   assert (skills / "sample.md").read_text() == "v1"
   assert _records(skills)["sample.md"]["baseline_sha256"] == hashlib.sha256(b"v1").hexdigest()
 
   (seed / "sample.md").write_text("v2")
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   module.init()
   assert (skills / "sample.md").read_text() == "v2"
   assert _records(skills)["sample.md"]["status"] == "current"
@@ -82,12 +82,12 @@ def test_fresh_seed_records_baseline_and_updates_clean_copy(boot):
 
 def test_recorded_owner_edit_survives_upstream_change(boot):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
   (skills / "sample.md").write_text("owner improvement")
 
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   module.init()
 
@@ -101,7 +101,7 @@ def test_recorded_owner_edit_survives_upstream_change(boot):
 def test_legacy_shipped_copy_is_recognized_from_git_history(boot):
   module, seed, skills, _, repo = boot
   _commit(repo, "v1")
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("v1")
@@ -114,7 +114,7 @@ def test_legacy_shipped_copy_is_recognized_from_git_history(boot):
 
 def test_exact_unsafe_legacy_copy_is_preserved_before_replacement(boot, monkeypatch):
   module, seed, skills, archive, repo = boot
-  module.BUILD_SHA = _commit(repo, "safe guidance")
+  _commit(repo, "safe guidance")
   (seed / "sample.md").write_text("safe guidance")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("unsafe curated guidance")
@@ -130,7 +130,7 @@ def test_exact_unsafe_legacy_copy_is_preserved_before_replacement(boot, monkeypa
 
 def test_unsafe_legacy_copy_is_not_replaced_if_archive_fails(boot, monkeypatch):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "safe guidance")
+  _commit(repo, "safe guidance")
   (seed / "sample.md").write_text("safe guidance")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("unsafe curated guidance")
@@ -146,7 +146,7 @@ def test_unsafe_legacy_copy_is_not_replaced_if_archive_fails(boot, monkeypatch):
 
 def test_exact_unsafe_copy_is_repaired_even_with_existing_baseline(boot, monkeypatch):
   module, seed, skills, archive, repo = boot
-  module.BUILD_SHA = _commit(repo, "safe guidance")
+  _commit(repo, "safe guidance")
   (seed / "sample.md").write_text("safe guidance")
   module.init()
   (skills / "sample.md").write_text("unsafe curated guidance")
@@ -166,7 +166,7 @@ def test_historical_identity_is_per_name_even_for_identical_blobs(boot):
   other.write_text("shared old text")
   _commit(repo, "shared old text")
   other.write_text("other new text")
-  module.BUILD_SHA = _commit(repo, "sample new text")
+  _commit(repo, "sample new text")
   (seed / "sample.md").write_text("sample new text")
   (seed / "other.md").write_text("other new text")
   skills.mkdir(parents=True)
@@ -181,7 +181,7 @@ def test_historical_identity_is_per_name_even_for_identical_blobs(boot):
 
 def test_unknown_legacy_and_later_local_edits_remain_visible(boot):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("my version")
@@ -198,7 +198,7 @@ def test_unknown_legacy_and_later_local_edits_remain_visible(boot):
   assert _skill_row(found[0], {}, {}, is_owner=True)["seed_status"] == "needs_review"
 
   (seed / "sample.md").write_text("v3")
-  module.BUILD_SHA = _commit(repo, "v3")
+  _commit(repo, "v3")
   module.init()
   assert (skills / "sample.md").read_text() == "my version"
   assert _records(skills)["sample.md"]["upstream_sha256"] == hashlib.sha256(b"v3").hexdigest()
@@ -206,7 +206,7 @@ def test_unknown_legacy_and_later_local_edits_remain_visible(boot):
 
 def test_owner_deleted_seed_is_not_recreated(boot):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
   (skills / "sample.md").unlink()
@@ -214,7 +214,7 @@ def test_owner_deleted_seed_is_not_recreated(boot):
   assert not (skills / "sample.md").exists()
   assert _records(skills)["sample.md"]["status"] == "missing_local"
 
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   module.init()
   assert not (skills / "sample.md").exists()
@@ -224,7 +224,7 @@ def test_owner_deleted_seed_is_not_recreated(boot):
 def test_retired_seed_is_archived_once_even_when_modified(boot):
   module, seed, skills, archive, repo = boot
   _commit(repo, "v1")
-  module.BUILD_SHA = _commit(repo, remove=True)
+  _commit(repo, remove=True)
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("owner notes")
 
@@ -246,7 +246,7 @@ def test_retired_seed_is_archived_once_even_when_modified(boot):
 def test_interrupted_retirement_replays_without_losing_archive(boot, monkeypatch):
   module, _, skills, archive, repo = boot
   _commit(repo, "v1")
-  module.BUILD_SHA = _commit(repo, remove=True)
+  _commit(repo, remove=True)
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("owner notes")
   original = module._write_records
@@ -265,7 +265,7 @@ def test_interrupted_retirement_replays_without_losing_archive(boot, monkeypatch
 def test_app_owned_historical_name_is_never_retired(boot):
   module, seed, skills, archive, repo = boot
   _commit(repo, "v1")
-  module.BUILD_SHA = _commit(repo, remove=True)
+  _commit(repo, remove=True)
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("app copy")
   (skills / ".app-skills.json").write_text(json.dumps({"sample.md": {"app_id": 42}}))
@@ -279,7 +279,7 @@ def test_app_owned_historical_name_is_never_retired(boot):
 def test_missing_history_never_guesses_legacy_ownership(boot):
   module, seed, skills, archive, repo = boot
   _commit(repo, "v1")
-  module.BUILD_SHA = "unavailable"
+  module._source_revision = lambda: None
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("v1")
@@ -293,24 +293,47 @@ def test_missing_history_never_guesses_legacy_ownership(boot):
   assert _records(skills)["sample.md"]["status"] == "needs_review"
 
 
-def test_history_newer_than_image_cannot_authorize_overwrite(boot):
+def test_history_from_another_revision_cannot_authorize_overwrite(boot):
   module, seed, skills, _, repo = boot
-  image_sha = _commit(repo, "v2")
-  _commit(repo, "future local edit")
-  module.BUILD_SHA = image_sha
+  applied = _commit(repo, "v2")
+  _git(repo, "checkout", "-q", "-b", "elsewhere")
+  _commit(repo, "edit on another revision")
+  _git(repo, "checkout", "-q", "main")
+  assert module._source_revision() == applied
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
-  (skills / "sample.md").write_text("future local edit")
+  (skills / "sample.md").write_text("edit on another revision")
 
   module.init()
 
-  assert (skills / "sample.md").read_text() == "future local edit"
+  assert (skills / "sample.md").read_text() == "edit on another revision"
   assert _records(skills)["sample.md"]["status"] == "needs_review"
+
+
+def test_seed_retired_by_an_older_source_returns_when_shipped_again(boot):
+  module, seed, skills, archive, repo = boot
+  (seed / "sample.md").write_text("v1")
+  _commit(repo, "v1")
+  module.init()
+  # An older image or the baked fallback, which lacks the seed, retires it.
+  (seed / "sample.md").unlink()
+  _commit(repo, remove=True)
+  module.init()
+  assert not (skills / "sample.md").exists()
+  assert _records(skills)["sample.md"]["status"] == "retired"
+
+  (seed / "sample.md").write_text("v1")
+  _commit(repo, "v1")
+  module.init()
+
+  assert (skills / "sample.md").read_text() == "v1"
+  assert _records(skills)["sample.md"]["status"] == "current"
+  assert list(archive.iterdir())
 
 
 def test_corrupt_owner_sidecar_blocks_all_mutation(boot):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   skills.mkdir(parents=True)
   (skills / ".app-skills.json").write_text("not json")
@@ -323,10 +346,10 @@ def test_corrupt_owner_sidecar_blocks_all_mutation(boot):
 
 def test_interrupted_file_write_reconciles_on_next_boot(boot, monkeypatch):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   original = module._write_records
   monkeypatch.setattr(module, "_write_records", lambda _records: (_ for _ in ()).throw(OSError("crash")))
@@ -342,13 +365,13 @@ def test_interrupted_file_write_reconciles_on_next_boot(boot, monkeypatch):
 
 def test_keep_local_decision_holds_edits_across_future_seed_updates(boot):
   module, seed, skills, _, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
   (skills / "sample.md").write_text("my version")
   module.resolve("sample.md", "keep-local", hashlib.sha256(b"my version").hexdigest())
 
-  module.BUILD_SHA = _commit(repo, "v2")
+  _commit(repo, "v2")
   (seed / "sample.md").write_text("v2")
   module.init()
 
@@ -359,7 +382,7 @@ def test_keep_local_decision_holds_edits_across_future_seed_updates(boot):
 
 def test_take_upstream_preserves_local_bytes_before_replacement(boot):
   module, seed, skills, archive, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
   (skills / "sample.md").write_text("my version")
@@ -373,7 +396,7 @@ def test_take_upstream_preserves_local_bytes_before_replacement(boot):
 
 def test_review_decision_rejects_changed_skill(boot):
   module, seed, skills, archive, repo = boot
-  module.BUILD_SHA = _commit(repo, "v1")
+  _commit(repo, "v1")
   (seed / "sample.md").write_text("v1")
   module.init()
   (skills / "sample.md").write_text("new edit")

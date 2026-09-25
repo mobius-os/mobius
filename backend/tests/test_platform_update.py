@@ -2269,7 +2269,8 @@ def test_platform_conflict_resolver_message_points_at_the_parked_worktree():
   assert "all marked files together" in content
   assert "merge --no-ff" not in content
   assert "running platform is untouched" in content
-  assert "separate image/restart actions" in content
+  assert "Finish update" in content
+  assert "Do not offer a plain restart instead" in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
@@ -2900,17 +2901,16 @@ def test_status_no_restart_when_only_tests_changed(clone_env):
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
-def test_status_ignores_seed_repair_already_matching_running_image(
+def test_status_ignores_boot_script_repair_already_matching_running_image(
   clone_env, monkeypatch,
 ):
-  """A served-checkout SHA cannot make an already-baked seed stale.
+  """A served-checkout SHA cannot make an already-baked boot script stale.
 
-  Seed templates run from the image, unlike the Python checkout. Restoring one
-  to the image's exact bytes must clear a false image-rebuild prompt without
-  modifying the separately owner-curated shared skill.
+  Boot scripts run from the image, unlike the Python checkout. Restoring one
+  to the image's exact bytes must clear a false image-rebuild prompt.
   """
   _, platform = clone_env
-  path = "backend/scripts/seed-skills/goal-planning.md"
+  path = "backend/scripts/init_chat_summaries.py"
   seed = platform / path
   seed.parent.mkdir(parents=True)
   seed.write_text("old seed\n")
@@ -2920,7 +2920,7 @@ def test_status_ignores_seed_repair_already_matching_running_image(
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   pu.SERVING_SHA_FILE.write_text(served + "\n")
 
-  baked = "running image seed\n"
+  baked = "running image script\n"
   _local_commit(platform, edits={path: baked})
   monkeypatch.setattr(pu, "_build_info", lambda: {
     "image_inputs": {path: hashlib.sha256(baked.encode()).hexdigest()},
@@ -4369,6 +4369,39 @@ def test_finish_stays_on_applied_release_when_newer_source_is_available(clone_en
   assert applied != newer
 
 
+def test_finish_targets_the_installed_release_when_the_tracking_ref_lags(clone_env):
+  origin, platform = clone_env
+  older = _served_sha(platform)
+  installed = _advance_origin(origin, edits={"release.txt": "installed release\n"})
+  assert pu.reconcile_clone(platform).status == "updated"
+  # A reviewed Apply can install an exact target fetched outside the tracking
+  # ref, so origin/main may still name the older release afterwards.
+  _git(platform, "update-ref", "refs/remotes/origin/main", older)
+
+  assert pu.applied_release_sha(platform) == installed
+  status = pu.platform_status(platform)
+  assert status["available"] is False
+  assert status["contained_upstream_sha"] == installed
+  preview = pu.platform_update_preview(platform)
+  assert preview["target_sha"] == installed
+  pu.check_for_updates(platform)
+  assert pu.recorded_upstream_sha(platform) == installed
+
+
+def test_finish_refuses_a_branch_reset_below_the_installed_release(clone_env):
+  origin, platform = clone_env
+  older = _served_sha(platform)
+  _advance_origin(origin, edits={"release.txt": "installed release\n"})
+  assert pu.reconcile_clone(platform).status == "updated"
+  _git(platform, "update-ref", "refs/remotes/origin/main", older)
+  _git(platform, "reset", "-q", "--hard", older)
+
+  # Finish must never target a release the served source does not contain,
+  # even though the lagging tracking ref names one it does.
+  with pytest.raises(pu.PlatformUpdateError, match="applied_release_unavailable"):
+    pu.applied_release_sha(platform)
+
+
 def test_finish_can_prove_applied_source_without_a_recorded_marker(clone_env):
   _origin, platform = clone_env
   applied = _served_sha(platform)
@@ -4460,12 +4493,12 @@ def test_host_installer_replays_exact_bundled_release_and_preserves_local_edits(
 
 
 @pytest.mark.parametrize("deployment", ["self_hosted", "railway"])
-def test_review_exposes_seed_customization_before_replacement_without_mutation(
+def test_review_exposes_boot_script_customization_before_replacement_without_mutation(
   clone_env, monkeypatch, deployment,
 ):
   origin, platform = clone_env
   monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
-  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/waiting.md"]
+  paths = ["backend/scripts/init_agent_context.py", "backend/scripts/init_chat_summaries.py"]
   _local_commit(platform, edits={path: "local instructions\n" for path in paths})
   target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
   pu._fetch(platform)
@@ -4483,7 +4516,7 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
   assert preview["blocking_paths"] == paths
   assert reviewed["blockers"] == preview["blocking_paths"]
   assert preview["blocking_diff"] is not None
-  assert "backend/scripts/seed-skills/cron.md" in preview["blocking_diff"]
+  assert "backend/scripts/init_agent_context.py" in preview["blocking_diff"]
   assert "local instructions" in preview["blocking_diff"]
   assert preview["blocking_diff_truncated"] is False
   assert preview["activation"]["deployment"] == deployment
@@ -4493,9 +4526,9 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
   assert all((platform / path).read_text() == "local instructions\n" for path in paths)
 
 
-def test_review_does_not_block_seed_changes_already_in_the_official_release(clone_env):
+def test_review_does_not_block_image_changes_already_in_the_official_release(clone_env):
   origin, platform = clone_env
-  path = "backend/scripts/seed-skills/cron.md"
+  path = "backend/scripts/init_chat_summaries.py"
   _local_commit(platform, edits={path: "same useful instructions\n"})
   target = _advance_origin(origin, edits={path: "same useful instructions\n"})
   pu._fetch(platform)
@@ -4615,7 +4648,7 @@ def test_review_does_not_follow_image_input_ancestor_symlink(clone_env):
 def test_finish_review_exposes_local_image_blockers_too(clone_env):
   _, platform = clone_env
   official = _served_sha(platform)
-  path = "backend/scripts/seed-skills/cron.md"
+  path = "backend/scripts/init_chat_summaries.py"
   _local_commit(platform, edits={path: "preserve me\n"})
   pu.mark_activation_needed(_served_sha(platform), [path], upstream_sha=official, repo=platform)
 

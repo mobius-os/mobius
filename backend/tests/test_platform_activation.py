@@ -50,8 +50,6 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     "backend/requirements.txt": "image_rebuild",
     "backend/requirements.lock": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
-    "backend/scripts/init_skills.py": "image_rebuild",
-    "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
     "backend/runtime": "image_rebuild",
     "backend/runtime/restart_ledger.py": "image_rebuild",
     "protected-files.txt": "image_rebuild",
@@ -60,6 +58,18 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     impact = activation.classify_activation([path], deployment="self_hosted")
     assert impact["level"] == level, path
     assert impact["level"] not in {"live", "server_restart"}, path
+
+
+def test_skill_templates_follow_the_served_source_after_a_restart():
+  # The server applies its own checkout's templates at startup, so a release
+  # that only changes skill wording needs no new container image.
+  for path in (
+    "backend/scripts/init_skills.py",
+    "backend/scripts/seed-skills/platform-maintenance.md",
+  ):
+    impact = activation.classify_activation([path], deployment="self_hosted")
+    assert impact["level"] == "server_restart", path
+    assert not activation.path_is_image_owned(path), path
 
 
 def test_served_runtime_module_restarts_instead_of_rebuilding_the_image():

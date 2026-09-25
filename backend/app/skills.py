@@ -81,11 +81,10 @@ _RESERVED_NAMES = frozenset({
   ".inactive",
 })
 
-# Baked seed skill names, resolved once. Used only to label provenance; a
-# missing seed dir (unusual) just means seed-authored files read as "agent",
-# which is harmless for an informational label.
+# The running checkout's seed skill names, resolved once. Used only to label
+# provenance; a missing seed dir (unusual) just means seed-authored files read
+# as "agent", which is harmless for an informational label.
 _SEED_CANDIDATES = (
-  Path("/app/scripts/seed-skills"),
   Path(__file__).resolve().parent.parent / "scripts" / "seed-skills",
 )
 

@@ -12,9 +12,9 @@
 # database is migrated later by SQLAlchemy; this image-owned script must not
 # assume either SQLite or a fixed database path.
 #
-# Run before init_skills.py and install-core-apps.sh, as the mobius user, so live
-# skill edits are moved before seeding and app rows are renamed before core app
-# registration.
+# Run before the server starts (it reconciles platform skills) and before
+# install-core-apps.sh, as the mobius user, so live skill edits are moved before
+# seeding and app rows are renamed before core app registration.
 set -uo pipefail
 
 DATA_DIR="${DATA_DIR:-/data}"

@@ -287,3 +287,45 @@ async def test_schema_safe_boot_runs_the_database_startup_phase(monkeypatch):
 
   assert result.serviceable is True
   assert events == ["process", "database"]
+
+
+@pytest.mark.asyncio
+async def test_server_start_applies_the_running_checkouts_skill_templates(
+  tmp_path, monkeypatch,
+):
+  # Templates follow the served source: the startup plan runs this checkout's
+  # reconciler, so a template-only release needs a restart, not a new image.
+  assert "reconcile platform skills" in [
+    task.name for task in startup.PROCESS_STARTUP_TASKS
+  ]
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  build_info = tmp_path / "build-info.json"
+  build_info.write_text('{"image_inputs": {"backend/scripts/entrypoint.sh": "x"}}')
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(build_info))
+  ctx = context()
+
+  await startup._reconcile_platform_skills(ctx)
+
+  seeds = startup._SKILL_RECONCILER.parent / "seed-skills"
+  installed = tmp_path / "shared" / "skills"
+  for seed in seeds.glob("*.md"):
+    assert (installed / seed.name).read_bytes() == seed.read_bytes()
+  assert (installed / ".seed-skills.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_an_image_that_still_reconciles_skills_keeps_the_job(
+  tmp_path, monkeypatch,
+):
+  # Running both reconcilers would let the image's older seeds retire and
+  # revert templates this checkout adds, on every restart.
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  build_info = tmp_path / "build-info.json"
+  build_info.write_text(
+    '{"image_inputs": {"backend/scripts/init_skills.py": "x"}}'
+  )
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(build_info))
+
+  await startup._reconcile_platform_skills(context())
+
+  assert not (tmp_path / "shared" / "skills").exists()
