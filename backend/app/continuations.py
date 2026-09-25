@@ -6,10 +6,6 @@ from collections.abc import Mapping
 import hashlib
 from typing import Any
 
-from sqlalchemy.orm import Session
-
-from app import models
-
 
 # ``auto_continuation`` is the durable legacy value already stored in partner
 # transcripts. New writes use the origin-neutral name because a manual Resume
@@ -184,7 +180,7 @@ def manual_continuation_run_token(chat_id: str, control_id: str) -> str:
 
 
 def recovery_reasons_by_run_id(
-  db: Session, chat_id: str, run_ids: list[str],
+  db, chat_id: str, run_ids: list[str],
 ) -> dict[str, str]:
   """Map each recovery run among ``run_ids`` to its continuation reason.
 
@@ -194,6 +190,7 @@ def recovery_reasons_by_run_id(
   """
   if not run_ids:
     return {}
+  from app import models  # keep this low-level module free of ORM imports
   rows = db.query(models.ChatRun.id, models.ChatRun.continuation_json).filter(
     models.ChatRun.chat_id == chat_id,
     models.ChatRun.id.in_(run_ids),

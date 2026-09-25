@@ -4051,7 +4051,7 @@
   margin-bottom: 10px;
 }
 
-.chat__answer-cause .chat__goal-history { margin-top: 0; }
+.chat__answer-cause .chat__wait-history { margin-top: 0; }
 
 .chat__lifecycle-icon {
   display: inline-flex;

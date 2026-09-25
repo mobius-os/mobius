@@ -689,13 +689,13 @@ def _chat_detail_response(
     if message.get("role") == "assistant" and isinstance(message.get("id"), str)
   ])
   if recovery_reasons:
-    page = [
-      {**message, "continuation_reason": recovery_reasons[message["id"]]}
-      if message.get("role") == "assistant"
-      and message.get("id") in recovery_reasons
-      else message
-      for message in page
-    ]
+    next_page = list(page)
+    for relative_index, message in enumerate(page):
+      reason = recovery_reasons.get(message.get("id"))
+      if message.get("role") != "assistant" or reason is None:
+        continue
+      next_page[relative_index] = {**message, "continuation_reason": reason}
+    page = next_page
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   # The picker's current model must match what a message would actually use. A
