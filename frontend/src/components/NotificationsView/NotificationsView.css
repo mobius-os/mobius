@@ -392,9 +392,15 @@
   font-size: 12px;
 }
 
+.notifications__row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
 .notifications__row-time {
   flex: none;
-  margin-top: 2px;
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;

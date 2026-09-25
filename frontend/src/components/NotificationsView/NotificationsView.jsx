@@ -213,7 +213,15 @@ export default function NotificationsView({
                   <Icon width={17} height={17} />
                 </span>
                 <span className="notifications__row-main">
-                  <span className="notifications__row-title">{n.title}</span>
+                  <span className="notifications__row-head">
+                    <span className="notifications__row-title">{n.title}</span>
+                    <time
+                      className="notifications__row-time"
+                      dateTime={n.sent_at}
+                    >
+                      {formatRelativeTime(n.sent_at, now)}
+                    </time>
+                  </span>
                   {n.body ? (
                     <span className="notifications__row-body">{n.body}</span>
                   ) : null}
@@ -246,12 +254,6 @@ export default function NotificationsView({
                     </span>
                   ) : null}
                 </span>
-                <time
-                  className="notifications__row-time"
-                  dateTime={n.sent_at}
-                >
-                  {formatRelativeTime(n.sent_at, now)}
-                </time>
               </>
             )
             return (
