@@ -228,9 +228,9 @@ async def _reconcile_platform_skills(context: StartupContext) -> None:
   import subprocess
   import sys
 
-  from app.platform_update import image_reconciles_skills
+  from app.config import _read_build_info
 
-  if image_reconciles_skills():
+  if "backend/scripts/init_skills.py" in (_read_build_info().get("image_inputs") or {}):
     # An image built before this handoff still runs its own reconciler from
     # the entrypoint with its baked seeds. Running both would let the older
     # one retire and revert templates this checkout adds on every restart, so
