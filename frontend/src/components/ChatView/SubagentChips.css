@@ -126,3 +126,28 @@
 @media (forced-colors: active) {
   .chat__subagent--running .chat__subagent-name-sweep { display: none !important; }
 }
+
+/* An agent row opens its helper's own conversation. The button keeps the row's
+   fixed height and quiet voice; a hover/focus wash and a trailing chevron say
+   it is openable. */
+.chat__subagent--openable {
+  width: 100%;
+  margin: 0;
+  padding: 1px 6px 1px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .chat__subagent--openable:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+}
+.chat__subagent--openable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat__subagent--openable:active { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.chat__subagent-open {
+  flex-shrink: 0;
+  color: var(--muted); /* CONTRACT: low-contrast affordance, not a call to action */
+}

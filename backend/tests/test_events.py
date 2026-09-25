@@ -310,6 +310,8 @@ def test_task_start_enriches_matching_task_block():
   assert changed
   helper = blocks[0]["subagent"]["task_A"]
   assert helper["description"] == "Review the diff for races"
+  # The kind survives reload so the row knows it has a conversation to open.
+  assert helper["task_type"] == "general"
   assert helper["status"] == "running"
   assert helper["summary"] is None
   assert isinstance(helper["startedAt"], int)

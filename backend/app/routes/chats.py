@@ -69,6 +69,7 @@ from app.chat_titles import (
 from app.database import get_db
 from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal
+from app.helper_transcripts import read_helper_conversation
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
@@ -1765,6 +1766,26 @@ def get_chat_activity(
     return chat_activity_page(db, chat_id, before=before, limit=limit)
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/{chat_id}/helpers/{task_id}")
+def get_chat_helper_conversation(
+  chat_id: str,
+  task_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """One helper's own conversation, read-only, for the chat that spawned it."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  conversation = read_helper_conversation(db, chat_id, task_id)
+  if conversation is None:
+    raise HTTPException(
+      status_code=404, detail="This helper's conversation is not available.",
+    )
+  return conversation
 
 
 @router.get("/{chat_id}/activity-detail")
