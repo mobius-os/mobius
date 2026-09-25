@@ -66,3 +66,30 @@ test('positioned helper completions stay inside the surrounding activity run', (
     { single: prose },
   ])
 })
+
+test('pages of one app operation render as one row listing every page', () => {
+  const page = (status, label, labels, extra = {}) => entry('tool', {
+    tool: 'Bash', status,
+    app_activity: {
+      app_slug: 'memory', status: 'succeeded', label,
+      operation_key: 'lk:read:ab12',
+      resources: labels.map(name => ({ label: name, intent: `note:${name}` })),
+      ...extra,
+    },
+  })
+  const first = page('done', 'Read a Memory page', ['A', 'B'])
+  const prose = entry('text', { content: 'Reading on.' })
+  const last = page('done', 'Finished reading 3 notes from Memory', ['B', 'C'])
+  const otherApp = page('done', 'Other', ['Z'], { app_slug: 'notes' })
+
+  const nodes = groupActivityRuns([first, prose, last, otherApp])
+  const row = nodes[0].group[0]
+  // The operation keeps its first slot and shows the finished wording with
+  // every note read, once each; another app's identical key stays separate.
+  assert.equal(nodes.length, 3)
+  assert.equal(row.item.app_activity.label, 'Finished reading 3 notes from Memory')
+  assert.deepEqual(row.item.app_activity.resources.map(r => r.label), ['A', 'B', 'C'])
+  assert.equal(nodes[0].group.length, 1)
+  assert.equal(nodes[1].single, prose)
+  assert.equal(nodes[2].group[0], otherApp)
+})

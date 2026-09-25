@@ -25,6 +25,10 @@ _BACKGROUND_RE = re.compile(
   r" Output is being written to: (?P<path>/[^\s]+?\.output)\."
 )
 _EXIT_TRAILER_RE = re.compile(r"\[exited with code (?P<code>-?\d+)\]\s*\Z")
+# One app operation can span several calls when its output is paged to fit a
+# provider's tool-output limit. Receipts from the same app that share this key
+# are one operation: the chat shows them as a single row (activityGrouping.js).
+_OPERATION_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,160}")
 
 
 def _text(value: object, limit: int) -> str:
@@ -240,6 +244,9 @@ def activity_from_result(
   resources = _resources(payload.get("resources"))
   if resources:
     settled["resources"] = resources
+  operation_key = payload.get("operation_key")
+  if isinstance(operation_key, str) and _OPERATION_KEY_RE.fullmatch(operation_key):
+    settled["operation_key"] = operation_key
   return _identity(pending, settled)
 
 
