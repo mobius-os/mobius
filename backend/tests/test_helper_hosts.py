@@ -253,32 +253,37 @@ def test_host_helper_sessions_round_trip():
   assert claude_host.agent_type_for(None) == "mobius-helper"
 
 
-def test_boot_ends_only_hosts_whose_server_is_gone():
+def test_boot_ends_only_hosts_whose_server_is_gone(monkeypatch):
   import subprocess
   gone = subprocess.Popen(["true"])
   gone.wait()
-  orphan = subprocess.Popen(
-    ["sleep", "60"], start_new_session=True,
-    env=dict(os.environ, **{
-      helper_hosts.HOST_MARKER_ENV: f"{gone.pid}:1:host-digest",
-    }),
-  )
-  # A live server's host (here: owned by this test process) is never touched,
-  # so running this test on a live instance cannot end its real hosts.
-  owned = subprocess.Popen(
-    ["sleep", "60"], start_new_session=True,
-    env=dict(os.environ, **{
-      helper_hosts.HOST_MARKER_ENV: helper_hosts.host_marker("live-digest"),
-    }),
-  )
+
+  def host(marker):
+    return subprocess.Popen(
+      ["sleep", "60"], start_new_session=True,
+      env=dict(os.environ, **{helper_hosts.HOST_MARKER_ENV: marker}),
+    )
+
+  orphan = host(f"{gone.pid}:1:host-digest")
+  unowned = host("host-digest")  # marker from before owners were recorded
+  owned = host(helper_hosts.host_marker("live-digest"))
   bystander = subprocess.Popen(["sleep", "60"], start_new_session=True)
+  procs = (orphan, unowned, owned, bystander)
+  # Scan only this test's processes: the real scan would end the live hosts
+  # of whatever instance runs the suite.
+  real_listdir = os.listdir
+  monkeypatch.setattr(
+    helper_hosts.os, "listdir",
+    lambda path: [str(p.pid) for p in procs] if path == "/proc" else real_listdir(path),
+  )
   try:
-    assert helper_hosts.end_orphaned_hosts() >= 1
+    assert helper_hosts.end_orphaned_hosts() == 2
     orphan.wait(timeout=2)
+    unowned.wait(timeout=2)
     assert owned.poll() is None
     assert bystander.poll() is None
   finally:
-    for proc in (orphan, owned, bystander):
+    for proc in procs:
       proc.kill()
       proc.wait()
 
