@@ -1356,6 +1356,14 @@ def container_replacement_blockers(
         marker_upstream,
         [path for path in image_pending if path in covered],
       ))
+    # A reviewed target may already contain the local change while also
+    # changing the same file further; the head bytes then differ even though
+    # the update loses nothing. Judge the merged file, not the head file.
+    if local_change_base:
+      exact_target_coverage.update(
+        path for path in image_pending
+        if _local_change_in_target(repo, local_change_base, head, expected_sha, path)
+      )
     # A target/head match says nothing about uncommitted bytes. Preserve those
     # paths as blockers until the owner commits, reverts, or reviews them.
     covered = (exact_target_coverage | carried_marker_coverage) - working_paths
@@ -1422,6 +1430,21 @@ def _write_activation_marker(
     "paths": clean_paths,
     "image_paths": clean_image_paths,
   }, separators=(",", ":")))
+
+
+def _local_change_in_target(
+  repo: Path, base: str, head: str, target: str, path: str,
+) -> bool:
+  """Whether merging this path's local change into ``target`` changes nothing."""
+  merged = _git(
+    "merge-file", "-p", "--object-id",
+    f"{target}:{path}", f"{base}:{path}", f"{head}:{path}",
+    repo=repo, check=False,
+  )
+  if merged.returncode != 0:
+    return False
+  official = _git("show", f"{target}:{path}", repo=repo, check=False)
+  return official.returncode == 0 and merged.stdout == official.stdout
 
 
 def _paths_matching_upstream(
