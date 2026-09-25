@@ -14,6 +14,7 @@ export default function ContinuationCard({ msg }) {
     usage_limit: 'Usage available again — continuing automatically',
     memory: 'Memory freed up — continuing automatically',
     storage: 'Storage freed up — continuing automatically',
+    model_capacity: 'Model available again — continuing automatically',
     goal_handoff: 'The agent turn ended, but the Goal is still unfinished',
   }[reason] || (!manual ? 'Interrupted work recovered — continuing automatically' : null)
 

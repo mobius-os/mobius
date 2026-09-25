@@ -4043,6 +4043,16 @@
 .chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
 .chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
 
+/* What started an answer sits above its first line. */
+.chat__answer-cause {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.chat__answer-cause .chat__wait-history { margin-top: 0; }
+
 .chat__lifecycle-icon {
   display: inline-flex;
   align-items: center;

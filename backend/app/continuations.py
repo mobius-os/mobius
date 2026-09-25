@@ -177,3 +177,27 @@ def manual_continuation_run_token(chat_id: str, control_id: str) -> str:
     f"{chat_id}\0{control_id}".encode("utf-8")
   ).hexdigest()[:48]
   return f"manual-resume-{digest}"
+
+
+def recovery_reasons_by_run_id(
+  db, chat_id: str, run_ids: list[str],
+) -> dict[str, str]:
+  """Map each recovery run among ``run_ids`` to its continuation reason.
+
+  A physical recovery keeps its control only in ``ChatRun.continuation_json``,
+  so chat detail projects the reason onto the answer that run wrote; the shell
+  marks why that answer started without a transcript row.
+  """
+  if not run_ids:
+    return {}
+  from app import models  # keep this low-level module free of ORM imports
+  rows = db.query(models.ChatRun.id, models.ChatRun.continuation_json).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.id.in_(run_ids),
+    models.ChatRun.continuation_json.is_not(None),
+  ).all()
+  return {
+    run_id: control["reason"]
+    for run_id, control in rows
+    if isinstance(control, dict) and isinstance(control.get("reason"), str)
+  }
