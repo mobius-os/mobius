@@ -175,34 +175,21 @@ def browser_tool_paths() -> tuple[Path, ...]:
 
 
 def settled_turn_paths(data_dir: str | Path, chat_id: str) -> tuple[Path, ...]:
-  """Return tool/source caches safe to evict once a chat turn is settled.
+  """Return caches a settled turn may leave hot, without walking checkouts.
 
-  Deliberately exclude databases, app data, shared files, and ``cli-auth``.
-  The latter is both credential-bearing and outside the agent write surface.
+  Git history reads fault whole pack files, so advise each managed
+  repository's flat pack directory. Walking every checkout instead touched
+  hundreds of thousands of small files per turn — seconds of server CPU —
+  and reclaimed no more than the packs alone. Deliberately exclude
+  databases, app data, shared files, and ``cli-auth``.
   """
   data = Path(data_dir)
-  roots = [
-    data / "platform" / ".git",
-    data / "platform" / "backend",
-    # Dependency pages belong to the existing build-exit cleanup, not every
-    # unrelated chat. Keep only source/publication pages at this boundary.
-    data / "platform" / "frontend" / "src",
-    data / "platform" / "frontend" / "dist",
-    data / "platform" / "frontend" / ".dist-staging",
-    data / "platform" / "frontend" / ".assets-attic",
-    data / "agent-browser-profiles" / f"chat-{chat_id}",
-  ]
-  for pattern in ('contrib/*/worktree', 'contrib/*', 'worktrees/*', 'apps/*'):
+  roots = [data / "agent-browser-profiles" / f"chat-{chat_id}"]
+  for pattern in ('platform', 'contrib/*', 'worktrees/*', 'apps/*'):
     for checkout in data.glob(pattern):
       if checkout.is_symlink() or checkout.parent.is_symlink():
         continue
-      git = checkout / '.git'
-      if git.exists():
-        roots.append(git)
-        if checkout.parent != data / 'apps':
-          roots.extend(checkout / path for path in (
-            'backend', 'frontend/src', 'frontend/dist',
-          ))
+      roots.append(checkout / '.git' / 'objects' / 'pack')
   return tuple(roots)
 
 
