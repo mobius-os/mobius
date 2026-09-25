@@ -12,10 +12,14 @@ export function isContinuationMessage(message) {
     || message?.kind === 'auto_continuation'
 }
 
-/** Cached history may stay readable during a transient runtime-read failure.
- * Retry only transport/server failures, and only a small fixed number of
- * times; permanent client errors and missing chats need a different remedy. */
-export function cachedActivationRetryDelay(error, attempt) {
+const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
+
+/** Delay before quietly retrying a failed chat activation, or null to stop.
+ * Only transport/server failures are retried; permanent client errors and
+ * missing chats need a different remedy. The schedule spans a server restart,
+ * and a timed-out read is still running server-side, so the next one waits at
+ * least as long as the read timeout: one load in flight at a time. */
+export function activationRetryDelay(error, attempt, readTimeoutMs) {
   const message = String(error?.message || '')
   const transientNetworkError = error?.name === 'TypeError'
     && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
@@ -23,10 +27,9 @@ export function cachedActivationRetryDelay(error, attempt) {
     || error?.name === 'TimeoutError'
     || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
     || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
-  if (!transient || !Number.isInteger(attempt) || attempt < 0 || attempt >= 3) {
-    return null
-  }
-  return [750, 2000, 5000][attempt]
+  const delay = transient ? ACTIVATION_RETRY_DELAYS_MS[attempt] : undefined
+  if (delay === undefined) return null
+  return error?.name === 'TimeoutError' ? Math.max(delay, readTimeoutMs) : delay
 }
 
 /**

@@ -33,7 +33,7 @@ import {
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
-import { cachedActivationRetryDelay } from './chatRuntimeState.js'
+import { activationRetryDelay } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -563,7 +563,7 @@ export default function ChatView({
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
-  const cachedActivationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
+  const activationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
@@ -1374,6 +1374,9 @@ export default function ChatView({
     failedAttemptTerminalOutcome = null,
   } = {}) => {
     if (sendingRef.current && !force) return
+    // Until activation has loaded the transcript, it alone reads history and
+    // attaches the live stream (see settleRuntime).
+    if (!activationSettledRef.current) return null
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1581,6 +1584,9 @@ export default function ChatView({
       )
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return null
+      // A running status alone must not attach a stream over a transcript that
+      // never loaded; a resumed reply would then look like the whole chat.
+      if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
       if (!runtimeTransition.adopt) return null
@@ -2146,6 +2152,7 @@ export default function ChatView({
         const target = externalSignalRef.current
         processedExternalSignalRef.current = target
         const delta = chatRunSignalDelta(previous, target)
+        if (!activationSettledRef.current) continue
         const locallyActive = (
           sendingRef.current
           || isStreamingRef.current
@@ -2453,10 +2460,10 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
-    const recovery = cachedActivationRecoveryRef.current
+    const recovery = activationRecoveryRef.current
     if (recovery.chatId !== String(activationIdentity)) {
       if (recovery.timer) clearTimeout(recovery.timer)
-      cachedActivationRecoveryRef.current = {
+      activationRecoveryRef.current = {
         chatId: String(activationIdentity), attempts: 0, timer: null,
       }
     }
@@ -2552,7 +2559,7 @@ export default function ChatView({
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
       commitRuntimeSnapshot(transition)
-      cachedActivationRecoveryRef.current.attempts = 0
+      activationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
@@ -2888,28 +2895,29 @@ export default function ChatView({
           // incomplete or server-rejected window before making the error state
           // paintable; otherwise those old rows would leak through this branch.
           applyMessagesToView([], 0)
+          // Nothing is shown, so a live stream from before (a retry keeps the
+          // transport wanting to reconnect) must not reappear on its own.
+          disconnect({ clearStreaming: true })
         }
+        const retry = activationRetryDelay(
+          err, activationRecoveryRef.current.attempts, CHAT_FETCH_TIMEOUT_MS,
+        )
         setInitialEntryPhase('ready')
-        setLoadError(!cacheIsSafeFallback)
-        setLoading(false)
+        // An empty chat keeps loading while a quiet retry is scheduled.
+        setLoadError(!cacheIsSafeFallback && retry == null)
+        setLoading(!cacheIsSafeFallback && retry != null)
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
-        if (cacheIsSafeFallback) {
-          const retry = cachedActivationRetryDelay(
-            err,
-            cachedActivationRecoveryRef.current.attempts,
-          )
-          if (retry != null) {
-            const retryState = cachedActivationRecoveryRef.current
-            retryState.attempts += 1
-            retryState.timer = setTimeout(() => {
-              retryState.timer = null
-              setActivationPhase('pending')
-              setLoading(true)
-              setLoadNonce(nonce => nonce + 1)
-            }, retry)
-          }
+        if (retry != null) {
+          const retryState = activationRecoveryRef.current
+          retryState.attempts += 1
+          retryState.timer = setTimeout(() => {
+            retryState.timer = null
+            setActivationPhase('pending')
+            setLoading(true)
+            setLoadNonce(nonce => nonce + 1)
+          }, retry)
         }
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
@@ -2934,9 +2942,9 @@ export default function ChatView({
         // cleanup, so modeRef is captured for the chat we're leaving.)
       } catch {}
       cancelled = true
-      if (cachedActivationRecoveryRef.current.timer) {
-        clearTimeout(cachedActivationRecoveryRef.current.timer)
-        cachedActivationRecoveryRef.current.timer = null
+      if (activationRecoveryRef.current.timer) {
+        clearTimeout(activationRecoveryRef.current.timer)
+        activationRecoveryRef.current.timer = null
       }
       initialLoadController.abort()
       chatIdStaleRef.current = true
@@ -5244,13 +5252,14 @@ export default function ChatView({
           .map(it => questionKey(it))
       )
     : null
-  const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+  // An unloaded transcript's error wins over a cached running marker.
+  const showLoadError = loadError && messages.length === 0 && !loading
   // Stay quiet while an automatic retry is scheduled; the timer is set in the
   // same batch as the error phase, so this render already sees it.
   const showActivationRetry = (
     activationPhase === 'error'
     && !loadError
-    && cachedActivationRecoveryRef.current.timer == null
+    && activationRecoveryRef.current.timer == null
   )
 
   // Transcript geometry reads force a synchronous layout of the whole

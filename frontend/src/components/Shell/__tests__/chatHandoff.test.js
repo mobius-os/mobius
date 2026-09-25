@@ -155,7 +155,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /if \(activationCacheReusable && cacheCoversSavedAnchor && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a warm version mismatch must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
-    /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
+    /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback && retry == null\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
   assert.match(`${scrollRestore}\n${scrollMode}`,
     /mode\?\.kind !== 'INITIAL'[\s\S]*phase === 'cache-validating' && !resolved[\s\S]*action: 'wait'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*onCachedCoordinateReady\?\.\(\)/,
@@ -479,15 +479,15 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
     'the disabled Send affordance explains the cold activation')
   assert.match(chatView,
-    /cachedActivationRetryDelay\(\s*err,[\s\S]*retryState\.timer = setTimeout\([\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
-    'cached activation failures get bounded quiet retries at the activation owner')
+    /activationRetryDelay\(\s*err,[\s\S]*retryState\.timer = setTimeout\([\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
+    'transient activation failures get bounded quiet retries at the activation owner')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
     2,
     'uncached and terminal cached activation failures retain manual recovery',
   )
   assert.match(chatView,
-    /const showActivationRetry = \([\s\S]*activationPhase === 'error'[\s\S]*!loadError[\s\S]*cachedActivationRecoveryRef\.current\.timer == null[\s\S]*chat__activation-retry[\s\S]*Chat activation still needs a retry before sending\.[\s\S]*onClick=\{retryActivation\}/,
+    /const showActivationRetry = \([\s\S]*activationPhase === 'error'[\s\S]*!loadError[\s\S]*activationRecoveryRef\.current\.timer == null[\s\S]*chat__activation-retry[\s\S]*Chat activation still needs a retry before sending\.[\s\S]*onClick=\{retryActivation\}/,
     'quiet retries stay quiet while scheduled, then terminal failures explain the disabled composer and recover in place')
   assert.match(chatView,
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
@@ -495,4 +495,25 @@ test('cold activation keeps one composer visible but refuses sends until runtime
   assert.match(chatView,
     /cacheIsSafeFallback = activationCacheReusable[\s\S]*err\?\.message !== 'CHAT_NOT_FOUND'/,
     'an explicit missing resource dominates stale cache history and remains non-sendable')
+})
+
+test('only a loaded transcript lets runtime evidence attach a stream or reread history', () => {
+  // After a restart the light runtime read can succeed while the history read
+  // times out; attaching from runtime alone showed the resumed reply as the
+  // whole chat.
+  assert.match(chatView,
+    /if \(sendingRef\.current && !force\) return[\s\S]{0,200}if \(!activationSettledRef\.current\) return null/,
+    'history refreshes wait for activation')
+  assert.match(chatView,
+    /await jsonOrThrow\(res, 'Runtime refresh failed'\)[\s\S]{0,300}if \(!activationSettledRef\.current\) return null/,
+    'runtime refreshes never attach before activation')
+  assert.match(chatView,
+    /const delta = chatRunSignalDelta\(previous, target\)\s*if \(!activationSettledRef\.current\) continue/,
+    'run signals never attach before activation')
+  assert.match(chatView,
+    /applyMessagesToView\(\[\], 0\)[\s\S]{0,300}disconnect\(\{ clearStreaming: true \}\)/,
+    'a load that shows nothing also detaches any live stream')
+  assert.match(chatView,
+    /const showLoadError = loadError && messages\.length === 0 && !loading\n/,
+    'the load error is not hidden behind a cached running marker')
 })
