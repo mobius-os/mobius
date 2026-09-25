@@ -192,7 +192,7 @@ async def _await_control_mcp_ready(
 # register: appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Be concise by default: lead with the result, skip preamble, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -490,6 +490,11 @@ class ActiveClaudeClient:
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
     self.pending_steer: list[str] = []
+    # Whether any buffered steer is a person's visible message rather than an
+    # agent-originated carrier (helper result, peer note), which the transcript
+    # marks `hidden`. It decides how the requery frames the text: a person is
+    # owed a visible reply, while machine context is folded into the work.
+    self.steer_from_person = False
     # Transcript-side payload for the buffered steers: the steered user rows +
     # any queued rows they consume. The RUNNER drives the transcript split
     # (seal the pre-interrupt A1, append these user rows, reset the sink for
@@ -574,6 +579,8 @@ class ActiveClaudeClient:
     if user_msgs and not appended_any:
       return True
     self.pending_steer.append(text)
+    if any(not m.get("hidden") for m in user_msgs or ()):
+      self.steer_from_person = True
     if consume_pending_cids:
       buffered_consume = set(self._steer_consume_cids)
       for cid in consume_pending_cids:
@@ -626,6 +633,7 @@ class ActiveClaudeClient:
     if interrupt_landed and self._interrupt_owner == "steer":
       self._interrupt_owner = None
     texts, self.pending_steer = self.pending_steer, []
+    self.steer_from_person = False
     return texts
 
   def claim_owner_card_end(self) -> bool:
@@ -705,6 +713,7 @@ class ActiveClaudeClient:
     """
     self._interrupt_owner = "stop"
     self.pending_steer = []
+    self.steer_from_person = False
     self._steer_user_msgs = []
     self._steer_consume_cids = []
     await self._client.interrupt()
@@ -786,8 +795,23 @@ class ActiveClaudeClient:
       self._finished.set_result(None)
 
 
-def _steer_redirect_message(text: str) -> str:
-  """Frame owner or product context on the still-connected client."""
+def _steer_redirect_message(texts: list[str], *, from_person: bool) -> str:
+  """Frame mid-turn input for the requery on the still-connected client.
+
+  A person's message is a conversational turn, not context to absorb: framing
+  it as "continue the same task" let agents fold a question into their work
+  and never answer it where the partner can see. Agent-originated carriers
+  (helper results, peer notes) remain context for the ongoing work.
+  """
+  text = "\n\n".join(texts)
+  if from_person:
+    return (
+      "The partner sent this message while you were working. Reply to it in "
+      "your visible response before continuing: answer any question and "
+      "acknowledge any correction or change of direction. Then continue the "
+      "task as the message directs:\n\n"
+      f"{text}"
+    )
   return (
     "New context arrived while you were working. Incorporate it according "
     "to its stated authority and continue the same task:\n\n"
@@ -1693,6 +1717,7 @@ async def run_claude_sdk_turn(
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut or a saved owner card may end a later segment.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
               sdk_msg.stop_reason == "interrupt"
@@ -1705,7 +1730,9 @@ async def run_claude_sdk_turn(
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             break
           # Recover a synthetic no-op RESUME. When a resumed session's prior
@@ -1765,6 +1792,7 @@ async def run_claude_sdk_turn(
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
           # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=False,
           )
@@ -1773,7 +1801,9 @@ async def run_claude_sdk_turn(
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             continue
           break
