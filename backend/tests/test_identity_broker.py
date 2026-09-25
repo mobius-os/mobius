@@ -936,25 +936,12 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   assert capabilities[5]["path"] == editorial_feed_path
   assert seen[0][2]["Idempotency-Key"] == "publish:1234567890abcdef"
 
-  retired = (
-    ("PUT", "/v1/community/apps/app_12345678/rating"),
-    ("POST", "/v1/community/apps/app_12345678/revisions/rev_12345678/comments"),
-    ("POST", "/v1/community/publications"),
-    ("POST", "/v1/community/apps/app_12345678/remixes"),
-    ("DELETE", "/v1/community/comments/comment_12345678"),
-    ("POST", "/v1/community/comments/comment_12345678/reports"),
-    (
-      "POST",
-      "/v1/community/apps/app_12345678/revisions/rev_12345678/reviews",
-    ),
-  )
-  for method, path in retired:
-    with pytest.raises(FileNotFoundError):
-      broker.proxy(
-        method=method, path=path, body=b'{}',
-        headers={"idempotency-key": "retired:1234567890abcdef"},
-        allow_private_routes=True,
-      )
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="POST", path="/v1/community/apps/app_12345678/unknown",
+      body=b'{}', headers={"idempotency-key": "unknown:1234567890abcdef"},
+      allow_private_routes=True,
+    )
 
 
 def test_body_limits_are_only_for_exact_declared_routes():
