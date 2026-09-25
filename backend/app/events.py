@@ -745,6 +745,10 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
     if event_type == "task_start":
       if event.get("description"):
         entry["description"] = event["description"]
+      # The live reducer keeps the kind too; a reloaded row needs it to tell
+      # an agent (it has a conversation to open) from a shell task.
+      if event.get("task_type"):
+        entry["task_type"] = str(event["task_type"])[:64]
       # A re-delivered start (catch-up replay, or an out-of-order start after
       # the done) must NOT downgrade an already-terminal helper back to running
       # — mirrors the frontend reducer's monotonic guard.

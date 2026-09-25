@@ -435,12 +435,15 @@ function GroupedActivityStretch({
         hidden={!open}
       >
         {/* Helper rows are status within this whole-turn disclosure. The
-            transcript does not map activity entries to individual helpers, so
-            the rows deliberately do not claim helper-specific controls. */}
+            parent transcript does not map its activity entries to individual
+            helpers; an agent row instead opens that helper's OWN conversation,
+            which the provider recorded separately (HelperConversation). */}
         {subagentTools.map((tool, i) => (
           <SubagentChips
             key={tool.tool_use_id ?? `subagent-${i}`}
             subagent={tool.subagent}
+            chatId={chatId}
+            onInternalNav={onInternalNav}
           />
         ))}
         {open && detailError && (
