@@ -12,7 +12,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.agent_coordination import MESSAGE_KINDS as _KINDS
+from app.agent_coordination import (
+  MESSAGE_DELIVERIES as _DELIVERIES,
+  MESSAGE_KINDS as _KINDS,
+)
 
 
 CLAUDE_SEND_TOOL = "mcp__mobius_control__send_agent_message"
@@ -221,6 +224,11 @@ def _kind(value: Any) -> str:
   return candidate if candidate in _KINDS else _DEFAULT_KIND
 
 
+def _delivery(value: Any) -> str | None:
+  candidate = _clip(value, MAX_KIND_CHARS)
+  return candidate if candidate in _DELIVERIES else None
+
+
 def bounded_peer_message(value: Any) -> dict | None:
   """Validate and re-bound a persisted marker before read-side projection."""
   if not isinstance(value, dict) or value.get("status") not in _STATUSES:
@@ -244,7 +252,7 @@ def bounded_peer_message(value: Any) -> dict | None:
         peers.append(name)
       if len(peers) >= MAX_PEER_NOTES:
         break
-    return {
+    marker = {
       "direction": DIRECTION_SEND,
       "status": STATUS_SENT,
       "peers": peers,
@@ -254,6 +262,10 @@ def bounded_peer_message(value: Any) -> dict | None:
       "body_truncated": bool(value.get("body_truncated")),
       "broadcast": bool(value.get("broadcast")),
     }
+    delivery = _delivery(value.get("delivery"))
+    if delivery:
+      marker["delivery"] = delivery
+    return marker
 
   if status == STATUS_RECEIVED:
     notes: list[dict] = []
@@ -332,7 +344,7 @@ def settle_peer_message(
     max(len(recipient_ids), len(visible_peers)),
   )
   first = rows[0]
-  return {
+  marker = {
     "direction": DIRECTION_SEND,
     "status": STATUS_SENT,
     "peers": visible_peers,
@@ -342,6 +354,10 @@ def settle_peer_message(
     "body_truncated": bool(first.get("body_truncated")),
     "broadcast": broadcast,
   }
+  delivery = _delivery(first.get("delivery"))
+  if delivery:
+    marker["delivery"] = delivery
+  return marker
 
 
 def peer_message_compaction_lines(value: Any) -> list[str]:

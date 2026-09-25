@@ -417,11 +417,8 @@
   .chat__msg--search-reveal { animation: none; }
 }
 
-/* Metadata (timestamp + copy) for both user and assistant messages.
-   Older rows reveal it on tap; the newest message of each role (see
-   useMessageMetadata) keeps it visible without a tap.
-   The row sits on the same side as its bubble: flush right by default
-   (user), flush left for --assistant. */
+/* Tap-to-show metadata for user messages. Timestamp and copy share one row;
+   ChatView clears it automatically after a short glance. */
 .chat__msg-meta {
   display: inline-flex;
   align-items: center;
@@ -439,12 +436,6 @@
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
-}
-.chat__msg-meta--assistant {
-  align-self: flex-start;
-  /* Mirror the row so the copy glyph hugs the same left edge the assistant
-     bubble itself hugs, instead of drifting to the far side under it. */
-  flex-direction: row-reverse;
 }
 .chat__msg-meta--visible {
   opacity: 1;
@@ -500,6 +491,9 @@
   inset: 0;
   z-index: 210;
   display: grid;
+  /* One track no wider than the overlay: a long code line must scroll inside
+     the dialog, never widen the track it is centred in. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 18px;
   background: rgba(0, 0, 0, 0.46);
@@ -586,6 +580,41 @@
 .chat-summary__layer-body > :last-child { margin-bottom: 0; }
 .chat-summary__empty { margin: 0; color: var(--muted); }
 
+/* A helper's own conversation (HelperConversation) in the same dialog shell,
+   at a fixed height so live updates never resize it. */
+.helper-convo { width: min(760px, 100%); height: min(820px, calc(100% - 16px)); }
+.helper-convo__heading { min-width: 0; }
+.helper-convo__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.helper-convo__body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+  overscroll-behavior: contain;
+}
+.helper-convo__note { margin: 0; color: var(--muted); font-size: 12px; }
+.helper-convo__text { font-size: 14px; }
+.helper-convo__task {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  font-size: 14px;
+}
+.helper-convo__task-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.helper-convo__task > :last-child > :first-child,
+.helper-convo__text > :first-child > :first-child { margin-top: 0; }
+.helper-convo__task > :last-child > :last-child,
+.helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
+
 /* ── Bubble content ────────────────────────────────── */
 
 .chat__text {
@@ -602,6 +631,17 @@
   border-radius: 18px 18px 5px 18px;
   max-width: min(85%, 75ch);
   white-space: pre-wrap;
+}
+
+/* Boundary between owner messages delivered together in one bubble: a
+   wavy cut in the page background spanning the bubble edge to edge
+   (negative margins cancel .chat__text--user's 16px side padding). */
+.chat__batch-squiggle {
+  display: block;
+  height: 6px;
+  margin: 10px -16px;
+  background: var(--bg);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='6' viewBox='0 0 16 6'%3E%3Cpath d='M0 3 Q4 0 8 3 T16 3' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E") repeat-x left center / 16px 6px;
 }
 
 .chat__goal-message {
@@ -1159,7 +1199,8 @@
   line-height: 1.35;
 }
 
-.chat__peer-kind {
+.chat__peer-kind,
+.chat__peer-timing {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -1187,6 +1228,17 @@
 .chat__peer-kind--blocker {
   color: color-mix(in srgb, var(--danger) 78%, var(--text));
   background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+/* Delivery mode is outlined so it never reads as a second message kind. */
+.chat__peer-timing {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--border-light);
+}
+
+.chat__peer-timing--interrupt {
+  color: color-mix(in srgb, var(--danger) 68%, var(--text));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 28%, var(--border));
 }
 
 .chat__peer-excerpt {
@@ -4443,8 +4495,6 @@
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
-.chat__peer-load-error { font-size: 12px; color: var(--muted); }
-.chat__peer-load-error button { font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }
 
 /* A rejected outbox row keeps its original content and a visible next action. */
 .queued__rejection {

@@ -308,13 +308,14 @@ def test_task_start_enriches_matching_task_block():
     "description": "Review the diff for races", "task_type": "general",
   }, blocks)
   assert changed
-  assert blocks[0]["subagent"] == {
-    "task_A": {
-      "description": "Review the diff for races",
-      "status": "running",
-      "summary": None,
-    },
-  }
+  helper = blocks[0]["subagent"]["task_A"]
+  assert helper["description"] == "Review the diff for races"
+  # The kind survives reload so the row knows it has a conversation to open.
+  assert helper["task_type"] == "general"
+  assert helper["status"] == "running"
+  assert helper["summary"] is None
+  assert isinstance(helper["startedAt"], int)
+  assert helper["startedAt"] > 0
 
 
 def test_task_done_updates_status_and_summary_on_same_block():
@@ -328,15 +329,18 @@ def test_task_done_updates_status_and_summary_on_same_block():
     "type": "task_start", "task_id": "task_A", "tool_use_id": "toolu_1",
     "description": "Review the diff for races",
   }, blocks)
+  started_at = blocks[0]["subagent"]["task_A"]["startedAt"]
   changed = process_event({
     "type": "task_done", "task_id": "task_A", "tool_use_id": "toolu_1",
     "status": "done", "summary": "Found one race in the queue drain.",
   }, blocks)
   assert changed
-  assert blocks[0]["subagent"]["task_A"] == {
+  helper = blocks[0]["subagent"]["task_A"]
+  assert helper == {
     "description": "Review the diff for races",
     "status": "done",
     "summary": "Found one race in the queue drain.",
+    "startedAt": started_at,
   }
 
 
@@ -429,11 +433,11 @@ def test_task_done_without_prior_start_still_records_terminal_entry():
     "status": "failed", "summary": "boom",
   }, blocks)
   assert changed
-  assert blocks[0]["subagent"]["task_B"] == {
-    "description": "",
-    "status": "failed",
-    "summary": "boom",
-  }
+  helper = blocks[0]["subagent"]["task_B"]
+  assert helper["description"] == ""
+  assert helper["status"] == "failed"
+  assert helper["summary"] == "boom"
+  assert isinstance(helper["startedAt"], int)
 
 
 def test_task_event_unknown_tool_use_id_is_noop():
@@ -809,12 +813,12 @@ def test_thinking_survives_interleaved_unknown_event():
 
 
 def test_thinking_survives_interleaved_usage_and_signature():
-  # The full bookkeeping set is transparent to thinking coalescing: a `usage`
+  # The full bookkeeping set is transparent to thinking coalescing: a `context_usage`
   # event and a signature-style unknown_sdk_event between thinking chunks still
   # yield one block. Only a real new content block (text/tool_start/…) splits it.
   blocks = []
   process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
-  process_event({"type": "usage", "input_tokens": 5, "output_tokens": 7}, blocks)
+  process_event({"type": "context_usage", "input_tokens": 5}, blocks)
   process_event(
     {"type": "unknown_sdk_event",
      "kind": "stream:content_block_delta:signature_delta", "raw": {}},

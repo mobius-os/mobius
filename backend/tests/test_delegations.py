@@ -731,9 +731,7 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
 
 
 def test_delegated_codex_config_routes_questions_up_but_keeps_native_agents():
-  overrides = _codex_config_overrides(
-    allow_multi_agent=True,
-  )
+  overrides = _codex_config_overrides()
   assert "tools.experimental_request_user_input.enabled=false" in overrides
   assert "features.multi_agent_v2.enabled=true" in overrides
   assert "features.goals=false" in overrides
@@ -1960,6 +1958,42 @@ def test_cancelling_an_owner_settles_descendants_before_the_parent(db):
   assert leaf.cancelled_at <= owner.cancelled_at
 
 
+def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypatch):
+  from app.chat_activity import chat_activity_page
+
+  parent_id, _child, delegation_id = _seed_delegation(
+    db, suffix="cancel-position", child_status="parked",
+  )
+  frontier = {"assistant_message_id": "parent-turn", "block_index": 7}
+  monkeypatch.setattr(
+    "app.chat_event_sink.active_sink_activity_position",
+    lambda chat_id: frontier if chat_id == parent_id else None,
+  )
+  published = []
+  monkeypatch.setattr(
+    delegations_mod, "publish_chat_activity_changed", published.append,
+  )
+  starts = _capture_activity_starts(monkeypatch)
+
+  assert asyncio.run(
+    delegations_mod.cancel_delegation_execution(delegation_id)
+  ) is True
+  frontier = {"assistant_message_id": "parent-turn", "block_index": 99}
+  asyncio.run(delegations_mod.cancel_delegation_execution(delegation_id))
+
+  db.expire_all()
+  [event] = [
+    event for event in chat_activity_page(db, parent_id)["events"]
+    if event["delegation_id"] == delegation_id
+  ]
+  assert event["status"] == "cancelled"
+  assert event["display_position"] == {
+    "assistant_message_id": "parent-turn", "block_index": 7,
+  }
+  assert parent_id in published
+  assert starts == []
+
+
 def test_non_wake_terminal_and_inline_results_never_start_activity(
   db, monkeypatch,
 ):
@@ -2133,18 +2167,17 @@ def test_recovery_times_out_one_parent_without_starving_the_next(
   }
 
 
-def test_wake_disposition_gate_excludes_non_durable_terminals():
+def test_settle_gate_includes_final_stops_and_excludes_resumable_or_non_durable():
   import app.chat_queue as chat_queue
-  from app.chat import _DELEGATION_WAKE_DISPOSITIONS
+  from app.chat import _DELEGATION_SETTLED_DISPOSITIONS
 
-  assert (
-    chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
-    in _DELEGATION_WAKE_DISPOSITIONS
-  )
-  assert (
-    chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
-    in _DELEGATION_WAKE_DISPOSITIONS
-  )
+  for included in (
+    chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+    chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+    # A stopped helper is final; its parent must still record where it ended.
+    chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
+  ):
+    assert included in _DELEGATION_SETTLED_DISPOSITIONS
   for excluded in (
     chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER,
     chat_queue.TerminalDisposition.LIMIT_PARKED,
@@ -2152,7 +2185,7 @@ def test_wake_disposition_gate_excludes_non_durable_terminals():
     chat_queue.TerminalDisposition.STALE_NO_ACTION,
     chat_queue.TerminalDisposition.DRAINED_FOR_RESTART,
   ):
-    assert excluded not in _DELEGATION_WAKE_DISPOSITIONS
+    assert excluded not in _DELEGATION_SETTLED_DISPOSITIONS
 
 
 def test_migration_adds_wake_columns_idempotently(db):
@@ -2167,3 +2200,32 @@ def test_migration_adds_wake_columns_idempotently(db):
   cols = {c["name"] for c in sa_inspect(engine).get_columns("delegations")}
   assert "notify_parent_on_complete" in cols
   assert "parent_woken_at" in cols
+
+
+def test_helper_result_admitted_to_a_live_parent_run_no_longer_owns_the_goal(db):
+  """The turn incorporating a helper's result owns the Goal's next move.
+
+  Finalize latches parent_woken_at only when that turn ends, so without this
+  the incorporating turn itself could never complete the Goal.
+  """
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db, suffix="being-delivered", child_status="completed",
+  )
+  assert background_helper_goal_ids(db, parent_id) == {"root-being-delivered"}
+
+  db.add(make_goal_run(db,
+    id="parent-wake-run", root_run_id="root-being-delivered",
+    chat_id=parent_id, status="running", provider="claude",
+    started_at=now_naive_utc(),
+    activity_delivery_json={
+      "delegation_ids": [delegation_id],
+      "delivery_contract": "finalize_atomic_v1",
+    },
+  ))
+  db.commit()
+  assert background_helper_goal_ids(db, parent_id) == set()
+
+  # A delivery that stopped before Finalize hands ownership back to the helper.
+  db.get(models.ChatRun, "parent-wake-run").status = "stopped"
+  db.commit()
+  assert background_helper_goal_ids(db, parent_id) == {"root-being-delivered"}

@@ -12,6 +12,7 @@ position is only the compatibility path for older id-less events.
 import copy
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -66,6 +67,7 @@ EventType = Literal[
   "thinking",
   "text_boundary",
   "context_compacted",
+  "context_usage",
   "tool_start",
   "tool_input",
   "tool_output",
@@ -260,7 +262,7 @@ def _persisted_block(block: dict) -> dict:
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
 #  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
 #    `ping`, `signature_delta`, `content_block_stop`, `input_json_delta`), plus
-#    usage / session_init / done / catch_up_done / queued_turn_starting. These
+#    context_usage / session_init / done / catch_up_done / queued_turn_starting. These
 #    interleave BETWEEN successive thinking_delta events; closing the run on them
 #    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
 #    second" blocks (even splitting mid-word). They change no block, so they must
@@ -693,9 +695,8 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
     # sink's normal PersistTranscript/Finalize path persists it — this never
     # writes Chat.messages directly (the single-writer guardrail).
     #
-    # Frozen shape: block["subagent"] = {"<task_id>": {description, status,
-    # summary}} — status is "running" until task_done, then the terminal status
-    # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
+    # Persist startedAt with the lifecycle receipt so a reloaded chat can keep
+    # showing the helper's elapsed time. task_progress stays LIVE-ONLY: its
     # per-tick usage/last_tool_name is not worth persisting (it falls through to
     # `return False` below). A missing id, or a tool_use_id with no matching
     # block (unknown), no-ops so a stray event can never append a phantom block.
@@ -737,11 +738,17 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
       "description": "",
       "status": "running",
       "summary": None,
+      "startedAt": int(time.time() * 1000),
     })
+    entry.setdefault("startedAt", int(time.time() * 1000))
     was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
     if event_type == "task_start":
       if event.get("description"):
         entry["description"] = event["description"]
+      # The live reducer keeps the kind too; a reloaded row needs it to tell
+      # an agent (it has a conversation to open) from a shell task.
+      if event.get("task_type"):
+        entry["task_type"] = str(event["task_type"])[:64]
       # A re-delivered start (catch-up replay, or an out-of-order start after
       # the done) must NOT downgrade an already-terminal helper back to running
       # — mirrors the frontend reducer's monotonic guard.

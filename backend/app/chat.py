@@ -81,7 +81,6 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
-from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
@@ -584,6 +583,19 @@ async def _finish_run(
       "FinishRun did not persist chat_id=%s (reconciliation will repair)",
       chat_id, exc_info=True,
     )
+    return
+  _after_terminal_status(chat_id, terminal_status)
+
+
+def _after_terminal_status(chat_id: str, terminal_status: str) -> None:
+  """Post-commit follow-up for a durable Stop of this chat's work.
+
+  FinishRun released the stopped Goal's work claims in its own commit; the
+  followers are woken off this lifecycle path, which may still hold locks.
+  """
+  if terminal_status == "stopped":
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
 
 
 async def _record_run_metrics(
@@ -657,6 +669,7 @@ async def _finish_run_strict(
     )
   )
   await _await_ack(ack)
+  _after_terminal_status(chat_id, terminal_status)
 
 
 async def _recover_wedged_run_strict(
@@ -894,8 +907,12 @@ def reconcile_startup_chats(
       # `pause.kind='restart'` marks this as a benign restart pause (not a
       # failure) so the card renders in the calm "Paused" family rather than
       # the danger-red error styling — a restart is a maintenance event, not
-      # something the turn did wrong.
-      err_block = _pause_note(note, kind="restart")
+      # something the turn did wrong. A crash or an ineligible restart is
+      # stamped `manual` so the card does not promise a continuation.
+      restart_pause = {"kind": "restart"}
+      if not restart_eligible:
+        restart_pause["manual"] = True
+      err_block = {**_pause_note(note, kind="restart"), "pause": restart_pause}
       live_id = (
         chat.live_assistant.get("id")
         if isinstance(chat.live_assistant, dict) else None
@@ -967,7 +984,7 @@ def reconcile_startup_chats(
             if block.get("type") != "question" or block.get("answers"):
               break
             trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
+          paused["pause"] = dict(restart_pause)
           if trailing_open_start < len(blocks):
             paused.pop("resumable", None)
             blocks.insert(trailing_open_start, paused)
@@ -1198,6 +1215,15 @@ def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
 _WEDGED_RUN_MIN_AGE = timedelta(seconds=120)
 
 
+def _runner_alive(chat_id: str) -> bool:
+  """Whether a turn's runner still exists: a registered handle, or a broadcast
+  still streaming or finalizing."""
+  if registry.is_alive(chat_id):
+    return True
+  bc = get_broadcast(chat_id)
+  return bc is not None and bc.running
+
+
 async def sweep_wedged_runs(db: Session) -> list[str]:
   """Recover durable runs orphaned by a completed-but-unclosed turn.
 
@@ -1207,24 +1233,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   late-promote scheduling failure — leaves its ChatRun ``running`` forever.
   This periodic sweep closes that gap between boots.
 
-  Reaping keys on the progress LEASE (`ChatRun.progress_expires_at`), the single
-  liveness authority, not on the old registry+broadcast conjunction:
-
-    - Lease EXPIRED (non-NULL and in the past) → the turn stopped making
-      progress: crashed OR alive-but-hung. Reclaim regardless of whether a live
-      handle or a running broadcast still exists. A still-alive (hung) runner is
-      stopped first (graceful interrupt, then SIGKILL backstop) before recovery.
-      This is the fix for the old blind spot: a live handle or running broadcast
-      used to skip the chat forever, so a stalled model stream span endlessly.
-    - Lease VALID (non-NULL, in the future) → the runner is renewing it, so the
-      turn is making real progress — including a legitimately-long silent tool,
-      which renews with a bounded/suspended TTL. Never reaped.
-    - Lease NULL → a pre-migration/in-flight run or a provider without lease
-      renewal. Fall back to the legacy dead-process conjunction
-      (`registry.is_alive` False AND broadcast not running), so a live turn that
-      predates the lease is never reaped.
-    - `ChatRun.started_at` older than the floor — belt-and-suspenders; a valid
-      lease is always >= MODEL_IDLE_TTL past its last renewal anyway.
+  A run is a candidate only when its runner is gone: no registered handle and
+  no running broadcast. A live runner is never reaped, however quiet; a hung
+  provider stream is ended by the provider's own stall watchdog or the owner's
+  Stop.
 
   Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in, the actor no-ops rather than touching
@@ -1254,7 +1266,6 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
       db.query(
         models.ChatRun.id,
         models.ChatRun.chat_id,
-        models.ChatRun.progress_expires_at,
       )
       .join(models.Chat, models.Chat.id == models.ChatRun.chat_id)
       .filter(models.ChatRun.status == "running")
@@ -1266,28 +1277,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_wedged_runs: query failed")
     return swept
-  now = datetime.now(UTC).replace(tzinfo=None)
   for run in stale:
     chat_id = run.chat_id
-    if run.progress_expires_at is not None:
-      # The lease is the single liveness authority: a still-valid lease means
-      # the turn is making progress (even a legitimately-long silent tool), so
-      # leave it alone. An EXPIRED lease is a crashed OR hung turn — reclaim it
-      # regardless of whether a handle or broadcast still exists. That last part
-      # is the fix: the old conjunction skipped any chat with a live handle or a
-      # running broadcast, so an alive-but-hung turn was invisible forever.
-      if run.progress_expires_at >= now:
-        continue
-    else:
-      # NULL lease: a pre-migration/in-flight run, or a provider that does not
-      # renew leases yet. Fall back to the legacy dead-process conjunction so a
-      # live turn that simply predates the lease is never reaped.
-      if registry.is_alive(chat_id):
-        continue
-      bc = get_broadcast(chat_id)
-      if bc is not None and bc.running:
-        # Still streaming, in terminal cleanup, or a legitimately-long live turn.
-        continue
+    if _runner_alive(chat_id):
+      continue
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
@@ -1299,29 +1292,9 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
           if physical is None or physical.status != "running":
             # A fresh turn or a terminal transition raced in under the lock.
             continue
-          lease = physical.progress_expires_at
-          if lease is not None and lease >= datetime.now(UTC).replace(
-            tzinfo=None
-          ):
-            # The runner renewed the lease between the pre-check and the lock:
-            # healthy progress, never reap.
+          if _runner_alive(chat_id):
+            # A runner started between the pre-check and the lock.
             continue
-          # Past here the lease is either expired (non-NULL, in the past) or
-          # NULL (legacy fallback).
-          expired = lease is not None
-          handles = registry.get_handles(chat_id)
-          if handles and not expired:
-            # Only an expired lease authorizes tearing down a live handle; the
-            # legacy NULL-lease path never reaps a running runner.
-            continue
-          if handles:
-            # Alive but hung: stop the process first (graceful interrupt, then
-            # SIGKILL backstop) so a zombie write can't clobber recovery.
-            for handle in handles:
-              await _stop_handle_with_escalation(
-                chat_id, handle, source="sweep_wedged_runs",
-              )
-              registry.unregister(chat_id, handle.kind)
           chat = db.query(models.Chat).filter(
             models.Chat.id == chat_id,
             models.Chat.deleted_at.is_(None),
@@ -4098,8 +4071,9 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission. A plan advance or a committed owner steer permits one
-  # rollover; the successor must earn another before continuing again.
+  # provider admission. A plan advance that leaves runnable work, or a
+  # committed owner steer, permits one rollover; the successor must earn
+  # another before continuing again.
   # Otherwise the saved-question owner keeps the Goal exact and durable while
   # the partner decides whether to continue or stop it.
   terminal_handoff = None
@@ -4131,9 +4105,8 @@ async def _complete_turn(
           "id": "goal_next_step",
           "header": "Goal needs reconciliation",
           "question": (
-            "The turn ended without updating the saved plan or handing off "
-            "this Goal. Automatic continuation is paused. What should happen "
-            "next?"
+            "The turn ended without handing off this Goal, so automatic "
+            "continuation is paused. What should happen next?"
           ),
           "options": [
             {
@@ -4659,7 +4632,7 @@ async def run_chat(
         )
     # Parent progress must not wait on optional summary generation.
     try:
-      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+      if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
         from app.delegations import wake_parent_after_child_settled
         await wake_parent_after_child_settled(chat_id)
     except Exception:
@@ -4678,29 +4651,7 @@ async def run_chat(
         "attached contribution reconcile skipped", exc_info=True,
       )
 
-    # Turn-end chat-note guarantee: when the chat SETTLED (no pending
-    # follow-up), the platform's sole publisher updates its three summary
-    # granularities. Runs AFTER the reply is sent → no user-facing latency;
-    # gated to the settled dispositions so a multi-turn continuation publishes
-    # once, at rest; best-effort (a failure never affects the turn).
-    try:
-      _s = get_settings()
-      if _should_ensure_chat_note(
-        _s, chat_id, disposition, _s.data_dir, 0.0
-      ):
-        await _ensure_chat_note(
-          _s.data_dir,
-          chat_id,
-          deterministic=(
-            disposition in {
-              chat_queue.TerminalDisposition.LIMIT_PARKED,
-              chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
-            }
-          ),
-        )
-    except Exception:
-      _get_logger().debug("chat-note guarantee skipped", exc_info=True)
-    if runtime_settled and disposition in _NOTE_SETTLED_DISPOSITIONS:
+    if runtime_settled and disposition in _MEMORY_RECLAIM_DISPOSITIONS:
       # Release settled tool/source pages and allocator arenas. Source sweeps
       # protect live mappings and exclude owner data; tool advice may release
       # unused pages of shared executables.
@@ -4724,35 +4675,21 @@ async def run_chat(
 
 # The durable, settled, non-resuming terminals where a delegation child's
 # result is final and its ChatRun terminal status has committed (FinishRun ran
-# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
-# is excluded — the terminal isn't durable there; the boot reconcile covers it.
-_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+# inside drain_and_release before the disposition returned). A Stop is final
+# too: the settle hook records where the parent was, and its own status guard
+# decides whether to wake. FAILED_LEAVE_MARKER is excluded — the terminal
+# isn't durable there; the boot reconcile covers it. Parked children remain
+# resumable, not settled.
+_DELEGATION_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
 })
 
-
-def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
-  """Return a chat-note mtime for diagnostics and older callers."""
-  if not chat_id:
-    return 0.0
-  try:
-    return (
-      Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
-    ).stat().st_mtime
-  except OSError:
-    return 0.0
-
-
-# The dispositions where a chat is truly at rest, so the note guarantee (and
-# its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
-# fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
-# the day's last touch on a chat; skipping it left the chat note-less for the
-# night's reflection. LIMIT_PARKED and QUESTION_PARKED are settled too. The
-# former is forced onto the deterministic path so it never retries the provider
-# that just hit a limit; the latter preserves the owner handoff in the ordinary
-# summary without advancing the chat.
-_NOTE_SETTLED_DISPOSITIONS = frozenset({
+# Reclaim caches only after this exact physical run reached a settled boundary.
+# Continuations, stale owners, failed persistence, and restart drains retain
+# their warmer state because work still belongs to another/current run.
+_MEMORY_RECLAIM_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
@@ -4760,143 +4697,6 @@ _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.QUESTION_PARKED,
   chat_queue.TerminalDisposition.ACTIVATION_PARKED,
 })
-
-
-def _should_ensure_chat_note(
-  settings,
-  chat_id: str,
-  disposition: "chat_queue.TerminalDisposition",
-  data_dir: str,
-  note_mtime_before: float,
-) -> bool:
-  """Whether the platform's turn-end summary publisher should fire.
-
-  ``data_dir`` and ``note_mtime_before`` remain in the signature for callers
-  from older platform trees; note mtimes are intentionally not a gate anymore.
-  Exactly one platform publisher owns these files, even if legacy instructions
-  caused another writer to touch a note during the turn.
-  """
-  return bool(
-    getattr(settings, "ensure_chat_note", False)
-    and chat_id
-    and disposition in _NOTE_SETTLED_DISPOSITIONS
-  )
-
-
-def _run_owns_active_goal(
-  db: Session, *, chat_id: str, run_token: str | None,
-) -> bool:
-  """Whether the exact physical run currently owns committed Goal state."""
-  if not chat_id or not run_token:
-    return False
-  return db.query(models.ChatRun.id).filter(
-    models.ChatRun.id == run_token,
-    models.ChatRun.chat_id == chat_id,
-    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    models.ChatRun.goal_objective.isnot(None),
-  ).first() is not None
-
-
-async def _ensure_chat_note(
-  data_dir: str,
-  chat_id: str,
-  *,
-  deterministic: bool = False,
-  active_goal_checkpoint: bool = False,
-) -> None:
-  """Run the platform-owned turn-end chat-summary publisher.
-
-  Spawns the TOOL-FREE summarizer (scripts/chat_note.py) — it reads the chat's
-  transcript and writes chats/<id>/index.md; the subagent has no tools and the
-  server applies its emitted title under the chat transition lock. Best-effort
-  + bounded: it runs AFTER the reply is sent, so it never adds user-facing
-  latency, and any failure/timeout is swallowed — a missing note must never
-  break the turn — but
-  a nonzero exit leaves one WARN line (with the script's stderr reason) in
-  chat.log, so CLI credits dying no longer silently stops notes. The caller
-  gates this on ``ensure_chat_note`` plus the chat being settled."""
-  log = _get_logger()
-  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
-  if not script.exists() or not chat_id:
-    return
-  proc = None
-  # Pin the subprocess to the configured data tree so a non-default instance
-  # does not read one tree and write another.
-  env = dict(os.environ)
-  env["DATA_DIR"] = data_dir
-  if deterministic:
-    env["CHAT_NOTE_PROVIDER"] = "deterministic"
-  args = ["python3", str(script), chat_id]
-  if active_goal_checkpoint:
-    args.append("--active-goal-checkpoint")
-  try:
-    proc = await asyncio.create_subprocess_exec(
-      *args,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-      env=env,
-    )
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=150)
-    if proc.returncode:
-      tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
-      log.warning(
-        "chat-note summarizer failed for chat %s (rc=%s): %s",
-        chat_id, proc.returncode, tail,
-      )
-    else:
-      try:
-        title = _chat_note_title_result(out)
-        if title is not None:
-          await _sync_generated_chat_title(chat_id, title)
-      except Exception:
-        # The note is already durable. Keep the turn successful, but make a
-        # partial title-sync failure observable instead of silently leaving
-        # the drawer on its first-message fallback.
-        log.warning(
-          "chat-note title sync failed for chat %s", chat_id, exc_info=True,
-        )
-  except asyncio.TimeoutError:
-    log.info("ensure_chat_note timed out for chat %s", chat_id)
-    if proc is not None:
-      try:
-        proc.kill()
-      except ProcessLookupError:
-        pass
-  except Exception:
-    log.debug("ensure_chat_note failed", exc_info=True)
-
-
-def _chat_note_title_result(stdout: bytes | None) -> str | None:
-  """Parse the publisher's single structured title result, when present."""
-  raw = (stdout or b"").decode("utf-8", "replace").strip()
-  if not raw:
-    return None
-  result = json.loads(raw)
-  title = result.get("title") if isinstance(result, dict) else None
-  if not isinstance(title, str) or not title.strip():
-    raise ValueError("chat-note publisher returned an invalid title result")
-  return title.strip()[:200]
-
-
-async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
-  """Commit one generated title without a revocable self-HTTP credential."""
-  from app.database import SessionLocal
-
-  async with chat_queue.get_transition_lock(chat_id):
-    with SessionLocal() as db:
-      chat = db.query(models.Chat).filter(
-        models.Chat.id == chat_id,
-        models.Chat.deleted_at.is_(None),
-      ).one_or_none()
-      if chat is None or not apply_generated_title(chat, title):
-        return False
-      db.commit()
-      db.refresh(chat)
-      event = renamed_event(chat)
-
-  # Publish only committed truth, after releasing the database connection.
-  get_system_broadcast().publish(event)
-  return True
 
 
 async def _acknowledge_provider_success(
@@ -5191,25 +4991,6 @@ async def _run_chat_impl_with_db(
   raw_user_message = messages[-1].content
   user_message = raw_user_message
   historical_goal_mode = _chat_has_goal_intent(messages)
-  question_checkpoint = None
-  if settings.ensure_chat_note and chat_id:
-    async def question_checkpoint() -> None:
-      # Automatic promotion happens after this runner has started, so
-      # transcript intent captured above is not authoritative here. Read the
-      # exact physical run at checkpoint time and summarize only if it owns a
-      # committed Goal then.
-      from app.database import SessionLocal
-      with SessionLocal() as checkpoint_db:
-        active_goal = _run_owns_active_goal(
-          checkpoint_db, chat_id=chat_id, run_token=run_token,
-        )
-      if not active_goal:
-        return
-      await _ensure_chat_note(
-        settings.data_dir,
-        chat_id,
-        active_goal_checkpoint=True,
-      )
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -5842,7 +5623,6 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       agent_activity_binding=agent_activity_binding,
-      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
@@ -6039,7 +5819,6 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       agent_activity_binding=agent_activity_binding,
-      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider

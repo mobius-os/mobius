@@ -26,7 +26,6 @@ import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
-import { recoveryFailure } from '../../lib/notificationRecovery.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
@@ -4067,25 +4066,6 @@ export default function Shell({ onInitialVisualReady }) {
     throw new Error('Unsupported recovery action')
   }
 
-  function showDeletionUndo(response, resourceType, resourceId) {
-    const notificationId = response.headers.get('X-Recovery-Notification-Id')
-    if (!notificationId) return
-    const name = resourceType[0].toUpperCase() + resourceType.slice(1)
-    showToast(`${name} deleted`, {
-      duration: 5000,
-      action: {
-        label: 'Undo',
-        onAction: async () => {
-          try {
-            await recoverNotificationAction(notificationId, { resourceType, resourceId: String(resourceId) })
-          } catch (error) {
-            showToast(recoveryFailure(error).message, { variant: 'error' })
-          }
-        },
-      },
-    })
-  }
-
   async function deleteChat(id) {
     // 409 means the agent is still running and stop_chat_for couldn't
     // interrupt it within the timeout. We MUST NOT clear local state
@@ -4123,7 +4103,7 @@ export default function Shell({ onInitialVisualReady }) {
     // Scrub any navStack entries pointing at the deleted chat —
     // otherwise pressing back would navigate into a chat that returns
     // 404, leaving the user staring at an empty view. Soft-deleted
-    // chats are recoverable for 7 days via Undo/the chat recovery API; once
+    // chats are recoverable for 7 days via the notification history's recover action or the chat recovery API; once
     // recovered
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
@@ -4146,7 +4126,6 @@ export default function Shell({ onInitialVisualReady }) {
     const wsAfterClose = workspaceStateRef.current.ws
     const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
-    showDeletionUndo(res, 'chat', id)
     if (!single && !focusedAfterClose?.activeTabKey) {
       await newChat()
     }
@@ -4211,7 +4190,6 @@ export default function Shell({ onInitialVisualReady }) {
         reason: 'deleted',
       })
     }
-    showDeletionUndo(res, 'project', projectId)
     await Promise.all([
       projectsQuery.refetch(),
       refreshChats(),
@@ -4271,7 +4249,6 @@ export default function Shell({ onInitialVisualReady }) {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
-    showDeletionUndo(res, 'app', id)
     await refreshApps()
   }
 

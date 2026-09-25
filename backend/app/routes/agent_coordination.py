@@ -23,7 +23,12 @@ from app.agent_coordination import (
   send_work_claim_notice,
   visible_peer_messages,
 )
-from app.agent_work_claims import acknowledge_notice, claim_work, finish_work
+from app.agent_work_claims import (
+  acknowledge_notice,
+  claim_work,
+  finish_work,
+  work_claim_notice_body,
+)
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -149,6 +154,7 @@ async def claim_current_work(
     result["steered"] = delivery.steered
     result["woken"] = delivery.woken
     result["queued"] = delivery.queued
+    result["unreachable"] = delivery.unreachable
   return result
 
 
@@ -180,9 +186,9 @@ async def finish_current_work(
       revision=finished.claim["revision"],
       sender_chat_id=principal.chat_id,
       recipients=recipients,
-      body=(
-        f"Work claim {finished.claim['work_key']} was "
-        f"{finished.claim['state']}: {finished.claim.get('outcome') or ''}"
+      body=work_claim_notice_body(
+        finished.claim["work_key"], finished.claim["state"],
+        finished.claim.get("outcome") or "",
       ),
     )
     delivery = await deliver_peer_recipients(
@@ -198,6 +204,7 @@ async def finish_current_work(
     **finished.claim, "notification_pending": False,
     "notified": recipients, "steered": delivery.steered if recipients else [],
     "woken": woken, "queued": delivery.queued if recipients else [],
+    "unreachable": delivery.unreachable if recipients else [],
   }
 
 
@@ -259,7 +266,7 @@ async def send_current_message(
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
   # owner-visible activity card needs, not the body repeated up to 24 times.
-  return {
+  result = {
     "messages": [model_message(row) for row in rows[:1]],
     "recipient_count": len(rows),
     "recipient_names": [
@@ -269,7 +276,20 @@ async def send_current_message(
     "steered": delivery.steered if delivery else [],
     "woken": delivery.woken if delivery else [],
     "queued": delivery.queued if delivery else [],
+    "unreachable": delivery.unreachable if delivery else [],
   }
+  if delivery is not None and delivery.unreachable:
+    # Recorded facts, never a timeout: the sender learns that nothing will
+    # read this note soon instead of streaming more notes into a dead chat.
+    result["unreachable_reasons"] = {
+      chat_id: delivery.reasons[chat_id] for chat_id in delivery.unreachable
+    }
+    result["next_action"] = (
+      "The note is stored, but no turn will read it soon at the unreachable "
+      "recipients. Do not resend, split, or re-interrupt them; pick a live "
+      "recipient or tell the owner."
+    )
+  return result
 
 
 @router.get("/chats/{chat_id}")

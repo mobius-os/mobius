@@ -5169,6 +5169,157 @@ def _add_chat_run_continuation_control(eng) -> None:
     ))
 
 
+def _add_chat_continuity_journal(eng) -> None:
+  """Create the current-state row and immutable checkpoint journal."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity (
+        chat_id VARCHAR(64) NOT NULL PRIMARY KEY
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL DEFAULT 0,
+        current_summary TEXT,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        updated_at TIMESTAMP NOT NULL
+      )
+    """))
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity_entries (
+        chat_id VARCHAR(64) NOT NULL
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        checkpoint_id VARCHAR(128) NOT NULL,
+        run_id VARCHAR(64),
+        digest TEXT NOT NULL,
+        current_summary TEXT,
+        requested_title VARCHAR(256),
+        source_cursor_json JSON,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        legacy_markdown TEXT,
+        created_at TIMESTAMP NOT NULL,
+        PRIMARY KEY (chat_id, revision),
+        CONSTRAINT uq_continuity_checkpoint UNIQUE (chat_id, checkpoint_id)
+      )
+    """))
+
+
+def _add_run_delivered_input_boundary(eng) -> None:
+  """Remember an SDK-accepted transcript prefix for each physical run."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "delivered_message_count" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_message_count INTEGER NULL"
+      ))
+    if "delivered_prefix_hash" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_prefix_hash VARCHAR(64) NULL"
+      ))
+
+
+
+def _retire_chat_continuity_journal(eng) -> None:
+  """Fold 0064's journal back into each chat's note.
+
+  The journal briefly duplicated the note file with swapped section names.
+  Each chat that saved into it gets its note rewritten in the ordinary format
+  (Digest = current paragraph; Summary = earlier history plus every saved
+  entry). Nothing maps the 0064 tables or 0065 run columns any more; they stay
+  because a baked fallback platform may still map them.
+  """
+  import os
+  import re
+  from pathlib import Path
+
+  from sqlalchemy import inspect as sa_inspect, text
+
+  heading = re.compile(r"^## ", re.MULTILINE)
+
+  def split_legacy(markdown: str) -> tuple[str, str]:
+    """Return an old note's history and its trailing sections, losslessly."""
+    body = markdown
+    if body.startswith("---\n") and (end := body.find("\n---", 3)) != -1:
+      body = body[end + 4:]
+    summary = re.search(r"^## Summary[ \t]*$", body, re.MULTILINE)
+    trailing = re.search(r"^## (?:Facts & intent|Related)[ \t]*$", body, re.MULTILINE)
+    if summary is None:
+      return heading.sub("### ", body.strip()), ""
+    if trailing is None or trailing.start() < summary.end():
+      return body[summary.end():].strip(), ""
+    return body[summary.end():trailing.start()].strip(), body[trailing.start():].strip()
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if {"chats", "chat_continuity", "chat_continuity_entries"} <= tables:
+    chats_dir = Path(os.environ.get("DATA_DIR", "/data")) / "shared" / "memory" / "chats"
+    with eng.connect() as conn:
+      states = conn.execute(text(
+        "SELECT s.chat_id, s.current_summary, c.title FROM chat_continuity s "
+        "JOIN chats c ON c.id = s.chat_id"
+      )).all()
+      for chat_id, current, title in states:
+        history, trailing = [], ""
+        for digest, legacy, created_at in conn.execute(text(
+          "SELECT digest, legacy_markdown, created_at FROM chat_continuity_entries "
+          "WHERE chat_id = :chat_id ORDER BY revision"
+        ), {"chat_id": chat_id}):
+          if legacy is not None:
+            earlier, trailing = split_legacy(legacy)
+            history.append(earlier)
+          elif digest:
+            stamp = str(created_at)[:16].replace("T", " ")
+            history.append(f"### {stamp} UTC\n\n{heading.sub('### ', digest.strip())}")
+        name = " ".join((title or "").split())
+        note = (
+          f"---\ntype: chat\ndescription: {name}\n---\n\n"
+          f"## Digest\n\n{heading.sub('### ', (current or '').strip())}\n\n"
+          "## Summary\n\n" + "\n\n".join(part for part in history if part)
+          + (f"\n\n{trailing}" if trailing else "") + "\n"
+        )
+        path = chats_dir / chat_id / "index.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(".index.migrating")
+        temporary.write_text(note, encoding="utf-8")
+        os.replace(temporary, path)
+
+
+def _add_chat_drawer_covering_index(eng) -> None:
+  """Serve the drawer's chat list from an index instead of chat rows.
+
+  SQLite stores each row's transcript JSON inline, before the drawer columns,
+  so reading any later column walks that row's whole overflow chain. Covering
+  every column the list reads keeps it off the transcript pages entirely.
+  Other databases store large values out of line and need no such index; the
+  index is only an optimization, so a schema lacking a column skips it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  covered = (
+    "deleted_at", "id", "title", "updated_at", "activity_at", "pinned_at",
+    "created_by_app_id", "has_messages", "pending_question_id", "project_id",
+    "agent_settings_json",
+  )
+  if eng.dialect.name != "sqlite":
+    return
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  if not set(covered) <= {c["name"] for c in inspector.get_columns("chats")}:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      f"CREATE INDEX IF NOT EXISTS ix_chats_drawer ON chats ({', '.join(covered)})"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5234,10 +5385,18 @@ _SCHEMA_MIGRATIONS = (
   ("0059_app_service_aliases", _add_app_service_aliases),
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
+  # Retired: nothing maps chat_runs.progress_expires_at any more (turn
+  # liveness is the runner's own process/stream state). The column stays
+  # because the baked fallback platform can still map it.
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
   ("0064_require_git_app_sources", _require_git_app_sources),
+  # Retired by 0066: nothing maps these tables or columns any more.
+  ("0064_chat_continuity_journal", _add_chat_continuity_journal),
+  ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
+  ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
+  ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
 )
 
 

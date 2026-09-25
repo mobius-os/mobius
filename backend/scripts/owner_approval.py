@@ -112,6 +112,12 @@ def save_card(kind: str, body: dict) -> dict:
       "Owner-input card save was not confirmed. No answer or approval was granted; "
       "retry the identical request to recover its saved receipt."
     ) from exc
+  if (kind == "approval" and isinstance(payload, dict)
+      and payload.get("state") in {"held_by_peer", "completed"}
+      and isinstance(payload.get("work_key"), str)):
+    # The approval's work_key is already owned or completed elsewhere: no card
+    # was saved, the turn continues, and this is the claim_agent_work result.
+    return payload
   if (not isinstance(payload, dict)
       or payload.get("state") not in {"waiting_for_owner", "answered"}
       or not isinstance(payload.get("question_id"), str)

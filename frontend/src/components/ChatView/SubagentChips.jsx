@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import './SubagentChips.css'
 import { toolActivityLabel } from './toolActivityLabel.js'
+import HelperConversation from './HelperConversation.jsx'
 
 // Helper ROWS for a delegating turn's background subagents, rendered inside an
 // ActivityStretch when its Task/Agent tool block carries a `.subagent` map
@@ -10,6 +12,17 @@ import { toolActivityLabel } from './toolActivityLabel.js'
 // in the background" label and the running/done count, so there is no header
 // here. Renders nothing when `.subagent` is absent or empty (Codex delegations
 // surface as an ordinary background-work activity, with no per-helper chips).
+
+// An agent row opens that helper's own conversation (HelperConversation). A
+// shell task (Claude's local_bash, the Monitor tool) has none. Rows persisted
+// before task_type was recorded carry only their id: Claude names every shell
+// task `b` + 8 characters and every agent `a` + 16 hex.
+const SHELL_TASK_TYPES = new Set(['local_bash', 'monitor'])
+const LEGACY_SHELL_TASK_ID = /^b[a-z0-9]{8}$/
+function hasConversation(taskId, helper) {
+  if (helper.task_type) return !SHELL_TASK_TYPES.has(helper.task_type)
+  return !LEGACY_SHELL_TASK_ID.test(taskId)
+}
 
 // Owner-language: the chip name is ALWAYS the helper's `description` — never
 // task_type, never "subagent"/"Task". If a collab-op prefix ever leaks onto the
@@ -76,7 +89,7 @@ function StatusDot({ status }) {
   return <span className={`chat__subagent-dot ${cls}`} aria-hidden="true" />
 }
 
-export default function SubagentChips({ subagent }) {
+export default function SubagentChips({ subagent, chatId, onInternalNav }) {
   // Guard each helper value: a malformed persisted block (e.g. {t1: null}) must
   // not crash the whole chat render when a row dereferences helper.description.
   const helpers = subagent && typeof subagent === 'object'
@@ -95,7 +108,11 @@ export default function SubagentChips({ subagent }) {
     return () => clearInterval(id)
   }, [anyRunning])
 
+  // { taskId, host }: the open helper and the chat pane its dialog covers.
+  const [opened, setOpened] = useState(null)
+
   if (helpers.length === 0) return null
+  const openHelper = opened && helpers.find(([taskId]) => taskId === opened.taskId)?.[1]
 
   return (
     <div className="chat__subagents-list">
@@ -105,11 +122,20 @@ export default function SubagentChips({ subagent }) {
         const isRunning = helper.status === 'running'
         const ms = elapsedMs(helper, now)
         const elapsed = ms != null ? elapsedLabel(ms) : null
+        const openable = !!chatId && hasConversation(taskId, helper)
+        const Row = openable ? 'button' : 'div'
         return (
-          <div
+          <Row
             key={taskId}
+            {...(openable && {
+              type: 'button',
+              'aria-label': `Open ${name} conversation`,
+              'aria-haspopup': 'dialog',
+              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat') }),
+            })}
             className={
               'chat__subagent'
+              + (openable ? ' chat__subagent--openable' : '')
               + (isRunning ? ' chat__subagent--running' : '')
               + (helper.status === 'failed' || helper.status === 'killed'
                   || helper.status === 'stopped'
@@ -132,9 +158,21 @@ export default function SubagentChips({ subagent }) {
               {sub && <span className="chat__subagent-sub">{sub}</span>}
             </span>
             {elapsed && <span className="chat__subagent-elapsed">{elapsed}</span>}
-          </div>
+            {openable && <ChevronRight className="chat__subagent-open" width={14} height={14} aria-hidden="true" />}
+          </Row>
         )
       })}
+      {openHelper && (
+        <HelperConversation
+          chatId={chatId}
+          taskId={opened.taskId}
+          name={helperName(openHelper.description)}
+          status={openHelper.status}
+          host={opened.host}
+          onClose={() => setOpened(null)}
+          onInternalNav={onInternalNav}
+        />
+      )}
     </div>
   )
 }

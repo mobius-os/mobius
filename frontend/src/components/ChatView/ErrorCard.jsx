@@ -126,7 +126,9 @@ export default function ErrorCard({
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
                 ? block.resumable
-                  ? 'Möbius will continue automatically when the restart is complete.'
+                  ? block.pause.manual
+                    ? 'Your work is saved. Resume to continue.'
+                    : 'Möbius will continue automatically when the restart is complete.'
                   : (block.message || 'This response is paused.')
                 : vm.resourceWait
                   ? (block.message || 'Möbius will continue automatically when resources free up.')

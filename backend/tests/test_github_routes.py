@@ -3334,13 +3334,29 @@ def test_source_continuity_route_requires_the_exact_active_source_chat(
   assert accepted.status_code == 200, accepted.text
 
 
-def test_source_continuity_route_rejects_dirty_installed_source(
+def test_source_continuity_route_ignores_unrelated_uncommitted_work(
+  client, owner_token, db,
+):
+  """Another chat's in-progress edit elsewhere must not block Send."""
+  fixture = _prepared_continuity_route(
+    client, owner_token, db, "continuity-route-unrelated",
+  )
+  (fixture["source_repo"] / "uncommitted.txt").write_text("other work\n")
+
+  response = client.post(
+    fixture["url"], headers=fixture["auth"], json=fixture["body"],
+  )
+
+  assert response.status_code == 200, response.text
+
+
+def test_source_continuity_route_rejects_uncommitted_reviewed_file(
   client, owner_token, db,
 ):
   fixture = _prepared_continuity_route(
     client, owner_token, db, "continuity-route-dirty",
   )
-  (fixture["source_repo"] / "uncommitted.txt").write_text("not reviewed\n")
+  (fixture["source_repo"] / "index.jsx").write_text("export default 9\n")
 
   response = client.post(
     fixture["url"], headers=fixture["auth"], json=fixture["body"],
@@ -3667,7 +3683,7 @@ def test_source_resolution_keeps_exact_review_and_authority_guards(
     fixture["record"]["plan"]["body_draft"] = "A changed public proposal"
     _write_contribution(fixture["app_id"], fixture["record_id"], fixture["record"])
   elif changed == "dirty":
-    (fixture["source_repo"] / "unreviewed.txt").write_text("owner draft\n")
+    (fixture["source_repo"] / "index.jsx").write_text("owner draft\n")
   elif changed == "owner":
     headers = {"Authorization": f"Bearer {owner_token}"}
   response = client.post(fixture["url"], headers=headers, json=body)
@@ -5054,7 +5070,11 @@ def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
 def test_autopilot_update_rechecks_current_source_before_push(
   client, owner_token, monkeypatch,
 ):
-  """A follow-up round cannot publish a head absent from installed source."""
+  """A follow-up cannot publish once the PR left the head its grant covers.
+
+  The installed source no longer contains the change either, but the grant
+  binding, not that local witness, is what refuses this update.
+  """
   from app import contribution_autopilot
   from app.database import SessionLocal
 
@@ -5128,7 +5148,8 @@ def test_autopilot_update_rechecks_current_source_before_push(
   )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.json()["detail"]["code"] == "pr_moved_outside_grant"
+  assert response.json()["detail"]["published"] is False
   assert not github_routes.contribution_runtime.personal_attempt_path(
     app_id, record["id"],
   ).exists()

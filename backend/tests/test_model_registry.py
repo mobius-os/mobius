@@ -369,6 +369,31 @@ async def test_fetch_claude_models_uses_refreshed_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_new_claude_model_takes_its_context_size_from_the_provider(
+  tmp_path, monkeypatch,
+):
+  """A model newer than MODEL_CONTEXT_WINDOWS still gets a context ceiling,
+  so the composer can show "0 of 1M" before its first turn."""
+  future = int(time.time() * 1000) + 3_600_000
+  _write_creds(tmp_path, access="tok", refresh="r", expires_at=future)
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"data": [{
+      "id": "claude-some-future-model",
+      "display_name": "Claude Future Model",
+      "max_input_tokens": 1_000_000,
+    }]})
+
+  _install_mock_transport(monkeypatch, handler)
+
+  live_models = await providers._fetch_claude_models(str(tmp_path))
+  entries = providers._live_model_entries("claude", live_models)
+
+  assert "claude-some-future-model" not in providers.MODEL_CONTEXT_WINDOWS
+  assert entries[0]["context_window"] == 1_000_000
+
+
+@pytest.mark.asyncio
 async def test_fetch_claude_models_raises_when_refresh_fails(
   tmp_path, monkeypatch
 ):

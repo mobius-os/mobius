@@ -38,9 +38,14 @@ python3 /data/platform/backend/scripts/goal_plan.py set \
  --task 'inspect|Inspect' --task 'build|Build|inspect' --task 'verify|Verify|build'
 python3 /data/platform/backend/scripts/goal_plan.py add child 'Check edge' --parent inspect
 python3 /data/platform/backend/scripts/goal_plan.py update inspect --status running
+python3 /data/platform/backend/scripts/goal_plan.py update inspect --status completed --start build
 ```
 
-Tasks are `id|title|dependencies`. Work deepest leaves. Children inherit ancestor
+`--start` finishes one task and starts the next in one call. Each write prints
+the revision and the running and ready tasks, so it needs no `show`.
+
+Tasks are `id|title|dependencies`. Statuses are pending, running, completed,
+blocked, failed, and cancelled; notes and results hold up to 500 characters. Work deepest leaves. Children inherit ancestor
 dependencies and make a parent **Ready to verify**, not complete. Verify upward;
 cancelled prerequisites are settled. Plans may change; outcomes may not.
 
@@ -54,11 +59,14 @@ Resume attaches an ordinary attempt; it cannot reopen closed work.
 Before ending unfinished, create exactly one owning interaction: for an observable
 condition, read `waiting.md` and declare a durable Wait; for owner action, use the
 saved question tool, which keeps the Goal marked **Waiting for you**. Restart uses
-its dedicated card.
+its dedicated card. A button in an app or the Changes panel is not a handoff,
+and a `blocked` task only records the gate: when only the owner can unblock it
+(an approval, a choice, or a change of scope), put exactly that on the card.
 
 With no gate, keep working. Terminal settlement continues the exact Goal only
-when its saved plan advanced during the admitted turn; otherwise it asks the
-owner. An unchanged plan is not progress.
+when its saved plan advanced during the admitted turn and still has runnable
+work; otherwise it asks the owner. An unchanged plan is not progress; any real
+plan change is, so never checkpoint just to record it.
 
 Work in-run; turns are not a budget. Use `goal_plan.py context` for current focus
 or `context --task ID` for a branch. Running tasks select focus; the view includes
@@ -66,11 +74,11 @@ parent requirements and dependencies. `show` reads the full plan. Do not end a
 run merely to refresh context or select the next task. Never end with “tell me
 when…”, prose status, a bare paused Goal, or a custom status card.
 
-Before an unfinished handoff:
+Before an unfinished handoff, add `--next-action 'Exact next step'` to your last
+`update`, or run:
 
 ```bash
-python3 /data/platform/backend/scripts/goal_plan.py checkpoint \
- --summary 'Verified progress and remaining obligations' --next-action 'Exact next step'
+python3 /data/platform/backend/scripts/goal_plan.py checkpoint --next-action 'Exact next step'
 ```
 
 After verifying the original outcome:

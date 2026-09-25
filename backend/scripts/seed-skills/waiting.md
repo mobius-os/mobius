@@ -39,13 +39,25 @@ tokens until met, failed, or expired. Repeated timer wakes reload agent context
 just to discover that nothing changed. Use a timer when elapsed time is the
 condition or no safe read-only check is available.
 
-```bash
-python3 /data/platform/backend/scripts/chat_wait.py declare \
-  'the gate PR through the merge queue' \
-  --owner 'GitHub merge queue' \
-  --command 'gh pr view 123 --repo owner/repo --json state -q .state | grep -qx MERGED' \
-  --interval 300 --deadline 1800
+Use the first-class `declare_wait` tool from Möbius control (and `cancel_wait`
+to disarm). The `chat_wait.py` helper below is resilience, not an equivalent
+convenience path: use it only when the tool is absent or an attempted tool call
+returns a failure. Both arm the same wait.
+
+```json
+{
+  "description": "the gate PR through the merge queue",
+  "condition_owner": "GitHub merge queue",
+  "command": "gh pr view 123 --repo owner/repo --json state -q .state | grep -qx MERGED",
+  "interval_secs": 300,
+  "deadline_secs": 1800
+}
 ```
+
+For a pull request's CI, use `/data/platform/scripts/pr-checks.sh owner/repo PR
+SHA` as the command. It fails at once when SHA is not the PR's public head (a
+rejected update was never published, or a newer commit replaced it) instead of
+waiting on checks that will never run.
 
 - The check command must be **read-only** and exit **0 exactly when the
   condition is met**. An ordinary unmet result is **exit 1 with no diagnostic
@@ -57,26 +69,37 @@ python3 /data/platform/backend/scripts/chat_wait.py declare \
   turn's short-lived `AGENT_TOKEN`, `API_BASE_URL`, or other process-local
   environment. Do not query the live application database directly; use the
   stable owning interface or a purpose-built read-only helper instead.
-- `--interval` (seconds, default 300, min 60): match it to how fast the state
-  actually changes — a ~10-minute merge queue deserves ~300s, not 60s.
-- `--owner` is required for command waits: name the system, person, or durable
-  agent expected to make the condition true. A monitor proves only that someone
-  will check; it never proves that work is happening. For internal work, do not
-  declare the wait until that executor has explicitly accepted the handoff.
-- `--deadline` is required for command waits (max 7 days): use roughly 2–3× the
-  expected duration. At the deadline, the same chat wakes to inspect the owner
-  and real state before deciding whether safe takeover, reassignment, a longer
-  wait, or a blocker report is correct.
+- `interval_secs` / `--interval` (default 300, min 60): match it to how fast
+  the state actually changes — a ~10-minute merge queue deserves ~300s, not 60s.
+- `condition_owner` / `--owner` is required for command waits: name the
+  system, person, or durable agent expected to make the condition true. A
+  monitor proves only that someone will check; it never proves that work is
+  happening. For internal work, do not declare the wait until that executor has
+  explicitly accepted the handoff.
+- `deadline_secs` / `--deadline` is required for command waits (max 7 days):
+  use roughly 2–3× the expected duration. At the deadline, the same chat wakes
+  to inspect the owner and real state before deciding whether safe takeover,
+  reassignment, a longer wait, or a blocker report is correct.
 
-Timer form — resume after a fixed delay, no command:
+Timer form — resume after a fixed delay: pass `delay_secs` instead of
+`command`, for example `{"description": "review the agreed 30-minute
+observation window", "delay_secs": 1800}`.
+
+The partner sees each armed wait as a "Waiting…" chip in the chat and can
+cancel it too.
+
+Fallback helper, only when the tool is absent or failed (same arguments as
+flags; `list` shows this chat's armed waits and `cancel <id>` disarms one):
 
 ```bash
 python3 /data/platform/backend/scripts/chat_wait.py declare \
+  'the gate PR through the merge queue' \
+  --owner 'GitHub merge queue' \
+  --command 'gh pr view 123 --repo owner/repo --json state -q .state | grep -qx MERGED' \
+  --interval 300 --deadline 1800
+python3 /data/platform/backend/scripts/chat_wait.py declare \
   'review the agreed 30-minute observation window' --in 1800
 ```
-
-`list` shows this chat's armed waits; `cancel <id>` disarms one. The partner
-sees each armed wait as a "Waiting…" chip in the chat and can cancel it too.
 
 ## What happens on resume
 
@@ -95,7 +118,7 @@ been stopped or dismissed.
 ## Rules
 
 - Declare the wait BEFORE the closing words of the turn, and confirm the
-  declare succeeded (it prints the armed wait). Only then is "I'll continue
+  declare succeeded (it returns the armed wait). Only then is "I'll continue
   when X lands" an honest sentence.
 - In your closing message, say the chat will resume on its own and roughly
   when checks happen — the partner should never have to babysit.

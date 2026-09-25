@@ -130,6 +130,21 @@ test('the rendered limit card explains automatic and early recovery states', () 
   assert.match(elapsed, /Continue when you’re ready/)
 })
 
+test('a restart pause promises continuation only until it falls back to manual', () => {
+  const block = {
+    type: 'error', message: 'Paused for a platform update.', resumable: true,
+    pause: { kind: 'restart' },
+  }
+  const planned = renderToStaticMarkup(createElement(ErrorCard, { block }))
+  assert.match(planned, /continue automatically when the restart is complete/)
+
+  const manual = renderToStaticMarkup(createElement(ErrorCard, {
+    block: { ...block, pause: { kind: 'restart', manual: true } },
+  }))
+  assert.match(manual, /Your work is saved\. Resume to continue\./)
+  assert.doesNotMatch(manual, /continue automatically/)
+})
+
 test('a busy selected-model card explains its short automatic retry', (t) => {
   const previousWindow = globalThis.window
   globalThis.window = { location: { href: 'https://mobius.test/' } }
@@ -339,6 +354,10 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'the Paused heading uses the exact same accent token as Resume')
   assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
     'the restart pause briefly states its expected automatic outcome')
+  assert.match(errorCard, /block\.pause\.manual\s*\?\s*'Your work is saved\. Resume to continue\.'/,
+    'a crash or manual-fallback restart pause offers Resume instead of promising continuation')
+  assert.match(chatView, /pause\?\.kind === 'restart' && !pendingResumeBlock\.pause\.manual/,
+    'the status and nudge fall back to Resume wording for a manual restart pause')
   assert.match(errorCard, /block\.resumable[\s\S]*?This response is paused\./,
     'a question-held restart cannot promise continuation before the owner answers')
   assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,

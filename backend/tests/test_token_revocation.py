@@ -217,7 +217,7 @@ def test_service_token_carries_epoch_and_is_revocable(client):
   owner_token = r.json()["access_token"]
 
   from app import auth as auth_mod
-  # Re-derive what _write_service_token wrote: a 90-day token at the
+  # Re-derive what write_service_token wrote: a 90-day token at the
   # owner's epoch. (We mint an equivalent here rather than read the file
   # so the test doesn't depend on DATA_DIR layout.)
   service = auth_mod.create_access_token(

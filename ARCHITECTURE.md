@@ -128,13 +128,17 @@ rebase the local edits onto it:                    A → B → X
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
+- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and writes the markers into its isolated candidate worktree for the resolver. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
-The platform clone uses the same fix-forward shape at repository scale. It
-fetches the selected target, fast-forwards when local `main` is fully contained
-in it, and otherwise replays the still-local overlay as a linear series on top
-of the target. Changes proven to have landed upstream are retired instead of
-being carried forever under a different commit identity.
+The platform clone fetches the selected target and fast-forwards when local
+`main` is already contained in it. Otherwise it compares the final local and
+upstream trees once, records the reconciled tree as one local commit on the
+target, and keeps the previous local tip reachable for recovery. A conflict
+stays in an isolated worktree while the old checkout remains served. Working
+edits are carried through as a transient commit and returned uncommitted.
+Finishing a resolution runs the same final-tree merge again with the resolver's
+answer as one input, so live edits made meanwhile are merged in, or re-parked
+with fresh markers when they overlap the answer.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
@@ -158,9 +162,9 @@ and any newly added runtime module stay image-owned.
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or replay the local overlay onto the selected target (commit-stray-edits-first, off-tree conflict handling, post-replay import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or merge the final trees once into an isolated candidate (off-tree conflict handling, import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise a linear replay of the still-local overlay onto the selected target. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply records the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise compares the final trees once rather than replaying historical local commits. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -507,7 +511,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile against `.seed-skills.json` at image boot, preserving local changes, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer; it uses the provider captured with that settled chat only when its auth preflight passes, otherwise publishing the local deterministic fallback without spawning a dead CLI. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile against `.seed-skills.json` at image boot, preserving local changes, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. The working agent writes that note through its run-bound `checkpoint_chat` tool; there is no turn-end summarizer. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
 
 Platform skill reconciliation is owned by the image boot script, not the source
 updater. `.seed-skills.json` records the last platform bytes applied per skill.
@@ -565,11 +569,12 @@ Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
-fetches `origin/main`, commits any stray working-tree edits, and then
-fast-forwards or replays the still-local overlay onto that target. A conflict
-stays in an isolated candidate worktree while the last-served commit remains
-live, and a post-replay `import app.main` probe rolls back rather than serving a
-broken tree. (It reuses `app_git`'s isolated git env +
+fetches `origin/main`, carries working edits, and then fast-forwards or
+compares the final local and upstream trees once. A conflict stays in an
+isolated candidate worktree while the last-served commit remains live; the
+resolved answer is merged with the live source again before activation. An
+`import app.main` probe rolls
+back rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
 `commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
 maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
@@ -607,7 +612,7 @@ back to the baked backend, so the live container remains reachable to inspect.
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe and validation of its served identity broker. Startup may finish or undo
 an update interrupted during its own filesystem transaction, but it never
-fetches or selects a newer release. Fetching and replaying local commits happen
+fetches or selects a newer release. Fetching and reconciling local source happen
 only through the reviewed updater. An invalid existing clone or broker selects
 the complete baked platform without overwriting, quarantining, or reseeding the
 broken tree. Owner-data disaster recovery is the separate
@@ -1292,12 +1297,18 @@ serializer), and the FULL output is fetched only when the block is expanded (`GE
 ### Chat summary + continuity contract
 
 Each chat maintains a **growing per-chat note** at
-`/data/shared/memory/chats/<chat-id>/index.md` — a bounded `## Digest`, durable
-facts + the partner's intent, an uncapped cumulative `## Summary`, and a one-line
-**gist that IS the chat title**
-(`backend/scripts/chat_note.py` summarizer subagent: transcript in the prompt, no
-tools). This note is **core continuity** — it exists and is useful even when the
-Memory app is not installed. Its consumers:
+`/data/shared/memory/chats/<chat-id>/index.md` — a one-line name (frontmatter
+`description`, mirroring the chat title), a short `## Digest`, and an uncapped
+cumulative `## Summary`. The **working agent authors it** as it works through
+the run-bound `checkpoint_chat` MCP tool: `title` renames the chat unless the
+owner locked a name, `digest` replaces the Digest, and `summary` appends one
+timestamped Summary entry. `POST /api/chat/continuity/checkpoints` admits only
+the chat's live run (`AuthorizeCheckpoint` in the writer actor), then rewrites
+the file atomically under the chat's transition lock
+(`backend/app/chat_continuity.py`). There is no summarizer model, second store,
+or format version; a missed save simply leaves the note older, and the
+transcript remains the source of truth. This note is **core continuity** — it
+exists and is useful even when the Memory app is not installed. Its consumers:
 
 - **Short-term continuity into new chats.** A fresh chat opens with only the gist and
   bounded Digest from the ~10 most-recently-modified chats
@@ -1427,7 +1438,7 @@ Native question futures retain their existing answer/cancel behavior and
 share the same open-card slot as a compatibility path for existing sessions.
 
 Saved options may explicitly set `on_answer: "close"` (default `"resume"`).
-Quiet-capable cards receive immutable option IDs; the browser sends actual
+Every newly saved option receives an immutable ID; the browser sends actual
 selections in `selected_options`, keyed by subquestion ID, alongside the normal
 prompt-keyed `answers`. Free text, including text equal to an option label,
 never acquires option authority. Every subquestion must select only close

@@ -1,5 +1,7 @@
 """Workspace work ownership stays singular while explicit transfer remains possible."""
 
+import pytest
+
 from app.timeutil import now_naive_utc
 
 from app import models
@@ -203,3 +205,260 @@ def test_deleting_owner_releases_only_unfinished_exact_action(db):
   )
   assert reclaimed["state"] == "claimed"
   assert reclaimed["owner_chat_id"] == second.id
+
+
+# --- Claims settle with their owner's Goal -------------------------------
+
+KEY = "github:mobius-os/mobius:pr:1079:3134e050:merge"
+
+
+def _owned_goal_claim(db, *, task_status="completed"):
+  """First chat's open Goal owns KEY; the second chat's Goal follows it."""
+  owner, first, second = _fixture(db)
+  db.add_all([
+    models.ChatGoal(
+      id="claim-goal-first", chat_id=first.id, objective="Ship the change",
+      plan_json={"tasks": [{
+        "id": "ship", "title": "Ship", "status": task_status,
+        "depends_on": [],
+      }]},
+      revision=1,
+    ),
+    models.ChatGoal(
+      id="claim-goal-second", chat_id=second.id, objective="Align the platform",
+    ),
+  ])
+  db.commit()
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=KEY, summary="Merge the reviewed PR")
+  follower = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=KEY, summary="Merge the same reviewed PR",
+  )
+  assert follower["state"] == "held_by_peer"
+  return owner, first, second
+
+
+def _claim_row(db):
+  db.expire_all()
+  return db.query(models.AgentWorkClaim).filter_by(work_key=KEY).one()
+
+
+def test_goal_completion_completes_the_claims_it_names_with_the_result(db):
+  from app.agent_work_claims import pending_settlement_notices
+  from app.goals import update_goal_record
+
+  owner, first, second = _owned_goal_claim(db)
+  run = db.get(models.ChatRun, "claim-run-first")
+  goal = db.get(models.ChatGoal, "claim-goal-first")
+
+  update_goal_record(db, run, goal, 1, result="Merged as 0b44dc9d; CI green",
+                     finished_claims=[KEY])
+
+  row = _claim_row(db)
+  assert row.completed_at is not None and row.released_at is None
+  assert row.outcome == "Owning Goal completed: Merged as 0b44dc9d; CI green"
+  # The follower notice is owed durably until a seam delivers it.
+  [pending] = pending_settlement_notices(db, first.id)
+  assert (pending.state, pending.interested_chat_ids) == (
+    "completed", [second.id],
+  )
+  again = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=KEY, summary="Try the finished merge again",
+  )
+  assert again["state"] == "completed"
+
+
+@pytest.mark.parametrize("run_token", ["claim-run-first", ""])
+def test_stop_releases_the_goal_claims_in_the_same_writer_commit(db, run_token):
+  from app.chat_writer import FinishRun, get_writer
+
+  owner, first, second = _owned_goal_claim(db, task_status="running")
+  get_writer().submit(FinishRun(
+    chat_id=first.id, run_token=run_token, terminal_status="stopped",
+  )).result(timeout=5)
+
+  db.expire_all()
+  assert db.get(models.ChatGoal, "claim-goal-first").status == "stopped"
+  row = _claim_row(db)
+  assert row.released_at is not None and row.completed_at is None
+  assert "stopped" in row.outcome
+  taken = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=KEY, summary="Take over the released merge",
+  )
+  assert (taken["state"], taken["owner_chat_id"]) == ("claimed", second.id)
+
+
+def test_dismissing_an_unfinished_goal_releases_its_claims(db):
+  from app.chat_writer import ClearPresentedGoal, get_writer
+
+  _owner, first, _second = _owned_goal_claim(db, task_status="running")
+  receipt = get_writer().submit(ClearPresentedGoal(
+    chat_id=first.id, expected_goal_id="claim-goal-first",
+    preserve_execution=False,
+  )).result(timeout=5)
+
+  assert receipt["status"] == "cleared"
+  row = _claim_row(db)
+  assert row.released_at is not None
+  assert "dismissed" in row.outcome
+
+
+def test_restart_interruption_keeps_the_claim_with_its_open_goal(db):
+  from app.agent_work_claims import stage_settle_claims_with_owner
+  from app.chat_writer import FinishRun, get_writer
+
+  _owner, first, _second = _owned_goal_claim(db, task_status="running")
+  get_writer().submit(FinishRun(
+    chat_id=first.id, run_token="claim-run-first",
+    terminal_status="interrupted",
+  )).result(timeout=5)
+
+  assert stage_settle_claims_with_owner(db, first.id) == []
+  row = _claim_row(db)
+  assert row.completed_at is None and row.released_at is None
+  assert row.owner_chat_id == first.id
+
+
+def test_goal_settlement_never_overwrites_an_explicit_finish(db):
+  from app.chat_writer import FinishRun, get_writer
+
+  owner, first, _second = _owned_goal_claim(db, task_status="running")
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=KEY,
+              outcome="Merged as 0b44dc9d", release=False)
+  get_writer().submit(FinishRun(
+    chat_id=first.id, run_token="claim-run-first", terminal_status="stopped",
+  )).result(timeout=5)
+
+  row = _claim_row(db)
+  assert row.completed_at is not None and row.released_at is None
+  assert row.outcome == "Merged as 0b44dc9d"
+
+
+def test_post_commit_seam_repairs_claims_of_a_goal_ended_elsewhere(db):
+  from app.agent_work_claims import stage_settle_claims_with_owner
+
+  _owner, first, second = _owned_goal_claim(db, task_status="running")
+  # A Goal ended by a path that did not settle in-commit (e.g. an upgrade).
+  db.get(models.ChatGoal, "claim-goal-first").status = "stopped"
+  db.commit()
+
+  [settled] = stage_settle_claims_with_owner(db, first.id)
+  db.commit()
+  assert (settled.state, settled.interested_chat_ids) == (
+    "released", [second.id],
+  )
+  assert stage_settle_claims_with_owner(db, first.id) == []
+
+
+def test_claim_taken_outside_a_goal_waits_for_explicit_finish(db):
+  from app.agent_work_claims import stage_settle_claims_with_owner
+
+  owner, first, _second = _fixture(db)
+  db.add(models.ChatRun(
+    id="claim-run-plain", root_run_id="claim-run-plain", chat_id=first.id,
+    status="running", provider="codex",
+  ))
+  db.commit()
+  claim_work(db, owner_id=owner.id, chat_id=first.id,
+             run_id="claim-run-plain", work_key=KEY, summary="Merge it")
+
+  assert stage_settle_claims_with_owner(db, first.id) == []
+  assert _claim_row(db).completed_at is None
+
+
+def test_racing_first_claims_leave_one_owner_and_one_follower(db):
+  """Two chats insert the same key at once: the unique key picks one owner."""
+  from sqlalchemy import event
+  from sqlalchemy.orm import Session
+
+  from app.database import SessionLocal
+
+  owner, first, second = _fixture(db)
+  db.add(models.ChatGoal(id="claim-goal-second", chat_id=second.id,
+                         objective="Align the platform"))
+  db.commit()
+  raced = []
+
+  def first_chat_wins_inside_the_gap(session, _ctx, _instances):
+    pending = [
+      row for row in session.new
+      if isinstance(row, models.AgentWorkClaim) and row.owner_chat_id == second.id
+    ]
+    if not pending or raced:
+      return
+    raced.append(True)
+    with SessionLocal() as other:
+      won = claim_work(other, owner_id=owner.id, chat_id=first.id,
+                       run_id="claim-run-first", work_key=KEY,
+                       summary="Merge the reviewed PR")
+      assert won["state"] == "claimed"
+
+  event.listen(Session, "before_flush", first_chat_wins_inside_the_gap)
+  try:
+    lost = claim_work(db, owner_id=owner.id, chat_id=second.id,
+                      run_id="claim-run-second", work_key=KEY,
+                      summary="Merge the same reviewed PR")
+  finally:
+    event.remove(Session, "before_flush", first_chat_wins_inside_the_gap)
+
+  assert raced == [True]
+  assert (lost["state"], lost["owner_chat_id"]) == ("held_by_peer", first.id)
+  assert db.query(models.AgentWorkClaim).count() == 1
+  assert db.query(models.AgentWorkInterest).one().chat_id == second.id
+
+
+def test_goal_completion_releases_a_declined_action_it_did_not_name(db):
+  """A declined approval's claim must not read as done: completed is terminal."""
+  from app.agent_work_claims import pending_settlement_notices
+  from app.goals import update_goal_record
+
+  owner, first, second = _owned_goal_claim(db)
+  update_goal_record(
+    db, db.get(models.ChatRun, "claim-run-first"),
+    db.get(models.ChatGoal, "claim-goal-first"), 1,
+    result="Owner declined the merge; the PR stays open for review.",
+  )
+
+  row = _claim_row(db)
+  assert row.completed_at is None and row.released_at is not None
+  assert row.outcome.startswith(
+    "Owning Goal completed without recording this action as done: Owner declined"
+  )
+  [pending] = pending_settlement_notices(db, first.id)
+  assert pending.state == "released"
+  taken = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=KEY, summary="Merge once the owner approves",
+  )
+  assert (taken["state"], taken["owner_chat_id"]) == ("claimed", second.id)
+
+
+def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
+  from app.goal_plans import GoalPlanError
+  from app.goals import update_goal_record
+
+  _owned_goal_claim(db)
+  with pytest.raises(GoalPlanError, match="Not an open work claim"):
+    update_goal_record(
+      db, db.get(models.ChatRun, "claim-run-first"),
+      db.get(models.ChatGoal, "claim-goal-first"), 1,
+      result="Merged", finished_claims=[KEY + ":typo"],
+    )
+  db.expire_all()
+  assert db.get(models.ChatGoal, "claim-goal-first").status == "open"
+  row = _claim_row(db)
+  assert row.completed_at is None and row.released_at is None
+
+
+def test_work_keys_accept_pr_references_with_hash_and_plus():
+  import pytest
+
+  from app.agent_work_claims import clean_work_key
+
+  key = "pr-update:mobius-os/mobius#1365:5d0e+steer"
+  assert clean_work_key(key) == key
+  with pytest.raises(ValueError, match="# \\+"):
+    clean_work_key("Has Spaces")

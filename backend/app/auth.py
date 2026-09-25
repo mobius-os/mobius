@@ -1,7 +1,10 @@
 """Password hashing and JWT utilities."""
 
 import hashlib
+import os
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import bcrypt
@@ -87,6 +90,31 @@ def create_access_token(
   return jwt.encode(
     payload, settings.secret_key, algorithm="HS256"
   )
+
+
+def write_service_token(username: str, token_epoch: int) -> None:
+  """Re-mint the 90-day owner token at /data/service-token.txt (mode 0600).
+
+  The Host controller authenticates its cutover drain with this file. It is
+  stamped with the owner's token_epoch so "sign out everywhere" revokes it
+  too, which is why callers re-mint it instead of trusting the boot copy.
+  Rename-over-temp keeps readers from ever seeing a truncated token.
+  """
+  token = create_access_token(
+    {"sub": username},
+    expires_delta=timedelta(days=90),
+    token_epoch=token_epoch,
+  )
+  data_dir = get_settings().data_dir
+  fd, temp = tempfile.mkstemp(dir=data_dir, prefix=".service-token-")
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(token)
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(temp, os.path.join(data_dir, "service-token.txt"))
+  finally:
+    Path(temp).unlink(missing_ok=True)
 
 
 def create_agent_token(

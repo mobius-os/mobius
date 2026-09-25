@@ -58,7 +58,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import models, schemas
 from app.goals import admit_goal
 from app.chat_message_identity import assistant_message_index
-from app.chat_titles import first_message_title
+from app.chat_titles import apply_generated_title, first_message_title
 from app.json_safety import json_safe
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
@@ -1049,6 +1049,20 @@ class PersistCompaction(_Command):
   summary: str = ""
   expected_provider: str = ""
   source_messages_hash: str = ""
+
+
+@dataclass
+class AuthorizeCheckpoint(_Command):
+  """Admit a continuity save from the chat's live run; apply its name.
+
+  Returns ``{"status": "ok", "title_applied": bool}`` or
+  ``{"status": "stale_run"}``. The note file itself is written by the caller
+  under the chat's transition lock.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  title: str | None = None
 
 
 @dataclass
@@ -2073,6 +2087,8 @@ class ChatWriterActor:
       return self._append_steered_user_message(db, cmd)
     if isinstance(cmd, PersistCompaction):
       return self._persist_compaction(db, cmd)
+    if isinstance(cmd, AuthorizeCheckpoint):
+      return self._authorize_checkpoint(db, cmd)
     if isinstance(cmd, SwitchProviderWithCompaction):
       return self._switch_provider_with_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
@@ -4070,6 +4086,7 @@ class ChatWriterActor:
     if goal is not None and goal.status != "completed":
       goal.status = "dismissed"
       goal.revision += 1
+      _settle_ended_goal_claims(db, goal)
     # Exact Goal dismissal does not cancel another Goal or generic wait.
     _cancel_activation_owners(db, chat, goal_id=goal_id)
     if not cmd.preserve_execution:
@@ -4312,6 +4329,7 @@ class ChatWriterActor:
         and new_msg.get("role") == "user"
         and not new_msg.get("hidden")
       )
+    _stamp_provider_batch(stored_messages)
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4442,6 +4460,22 @@ class ChatWriterActor:
       "provider": chat.provider,
       "agent_settings_json": chat.agent_settings_json,
     }
+
+  def _authorize_checkpoint(self, db, cmd: AuthorizeCheckpoint) -> dict:
+    chat = _active_chat(db, cmd.chat_id)
+    run = db.get(models.ChatRun, cmd.run_token) if cmd.run_token else None
+    if (
+      chat is None or run is None or run.chat_id != cmd.chat_id
+      or run.status != "running"
+      or self._run_token_owner.get(cmd.chat_id) != cmd.run_token
+      or not self._run_is_latest(db, run)
+    ):
+      db.rollback()
+      return {"status": "stale_run"}
+    title_applied = bool(cmd.title and apply_generated_title(chat, cmd.title))
+    if title_applied and not _commit_or_rollback(db):
+      raise _PersistFailed("AuthorizeCheckpoint title did not persist")
+    return {"status": "ok", "title_applied": title_applied}
 
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
     """Append one marker and reset the resumable provider session."""
@@ -4908,6 +4942,7 @@ class ChatWriterActor:
         if goal is not None and goal.status == "open":
           goal.status = "stopped"
           goal.revision += 1
+          _settle_ended_goal_claims(db, goal)
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -4957,6 +4992,7 @@ class ChatWriterActor:
           if goal is not None and goal.status == "open":
             goal.status = "stopped"
             goal.revision += 1
+            _settle_ended_goal_claims(db, goal)
         if cmd.terminal_status == "failed":
           from app.chat_failure_activity import mark_failed
           mark_failed(
@@ -4992,6 +5028,7 @@ class ChatWriterActor:
             goal.status = "stopped"
             goal.revision += 1
             changed = True
+            _settle_ended_goal_claims(db, goal)
         for request in db.query(models.SavedSecureInput).filter(
           models.SavedSecureInput.chat_id == cmd.chat_id,
           models.SavedSecureInput.status.in_(("pending", "consuming")),
@@ -5339,6 +5376,7 @@ class ChatWriterActor:
     )
     if run.park_reason == "restart":
       run.restart_nonce = None
+      _mark_restart_pause_manual(_active_chat(db, run.chat_id))
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -5942,7 +5980,32 @@ def _pending_messages_for_transcript(
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)
+  _stamp_provider_batch(stored)
   return stored
+
+
+def _stamp_provider_batch(messages: list[dict]) -> None:
+  """Mark visible rows that reached the provider as one combined input.
+
+  Both queued-turn promotion and in-turn steering call this, so the shell can
+  render the rows as one message without the two paths drifting apart. Every
+  row already carries a cid; the first one names the batch. Hidden rows and
+  continuation markers are not owner speech, so they stay outside the batch.
+  """
+  from app.continuations import is_continuation_message
+
+  owner_rows = [
+    msg for msg in messages
+    if not msg.get("hidden") and not is_continuation_message(msg)
+  ]
+  for msg in messages:
+    msg.pop("provider_batch", None)
+  if len(owner_rows) < 2:
+    return
+  for index, msg in enumerate(owner_rows):
+    msg["provider_batch"] = {
+      "id": owner_rows[0]["cid"], "index": index, "count": len(owner_rows),
+    }
 
 
 def _commit_or_rollback(db) -> bool:
@@ -6052,6 +6115,37 @@ def _tail_open_question_state(
 def _tail_open_question_id(messages) -> str | None:
   """Compatibility projection for callers that only need the question id."""
   return _tail_open_question_state(messages)[0]
+
+
+def _mark_restart_pause_manual(chat) -> None:
+  """Stop the latest restart pause card from promising a continuation.
+
+  The drain writes its note before the next boot decides whether the parked
+  turn may continue. When that decision falls back to manual recovery, the note
+  must say so; otherwise the card keeps promising an automatic continuation.
+  """
+  if chat is None:
+    return
+  from sqlalchemy.orm.attributes import flag_modified
+
+  messages = copy.deepcopy(list(chat.messages or []))
+  latest = next((
+    message for message in reversed(messages)
+    if isinstance(message, dict) and message.get("role") == "assistant"
+  ), None)
+  pause = next((
+    block["pause"]
+    for block in reversed((latest or {}).get("blocks") or [])
+    if isinstance(block, dict)
+    and block.get("type") == "error"
+    and isinstance(block.get("pause"), dict)
+    and block["pause"].get("kind") == "restart"
+  ), None)
+  if pause is None or pause.get("manual"):
+    return
+  pause["manual"] = True
+  chat.messages = messages
+  flag_modified(chat, "messages")
 
 
 def _active_chat(db, chat_id: str):
@@ -6315,6 +6409,29 @@ def finalize_response_outcome(
   return _apply_last_assistant_message(
     db, chat_id, terminal_message, commit=commit,
   )
+
+
+def _settle_ended_goal_claims(db, goal) -> None:
+  """Settle an ending Goal's open work claims inside the same writer commit.
+
+  Stop and dismissal release the claims so followers may take the exact action
+  over. A savepoint keeps a claim-table failure from failing the lifecycle
+  write itself; the post-commit seam (``settle_claims_with_owner``) repairs
+  any claim left open from the durable Goal status.
+  """
+  from app.agent_work_claims import stage_settle_goal_claims
+
+  try:
+    with db.begin_nested():
+      stage_settle_goal_claims(
+        db, chat_id=goal.chat_id, goal_id=goal.id, status=goal.status,
+        result=goal.result,
+      )
+  except Exception:
+    log.warning(
+      "goal %s ended but its work claims were not settled in-commit",
+      goal.id, exc_info=True,
+    )
 
 
 def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:

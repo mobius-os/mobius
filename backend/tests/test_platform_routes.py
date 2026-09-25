@@ -6,7 +6,10 @@ and truthful failures at the HTTP boundary. A failed read must never become
 an apparently successful empty review or up-to-date status.
 """
 
+from pathlib import Path
+
 from app import deployment_control
+from app.config import get_settings
 from app.platform_activation import classify_activation
 
 
@@ -138,6 +141,62 @@ def test_reviewed_rebuild_forwards_exact_sha_and_digest(
   assert captured == body
   assert response.json()["release_source"] == "latest_ghcr"
 
+
+
+_REVIEWED_REBUILD = {
+  "plan_id": "a" * 64,
+  "current_sha": "1" * 40,
+  "target_sha": "2" * 40,
+}
+
+
+def test_reviewed_rebuild_remints_signed_out_host_controller_token(
+  client, auth, monkeypatch,
+):
+  token_file = Path(get_settings().data_dir, "service-token.txt")
+  client.post("/api/admin/sign-out-everywhere", headers=auth)
+  login = client.post("/api/auth/token", data={
+    "username": "test", "password": "testpassword123",
+  })
+  owner = {"Authorization": f"Bearer {login.json()['access_token']}"}
+  revoked = token_file.read_text()
+  seen_by_host = []
+
+  async def fake_rebuild(**_plan):
+    seen_by_host.append(token_file.read_text())
+    return {"state": "queued"}
+
+  monkeypatch.setattr(deployment_control, "request_reviewed_rebuild", fake_rebuild)
+  response = client.post(
+    "/api/platform/rebuild", headers=owner, json=_REVIEWED_REBUILD,
+  )
+
+  assert response.status_code == 202
+  [fresh] = seen_by_host
+  for token, status in ((revoked, 401), (fresh, 200)):
+    probe = client.get("/api/apps/", headers={"Authorization": f"Bearer {token}"})
+    assert probe.status_code == status
+  assert token_file.stat().st_mode & 0o777 == 0o600
+  assert not list(token_file.parent.glob(".service-token-*"))
+
+
+def test_reviewed_rebuild_stops_before_dispatch_without_controller_token(
+  client, auth, monkeypatch,
+):
+  def unwritable(*_args):
+    raise OSError("read-only data volume")
+
+  async def dispatch(**_plan):
+    raise AssertionError("a cutover must not start without its credential")
+
+  monkeypatch.setattr("app.routes.platform.auth.write_service_token", unwritable)
+  monkeypatch.setattr(deployment_control, "request_reviewed_rebuild", dispatch)
+  response = client.post(
+    "/api/platform/rebuild", headers=auth, json=_REVIEWED_REBUILD,
+  )
+
+  assert response.status_code == 503
+  assert response.json()["detail"]["code"] == "controller_auth_unavailable"
 
 def test_reviewed_rebuild_railway_requires_digest(client, auth, monkeypatch):
   # On Railway the image is pinned by GHCR digest, so a review with no digest is

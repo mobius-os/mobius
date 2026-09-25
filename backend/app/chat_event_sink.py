@@ -11,7 +11,7 @@ import copy
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Awaitable, Callable
+from typing import Awaitable
 
 from app.agent_lifecycle import normalize_chat_event
 from app.broadcast import get_broadcast
@@ -344,19 +344,12 @@ class ChatEventSink:
     run_token: str | None = None,
     *,
     agent_activity_binding: AgentActivityBinding = EMPTY_AGENT_ACTIVITY_BINDING,
-    on_question_checkpoint: Callable[[], Awaitable[None]] | None = None,
   ):
     self.bc = bc
     self.chat_id = chat_id
     # Exact manifest-declared app commands this turn may decorate. Resolve once
     # while the caller's DB session is live; provider turns can run for hours.
     self._agent_activity_binding = agent_activity_binding
-    # Active Goals may span many physical turns. A durably persisted question
-    # is their safe mid-operation summary boundary: the card is already
-    # recoverable, while an answer has not yet advanced the transcript. The
-    # caller owns summary policy; the sink only fires this optional hook after
-    # the QuestionCommit barrier and never waits on it before showing the card.
-    self._on_question_checkpoint = on_question_checkpoint
     self._side_tasks: set[asyncio.Task] = set()
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
@@ -1537,11 +1530,6 @@ class ChatEventSink:
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
-    if self._on_question_checkpoint is not None:
-      self._start_side_task(
-        self._on_question_checkpoint(),
-        failure_message="question checkpoint summary failed chat_id=%s",
-      )
 
   def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
     """Claim the clean card end synchronously, then signal it asynchronously.

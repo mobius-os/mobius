@@ -586,12 +586,21 @@ def is_repo(source_dir: str | Path) -> bool:
   return (Path(source_dir) / ".git").exists()
 
 
-def worktree_dirty(source_dir: str | Path) -> bool:
-  """Whether tracked/untracked accepted-source paths differ from ``main``."""
+def worktree_dirty(
+  source_dir: str | Path, paths: Iterable[str] = (),
+) -> bool:
+  """Whether tracked/untracked accepted-source paths differ from ``HEAD``.
+
+  ``paths`` narrows the check to those literal paths, so a proof about one
+  change is not blocked by unrelated in-progress edits. No paths means the
+  whole tree.
+  """
   if not is_repo(source_dir):
     return False
+  pathspec = [f":(literal){path}" for path in sorted(set(paths))]
   return bool(_run(
     Path(source_dir), "status", "--porcelain",
+    *(("--untracked-files=all", "--", *pathspec) if pathspec else ()),
     read_only=True,
   ).stdout.strip())
 
@@ -2865,7 +2874,7 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   and this returns False (no unmerged entries, `--check` not run).
   """
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
@@ -2873,22 +2882,23 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   return has_conflict_markers(repo)
 
 
+def _git_control_path(repo: Path, name: str) -> Path:
+  """Resolve per-worktree Git state without assuming `.git` is a directory."""
+  return Path(_run(
+    repo, "rev-parse", "--path-format=absolute", "--git-path", name,
+  ).stdout.strip())
+
+
 def merge_in_progress(source_dir: str | Path) -> bool:
   """Whether Git records an in-progress merge for this repository."""
   repo = Path(source_dir)
-  if not is_repo(repo):
-    return False
-  git_path = _run(repo, "rev-parse", "--git-path", "MERGE_HEAD").stdout.strip()
-  path = Path(git_path)
-  if not path.is_absolute():
-    path = repo / path
-  return path.is_file()
+  return is_repo(repo) and _git_control_path(repo, "MERGE_HEAD").is_file()
 
 
 def has_conflict_markers(source_dir: str | Path) -> bool:
   """Whether an in-progress merge's working tree still has text markers."""
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   # Scan tracked content for the labeled conflict boundaries. `git grep`
   # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
@@ -2907,7 +2917,7 @@ def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
   markers, so an unmerged binary path is never auto-accepted.
   """
   repo = Path(source_dir)
-  if not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   listing = _run(repo, "ls-files", "-u", "-z").stdout
   paths = {
@@ -2972,17 +2982,16 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   repo = Path(source_dir)
   ensure_repo(repo)
   _require_local_branch(repo)
-  git_dir = repo / ".git"
-  merge_head_path = git_dir / "MERGE_HEAD"
+  merge_head_path = _git_control_path(repo, "MERGE_HEAD")
   # Refuse to touch the index while a rebase/cherry-pick/am is in progress
   # (see the docstring's HARD GATE). Scoped to "no MERGE_HEAD" so the merge
   # finalize path below still stages-then-scans. `ls-files -u` covers a
   # conflict left in the index with no state dir (e.g. a bare `read-tree -m`).
   if not merge_head_path.exists():
     in_progress = (
-      (git_dir / "rebase-merge").exists()
-      or (git_dir / "rebase-apply").exists()
-      or (git_dir / "CHERRY_PICK_HEAD").exists()
+      _git_control_path(repo, "rebase-merge").exists()
+      or _git_control_path(repo, "rebase-apply").exists()
+      or _git_control_path(repo, "CHERRY_PICK_HEAD").exists()
       or bool(_run(repo, "ls-files", "-u").stdout.strip())
     )
     if in_progress:
@@ -3020,13 +3029,29 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
       log.warning("could not carry contribution provenance across replay",
                   exc_info=True)
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-      (repo / ".git" / name).unlink(missing_ok=True)
+      _git_control_path(repo, name).unlink(missing_ok=True)
     return sha
   status = _run(repo, "status", "--porcelain").stdout.strip()
   if not status:
     return None
   _run(repo, "commit", "-q", "-m", msg)
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
+
+
+def preserve_local_tip_for_recovery(source_dir: str | Path) -> str:
+  """Pin the current app source before a deliberate upstream-only replacement.
+
+  The Store self-update must stay installable even if its own source conflicts;
+  this ref keeps the displaced local tree (including captured working edits)
+  reachable for a later owner-guided reconciliation.
+  """
+  repo = Path(source_dir)
+  tip = head_sha(repo, LOCAL_BRANCH)
+  if not tip:
+    raise RuntimeError("local app source is unavailable for recovery")
+  ref = f"refs/mobius/app-pre-update/{tip}"
+  _run(repo, "update-ref", ref, tip)
+  return ref
 
 
 def commit_replay(
@@ -3081,305 +3106,31 @@ def commit_replay(
   return sha
 
 
-# ── Linear overlay ───────────────────────────────────────────────────────────
+# ── Overlay commit trailers ──────────────────────────────────────────────────
 #
-# A project's local history is an exact accepted upstream commit plus a LINEAR
-# overlay of intentional commits. Each overlay commit declares which unit it
-# belongs to and why it is local through commit trailers, so the disposition
-# survives every replay (a rebase preserves messages) with no side metadata.
-# The updater replays this overlay onto each new upstream base instead of
-# merging upstream into local history, so upstream never becomes an interleaved
-# side parent and a unit that has landed upstream simply disappears.
+# Platform updates record local source as commits on top of the reviewed
+# upstream. These trailers name the unit a commit carries, so the updater can
+# recognise and unwind its own transient working-edits commit.
 
 OVERLAY_UNIT_TRAILER = "Mobius-Overlay-Unit"
 OVERLAY_DISPOSITION_TRAILER = "Mobius-Disposition"
-OVERLAY_RECORD_TRAILER = "Mobius-Record"
-# ``pending``: has a Contribute record on its way upstream. ``local-only``: an
-# intentional overlay this installation keeps. ``private``: never leaves the
-# instance. ``wip``: not yet organised.
-OVERLAY_DISPOSITIONS = ("pending", "local-only", "private", "wip")
-# Commits without a unit trailer are still overlay commits; they belong to the
-# implicit unit Contribute organises later.
-OVERLAY_UNSORTED_UNIT = "unsorted"
 # Uncommitted working edits ride through an update as this transient unit and
 # return to the working tree afterwards.
 OVERLAY_WORKING_UNIT = "working-tree"
-_OVERLAY_UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
-_OVERLAY_LOG_FORMAT = (
-  "%H%x00%s%x00"
-  f"%(trailers:key={OVERLAY_UNIT_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={OVERLAY_DISPOSITION_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={OVERLAY_RECORD_TRAILER},valueonly=true)%x1e"
-)
-_CONFLICT_BOUNDARY_RE = r"^(<<<<<<< |>>>>>>> )"
-
-
-class OverlayNotLinear(RuntimeError):
-  """The local range contains merge commits; it is not a linear overlay."""
-
-
-@dataclass(frozen=True)
-class OverlayCommit:
-  sha: str
-  subject: str
-  unit: str
-  disposition: str
-  record_id: str | None
-
-
-@dataclass(frozen=True)
-class OverlayUnit:
-  id: str
-  disposition: str
-  record_id: str | None
-  commits: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class OverlayReplayResult:
-  """Outcome of replaying an overlay onto a new base inside a worktree.
-
-  ``status`` is ``clean`` (``tip`` is the complete candidate) or ``conflict``
-  (the worktree is left at the conflicting cherry-pick for a resolver;
-  ``conflict`` names the commit, its unit, the unmerged paths and the shas
-  still to replay). ``replayed`` maps old shas to their replayed shas and
-  ``dropped`` lists old shas whose change was already present in the base.
-  """
-
-  status: str
-  tip: str | None
-  replayed: tuple[tuple[str, str], ...]
-  dropped: tuple[str, ...]
-  conflict: dict | None = None
-
-
-def overlay_trailers(
-  unit: str, disposition: str, record_id: str | None = None,
-) -> str:
-  if not _OVERLAY_UNIT_RE.match(unit):
-    raise ValueError(f"invalid overlay unit {unit!r}")
-  if disposition not in OVERLAY_DISPOSITIONS:
-    raise ValueError(f"invalid overlay disposition {disposition!r}")
-  # Provenance must never be ambiguous: a pending unit names the Contribute
-  # record carrying it upstream, and only a pending unit may name one.
-  if (disposition == "pending") != bool(record_id):
-    raise ValueError(
-      "a pending overlay unit needs its Contribute record id; other "
-      "dispositions must not carry one"
-    )
-  lines = [
-    f"{OVERLAY_UNIT_TRAILER}: {unit}",
-    f"{OVERLAY_DISPOSITION_TRAILER}: {disposition}",
-  ]
-  if record_id:
-    lines.append(f"{OVERLAY_RECORD_TRAILER}: {record_id}")
-  return "\n".join(lines)
 
 
 def overlay_message(
-  subject: str,
-  *,
-  unit: str,
-  disposition: str,
-  record_id: str | None = None,
-  body: str = "",
+  subject: str, *, unit: str, disposition: str, body: str = "",
 ) -> str:
-  """A commit message carrying the overlay trailers."""
+  """A commit message carrying the overlay unit and disposition trailers."""
   parts = [subject.strip()]
   if body.strip():
     parts.append(body.strip())
-  parts.append(overlay_trailers(unit, disposition, record_id))
+  parts.append(
+    f"{OVERLAY_UNIT_TRAILER}: {unit}\n"
+    f"{OVERLAY_DISPOSITION_TRAILER}: {disposition}"
+  )
   return "\n\n".join(parts) + "\n"
-
-
-def _first_line(value: str) -> str:
-  return value.strip().splitlines()[0].strip() if value.strip() else ""
-
-
-def _overlay_log(repo: Path, *rev_args: str) -> list[OverlayCommit]:
-  proc = _run(
-    repo, "log", f"--format={_OVERLAY_LOG_FORMAT}", *rev_args, read_only=True,
-  )
-  commits: list[OverlayCommit] = []
-  for record in proc.stdout.split("\x1e"):
-    if not record.strip():
-      continue
-    fields = record.strip("\n").split("\x00")
-    fields.extend([""] * (5 - len(fields)))
-    unit = _first_line(fields[2])
-    disposition = _first_line(fields[3])
-    record_id = _first_line(fields[4])
-    if not _OVERLAY_UNIT_RE.match(unit):
-      unit = OVERLAY_UNSORTED_UNIT
-    if disposition not in OVERLAY_DISPOSITIONS:
-      disposition = "wip"
-    # Read leniently so a hand-written or legacy commit still replays, but
-    # never report provenance the trailers do not actually establish.
-    if disposition == "pending" and not record_id:
-      disposition = "wip"
-    if disposition != "pending":
-      record_id = ""
-    commits.append(OverlayCommit(
-      sha=fields[0].strip(), subject=fields[1].strip(), unit=unit,
-      disposition=disposition, record_id=record_id or None,
-    ))
-  return commits
-
-
-def overlay_commits(
-  source_dir: str | Path, base: str, tip: str,
-) -> list[OverlayCommit]:
-  """The overlay ``base..tip`` in replay order; raises when it is not linear."""
-  repo = Path(source_dir)
-  merges = _run(
-    repo, "rev-list", "--merges", "--count", f"{base}..{tip}", read_only=True,
-  ).stdout.strip()
-  if merges and int(merges) > 0:
-    raise OverlayNotLinear(
-      f"{merges} merge commit(s) between {base[:12]} and {tip[:12]}"
-    )
-  return _overlay_log(repo, "--reverse", "--no-merges", f"{base}..{tip}")
-
-
-def overlay_units(commits: Iterable[OverlayCommit]) -> list[OverlayUnit]:
-  order: list[str] = []
-  grouped: dict[str, dict] = {}
-  for commit in commits:
-    entry = grouped.get(commit.unit)
-    if entry is None:
-      entry = grouped[commit.unit] = {
-        "disposition": commit.disposition,
-        "record_id": commit.record_id,
-        "commits": [],
-      }
-      order.append(commit.unit)
-    entry["commits"].append(commit.sha)
-    if commit.record_id and not entry["record_id"]:
-      entry["record_id"] = commit.record_id
-  return [
-    OverlayUnit(
-      id=unit,
-      disposition=grouped[unit]["disposition"],
-      record_id=grouped[unit]["record_id"],
-      commits=tuple(grouped[unit]["commits"]),
-    )
-    for unit in order
-  ]
-
-
-def describe_overlay(source_dir: str | Path, base: str, tip: str) -> dict:
-  """The overlay invariant as a status projection.
-
-  ``linear`` is the invariant itself: the base is an ancestor of the tip and no
-  merge commit sits between them. Units are listed in replay order with their
-  disposition so Settings and Contribute can show exactly what this
-  installation carries on top of upstream.
-  """
-  repo = Path(source_dir)
-  base_sha = _resolve_commit(repo, base)
-  tip_sha = _resolve_commit(repo, tip)
-  out = {
-    "base_sha": base_sha,
-    "tip_sha": tip_sha,
-    "base_is_ancestor": False,
-    "linear": False,
-    "commits": 0,
-    "unsorted_commits": 0,
-    "units": [],
-  }
-  if not base_sha or not tip_sha:
-    return out
-  out["base_is_ancestor"] = ref_is_ancestor(repo, base_sha, tip_sha) is True
-  if not out["base_is_ancestor"]:
-    return out
-  try:
-    commits = overlay_commits(repo, base_sha, tip_sha)
-  except OverlayNotLinear:
-    return out
-  subjects = {commit.sha: commit.subject for commit in commits}
-  out["linear"] = True
-  out["commits"] = len(commits)
-  out["unsorted_commits"] = sum(
-    1 for commit in commits if commit.unit == OVERLAY_UNSORTED_UNIT
-  )
-  out["units"] = [
-    {
-      "id": unit.id,
-      "disposition": unit.disposition,
-      "record_id": unit.record_id,
-      "commits": len(unit.commits),
-      "subject": subjects.get(unit.commits[0], ""),
-    }
-    for unit in overlay_units(commits)
-  ]
-  return out
-
-
-def _same_change(
-  repo: Path, *, base: str, tip: str, change: EquivalentChange,
-) -> bool:
-  """Whether ``base..tip`` is exactly the reviewed delta of ``change``.
-
-  Two strict three-way proofs, both byte-exact on trees: the reviewed delta
-  adds nothing to ``tip`` (it is already there), and ``base..tip`` adds
-  nothing to the reviewed head (it carries nothing beyond the review). Whitespace
-  or indentation differences fail both, as they must for source where they
-  matter.
-  """
-  return (
-    _change_is_subsumed(repo, change.base_sha, change.anchor_sha, tip)
-    and _change_is_subsumed(repo, base, tip, change.anchor_sha)
-  )
-
-
-def landed_overlay_commits(
-  source_dir: str | Path, commits: Iterable[OverlayCommit], target: str,
-) -> set[str]:
-  """Overlay commits whose exact reviewed change already landed in ``target``.
-
-  A squash or rebase merge gives a contribution a new identity upstream, so a
-  replay of the local original would conflict instead of vanishing. Each
-  landed equivalence anchor proves one reviewed delta reached the target. A
-  contiguous run of same-unit commits whose combined delta is exactly that
-  reviewed delta is the landed contribution and is dropped before replay;
-  when a run is not the whole review, each commit is tried on its own. A
-  commit carrying more than the reviewed delta keeps replaying, where its
-  remainder either applies or conflicts honestly.
-  """
-  repo = Path(source_dir)
-  anchors = [
-    change for change in _landed_equivalent_changes(repo)
-    if _change_landed_in_target(repo, change, target)
-  ]
-  ordered = list(commits)
-  if not anchors or not ordered:
-    return set()
-  runs: list[list[OverlayCommit]] = []
-  for commit in ordered:
-    if runs and runs[-1][-1].unit == commit.unit:
-      runs[-1].append(commit)
-    else:
-      runs.append([commit])
-  dropped: set[str] = set()
-
-  def _proven(span: list[OverlayCommit]) -> bool:
-    base = _resolve_commit(repo, f"{span[0].sha}^")
-    if base is None:
-      return False
-    return any(
-      _same_change(repo, base=base, tip=span[-1].sha, change=change)
-      for change in anchors
-    )
-
-  for run in runs:
-    if _proven(run):
-      dropped.update(commit.sha for commit in run)
-      continue
-    if len(run) > 1:
-      dropped.update(
-        commit.sha for commit in run if _proven([commit])
-      )
-  return dropped
 
 
 def remove_overlay_worktree(source_dir: str | Path, worktree: str | Path) -> None:
@@ -3389,234 +3140,6 @@ def remove_overlay_worktree(source_dir: str | Path, worktree: str | Path) -> Non
     _run(repo, "worktree", "remove", "--force", str(path), check=False)
     shutil.rmtree(path, ignore_errors=True)
   _run(repo, "worktree", "prune", check=False)
-
-
-def _worktree_head(worktree: Path) -> str:
-  return _run(worktree, "rev-parse", "HEAD", read_only=True).stdout.strip()
-
-
-def _worktree_unmerged(worktree: Path) -> list[str]:
-  out = _run(
-    worktree, "diff", "--name-only", "--diff-filter=U", check=False,
-    read_only=True,
-  ).stdout
-  return sorted(line.strip() for line in out.splitlines() if line.strip())
-
-
-def _semantic_replay_prefix(
-  repo: Path,
-  commits: list[OverlayCommit],
-  start: int,
-  onto: str,
-) -> tuple[int, MergeResult] | None:
-  """Prove a conflicted overlay prefix through its reviewed source tip.
-
-  A source-resolution witness can become complete in a later commit than the
-  one where ordinary cherry-picking first conflicts. The later commits may be
-  consumed by the semantic replay only when every path they touch belongs to
-  the exact reviewed change. That keeps unrelated overlay units separate while
-  allowing one reviewed adaptation to replay as the atomic unit it was.
-  """
-  for end in range(start, len(commits)):
-    merged = merge_with_equivalent_changes(repo, commits[end].sha, onto)
-    if (
-      merged is None
-      or merged.status != "clean"
-      or not merged.merged_tree_oid
-      or not merged.equivalent_change_refs
-    ):
-      continue
-    reviewed_paths: set[str] = set()
-    valid = True
-    for ref in merged.equivalent_change_refs:
-      change = _read_equivalent_change(repo, ref)
-      paths = (
-        endpoint_diff_paths(repo, change.base_sha, change.anchor_sha)
-        if change is not None else None
-      )
-      if not paths:
-        valid = False
-        break
-      reviewed_paths.update(paths)
-    if not valid:
-      continue
-    consumed_paths: set[str] = set()
-    for consumed in commits[start + 1:end + 1]:
-      parent = _resolve_commit(repo, f"{consumed.sha}^")
-      paths = (
-        endpoint_diff_paths(repo, parent, consumed.sha)
-        if parent is not None else None
-      )
-      if paths is None:
-        valid = False
-        break
-      consumed_paths.update(paths)
-    if valid and consumed_paths.issubset(reviewed_paths):
-      return end, merged
-  return None
-
-
-def _replay_into(
-  repo: Path,
-  worktree: Path,
-  commits: list[OverlayCommit],
-  skip: set[str],
-  replayed: list[tuple[str, str]],
-  dropped: list[str],
-) -> OverlayReplayResult:
-  for index, commit in enumerate(commits):
-    if commit.sha in skip:
-      dropped.append(commit.sha)
-      continue
-    previous_tip = _worktree_head(worktree)
-    pick = _run(worktree, "cherry-pick", "--no-commit", commit.sha, check=False)
-    unmerged = _worktree_unmerged(worktree)
-    if unmerged:
-      # A source-resolution witness may bind a reviewed adaptation at a later
-      # source tip even though the adapted bytes entered in this earlier
-      # commit. Re-run the same proof against this commit and, when it is exact,
-      # materialize the proven semantic merge tree while preserving the
-      # original commit message and overlay trailers.
-      semantic = (
-        _semantic_replay_prefix(repo, commits, index, previous_tip)
-        if not replayed else None
-      )
-      if semantic is not None:
-        consumed_through, equivalent = semantic
-        restored = _run(
-          worktree, "reset", "-q", "--hard", previous_tip, check=False,
-        )
-        if restored.returncode == 0:
-          _run(
-            worktree, "read-tree", "--reset", "-u",
-            equivalent.merged_tree_oid,
-          )
-          if _run(
-            worktree, "diff", "--cached", "--quiet", check=False,
-          ).returncode == 0:
-            dropped.append(commit.sha)
-          else:
-            _run(worktree, "commit", "-q", "--no-verify", "-C", commit.sha)
-            replayed.append((commit.sha, _worktree_head(worktree)))
-          skip.update(
-            later.sha for later in commits[index + 1:consumed_through + 1]
-          )
-          continue
-      return OverlayReplayResult(
-        status="conflict",
-        tip=_worktree_head(worktree),
-        replayed=tuple(replayed),
-        dropped=tuple(dropped),
-        conflict={
-          "sha": commit.sha,
-          "unit": commit.unit,
-          "subject": commit.subject,
-          "paths": unmerged,
-          "remaining": [later.sha for later in commits[index + 1:]],
-        },
-      )
-    nothing_staged = _run(
-      worktree, "diff", "--cached", "--quiet", check=False,
-    ).returncode == 0
-    if nothing_staged:
-      # The change is already in the base: a landed contribution whose
-      # identity Git could not otherwise connect. Nothing to carry.
-      _run(worktree, "cherry-pick", "--quit", check=False)
-      _run(worktree, "reset", "-q", "--hard", check=False)
-      dropped.append(commit.sha)
-      continue
-    if pick.returncode != 0:
-      raise RuntimeError(
-        f"cherry-pick {commit.sha[:12]} failed: "
-        f"{(pick.stderr or pick.stdout).strip()[-500:]}"
-      )
-    _run(worktree, "commit", "-q", "--no-verify", "-C", commit.sha)
-    replayed.append((commit.sha, _worktree_head(worktree)))
-  return OverlayReplayResult(
-    status="clean",
-    tip=_worktree_head(worktree),
-    replayed=tuple(replayed),
-    dropped=tuple(dropped),
-  )
-
-
-def replay_overlay(
-  source_dir: str | Path,
-  *,
-  commits: Iterable[OverlayCommit],
-  onto: str,
-  worktree: str | Path,
-  skip: Iterable[str] = (),
-) -> OverlayReplayResult:
-  """Replay ``commits`` onto ``onto`` in a fresh detached worktree.
-
-  Every commit keeps its author, message and trailers. A commit in ``skip``
-  or one whose cherry-pick is empty is dropped as already landed. A conflict
-  is retried only through an exact landed-change semantic proof; otherwise the
-  first conflict stops the replay and leaves the worktree for a resolver. No
-  ref of the live checkout moves here.
-  """
-  repo = Path(source_dir)
-  path = Path(worktree)
-  remove_overlay_worktree(repo, path)
-  path.parent.mkdir(parents=True, exist_ok=True)
-  _run(repo, "worktree", "add", "--detach", "-q", str(path), onto)
-  return _replay_into(repo, path, list(commits), set(skip), [], [])
-
-
-def replay_more(
-  source_dir: str | Path,
-  *,
-  worktree: str | Path,
-  commits: Iterable[OverlayCommit],
-  previous: OverlayReplayResult,
-) -> OverlayReplayResult:
-  """Replay further commits onto an existing clean candidate worktree."""
-  repo = Path(source_dir)
-  path = Path(worktree)
-  return _replay_into(
-    repo, path, list(commits), set(),
-    list(previous.replayed), list(previous.dropped),
-  )
-
-
-def continue_overlay_replay(
-  source_dir: str | Path,
-  *,
-  worktree: str | Path,
-  commit_sha: str,
-  remaining: Iterable[str],
-  skip: Iterable[str] = (),
-) -> OverlayReplayResult | None:
-  """Finish a conflicting replay after the resolver edited the worktree.
-
-  Returns None while unmerged entries or labeled conflict boundaries remain.
-  Otherwise commits the resolved pick under its original message, replays the
-  remaining commits and returns the new outcome.
-  """
-  repo = Path(source_dir)
-  path = Path(worktree)
-  if not (path / ".git").exists():
-    return None
-  if _run(path, "ls-files", "-u", read_only=True).stdout.strip():
-    return None
-  markers = _run(
-    path, "grep", "-lE", _CONFLICT_BOUNDARY_RE, check=False, read_only=True,
-  )
-  if markers.returncode == 0:
-    return None
-  _run(path, "add", "-A")
-  replayed: list[tuple[str, str]] = []
-  dropped: list[str] = []
-  if _run(path, "diff", "--cached", "--quiet", check=False).returncode == 0:
-    _run(path, "cherry-pick", "--quit", check=False)
-    dropped.append(commit_sha)
-  else:
-    _run(path, "commit", "-q", "--no-verify", "-C", commit_sha)
-    replayed.append((commit_sha, _worktree_head(path)))
-  shas = [sha for sha in remaining if sha]
-  commits = _overlay_log(repo, "--no-walk=unsorted", *shas) if shas else []
-  return _replay_into(repo, path, commits, set(skip), replayed, dropped)
 
 
 def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
@@ -3970,9 +3493,8 @@ def start_conflict_merge(
             repo, "checkout", "--conflict=merge", "--", path, check=False,
           )
       _run(repo, "update-ref", "ORIG_HEAD", local_sha)
-      git_dir = repo / ".git"
-      (git_dir / "MERGE_HEAD").write_text(upstream_sha + "\n")
-      (git_dir / "MERGE_MSG").write_text(
+      _git_control_path(repo, "MERGE_HEAD").write_text(upstream_sha + "\n")
+      _git_control_path(repo, "MERGE_MSG").write_text(
         f"Merge {upstream_branch} with reviewed contribution base\n"
       )
       merged = subprocess.CompletedProcess(
@@ -3981,7 +3503,7 @@ def start_conflict_merge(
     except Exception:
       _run(repo, "reset", "--hard", local_sha, check=False)
       for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-        (repo / ".git" / name).unlink(missing_ok=True)
+        _git_control_path(repo, name).unlink(missing_ok=True)
       raise
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
@@ -3994,12 +3516,12 @@ def start_conflict_merge(
   if merged.returncode != 0 and not conflict_paths:
     detail = merged.stderr.strip() or merged.stdout.strip()
     raise RuntimeError(f"git merge failed (rc={merged.returncode}): {detail}")
-  if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
+  if not conflict_paths and merge_in_progress(repo):
     # Real/explicit-base materialization resolved clean despite the earlier
     # verdict. Don't strand a dangling merge; restore the committed local state.
     _run(repo, "reset", "--hard", local_sha, check=False)
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
-      (repo / ".git" / name).unlink(missing_ok=True)
+      _git_control_path(repo, name).unlink(missing_ok=True)
   return conflict_paths
 
 
@@ -4013,7 +3535,7 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
   (committed local) state. Returns True if a merge was aborted, else False.
   """
   repo = Path(source_dir)
-  if not is_repo(repo) or not (repo / ".git" / "MERGE_HEAD").exists():
+  if not merge_in_progress(repo):
     return False
   _run(repo, "merge", "--abort", check=False)
   return True
@@ -4183,15 +3705,19 @@ def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | 
 
 
 def _resolve_benign_conflict_file(
-  rel: str, base: bytes, ours: bytes, theirs: bytes
+  rel: str, base: bytes | None, ours: bytes, theirs: bytes
 ) -> bytes | None:
   """One conflicting file auto-resolved, or None when it needs the owner.
 
   JSON manifests get a full structural three-way merge (serialization drift and
-  disjoint edits reconcile; true overlap does not). Other source files keep the
-  narrow APP_VERSION-only line resolution."""
+  disjoint edits reconcile; true overlap does not). A manifest both sides added
+  merges from the empty object, so only agreeing or disjoint keys combine. Other
+  source files keep the narrow APP_VERSION-only line resolution and need a
+  base."""
   if rel.rsplit("/", 1)[-1] in _JSON_MANIFESTS:
-    return _resolve_json_manifest(base, ours, theirs)
+    return _resolve_json_manifest(b"{}" if base is None else base, ours, theirs)
+  if base is None:
+    return None
   return _resolve_source_version(base, ours, theirs)
 
 
@@ -4232,7 +3758,8 @@ class BenignResolution:
 
 
 def resolve_benign_conflict(
-  source_dir: str | Path, conflict_paths: list[str]
+  source_dir: str | Path, conflict_paths: list[str],
+  *, merge_base: str | None = None,
 ) -> BenignResolution | None:
   """Full merged source tree with every BENIGN conflict auto-resolved, or None
   when any conflicting file carries a genuine overlap.
@@ -4247,6 +3774,10 @@ def resolve_benign_conflict(
   and the caller falls back to the owner-resolver flow. Fail-safe by
   construction: a genuine local edit is never silently dropped, because a
   residual conflict aborts the whole attempt.
+
+  Pass ``merge_base`` when the caller's merge verdict used an explicit base
+  (a recorded previous release unrelated to the installed history), so this
+  proof reasons from the same base.
   """
   repo = Path(source_dir)
   if not conflict_paths:
@@ -4258,9 +3789,11 @@ def resolve_benign_conflict(
   # conflict paths from THIS run (not the caller's list) so the tree oid and the
   # paths we overwrite are guaranteed to come from the same merge — a marker can
   # never leak through a path mismatch.
+  args = ["merge-tree", "--write-tree", "--name-only"]
+  if merge_base is not None:
+    args.extend(("--merge-base", merge_base))
   proc = _run(
-    repo, "merge-tree", "--write-tree", "--name-only",
-    LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    repo, *args, LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
   )
   if proc.returncode != 1:
     return None
@@ -4275,22 +3808,24 @@ def resolve_benign_conflict(
     merge_conflicts.append(ln)  # verbatim — a path may legitimately hold spaces
   if not merge_conflicts:
     return None
-  base_proc = _run(
-    repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
-  )
-  base_ref = base_proc.stdout.strip()
-  if base_proc.returncode != 0 or not base_ref:
+  base_ref = merge_base
+  if base_ref is None:
+    base_proc = _run(
+      repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    )
+    base_ref = base_proc.stdout.strip() if base_proc.returncode == 0 else ""
+  if not base_ref:
     return None
   resolved: dict[str, bytes] = {}
   for rel in merge_conflicts:
     ours = read_blob(repo, LOCAL_BRANCH, rel)
     theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
-    base_blob = read_blob(repo, base_ref, rel)
-    # An add/add or delete conflict (a side missing the file) is not a benign
-    # shape we reconcile here; leave it to the owner.
-    if ours is None or theirs is None or base_blob is None:
+    # A deletion on either side is not a benign shape; leave it to the owner.
+    if ours is None or theirs is None:
       return None
-    merged = _resolve_benign_conflict_file(rel, base_blob, ours, theirs)
+    merged = _resolve_benign_conflict_file(
+      rel, read_blob(repo, base_ref, rel), ours, theirs,
+    )
     if merged is None:
       return None
     resolved[rel] = merged

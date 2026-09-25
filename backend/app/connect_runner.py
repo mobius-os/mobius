@@ -19,10 +19,13 @@ Manage the installed service:
 """
 import argparse
 import base64
+import codecs
 from collections import deque
 from contextlib import contextmanager
+import io
 import ipaddress
 import json
+import locale
 import os
 import platform
 import signal
@@ -57,7 +60,11 @@ RUNNER_PROTOCOL_VERSION = 4
 # Increment this for every shipped runner change that an existing installation
 # should receive. Protocol only describes wire compatibility; compatible
 # releases can keep using the same protocol while still offering an update.
-RUNNER_RELEASE = 1
+RUNNER_RELEASE = 3
+# What this runner can do, announced on every stream. Möbius gates behavior on
+# these names, never on release numbers: independently maintained copies of
+# this runner can reach the same release number with different abilities.
+RUNNER_CAPABILITIES = ("parallel",)
 # A live stream receives a server heartbeat every 15 seconds. Some hosting
 # proxies keep the client TCP socket open after the backend behind it restarts,
 # leaving the runner blocked forever on a stream the new backend no longer
@@ -71,6 +78,9 @@ STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
 # before one heartbeat interval still take the ordinary retry backoff so a
 # broken intermediary cannot create a tight reconnect loop.
 STREAM_HEALTHY_SECONDS = STREAM_HEARTBEAT_SECONDS
+# Set by a Mobius that supervises this runner (a Mobius-to-Mobius connection).
+# Such a runner is updated by its supervisor, not by an install command.
+SUPERVISOR_ENV = "CONNECT_RUNNER_SUPERVISOR"
 RUNNER_USER_AGENT = (
     "mobius-connect/%s (protocol/%s; +https://github.com/mobius-os/mobius)"
     % (RUNNER_RELEASE, RUNNER_PROTOCOL_VERSION)
@@ -249,13 +259,13 @@ def _remove_connection(url, host_id):
     return len(conns)
 
 
-def _post(url, payload, token=None):
+def _post(url, payload, token=None, timeout=30):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", "Bearer " + token)
-    with _open_url(req, timeout=30) as resp:
+    with _open_url(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -509,10 +519,10 @@ def _script_input(script, *, is_windows=None):
 
 
 def _spawn_command(cmd, cwd, *, script=None, shell=None):
+    """Start one command with binary pipes so output can stream as it arrives."""
     popen_args = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
-        "text": True,
         "cwd": (cwd or None),
     }
     if script is not None:
@@ -532,62 +542,257 @@ def _spawn_command(cmd, cwd, *, script=None, shell=None):
     return subprocess.Popen(command, **popen_args)
 
 
-def _run_command(cmd, cwd, timeout):
-    proc = None
-    try:
-        proc = _spawn_command(cmd, cwd)
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return stdout, stderr, proc.returncode, False
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(proc)
-        return "", "command timed out after %ss" % timeout, 124, True
-    except KeyboardInterrupt:
-        if proc is not None:
-            _terminate_process_tree(proc)
-        raise
-    except Exception as exc:  # noqa: BLE001 - report any spawn failure back
-        if proc is not None:
-            _terminate_process_tree(proc)
-        return "", "runner error: %s" % exc, 1, False
-
-
-# Match the diagnostic view the server can return. Sending more only spends
-# bandwidth before the server discards it, and sufficiently large output can
-# be rejected before it reaches that truncation boundary. Keep the head and
-# tail: both the first error and the final summary usually matter.
+# The final result keeps a head+tail view that matches what the server can
+# return. Sending more only spends bandwidth before the server discards it, and
+# sufficiently large output can be rejected before it reaches that truncation
+# boundary. Both the first error and the final summary usually matter.
 _MAX_RESULT_STREAM = 60_000
+# Live output is delivered in numbered chunks about twice a second. Unsent
+# chunks are held only up to a memory bound; if the server is unreachable for
+# long enough, the oldest are dropped and the server sees a sequence gap.
+_OUTPUT_FLUSH_SECONDS = 0.5
+# Output is delivered from each command's own watch loop, so a slow Möbius
+# must not hold up that loop's time-limit and cancel checks for long.
+_OUTPUT_POST_TIMEOUT_SECONDS = 5
+_OUTPUT_BATCH_CHARS = 512_000
+_MAX_PENDING_OUTPUT_CHARS = 4_000_000
+# After a timeout or cancel kills the process group, a descendant that escaped
+# the group could keep the pipes open. Stop waiting for it after this long.
+_PIPE_DRAIN_AFTER_KILL_SECONDS = 5
+
+
+def _truncated_view(head_source, tail_source):
+    marker = "\n…[output truncated by runner]…\n"
+    kept = _MAX_RESULT_STREAM - len(marker)
+    head = (kept + 1) // 2
+    tail = kept // 2
+    return head_source[:head] + marker + tail_source[-tail:]
 
 
 def _cap_output(text):
     text = text or ""
     if len(text) <= _MAX_RESULT_STREAM:
         return text, False
-    marker = "\n…[output truncated by runner]…\n"
-    kept = _MAX_RESULT_STREAM - len(marker)
-    head = (kept + 1) // 2
-    tail = kept // 2
-    return text[:head] + marker + text[-tail:], True
+    return _truncated_view(text, text), True
+
+
+class _HeadTail:
+    """Accumulate one stream while retaining only what `_cap_output` keeps."""
+
+    def __init__(self):
+        self.head = ""
+        self.tail = ""
+        self.total = 0
+
+    def append(self, text):
+        self.total += len(text)
+        if len(self.head) < _MAX_RESULT_STREAM:
+            self.head += text[:_MAX_RESULT_STREAM - len(self.head)]
+        self.tail = (self.tail + text)[-_MAX_RESULT_STREAM:]
+
+    def value(self):
+        if self.total <= _MAX_RESULT_STREAM:
+            return self.head, False
+        return _truncated_view(self.head, self.tail), True
+
+
+class _CommandOutput:
+    """One command's undelivered live chunks plus its capped final view.
+
+    Each read becomes one chunk with an absolute sequence number, so a retried
+    delivery is idempotent on the server.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.chunks = []
+        self.next_seq = 0
+        self.pending_chars = 0
+        self.final = {"stdout": _HeadTail(), "stderr": _HeadTail()}
+
+    def append(self, stream, text):
+        if not text:
+            return
+        with self.lock:
+            self.final[stream].append(text)
+            self.chunks.append(
+                {"seq": self.next_seq, "stream": stream, "text": text},
+            )
+            self.next_seq += 1
+            self.pending_chars += len(text)
+            while (
+                self.pending_chars > _MAX_PENDING_OUTPUT_CHARS
+                and len(self.chunks) > 1
+            ):
+                self.pending_chars -= len(self.chunks.pop(0)["text"])
+
+    def take_batch(self):
+        with self.lock:
+            batch = []
+            size = 0
+            for chunk in self.chunks:
+                if batch and size + len(chunk["text"]) > _OUTPUT_BATCH_CHARS:
+                    break
+                batch.append(dict(chunk))
+                size += len(chunk["text"])
+            return batch
+
+    def acknowledge(self, through_seq):
+        with self.lock:
+            while self.chunks and self.chunks[0]["seq"] <= through_seq:
+                self.pending_chars -= len(self.chunks.pop(0)["text"])
+
+    def discard_pending(self):
+        with self.lock:
+            self.chunks = []
+            self.pending_chars = 0
+
+    def final_streams(self):
+        with self.lock:
+            stdout, stdout_truncated = self.final["stdout"].value()
+            stderr, stderr_truncated = self.final["stderr"].value()
+            return stdout, stderr, stdout_truncated or stderr_truncated
+
+
+def _stream_decoder():
+    # Match text-mode subprocess decoding: the locale's encoding plus universal
+    # newlines, applied incrementally so a split character or CRLF is intact.
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    try:
+        decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+    except LookupError:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    return io.IncrementalNewlineDecoder(decoder, translate=True)
+
+
+def _pump_stream(pipe, stream, output):
+    decoder = _stream_decoder()
+    try:
+        while True:
+            data = pipe.read1(65536)
+            if not data:
+                break
+            output.append(stream, decoder.decode(data))
+    except (OSError, ValueError):
+        pass
+    finally:
+        output.append(stream, decoder.decode(b"", final=True))
+
+
+def _feed_stdin(pipe, text):
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    try:
+        pipe.write(text.encode(encoding, errors="replace"))
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
+def _supervise_process(proc, output, *, timeout, stdin_text=None,
+                       stop_reason=lambda: None, on_tick=lambda: None):
+    """Collect output, enforce the time limit, and return why it ended.
+
+    Returns ``"timed_out"``, the caller's stop reason, or ``None`` when the
+    command finished by itself. The command is over only when its shell has
+    exited AND every process holding its pipes has closed them.
+    """
+    readers = [
+        threading.Thread(
+            target=_pump_stream, args=(proc.stdout, "stdout", output),
+            daemon=True, name="mobius-connect-stdout",
+        ),
+        threading.Thread(
+            target=_pump_stream, args=(proc.stderr, "stderr", output),
+            daemon=True, name="mobius-connect-stderr",
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    if stdin_text is not None:
+        threading.Thread(
+            target=_feed_stdin, args=(proc.stdin, stdin_text),
+            daemon=True, name="mobius-connect-stdin",
+        ).start()
+    deadline = time.monotonic() + timeout
+    ended_by = None
+    killed_at = None
+    while proc.poll() is None or any(reader.is_alive() for reader in readers):
+        now = time.monotonic()
+        if ended_by is None:
+            reason = stop_reason()
+            if reason is not None:
+                ended_by = reason
+            elif now >= deadline:
+                ended_by = "timed_out"
+            if ended_by is not None:
+                _terminate_process_tree(proc)
+                killed_at = time.monotonic()
+        if (
+            killed_at is not None
+            and time.monotonic() - killed_at >= _PIPE_DRAIN_AFTER_KILL_SECONDS
+        ):
+            break
+        wait_for = _OUTPUT_FLUSH_SECONDS
+        if ended_by is None:
+            wait_for = max(0.01, min(wait_for, deadline - now))
+        alive = [reader for reader in readers if reader.is_alive()]
+        if alive:
+            alive[0].join(wait_for)
+        else:
+            try:
+                proc.wait(timeout=wait_for)
+            except subprocess.TimeoutExpired:
+                pass
+        on_tick()
+    if proc.poll() is None:
+        proc.wait()
+    # cancel() terminates the tree directly, so the loop can observe the exit
+    # before it observes the request that caused it.
+    return ended_by if ended_by is not None else stop_reason()
+
+
+def _run_command(cmd, cwd, timeout):
+    """Run one command to completion here; used by local diagnostics/tests."""
+    output = _CommandOutput()
+    try:
+        proc = _spawn_command(cmd, cwd)
+    except Exception as exc:  # noqa: BLE001 - report any spawn failure back
+        return "", "runner error: %s" % exc, 1, False
+    ended_by = _supervise_process(proc, output, timeout=timeout)
+    stdout, stderr, _truncated = output.final_streams()
+    if ended_by == "timed_out":
+        return stdout, stderr or "command timed out after %ss" % timeout, 124, True
+    return stdout, stderr, proc.returncode, False
 
 
 class _CommandRunner:
-    """Own one subprocess and retain lifecycle messages across reconnects."""
+    """Own this connection's commands and retain lifecycle messages.
 
-    def __init__(self, base, token, command_gate=None):
+    Commands run independently: each has its own request id, time limit,
+    output, and cancellation. Nothing queues — a command starts at once or
+    reports why it could not.
+    """
+
+    def __init__(self, base, token):
         self.base = base
         self.token = token
-        # Several Mobius connections still represent one physical machine.
-        # Share this gate across their runners so commands cannot overlap just
-        # because they arrived from different instances.
-        self.command_gate = command_gate or threading.Lock()
         self.lock = threading.Lock()
         self.flush_lock = threading.Lock()
-        self.active = None
+        self.active = {}
         self.outbox = deque()
         self.reconcile_requested = False
+        # Turned on by the server's stream hello and kept across reconnects,
+        # so output buffered during an outage is still delivered. Older
+        # servers send no hello and receive only final results.
+        self.live_output = False
         # A rotating stream can deliver the same event from the retiring and
         # replacement connection. Request ids are idempotency keys: once this
         # process accepts one, never spawn it a second time.
-        self.seen_request_ids = deque(maxlen=64)
+        self.seen_request_ids = deque(maxlen=512)
 
     def pending_messages(self):
         with self.lock:
@@ -602,12 +807,12 @@ class _CommandRunner:
 
     def snapshot(self):
         with self.lock:
-            active_id = self.active["request_id"] if self.active else None
+            active_ids = sorted(self.active)
             pending = [
                 message.get("request_id") for message in self.outbox
                 if message.get("type") == "result" and message.get("request_id")
             ]
-        return active_id, pending
+        return active_ids, pending
 
     def take_reconcile_request(self):
         """Consume a request to reconnect after discarding a terminal result."""
@@ -628,8 +833,7 @@ class _CommandRunner:
                 except urllib.error.HTTPError as exc:
                     # A 4xx means the server refuses this exact payload, so an
                     # identical retry can never succeed. Retrying it forever
-                    # would pin the machine on one finished command and block
-                    # every new one, which is exactly how a runner wedges.
+                    # would pin a finished command and wedge the runner.
                     # Drop it and let the server's reconcile finalize the
                     # command as lost. 408/425/429 are transient, so retry.
                     if 400 <= exc.code < 500 and exc.code not in (408, 425, 429):
@@ -653,8 +857,40 @@ class _CommandRunner:
                 self.acknowledge_message(message)
         return True
 
+    def flush_output(self, record, drain=False):
+        """Deliver pending live chunks: one batch per call unless draining.
+
+        One batch per watch-loop tick keeps a fast-printing command from
+        starving its own time-limit and cancel checks. False means retry later.
+        """
+        output = record["output"]
+        while True:
+            if not self.live_output:
+                output.discard_pending()
+                return True
+            batch = output.take_batch()
+            if not batch:
+                return True
+            try:
+                _post(self.base + "/api/connect/output", {
+                    "request_id": record["request_id"],
+                    "chunks": batch,
+                }, token=self.token, timeout=_OUTPUT_POST_TIMEOUT_SECONDS)
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500 and exc.code not in (408, 425, 429):
+                    # The server no longer tracks this command's output.
+                    output.discard_pending()
+                    return True
+                return False
+            except (urllib.error.URLError, OSError, ValueError):
+                return False
+            output.acknowledge(batch[-1]["seq"])
+            if not drain:
+                return True
+
     def _post_result(
         self, request_id, stdout, stderr, exit_code, outcome, record=None,
+        truncated=False, output_seq=None,
     ):
         stdout, stdout_truncated = _cap_output(stdout)
         stderr, stderr_truncated = _cap_output(stderr)
@@ -666,22 +902,20 @@ class _CommandRunner:
             "exit_code": exit_code,
             "timed_out": outcome in ("timed_out", "expired"),
             "outcome": outcome,
-            "truncated": stdout_truncated or stderr_truncated,
+            "truncated": truncated or stdout_truncated or stderr_truncated,
         }
+        if output_seq is not None:
+            message["output_seq"] = output_seq
         # Retain before attempting the network request. A concurrent stream
         # rotation can now always announce this pending id, so the server will
         # never mistake the just-finished command for lost work and replay it.
-        # Releasing the active slot and retaining its result must be one
+        # Releasing the active command and retaining its result must be one
         # atomic state transition. Otherwise a reconnect can observe neither
         # and tell the server that successfully completed work was lost.
-        release_gate = False
         with self.lock:
             self.outbox.append(message)
-            if record is not None and self.active is record:
-                self.active = None
-                release_gate = bool(record.get("gate_claimed"))
-        if release_gate:
-            self.command_gate.release()
+            if record is not None and self.active.get(request_id) is record:
+                del self.active[request_id]
         self.flush_pending_results()
 
     def _post_started(self, request_id):
@@ -700,11 +934,7 @@ class _CommandRunner:
         with self.lock:
             if request_id in self.seen_request_ids:
                 return
-            if self.active is not None:
-                refused = True
-            else:
-                refused = False
-                self.seen_request_ids.append(request_id)
+            self.seen_request_ids.append(request_id)
         not_after = float(evt.get("not_after") or 0)
         if not_after and time.time() > not_after:
             self._post_result(
@@ -719,17 +949,10 @@ class _CommandRunner:
             "reason": None,
             "timeout": max(1, int(evt.get("timeout", 60))),
             "input": None,
-            "gate_claimed": False,
+            "output": _CommandOutput(),
         }
-        if refused or not self.command_gate.acquire(blocking=False):
-            self._post_result(
-                request_id, "", "runner refused a parallel command", 125,
-                "expired",
-            )
-            return
-        record["gate_claimed"] = True
         with self.lock:
-            self.active = record
+            self.active[request_id] = record
 
         try:
             self._post_started(request_id)
@@ -755,10 +978,6 @@ class _CommandRunner:
             else:
                 proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
             record["proc"] = proc
-            with self.lock:
-                reason = record["reason"]
-            if reason is not None:
-                _terminate_process_tree(proc)
         except Exception as exc:  # noqa: BLE001 - report the spawn boundary
             self._post_result(
                 request_id, "", "runner error: %s" % exc, 1, "completed",
@@ -773,57 +992,66 @@ class _CommandRunner:
 
     def _wait(self, record):
         proc = record["proc"]
-        stdout = ""
-        stderr = ""
-        try:
-            stdout, stderr = proc.communicate(
-                input=record["input"], timeout=record["timeout"],
-            )
-        except subprocess.TimeoutExpired:
-            with self.lock:
-                if record["reason"] is None:
-                    record["reason"] = "timed_out"
-            _terminate_process_tree(proc)
-            stdout, stderr = proc.communicate()
-        except Exception as exc:  # noqa: BLE001 - preserve a final result
-            stderr = "runner error: %s" % exc
+        output = record["output"]
 
-        with self.lock:
-            reason = record["reason"]
-        if reason == "timed_out":
+        def stop_reason():
+            with self.lock:
+                return record["reason"]
+
+        try:
+            ended_by = _supervise_process(
+                proc,
+                output,
+                timeout=record["timeout"],
+                stdin_text=record["input"],
+                stop_reason=stop_reason,
+                on_tick=lambda: self.flush_output(record),
+            )
+            error = None
+        except Exception as exc:  # noqa: BLE001 - preserve a final result
+            _terminate_process_tree(proc)
+            ended_by = stop_reason()
+            error = "runner error: %s" % exc
+        self.flush_output(record, drain=True)
+        stdout, stderr, truncated = output.final_streams()
+        if error is not None:
+            stderr = (stderr + "\n" if stderr else "") + error
+        if ended_by == "timed_out":
             outcome, exit_code = "timed_out", 124
             stderr = stderr or "command timed out after %ss" % record["timeout"]
-        elif reason is not None:
+        elif ended_by is not None:
             outcome, exit_code = "canceled", 130
             stderr = stderr or "command canceled"
         else:
             outcome, exit_code = "completed", proc.returncode
         self._post_result(
             record["request_id"], stdout, stderr, exit_code, outcome,
-            record=record,
+            record=record, truncated=truncated, output_seq=output.next_seq,
         )
 
     def cancel(self, request_id, reason="canceled"):
+        """Stop one command, or every command when request_id is None."""
         with self.lock:
-            record = self.active
-            if record is None or (
-                request_id is not None and record["request_id"] != request_id
-            ):
-                return False
-            if record["reason"] is None:
-                record["reason"] = reason
-            proc = record["proc"]
-        if proc is not None:
-            _terminate_process_tree(proc)
-        return True
+            if request_id is None:
+                records = list(self.active.values())
+            else:
+                record = self.active.get(request_id)
+                records = [record] if record is not None else []
+            for record in records:
+                if record["reason"] is None:
+                    record["reason"] = reason
+        for record in records:
+            if record["proc"] is not None:
+                _terminate_process_tree(record["proc"])
+        return bool(records)
 
 
-def _serve_connection(conn, command_gate=None, stop_event=None):
+def _serve_connection(conn, stop_event=None):
     base = _validated_base_url(conn["url"])
     token = conn["token"]
     ctx = ssl.create_default_context()
     plat = "%s %s" % (platform.system(), platform.release())
-    commands = _CommandRunner(base, token, command_gate)
+    commands = _CommandRunner(base, token)
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
@@ -843,18 +1071,25 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             # A result discarded before opening the stream has already made
             # this upcoming hello the required reconciliation boundary.
             commands.take_reconcile_request()
-            active_id, pending_ids = commands.snapshot()
+            active_ids, pending_ids = commands.snapshot()
             query = [
                 ("protocol", str(RUNNER_PROTOCOL_VERSION)),
                 ("release", str(RUNNER_RELEASE)),
                 ("platform", plat),
             ]
-            if active_id:
-                query.append(("active_request_id", active_id))
+            query.extend(
+                ("capability", capability)
+                for capability in RUNNER_CAPABILITIES
+            )
+            query.extend(
+                ("active_request_id", request_id) for request_id in active_ids
+            )
             query.extend(
                 ("pending_result_id", request_id)
                 for request_id in pending_ids
             )
+            if os.environ.get(SUPERVISOR_ENV) == "mobius":
+                query.append(("managed", "mobius"))
             stream_url = base + "/api/connect/stream?" + urllib.parse.urlencode(
                 query,
             )
@@ -896,6 +1131,9 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                     try:
                         evt = json.loads(line[5:].strip())
                     except ValueError:
+                        continue
+                    if evt.get("type") == "hello":
+                        commands.live_output = bool(evt.get("live_output"))
                         continue
                     if evt.get("type") == "cancel":
                         commands.cancel(evt.get("request_id"))
@@ -981,10 +1219,10 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
         backoff = min(backoff * 2, 30)
 
 
-def _serve_connection_safe(conn, command_gate, stop_event=None):
+def _serve_connection_safe(conn, stop_event=None):
     """Run one connection's loop so its failure never stops the others."""
     try:
-        _serve_connection(conn, command_gate, stop_event)
+        _serve_connection(conn, stop_event)
     except Exception as exc:  # noqa: BLE001 - one connection must not crash all
         print("connection to %s stopped: %s" % (conn.get("url"), exc))
 
@@ -1000,7 +1238,6 @@ def _serve_all():
     if not _connections():
         print("Not paired. Run with --pair CODE --url URL first.")
         sys.exit(2)
-    command_gate = threading.Lock()
     workers = {}  # key -> (thread, stop_event)
     try:
         while True:
@@ -1016,7 +1253,7 @@ def _serve_all():
                     stop_event = threading.Event()
                     thread = threading.Thread(
                         target=_serve_connection_safe,
-                        args=(conn, command_gate, stop_event), daemon=True,
+                        args=(conn, stop_event), daemon=True,
                         name="mobius-connect-%s" % (key or "unknown"),
                     )
                     thread.start()
