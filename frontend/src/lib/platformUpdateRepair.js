@@ -14,9 +14,9 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (preview?.blocking_paths?.length || errorCode === 'local_runtime_changes') {
     return 'This update needs help preserving your local changes.'
   }
-  // Preview overlap is a prediction, not a blocker. Apply owns the exact
-  // merge and parks any real conflict for the resolver without touching the
-  // served source; routing to repair here would hide Apply entirely.
+  if (preview?.conflict_paths?.length) {
+    return 'This update overlaps your local changes and needs help to finish.'
+  }
   const incomingActivation = preview?.incoming_activation || preview?.activation
   if (incomingActivation?.reasons?.some(reason => reason?.code === 'python_dependencies')) {
     return 'This update changes Python packages and needs a separately checked system update.'

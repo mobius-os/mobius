@@ -3106,219 +3106,31 @@ def commit_replay(
   return sha
 
 
-# ── Linear overlay ───────────────────────────────────────────────────────────
+# ── Overlay commit trailers ──────────────────────────────────────────────────
 #
-# A project's local history is an exact accepted upstream commit plus a LINEAR
-# overlay of intentional commits. Each overlay commit declares which unit it
-# belongs to and why it is local through commit trailers, so the disposition
-# survives every replay (a rebase preserves messages) with no side metadata.
-# The updater replays this overlay onto each new upstream base instead of
-# merging upstream into local history, so upstream never becomes an interleaved
-# side parent and a unit that has landed upstream simply disappears.
+# Platform updates record local source as commits on top of the reviewed
+# upstream. These trailers name the unit a commit carries, so the updater can
+# recognise and unwind its own transient working-edits commit.
 
 OVERLAY_UNIT_TRAILER = "Mobius-Overlay-Unit"
 OVERLAY_DISPOSITION_TRAILER = "Mobius-Disposition"
-OVERLAY_RECORD_TRAILER = "Mobius-Record"
-# ``pending``: has a Contribute record on its way upstream. ``local-only``: an
-# intentional overlay this installation keeps. ``private``: never leaves the
-# instance. ``wip``: not yet organised.
-OVERLAY_DISPOSITIONS = ("pending", "local-only", "private", "wip")
-# Commits without a unit trailer are still overlay commits; they belong to the
-# implicit unit Contribute organises later.
-OVERLAY_UNSORTED_UNIT = "unsorted"
 # Uncommitted working edits ride through an update as this transient unit and
 # return to the working tree afterwards.
 OVERLAY_WORKING_UNIT = "working-tree"
-_OVERLAY_UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
-_OVERLAY_LOG_FORMAT = (
-  "%H%x00%s%x00"
-  f"%(trailers:key={OVERLAY_UNIT_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={OVERLAY_DISPOSITION_TRAILER},valueonly=true)%x00"
-  f"%(trailers:key={OVERLAY_RECORD_TRAILER},valueonly=true)%x1e"
-)
-
-
-class OverlayNotLinear(RuntimeError):
-  """The local range contains merge commits; it is not a linear overlay."""
-
-
-@dataclass(frozen=True)
-class OverlayCommit:
-  sha: str
-  subject: str
-  unit: str
-  disposition: str
-  record_id: str | None
-
-
-@dataclass(frozen=True)
-class OverlayUnit:
-  id: str
-  disposition: str
-  record_id: str | None
-  commits: tuple[str, ...]
-
-
-def overlay_trailers(
-  unit: str, disposition: str, record_id: str | None = None,
-) -> str:
-  if not _OVERLAY_UNIT_RE.match(unit):
-    raise ValueError(f"invalid overlay unit {unit!r}")
-  if disposition not in OVERLAY_DISPOSITIONS:
-    raise ValueError(f"invalid overlay disposition {disposition!r}")
-  # Provenance must never be ambiguous: a pending unit names the Contribute
-  # record carrying it upstream, and only a pending unit may name one.
-  if (disposition == "pending") != bool(record_id):
-    raise ValueError(
-      "a pending overlay unit needs its Contribute record id; other "
-      "dispositions must not carry one"
-    )
-  lines = [
-    f"{OVERLAY_UNIT_TRAILER}: {unit}",
-    f"{OVERLAY_DISPOSITION_TRAILER}: {disposition}",
-  ]
-  if record_id:
-    lines.append(f"{OVERLAY_RECORD_TRAILER}: {record_id}")
-  return "\n".join(lines)
 
 
 def overlay_message(
-  subject: str,
-  *,
-  unit: str,
-  disposition: str,
-  record_id: str | None = None,
-  body: str = "",
+  subject: str, *, unit: str, disposition: str, body: str = "",
 ) -> str:
-  """A commit message carrying the overlay trailers."""
+  """A commit message carrying the overlay unit and disposition trailers."""
   parts = [subject.strip()]
   if body.strip():
     parts.append(body.strip())
-  parts.append(overlay_trailers(unit, disposition, record_id))
+  parts.append(
+    f"{OVERLAY_UNIT_TRAILER}: {unit}\n"
+    f"{OVERLAY_DISPOSITION_TRAILER}: {disposition}"
+  )
   return "\n\n".join(parts) + "\n"
-
-
-def _first_line(value: str) -> str:
-  return value.strip().splitlines()[0].strip() if value.strip() else ""
-
-
-def _overlay_log(repo: Path, *rev_args: str) -> list[OverlayCommit]:
-  proc = _run(
-    repo, "log", f"--format={_OVERLAY_LOG_FORMAT}", *rev_args, read_only=True,
-  )
-  commits: list[OverlayCommit] = []
-  for record in proc.stdout.split("\x1e"):
-    if not record.strip():
-      continue
-    fields = record.strip("\n").split("\x00")
-    fields.extend([""] * (5 - len(fields)))
-    unit = _first_line(fields[2])
-    disposition = _first_line(fields[3])
-    record_id = _first_line(fields[4])
-    if not _OVERLAY_UNIT_RE.match(unit):
-      unit = OVERLAY_UNSORTED_UNIT
-    if disposition not in OVERLAY_DISPOSITIONS:
-      disposition = "wip"
-    # Read leniently so a hand-written or legacy commit still replays, but
-    # never report provenance the trailers do not actually establish.
-    if disposition == "pending" and not record_id:
-      disposition = "wip"
-    if disposition != "pending":
-      record_id = ""
-    commits.append(OverlayCommit(
-      sha=fields[0].strip(), subject=fields[1].strip(), unit=unit,
-      disposition=disposition, record_id=record_id or None,
-    ))
-  return commits
-
-
-def overlay_commits(
-  source_dir: str | Path, base: str, tip: str,
-) -> list[OverlayCommit]:
-  """The overlay ``base..tip`` in replay order; raises when it is not linear."""
-  repo = Path(source_dir)
-  merges = _run(
-    repo, "rev-list", "--merges", "--count", f"{base}..{tip}", read_only=True,
-  ).stdout.strip()
-  if merges and int(merges) > 0:
-    raise OverlayNotLinear(
-      f"{merges} merge commit(s) between {base[:12]} and {tip[:12]}"
-    )
-  return _overlay_log(repo, "--reverse", "--no-merges", f"{base}..{tip}")
-
-
-def overlay_units(commits: Iterable[OverlayCommit]) -> list[OverlayUnit]:
-  order: list[str] = []
-  grouped: dict[str, dict] = {}
-  for commit in commits:
-    entry = grouped.get(commit.unit)
-    if entry is None:
-      entry = grouped[commit.unit] = {
-        "disposition": commit.disposition,
-        "record_id": commit.record_id,
-        "commits": [],
-      }
-      order.append(commit.unit)
-    entry["commits"].append(commit.sha)
-    if commit.record_id and not entry["record_id"]:
-      entry["record_id"] = commit.record_id
-  return [
-    OverlayUnit(
-      id=unit,
-      disposition=grouped[unit]["disposition"],
-      record_id=grouped[unit]["record_id"],
-      commits=tuple(grouped[unit]["commits"]),
-    )
-    for unit in order
-  ]
-
-
-def describe_overlay(source_dir: str | Path, base: str, tip: str) -> dict:
-  """The overlay invariant as a status projection.
-
-  ``linear`` is the invariant itself: the base is an ancestor of the tip and no
-  merge commit sits between them. Units are listed in replay order with their
-  disposition so Settings and Contribute can show exactly what this
-  installation carries on top of upstream.
-  """
-  repo = Path(source_dir)
-  base_sha = _resolve_commit(repo, base)
-  tip_sha = _resolve_commit(repo, tip)
-  out = {
-    "base_sha": base_sha,
-    "tip_sha": tip_sha,
-    "base_is_ancestor": False,
-    "linear": False,
-    "commits": 0,
-    "unsorted_commits": 0,
-    "units": [],
-  }
-  if not base_sha or not tip_sha:
-    return out
-  out["base_is_ancestor"] = ref_is_ancestor(repo, base_sha, tip_sha) is True
-  if not out["base_is_ancestor"]:
-    return out
-  try:
-    commits = overlay_commits(repo, base_sha, tip_sha)
-  except OverlayNotLinear:
-    return out
-  subjects = {commit.sha: commit.subject for commit in commits}
-  out["linear"] = True
-  out["commits"] = len(commits)
-  out["unsorted_commits"] = sum(
-    1 for commit in commits if commit.unit == OVERLAY_UNSORTED_UNIT
-  )
-  out["units"] = [
-    {
-      "id": unit.id,
-      "disposition": unit.disposition,
-      "record_id": unit.record_id,
-      "commits": len(unit.commits),
-      "subject": subjects.get(unit.commits[0], ""),
-    }
-    for unit in overlay_units(commits)
-  ]
-  return out
 
 
 def remove_overlay_worktree(source_dir: str | Path, worktree: str | Path) -> None:
@@ -3893,15 +3705,19 @@ def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | 
 
 
 def _resolve_benign_conflict_file(
-  rel: str, base: bytes, ours: bytes, theirs: bytes
+  rel: str, base: bytes | None, ours: bytes, theirs: bytes
 ) -> bytes | None:
   """One conflicting file auto-resolved, or None when it needs the owner.
 
   JSON manifests get a full structural three-way merge (serialization drift and
-  disjoint edits reconcile; true overlap does not). Other source files keep the
-  narrow APP_VERSION-only line resolution."""
+  disjoint edits reconcile; true overlap does not). A manifest both sides added
+  merges from the empty object, so only agreeing or disjoint keys combine. Other
+  source files keep the narrow APP_VERSION-only line resolution and need a
+  base."""
   if rel.rsplit("/", 1)[-1] in _JSON_MANIFESTS:
-    return _resolve_json_manifest(base, ours, theirs)
+    return _resolve_json_manifest(b"{}" if base is None else base, ours, theirs)
+  if base is None:
+    return None
   return _resolve_source_version(base, ours, theirs)
 
 
@@ -3958,6 +3774,10 @@ def resolve_benign_conflict(
   and the caller falls back to the owner-resolver flow. Fail-safe by
   construction: a genuine local edit is never silently dropped, because a
   residual conflict aborts the whole attempt.
+
+  Pass ``merge_base`` when the caller's merge verdict used an explicit base
+  (a recorded previous release unrelated to the installed history), so this
+  proof reasons from the same base.
   """
   repo = Path(source_dir)
   if not conflict_paths:
@@ -3988,31 +3808,24 @@ def resolve_benign_conflict(
     merge_conflicts.append(ln)  # verbatim — a path may legitimately hold spaces
   if not merge_conflicts:
     return None
-  if merge_base is None:
+  base_ref = merge_base
+  if base_ref is None:
     base_proc = _run(
       repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
     )
-    base_ref = base_proc.stdout.strip()
-    if base_proc.returncode != 0 or not base_ref:
-      return None
-  else:
-    base_ref = merge_base
+    base_ref = base_proc.stdout.strip() if base_proc.returncode == 0 else ""
+  if not base_ref:
+    return None
   resolved: dict[str, bytes] = {}
   for rel in merge_conflicts:
     ours = read_blob(repo, LOCAL_BRANCH, rel)
     theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
-    base_blob = read_blob(repo, base_ref, rel)
-    # A deletion still needs the owner. A JSON manifest independently added
-    # on both sides can be merged from the empty object: matching keys agree,
-    # disjoint keys combine, and divergent non-version keys remain conflicts.
-    # Other add/add source files have no structural contract and stay manual.
+    # A deletion on either side is not a benign shape; leave it to the owner.
     if ours is None or theirs is None:
       return None
-    if base_blob is None:
-      if rel.rsplit("/", 1)[-1] not in _JSON_MANIFESTS:
-        return None
-      base_blob = b"{}"
-    merged = _resolve_benign_conflict_file(rel, base_blob, ours, theirs)
+    merged = _resolve_benign_conflict_file(
+      rel, read_blob(repo, base_ref, rel), ours, theirs,
+    )
     if merged is None:
       return None
     resolved[rel] = merged

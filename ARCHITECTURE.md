@@ -128,18 +128,17 @@ rebase the local edits onto it:                    A → B → X
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
+- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and writes the markers into its isolated candidate worktree for the resolver. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
 The platform clone fetches the selected target and fast-forwards when local
 `main` is already contained in it. Otherwise it compares the final local and
 upstream trees once, records the reconciled tree as one local commit on the
 target, and keeps the previous local tip reachable for recovery. A conflict
 stays in an isolated worktree while the old checkout remains served. Working
-edits present before Apply are carried separately and returned uncommitted;
-edits made while a conflict is being resolved are saved for post-update review.
-If those original working edits themselves conflict with the resolved committed
-tree, activation stops; the owner settles them in the live checkout and starts
-a new reviewed Apply rather than silently committing or discarding them.
+edits are carried through as a transient commit and returned uncommitted.
+Finishing a resolution runs the same final-tree merge again with the resolver's
+answer as one input, so live edits made meanwhile are merged in, or re-parked
+with fresh markers when they overlap the answer.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
@@ -570,10 +569,11 @@ Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
-fetches `origin/main`, snapshots working edits, and then fast-forwards or
+fetches `origin/main`, carries working edits, and then fast-forwards or
 compares the final local and upstream trees once. A conflict stays in an
 isolated candidate worktree while the last-served commit remains live; the
-resolved tree is frozen before activation. An `import app.main` probe rolls
+resolved answer is merged with the live source again before activation. An
+`import app.main` probe rolls
 back rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
 `commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the

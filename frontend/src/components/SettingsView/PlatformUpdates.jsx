@@ -25,7 +25,6 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const restartNeeded = level === 'server_restart'
   const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
   const conflict = platform?.state === 'conflict'
-  const savedEdits = Boolean(platform?.late_changes)
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
@@ -78,10 +77,8 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
 
   const primary = conflict
     ? { label: platform?.conflict_chat_id ? 'Open chat' : 'Resolve in chat', act: update.resolve }
-    : savedEdits
-      ? { label: platform?.late_changes?.chat_id ? 'Open chat' : 'Review saved edits', act: update.resolve }
-      : available
-        ? { label: 'Review update', act: () => openReview() }
+    : available
+      ? { label: 'Review update', act: () => openReview() }
       : imageNeeded
         ? { label: 'Finish update', act: () => openReview('finish') }
         : restartNeeded
@@ -102,7 +99,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
             disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
         ) : (
-          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || ((conflict || savedEdits) && !onOpenChat)} onClick={primary.act}>
+          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
             {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : 'Updating…') : primary.label}
           </button>
         )}
@@ -112,13 +109,6 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           <p>{repairReason}</p>
           {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
         </div>
-      )}
-      {platform?.late_changes && (
-        <Alert color="warning" variant="soft" description={
-          platform.late_changes.state === 'restore_pending'
-            ? 'An interrupted update saved a platform edit that still needs review before changing platform source.'
-            : 'The update is installed. Edits made after its review are saved for a separate merge; review them before another update.'
-        } />
       )}
       <div className="platform-updates__version-row">
         <dl className="platform-updates__versions">
