@@ -80,7 +80,7 @@ def test_production_startup_plan_has_explicit_unique_order():
   assert len(names) == len(set(names))
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
   assert names.index("sweep Codex provider sessions") < names.index(
-    "configure Claude provider retention"
+    "configure Claude settings defaults"
   ) < names.index("initialize database")
   assert names.index("normalize background agent settings") < names.index(
     "initialize database"
@@ -182,12 +182,12 @@ async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
     raise OSError("settings disk full")
 
   monkeypatch.setattr(retention, "sweep_stale_provider_sessions", sweep)
-  monkeypatch.setattr(retention, "ensure_claude_retention_default", fail_claude)
+  monkeypatch.setattr(retention, "ensure_claude_settings_defaults", fail_claude)
   tasks = tuple(
     task for task in startup.PROCESS_STARTUP_TASKS
     if task.name in {
       "sweep Codex provider sessions",
-      "configure Claude provider retention",
+      "configure Claude settings defaults",
     }
   )
 
@@ -195,7 +195,7 @@ async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
   await run_startup_tasks(ctx, tasks)
 
   assert events == ["codex-swept", "claude-failed"]
-  assert ctx.failed_tasks == ["configure Claude provider retention"]
+  assert ctx.failed_tasks == ["configure Claude settings defaults"]
 
 
 def test_active_assistant_backfill_command_is_available_to_startup():

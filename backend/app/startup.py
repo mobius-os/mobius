@@ -205,16 +205,13 @@ def _sweep_codex_provider_sessions(context: StartupContext) -> None:
     )
 
 
-def _configure_claude_provider_retention(context: StartupContext) -> None:
-  """Seed Claude's native working-state retention without blocking reclaim."""
-  from app.provider_session_retention import ensure_claude_retention_default
+def _configure_claude_settings_defaults(context: StartupContext) -> None:
+  """Seed Möbius's Claude settings defaults without blocking reclaim."""
+  from app.provider_session_retention import ensure_claude_settings_defaults
 
-  claude = ensure_claude_retention_default(context.settings.data_dir)
-  if claude["changed"]:
-    context.logger.info(
-      "set Claude native working-state retention default to %d days",
-      claude["retention_days"],
-    )
+  added = ensure_claude_settings_defaults(context.settings.data_dir)
+  if added:
+    context.logger.info("set Claude settings defaults: %s", ", ".join(added))
 
 
 def _initialize_database(context: StartupContext) -> None:
@@ -553,8 +550,8 @@ PROCESS_STARTUP_TASKS = (
     _sweep_codex_provider_sessions,
   ),
   StartupTask(
-    "configure Claude provider retention",
-    _configure_claude_provider_retention,
+    "configure Claude settings defaults",
+    _configure_claude_settings_defaults,
   ),
   StartupTask(
     "initialize database",

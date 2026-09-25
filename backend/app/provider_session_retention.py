@@ -120,16 +120,23 @@ def sweep_stale_provider_sessions(
   return result
 
 
-def ensure_claude_retention_default(data_dir: str | Path) -> dict:
-  """Set Mobius's Claude default without overriding an owner choice.
+# Möbius defaults for Claude's persisted settings. Each applies only while its
+# key is absent, so an explicit owner or provider choice always wins.
+CLAUDE_SETTINGS_DEFAULTS = {
+  # Claude applies this horizon to transcripts and to disposable task state,
+  # shell snapshots, backups, and tool-result files.
+  "cleanupPeriodDays": DEFAULT_RETENTION_DAYS["claude"],
+  # Agent commits carry Möbius's own attribution, not Claude's Co-Authored-By
+  # trailer and generated-with note.
+  "includeCoAuthoredBy": False,
+}
 
-  Claude Code natively owns cleanup through ``cleanupPeriodDays``. Its scope is
-  broader than transcript JSONL: Claude also applies the horizon to disposable
-  task state, shell snapshots, backups, and tool-result files. Mobius supplies
-  its 14-day working-state default only while that key is absent, preserving a
-  future user/provider-specific setting as well as every unrelated Claude
-  preference. Malformed or non-object settings fail loudly rather than being
-  replaced.
+
+def ensure_claude_settings_defaults(data_dir: str | Path) -> list[str]:
+  """Add Möbius's Claude settings defaults and return the keys it added.
+
+  Every unrelated Claude preference is preserved. Malformed or non-object
+  settings fail loudly rather than being replaced.
   """
   path = Path(data_dir) / "cli-auth" / "claude" / "settings.json"
   if path.exists():
@@ -138,21 +145,11 @@ def ensure_claude_retention_default(data_dir: str | Path) -> dict:
       raise ValueError("Claude settings must contain a JSON object")
   else:
     decoded = {}
-  if "cleanupPeriodDays" in decoded:
-    existing = decoded["cleanupPeriodDays"]
-    return {
-      "changed": False,
-      "retention_days": existing,
-      "source": "explicit",
-    }
-  retention_days = DEFAULT_RETENTION_DAYS["claude"]
-  decoded["cleanupPeriodDays"] = retention_days
-  atomic_write(
-    path,
-    json.dumps(decoded, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-  )
-  return {
-    "changed": True,
-    "retention_days": retention_days,
-    "source": "mobius_default",
-  }
+  added = [key for key in CLAUDE_SETTINGS_DEFAULTS if key not in decoded]
+  if added:
+    decoded.update({key: CLAUDE_SETTINGS_DEFAULTS[key] for key in added})
+    atomic_write(
+      path,
+      json.dumps(decoded, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+  return added
