@@ -50,79 +50,19 @@ Packaged nested documents under `/app-embeds/` do not inherit a recursive
 static-asset offline guarantee. Their subresources need an explicit future
 warm contract; until then, keep an app that depends on them online-only.
 
-## Storage invariants
+## Storage and conflict boundaries
 
-The exact storage API recipes live in the seeded
-[`building-apps`](backend/scripts/seed-skills/building-apps.md) guide. An app
-that promises offline behavior must preserve these boundaries:
+Use `window.mobius.storage`, not raw storage `fetch` calls. The complete
+read, versioned-write, collection-completeness, subscription, and
+`conflictContext` rules live in the seeded
+[`building-apps`](backend/scripts/seed-skills/building-apps.md) guide; keep
+those mechanics in that one place rather than copying a second recipe here.
 
-- use `window.mobius.storage`, not raw storage `fetch` calls, so ordinary reads
-  can overlay queued writes and retain read-your-writes behavior;
-- use `getWithVersion()` only as an authoritative merge base when
-  `runtimeFeatures.authoritativeVersionedReads === true` and its result is not
-  marked `offline`;
-- treat `listWithStatus().complete === false` as partial or unavailable
-  knowledge, never proof that a collection is empty; and
-- subscribe to paths that the agent, a job, or another frame can update.
-
-A complete listing proves membership, not that every record body is available.
-Preserve the last authoritative UI state and stop safely when a required body
-cannot be loaded.
-
-## Conflict recovery
-
-Prefer one file per independently edited record; use compare-and-swap only for
-a document that genuinely has multiple writers. The general CAS mechanics are
-covered in `building-apps.md`. An offline conditional write adds one requirement:
-include a small `conflictContext` that describes mutation intent, not only the
-resulting whole document. When several writes to one path coalesce, the runtime
-retains those opaque intents in order.
-
-```js
-const { storage } = window.mobius
-const canRecover =
-  window.mobius.runtimeFeatures?.authoritativeVersionedReads === true
-
-if (canRecover) {
-  storage.onConflict(async (conflict) => {
-    const current = await storage.getWithVersion(conflict.path)
-    if (current.offline) return false
-
-    const intents = storage.conflictContextItems(conflict.conflictContext)
-    const merged = applyIntents(current.value, intents)
-    const guard = current.version
-      ? { ifMatch: current.version }
-      : { ifNoneMatch: true }
-    try {
-      const result = await storage.durableWrite(conflict.path, merged, {
-        ...guard,
-        conflictContext: conflict.conflictContext,
-      })
-      return result?.durability === 'synced'
-    } catch (error) {
-      if (error?.code === 'conflict') return false
-      throw error
-    }
-  })
-}
-```
-
-The callback's result is a durability decision: truthy retires the original
-conflict, while `false` preserves it. A preserved conflict is replayed when an
-`onConflict` listener registers again, normally on the next app-frame load or
-remount; reconnect alone does not redispatch it. A result with
-`durability: "queued"` is not server acceptance. Do not acknowledge it, and do
-not use a separate `pendingCount()` check as proof: a different frame can
-enqueue between that check and a later read. The authoritative versioned read
-is the merge boundary.
-
-Carry the original `conflictContext` onto the recovery write. Connectivity can
-drop between the authoritative read and that write; if the queued recovery
-later conflicts, the app still needs the retained intent to recover safely.
-
-Keep conflict contexts bounded and deterministic. If applying the same intent
-twice would duplicate or corrupt data, make the intent idempotent or record a
-stable operation id in the app document.
+Apps own merge policy and recovery UI. Do not install a generic automatic
+`onConflict` recovery callback from this guide: its asynchronous delivery and
+replay lifecycle must be tested with the app's own domain operations. Preserve
+a conflict visibly and make the app-specific next step deliberate until that
+lifecycle is covered.
 
 ## Loading and offline UI
 
