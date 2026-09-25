@@ -2060,7 +2060,7 @@ def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
   assert target.adopting_trusted_origin is True
 
 
-def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
+def test_trusted_origin_first_adoption_conflict_resolves_and_finalizes(
   client, auth, db, tmp_path, bypass_url_validation,
 ):
   """A proven local app stays unprivileged until its conflict is accepted."""
@@ -2153,22 +2153,14 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
   assert row.connect_manage is False
 
   selected = client.post(
-    "/api/apps/resolve-update/policy",
-    headers=auth,
-    json={"source_dir": str(repo), "policy": "preserve_local"},
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
   )
   assert selected.status_code == 200, selected.text
-  assert (repo / ".git" / "MERGE_HEAD").is_file()
-  (repo / "index.jsx").write_text(resolved, encoding="utf-8")
-  (repo / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-  reviewed = client.post(
-    "/api/apps/resolve-update/review",
-    headers=auth,
-    json={"source_dir": str(repo)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
-  assert "RESOLVED" in reviewed.json()["diff"]
+  checkout = install.pending_update_worktree(repo)
+  assert app_git.merge_in_progress(checkout)
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  (checkout / "index.jsx").write_text(resolved, encoding="utf-8")
+  (checkout / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
 
   db.expire_all()
   row = db.query(models.App).filter(models.App.id == app_id).one()
@@ -2183,10 +2175,7 @@ def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
     finalized = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      json={
-        "source_dir": str(repo),
-        "reviewed_tree_oid": reviewed.json()["tree_oid"],
-      },
+      json={"source_dir": str(repo)},
     )
 
   assert finalized.status_code == 200, finalized.text
@@ -2257,13 +2246,11 @@ def test_trusted_origin_pending_adoption_rejects_mismatched_and_stale_receipts(
     candidate_digest="b" * 64,
   )
   mismatched = client.post(
-    "/api/apps/resolve-update/policy",
-    headers=auth,
-    json={"source_dir": str(repo), "policy": "preserve_local"},
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
   )
   assert mismatched.status_code == 409, mismatched.text
   assert mismatched.json()["detail"]["code"] == "pending_update_identity_changed"
-  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  assert not install.pending_update_worktree(repo).exists()
 
   install.stage_pending_conflict_update(
     repo,
@@ -2278,12 +2265,10 @@ def test_trusted_origin_pending_adoption_rejects_mismatched_and_stale_receipts(
     candidate_digest="b" * 64,
   )
   stale = client.post(
-    "/api/apps/resolve-update/policy",
-    headers=auth,
-    json={"source_dir": str(repo), "policy": "preserve_local"},
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
   )
   assert stale.status_code == 409, stale.text
-  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  assert not install.pending_update_worktree(repo).exists()
   db.expire_all()
   row = db.query(models.App).filter(models.App.id == app_id).one()
   assert row.manifest_url is None
@@ -2823,468 +2808,36 @@ def _update_v2(client, auth, base, manifest, jsx):
     })
 
 
-def test_pending_update_receipt_upgrades_schema_one_on_policy_choice(tmp_path):
-  """A rolling restart preserves old pending conflicts until owner choice."""
+@pytest.mark.parametrize("schema", [1, 2, 3])
+def test_pending_update_receipts_from_earlier_releases_stay_readable(
+  tmp_path, schema,
+):
+  """A rolling restart keeps an earlier release's pending conflict resumable;
+  its retired policy/review fields are simply ignored."""
   from app import install
 
   source = tmp_path / "legacy-pending"
   pending = source / ".git" / "mobius-pending-update"
   pending.mkdir(parents=True)
-  receipt_path = pending / "receipt.json"
-  receipt_path.write_text(json.dumps({
-    "schema": 1,
+  receipt = {
+    "schema": schema,
     "app_id": 42,
     "upstream_commit": "a" * 40,
     "manifest": {"id": "legacy"},
     "raw_base": "https://legacy.test/repo/",
     "capability_digest": "capability",
     "candidate_digest": "b" * 64,
-  }))
+  }
+  if schema > 1:
+    receipt |= {"resolution_policy": "preserve_local", "reviewed_tree_oid": None}
+  (pending / "receipt.json").write_text(json.dumps(receipt))
 
   legacy = install.read_pending_conflict_update_receipt(
-    source,
-    app_id=42,
-    upstream_commit="a" * 40,
+    source, app_id=42, upstream_commit="a" * 40,
   )
   assert legacy is not None
-  assert legacy["resolution_policy"] is None
-  install.set_pending_conflict_update_policy(
-    source,
-    app_id=42,
-    upstream_commit="a" * 40,
-    policy="preserve_local",
-  )
-  upgraded = json.loads(receipt_path.read_text())
-  assert upgraded["schema"] == 2
-  assert upgraded["resolution_policy"] == "preserve_local"
-  assert upgraded["reviewed_tree_oid"] is None
-
-
-def test_git_install_creates_repo_and_records_upstream(
-  client, auth, bypass_url_validation,
-):
-  """a fresh install inits the per-app repo and stamps the
-  upstream commit + jsx sha on the App row."""
-  base = "https://on.test/repo/"
-  r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "on-install"}, JSX)
-  assert r.status_code == 201, r.text
-  assert r.json()["divergence"] == "none"
-  data_dir = Path(get_settings().data_dir)
-  assert (data_dir / "apps" / "on-install" / ".git").is_dir()
-  # The App row carries the upstream provenance.
-  from app.models import App
-  from app.database import SessionLocal
-  db = SessionLocal()
-  try:
-    app = db.query(App).filter(App.slug == "on-install").first()
-    assert app.upstream_commit
-    assert app.upstream_jsx_sha
-  finally:
-    db.close()
-
-
-def test_git_clean_update_carries_local_edits_forward(
-  client, auth, bypass_url_validation,
-):
-  """a local edit to one region + an upstream edit to a DISJOINT
-  region merges cleanly — the served source contains BOTH changes."""
-  base = "https://on2.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "on-clean"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  jsx_file = data_dir / "apps" / "on-clean" / "index.jsx"
-
-  # Agent edits the title locally.
-  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
-
-  # Upstream v2 edits the footer — a disjoint region.
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "clean_merge"
-  merged = jsx_file.read_text()
-  assert "AGENT TITLE" in merged       # local edit carried forward
-  assert "UPSTREAM FOOTER" in merged   # upstream change applied
-
-
-# A multi-line job script with two editable regions (the first and last
-# step) separated by unchanged context, so git's line-based 3-way merge can
-# interleave a local edit and a disjoint upstream edit cleanly — the same
-# spacing reason JSX_MULTI documents.
-JOB_MULTI = (
-  "#!/bin/bash\n"
-  "echo step ONE\n"
-  "echo a\n"
-  "echo b\n"
-  "echo c\n"
-  "echo d\n"
-  "echo step FIVE\n"
-)
-
-
-def _install_with_job(client, auth, base, manifest, jsx, job):
-  responses = {
-    base + "mobius.json": (200, json.dumps(manifest).encode()),
-    base + "index.jsx": (200, jsx.encode()),
-    base + "icon.png": (200, _png_bytes()),
-    base + "prompt.md": (200, PROMPT.encode()),
-    base + "fetch.sh": (200, job.encode()),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
-  ):
-    return client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base + "mobius.json",
-    })
-
-
-def test_fresh_install_writes_bundled_job_script(
-  client, auth, bypass_url_validation,
-):
-  """A fresh install writes the manifest's bundled job script to source_dir,
-  executable, so cron + run-job can find it. The transactional source write
-  (not the removed post-commit blind overwrite) is the writer now."""
-  base = "https://job-fresh.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "job-fresh"}
-  r = _install_with_job(client, auth, base, m, JSX, JOB_MULTI)
-  assert r.status_code == 201, r.text
-  data_dir = Path(get_settings().data_dir)
-  job_file = data_dir / "apps" / "job-fresh" / "fetch.sh"
-  assert job_file.read_text() == JOB_MULTI
-  assert job_file.stat().st_mode & 0o111  # executable bit set
-
-
-def test_clean_update_preserves_local_job_script_edit(
-  client, auth, bypass_url_validation,
-):
-  """A locally edited job script survives a clean update: the agent edits one
-  step of fetch.sh, an upstream v2 edits a DISJOINT step, and the served job
-  script contains BOTH changes — the bundled copy no longer clobbers the
-  local edit. The schedule job now flows through the same 3-way merge as
-  index.jsx."""
-  base = "https://job-clean.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "job-clean"}
-  r1 = _install_with_job(client, auth, base, m, JSX, JOB_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  job_file = data_dir / "apps" / "job-clean" / "fetch.sh"
-
-  # Agent edits the FIRST step of the job locally.
-  job_file.write_text(JOB_MULTI.replace("step ONE", "step ONE LOCAL"))
-
-  # Upstream v2 edits the LAST step — a disjoint region.
-  job_v2 = JOB_MULTI.replace("step FIVE", "step FIVE UPSTREAM")
-  r2 = _install_with_job(
-    client, auth, base, {**m, "version": "2.0.0"}, JSX, job_v2,
-  )
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "clean_merge"
-  served = job_file.read_text()
-  assert "step ONE LOCAL" in served      # local job edit carried forward
-  assert "step FIVE UPSTREAM" in served  # upstream job change applied
-  assert "<<<<<<<" not in served
-
-
-def test_git_repeated_updates_to_same_region_stay_clean(
-  client, auth, bypass_url_validation,
-):
-  """A clean merge must advance the merge base so the NEXT update only
-  reconciles the genuinely-new upstream delta.
-
-  Upstream evolves the footer across v2 and v3 while the agent's local
-  edit sits on the disjoint title line. Each update is individually a
-  disjoint clean merge, so BOTH should apply seamlessly. If a clean merge
-  is recorded as a plain commit (upstream never an ancestor of the local
-  branch), the v3 merge re-runs against the v1 install point: it sees the
-  footer changed on both sides (local already holds v2's footer, upstream
-  ships v3's) and reports a spurious conflict. Recording the merge so the
-  base advances keeps v3 clean.
-  """
-  base = "https://on-repeat.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "on-repeat"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  jsx_file = data_dir / "apps" / "on-repeat" / "index.jsx"
-
-  # Agent edits the title locally — a region upstream never touches.
-  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "clean_merge"
-
-  # Upstream evolves the SAME footer line again. With the base advanced to
-  # v2 this is still disjoint from the local title edit -> clean.
-  jsx_v3 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V3")
-  r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
-  assert r3.status_code == 201, r3.text
-  assert r3.json()["mode"] == "update", (
-    "v3 update should merge cleanly, not conflict against a stale base; "
-    f"got {r3.json()}"
-  )
-  merged = jsx_file.read_text()
-  assert "AGENT TITLE" in merged   # local edit still preserved
-  assert "FOOTER V3" in merged     # latest upstream footer applied
-  assert "<<<<<<<" not in merged
-
-
-def test_git_clean_update_advances_merge_base(
-  client, auth, bypass_url_validation,
-):
-  """After a clean update the local branch records upstream as an
-  ancestor, so the recorded upstream tip is reachable from `main`. This is
-  the structural invariant that keeps repeated updates from re-litigating
-  already-merged history."""
-  import subprocess
-
-  base = "https://on-advance.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "on-advance"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  repo = data_dir / "apps" / "on-advance"
-  (repo / "index.jsx").write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["divergence"] == "clean_merge"
-
-  from app import app_git
-  env = app_git._git_env(repo)
-  proc = subprocess.run(
-    ["git", "-C", str(repo), "merge-base", "--is-ancestor", "upstream", "main"],
-    env=env, capture_output=True,
-  )
-  assert proc.returncode == 0, (
-    "upstream tip must be an ancestor of main after a clean merge so the "
-    "next update's base is the just-merged version"
-  )
-
-
-def test_git_clean_update_without_local_edits_is_fast_forward(
-  client, auth, bypass_url_validation,
-):
-  """when local main still matches the previous upstream, a
-  clean update reports fast_forward for the seamless store path."""
-  base = "https://on-fast.test/repo/"
-  m = {
-    **MANIFEST_NEWS,
-    "id": "on-fast-forward",
-    "icon": None,
-    "storage_seeds": {},
-    "schedule": None,
-  }
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  payload = r2.json()
-  assert payload["mode"] == "update"
-  assert payload["divergence"] == "fast_forward"
-  assert "index.jsx" in payload["reconciliation"]["new_upstream_paths"]
-  assert payload["reconciliation"]["proven_present"] == []
-  assert payload["reconciliation"]["local_only_paths"] == []
-  # With no local edits the served source must be the new upstream verbatim.
-  # The latent bug let a failed in-memory merge leave the OLD bytes on disk
-  # while still bumping the version, so assert the new content actually
-  # landed rather than trusting the divergence label alone.
-  data_dir = Path(get_settings().data_dir)
-  served = (data_dir / "apps" / "on-fast-forward" / "index.jsx").read_text()
-  assert "UPSTREAM FOOTER" in served
-  assert "ORIGINAL FOOTER" not in served
-
-
-def test_git_consecutive_no_edit_updates_advance_base(
-  client, auth, bypass_url_validation,
-):
-  """Successive no-local-edit updates must each carry the new upstream
-  content and keep upstream an ancestor of `main`.
-
-  Without the no-edit fast path, the first update commits a single-parent
-  local commit (upstream unreachable from `main`), so the second update's
-  merge base is the original install point. The overlapping footer diff
-  then resolves to the LOCAL (stale) side and v3's content never lands.
-  Each update must advance the base so v3's bytes are served and the
-  merge-base invariant holds.
-  """
-  import subprocess
-
-  base = "https://on-consec.test/repo/"
-  m = {
-    **MANIFEST_NEWS,
-    "id": "on-consecutive",
-    "icon": None,
-    "storage_seeds": {},
-    "schedule": None,
-  }
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  repo = data_dir / "apps" / "on-consecutive"
-  jsx_file = repo / "index.jsx"
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["divergence"] == "fast_forward"
-  assert "FOOTER V2" in jsx_file.read_text()
-
-  jsx_v3 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V3")
-  r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
-  assert r3.status_code == 201, r3.text
-  assert r3.json()["mode"] == "update"
-  served = jsx_file.read_text()
-  assert "FOOTER V3" in served, (
-    "v3 upstream content must land on disk; a stale merge base resolves the "
-    f"footer to the local side and serves old bytes. got: {served!r}"
-  )
-  assert "FOOTER V2" not in served
-
-  from app import app_git
-  proc = subprocess.run(
-    ["git", "-C", str(repo), "merge-base", "--is-ancestor", "upstream", "main"],
-    env=app_git._git_env(repo), capture_output=True,
-  )
-  assert proc.returncode == 0, (
-    "upstream tip must stay an ancestor of main across consecutive no-edit "
-    "updates so each update's merge base is the just-installed version"
-  )
-
-
-def test_git_static_asset_update_leaves_clean_app_repo(
-  client, auth, bypass_url_validation,
-):
-  """Static asset rollback snapshots must never land in per-app git.
-
-  CubeRun-style packages update dozens of static files. The installer uses
-  temporary snapshots for rollback, but those snapshots must live outside the
-  source repo so the post-write local commit stays clean and future updates
-  do not see installer noise as local edits.
-  """
-  base = "https://static-clean.test/repo/"
-  manifest_v1 = {
-    **MANIFEST_NEWS,
-    "id": "static-clean",
-    "icon": None,
-    "storage_seeds": {},
-    "schedule": None,
-    "static_assets": {
-      "index.html": "build/index.html",
-      "static/css/main.css": "build/static/css/main.css",
-    },
-  }
-  responses_v1 = {
-    base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
-    base + "index.jsx": (200, JSX.encode()),
-    base + "build/index.html": (200, b"<!doctype html><title>v1</title>"),
-    base + "build/static/css/main.css": (200, b"body{color:red}"),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses_v1),
-  ):
-    r1 = client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base + "mobius.json",
-    })
-  assert r1.status_code == 201, r1.text
-
-  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
-  responses_v2 = {
-    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
-    base + "index.jsx": (200, JSX.encode()),
-    base + "build/index.html": (200, b"<!doctype html><title>v2</title>"),
-    base + "build/static/css/main.css": (200, b"body{color:blue}"),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses_v2),
-  ):
-    r2 = client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base + "mobius.json",
-    })
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-
-  from app import app_git
-  data_dir = Path(get_settings().data_dir)
-  source_dir = data_dir / "apps" / "static-clean"
-  assert (source_dir / "static" / "index.html").read_text() == (
-    "<!doctype html><title>v2</title>"
-  )
-  assert list(source_dir.rglob("*.mobius-bak")) == []
-  assert not (data_dir / "apps" / ".static-clean.mobius-static-bak").exists()
-  assert app_git._run(source_dir, "status", "--porcelain").stdout == ""
-  assert app_git._run(source_dir, "ls-files", "*.mobius-bak").stdout == ""
-
-
-def test_app_store_update_recognizes_squashed_local_contribution(
-  client, auth, bypass_url_validation,
-):
-  """App Store update uses the same provenance engine as the shell updater."""
-  from app import app_git
-
-  base_url = "https://equivalent.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "equivalent-update"}
-  r1 = _install_v1(client, auth, base_url, manifest, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  source = Path(get_settings().data_dir) / "apps" / "equivalent-update"
-  entry = source / "index.jsx"
-  base_sha = app_git.head_sha(source, app_git.UPSTREAM_BRANCH)
-
-  shared = JSX_MULTI.replace("ORIGINAL TITLE", "SHARED REVIEW")
-  entry.write_text(shared)
-  reviewed = app_git.commit_local(source, "reviewed contribution")
-  assert reviewed
-  reviewed_diff = app_git._canonical_diff(source, base_sha, reviewed)
-  assert reviewed_diff is not None
-  digest = hashlib.sha256(reviewed_diff).hexdigest()
-  assert app_git.record_pending_equivalent_change(
-    source,
-    base_sha=base_sha,
-    head_sha=reviewed,
-    source_sha=reviewed,
-    diff_sha256=digest,
-    contribution_id="app-store-reviewed-change",
-  )
-  landed = app_git.mark_equivalent_change_landed(source, digest)
-  assert landed
-
-  # Local keeps evolving the contributed line before the Store fetches the
-  # squash result, which is exactly the shape ordinary three-way Git conflicts.
-  entry.write_text(shared.replace("SHARED REVIEW", "LOCAL FOLLOWUP"))
-  r2 = _update_v2(
-    client,
-    auth,
-    base_url,
-    {**manifest, "version": "2.0.0"},
-    shared,
-  )
-
-  assert r2.status_code == 201, r2.text
-  body = r2.json()
-  assert body["mode"] == "update"
-  assert body["divergence"] == "clean_merge"
-  assert any("already present upstream" in item for item in body["warnings"])
-  assert body["reconciliation"] == {
-    "proven_present": ["app-store-reviewed-change"],
-    "local_only_paths": ["index.jsx"],
-    "new_upstream_paths": [],
-    "compatible_paths": [],
-    "unresolved_conflict_paths": [],
-    "provenance_refs_used": [landed],
-  }
-  assert "LOCAL FOLLOWUP" in entry.read_text()
-  assert not app_git.ref_exists(source, landed)
+  assert legacy["candidate_digest"] == "b" * 64
+  assert legacy["merge_base_override"] is None
 
 
 def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
@@ -3358,15 +2911,6 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   assert update.json()["pending_update_state"] == "needs_resolution"
   assert update.json()["needs_resolution"] is True
   assert update.json()["upstream_version"] == "2.0.0"
-  with patch("app.app_git.ref_is_ancestor", return_value=None):
-    unknown = client.get(
-      f"/api/apps/{payload['id']}/update-check", headers=auth,
-    )
-  assert unknown.status_code == 200, unknown.text
-  assert unknown.json()["update_available"] is True
-  assert unknown.json()["pending_update_state"] == "unknown"
-  assert unknown.json()["needs_resolution"] is False
-
   bypass = client.patch(
     f"/api/apps/{payload['id']}",
     headers=auth,
@@ -3374,45 +2918,36 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   )
   assert bypass.status_code == 422, bypass.text
 
-  # The explicit whole-tree policy is carried by the resolver-open request,
-  # persisted before the real merge, and therefore precedes the agent turn.
+  # Opening the resolver merges in a private checkout inside the app's git
+  # directory. The served source directory is never half-merged.
   resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
     json={"resolution_policy": "preserve_local"},
   )
   assert resolver.status_code == 200, resolver.text
-  assert (app_dir / ".git" / "MERGE_HEAD").is_file()
-  resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
-  jsx_file.write_text(resolved)
-
-  reviewed = client.post(
-    "/api/apps/resolve-update/review",
-    headers=auth,
-    json={"source_dir": str(app_dir)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
-  reviewed_tree = reviewed.json()["tree_oid"]
-  assert "RESOLVED TITLE" in reviewed.json()["diff"]
-  assert json.loads(pending.read_text())["reviewed_tree_oid"] == reviewed_tree
-
-  # Resolution and promotion are separate crash-safe phases. Once the resolved
-  # source is committed, the receipt remains so the canonical installer can
-  # replay bundle/static/DB promotion. The existing resolver chat remains the
-  # resumable surface while upstream is already an ancestor of local source.
-  from app import app_git
-  resolved_commit = app_git.commit_local(app_dir, "resolve app update")
-  assert resolved_commit
+  checkout = app_dir / ".git" / "mobius-pending-update" / "worktree"
+  assert "<<<<<<<" in (checkout / "index.jsx").read_text()
+  assert jsx_file.read_text() == local
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+
+  # The live app stays editable while the resolver works: an ordinary apply
+  # of an unrelated line is accepted, and later merged into the resolution.
+  late = local.replace("ORIGINAL FOOTER", "LATE FOOTER")
+  jsx_file.write_text(late)
+  applied = client.post(
+    "/api/apps/apply", headers=auth, json={"source_dir": str(app_dir)},
+  )
+  assert applied.status_code == 200, applied.text
+
+  (checkout / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  )
   pending_update = client.get(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
-  assert pending_update.status_code == 200, pending_update.text
-  assert pending_update.json()["update_available"] is True
-  assert pending_update.json()["pending_update_state"] == "replay_pending"
-  assert pending_update.json()["needs_resolution"] is False
+  assert pending_update.json()["pending_update_state"] == "needs_resolution"
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
-    json={"resolution_policy": "preserve_local"},
   )
   assert redundant_resolver.status_code == 200, redundant_resolver.text
   assert redundant_resolver.json()["created"] is False
@@ -3423,7 +2958,6 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
     base + "prompt.md": (200, b"v2 prompt"),
     base + "fetch.sh": (200, b""),
   }
-
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(replay_responses),
@@ -3431,23 +2965,26 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      # Simulate a retry after the review response was lost: the exact tree
-      # identity survives in the pending receipt.
       json={"source_dir": str(app_dir)},
     )
   assert replayed.status_code == 200, replayed.text
   assert replayed.json()["mode"] == "updated"
 
+  expected = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE").replace(
+    "ORIGINAL FOOTER", "LATE FOOTER",
+  )
   db = SessionLocal()
   try:
     app = db.query(App).filter(App.slug == "on-conflict").first()
     assert app.version == "2.0.0"
-    assert app.jsx_source == resolved
+    assert app.jsx_source == expected
   finally:
     db.close()
-  assert jsx_file.read_text() == resolved
-  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert jsx_file.read_text() == expected
+  assert not checkout.exists()
   assert not pending.exists()
+  settled = client.get(f"/api/apps/{payload['id']}/update-check", headers=auth)
+  assert settled.json()["pending_update_state"] == "none"
 
 
 def test_version_only_conflict_auto_resolves_to_upstream(
@@ -3510,13 +3047,8 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
   )
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
-  jsx_file.write_text(resolved)
-  reviewed = client.post(
-    "/api/apps/resolve-update/review",
-    headers=auth,
-    json={"source_dir": str(app_dir)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
+  checkout = app_dir / ".git" / "mobius-pending-update" / "worktree"
+  (checkout / "index.jsx").write_text(resolved)
   pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
   bundle = Path(installed.json()["compiled_path"])
   old_bundle = bundle.read_bytes()
@@ -3537,10 +3069,7 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      json={
-        "source_dir": str(app_dir),
-        "reviewed_tree_oid": reviewed.json()["tree_oid"],
-      },
+      json={"source_dir": str(app_dir)},
     )
   assert replayed.status_code == 409, replayed.text
   assert replayed.json()["detail"]["code"] == "pending_update_changed"
@@ -3555,7 +3084,11 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
   assert bundle.read_bytes() == old_bundle
   assert pending.is_file(), "journal must survive for restart/user retry"
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
-  assert jsx_file.read_text() == resolved
+  assert jsx_file.read_text() == JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE")
+  # The committed resolution stays in its checkout for the retry.
+  assert (checkout / "index.jsx").read_text() == resolved
+  retry = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert retry.json()["pending_update_state"] == "replay_pending"
 
 
 def test_resolved_conflict_converges_static_metadata_and_bundle_once(
@@ -3625,13 +3158,8 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
   )
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
-  jsx_file.write_text(resolved)
-  reviewed = client.post(
-    "/api/apps/resolve-update/review",
-    headers=auth,
-    json={"source_dir": str(app_dir)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
+  checkout = app_dir / ".git" / "mobius-pending-update" / "worktree"
+  (checkout / "index.jsx").write_text(resolved)
 
   replay_responses = {
     base + "index.jsx": (200, jsx_v2.encode()),
@@ -3645,10 +3173,7 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      json={
-        "source_dir": str(app_dir),
-        "reviewed_tree_oid": reviewed.json()["tree_oid"],
-      },
+      json={"source_dir": str(app_dir)},
     )
   assert replayed.status_code == 200, replayed.text
   assert replayed.json()["mode"] == "updated"
@@ -3778,10 +3303,13 @@ def test_conflicting_update_returns_conflict_without_auto_spawning(
     db.close()
 
 
-def test_conflict_resolver_requires_policy_before_materializing_merge(
+def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   client, auth, bypass_url_validation, monkeypatch,
 ):
-  """Neither update nor chat open mutates source; the selected policy does."""
+  """Neither the update nor the resolver touches the served source; the
+  resolver's first turn starts with the real merge already in its checkout."""
+  from app import install
+
   base = "https://click-conflict.test/repo/"
   m = {**MANIFEST_NEWS, "id": "click-conflict", "name": "Click Conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -3790,6 +3318,7 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
   data_dir = Path(get_settings().data_dir)
   app_dir = data_dir / "apps" / "click-conflict"
   jsx_file = app_dir / "index.jsx"
+  checkout = install.pending_update_worktree(app_dir)
 
   local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
   jsx_file.write_text(local)
@@ -3798,10 +3327,11 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "conflict"
   assert jsx_file.read_text() == local
-  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert not checkout.exists()
 
-  async def fake_start_turn(*args, **kwargs):
-    assert (app_dir / ".git" / "MERGE_HEAD").exists()
+  async def fake_start_turn(db, chat_id, title, content, provider):
+    assert app_git.merge_in_progress(checkout)
+    assert str(checkout) in content
     return True
 
   monkeypatch.setattr(
@@ -3815,17 +3345,7 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
       "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
     },
   )
-  missing_policy = client.post(
-    f"/api/apps/{app_id}/conflict-resolver-chat",
-    headers=auth,
-  )
-  assert missing_policy.status_code == 422, missing_policy.text
-  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
-  r3 = client.post(
-    f"/api/apps/{app_id}/conflict-resolver-chat",
-    headers=auth,
-    json={"resolution_policy": "preserve_local"},
-  )
+  r3 = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
   assert r3.status_code == 200, r3.text
   payload = r3.json()
   assert payload["chat_id"]
@@ -3841,192 +3361,111 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
   finally:
     db.close()
 
-  materialized = jsx_file.read_text()
+  materialized = (checkout / "index.jsx").read_text()
   assert "<<<<<<<" in materialized and ">>>>>>>" in materialized
   assert "AGENT TITLE" in materialized and "UPSTREAM TITLE" in materialized
-  assert (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert jsx_file.read_text() == local
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
 
 
-def test_preserve_resolution_reviews_whole_tree_and_rejects_drift(
-  client, auth, bypass_url_validation,
-):
-  """Review covers local-only files and finalize binds that exact tree."""
-  base = "https://whole-tree-review.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "whole-tree-review"}
+def _conflicted_app(client, auth, base, slug):
+  manifest = {**MANIFEST_NEWS, "id": slug}
   installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
   assert installed.status_code == 201, installed.text
-  app_id = installed.json()["id"]
-  app_dir = Path(get_settings().data_dir) / "apps" / "whole-tree-review"
-  entry = app_dir / "index.jsx"
-  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
-  (app_dir / "local-only.js").write_text("export const localOnly = true\n")
-
+  app_dir = Path(get_settings().data_dir) / "apps" / slug
+  (app_dir / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"),
+  )
   upstream = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   conflicted = _update_v2(
     client, auth, base, {**manifest, "version": "2.0.0"}, upstream,
   )
-  assert conflicted.status_code == 201, conflicted.text
-  assert conflicted.json()["mode"] == "conflict"
-
-  selected = client.post(
-    "/api/apps/resolve-update/policy",
-    headers=auth,
-    json={"source_dir": str(app_dir), "policy": "preserve_local"},
-  )
-  assert selected.status_code == 200, selected.text
-  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"))
-
-  reviewed = client.post(
-    "/api/apps/resolve-update/review",
-    headers=auth,
-    json={"source_dir": str(app_dir)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
-  payload = reviewed.json()
-  assert "local-only.js" in payload["diff"]
-  assert "RESOLVED TITLE" in payload["diff"]
-
-  (app_dir / "local-only.js").write_text("export const localOnly = false\n")
-  rejected = client.post(
-    "/api/apps/resolve-update",
-    headers=auth,
-    json={
-      "source_dir": str(app_dir),
-      "reviewed_tree_oid": payload["tree_oid"],
-    },
-  )
-  assert rejected.status_code == 409, rejected.text
-  assert rejected.json()["detail"]["code"] == "reviewed_tree_changed"
-  assert (app_dir / ".git" / "MERGE_HEAD").exists()
-
-
-def test_late_app_edit_after_review_stays_uncommitted_on_rejection(
-  client, auth, bypass_url_validation, monkeypatch,
-):
-  """The installer must not commit a late edit before rejecting stale review."""
-  base = "https://late-review-edit.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "late-review-edit"}
-  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
-  assert installed.status_code == 201, installed.text
-  app_dir = Path(get_settings().data_dir) / "apps" / "late-review-edit"
-  entry = app_dir / "index.jsx"
-  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
-  conflicted = _update_v2(
-    client, auth, base, {**manifest, "version": "2.0.0"},
-    JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE"),
-  )
-  assert conflicted.status_code == 201, conflicted.text
-  assert conflicted.json()["mode"] == "conflict"
-  selected = client.post(
-    "/api/apps/resolve-update/policy", headers=auth,
-    json={"source_dir": str(app_dir), "policy": "preserve_local"},
-  )
-  assert selected.status_code == 200, selected.text
-  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"))
-  reviewed = client.post(
-    "/api/apps/resolve-update/review", headers=auth,
-    json={"source_dir": str(app_dir)},
-  )
-  assert reviewed.status_code == 200, reviewed.text
-
-  original_install = install.install_from_manifest
-  late_content = JSX_MULTI.replace("ORIGINAL TITLE", "LATE TITLE")
-  installer_head = {}
-
-  async def late_edit_before_installer(*args, **kwargs):
-    installer_head["sha"] = app_git.head_sha(app_dir, app_git.LOCAL_BRANCH)
-    entry.write_text(late_content)
-    return await original_install(*args, **kwargs)
-
-  monkeypatch.setattr(install, "install_from_manifest", late_edit_before_installer)
-  replay_responses = {
-    base + "index.jsx": (
-      200, JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE").encode(),
-    ),
-    base + "icon.png": (200, _png_bytes()),
-    base + "prompt.md": (200, b"v2 prompt"),
-    base + "fetch.sh": (200, b""),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(replay_responses),
-  ):
-    rejected = client.post(
-      "/api/apps/resolve-update", headers=auth,
-      json={
-        "source_dir": str(app_dir),
-        "reviewed_tree_oid": reviewed.json()["tree_oid"],
-      },
-    )
-  assert rejected.status_code == 409, rejected.text
-  assert rejected.json()["detail"]["code"] == "reviewed_tree_changed"
-  assert app_git.head_sha(app_dir, app_git.LOCAL_BRANCH) == installer_head["sha"]
-  assert entry.read_text() == late_content
-  assert "index.jsx" in app_git._run(
-    app_dir, "status", "--porcelain",
-  ).stdout
-
-
-def test_exact_upstream_policy_replaces_complete_tracked_source_tree(
-  client, auth, bypass_url_validation,
-):
-  """Explicit exact policy removes both conflicting and local-only source."""
-  base = "https://whole-tree-exact.test/repo/"
-  manifest = {**MANIFEST_NEWS, "id": "whole-tree-exact"}
-  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
-  assert installed.status_code == 201, installed.text
+  assert conflicted.json()["mode"] == "conflict", conflicted.text
   app_id = installed.json()["id"]
-  app_dir = Path(get_settings().data_dir) / "apps" / "whole-tree-exact"
-  entry = app_dir / "index.jsx"
-  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
-  local_only = app_dir / "local-only.js"
-  local_only.write_text("export const localOnly = true\n")
-
-  upstream = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
-  manifest_v2 = {**manifest, "version": "2.0.0"}
-  conflicted = _update_v2(client, auth, base, manifest_v2, upstream)
-  assert conflicted.status_code == 201, conflicted.text
-  assert conflicted.json()["mode"] == "conflict"
-
-  selected = client.post(
-    f"/api/apps/{app_id}/conflict-resolver-chat",
-    headers=auth,
-    json={
-      "resolution_policy": "accept_reviewed_upstream_exact",
-    },
-  )
-  assert selected.status_code == 200, selected.text
-  assert entry.read_text() != upstream
-  assert local_only.exists()
-  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
-
-  replay_responses = {
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  replay = {
     base + "index.jsx": (200, upstream.encode()),
     base + "icon.png": (200, _png_bytes()),
     base + "prompt.md": (200, b"v2 prompt"),
     base + "fetch.sh": (200, b""),
   }
+  return app_id, app_dir, replay
+
+
+def _finish(client, auth, app_dir, replay):
   with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(replay_responses),
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(replay),
   ):
-    finalized = client.post(
-      "/api/apps/resolve-update",
-      headers=auth,
+    return client.post(
+      "/api/apps/resolve-update", headers=auth,
       json={"source_dir": str(app_dir)},
     )
-  assert finalized.status_code == 200, finalized.text
-  assert finalized.json()["mode"] == "updated"
-  assert entry.read_text() == upstream
-  assert not local_only.exists()
-  diff = subprocess.run(
-    ["git", "-C", str(app_dir), "diff", "upstream..main"],
-    capture_output=True,
-    text=True,
-    check=True,
+
+
+def test_finishing_refuses_markers_and_incomplete_resolutions(
+  client, auth, bypass_url_validation,
+):
+  """Finishing commits the checkout itself, but never markers and never an
+  answer that does not contain the update."""
+  from app import install
+
+  base = "https://finish-guard.test/repo/"
+  app_id, app_dir, replay = _conflicted_app(client, auth, base, "finish-guard")
+  checkout = install.pending_update_worktree(app_dir)
+
+  unresolved = _finish(client, auth, app_dir, replay)
+  assert unresolved.status_code == 409, unresolved.text
+  assert unresolved.json()["detail"]["code"] == "conflicts_remaining"
+
+  app_git._run(checkout, "merge", "--abort")
+  incomplete = _finish(client, auth, app_dir, replay)
+  assert incomplete.status_code == 409, incomplete.text
+  assert incomplete.json()["detail"]["code"] == "resolution_incomplete"
+
+  # Opening the resolver again restarts the abandoned merge.
+  reopened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert reopened.status_code == 200, reopened.text
+  assert app_git.merge_in_progress(checkout)
+  (checkout / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
   )
-  assert diff.stdout == ""
-  assert finalized.json()["app"]["id"] == app_id
+  finished = _finish(client, auth, app_dir, replay)
+  assert finished.status_code == 200, finished.text
+  assert "RESOLVED TITLE" in (app_dir / "index.jsx").read_text()
+
+
+def test_overlapping_live_edit_sends_finish_back_to_the_resolver(
+  client, auth, bypass_url_validation,
+):
+  """An edit to the live app that overlaps the resolution is never
+  overwritten: finishing refuses without touching live source, and a
+  `git merge main` in the checkout reconciles it."""
+  from app import install
+
+  base = "https://late-overlap.test/repo/"
+  app_id, app_dir, replay = _conflicted_app(client, auth, base, "late-overlap")
+  checkout = install.pending_update_worktree(app_dir)
+  entry = app_dir / "index.jsx"
+  (checkout / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  )
+  late = JSX_MULTI.replace("ORIGINAL TITLE", "LATE TITLE")
+  entry.write_text(late)
+
+  behind = _finish(client, auth, app_dir, replay)
+  assert behind.status_code == 409, behind.text
+  assert behind.json()["detail"]["code"] == "resolution_behind_local_edits"
+  assert entry.read_text() == late
+
+  app_git._run(checkout, "merge", "main", check=False)
+  (checkout / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED LATE TITLE"),
+  )
+  finished = _finish(client, auth, app_dir, replay)
+  assert finished.status_code == 200, finished.text
+  assert "RESOLVED LATE TITLE" in entry.read_text()
+  assert not checkout.exists()
 
 
 def test_git_conflict_does_not_apply_upstream_capabilities(
@@ -4245,30 +3684,6 @@ def test_store_id_from_spoofed_path_still_preserves_local_conflict(
   assert "<<<<<<<" not in served and "UPSTREAM SPOOF TITLE" not in served
 
 
-def test_update_preview_clean_returns_upstream_diff(
-  client, auth, bypass_url_validation,
-):
-  """Preview on a clean update reports clean status and the upstream diff."""
-  base = "https://preview-clean.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "preview-clean"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  app_id = r1.json()["id"]
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-
-  preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
-  assert preview.status_code == 200, preview.text
-  payload = preview.json()
-  assert payload["upstream_version"] == "2.0.0"
-  assert payload["upstream_commit"]
-  assert payload["conflict_paths"] == []
-  assert payload["conflicts"] == []
-  assert "UPSTREAM FOOTER" in payload["upstream_diff"]
-
-
 def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   client, auth, bypass_url_validation,
 ):
@@ -4438,6 +3853,83 @@ def test_update_candidate_preview_applies_the_reviewed_commit_without_refetch(
   assert "UNREVIEWED FOOTER" not in (source_dir / "index.jsx").read_text()
 
 
+def test_store_update_of_a_resolved_release_finishes_it(
+  client, auth, db, tmp_path, bypass_url_validation,
+):
+  """Pressing Update again never discards the resolver's work: while it is
+  in progress the checkout survives, and once committed the same reviewed
+  release installs from it."""
+  from app import install
+
+  base = "https://raw.githubusercontent.com/example/app-resumed/main/"
+  manifest = {
+    "id": "resumed-update",
+    "name": "Resumed update",
+    "version": "1.0.0",
+    "description": "Resolved then updated from the Store",
+    "entry": "index.jsx",
+  }
+  work, bare, _ = _make_clone_fixture(tmp_path, JSX_MULTI, "")
+  (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  _fixture_commit(work, "manifest")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, JSX_MULTI, "", bare,
+  )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  source_dir = Path(get_settings().data_dir) / "apps" / manifest["id"]
+  (source_dir / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"),
+  )
+  (work / "mobius.json").write_text(
+    json.dumps({**manifest, "version": "2.0.0"}), encoding="utf-8",
+  )
+  (work / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE"), encoding="utf-8",
+  )
+  _fixture_commit(work, "v2")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(work),
+  )
+  with patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+  assert preview.status_code == 200, preview.text
+
+  def press_update():
+    with patch("app.install.httpx.AsyncClient"):
+      return client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": base + "mobius.json",
+        "reviewed_source_digest": preview.json()["source_digest"],
+        "update_app_id": app_id,
+        "reviewed_upstream_commit": preview.json()["upstream_commit"],
+      })
+
+  assert press_update().json()["mode"] == "conflict"
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  checkout = install.pending_update_worktree(source_dir)
+  resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
+  (checkout / "index.jsx").write_text(resolved)
+
+  assert press_update().json()["mode"] == "conflict"
+  assert (checkout / "index.jsx").read_text() == resolved
+
+  app_git._run(checkout, "commit", "-qam", "resolve")
+  finished = press_update()
+  assert finished.status_code == 201, finished.text
+  assert finished.json()["mode"] == "update"
+  assert finished.json()["version"] == "2.0.0"
+  assert (source_dir / "index.jsx").read_text() == resolved
+  assert not checkout.exists()
+
+
 def test_missing_reviewed_git_commit_is_a_stale_update(
   client, auth, bypass_url_validation,
 ):
@@ -4496,10 +3988,10 @@ def test_update_candidate_preview_rejects_a_different_catalog_app(
 
 
 
-def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
+def test_update_check_accepts_app_token_with_manage_apps_for_other_app(
   client, db, auth, bypass_url_validation,
 ):
-  """The App Store can review update previews for apps it manages."""
+  """The App Store can check updates for apps it manages."""
   from app.auth import create_access_token
   base = "https://preview-manager.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-manager-target"}
@@ -4519,20 +4011,18 @@ def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
     "sub": "test", "scope": "app", "app_id": manager_app_id,
   })
 
-  preview = client.get(
-    f"/api/apps/{target_app_id}/update-preview",
+  checked = client.get(
+    f"/api/apps/{target_app_id}/update-check",
     headers={"Authorization": f"Bearer {token}"},
   )
-  assert preview.status_code == 200, preview.text
-  payload = preview.json()
-  assert payload["app_id"] == target_app_id
-  assert payload["upstream_version"] == "2.0.0"
+  assert checked.status_code == 200, checked.text
+  assert checked.json()["local_version"] == "2.0.0"
 
 
-def test_update_preview_rejects_ordinary_app_token_for_other_app(
+def test_update_checks_reject_ordinary_app_token_for_other_app(
   client, db, auth, bypass_url_validation,
 ):
-  """App tokens without manage_apps cannot read another app's source preview."""
+  """App tokens without manage_apps cannot inspect another app's updates."""
   from app.auth import create_access_token
   base = "https://preview-denied.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-denied-target"}
@@ -4548,63 +4038,13 @@ def test_update_preview_rejects_ordinary_app_token_for_other_app(
     "sub": "test", "scope": "app", "app_id": caller_app_id,
   })
 
-  preview = client.get(
-    f"/api/apps/{target_app_id}/update-preview",
-    headers={"Authorization": f"Bearer {token}"},
-  )
-  assert preview.status_code == 403, preview.text
-  assert "manage_apps" in preview.json()["detail"]
-
-
-def test_update_preview_conflict_returns_real_markers_without_live_mutation(
-  client, auth, bypass_url_validation,
-):
-  """Preview materializes conflict markers in a throwaway worktree only."""
-  base = "https://preview-conflict.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "preview-conflict"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  app_id = r1.json()["id"]
-  data_dir = Path(get_settings().data_dir)
-  jsx_file = data_dir / "apps" / "preview-conflict" / "index.jsx"
-
-  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
-  jsx_file.write_text(local)
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "conflict"
-
-  # The conflict update did not materialize markers in the LIVE tree. The preview
-  # reads from a throwaway worktree and must not mutate the live tree either.
-  before_preview = jsx_file.read_text()
-  assert before_preview == local
-  assert "<<<<<<<" not in before_preview
-  assert not (jsx_file.parent / ".git" / "MERGE_HEAD").exists()
-
-  preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
-  assert preview.status_code == 200, preview.text
-  payload = preview.json()
-  assert payload["status"] == "conflict"
-  assert payload["upstream_version"] == "2.0.0"
-  assert payload["conflict_paths"] == ["index.jsx"]
-  assert payload["upstream_commit"]
-  assert "UPSTREAM TITLE" in payload["upstream_diff"]
-  assert payload["conflicts"][0]["path"] == "index.jsx"
-  markers = payload["conflicts"][0]["merged_with_markers"]
-  assert "<<<<<<<" in markers
-  assert "=======" in markers
-  assert ">>>>>>>" in markers
-  assert "AGENT TITLE" in markers
-  assert "UPSTREAM TITLE" in markers
-  assert jsx_file.read_text() == before_preview
-  assert not (jsx_file.parent / ".git" / "MERGE_HEAD").exists()
-
-
-# --------------------------------------------------------------------------
-# Predecessor adoption — a renamed app (or a baked predecessor installed
-# without a manifest_url) UPDATES the existing row instead of duplicating it.
-# --------------------------------------------------------------------------
+  for path in ("update-check", "update-candidate-preview"):
+    denied = client.get(
+      f"/api/apps/{target_app_id}/{path}",
+      headers={"Authorization": f"Bearer {token}"},
+    )
+    assert denied.status_code == 403, denied.text
+    assert "manage_apps" in denied.json()["detail"]
 
 
 def _simple_manifest(
