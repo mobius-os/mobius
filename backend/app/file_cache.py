@@ -14,6 +14,9 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
+import sys
+import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -227,7 +230,46 @@ async def reclaim_provider_cache(provider: str) -> None:
     log.debug('provider file cache advice failed', exc_info=True)
 
 
-def reclaim_settled_cache(data_dir: str | Path, chat_id: str) -> None:
-  """Called by the existing settled-turn worker; no new scheduler or timer."""
+def _sweep_settled_cache(data_dir: str | Path, chat_id: str) -> None:
   reclaim_file_cache(settled_tool_paths(), skip_mapped=False)
   reclaim_file_cache(settled_turn_paths(data_dir, chat_id))
+
+
+# The settled sweep walks every managed checkout (hundreds of thousands of
+# files on a busy instance), about 14s of CPU. Run inside the server, each
+# sweep competed with every request for the interpreter, and one sweep per
+# settled turn let several overlap whenever many agents finished together.
+# Only one sweep runs at a time: the running sweep already covers the shared
+# checkouts and tools, so an overlapping request is skipped (only its chat's
+# own browser-profile pages go unadvised). The sweep runs in a separate
+# low-priority process.
+_settled_sweep_lock = threading.Lock()
+_SETTLED_SWEEP_TIMEOUT_SECONDS = 600
+
+
+def reclaim_settled_cache(data_dir: str | Path, chat_id: str) -> bool:
+  """Called by the existing settled-turn worker; no new scheduler or timer.
+
+  Blocks its worker thread (not the event loop) until the sweep process
+  exits. Returns False when another sweep was already running.
+  """
+  if not _settled_sweep_lock.acquire(blocking=False):
+    return False
+  try:
+    subprocess.run(
+      [sys.executable, str(Path(__file__).resolve()), "settled",
+       str(data_dir), chat_id],
+      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL, check=False,
+      timeout=_SETTLED_SWEEP_TIMEOUT_SECONDS,
+    )
+  finally:
+    _settled_sweep_lock.release()
+  return True
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["settled"]:
+  # Only the standard library is imported above, so this runs as a plain
+  # script without loading the application.
+  os.nice(19)
+  _sweep_settled_cache(sys.argv[2], sys.argv[3])
