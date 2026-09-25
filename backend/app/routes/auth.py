@@ -238,7 +238,7 @@ def _ensure_managed_owner(db: Session, settings=None):
       return db.query(models.Owner).first()
     owner = db.query(models.Owner).filter(models.Owner.id == owner.id).first()
     try:
-      _write_service_token(owner.username, owner.token_epoch)
+      auth.write_service_token(owner.username, owner.token_epoch)
     except OSError as exc:
       log.warning("Could not write service token: %s", exc)
     return owner
@@ -256,33 +256,10 @@ def _ensure_managed_owner(db: Session, settings=None):
     return db.query(models.Owner).first()
   db.refresh(owner)
   try:
-    _write_service_token(owner.username, owner.token_epoch)
+    auth.write_service_token(owner.username, owner.token_epoch)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
   return owner
-
-
-def _write_service_token(username: str, token_epoch: int) -> None:
-  """Mints a 90-day service token for cron jobs and writes it to
-  /data/service-token.txt (chmod 600). The entrypoint refresh path
-  only runs when an owner exists at boot, so on first-time setup we
-  have to seed it here — otherwise the file is missing until the
-  next container restart.
-
-  Stamped with the owner's token_epoch so "sign out everywhere"
-  revokes it too — a 90-day unrevocable token would be the largest
-  hole in the revocation story. The owner must re-mint it afterward
-  (the entrypoint refresh path does this on the next restart)."""
-  settings = get_settings()
-  path = os.path.join(settings.data_dir, "service-token.txt")
-  token = auth.create_access_token(
-    {"sub": username},
-    expires_delta=timedelta(days=90),
-    token_epoch=token_epoch,
-  )
-  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(fd, "w") as f:
-    f.write(token)
 
 
 # Self-hosted ownership contract: without managed SSO, possession of the
@@ -317,7 +294,7 @@ def setup(
     raise HTTPException(status_code=400, detail="Already configured.")
   db.refresh(owner)
   try:
-    _write_service_token(owner.username, owner.token_epoch)
+    auth.write_service_token(owner.username, owner.token_epoch)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
   token = auth.create_access_token(
