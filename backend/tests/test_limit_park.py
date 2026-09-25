@@ -1935,12 +1935,22 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   _due_park(
     cid, token, auto_restart=True, park_reason="restart",
     restart_nonce="unaccepted-nonce-1234",
+    messages=[
+      {"role": "user", "content": "do work", "ts": 1},
+      {"role": "assistant", "ts": 2, "content": "", "blocks": [{
+        "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+        "resumable": True, "pause": {"kind": "restart"},
+      }]},
+    ],
   )
 
   assert _run_sweep() == [cid]
   assert _run_row(token)["status"] == "interrupted"
   assert _run_row(token)["restart_nonce"] is None
   assert notifications[0]["title"] == "Möbius restarted"
+  # The drained card no longer promises the continuation that fell back.
+  pause = _chat_row(cid)["messages"][-1]["blocks"][-1]["pause"]
+  assert pause == {"kind": "restart", "manual": True}
 
 
 def test_restart_park_with_no_nonce_never_matches_missing_ack(

@@ -907,8 +907,12 @@ def reconcile_startup_chats(
       # `pause.kind='restart'` marks this as a benign restart pause (not a
       # failure) so the card renders in the calm "Paused" family rather than
       # the danger-red error styling — a restart is a maintenance event, not
-      # something the turn did wrong.
-      err_block = _pause_note(note, kind="restart")
+      # something the turn did wrong. A crash or an ineligible restart is
+      # stamped `manual` so the card does not promise a continuation.
+      restart_pause = {"kind": "restart"}
+      if not restart_eligible:
+        restart_pause["manual"] = True
+      err_block = {**_pause_note(note, kind="restart"), "pause": restart_pause}
       live_id = (
         chat.live_assistant.get("id")
         if isinstance(chat.live_assistant, dict) else None
@@ -980,7 +984,7 @@ def reconcile_startup_chats(
             if block.get("type") != "question" or block.get("answers"):
               break
             trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
+          paused["pause"] = dict(restart_pause)
           if trailing_open_start < len(blocks):
             paused.pop("resumable", None)
             blocks.insert(trailing_open_start, paused)

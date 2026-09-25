@@ -5376,6 +5376,7 @@ class ChatWriterActor:
     )
     if run.park_reason == "restart":
       run.restart_nonce = None
+      _mark_restart_pause_manual(_active_chat(db, run.chat_id))
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -6114,6 +6115,37 @@ def _tail_open_question_state(
 def _tail_open_question_id(messages) -> str | None:
   """Compatibility projection for callers that only need the question id."""
   return _tail_open_question_state(messages)[0]
+
+
+def _mark_restart_pause_manual(chat) -> None:
+  """Stop the latest restart pause card from promising a continuation.
+
+  The drain writes its note before the next boot decides whether the parked
+  turn may continue. When that decision falls back to manual recovery, the note
+  must say so; otherwise the card keeps promising an automatic continuation.
+  """
+  if chat is None:
+    return
+  from sqlalchemy.orm.attributes import flag_modified
+
+  messages = copy.deepcopy(list(chat.messages or []))
+  latest = next((
+    message for message in reversed(messages)
+    if isinstance(message, dict) and message.get("role") == "assistant"
+  ), None)
+  pause = next((
+    block["pause"]
+    for block in reversed((latest or {}).get("blocks") or [])
+    if isinstance(block, dict)
+    and block.get("type") == "error"
+    and isinstance(block.get("pause"), dict)
+    and block["pause"].get("kind") == "restart"
+  ), None)
+  if pause is None or pause.get("manual"):
+    return
+  pause["manual"] = True
+  chat.messages = messages
+  flag_modified(chat, "messages")
 
 
 def _active_chat(db, chat_id: str):
