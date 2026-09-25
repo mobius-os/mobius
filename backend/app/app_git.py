@@ -3270,10 +3270,11 @@ def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
   `MergeResult.merged_tree_oid` here and writes it back, so one and many files
   share one path. Paths are repo-relative POSIX; bytes are read binary-faithful
   (no text decode). `-z` keeps paths NUL-separated so names with spaces or
-  newlines survive. All blobs stream through one `cat-file --batch` process:
-  update checks and installs read several trees each, and one subprocess per
-  file dominated their cost. Gitlinks have no blob in this repository and are
-  skipped.
+  newlines survive. All blobs stream through one `cat-file --batch` process
+  (update checks and installs read several trees each, and one process per
+  file dominated their cost), spooled to a temporary file so each blob is held
+  in memory once. Only blobs are files: gitlinks are skipped, and an object
+  missing from the database is omitted so callers treat the tree as incomplete.
   """
   repo = Path(source_dir)
   listing = subprocess.run(
@@ -3288,25 +3289,25 @@ def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
     _mode, kind, oid = meta.split()
     if kind == b"blob":
       entries.append((rel.decode(), oid.decode()))
-  if not entries:
-    return {}
-  batch = subprocess.run(
-    ["git", "-C", str(repo), "cat-file", "--batch"],
-    input="".join(f"{oid}\n" for _rel, oid in entries).encode(),
-    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
-  )
-  out = batch.stdout
   files: dict[str, bytes] = {}
-  offset = 0
-  for rel, oid in entries:
-    header_end = out.index(b"\n", offset)
-    header = out[offset:header_end].split()
-    if len(header) != 3 or header[0].decode() != oid:
-      raise RuntimeError(f"git cat-file --batch could not read {rel}")
-    start = header_end + 1
-    end = start + int(header[2])
-    files[rel] = out[start:end]
-    offset = end + 1
+  if not entries:
+    return files
+  with tempfile.TemporaryFile() as out:
+    subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "--batch"],
+      input="".join(f"{oid}\n" for _rel, oid in entries).encode(),
+      stdout=out, stderr=subprocess.PIPE,
+      timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+    )
+    out.seek(0)
+    for rel, oid in entries:
+      header = out.readline().split()
+      if header[:1] != [oid.encode()]:
+        raise RuntimeError(f"git cat-file --batch lost its place at {rel}")
+      if header[1:] == [b"missing"]:
+        continue
+      files[rel] = out.read(int(header[2]))
+      out.read(1)
   return files
 
 

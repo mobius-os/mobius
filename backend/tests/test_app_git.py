@@ -4482,3 +4482,50 @@ def test_read_ref_tree_returns_every_blob_byte_for_byte(tmp_path):
   assert app_git.read_ref_tree(repo, "HEAD") == {
     **files, "link.jsx": b"index.jsx",
   }
+
+
+def test_read_ref_tree_omits_a_blob_missing_from_the_object_database(tmp_path):
+  """An unreadable entry is left out, so callers see an incomplete tree."""
+  repo = tmp_path / "missing-blob"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  (repo / "index.jsx").write_bytes(b"entry\n")
+  (repo / "gone.js").write_bytes(b"lost\n")
+  subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+      "commit", "-q", "-m", "tree",
+    ],
+    check=True,
+  )
+  oid = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD:gone.js"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  (repo / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
+
+  assert app_git.read_ref_tree(repo, "HEAD") == {"index.jsx": b"entry\n"}
+
+
+def test_read_ref_tree_skips_gitlinks(tmp_path):
+  """A submodule entry has no blob in the app repository and is not a file."""
+  repo = tmp_path / "gitlink"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  (repo / "index.jsx").write_bytes(b"entry\n")
+  subprocess.run(["git", "-C", str(repo), "add", "index.jsx"], check=True)
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+      f"160000,{'1' * 40},vendor/lib",
+    ],
+    check=True,
+  )
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+      "commit", "-q", "-m", "tree",
+    ],
+    check=True,
+  )
+
+  assert app_git.read_ref_tree(repo, "HEAD") == {"index.jsx": b"entry\n"}
