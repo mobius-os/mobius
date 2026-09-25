@@ -345,11 +345,11 @@ async def test_disk_pressure_admission_sweeps_with_the_start_race_grace(
     return {"removed": 0, "bytes": 0, "kept_recent": 0}
 
   monkeypatch.setattr(agent_scratch, "sweep_idle_scratch", sweep)
-  statuses = iter([{"critical": True}, {}])
-  monkeypatch.setattr(
-    agent_admission, "_deferral",
-    lambda status: RuntimeError("full") if status.get("critical") else None,
-  )
+  full = {
+    "facts": {"disk": {"free_bytes": 1}},
+    "pressure": {"disk": {"state": "critical", "critical_below_bytes": 2}},
+  }
+  statuses = iter([full, {}])
   await agent_admission.require_agent_turn_admission(
     tmp_path, status_reader=lambda _d: next(statuses),
   )

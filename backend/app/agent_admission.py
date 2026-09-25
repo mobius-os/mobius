@@ -107,8 +107,13 @@ async def require_agent_turn_admission(
   critical boundary. Unknown telemetry fails open for developer hosts and
   unusual self-hosted runtimes.
   """
-  if _deferral(status_reader(data_dir)) is None:
+  status = status_reader(data_dir)
+  deferral = _deferral(status)
+  if deferral is None:
     return
+  if _storage_deferral(status) is None:
+    # Deleting paused chats' scratch frees no memory.
+    raise deferral
   if scratch_sweeper is None:
     from app.agent_scratch import START_RACE_GRACE_SECONDS, sweep_idle_scratch
 
