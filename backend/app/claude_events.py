@@ -452,8 +452,10 @@ def dispatch_sdk_message(
         if native_work is not None:
           native_work.task_finished(sdk_msg.task_id)
       return current_session_id, None
-    if sdk_msg.subtype == "init":
-      # Setup metadata only — no Möbius-side render.
+    if sdk_msg.subtype in ("init", "thinking_tokens"):
+      # Setup metadata and the per-token thinking counter — no Möbius-side
+      # render. `thinking_tokens` arrives alongside every thinking delta;
+      # forwarding it added a broadcast and replay entry per delta.
       return current_session_id, None
     _emit_unknown(bc, f"system:{sdk_msg.subtype}", sdk_msg)
     return current_session_id, None
@@ -494,6 +496,11 @@ def dispatch_sdk_message(
             if block_index is not None else None
           )
           bc.publish(_thinking_event(thinking, segment_id))
+        return current_session_id, None
+      if delta_type == "input_json_delta":
+        # Partial tool-input JSON, one event per fragment. The complete input
+        # arrives on the AssistantMessage's ToolUseBlock (`tool_input`), so
+        # the fragments carry nothing a client or the transcript uses.
         return current_session_id, None
       _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
       return current_session_id, None

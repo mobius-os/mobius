@@ -1797,14 +1797,32 @@ async def test_precompact_hook_publishes_context_compaction_marker(monkeypatch):
   } in bus.events
 
 
-def test_dispatch_input_json_delta_emits_unknown(monkeypatch):
+def test_per_token_provider_progress_is_not_broadcast(monkeypatch):
+  """Tool-input fragments and the thinking-token counter arrive once per
+  token. Nothing renders them, so broadcasting them only multiplied every
+  chat's stream and replay volume."""
   monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
   bus = _Bus()
-  msg = _stream_delta("input_json_delta", partial_json="{\"a\":")
-  dispatch_sdk_message(msg, bus, None)
+  dispatch_sdk_message(
+    _stream_delta("input_json_delta", partial_json="{\"a\":"), bus, None,
+  )
+  dispatch_sdk_message(
+    SystemMessage(
+      subtype="thinking_tokens",
+      data={"estimated_tokens": 1, "estimated_tokens_delta": 1},
+    ),
+    bus, None,
+  )
+  assert bus.events == []
+
+
+def test_dispatch_unrecognized_delta_emits_unknown(monkeypatch):
+  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
+  bus = _Bus()
+  dispatch_sdk_message(_stream_delta("signature_delta", signature="abc"), bus, None)
   assert len(bus.events) == 1
   assert bus.events[0]["type"] == "unknown_sdk_event"
-  assert bus.events[0]["kind"] == "stream:content_block_delta:input_json_delta"
+  assert bus.events[0]["kind"] == "stream:content_block_delta:signature_delta"
 
 
 def test_dispatch_unknown_delta_silent_when_disabled(monkeypatch):
