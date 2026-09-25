@@ -25,57 +25,25 @@
  */
 import { test, expect } from '@playwright/test'
 import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { mockDeliveryReady } from './_chatTestPrerequisites.mjs'
+import { createChat, sendMessage, waitForChatShell, waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
+  await mockDeliveryReady(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
+  await waitForChatShell(page)
 }
 
-async function newChat(page) {
-  // Target the navigation toggle by its accessible name, not a generic
-  // [aria-expanded] selector.
-  const navToggle = page.getByRole('button', { name: 'Toggle navigation' })
-  if ((await navToggle.getAttribute('aria-expanded')) !== 'true') {
-    await navToggle.click()
-  }
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  await page.evaluate(() => {
-    const newChatBtn = document.querySelector('.drawer__item--new')
-    if (newChatBtn) newChatBtn.click()
-  })
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  // New Chat may correctly reuse the already-visible untouched chat. Wait for
-  // the draft-first cover to hand off to whichever durable composer owns the
-  // destination rather than requiring a newly allocated identity.
-  await page.waitForFunction(() => {
-    const surface = document.querySelector('[data-chat-surface="painted"]')
-    const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
-    return !!surface?.getAttribute('data-chat-id')
-      && !document.querySelector('[data-new-chat-presentation]')
-      && !!composer
-      && !composer.disabled
-  }, undefined, { timeout: 10000 })
-}
-
-async function sendMessage(page, text) {
-  const input = page.locator('[data-chat-surface="painted"]')
-    .getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await input.press('Enter')
+// A send into a live turn is queued, so it adds no transcript row to wait on.
+async function queueMessage(page, text) {
+  const surface = page.locator('[data-chat-surface="painted"]')
+  await surface.getByRole('textbox', { name: 'Message Möbius…' }).fill(text)
+  await waitForComposerSendable(surface)
+  await page.keyboard.press('Enter')
 }
 
 // These tests mock the network via page.route and assert no service-worker
@@ -84,6 +52,7 @@ async function sendMessage(page, text) {
 // (the app-canvas and steer-queued specs both hit this class). Block it so
 // the mocks stay authoritative for the whole test.
 test.use({ serviceWorkers: 'block' })
+attachCleanup()
 
 test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
   test('Stop with a queued message clears the queue and never resurrects it during the stop POST', async ({ page }) => {
@@ -217,14 +186,14 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'handleStop')
     // Send the first message — kicks off the active turn (stream
     // stays open per the route mock above).
     await sendMessage(page, 'first message')
     // Wait until sending=true (Stop button rendered).
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     // Queue a second message while the first is still streaming.
-    await sendMessage(page, 'queued message')
+    await queueMessage(page, 'queued message')
     // Verify the queued tray rendered with the second message.
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
