@@ -69,6 +69,7 @@ from app.chat_titles import (
 from app.database import get_db
 from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal
+from app.helper_transcripts import read_helper_conversation
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
@@ -682,6 +683,19 @@ def _chat_detail_response(
       projected_message["wait_summaries"] = summaries
       next_page[relative_index] = projected_message
     page = next_page
+  from app.continuations import recovery_reasons_by_run_id
+  recovery_reasons = recovery_reasons_by_run_id(db, chat.id, [
+    message["id"] for message in page
+    if message.get("role") == "assistant" and isinstance(message.get("id"), str)
+  ])
+  if recovery_reasons:
+    next_page = list(page)
+    for relative_index, message in enumerate(page):
+      reason = recovery_reasons.get(message.get("id"))
+      if message.get("role") != "assistant" or reason is None:
+        continue
+      next_page[relative_index] = {**message, "continuation_reason": reason}
+    page = next_page
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   # The picker's current model must match what a message would actually use. A
@@ -778,8 +792,11 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  # Drawer projection only. ``has_messages`` is maintained with the transcript
-  # by the Chat model and the two writer bulk-update paths, so this hot query
+  # Drawer projection only, served entirely by the ``ix_chats_drawer`` covering
+  # index (migration 0067): a column read from the row itself would walk past
+  # the inline transcript. A new projected column needs a new migration that
+  # replaces the index under a new name (IF NOT EXISTS matches names only).
+  # ``has_messages`` is maintained with the transcript by the Chat model and the two writer bulk-update paths, so this hot query
   # never reads or decodes the potentially large ``messages`` JSON column.
   # Recents now INCLUDES project chats, each carrying its project so the drawer
   # can render a project chip. The LEFT JOIN attaches the owning live project by
@@ -1764,6 +1781,26 @@ def get_chat_activity(
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.get("/{chat_id}/helpers/{task_id}")
+def get_chat_helper_conversation(
+  chat_id: str,
+  task_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """One helper's own conversation, read-only, for the chat that spawned it."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  conversation = read_helper_conversation(db, chat_id, task_id)
+  if conversation is None:
+    raise HTTPException(
+      status_code=404, detail="This helper's conversation is not available.",
+    )
+  return conversation
+
+
 @router.get("/{chat_id}/activity-detail")
 def get_chat_activity_detail(
   chat_id: str,
@@ -2266,10 +2303,20 @@ def get_current_chat_usage(
     .first()
   )
   if run is None:
+    # Before this chat has settled any turn with the provider, its context is
+    # genuinely empty so far (live readings take over at the first model
+    # call). After one, missing usage stays unknown rather than claiming zero.
+    has_settled_turn = db.query(
+      db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.provider == provider,
+        models.ChatRun.status.notin_(models.NONTERMINAL_RUN_STATUSES),
+      ).exists()
+    ).scalar()
     return {
       "provider": provider,
       "provider_session_id": provider_session_id,
-      "input_tokens": None,
+      "input_tokens": None if has_settled_turn else 0,
       "context_window": None,
     }
   return {
@@ -2418,47 +2465,14 @@ async def delete_chat(
   # best-effort delivery layer; failure cannot roll back an owner-requested
   # deletion, and the released claim itself remains reclaimable by exact key.
   if released_claims:
-    from app.agent_coordination import (
-      DELIVERY_INTERRUPT,
-      deliver_peer_recipients,
-      send_work_claim_notice,
-    )
-    from app.agent_work_claims import acknowledge_notice
-    wake_recipients: list[str] = []
-    for released in released_claims:
-      if not released.interested_chat_ids:
-        continue
-      try:
-        send_work_claim_notice(
-          db,
-          owner_id=owner.id,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          sender_chat_id=chat_id,
-          recipients=released.interested_chat_ids,
-          body=(
-            f"Work claim {released.work_key} was released because its owning "
-            "chat was deleted. Reconcile the exact action with your Goal."
-          ),
-        )
-        acknowledge_notice(
-          db,
-          claim_id=released.claim_id,
-          revision=released.revision,
-          resolve_interests=True,
-        )
-        wake_recipients.extend(released.interested_chat_ids)
-      except Exception:
-        log.exception(
-          "Chat %s was deleted but claim %s followers were not notified",
-          chat_id,
-          released.claim_id,
-        )
-    if wake_recipients:
-      await deliver_peer_recipients(
-        recipients=list(dict.fromkeys(wake_recipients)),
-        delivery=DELIVERY_INTERRUPT, kind="handoff",
-        sender_chat_id=chat_id,
+    from app.agent_coordination import notify_settled_claims
+    try:
+      await notify_settled_claims(
+        db, owner_id=owner.id, sender_chat_id=chat_id, settled=released_claims,
+      )
+    except Exception:
+      log.exception(
+        "Chat %s was deleted but claim followers were not notified", chat_id,
       )
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.

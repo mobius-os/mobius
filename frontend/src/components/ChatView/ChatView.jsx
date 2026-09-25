@@ -1,6 +1,6 @@
 import { LocalAnswersContext } from './localAnswersContext.js'
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -41,13 +41,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus, { useDeliveryReady, useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useDeliveryReady } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
-  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -458,7 +457,6 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
-  const reachabilityPhase = useReachabilityPhase()
   const deliveryReady = useDeliveryReady()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
@@ -1786,6 +1784,9 @@ export default function ChatView({
     setChatInfo(newChatSession.chatInfo)
   }, [newChatSession?.chatInfo, newChatSession?.materialized, setChatInfo])
 
+  // The running turn's latest context reading. The pane is keyed by chat, so
+  // it never outlives this chat's stream.
+  const [liveContext, setLiveContext] = useState(null)
   const {
     streamItems,
     latestItemsRef,
@@ -1951,6 +1952,7 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
+    onContextUsage: setLiveContext,
     onSteeredIntoTurn: ({
       ts,
       content,
@@ -2839,10 +2841,14 @@ export default function ChatView({
       // activity, and report blocks. React cannot interrupt one DOM commit, so
       // prepare that hidden destination in prefix-complete frame-sized slices.
       // Each await yields a real paint opportunity to the outgoing chat and
-      // drawer. Only the final authoritative frame settles loading/readiness,
-      // preserving the existing hide-then-reveal scroll contract.
+      // drawer. Every commit also pays a fixed cost (the whole view renders),
+      // so while commits stay under ~48ms each one skips twice as many planned
+      // frames as the last. Only the final authoritative frame settles
+      // loading/readiness, preserving the existing hide-then-reveal contract.
       setInitialEntryPhase('preparing')
-      for (const frame of renderFrames) {
+      const lastFrame = renderFrames.length - 1
+      let stride = 1
+      for (let frameIndex = 0; ; frameIndex = Math.min(lastFrame, frameIndex + stride)) {
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
@@ -2852,7 +2858,12 @@ export default function ChatView({
         // React may batch state updates across async task yields and discard
         // every intermediate prefix. Commit each hidden slice explicitly; the
         // flush is scoped to this cold, off-screen preparation path only.
-        flushSync(() => applyMessagesToView(frame, refreshed.offset))
+        const commitStartedAt = performance.now()
+        flushSync(() => applyMessagesToView(
+          renderFrames[frameIndex], refreshed.offset,
+        ))
+        if (frameIndex === lastFrame) break
+        if (performance.now() - commitStartedAt < 48) stride *= 2
       }
       settleRuntime(runtime, refreshed.messages)
     }
@@ -3026,21 +3037,11 @@ export default function ChatView({
       })
   }
 
-  // A tall viewport or an unusually compact page can have older history but no
-  // scroll range. Fill only until scrolling becomes possible; subsequent pages
-  // remain user-driven and bounded.
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el || loadingOlder.current || loading || offset <= 0) return
-    if (olderHistoryShouldLoad(el)) loadOlderMessages()
-  })
-
   // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
   // writes scrollTop, so it lives outside the scroll controller's ownership
-  // gates. Recomputed from every scroll event (gesture or programmatic) and
-  // from every commit via the dependency-less layout effect below: a stream
-  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
-  // tick re-renders this component. The guarded setState keeps those
+  // gates. Recomputed from every scroll event and from the transcript
+  // ResizeObserver below: a stream growing beneath a held ANCHOR_AT emits no
+  // scroll event, but it does resize the list. The guarded setState keeps
   // recomputes render-free until the boolean actually flips.
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
@@ -3048,7 +3049,6 @@ export default function ChatView({
     const away = !!el && !isNearPhysicalBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
-  useLayoutEffect(updateJumpToLatest)
 
   function handleScroll() {
     updateJumpToLatest()
@@ -4987,15 +4987,23 @@ export default function ChatView({
     }
   }, [chatId, queryClient, refreshContributionOverview])
 
+  const chatProvider = chatInfo?.provider || null
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
-      settingsQueries.providerUsage.invalidate(queryClient)
+      // Only this chat's provider spent allowance. Refreshing every provider
+      // on every pane's turn end multiplied reads of rate-limited services.
+      if (chatProvider) {
+        settingsQueries.providerUsage.invalidate(queryClient, chatProvider)
+      }
       chatQueries.usage.invalidate(queryClient, chatId)
-      chatQueries.currentUsage.invalidate(queryClient, chatId)
+      // The settled run now records what the live reading showed; drop the
+      // live one only once that record is in, so the gauge never steps back.
+      void chatQueries.currentUsage.invalidate(queryClient, chatId)
+        .finally(() => setLiveContext(null))
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, turnActive, queryClient])
+  }, [chatId, chatProvider, turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -5237,6 +5245,38 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+  // Stay quiet while an automatic retry is scheduled; the timer is set in the
+  // same batch as the error phase, so this render already sees it.
+  const showActivationRetry = (
+    activationPhase === 'error'
+    && !loadError
+    && cachedActivationRecoveryRef.current.timer == null
+  )
+
+  // Transcript geometry reads force a synchronous layout of the whole
+  // transcript, so they follow its size (content, spacer, and viewport) rather
+  // than running after every commit. A tall viewport or an unusually compact
+  // page can have older history but no scroll range: fill only until
+  // scrolling becomes possible; later pages remain user-driven and bounded.
+  // Observation reports an initial size, so re-subscribing when loading or
+  // the loaded page changes re-checks both.
+  const hasTranscript = !showEmpty && !showLoadError
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) {
+      updateJumpToLatest()
+      return
+    }
+    const observer = new ResizeObserver(() => {
+      updateJumpToLatest()
+      if (!loadingOlder.current && !loading && offset > 0
+          && olderHistoryShouldLoad(el)) loadOlderMessages()
+    })
+    observer.observe(el)
+    observer.observe(el.querySelector('.chat__list'))
+    observer.observe(spacerRef.current)
+    return () => observer.disconnect()
+  }, [chatId, hasTranscript, loading, offset]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
@@ -5651,7 +5691,7 @@ export default function ChatView({
         ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
         : 'Usage limit reached. Automatic continuation available.'
     }
-    if (pendingResumeBlock.pause?.kind === 'restart') {
+    if (pendingResumeBlock.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual) {
       return 'Response paused for restart. Möbius will continue automatically.'
     }
     return 'Turn paused — Resume available.'
@@ -6118,15 +6158,6 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError
-            error={peerTimeline.error}
-            recoveryActive={
-              peerTimeline.recoveryActive
-              || restartPending
-              || reachabilityPhase !== ReachabilityPhase.ONLINE
-            }
-            onRetry={peerTimeline.retry}
-          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
@@ -6234,7 +6265,7 @@ export default function ChatView({
                           : limitResetElapsed
                             ? 'Usage available — tap to continue'
                             : 'Usage limit reached — continuation available'
-                        : pendingResumeBlock?.pause?.kind === 'restart'
+                        : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
                           : 'Turn paused — tap to resume'}
                     </button>
@@ -6272,6 +6303,24 @@ export default function ChatView({
             resourcePause={resourcePause}
             onCancel={handleCancelWait}
           />
+        )}
+        {showActivationRetry && (
+          <div
+            className="chat__offline-note chat__offline-note--error chat__activation-retry"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+          >
+            <span>Chat activation still needs a retry before sending.</span>
+            <button
+              type="button"
+              className="chat__empty-action"
+              onPointerDown={event => event.preventDefault()}
+              onClick={retryActivation}
+            >
+              Retry
+            </button>
+          </div>
         )}
         <ConnectionStatus
           error={connectionError}
@@ -6341,6 +6390,7 @@ export default function ChatView({
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
+              liveContext={liveContext}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover

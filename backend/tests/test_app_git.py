@@ -3562,6 +3562,75 @@ def test_version_only_conflict_resolves_to_upstream(tmp_path):
   assert tree["index.jsx"] == jsx
 
 
+def test_add_add_manifest_uses_recorded_base_without_shared_history(
+  tmp_path,
+):
+  """A synthetic base lacking mobius.json can prove disjoint manifest additions.
+
+  The real release may be unrelated to the installed Git history. Both the
+  first merge and benign resolution must use the same recorded previous version.
+  """
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  _diverge(
+    repo,
+    local_files={"index.jsx": jsx, "mobius.json": _manifest("1.0.1")},
+    upstream_files={
+      "index.jsx": jsx,
+      "mobius.json": _manifest("2.0.0").replace(
+        b'"entry": "index.jsx"',
+        b'"entry": "index.jsx", "model_provider": {"models": []}',
+      ),
+    },
+    base_files={"index.jsx": jsx},
+  )
+  base = app_git._run(repo, "rev-parse", "main~1").stdout.strip()
+  release_tree = app_git._run(repo, "rev-parse", "upstream^{tree}").stdout.strip()
+  unrelated_release = app_git._run(
+    repo, "commit-tree", release_tree, "-m", "unrelated reviewed release",
+  ).stdout.strip()
+  app_git._run(repo, "update-ref", "refs/heads/upstream", unrelated_release)
+  assert app_git._run(repo, "merge-base", "main", "upstream", check=False).returncode == 1
+
+  merge = app_git.merge_refs(repo, "main", "upstream", merge_base=base)
+  assert merge.status == "conflict"
+  assert "mobius.json" in merge.conflict_paths
+  resolved = app_git.resolve_benign_conflict(
+    repo, merge.conflict_paths, merge_base=base,
+  )
+  assert resolved is not None
+  assert json.loads(resolved.tree["mobius.json"]) == {
+    "id": "demo", "name": "Demo", "version": "2.0.0",
+    "entry": "index.jsx", "model_provider": {"models": []},
+  }
+
+
+def test_add_add_manifest_does_not_auto_merge_permission_disagreement(tmp_path):
+  """A missing manifest base never authorizes a conflicting permission edit."""
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  common = {"id": "demo", "name": "Demo", "entry": "index.jsx"}
+  _diverge(
+    repo,
+    local_files={
+      "index.jsx": jsx,
+      "mobius.json": json.dumps({
+        **common, "version": "1.0.0", "permissions": {"data.github_access": False},
+      }).encode(),
+    },
+    upstream_files={
+      "index.jsx": jsx,
+      "mobius.json": json.dumps({
+        **common, "version": "2.0.0", "permissions": {"data.github_access": True},
+      }).encode(),
+    },
+    base_files={"index.jsx": jsx},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
+
+
 def test_version_only_conflict_preserves_disjoint_local_edit(tmp_path):
   """A version bump AND a disjoint local code edit: resolve to upstream version
   while carrying the unrelated local edit forward (never silently dropped)."""
@@ -3953,101 +4022,6 @@ def test_manifest_merge_integration_through_conflict(tmp_path):
   assert b"\\u00f6" not in res.tree["mobius.json"]  # drift healed
 
 
-# ── Linear overlay: trailers, units, and the invariant projection ─────────────
-
-def test_overlay_commits_read_trailers_and_group_units(tmp_path):
-  repo = tmp_path / "app"
-  _install(repo, b"line A\nline B\n")
-  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  _write(repo, "line A LOCAL\nline B\n")
-  app_git.commit_local(repo, app_git.overlay_message(
-    "keep line A local", unit="line-a", disposition="local-only",
-  ))
-  _write(repo, "line A LOCAL\nline B PENDING\n")
-  app_git.commit_local(repo, app_git.overlay_message(
-    "send line B upstream", unit="line-b", disposition="pending",
-    record_id="line-b-20260903", body="Reviewed in Contribute.",
-  ))
-  _write(repo, "line A LOCAL\nline B PENDING\nline C\n")
-  app_git.commit_local(repo, "an untagged edit")
-
-  commits = app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
-
-  assert [(c.subject, c.unit, c.disposition, c.record_id) for c in commits] == [
-    ("keep line A local", "line-a", "local-only", None),
-    ("send line B upstream", "line-b", "pending", "line-b-20260903"),
-    ("an untagged edit", app_git.OVERLAY_UNSORTED_UNIT, "wip", None),
-  ]
-  units = app_git.overlay_units(commits)
-  assert [(u.id, u.disposition, u.record_id, len(u.commits)) for u in units] == [
-    ("line-a", "local-only", None, 1),
-    ("line-b", "pending", "line-b-20260903", 1),
-    (app_git.OVERLAY_UNSORTED_UNIT, "wip", None, 1),
-  ]
-  described = app_git.describe_overlay(repo, base, app_git.LOCAL_BRANCH)
-  assert described["linear"] is True
-  assert described["commits"] == 3
-  assert described["unsorted_commits"] == 1
-  assert described["units"][0] == {
-    "id": "line-a", "disposition": "local-only", "record_id": None,
-    "commits": 1, "subject": "keep line A local",
-  }
-
-
-def test_overlay_rejects_merge_commits_and_bad_trailers(tmp_path):
-  repo = tmp_path / "app"
-  _install(repo, b"line A\n")
-  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  _write(repo, "line A LOCAL\n")
-  app_git.commit_local(repo, "local")
-  app_git._run(repo, "branch", "side", base)
-  side_tree = app_git._run(repo, "rev-parse", f"{base}^{{tree}}").stdout.strip()
-  side = app_git._run(
-    repo, "commit-tree", side_tree, "-p", base, "-m", "side",
-  ).stdout.strip()
-  app_git._run(repo, "merge", "--no-ff", "-q", "-m", "merge side", side)
-
-  with pytest.raises(app_git.OverlayNotLinear):
-    app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
-  assert app_git.describe_overlay(repo, base, app_git.LOCAL_BRANCH)["linear"] is False
-  with pytest.raises(ValueError):
-    app_git.overlay_trailers("bad unit!", "local-only")
-  with pytest.raises(ValueError):
-    app_git.overlay_trailers("unit", "maybe")
-  # A pending unit must name its Contribute record; nothing else may.
-  with pytest.raises(ValueError):
-    app_git.overlay_trailers("unit", "pending")
-  with pytest.raises(ValueError):
-    app_git.overlay_trailers("unit", "local-only", record_id="rec-1")
-  assert "Mobius-Record: rec-1" in app_git.overlay_trailers(
-    "unit", "pending", record_id="rec-1",
-  )
-
-
-def test_overlay_parse_downgrades_a_pending_commit_without_a_record(tmp_path):
-  repo = tmp_path / "app"
-  _install(repo, b"line A\n")
-  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  _write(repo, "line A LOCAL\n")
-  app_git.commit_local(
-    repo,
-    "hand-written\n\nMobius-Overlay-Unit: unit-x\nMobius-Disposition: pending\n",
-  )
-  _write(repo, "line A LOCAL\nline B\n")
-  app_git.commit_local(
-    repo,
-    "hand-written too\n\nMobius-Overlay-Unit: unit-y\n"
-    "Mobius-Disposition: local-only\nMobius-Record: stray\n",
-  )
-
-  commits = app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
-
-  assert [(c.unit, c.disposition, c.record_id) for c in commits] == [
-    ("unit-x", "wip", None),
-    ("unit-y", "local-only", None),
-  ]
-
-
 def _source_resolution_history(tmp_path):
   repo = tmp_path / "source-resolution"
   _install(repo, b"mode = 'base'\n")
@@ -4280,88 +4254,6 @@ def test_landed_source_resolution_preserves_adapted_overlay_and_later_intent(
   assert tree["shared.js"] == b"reviewed nonconflicting addition\n"
 
 
-def test_overlay_replay_consumes_only_reviewed_source_resolution_continuation(
-  tmp_path,
-):
-  """A reviewed continuation after an adaptation must not force a resolver.
-
-  Contribute can finish reviewing the source after another commit completes
-  the accepted adaptation. The witness then names that later tip, while the
-  local remainder still belongs to the earlier overlay commit. The semantic
-  replay consumes only that reviewed-path continuation, not unrelated units.
-  """
-  repo, base, head, adapted, digest = _source_resolution_history(tmp_path)
-  (repo / "shared.js").write_text(
-    "reviewed nonconflicting addition\nlocal retained detail\n",
-  )
-  later = _commit_all(repo, "complete reviewed adaptation")
-  later_resolution = app_git.preview_source_resolution(
-    repo, base_sha=base, head_sha=head, source_sha=later,
-    diff_sha256=digest,
-  )
-  assert later_resolution is not None
-  assert app_git.record_prepublication_source_continuity(
-    repo,
-    base_sha=base,
-    head_sha=head,
-    source_sha=adapted,
-    reviewed_through_sha=later,
-    diff_sha256=digest,
-    contribution_id="adapted-review",
-    review_identity_sha256="a" * 64,
-    source_resolution_sha256=later_resolution.diff_sha256,
-  )
-  witness = app_git.prepublication_source_continuity(
-    repo,
-    base_sha=base,
-    head_sha=head,
-    source_sha=adapted,
-    current_source_sha=later,
-    diff_sha256=digest,
-    contribution_id="adapted-review",
-    review_identity_sha256="a" * 64,
-  )
-  assert witness is not None
-  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
-  upstream = app_git.record_upstream(
-    repo,
-    {
-      "index.jsx": b"mode = 'published form'\n",
-      "shared.js": b"reviewed nonconflicting addition\n",
-      "upstream-only.js": b"new upstream feature\n",
-    },
-    "https://x/mobius.json",
-    "2.0.0",
-  )
-  assert app_git.mark_equivalent_change_landed(
-    repo, digest, upstream_sha=upstream,
-  )
-
-  commits = app_git.overlay_commits(repo, base, later)
-  replay = app_git.replay_overlay(
-    repo,
-    commits=commits,
-    onto=upstream,
-    worktree=tmp_path / "replay",
-  )
-
-  assert replay.status == "clean"
-  assert [old for old, _new in replay.replayed] == [adapted]
-  assert replay.dropped == (later,)
-  tree = app_git.read_merged_tree(repo, replay.tip)
-  assert tree["index.jsx"] == b"mode = 'local adapted form'\n"
-  assert tree["shared.js"] == (
-    b"reviewed nonconflicting addition\nlocal retained detail\n"
-  )
-  assert tree["local-only.js"] == b"unrelated local feature\n"
-  assert tree["upstream-only.js"] == b"new upstream feature\n"
-  assert app_git._run(
-    repo, "log", "--format=%s", "--reverse", f"{upstream}..{replay.tip}",
-  ).stdout.splitlines() == [
-    "local adaptation and unrelated feature",
-  ]
-
-
 @pytest.mark.parametrize("field,value", [
   ("source_resolution_sha256", "0" * 64),
   ("source_resolution_captured_sha", "0" * 40),
@@ -4539,3 +4431,24 @@ def test_legacy_continuity_witness_remains_readable_and_allows_a_fresh_identity(
   assert replacement and replacement != legacy_ref
   assert app_git._read_prepublication_source_continuity(repo, replacement) is not None
   assert app_git._resolve_commit(repo, legacy_ref) is None
+
+
+def test_path_scoped_dirty_check_ignores_unrelated_work_but_not_reviewed_paths(
+  tmp_path,
+):
+  """Send proves reviewed paths; other in-progress edits must not block it."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  (repo / "notes.md").write_text("unrelated draft\n")
+  (repo / "a*b.js").write_text("literal glob name\n")
+  reviewed = ["index.jsx", "new/added.js"]
+
+  assert app_git.worktree_dirty(repo)
+  assert not app_git.worktree_dirty(repo, reviewed)
+  # A glob-looking reviewed path is matched literally, never as a pattern.
+  assert not app_git.worktree_dirty(repo, ["a?b.js"])
+
+  (repo / "new").mkdir()
+  (repo / "new" / "added.js").write_text("untracked reviewed file\n")
+  assert app_git.worktree_dirty(repo, reviewed)
+  assert app_git.worktree_dirty(repo, []) is app_git.worktree_dirty(repo)

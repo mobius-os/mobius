@@ -165,3 +165,38 @@ def test_notify_owner_does_not_quiet_app_update_copy(db, auth, monkeypatch):
 
   assert db.get(models.Notification, notif_id) is not None
   assert len(sent) == 1
+
+
+def test_chat_presence_suppresses_only_chat_sources_not_app_sources(
+  db, auth, monkeypatch,
+):
+  """A chat stream's watchers speak for that chat only. An app's source_id
+  names an app, so a chat stream sharing the id must not silence the app's
+  push; apps are watched through the shell's reported visible apps."""
+  from app.broadcast import create_broadcast, remove_broadcast
+
+  owner = _owner_with_subscription(db)
+  sent = []
+  monkeypatch.setattr(
+    "app.push.send_push",
+    lambda subscription_info, payload: sent.append(payload) or True,
+  )
+
+  async def go():
+    watched = create_broadcast("7")
+    _catch_up, queue = watched.subscribe()
+    try:
+      notify_owner(
+        db, owner.id, title="Agent reply", body=None,
+        source_type="agent", source_id="7",
+      )
+      notify_owner(
+        db, owner.id, title="App message", body=None,
+        source_type="app", source_id="7",
+      )
+    finally:
+      watched.unsubscribe(queue)
+      remove_broadcast("7")
+
+  asyncio.run(go())
+  assert [payload["title"] for payload in sent] == ["App message"]

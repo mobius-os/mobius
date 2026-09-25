@@ -251,3 +251,38 @@ def test_provider_only_resume_preserves_durable_goal_without_transcript_control(
     assert db.get(models.Chat, chat.id).messages == before
     assert "Verify recovery" in resume_context(db, run.id)
   assert result["history"][-1].content
+
+
+def test_chat_detail_marks_the_answer_a_recovery_run_started(
+  client, owner_token, db,
+):
+  """A recovery keeps its control off the transcript, so detail projects it."""
+  from app import models
+  from app.continuations import continuation_control_envelope
+
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  created = client.post("/api/chats", json={
+    "title": "Recovered work",
+    "messages": [
+      {"role": "user", "content": "begin", "ts": 1},
+      {"role": "assistant", "id": "rt-parked", "content": "paused", "ts": 2},
+      {"role": "assistant", "id": "auto-retry-next", "content": "resumed", "ts": 3},
+    ],
+  }, headers=auth)
+  assert created.status_code == 200, created.text
+  chat_id = created.json()["id"]
+  db.add_all([
+    models.ChatRun(id="rt-parked", chat_id=chat_id, status="completed"),
+    models.ChatRun(
+      id="auto-retry-next", chat_id=chat_id, status="completed",
+      continuation_json=continuation_control_envelope(
+        reason="restart", control_id="control-1",
+        supersedes_run_token="rt-parked",
+      ),
+    ),
+  ])
+  db.commit()
+
+  messages = client.get(f"/api/chats/{chat_id}", headers=auth).json()["messages"]
+  assert "continuation_reason" not in messages[1]
+  assert messages[2]["continuation_reason"] == "restart"

@@ -57,6 +57,13 @@ self.addEventListener('push', (e) => {
       title: a.title,
     })),
   }
+  // The server namespaces the tag by source, so a newer push from the same
+  // conversation replaces its predecessor instead of stacking. `renotify`
+  // still alerts for the replacement; browsers reject it without a tag.
+  if (data.tag) {
+    options.tag = data.tag
+    options.renotify = true
+  }
   e.waitUntil(self.registration.showNotification(data.title, options))
 })
 

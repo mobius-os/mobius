@@ -296,6 +296,10 @@ def test_core_requires_one_claim_for_convergent_cross_chat_work():
   assert "The first atomic claimant owns it" in core
   assert "must not duplicate its approval, mutation, or monitor" in core
   assert "Claims coordinate agents; they never grant the owner's authority" in core
+  # An approval-gated action costs one call: the approval key is the claim,
+  # and the owner's Goal lifecycle settles it without a trailing finish.
+  assert "`request_approval` with that key is the claim" in core
+  assert "Claims settle with their owner" in core
 
 
 def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():

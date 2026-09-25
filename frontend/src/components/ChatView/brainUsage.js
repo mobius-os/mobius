@@ -45,27 +45,48 @@ export function modelContextTokenCounts(registry, provider, model) {
   return { used: 0, maximum: Math.round(maximum) }
 }
 
+function positiveCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : null
+}
+
 export function resolvedContextTokenCounts(
   snapshot,
   registry,
   provider,
   model,
-  { noSession = false } = {},
+  { noSession = false, live = null } = {},
 ) {
+  const ceiling = modelContextTokenCounts(registry, provider, model)
+  const settled = snapshot?.provider === provider ? snapshot : null
+  // The running turn's latest model call is the freshest reading. Providers
+  // that do not report their window mid-turn keep the settled or catalog one.
+  if (
+    live?.provider === provider
+    && typeof live.input_tokens === 'number'
+    && Number.isFinite(live.input_tokens)
+  ) {
+    const maximum = positiveCount(live.context_window)
+      ?? positiveCount(settled?.context_window)
+      ?? ceiling?.maximum
+      ?? null
+    return maximum === null
+      ? null
+      : { used: Math.max(0, Math.round(live.input_tokens)), maximum }
+  }
   // A chat that has never started a provider session has no server snapshot
   // at all: the usage query stays disabled until a session exists. Before the
   // first turn the registry is the only honest source for the ceiling, and
   // the used count is genuinely zero.
-  if (noSession) return modelContextTokenCounts(registry, provider, model)
-  if (!snapshot || snapshot.provider !== provider) return null
-  const live = contextTokenCounts(snapshot)
-  if (live !== null) return live
-  // The registry can prove the ceiling, but only the server can prove that a
-  // chat has used no context yet. An established session with missing usage is
-  // unknown—not an empty context—and a failed request has no snapshot at all.
-  return snapshot.provider_session_id === null
-    ? modelContextTokenCounts(registry, provider, model)
-    : null
+  if (noSession) return ceiling
+  if (!settled) return null
+  const recorded = contextTokenCounts(settled)
+  if (recorded !== null) return recorded
+  // Only the server can prove that a chat has used no context yet: it reports
+  // 0 without a window before the first settled turn. After one, missing usage
+  // is unknown—not an empty context—and a failed request has no snapshot.
+  return settled.input_tokens === 0 ? ceiling : null
 }
 
 // Descending unit steps so a count keeps at most three digits before its

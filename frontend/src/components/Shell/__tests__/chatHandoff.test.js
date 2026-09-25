@@ -483,11 +483,12 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     'cached activation failures get bounded quiet retries at the activation owner')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
-    1,
-    'the manual Retry remains only for an uncached initial-load failure',
+    2,
+    'uncached and terminal cached activation failures retain manual recovery',
   )
-  assert.doesNotMatch(chatView, /chat__activation-retry|Chat activation needs a retry before sending\./,
-    'activation failures never add a retry warning above the composer')
+  assert.match(chatView,
+    /const showActivationRetry = \([\s\S]*activationPhase === 'error'[\s\S]*!loadError[\s\S]*cachedActivationRecoveryRef\.current\.timer == null[\s\S]*chat__activation-retry[\s\S]*Chat activation still needs a retry before sending\.[\s\S]*onClick=\{retryActivation\}/,
+    'quiet retries stay quiet while scheduled, then terminal failures explain the disabled composer and recover in place')
   assert.match(chatView,
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
     'only a classifier-approved complete cache may enter runtime reuse or fallback')

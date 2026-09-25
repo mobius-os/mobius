@@ -1338,6 +1338,18 @@ export const api = {
       { method: 'DELETE' },
     ),
   },
+  events: {
+    // `keepalive` lets the report sent as the page hides outlive the page
+    // being frozen or unloaded; a lost "hidden" report would withhold pushes.
+    reportVisibleApps: (subscriptionId, sequence, appIds) => apiFetch(
+      `/events/system/${encodeURIComponent(subscriptionId)}/visible-apps`,
+      {
+        method: 'POST',
+        keepalive: true,
+        body: JSON.stringify({ sequence, app_ids: appIds }),
+      },
+    ),
+  },
   notifications: {
     // Cursor pagination: `before` is the last row id of the previous page.
     list: ({ before, limit } = {}) => {
@@ -1376,6 +1388,11 @@ export const api = {
       body: JSON.stringify(plan),
     }),
     rebuild: (plan) => apiFetch('/platform/rebuild', {
+      method: 'POST',
+      body: JSON.stringify(plan),
+    }),
+    cancelPreparedUpdate: () => apiFetch('/platform/prepared-update', { method: 'DELETE' }),
+    parkForAgent: (plan) => apiFetch('/platform/park-for-agent', {
       method: 'POST',
       body: JSON.stringify(plan),
     }),

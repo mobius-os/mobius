@@ -135,12 +135,16 @@ def project_messages_for_detail(
   fetchable_tool_output_ids: set[str],
   live_message: dict | None = None,
 ) -> list[dict]:
-  """Remove non-live large-output excerpts that already have a sidecar.
+  """Project non-live tool blocks for a historical read.
 
   Large tool output is stored once in ``tool_outputs`` and exposed lazily when
   its disclosure opens.  The current live assistant message keeps its bounded
   excerpts so the streaming surface stays self-contained.  Historical messages
   do not need to repeat those excerpts merely because a newer turn is running.
+
+  A task (helper or background command) still marked running in a historical
+  message lost its terminal fact when its turn ended or was interrupted first,
+  so it reads as stopped rather than live forever.
 
   Copy only messages and blocks that change.  This keeps the persisted JSON and
   live-assistant snapshot immutable, and preserves the common small-chat path.
@@ -156,21 +160,36 @@ def project_messages_for_detail(
 
     next_blocks: list[dict] | None = None
     for block_index, block in enumerate(blocks):
-      if not (
-        isinstance(block, dict)
-        and block.get("type") == "tool"
-        and block.get("output_truncated") is True
+      if not isinstance(block, dict) or block.get("type") != "tool":
+        continue
+      next_block = block
+      if (
+        block.get("output_truncated") is True
         and isinstance(block.get("tool_use_id"), str)
         and block["tool_use_id"]
         and block["tool_use_id"] in fetchable_tool_output_ids
         and "output" in block
       ):
+        next_block = dict(block)
+        next_block.pop("output", None)
+      tasks = block.get("subagent")
+      if isinstance(tasks, dict) and any(
+        isinstance(task, dict) and task.get("status") == "running"
+        for task in tasks.values()
+      ):
+        next_block = {**next_block, "subagent": {
+          task_id: (
+            {**task, "status": "stopped"}
+            if isinstance(task, dict) and task.get("status") == "running"
+            else task
+          )
+          for task_id, task in tasks.items()
+        }}
+      if next_block is block:
         continue
 
       if next_blocks is None:
         next_blocks = list(blocks)
-      next_block = dict(block)
-      next_block.pop("output", None)
       next_blocks[block_index] = next_block
 
     if next_blocks is None:
@@ -529,6 +548,10 @@ def compact_messages_for_detail(
     sources = message_sources_for_detail(message)
     redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
     next_blocks: list[dict] = []
+    # Stored-block index of each emitted passthrough block (None for a compact
+    # run, which carries start/end). Recorded activity positions use stored
+    # coordinates, so a renumbered projection must say where each block came from.
+    next_raw: list[int | None] = []
     run: list[tuple[int, dict]] = []
     changed = False
     emitted_activity_projection = False
@@ -544,10 +567,13 @@ def compact_messages_for_detail(
             message_index=message_offset + page_index,
             binding=binding,
           ))
+          next_raw.append(None)
           changed = True
           emitted_activity_projection = True
         else:
-          next_blocks.extend(block for _, block in chunk)
+          for raw_index, block in chunk:
+            next_blocks.append(block)
+            next_raw.append(raw_index)
       run.clear()
 
     for raw_index, block in enumerate(blocks):
@@ -591,7 +617,14 @@ def compact_messages_for_detail(
         changed = True
       else:
         next_blocks.append(block)
+      next_raw.append(raw_index)
     flush()
+    if changed:
+      next_blocks = [
+        {**block, "raw_index": raw}
+        if raw is not None and isinstance(block, dict) else block
+        for block, raw in zip(next_blocks, next_raw, strict=True)
+      ]
 
     if not changed and not sources:
       continue

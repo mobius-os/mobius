@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
+import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import './SubagentChips.css'
 import { toolActivityLabel } from './toolActivityLabel.js'
+import HelperConversation from './HelperConversation.jsx'
+import { agentHelperEntries, elapsedLabel } from './toolTasks.js'
 
 // Helper ROWS for a delegating turn's background subagents, rendered inside an
 // ActivityStretch when its Task/Agent tool block carries a `.subagent` map
@@ -8,8 +11,7 @@ import { toolActivityLabel } from './toolActivityLabel.js'
 // same shape, so live/promoted/reloaded render identically). This component
 // owns ONLY the rows — the enclosing ActivityStretch header owns the "Working
 // in the background" label and the running/done count, so there is no header
-// here. Renders nothing when `.subagent` is absent or empty (Codex delegations
-// surface as an ordinary background-work activity, with no per-helper chips).
+// here. Renders nothing when `.subagent` holds no agent helper.
 
 // Owner-language: the chip name is ALWAYS the helper's `description` — never
 // task_type, never "subagent"/"Task". If a collab-op prefix ever leaks onto the
@@ -18,15 +20,6 @@ const OP_PREFIX_RE = /^(spawnAgent|wait|Task|Agent)\s*:\s*/i
 function helperName(description) {
   const raw = String(description || '').trim().replace(OP_PREFIX_RE, '').trim()
   return raw || 'Working in the background'
-}
-
-// Whole-second elapsed, compact ("8s", "1m 04s").
-function elapsedLabel(ms) {
-  const total = Math.max(0, Math.round(ms / 1000))
-  if (total < 60) return `${total}s`
-  const mins = Math.floor(total / 60)
-  const secs = total % 60
-  return `${mins}m ${String(secs).padStart(2, '0')}s`
 }
 
 // Best-effort elapsed. task_* events currently carry NO ts, so this is anchored
@@ -76,12 +69,9 @@ function StatusDot({ status }) {
   return <span className={`chat__subagent-dot ${cls}`} aria-hidden="true" />
 }
 
-export default function SubagentChips({ subagent }) {
-  // Guard each helper value: a malformed persisted block (e.g. {t1: null}) must
-  // not crash the whole chat render when a row dereferences helper.description.
-  const helpers = subagent && typeof subagent === 'object'
-    ? Object.entries(subagent).filter(([, h]) => h && typeof h === 'object')
-    : []
+export default function SubagentChips({ subagent, chatId, onInternalNav }) {
+  // Only agent helpers are rows; a shell task is its command's own row.
+  const helpers = agentHelperEntries({ subagent })
   const anyRunning = helpers.some(([, h]) => h.status === 'running')
 
   // One 1s ticker advances the elapsed labels while anything runs, stopping the
@@ -95,7 +85,11 @@ export default function SubagentChips({ subagent }) {
     return () => clearInterval(id)
   }, [anyRunning])
 
+  // { taskId, host }: the open helper and the chat pane its dialog covers.
+  const [opened, setOpened] = useState(null)
+
   if (helpers.length === 0) return null
+  const openHelper = opened && helpers.find(([taskId]) => taskId === opened.taskId)?.[1]
 
   return (
     <div className="chat__subagents-list">
@@ -105,11 +99,20 @@ export default function SubagentChips({ subagent }) {
         const isRunning = helper.status === 'running'
         const ms = elapsedMs(helper, now)
         const elapsed = ms != null ? elapsedLabel(ms) : null
+        const openable = !!chatId
+        const Row = openable ? 'button' : 'div'
         return (
-          <div
+          <Row
             key={taskId}
+            {...(openable && {
+              type: 'button',
+              'aria-label': `Open ${name} conversation`,
+              'aria-haspopup': 'dialog',
+              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat') }),
+            })}
             className={
               'chat__subagent'
+              + (openable ? ' chat__subagent--openable' : '')
               + (isRunning ? ' chat__subagent--running' : '')
               + (helper.status === 'failed' || helper.status === 'killed'
                   || helper.status === 'stopped'
@@ -132,9 +135,21 @@ export default function SubagentChips({ subagent }) {
               {sub && <span className="chat__subagent-sub">{sub}</span>}
             </span>
             {elapsed && <span className="chat__subagent-elapsed">{elapsed}</span>}
-          </div>
+            {openable && <ChevronRight className="chat__subagent-open" width={14} height={14} aria-hidden="true" />}
+          </Row>
         )
       })}
+      {openHelper && (
+        <HelperConversation
+          chatId={chatId}
+          taskId={opened.taskId}
+          name={helperName(openHelper.description)}
+          status={openHelper.status}
+          host={opened.host}
+          onClose={() => setOpened(null)}
+          onInternalNav={onInternalNav}
+        />
+      )}
     </div>
   )
 }

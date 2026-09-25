@@ -1,6 +1,6 @@
 /* Place recorded peer activity within an assistant response without renumbering its blocks. */
 import { marked } from 'marked'
-import { peerRecordTool, peerTime } from './peerTimeline.js'
+import { peerRecordTool, peerTime, storedBlockRange } from './peerTimeline.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { isActivityRunEntry } from './activityGrouping.js'
 
@@ -169,7 +169,7 @@ export function mergeAdjacentCompactActivityEntries(entries = []) {
         positioned_entries: item.positioned_entries || [],
         tool_count: Number.isInteger(item.tool_count)
           ? item.tool_count + (item.positioned_entries || [])
-            .filter(positioned => positioned?.item?.type === 'tool').length
+            .filter(positioned => ['tool', 'helper_result'].includes(positioned?.item?.type)).length
           : summary.filter(summaryEntry => summaryEntry?.item?.type === 'tool').length,
         source: item,
       }
@@ -192,6 +192,32 @@ export function mergeAdjacentCompactActivityEntries(entries = []) {
   return output
 }
 
+const sameStoredSource = (item, position) => (
+  (item?.source_message_id ?? null) === (position?.source_message_id ?? null)
+)
+
+// A boundary at either edge of a compact run is visually the same place, unless
+// it lies inside the prose that follows the run.
+const compactRunContains = (item, position) => {
+  const range = item?.type === 'activity' && Array.isArray(item.entries) && storedBlockRange(item)
+  if (!range || !sameStoredSource(item, position)) return false
+  const at = position.block_index
+  return at >= range.start && (
+    at < range.end || (at === range.end && !(position.text_offset > 0))
+  )
+}
+
+// Entry boundary for a recorded stored index, or undefined when this surface
+// carries no stored coordinates for the note's source (a raw stored message).
+function storedBoundaryIndex(entries, position) {
+  const located = entries.filter(({ item }) => sameStoredSource(item, position) && storedBlockRange(item))
+  if (!located.length) return undefined
+  const before = located.find(({ item }) => storedBlockRange(item).start >= position.block_index)
+  if (before) return before.idx
+  const lastAt = entries.indexOf(located.at(-1))
+  return entries[lastAt + 1]?.idx ?? Number.MAX_SAFE_INTEGER
+}
+
 export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
   if (!notes?.length) return entries
   const skipped = suppressedQuestionToolIndices(sourceBlocks)
@@ -203,15 +229,11 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
   const remainingNotes = []
   for (const note of notes) {
     const position = note.display_position
-    const compactEntry = note.type !== 'helper_result'
-      && Number.isInteger(position?.block_index)
-      && entries.find(({ item }) => (
-        item?.type === 'activity'
-        && Number.isInteger(item.start)
-        && Number.isInteger(item.end)
-        && position.block_index >= item.start
-        && position.block_index < item.end
-      ))
+    // Helper results are activity-run entries just like peer messages, so both
+    // join the compact run that owns their stored boundary. The run samples its
+    // entries; the recorded anchor may be absent, but its stored range is exact.
+    const compactEntry = Number.isInteger(position?.block_index)
+      && entries.find(({ item }) => compactRunContains(item, position))
     if (!compactEntry) {
       remainingNotes.push(note)
       continue
@@ -235,7 +257,11 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
   for (const note of remainingNotes) {
     const position = note.display_position
     if (!position || !Number.isInteger(position.block_index)) continue
-    const reference = position.block_key && projectedEntries.find(({ item }) => {
+    // Projections that renumber blocks declare stored coordinates. Otherwise
+    // the blocks are the stored ones, and the anchor key survives live/DB
+    // surface switches, including an older cached summary without a range.
+    const stored = storedBoundaryIndex(projectedEntries, position)
+    const reference = stored === undefined && position.block_key && projectedEntries.find(({ item }) => {
       const key = item.type === 'question' ? item.question_id
         : item.type === 'thinking' ? item.thinking_id : item.tool_use_id
       if (key && `${item.type}:${key}` === position.block_key) return true
@@ -246,14 +272,11 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
           return nestedKey && `${nested.type}:${nestedKey}` === position.block_key
         })
     })
-    const index = position.block_key
+    const index = stored ?? (position.block_key
       ? reference
-        // A compact activity run changes the anchor's top-level surface, not
-        // the boundary it recorded. Its distance still selects the matching
-        // later visible block.
         ? reference.idx + position.block_distance
         : projectedEntries.length + 1
-      : position.block_index - [...skipped].filter(i => i < position.block_index).length
+      : position.block_index - [...skipped].filter(i => i < position.block_index).length)
     const list = boundaries.get(index) || []
     list.push(note)
     boundaries.set(index, list)

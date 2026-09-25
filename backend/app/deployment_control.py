@@ -365,9 +365,14 @@ async def applied_release_digest(target_sha: str) -> str:
   """Recover an applied release's immutable image identity without retargeting.
 
   The account service exposes latest-release discovery, not historical lookup.
-  Its durable operation receipt can identify a failed or completed exact target;
-  otherwise discovery is useful only when it names the same applied revision.
+  The update's own progress record keeps the image it reviewed; the durable
+  operation receipt can identify a failed or completed exact target; otherwise
+  discovery is useful only when it names the same applied revision.
   """
+  progress = platform_update.platform_update_progress()
+  digest = str(progress.get("image_digest") or "")
+  if progress.get("target_sha") == target_sha and _DIGEST_RE.fullmatch(digest):
+    return digest
   status = await read_rebuild_status()
   digest = str(status.get("image_digest") or "")
   if status.get("expected_sha") == target_sha and _DIGEST_RE.fullmatch(digest):
@@ -604,17 +609,15 @@ async def _request_reviewed_rebuild_transaction(
 ) -> RebuildStatus | platform_update.PlatformApplyResult:
   """Drive the container rebuild bound to an owner-reviewed update target.
 
-  Railway cuts over to the exact digest-pinned GHCR image. Self-hosted applies
-  the reviewed source in place first — activating every live/restart part and
-  advancing the upstream marker to the target — then queues the host helper to
-  rebuild the pinned ``sha-<target>`` image. Both deployments finish an
-  image-level update from the single reviewed-update confirmation instead of a
-  separate Apply followed by a manual Rebuild.
+  The update is prepared and checked on a frozen copy of the live source (or
+  was already prepared by a resolver); the live checkout keeps serving until
+  the cutover's shutdown drain swaps the checked update in, so nothing edited
+  meanwhile enters it. Railway then cuts over to the exact digest-pinned GHCR
+  image; self-hosted queues the host helper for the pinned ``sha-<target>``.
 
   Returns the :class:`RebuildStatus` of the queued/started replacement, or the
-  :class:`~app.platform_update.PlatformApplyResult` when the in-place source
-  apply stopped at a conflict or rollback (nothing was rebuilt; the review
-  sheet renders that outcome instead).
+  :class:`~app.platform_update.PlatformApplyResult` when preparing stopped at a
+  conflict (parked for the resolver; nothing was rebuilt).
   """
   deployment = platform_activation.deployment_kind()
   if deployment == "railway" and not image_digest:
@@ -642,6 +645,9 @@ async def _request_reviewed_rebuild_transaction(
         ),
         "update_plan_target_missing": (
           "The reviewed release source is unavailable. Refresh and try again shortly."
+        ),
+        "finish_update_first": (
+          "Another update is not finished yet. Finish it in Settings before starting a new one."
         ),
       }
       raise DeploymentControlError(
@@ -684,58 +690,43 @@ async def _request_reviewed_rebuild_transaction(
     if reviewed["blockers"]:
       _raise_local_runtime_blockers(reviewed["blockers"])
 
-  await asyncio.to_thread(validate_reviewed_release)
-  # Both deployment types prepare persistent source explicitly. A replacement
-  # image no longer asks startup to fetch or choose the source release for it.
-  _ensure_can_rebuild(await read_rebuild_status())
-  started.set()
-  apply_result = await platform_update.apply_platform_update(
-    db, plan_id=plan_id, current_sha=current_sha,
-    target_sha=target_sha, image_digest=image_digest,
-    allow_image_activation=True,
-  )
-  state = apply_result.get("state")
-  if state in (
-    platform_update.PlatformUpdateState.CONFLICT.value,
-    platform_update.PlatformUpdateState.ROLLED_BACK.value,
+  prepared = platform_update.read_prepared_update()
+  final_check: Callable[[], None]
+  if (
+    prepared and prepared["state"] == "prepared"
+    and prepared["target"] == target_sha
   ):
-    return apply_result
-  if state not in {"activation_needed", "restart_needed", "up_to_date"}:
-    raise DeploymentControlError(
-      "source_install_unconfirmed",
-      "The reviewed source installation could not be confirmed. Review its status before updating the container.",
-      status_code=409,
-    )
-
-  # The source tip changed by our own Apply is expected. Bind final validation
-  # to that exact result, not an arbitrary new snapshot after a concurrent edit.
-  current_sha = apply_result.get("merge_commit") or current_sha
-  plan_id = platform_update._update_plan_id(current_sha, target_sha, image_digest)
-  try:
+    # A resolver already prepared and checked this exact release.
+    started.set()
+    final_check = lambda: None  # noqa: E731
+  else:
     await asyncio.to_thread(validate_reviewed_release)
-    if deployment != "railway":
-      return await _request_self_hosted_rebuild(
-        expected_sha=target_sha, final_check=validate_reviewed_release,
-      )
-    return await _request_managed_rebuild(
-      target_sha, image_digest, final_check=validate_reviewed_release,
+    _ensure_can_rebuild(await read_rebuild_status())
+    started.set()
+    # Prepare from a snapshot of the live source; the live checkout keeps
+    # serving it until the cutover swaps the checked update in.
+    outcome = await platform_update.prepare_platform_update(
+      plan_id=plan_id, current_sha=current_sha,
+      target_sha=target_sha, image_digest=image_digest,
     )
-  except DeploymentControlError as exc:
-    if exc.code not in {
-      "update_plan_stale", "update_plan_invalid", "activation_changed",
-    }:
-      raise
-    # Apply already installed the reviewed source. A later edit can invalidate
-    # the final dispatch plan, but this is no longer the mutation-free
-    # "review again" outcome used before Apply. Keep the partial success
-    # distinct so Settings can recover after reloading authoritative status.
+    if outcome.get("state") != "prepared":
+      return outcome  # parked for its resolver; nothing was prepared
+    prepared = outcome
+    final_check = validate_reviewed_release
+  if not prepared["requires_image"]:
     raise DeploymentControlError(
-      "update_applied_rebuild_pending",
-      "The reviewed source was applied, but the container rebuild was not "
-      "queued because the source changed again. Ask Möbius to inspect the "
-      "current update state and help finish it.",
+      "activation_changed",
+      "This update no longer requires a container rebuild. Refresh the review.",
       status_code=409,
-    ) from exc
+    )
+  if deployment != "railway":
+    return await _request_self_hosted_rebuild(
+      expected_sha=target_sha, final_check=final_check,
+    )
+  return await _request_managed_rebuild(
+    target_sha, image_digest or prepared["image_digest"] or "",
+    final_check=final_check,
+  )
 
 
 def _raise_local_runtime_blockers(blockers: list[str]) -> None:

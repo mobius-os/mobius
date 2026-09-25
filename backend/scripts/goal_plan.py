@@ -25,6 +25,16 @@ def _settings() -> tuple[str, str, str]:
   return base, token, chat_id
 
 
+# The server names what is wrong by code; this helper names its own flags.
+_REMEDIES = {
+  "no_active_goal": "Promote first, or run `list` then `resume ID`.",
+  "progress_incomplete": (
+    "If every repetition is done, record it in the same update: "
+    "update {task_id} --progress {total}/{total} --status completed"
+  ),
+}
+
+
 def _request(method: str, path: str, body=None):
   base, token, _ = _settings()
   data = None if body is None else json.dumps(body).encode("utf-8")
@@ -45,6 +55,14 @@ def _request(method: str, path: str, body=None):
       detail = json.loads(raw).get("detail", raw)
     except json.JSONDecodeError:
       detail = raw
+    if isinstance(detail, dict):
+      hint = _REMEDIES.get(detail.get("code"), "")
+      try:
+        hint = hint.format(**detail)
+      except (KeyError, IndexError, ValueError):
+        hint = ""
+      message = str(detail.get("message", "")).rstrip(".")
+      detail = f"{message}. {hint}" if hint else message
     raise SystemExit(f"goal-plan request failed ({exc.code}): {detail}") from exc
   except URLError as exc:
     raise SystemExit(f"goal-plan request failed: {exc.reason}") from exc
@@ -161,6 +179,10 @@ def main() -> int:
   checkpoint_parser.add_argument("--next-action", required=True)
   complete_parser = sub.add_parser("complete", help="validate and record the verified outcome; no preflight required")
   complete_parser.add_argument("--result", required=True)
+  complete_parser.add_argument(
+    "--finished", action="append", default=[], metavar="WORK_KEY",
+    help="an exact claimed action this Goal performed; other claims are released",
+  )
   update_parser = sub.add_parser("update", help="advance one task")
   update_parser.add_argument("task_id")
   update_parser.add_argument(
@@ -195,6 +217,8 @@ def main() -> int:
     body = {"goal_id": goal["id"], "expected_revision": goal["revision"]}
     if args.command == "complete":
       body["result"] = args.result
+      if args.finished:
+        body["finished_claims"] = args.finished
     else:
       body.update(checkpoint=args.summary, next_action=args.next_action)
     print(json.dumps(_request("PATCH", f"/api/chats/{chat_id}/goal", body)))
@@ -213,6 +237,11 @@ def main() -> int:
     if goal is None:
       raise SystemExit("No Goal record to check.")
     print(f"Goal status: {goal['status']} (read-only; unchanged).")
+    if payload.get("plan_unreadable"):
+      raise SystemExit(
+        "The saved todo plan is unreadable, so the Goal cannot complete. "
+        "Replace the complete plan with `set`."
+      )
     blockers = _completion_blockers(current)
     if blockers:
       raise SystemExit(
@@ -264,8 +293,8 @@ def main() -> int:
       parser.error("update needs --status, --note, --result, or --progress")
 
   payload = _attach_for_write(chat_id)
-  current = payload.get("plan") if isinstance(payload, dict) else None
-  revision = int((current or {}).get("revision", 0))
+  # The Goal record carries the revision even when its saved plan is unreadable.
+  revision = int(payload["goal"]["revision"])
   if args.command == "set":
     result = _request(
       "PUT", f"/api/chats/{chat_id}/goal-plan",

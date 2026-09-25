@@ -149,6 +149,12 @@ def validate_saved_answer(
     spec = specs[key]
     option_list = spec.get("options", [])
     option_ids = [option.get("id") for option in option_list]
+    if option_list and not any(option_ids):
+      # Cards saved before every option carried an identity, and native
+      # provider questions, are answered by their label text alone.
+      raise AnswerConflict(
+        "This card's options have no saved identities; answer with the option label only."
+      )
     if (any(not isinstance(identity, str) or not identity for identity in option_ids)
         or any(not isinstance(option.get("label"), str) for option in option_list)
         or len(set(option_ids)) != len(option_ids)):

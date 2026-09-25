@@ -67,6 +67,7 @@ EventType = Literal[
   "thinking",
   "text_boundary",
   "context_compacted",
+  "context_usage",
   "tool_start",
   "tool_input",
   "tool_output",
@@ -259,9 +260,8 @@ def _persisted_block(block: dict) -> dict:
 # context_compacted, tool_start, error, question, secure_input_request.
 #
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
-#  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
-#    `ping`, `signature_delta`, `content_block_stop`, `input_json_delta`), plus
-#    usage / session_init / done / catch_up_done / queued_turn_starting. These
+#  - Bookkeeping events such as
+#    context_usage / session_init / done / catch_up_done / queued_turn_starting. These
 #    interleave BETWEEN successive thinking_delta events; closing the run on them
 #    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
 #    second" blocks (even splitting mid-word). They change no block, so they must
@@ -744,6 +744,10 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
     if event_type == "task_start":
       if event.get("description"):
         entry["description"] = event["description"]
+      # The live reducer keeps the kind too; a reloaded row needs it to tell
+      # an agent (it has a conversation to open) from a shell task.
+      if event.get("task_type"):
+        entry["task_type"] = str(event["task_type"])[:64]
       # A re-delivered start (catch-up replay, or an out-of-order start after
       # the done) must NOT downgrade an already-terminal helper back to running
       # — mirrors the frontend reducer's monotonic guard.
@@ -1006,7 +1010,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return False
 
   # Only a NEW visible content block ends a thinking run. Closing on transparent
-  # bookkeeping events (unknown_sdk_event/ping/signature_delta, usage, done, …)
+  # bookkeeping events (usage, done, …)
   # is what fragmented one reasoning pass into dozens of tiny blocks.
   if event_type in _THINKING_INTERRUPTING_TYPES:
     _close_trailing_thinking(assistant_blocks)

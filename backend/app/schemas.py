@@ -897,6 +897,14 @@ class NotificationSendRequest(BaseModel):
   # with just {title, body}. Apps should pass 'app' + their id.
   source_type: str = "agent"
   source_id: str | None = None
+  # Groups this notification with earlier ones carrying the same tag (e.g. one
+  # conversation): a newer push replaces the older OS notification instead of
+  # stacking beside it. push.py namespaces it by source before delivery, so a
+  # sender can only ever replace its own notifications. Same shape as a shell
+  # app intent (sw-push.js _safeTarget), so an app can reuse its target intent.
+  tag: str | None = Field(
+    default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$",
+  )
 
   @field_validator("target")
   @classmethod

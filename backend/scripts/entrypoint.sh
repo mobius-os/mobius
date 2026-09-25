@@ -136,6 +136,9 @@ find /app/shell-src -path '*/node_modules' -prune -o -exec chmod a+rX {} + 2>/de
 # before the platform import probe because app.main loads settings at import.
 if [ -z "$SECRET_KEY" ]; then
   if [ -f /data/.secret-key ]; then
+    # Re-assert owner-only access on every boot, not only at creation: an
+    # older copy, restore, or permission fallback can leave it world-readable.
+    chmod 600 /data/.secret-key 2>/dev/null || true
     export SECRET_KEY=$(cat /data/.secret-key)
   else
     export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
@@ -259,6 +262,31 @@ _platform_import_probe_dir() {
 
 _platform_import_probe() {
   _platform_import_probe_dir /data/platform/backend
+}
+
+# A checked platform update is swapped in at shutdown and its previous state
+# (previous version plus edits made meanwhile) saved as one commit. If the
+# swapped-in version still fails its startup check, return to that commit so
+# the owner keeps a working Möbius; the server then reports the update failed.
+_platform_revert_swap() {
+  _swap_record=/data/.platform-prepared-update.json
+  [ -f "$_swap_record" ] || return 1
+  _swap_late="$(python3 -P -c 'import json, sys
+r = json.load(open(sys.argv[1]))
+print(r.get("late") or "" if r.get("state") == "swapped" else "")' "$_swap_record" 2>/dev/null)" || return 1
+  case "$_swap_late" in *[!0-9a-f]*|"") return 1 ;; esac
+  [ "${#_swap_late}" -eq 40 ] || return 1
+  echo "PLATFORM LAYER WARNING: the updated version failed its startup check; returning to the previous version." >&2
+  su -s /bin/sh mobius -c "git -C /data/platform reset -q --hard $_swap_late" || return 1
+  python3 -P -c 'import json, os, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["state"] = "reverted"
+temp = path + ".tmp"
+with open(temp, "w") as handle:
+  handle.write(json.dumps(record, sort_keys=True))
+os.replace(temp, path)' "$_swap_record" || return 1
+  chown mobius:mobius "$_swap_record" 2>/dev/null || true
 }
 
 _platform_clear_empty_target() {
@@ -502,6 +530,9 @@ else
   if _platform_git_valid; then
     if _platform_import_probe; then
       echo "Platform layer: import probe OK; serving /data/platform/backend."
+      _platform_use_direct
+    elif _platform_revert_swap && _platform_import_probe; then
+      echo "Platform layer: returned to the previous version; serving /data/platform/backend."
       _platform_use_direct
     else
       echo "PLATFORM LAYER WARNING: import probe failed for /data/platform." >&2
@@ -883,10 +914,8 @@ fi
 # system app; base boot must not activate them.
 python3 /app/scripts/init_chat_summaries.py
 
-# Reconcile platform-owned skills against their recorded baseline. Untouched
-# copies advance with the image; owner-edited copies remain in place for review.
-# The system prompt (skill/core.md) points at this mixed ownership directory.
-python3 /app/scripts/init_skills.py
+# Platform-owned skills are reconciled by the served server at startup
+# (app/startup.py), so they follow the running source rather than this image.
 
 # Theme: no starter file written here. /api/theme reads
 # /data/shared/theme.css when present, otherwise falls through to

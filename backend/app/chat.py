@@ -583,6 +583,19 @@ async def _finish_run(
       "FinishRun did not persist chat_id=%s (reconciliation will repair)",
       chat_id, exc_info=True,
     )
+    return
+  _after_terminal_status(chat_id, terminal_status)
+
+
+def _after_terminal_status(chat_id: str, terminal_status: str) -> None:
+  """Post-commit follow-up for a durable Stop of this chat's work.
+
+  FinishRun released the stopped Goal's work claims in its own commit; the
+  followers are woken off this lifecycle path, which may still hold locks.
+  """
+  if terminal_status == "stopped":
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
 
 
 async def _record_run_metrics(
@@ -656,6 +669,7 @@ async def _finish_run_strict(
     )
   )
   await _await_ack(ack)
+  _after_terminal_status(chat_id, terminal_status)
 
 
 async def _recover_wedged_run_strict(
@@ -893,8 +907,12 @@ def reconcile_startup_chats(
       # `pause.kind='restart'` marks this as a benign restart pause (not a
       # failure) so the card renders in the calm "Paused" family rather than
       # the danger-red error styling — a restart is a maintenance event, not
-      # something the turn did wrong.
-      err_block = _pause_note(note, kind="restart")
+      # something the turn did wrong. A crash or an ineligible restart is
+      # stamped `manual` so the card does not promise a continuation.
+      restart_pause = {"kind": "restart"}
+      if not restart_eligible:
+        restart_pause["manual"] = True
+      err_block = {**_pause_note(note, kind="restart"), "pause": restart_pause}
       live_id = (
         chat.live_assistant.get("id")
         if isinstance(chat.live_assistant, dict) else None
@@ -966,7 +984,7 @@ def reconcile_startup_chats(
             if block.get("type") != "question" or block.get("answers"):
               break
             trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
+          paused["pause"] = dict(restart_pause)
           if trailing_open_start < len(blocks):
             paused.pop("resumable", None)
             blocks.insert(trailing_open_start, paused)
@@ -2269,6 +2287,11 @@ async def sweep_reset_parks(
   resolved: list[str] = []
   restart_deferred = False
   if draining:
+    return ContinuationSweepResult()
+  from app.platform_update import late_edits_pending
+  if late_edits_pending():
+    # Chats resume only once edits made on the previous platform source are
+    # back; a resolver chat started meanwhile is not a park and runs normally.
     return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
   limit_resume_started = False
@@ -4614,7 +4637,7 @@ async def run_chat(
         )
     # Parent progress must not wait on optional summary generation.
     try:
-      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+      if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
         from app.delegations import wake_parent_after_child_settled
         await wake_parent_after_child_settled(chat_id)
     except Exception:
@@ -4657,11 +4680,15 @@ async def run_chat(
 
 # The durable, settled, non-resuming terminals where a delegation child's
 # result is final and its ChatRun terminal status has committed (FinishRun ran
-# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
-# is excluded — the terminal isn't durable there; the boot reconcile covers it.
-_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+# inside drain_and_release before the disposition returned). A Stop is final
+# too: the settle hook records where the parent was, and its own status guard
+# decides whether to wake. FAILED_LEAVE_MARKER is excluded — the terminal
+# isn't durable there; the boot reconcile covers it. Parked children remain
+# resumable, not settled.
+_DELEGATION_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
 })
 
 # Reclaim caches only after this exact physical run reached a settled boundary.

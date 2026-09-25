@@ -37,6 +37,7 @@ _CLAUDE_EXTRA_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/organizations/"
   "{organization_uuid}/overage_spend_limit"
 )
+_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_RESET_USAGE_URL = (
   "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 )
@@ -46,8 +47,15 @@ _CLAUDE_RESET_URL = (
 )
 _CLAUDE_RESET_PROGRAM = "cedar_ember"
 _PROVIDER_TIMEOUT_SECONDS = 12.0
-_PROVIDER_USAGE_FRESH_SECONDS = 2.0
+# Every open chat pane refreshes its provider's allowance when a turn ends, so
+# parallel chats and browsers converge on this read. Claude's usage service
+# rate-limits it; one reading per half minute is ample for a gauge.
+_PROVIDER_USAGE_FRESH_SECONDS = 30.0
 _PROVIDER_USAGE_STALE_SECONDS = 10 * 60.0
+# When a provider refuses the read (HTTP 429 without a usable Retry-After), the
+# next probe waits this long, doubling per consecutive refusal up to the stale
+# bound. Probing again sooner only extends the refusal.
+_PROVIDER_USAGE_REFUSED_BACKOFF_SECONDS = 60.0
 # Claude's usage-only endpoint can briefly return no windows while ordinary
 # chat authentication and model discovery remain healthy. Retry only this
 # observed cold-read failure; Codex already owns a bounded protocol timeout and
@@ -63,9 +71,28 @@ _CLAUDE_COLD_RETRY_DELAYS = (0.25, 0.75)
 @dataclass
 class _CachedProviderUsage:
   observed_at: float
-  checked_at: float
+  # Monotonic time before which callers reuse ``snapshot`` without probing:
+  # the fresh window after a read, or a backoff after the provider refused.
+  next_check_at: float
   snapshot: dict[str, Any]
   stale: bool = False
+  consecutive_refusals: int = 0
+
+
+class ProviderUsageRefused(RuntimeError):
+  """The provider rate-limited the usage read itself (not the chat)."""
+
+  def __init__(self, provider_id: str, retry_after: float | None):
+    super().__init__(f"{provider_id} usage read rate-limited")
+    self.retry_after = retry_after
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+  try:
+    value = float(response.headers.get("retry-after", ""))
+  except ValueError:
+    return None
+  return value if value > 0 else None
 
 
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
@@ -531,12 +558,29 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    response = await client.get(_CLAUDE_RESET_USAGE_URL, headers=headers)
-    response.raise_for_status()
-    return normalize_claude_usage(
-      response.json(),
-      subscription_type=subscription_type,
-    )
+    for delay in (0.0, *_CLAUDE_COLD_RETRY_DELAYS):
+      if delay:
+        await asyncio.sleep(delay)
+      # The reset-offer read skips spend data, so paid extra usage comes from
+      # the ordinary read; the reset read contributes only its offer.
+      responses = await asyncio.gather(
+        client.get(_CLAUDE_USAGE_URL, headers=headers),
+        client.get(_CLAUDE_RESET_USAGE_URL, headers=headers),
+      )
+      for response in responses:
+        if response.status_code == 429:
+          raise ProviderUsageRefused("claude", _retry_after_seconds(response))
+        response.raise_for_status()
+      usage, reset = (response.json() for response in responses)
+      if isinstance(usage, dict) and isinstance(reset, dict):
+        usage = {**usage, "cedar_ember": reset.get("cedar_ember")}
+      snapshot = normalize_claude_usage(
+        usage,
+        subscription_type=subscription_type,
+      )
+      if snapshot.get("state") != "unavailable":
+        break
+    return snapshot
 
 
 async def set_claude_extra_usage(
@@ -1079,16 +1123,24 @@ def _cache_key(provider_id: str, data_dir: str) -> tuple[str, str]:
   return (str(Path(data_dir).resolve()), provider_id)
 
 
-def _cached_usage(
-  key: tuple[str, str],
-  *,
-  max_age: float,
-) -> dict[str, Any] | None:
+def _stale_reading_is_servable(cached: _CachedProviderUsage, now: float) -> bool:
+  """A fallback reading never outlives the stale bound or a provider reset."""
+  return (
+    cached.snapshot.get("state") == "ready"
+    and now - cached.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
+    and _snapshot_resets_are_current(cached.snapshot)
+  )
+
+
+def _held_usage(key: tuple[str, str]) -> dict[str, Any] | None:
+  """The answer to give without probing, or None when a probe is due."""
   cached = _provider_usage_cache.get(key)
-  if cached is None:
+  now = time.monotonic()
+  if cached is None or now >= cached.next_check_at:
     return None
-  if time.monotonic() - cached.checked_at > max_age:
-    return None
+  if cached.stale and not _stale_reading_is_servable(cached, now):
+    # Still inside a refusal backoff, but the old reading has expired.
+    return {**_unavailable(cached.snapshot.get("plan_label")), "stale": False}
   snapshot = copy.deepcopy(cached.snapshot)
   snapshot["stale"] = cached.stale
   return snapshot
@@ -1112,20 +1164,6 @@ def _snapshot_resets_are_current(
   return True
 
 
-async def _fresh_provider_snapshot(
-  provider_id: str,
-  data_dir: str,
-) -> dict[str, Any]:
-  delays = _CLAUDE_COLD_RETRY_DELAYS if provider_id == "claude" else ()
-  snapshot = await _provider_snapshot(provider_id, data_dir)
-  for delay in delays:
-    if snapshot.get("state") != "unavailable":
-      break
-    await asyncio.sleep(delay)
-    snapshot = await _provider_snapshot(provider_id, data_dir)
-  return snapshot
-
-
 async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
   provider = providers.PROVIDERS[provider_id]
   if provider.check_auth(data_dir) is not None:
@@ -1142,19 +1180,23 @@ async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
       return await _fetch_codex_usage(data_dir)
     if provider_id == "mobius":
       return await _fetch_mobius_usage()
+  except ProviderUsageRefused:
+    raise
   except Exception as exc:  # best-effort read; Settings must still open
     log.warning("%s plan usage unavailable: %s", provider_id, exc)
-    if provider_id == "mobius":
-      plan = "Möbius"
-    else:
-      subscription = (
-        providers.claude_subscription_type(data_dir)
-        if provider_id == "claude"
-        else providers.codex_subscription_type(data_dir)
-      )
-      plan = plan_label(subscription)
-    return _unavailable(plan)
+    return _unavailable(_configured_plan_label(provider_id, data_dir))
   return _unavailable()
+
+
+def _configured_plan_label(provider_id: str, data_dir: str) -> str | None:
+  if provider_id == "mobius":
+    return "Möbius"
+  subscription = (
+    providers.claude_subscription_type(data_dir)
+    if provider_id == "claude"
+    else providers.codex_subscription_type(data_dir)
+  )
+  return plan_label(subscription)
 
 
 def configured_plan_labels(data_dir: str) -> dict[str, str]:
@@ -1182,33 +1224,49 @@ async def read_provider_usage(
   A connected provider's usage service is advisory and can fail independently
   from chat authentication. A recent successful observation is safer and more
   useful than erasing the gauge after one failed probe, but it must never live
-  past either the stale bound or a provider reset.
+  past either the stale bound or a provider reset. Every answer is held until
+  its entry's ``next_check_at``: the fresh window after a read, or a growing
+  backoff after the provider refuses the read, so parallel chats and browsers
+  never turn one refusal into a sustained rate limit.
   """
   key = _cache_key(provider_id, data_dir)
-  cached = None if force_refresh else _cached_usage(
-    key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
-  )
-  if cached is not None:
-    return cached
+  held = None if force_refresh else _held_usage(key)
+  if held is not None:
+    return held
 
   lock = _provider_usage_locks.setdefault(key, asyncio.Lock())
   async with lock:
     # Another request may have refreshed while this one waited.
-    cached = None if force_refresh else _cached_usage(
-      key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
-    )
-    if cached is not None:
-      return cached
+    held = None if force_refresh else _held_usage(key)
+    if held is not None:
+      return held
 
-    snapshot = await _fresh_provider_snapshot(provider_id, data_dir)
+    prior = _provider_usage_cache.get(key)
+    refusals = 0
+    try:
+      snapshot = await _provider_snapshot(provider_id, data_dir)
+      next_check_at = time.monotonic() + _PROVIDER_USAGE_FRESH_SECONDS
+    except ProviderUsageRefused as refused:
+      refusals = (prior.consecutive_refusals if prior else 0) + 1
+      backoff = refused.retry_after or min(
+        _PROVIDER_USAGE_REFUSED_BACKOFF_SECONDS * 2 ** (refusals - 1),
+        _PROVIDER_USAGE_STALE_SECONDS,
+      )
+      log.info(
+        "%s usage read rate-limited; next probe in %.0fs",
+        provider_id, backoff,
+      )
+      snapshot = _unavailable(_configured_plan_label(provider_id, data_dir))
+      next_check_at = time.monotonic() + backoff
+
+    now = time.monotonic()
     if snapshot.get("state") == "ready":
       ready = copy.deepcopy(snapshot)
       ready["observed_at"] = datetime.now(UTC).isoformat()
       ready["stale"] = False
-      checked_at = time.monotonic()
       _provider_usage_cache[key] = _CachedProviderUsage(
-        observed_at=checked_at,
-        checked_at=checked_at,
+        observed_at=now,
+        next_check_at=next_check_at,
         snapshot=ready,
       )
       return copy.deepcopy(ready)
@@ -1217,19 +1275,15 @@ async def read_provider_usage(
       _provider_usage_cache.pop(key, None)
       return snapshot
 
-    prior = _provider_usage_cache.get(key)
-    now = time.monotonic()
     if (
       not force_refresh
       and prior is not None
-      and prior.snapshot.get("state") == "ready"
-      and now - prior.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
-      and _snapshot_resets_are_current(prior.snapshot)
+      and _stale_reading_is_servable(prior, now)
     ):
-      # Suppress a second browser waiting on the same failed live probe while
-      # preserving the original observation age for the stale ceiling.
-      prior.checked_at = now
+      # Keep the original observation age for the stale ceiling.
+      prior.next_check_at = next_check_at
       prior.stale = True
+      prior.consecutive_refusals = refusals
       fallback = copy.deepcopy(prior.snapshot)
       fallback["stale"] = True
       return fallback
@@ -1238,7 +1292,8 @@ async def read_provider_usage(
     unavailable["stale"] = False
     _provider_usage_cache[key] = _CachedProviderUsage(
       observed_at=now,
-      checked_at=now,
+      next_check_at=next_check_at,
       snapshot=unavailable,
+      consecutive_refusals=refusals,
     )
     return unavailable

@@ -10,7 +10,7 @@ from app import chat as chat_mod, models, questions
 from app.chat_writer import AppendPending, PersistTranscript, get_writer
 from app.database import SessionLocal
 from app.routes import chats_stream
-from tests.test_owner_approvals import approval_run, _ask, _finish, _row, PROMPT
+from tests.test_owner_approvals import approval_run, _ask, _finish, _row, PROMPT, QUESTION_PROMPT
 
 
 QUIET = copy.deepcopy(PROMPT)
@@ -103,6 +103,38 @@ def test_authenticated_agent_quiet_retry_is_idempotent(
   assert _block(chat.id, qid)['answers'] == {QUIET['question']: 'Not now'}
 
 
+def test_agent_answers_ordinary_card_by_exact_option_identity(
+    client, chat, approval_run, db):
+  # A card with no quiet choice used to save no option identities, so another
+  # agent's exact selection was refused as "ambiguous options".
+  qid = _ask_quiet(client, chat, approval_run, QUESTION_PROMPT).json()['question_id']
+  owner = db.query(models.Owner).one()
+  agent_auth = {'Authorization': 'Bearer ' + auth_mod.create_agent_token(
+    chat_id='answerer-chat', owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+  )}
+  body = {'content': '', 'question_id': qid,
+          'answers': {QUESTION_PROMPT['question']: 'Restart now'},
+          'selected_options': {'approval': ['1']}}
+
+  first = client.post(f'/api/chats/{chat.id}/messages', headers=agent_auth, json=body)
+  retry = client.post(f'/api/chats/{chat.id}/messages', headers=agent_auth, json=body)
+
+  assert first.status_code in (200, 202), first.text
+  assert retry.status_code in (200, 202), retry.text
+  assert _block(chat.id, qid)['answers'] == {QUESTION_PROMPT['question']: 'Restart now'}
+  assert _block(chat.id, qid)['selected_options'] == {'approval': ['1']}
+  assert len(_row(chat.id)[2]) <= 1
+
+
+def test_identity_less_card_names_the_label_only_answer_path():
+  card = {'questions': [{'id': 'q', 'question': 'Q?', 'options': [
+      {'label': 'Yes'}, {'label': 'No'}]}]}
+  questions.validate_saved_answer(card, {'Q?': 'Yes'}, None)
+  with pytest.raises(questions.AnswerConflict, match='answer with the option label only'):
+    questions.validate_saved_answer(card, {'Q?': 'Yes'}, {'q': ['0']})
+
+
 def test_quiet_retry_cannot_clear_newer_card(client, chat, auth, approval_run):
   qid = _ask_quiet(client, chat, approval_run).json()['question_id']
   assert _quiet(client, chat, auth, qid).status_code == 200
@@ -142,10 +174,14 @@ def test_legacy_route_cannot_bypass_typed_card(client, chat, auth, approval_run)
   assert _row(chat.id)[0] == qid
 
 
-def test_quiet_option_identity_minted_and_duplicate_labels_rejected(client, chat, approval_run):
+@pytest.mark.parametrize('first_close', ['close', None])
+def test_option_identity_minted_and_duplicate_labels_rejected(
+    client, chat, approval_run, first_close):
+  first = {'label': 'No', 'description': 'Done'}
+  if first_close:
+    first['on_answer'] = first_close
   prompt = {'questions': [{'id': 'pick', 'header': 'Pick', 'question': 'Need more?',
-      'options': [{'label': 'No', 'description': 'Done', 'on_answer': 'close'},
-                  {'label': 'No', 'description': 'Continue'}]}]}
+      'options': [first, {'label': 'No', 'description': 'Continue'}]}]}
   response = client.post(f'/api/chats/{chat.id}/question', headers=approval_run[1], json=prompt)
   assert response.status_code == 422
   assert _row(chat.id)[0] is None

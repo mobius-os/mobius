@@ -26,7 +26,8 @@ if (
 
 # Set env vars before importing app modules.
 _tmp = tempfile.mkdtemp()
-os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
+_TEST_SECRET_KEY = "test-secret-key-at-least-32-characters-long"
+os.environ["SECRET_KEY"] = _TEST_SECRET_KEY
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["DOMAIN"] = "localhost"
@@ -118,7 +119,16 @@ notifications_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)
-def _isolate_git_env(monkeypatch, tmp_path):
+def _test_secret_key_in_environment():
+  """A test that runs the app lifespan withholds SECRET_KEY from the process
+  environment, as production does; later tests that rebuild settings still
+  need the fixed test key there."""
+  yield
+  os.environ["SECRET_KEY"] = _TEST_SECRET_KEY
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_env(monkeypatch, tmp_path, tmp_path_factory):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
 
   app_git tests run `git init/commit/merge` against a repo in tmp_path via
@@ -139,7 +149,17 @@ def _isolate_git_env(monkeypatch, tmp_path):
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
   ):
     monkeypatch.delenv(var, raising=False)
-  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+  # A commit ends with `git maintenance run --auto`, which detaches and briefly
+  # holds maintenance.lock after the commit has returned. Tests that assert a
+  # read-only operation leaves no lock behind would then flake on that
+  # unrelated background writer. Seed the global config with maintenance off.
+  # Keep it OUTSIDE tmp_path (a sibling dir from the factory): many tests use
+  # their own tmp_path as the subject under test — measuring its size, snapshot
+  # status, or agent-rule cleanup — so a config file placed inside tmp_path
+  # would leak into those assertions.
+  global_config = tmp_path_factory.mktemp("git-global") / "gitconfig"
+  global_config.write_text("[maintenance]\n\tauto = false\n")
+  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
   repo_root = _Path(__file__).resolve().parents[2]
   monkeypatch.setenv(

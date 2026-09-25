@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
 import logging
@@ -62,11 +63,19 @@ class PeerPage:
 
 @dataclass(frozen=True)
 class PeerDeliveryResult:
-  """How one direct message's delivery intent reached each recipient."""
+  """What will actually happen to one direct message at each recipient.
+
+  ``steered`` reached a running turn, ``woken`` started an idle Goal,
+  ``queued`` waits for the recipient's next turn, and ``unreachable`` is
+  stored but recorded facts show no turn will read it soon; ``reasons`` names
+  that fact per unreachable recipient.
+  """
 
   steered: list[str]
   woken: list[str]
   queued: list[str]
+  unreachable: list[str] = field(default_factory=list)
+  reasons: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, order=True)
@@ -103,6 +112,7 @@ def _latest_runs(
     models.ChatRun.goal_objective,
     models.ChatRun.started_at,
     models.ChatRun.ended_at,
+    models.ChatRun.provider_execution_admitted,
   ).join(
     latest_started,
     and_(
@@ -1848,6 +1858,54 @@ async def _wake_idle_recipient(
       return False
 
 
+def unreachable_reasons(
+  db: Session, chat_ids: list[str] | set[str],
+) -> dict[str, str]:
+  """Name recipients that recorded facts say will not read mail soon.
+
+  Only durable state counts, never elapsed time: a deleted chat, a latest
+  physical run that failed, or one stopped before its provider turn began. A
+  running, parked, resuming, or idle chat is queued for its next turn.
+  """
+  if not chat_ids:
+    return {}
+  ids = list(dict.fromkeys(chat_ids))
+  reasons = {
+    str(chat_id): "the chat is deleted"
+    for (chat_id,) in db.query(models.Chat.id).filter(
+      models.Chat.id.in_(ids), models.Chat.deleted_at.is_not(None),
+    ).all()
+  }
+  for chat_id, run in _latest_runs(
+    db, [chat_id for chat_id in ids if chat_id not in reasons],
+  ).items():
+    never_started = run.provider_execution_admitted is False
+    if run.status == "failed":
+      reasons[chat_id] = (
+        "its latest run failed before starting" if never_started
+        else "its latest run failed"
+      )
+    elif run.status == "stopped" and never_started:
+      reasons[chat_id] = "its latest run was stopped before starting"
+  return reasons
+
+
+def _classify_undelivered(chat_ids: list[str]) -> tuple[list[str], dict[str, str]]:
+  """Split undelivered recipients into queued and (reasoned) unreachable."""
+  if not chat_ids:
+    return [], {}
+  from app.database import SessionLocal
+
+  try:
+    with SessionLocal() as db:
+      reasons = unreachable_reasons(db, chat_ids)
+  except Exception:
+    # Reporting must never fail a committed send; queued is the safe claim.
+    log.warning("peer reachability check failed", exc_info=True)
+    reasons = {}
+  return [chat_id for chat_id in chat_ids if chat_id not in reasons], reasons
+
+
 async def deliver_peer_recipients(
   *, recipients: list[str], delivery: str, kind: str, sender_chat_id: str,
 ) -> PeerDeliveryResult:
@@ -1856,17 +1914,17 @@ async def deliver_peer_recipients(
   ``next_turn`` never causes model work. ``interrupt`` steers a live recipient
   or wakes an idle unfinished Goal. An owner-input, usage, or restart barrier
   still wins. An armed external Wait remains durable and active but does not
-  suppress an explicitly interrupting peer message.
+  suppress an explicitly interrupting peer message. Every other recipient is
+  reported as queued, or as unreachable when recorded facts show no turn will
+  read the note soon, so a sender learns it is writing into a dead chat.
   """
-  if delivery != DELIVERY_INTERRUPT:
-    return PeerDeliveryResult(
-      steered=[], woken=[], queued=list(dict.fromkeys(recipients)),
-    )
-
   steered: list[str] = []
   woken: list[str] = []
-  queued: list[str] = []
+  undelivered: list[str] = []
   for chat_id in dict.fromkeys(recipients):
+    if delivery != DELIVERY_INTERRUPT:
+      undelivered.append(chat_id)
+      continue
     state = await _steer_running_recipient(chat_id)
     if state == "steered":
       steered.append(chat_id)
@@ -1876,8 +1934,125 @@ async def deliver_peer_recipients(
     ):
       woken.append(chat_id)
       continue
-    queued.append(chat_id)
-  return PeerDeliveryResult(steered=steered, woken=woken, queued=queued)
+    undelivered.append(chat_id)
+  queued, reasons = _classify_undelivered(undelivered)
+  return PeerDeliveryResult(
+    steered=steered, woken=woken, queued=queued,
+    unreachable=[chat_id for chat_id in undelivered if chat_id in reasons],
+    reasons=reasons,
+  )
+
+
+async def notify_settled_claims(
+  db: Session, *, owner_id: int, sender_chat_id: str, settled: list[Any],
+) -> list[str]:
+  """Notify and wake followers of claims settled with their owner.
+
+  Each notice is persisted idempotently (``send_id`` is the claim revision),
+  then one interrupting delivery wakes every follower, and only then is each
+  retry latch acknowledged. A crash before acknowledgement leaves the claim's
+  notice pending for the next lifecycle seam; one failing claim cannot
+  suppress fanout for the others. Returns the notified follower ids.
+  """
+  from app.agent_work_claims import acknowledge_notice, work_claim_notice_body
+
+  recipients: list[str] = []
+  noticed = []
+  for item in settled:
+    try:
+      if item.interested_chat_ids:
+        send_work_claim_notice(
+          db,
+          owner_id=owner_id,
+          claim_id=item.claim_id,
+          revision=item.revision,
+          sender_chat_id=sender_chat_id,
+          recipients=item.interested_chat_ids,
+          body=work_claim_notice_body(item.work_key, item.state, item.outcome),
+        )
+        recipients.extend(item.interested_chat_ids)
+      noticed.append(item)
+    except Exception:
+      db.rollback()
+      log.exception(
+        "claim %s settled with chat %s but followers were not notified",
+        item.claim_id, sender_chat_id,
+      )
+  recipients = list(dict.fromkeys(recipients))
+  if recipients:
+    await deliver_peer_recipients(
+      recipients=recipients, delivery=DELIVERY_INTERRUPT, kind="handoff",
+      sender_chat_id=sender_chat_id,
+    )
+  for item in noticed:
+    try:
+      acknowledge_notice(
+        db, claim_id=item.claim_id, revision=item.revision,
+        resolve_interests=True,
+      )
+    except Exception:
+      db.rollback()
+      log.warning(
+        "claim %s notice delivered but not acknowledged", item.claim_id,
+        exc_info=True,
+      )
+  return recipients
+
+
+async def settle_claims_with_owner(chat_id: str) -> list[str]:
+  """Post-commit seam: settle and announce claims whose owner has ended.
+
+  Lifecycle writes (Goal completion, Stop, dismissal, chat deletion) settle
+  claims atomically with the Goal or tombstone. This seam re-derives any
+  claim those writes could not settle, then delivers every notice this chat
+  still owes its followers. Returns the notified follower ids. It never
+  raises: a failure leaves durable state for the next seam, never a false
+  completion.
+  """
+  from app.agent_work_claims import (
+    pending_settlement_notices,
+    stage_settle_claims_with_owner,
+  )
+  from app.database import SessionLocal
+
+  try:
+    with SessionLocal() as db:
+      if stage_settle_claims_with_owner(db, chat_id):
+        db.commit()
+      else:
+        db.rollback()
+      pending = pending_settlement_notices(db, chat_id)
+      by_owner: dict[int, list[Any]] = {}
+      for item in pending:
+        by_owner.setdefault(item.owner_id, []).append(item)
+      notified: list[str] = []
+      for owner_id, items in by_owner.items():
+        notified.extend(await notify_settled_claims(
+          db, owner_id=owner_id, sender_chat_id=chat_id, settled=items,
+        ))
+      return notified
+  except Exception:
+    log.warning("claim settlement failed chat=%s", chat_id, exc_info=True)
+    return []
+
+
+_SETTLEMENT_TASKS: set[asyncio.Task] = set()
+
+
+def schedule_claim_settlement(chat_id: str) -> None:
+  """Run ``settle_claims_with_owner`` outside the caller's lifecycle locks.
+
+  Stop finishes while holding this chat's queue or transition lock, and
+  follower delivery takes other chats' locks; awaiting it inline could invert
+  lock order between two chats stopping at once.
+  """
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    return
+  task = loop.create_task(settle_claims_with_owner(chat_id))
+  _SETTLEMENT_TASKS.add(task)
+  task.add_done_callback(_SETTLEMENT_TASKS.discard)
 
 
 def build_coordination_context_delivery(

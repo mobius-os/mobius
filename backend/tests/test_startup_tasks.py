@@ -80,7 +80,7 @@ def test_production_startup_plan_has_explicit_unique_order():
   assert len(names) == len(set(names))
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
   assert names.index("sweep Codex provider sessions") < names.index(
-    "configure Claude provider retention"
+    "configure Claude settings defaults"
   ) < names.index("initialize database")
   assert names.index("normalize background agent settings") < names.index(
     "initialize database"
@@ -182,12 +182,12 @@ async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
     raise OSError("settings disk full")
 
   monkeypatch.setattr(retention, "sweep_stale_provider_sessions", sweep)
-  monkeypatch.setattr(retention, "ensure_claude_retention_default", fail_claude)
+  monkeypatch.setattr(retention, "ensure_claude_settings_defaults", fail_claude)
   tasks = tuple(
     task for task in startup.PROCESS_STARTUP_TASKS
     if task.name in {
       "sweep Codex provider sessions",
-      "configure Claude provider retention",
+      "configure Claude settings defaults",
     }
   )
 
@@ -195,7 +195,7 @@ async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
   await run_startup_tasks(ctx, tasks)
 
   assert events == ["codex-swept", "claude-failed"]
-  assert ctx.failed_tasks == ["configure Claude provider retention"]
+  assert ctx.failed_tasks == ["configure Claude settings defaults"]
 
 
 def test_active_assistant_backfill_command_is_available_to_startup():
@@ -287,3 +287,45 @@ async def test_schema_safe_boot_runs_the_database_startup_phase(monkeypatch):
 
   assert result.serviceable is True
   assert events == ["process", "database"]
+
+
+@pytest.mark.asyncio
+async def test_server_start_applies_the_running_checkouts_skill_templates(
+  tmp_path, monkeypatch,
+):
+  # Templates follow the served source: the startup plan runs this checkout's
+  # reconciler, so a template-only release needs a restart, not a new image.
+  assert "reconcile platform skills" in [
+    task.name for task in startup.PROCESS_STARTUP_TASKS
+  ]
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  build_info = tmp_path / "build-info.json"
+  build_info.write_text('{"image_inputs": {"backend/scripts/entrypoint.sh": "x"}}')
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(build_info))
+  ctx = context()
+
+  await startup._reconcile_platform_skills(ctx)
+
+  seeds = startup._SKILL_RECONCILER.parent / "seed-skills"
+  installed = tmp_path / "shared" / "skills"
+  for seed in seeds.glob("*.md"):
+    assert (installed / seed.name).read_bytes() == seed.read_bytes()
+  assert (installed / ".seed-skills.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_an_image_that_still_reconciles_skills_keeps_the_job(
+  tmp_path, monkeypatch,
+):
+  # Running both reconcilers would let the image's older seeds retire and
+  # revert templates this checkout adds, on every restart.
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  build_info = tmp_path / "build-info.json"
+  build_info.write_text(
+    '{"image_inputs": {"backend/scripts/init_skills.py": "x"}}'
+  )
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(build_info))
+
+  await startup._reconcile_platform_skills(context())
+
+  assert not (tmp_path / "shared" / "skills").exists()

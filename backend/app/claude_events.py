@@ -47,11 +47,14 @@ except ImportError:
   DEFERRING_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
 
 from app import activity
-from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_edit_preview import claude_edit_preview
 from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
-from app.usage_metrics import normalize_claude_usage
+from app.usage_metrics import (
+  claude_call_input_tokens,
+  context_usage_event,
+  normalize_claude_usage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -254,33 +257,14 @@ def _is_web_search_tool_result(content: Any) -> bool:
   return content.get("type") == "web_search_tool_result"
 
 
-def _emit_unknown(bc, kind: str, raw: Any) -> None:
-  """Logs an unknown SDK event and emits it on the wire when enabled.
+def _log_unknown(kind: str, raw: Any) -> None:
+  """Record an SDK event Möbius does not handle.
 
-  The DEBUG log fires unconditionally so noisy sessions stay
-  inspectable in `chat.log` even when wire emission is turned off
-  via ``MOBIUS_EMIT_UNKNOWN=0``.
+  Unhandled events are never broadcast: no client renders them, and on a
+  busy chat the per-token progress events alone were most of the stream and
+  of every reconnect replay.
   """
-  event = unknown_event(kind, raw)
-  if emit_unknown_enabled():
-    bc.publish(event)
-
-
-def _usage_event(usage: dict[str, Any]) -> dict:
-  """Builds the wire-shape `usage` event from an SDK usage dict.
-
-  The SDK's usage shape evolves — we extract the fields we know
-  about today and pass the full dict through under ``raw`` so a
-  later UI can pick up newly-added counters without a runner change.
-  """
-  return {
-    "type": "usage",
-    "input_tokens": usage.get("input_tokens"),
-    "output_tokens": usage.get("output_tokens"),
-    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
-    "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
-    "raw": dict(usage),
-  }
+  log.debug("unhandled Claude SDK event: kind=%s raw=%r", kind, raw)
 
 
 # Tools that are pure harness mechanics: they carry no owner-facing meaning, so
@@ -468,7 +452,7 @@ def dispatch_sdk_message(
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.
       return current_session_id, None
-    _emit_unknown(bc, f"system:{sdk_msg.subtype}", sdk_msg)
+    _log_unknown(f"system:{sdk_msg.subtype}", sdk_msg)
     return current_session_id, None
 
   if isinstance(sdk_msg, StreamEvent):
@@ -508,7 +492,7 @@ def dispatch_sdk_message(
           )
           bc.publish(_thinking_event(thinking, segment_id))
         return current_session_id, None
-      _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
+      _log_unknown(f"stream:content_block_delta:{delta_type}", delta)
       return current_session_id, None
     if event_type == "content_block_start":
       # A new assistant content block is starting. When it is a TEXT
@@ -524,7 +508,7 @@ def dispatch_sdk_message(
       if isinstance(cb, dict) and cb.get("type") == "text":
         bc.publish({"type": "text_boundary"})
         return current_session_id, None
-    _emit_unknown(bc, f"stream:{event_type}", event)
+    _log_unknown(f"stream:{event_type}", event)
     return current_session_id, None
 
   if isinstance(sdk_msg, AssistantMessage):
@@ -588,9 +572,7 @@ def dispatch_sdk_message(
             "tool_use_id": block.id,
           })
           continue
-        _emit_unknown(
-          bc, f"assistant_block:{type(block).__name__}", block,
-        )
+        _log_unknown(f"assistant_block:{type(block).__name__}", block)
         continue
       if isinstance(block, ServerToolResultBlock):
         tool_name = server_tools.get(block.tool_use_id)
@@ -610,9 +592,7 @@ def dispatch_sdk_message(
             "tool_use_id": block.tool_use_id,
           })
           continue
-        _emit_unknown(
-          bc, f"assistant_block:{type(block).__name__}", block,
-        )
+        _log_unknown(f"assistant_block:{type(block).__name__}", block)
         continue
       if isinstance(block, ThinkingBlock):
         # Streamed via thinking_delta already — snapshot duplicate.
@@ -639,11 +619,11 @@ def dispatch_sdk_message(
             **({"text_item_id": item_id} if item_id else {}),
           })
         continue
-      _emit_unknown(
-        bc, f"assistant_block:{type(block).__name__}", block,
-      )
+      _log_unknown(f"assistant_block:{type(block).__name__}", block)
     if sdk_msg.usage:
-      bc.publish(_usage_event(sdk_msg.usage))
+      bc.publish(context_usage_event(
+        "claude", claude_call_input_tokens(sdk_msg.usage),
+      ))
     if sdk_msg.stop_reason:
       bc.publish({
         "type": "stop_reason",
@@ -684,7 +664,7 @@ def dispatch_sdk_message(
             })
         bc.publish({"type": "tool_end", "tool_use_id": block.tool_use_id})
         continue
-      _emit_unknown(bc, f"user_block:{type(block).__name__}", block)
+      _log_unknown(f"user_block:{type(block).__name__}", block)
     return current_session_id, None
 
   if isinstance(sdk_msg, RateLimitEvent):
@@ -701,8 +681,6 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, ResultMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
-    if sdk_msg.usage:
-      bc.publish(_usage_event(sdk_msg.usage))
     if sdk_msg.stop_reason:
       bc.publish({
         "type": "stop_reason",
@@ -728,6 +706,6 @@ def dispatch_sdk_message(
       ),
     }
 
-  # Any SDK message class we didn't enumerate — never silently dropped.
-  _emit_unknown(bc, f"sdk_message:{type(sdk_msg).__name__}", sdk_msg)
+  # Any SDK message class we didn't enumerate is logged, never broadcast.
+  _log_unknown(f"sdk_message:{type(sdk_msg).__name__}", sdk_msg)
   return current_session_id, None

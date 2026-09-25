@@ -77,6 +77,16 @@ mapi -X POST /api/notifications/send --data-binary @- <<JSON
 JSON
 ```
 
+Optional `"tag"` (1-128 chars of `A-Z a-z 0-9 _ . : -`, the same shape as a
+target `intent`) groups pushes about the same thing: a newer push replaces the
+older one on the device instead of stacking. Using the target's intent as the
+tag (`"target": "/shell/?app=ID&intent=dm:alice.example"`, `"tag":
+"dm:alice.example"`) groups notifications per destination. The server scopes
+the tag to the sender, so it can never replace another app's notifications.
+Every send still gets its own history row. An app's push is not sent while the
+shell is visibly showing that app; the bell still records it. Sends are
+rate-limited per sender (each app, each agent chat, the owner).
+
 ---
 
 ## Durable Undo for recoverable deletion

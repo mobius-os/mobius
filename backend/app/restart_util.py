@@ -26,6 +26,8 @@ import sys
 import threading
 from pathlib import Path
 
+from app.config import import_probe_env
+
 log = logging.getLogger("mobius.restart")
 
 # Grace after SIGTERM before the hard kill — the crash floor. uvicorn's graceful
@@ -42,7 +44,7 @@ class RestartSourceInvalid(RuntimeError):
   """The editable platform would not survive the next startup probe."""
 
 
-def validate_restart_source() -> None:
+def validate_restart_source(platform_root: Path | None = None) -> None:
   """Run the production boot import verdict before accepting a restart.
 
   The entrypoint deliberately falls back to the baked platform when an edited
@@ -55,7 +57,7 @@ def validate_restart_source() -> None:
   registry verdict.  A missing editable backend is valid for a baked-only
   installation; first-boot seeding remains owned by the entrypoint.
   """
-  platform_root = Path(
+  platform_root = platform_root or Path(
     os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform")
   )
   backend = platform_root / "backend"
@@ -77,6 +79,7 @@ def validate_restart_source() -> None:
   ):
     env.pop(key, None)
   env["PYTHONDONTWRITEBYTECODE"] = "1"
+  import_probe_env(env)
   command = [
     sys.executable,
     "-c",
@@ -135,8 +138,11 @@ def restart_admission_in_progress() -> bool:
     return _RESTART_ADMITTED
 
 
-async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
-  """Gate admission and bind every live run to one fresh restart nonce."""
+async def _drain_exact_restart(
+  *, cutover: bool = False,
+) -> tuple[str, str, list[dict[str, str]]]:
+  """Gate admission, bind every live run to one fresh restart nonce, and swap
+  in a prepared platform update once every chat is paused."""
   from app import chat, restart_ledger
   from app.broadcast import get_system_broadcast
 
@@ -176,6 +182,11 @@ async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
     )
   except Exception:
     log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
+  try:
+    from app.platform_update import swap_in_prepared_update
+    await asyncio.to_thread(swap_in_prepared_update, cutover=cutover)
+  except Exception:
+    log.warning("prepared platform update was not swapped in", exc_info=True)
   return boot_id, restart_nonce, restart_runs
 
 
@@ -280,7 +291,7 @@ async def prepare_container_cutover(
   if not restart_ledger.authorized_cutover_challenge(cutover_id):
     raise RuntimeError("the Host did not authorize this cutover")
 
-  boot_id, restart_nonce, restart_runs = await _drain_exact_restart()
+  boot_id, restart_nonce, restart_runs = await _drain_exact_restart(cutover=True)
   try:
     if not boot_id:
       raise RuntimeError("entrypoint boot id is unavailable")

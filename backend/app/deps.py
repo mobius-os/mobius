@@ -8,7 +8,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
-from app import auth, models
+from app import auth, connect_outbound, models
 from app.app_capabilities import storage_grant
 from app.config import get_settings
 from app.database import SessionLocal, get_db
@@ -218,6 +218,10 @@ def _resolve_owner(
     raise HTTPException(status_code=401, detail="Owner not found.")
   if payload.get("epoch", 0) != owner.token_epoch:
     raise HTTPException(status_code=401, detail="Token revoked.")
+  connect_agent = payload.get(connect_outbound.AGENT_CLAIM)
+  if connect_agent is not None:
+    if not connect_outbound.agent_access_active(connect_agent):
+      raise HTTPException(status_code=401, detail="Connect agent access ended.")
   agent_chat = payload.get("agent_chat")
   agent_run = payload.get("agent_run")
   if agent_run is not None:

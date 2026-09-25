@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from app import app_git, models
+from app import app_git, install, models
 from app.config import get_settings
 from test_app_fixtures import create_local_app
 
@@ -3900,6 +3900,73 @@ def test_preserve_resolution_reviews_whole_tree_and_rejects_drift(
   assert (app_dir / ".git" / "MERGE_HEAD").exists()
 
 
+def test_late_app_edit_after_review_stays_uncommitted_on_rejection(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  """The installer must not commit a late edit before rejecting stale review."""
+  base = "https://late-review-edit.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "late-review-edit"}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_dir = Path(get_settings().data_dir) / "apps" / "late-review-edit"
+  entry = app_dir / "index.jsx"
+  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+  conflicted = _update_v2(
+    client, auth, base, {**manifest, "version": "2.0.0"},
+    JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE"),
+  )
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+  selected = client.post(
+    "/api/apps/resolve-update/policy", headers=auth,
+    json={"source_dir": str(app_dir), "policy": "preserve_local"},
+  )
+  assert selected.status_code == 200, selected.text
+  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"))
+  reviewed = client.post(
+    "/api/apps/resolve-update/review", headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
+
+  original_install = install.install_from_manifest
+  late_content = JSX_MULTI.replace("ORIGINAL TITLE", "LATE TITLE")
+  installer_head = {}
+
+  async def late_edit_before_installer(*args, **kwargs):
+    installer_head["sha"] = app_git.head_sha(app_dir, app_git.LOCAL_BRANCH)
+    entry.write_text(late_content)
+    return await original_install(*args, **kwargs)
+
+  monkeypatch.setattr(install, "install_from_manifest", late_edit_before_installer)
+  replay_responses = {
+    base + "index.jsx": (
+      200, JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE").encode(),
+    ),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(replay_responses),
+  ):
+    rejected = client.post(
+      "/api/apps/resolve-update", headers=auth,
+      json={
+        "source_dir": str(app_dir),
+        "reviewed_tree_oid": reviewed.json()["tree_oid"],
+      },
+    )
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "reviewed_tree_changed"
+  assert app_git.head_sha(app_dir, app_git.LOCAL_BRANCH) == installer_head["sha"]
+  assert entry.read_text() == late_content
+  assert "index.jsx" in app_git._run(
+    app_dir, "status", "--porcelain",
+  ).stdout
+
+
 def test_exact_upstream_policy_replaces_complete_tracked_source_tree(
   client, auth, bypass_url_validation,
 ):
@@ -4117,7 +4184,18 @@ def test_core_app_store_self_update_overwrites_local_conflict(
   assert payload["mode"] == "update"
   assert payload["version"] == "2.0.0"
   assert payload["conflict_paths"] == []
-  assert any("core App Store self-update" in w for w in payload["warnings"])
+  assert payload["reconciliation"]["unresolved_conflict_paths"] == []
+  assert any(
+    "previous local edits were saved for recovery" in w
+    for w in payload["warnings"]
+  )
+  app_dir = jsx_file.parent
+  refs = app_git._run(
+    app_dir, "for-each-ref", "--format=%(refname)",
+    "refs/mobius/app-pre-update/",
+  ).stdout.splitlines()
+  assert len(refs) == 1
+  assert app_git._run(app_dir, "show", f"{refs[0]}:index.jsx").stdout == local
 
   served = jsx_file.read_text()
   assert served == jsx_v2

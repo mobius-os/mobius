@@ -203,3 +203,62 @@ test('peer notes inside a compact raw range stay inside that activity', () => {
     [10, 'peer-inside', 19],
   )
 })
+
+const helperAt = (block_index, extra = {}) => ({
+  id: 'delegation:review:completed', activityId: 'delegation:review:completed',
+  type: 'helper_result', status: 'completed', created_at: 1000,
+  display_position: { assistant_message_id: 'answer', block_index, ...extra },
+})
+
+test('a helper result inside a sampled compact run stays at its step, not the response tail', () => {
+  // Compaction samples repeated tools, so the recorded anchor (the 40th
+  // command) is absent from the projection. The stored range still owns it.
+  const blocks = [
+    { type: 'activity', start: 2, end: 60, entries: [
+      { idx: 2, item: { type: 'tool', tool: 'Bash', tool_use_id: 'first' } },
+      { idx: 3, item: { type: 'tool', tool: 'Bash', tool_use_id: 'second' } },
+    ] },
+    { type: 'text', content: 'Later findings.', raw_index: 60 },
+    { type: 'activity', start: 61, end: 90, entries: [
+      { idx: 61, item: { type: 'tool', tool: 'Edit', tool_use_id: 'edit' } },
+    ] },
+  ]
+  const helper = helperAt(41, { block_key: 'tool:fortieth', block_distance: 1 })
+  const output = insertPositionedActivity(entries(blocks), [helper], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), ['activity', 'text', 'activity'])
+  assert.equal(output[0].item.positioned_entries[0].item, helper)
+  assert.equal(output[0].item.positioned_entries[0].positionIndex, 41)
+})
+
+test('a compact run edge joins that activity, while later prose splits at its offset', () => {
+  const blocks = [
+    { type: 'activity', start: 0, end: 5, entries: [
+      { idx: 0, item: { type: 'tool', tool: 'Bash', tool_use_id: 'first' } },
+    ] },
+    { type: 'text', content: 'Before.\n\nAfter.', raw_index: 5 },
+    { type: 'activity', start: 6, end: 9, entries: [
+      { idx: 6, item: { type: 'tool', tool: 'Edit', tool_use_id: 'edit' } },
+    ] },
+  ]
+  const atEdge = insertPositionedActivity(entries(blocks), [note('edge', 5)], blocks, 'chat')
+  assert.equal(atEdge.length, 3)
+  assert.equal(atEdge[0].item.positioned_entries[0].item.tool_use_id, 'peer-edge')
+
+  const inProse = insertPositionedActivity(entries(blocks), [helperAt(5, {
+    text_offset: 9, block_key: 'thinking:sampled-out', block_distance: 1,
+  })], blocks, 'chat')
+  assert.deepEqual(inProse.map(e => e.item.content || e.item.type), [
+    'activity', 'Before.\n\n', 'helper_result', 'After.', 'activity',
+  ])
+})
+
+test('stored indices survive an omitted question twin in the compact projection', () => {
+  // Stored: 0 text, 1 twin tool (omitted), 2 question, 3 text.
+  const blocks = [
+    { type: 'text', content: 'Asked.', raw_index: 0 },
+    { type: 'question', question_id: 'q', questions: [], raw_index: 2 },
+    { type: 'text', content: 'Answered.', raw_index: 3 },
+  ]
+  const output = insertPositionedActivity(entries(blocks), [note('late', 3)], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), ['text', 'question', 'tool', 'text'])
+})

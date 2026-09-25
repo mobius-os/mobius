@@ -4086,6 +4086,7 @@ class ChatWriterActor:
     if goal is not None and goal.status != "completed":
       goal.status = "dismissed"
       goal.revision += 1
+      _settle_ended_goal_claims(db, goal)
     # Exact Goal dismissal does not cancel another Goal or generic wait.
     _cancel_activation_owners(db, chat, goal_id=goal_id)
     if not cmd.preserve_execution:
@@ -4941,6 +4942,7 @@ class ChatWriterActor:
         if goal is not None and goal.status == "open":
           goal.status = "stopped"
           goal.revision += 1
+          _settle_ended_goal_claims(db, goal)
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -4990,6 +4992,7 @@ class ChatWriterActor:
           if goal is not None and goal.status == "open":
             goal.status = "stopped"
             goal.revision += 1
+            _settle_ended_goal_claims(db, goal)
         if cmd.terminal_status == "failed":
           from app.chat_failure_activity import mark_failed
           mark_failed(
@@ -5025,6 +5028,7 @@ class ChatWriterActor:
             goal.status = "stopped"
             goal.revision += 1
             changed = True
+            _settle_ended_goal_claims(db, goal)
         for request in db.query(models.SavedSecureInput).filter(
           models.SavedSecureInput.chat_id == cmd.chat_id,
           models.SavedSecureInput.status.in_(("pending", "consuming")),
@@ -5372,6 +5376,7 @@ class ChatWriterActor:
     )
     if run.park_reason == "restart":
       run.restart_nonce = None
+      _mark_restart_pause_manual(_active_chat(db, run.chat_id))
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -6112,6 +6117,37 @@ def _tail_open_question_id(messages) -> str | None:
   return _tail_open_question_state(messages)[0]
 
 
+def _mark_restart_pause_manual(chat) -> None:
+  """Stop the latest restart pause card from promising a continuation.
+
+  The drain writes its note before the next boot decides whether the parked
+  turn may continue. When that decision falls back to manual recovery, the note
+  must say so; otherwise the card keeps promising an automatic continuation.
+  """
+  if chat is None:
+    return
+  from sqlalchemy.orm.attributes import flag_modified
+
+  messages = copy.deepcopy(list(chat.messages or []))
+  latest = next((
+    message for message in reversed(messages)
+    if isinstance(message, dict) and message.get("role") == "assistant"
+  ), None)
+  pause = next((
+    block["pause"]
+    for block in reversed((latest or {}).get("blocks") or [])
+    if isinstance(block, dict)
+    and block.get("type") == "error"
+    and isinstance(block.get("pause"), dict)
+    and block["pause"].get("kind") == "restart"
+  ), None)
+  if pause is None or pause.get("manual"):
+    return
+  pause["manual"] = True
+  chat.messages = messages
+  flag_modified(chat, "messages")
+
+
 def _active_chat(db, chat_id: str):
   """The chat row for `chat_id`, or None if it is missing OR soft-deleted.
 
@@ -6373,6 +6409,29 @@ def finalize_response_outcome(
   return _apply_last_assistant_message(
     db, chat_id, terminal_message, commit=commit,
   )
+
+
+def _settle_ended_goal_claims(db, goal) -> None:
+  """Settle an ending Goal's open work claims inside the same writer commit.
+
+  Stop and dismissal release the claims so followers may take the exact action
+  over. A savepoint keeps a claim-table failure from failing the lifecycle
+  write itself; the post-commit seam (``settle_claims_with_owner``) repairs
+  any claim left open from the durable Goal status.
+  """
+  from app.agent_work_claims import stage_settle_goal_claims
+
+  try:
+    with db.begin_nested():
+      stage_settle_goal_claims(
+        db, chat_id=goal.chat_id, goal_id=goal.id, status=goal.status,
+        result=goal.result,
+      )
+  except Exception:
+    log.warning(
+      "goal %s ended but its work claims were not settled in-commit",
+      goal.id, exc_info=True,
+    )
 
 
 def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:

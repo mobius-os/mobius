@@ -276,6 +276,7 @@ export default function useStreamConnection(chatId, {
   onSteerDeliveryFailed,
   onLiveQuestion,
   onQuestionResponseStart,
+  onContextUsage,
 }) {
   // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
   // keeps them off every frame-paced render while a reply is revealing.
@@ -766,6 +767,8 @@ export default function useStreamConnection(chatId, {
   onSteerDeliveryFailedRef.current = onSteerDeliveryFailed
   const onLiveQuestionRef = useRef(onLiveQuestion)
   onLiveQuestionRef.current = onLiveQuestion
+  const onContextUsageRef = useRef(onContextUsage)
+  onContextUsageRef.current = onContextUsage
   const queuedContinuationRef = useRef(false)
   // Carries the ts of the message the backend just promoted so the
   // frontend can remove the matching pending entry, even if the user
@@ -1051,6 +1054,13 @@ export default function useStreamConnection(chatId, {
             if (shouldForwardChatStreamSystemEvent(event)) {
               onSystemEventRef.current?.(event)
             }
+            continue
+          }
+
+          if (event.type === 'context_usage') {
+            // A complete reading of the latest model call's context (the
+            // server replays only the newest on reconnect); no stream content.
+            onContextUsageRef.current?.(event)
             continue
           }
 

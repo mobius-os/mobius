@@ -269,6 +269,11 @@ async def promote_pending_messages_locked(
   result = await await_ack(ack)
   if isinstance(result, PromotePendingBlocked):
     raise PendingAdmissionBlocksPromotion(result)
+  if ending_status == "stopped":
+    # The superseded run's Goal was stopped in this commit, releasing its
+    # work claims; wake their followers off this locked path.
+    from app.agent_coordination import schedule_claim_settlement
+    schedule_claim_settlement(chat_id)
   promoted = result["promoted"]
   if promoted is None:
     # Empty queue — nothing to promote (the actor returned promoted=None

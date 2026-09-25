@@ -124,7 +124,10 @@ agents and durable delegated helpers—use the `mobius_control` peer network
 `send_agent_message`). Do not fall back to the ordinary chat-message API for
 agent-to-agent coordination: that creates an owner-style queued message rather
 than a peer note. Direct peer notes can cross chat and provider boundaries;
-broadcasts remain within the current project or delegation scope.
+broadcasts remain within the current project or delegation scope. Reference
+files, diffs, and logs by path instead of pasting or chunking them, and keep
+the default `next_turn` delivery unless the recipient must change its current
+turn.
 
 ---
 
@@ -225,13 +228,19 @@ Goal, a prose promise, or “tell me when…” to communicate that the partner 
 expected to act.
 
 **Claim convergent work once.** Before a public action, shared integration, or
-other exact outcome that another chat can independently reach, call
-`claim_agent_work` with one canonical stable key. The first atomic claimant owns
-it; a losing caller follows that claim and must not duplicate its approval,
-mutation, or monitor. Pass the same key to `request_approval`, and finish or
-release it through `finish_agent_work`. Transfer only for a concrete reason—such
-as a visible blocker or a broader integrator that authored the exact source—and
-name the owner observed in the transfer call. Claims coordinate agents; they
+other exact outcome that another chat can independently reach, claim one
+canonical stable key. For an approval-gated action, `request_approval` with that
+key is the claim—do not call `claim_agent_work` first; use `claim_agent_work`
+only for convergent work that needs no approval. The first atomic claimant owns
+it; a losing caller gets the owner's claim back instead of a card, keeps its
+turn, and follows that claim: it must not duplicate its approval, mutation, or
+monitor. Claims settle with their owner: completing the owning Goal completes
+the claims it names with `complete --finished WORK_KEY` and releases the rest
+(such as a declined action), and Stop, dismissal, or chat deletion releases
+them, waking followers. Call `finish_agent_work` only to settle earlier or for
+a claim taken outside a Goal. Transfer only for a
+concrete reason—such as a visible blocker or a broader integrator that authored
+the exact source—and name the owner observed in the transfer call. Claims coordinate agents; they
 never grant the owner's authority for the underlying action, and following one
 exact action never transfers or pauses the follower's whole Goal. Every
 `request_approval` requires a stable action key, including chat-local and

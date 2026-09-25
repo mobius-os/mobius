@@ -4,7 +4,7 @@ import os
 import pytest
 
 from app.provider_session_retention import (
-  ensure_claude_retention_default,
+  ensure_claude_settings_defaults,
   sweep_stale_provider_sessions,
 )
 from app.codex_session_lock import (
@@ -133,49 +133,41 @@ def test_exclusive_codex_sweep_lock_is_released(tmp_path):
   next_ownership.release()
 
 
-def test_claude_default_is_added_without_replacing_other_settings(tmp_path):
+def test_claude_defaults_are_added_without_replacing_other_settings(tmp_path):
   path = tmp_path / "cli-auth" / "claude" / "settings.json"
   path.parent.mkdir(parents=True)
   path.write_text(json.dumps({"theme": "dark"}))
 
-  result = ensure_claude_retention_default(tmp_path)
+  added = ensure_claude_settings_defaults(tmp_path)
 
-  assert result == {
-    "changed": True,
-    "retention_days": 14,
-    "source": "mobius_default",
-  }
+  assert added == ["cleanupPeriodDays", "includeCoAuthoredBy"]
   assert json.loads(path.read_text()) == {
     "cleanupPeriodDays": 14,
+    "includeCoAuthoredBy": False,
     "theme": "dark",
   }
 
 
-def test_claude_explicit_retention_is_preserved(tmp_path):
+def test_claude_defaults_seed_a_missing_settings_file(tmp_path):
   path = tmp_path / "cli-auth" / "claude" / "settings.json"
   path.parent.mkdir(parents=True)
-  path.write_text(json.dumps({"cleanupPeriodDays": 21}))
 
-  result = ensure_claude_retention_default(tmp_path)
+  ensure_claude_settings_defaults(tmp_path)
 
-  assert result["changed"] is False
-  assert result["retention_days"] == 21
-  assert json.loads(path.read_text())["cleanupPeriodDays"] == 21
-
-
-def test_claude_present_null_retention_is_not_silently_replaced(tmp_path):
-  path = tmp_path / "cli-auth" / "claude" / "settings.json"
-  path.parent.mkdir(parents=True)
-  path.write_text(json.dumps({"cleanupPeriodDays": None}))
-
-  result = ensure_claude_retention_default(tmp_path)
-
-  assert result == {
-    "changed": False,
-    "retention_days": None,
-    "source": "explicit",
+  assert json.loads(path.read_text()) == {
+    "cleanupPeriodDays": 14,
+    "includeCoAuthoredBy": False,
   }
-  assert json.loads(path.read_text())["cleanupPeriodDays"] is None
+
+
+def test_claude_explicit_settings_are_preserved_even_when_null(tmp_path):
+  path = tmp_path / "cli-auth" / "claude" / "settings.json"
+  path.parent.mkdir(parents=True)
+  explicit = {"cleanupPeriodDays": None, "includeCoAuthoredBy": True}
+  path.write_text(json.dumps(explicit))
+
+  assert ensure_claude_settings_defaults(tmp_path) == []
+  assert json.loads(path.read_text()) == explicit
 
 
 def test_claude_malformed_settings_are_never_replaced(tmp_path):
@@ -184,6 +176,6 @@ def test_claude_malformed_settings_are_never_replaced(tmp_path):
   path.write_text("not-json")
 
   with pytest.raises(json.JSONDecodeError):
-    ensure_claude_retention_default(tmp_path)
+    ensure_claude_settings_defaults(tmp_path)
 
   assert path.read_text() == "not-json"

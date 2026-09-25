@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse, urlunsplit
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,10 +65,25 @@ def _validated_origin(value: str, setting_name: str) -> str:
   return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "", "", ""))
 
 
+def _persisted_secret_key() -> str:
+  """The key the entrypoint persists, for processes started without it.
+
+  The server withholds SECRET_KEY from its children's environment (see
+  withhold_server_secrets_from_children), so a Möbius process started by the
+  server or an agent reads the same persisted key the entrypoint uses. Empty
+  when absent, which the length validator reports.
+  """
+  path = Path(os.environ.get("DATA_DIR", "/data")) / ".secret-key"
+  try:
+    return path.read_text().strip()
+  except OSError:
+    return ""
+
+
 class Settings(BaseSettings):
   """Application settings."""
 
-  secret_key: str
+  secret_key: str = Field(default_factory=_persisted_secret_key)
   domain: str = "localhost"
   database_url: str = "sqlite:////data/db/ultimate.db"
   data_dir: str = "/data"
@@ -221,6 +236,37 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
   """Returns the cached application settings singleton."""
   return Settings()
+
+
+# Server-only secrets the process needs exactly once, at settings load. Every
+# child the server starts (agents, their commands, tools) inherits the
+# server's environment — the provider SDKs merge it underneath whatever env
+# Möbius passes — so a secret left in os.environ reaches every agent even when
+# the agent env is built from an allowlist. SECRET_KEY signs login tokens and
+# derives the keys for stored secrets; no child needs it.
+SERVER_ONLY_ENV = ("SECRET_KEY",)
+
+
+def withhold_server_secrets_from_children() -> None:
+  """Drop server-only secrets from this process's environment once loaded.
+
+  The cached settings keep the values in memory. A restart starts a fresh
+  process from the launcher, whose environment still holds them.
+  """
+  get_settings()
+  for name in SERVER_ONLY_ENV:
+    os.environ.pop(name, None)
+
+
+def import_probe_env(env: dict[str, str]) -> dict[str, str]:
+  """Complete the environment of a child that only proves the source imports.
+
+  Such a child has neither the withheld key nor, when the install pins
+  SECRET_KEY in its environment, a persisted key file. It gets a valid
+  placeholder instead of the real signing key.
+  """
+  env.setdefault("SECRET_KEY", "import-probe-placeholder-" + "0" * 32)
+  return env
 
 
 def agent_scratch_root() -> Path:

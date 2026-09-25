@@ -431,7 +431,7 @@ claude-agent-sdk==0.2.159 \
     --hash=sha256:87f553fda74e2f57e00f2bcb1705ab9311a937f97571f4f9eceea2bd411b6e32 \
     --hash=sha256:b03683d12d217b0b6c189c88a3d260a045171e7fdc9f23e2d0dfb05ff3276834 \
     --hash=sha256:ba7f152560dca5001a0bc46ed13b7da14eb14b419faed25bb1af821bfa95d3de \
-    --hash=sha256:cc1b92ae56f42ada2d083ef2d2e5edb4aa8c7a6d856818a9b8f60cf6ae746f3a \
+    --hash=sha256:cc1b92ae56f42ade2d083ef2d2e5edb4aa8c7a6d856818a9b8f60cf6ae746f3a \
     --hash=sha256:d3ba57c187b07c87702b94e2b62dd7c61ed874899defcbb35bb5cef4cb94ace1 \
     --hash=sha256:e1905e2637b27971bb561bb6ad317aeb3d50619be5261bfa7ff2e9c2be0f0fd1
     # via -r requirements.txt
