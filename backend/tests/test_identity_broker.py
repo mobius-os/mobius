@@ -898,19 +898,15 @@ def test_community_mutations_are_narrow_and_require_idempotency(
     headers={"idempotency-key": "install:1234567890abcdef"},
     allow_private_routes=True,
   ).close()
-  rating_path = "/v1/community/apps/app_12345678/rating"
+  review_path = "/v1/community/apps/app_12345678/review"
   broker.proxy(
-    method="PUT", path=rating_path, body=b'{"value":5}',
-    headers={"idempotency-key": "rating:1234567890abcdef"},
+    method="PUT", path=review_path, body=b'{"stars":5,"review_text":null}',
+    headers={"idempotency-key": "review:1234567890abcdef"},
     allow_private_routes=True,
   ).close()
-  comment_path = (
-    "/v1/community/apps/app_12345678/revisions/"
-    "rev_12345678/comments"
-  )
+  reviews_path = "/v1/community/apps/app_12345678/reviews"
   broker.proxy(
-    method="POST", path=comment_path, body=b'{"body":"Useful"}',
-    headers={"idempotency-key": "comment:1234567890abcdef"},
+    method="GET", path=reviews_path, body=b'', headers={},
     allow_private_routes=True,
   ).close()
   editorial_asset_path = "/v1/community/editorial/assets"
@@ -930,10 +926,10 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   assert capabilities[0]["path"] == publish_path
   assert capabilities[1]["scope"] == "community:install"
   assert capabilities[1]["path"] == install_path
-  assert capabilities[2]["scope"] == "community:rate"
-  assert capabilities[2]["path"] == rating_path
-  assert capabilities[3]["scope"] == "community:comment"
-  assert capabilities[3]["path"] == comment_path
+  assert capabilities[2]["scope"] == "community:review"
+  assert capabilities[2]["path"] == review_path
+  assert capabilities[3]["scope"] == "community:read"
+  assert capabilities[3]["path"] == reviews_path
   assert capabilities[4]["scope"] == "community:editorial"
   assert capabilities[4]["path"] == editorial_asset_path
   assert capabilities[5]["scope"] == "community:editorial"
@@ -941,6 +937,8 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   assert seen[0][2]["Idempotency-Key"] == "publish:1234567890abcdef"
 
   retired = (
+    ("PUT", "/v1/community/apps/app_12345678/rating"),
+    ("POST", "/v1/community/apps/app_12345678/revisions/rev_12345678/comments"),
     ("POST", "/v1/community/publications"),
     ("POST", "/v1/community/apps/app_12345678/remixes"),
     ("DELETE", "/v1/community/comments/comment_12345678"),
@@ -1434,16 +1432,16 @@ def test_unix_handler_rejects_identity_queries_and_forwards_feedback_mutations()
         content=b'{"github":{}}',
         headers={"Idempotency-Key": "publish:1234567890abcdef"},
       )
-      rating = client.put(
-        "/v1/community/apps/app_12345678/rating",
-        content=b'{"value":4}',
-        headers={"Idempotency-Key": "rating:1234567890abcdef"},
+      review = client.put(
+        "/v1/community/apps/app_12345678/review",
+        content=b'{"stars":4,"review_text":null}',
+        headers={"Idempotency-Key": "review:1234567890abcdef"},
       )
     assert published.json() == {"method": "POST"}
-    assert rating.json() == {"method": "PUT"}
+    assert review.json() == {"method": "PUT"}
     assert seen == [
       ("POST", "/v1/community/apps", b'{"github":{}}', True),
-      ("PUT", "/v1/community/apps/app_12345678/rating", b'{"value":4}', True),
+      ("PUT", "/v1/community/apps/app_12345678/review", b'{"stars":4,"review_text":null}', True),
     ]
   finally:
     server.shutdown()

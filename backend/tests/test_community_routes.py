@@ -225,7 +225,7 @@ async def test_publication_lifecycle_reads_through_identity_broker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_feedback_mutations_forward_only_exact_revision_bound_payloads(
+async def test_review_routes_forward_account_review_payload_and_list(
   monkeypatch,
 ):
   calls = []
@@ -236,35 +236,28 @@ async def test_feedback_mutations_forward_only_exact_revision_bound_payloads(
 
   monkeypatch.setattr(community, "_request", fake_request)
   owner = SimpleNamespace()
-  rating = community.RatingIn(value=5, revision_id="rev_12345678")
-  comment = community.CommentIn(
-    body="Clear and useful.", public_identity="github",
-  )
+  review = community.ReviewIn(stars=5, review_text="Clear and useful.")
 
-  await community.set_community_rating(
-    "app_12345678", rating, owner, "rating:1234567890abcdef",
+  await community.set_community_review(
+    "app_12345678", review, owner, "review:1234567890abcdef",
   )
-  await community.add_community_comment(
-    "app_12345678", "rev_12345678", comment, owner,
-    "comment:1234567890abcdef",
+  await community.list_community_reviews(
+    "app_12345678", owner,
   )
 
   assert calls == [
     (
       "PUT",
-      "/v1/community/apps/app_12345678/rating",
+      "/v1/community/apps/app_12345678/review",
       {
-        "body": {"value": 5, "revision_id": "rev_12345678"},
-        "idempotency_key": "rating:1234567890abcdef",
+        "body": {"stars": 5, "review_text": "Clear and useful."},
+        "idempotency_key": "review:1234567890abcdef",
       },
     ),
     (
-      "POST",
-      "/v1/community/apps/app_12345678/revisions/rev_12345678/comments",
-      {
-        "body": {"body": "Clear and useful.", "public_identity": "github"},
-        "idempotency_key": "comment:1234567890abcdef",
-      },
+      "GET",
+      "/v1/community/apps/app_12345678/reviews",
+      {},
     ),
   ]
 

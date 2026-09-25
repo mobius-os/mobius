@@ -55,15 +55,15 @@ def test_connector_mutation_preflight_allows_the_generation_header(client):
 
 
 def test_community_mutation_preflight_allows_idempotency_key(client):
-  """Store ratings and reviews must reach the authenticated route.
+  """Store account reviews must reach the authenticated route.
 
   Every community mutation carries Idempotency-Key. Sandboxed app frames have
   an opaque origin, so Chromium/WebKit preflight that non-simple header before
-  sending the PUT/POST. Omitting it here turns a valid rating into the browser's
+  sending the PUT. Omitting it here turns a valid rating into the browser's
   generic "Failed to fetch" without the route ever seeing the request.
   """
   r = client.options(
-    "/api/community/apps/app_public_1234/rating",
+    "/api/community/apps/app_public_1234/review",
     headers={
       "Origin": "null",
       "Access-Control-Request-Method": "PUT",

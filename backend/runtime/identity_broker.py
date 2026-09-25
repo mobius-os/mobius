@@ -117,6 +117,11 @@ _COMMUNITY_ROUTES = (
   ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
   (
     "GET",
+    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/reviews"),
+    "community:read",
+  ),
+  (
+    "GET",
     re.compile(
       r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
       r"[A-Za-z0-9_:-]{8,200}"
@@ -139,16 +144,8 @@ _COMMUNITY_ROUTES = (
   ),
   (
     "PUT",
-    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/rating"),
-    "community:rate",
-  ),
-  (
-    "POST",
-    re.compile(
-      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
-      r"[A-Za-z0-9_:-]{8,200}/comments"
-    ),
-    "community:comment",
+    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/review"),
+    "community:review",
   ),
   (
     "POST",
