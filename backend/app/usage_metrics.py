@@ -74,6 +74,43 @@ def _plain(value: Any) -> Any:
   return str(value)
 
 
+def claude_call_input_tokens(usage: dict[str, Any]) -> int:
+  """One Claude model call's full context input.
+
+  Anthropic splits a call's input into uncached, cache-write, and cache-read
+  counters; their sum is the context the model actually read.
+  """
+  return sum(
+    _count(usage.get(field))
+    for field in (
+      "input_tokens",
+      "cache_creation_input_tokens",
+      "cache_read_input_tokens",
+    )
+  )
+
+
+def context_usage_event(
+  provider: str,
+  input_tokens: int,
+  context_window: int | None = None,
+) -> dict:
+  """The provider-neutral live context-occupancy event for one model call.
+
+  Durable runs record the same quantity as ``latest_model_input_tokens`` /
+  the last Codex model call once a turn settles; this event lets the composer
+  gauge follow it during the turn. ``context_window`` is present only when the
+  provider reports it mid-turn (Codex); the shell keeps its known ceiling
+  otherwise. The broadcast log retains only the newest one for reconnects.
+  """
+  return {
+    "type": "context_usage",
+    "provider": provider,
+    "input_tokens": _count(input_tokens),
+    "context_window": _count(context_window) or None,
+  }
+
+
 def normalize_claude_usage(
   usage: dict[str, Any] | None,
   model_usage: dict[str, Any] | None = None,
@@ -93,16 +130,10 @@ def normalize_claude_usage(
   cache_read = _count(usage.get("cache_read_input_tokens"))
   output = _count(usage.get("output_tokens"))
   input_total = uncached + cache_write + cache_read
-  latest_input_total = None
-  if latest_model_usage:
-    latest_input_total = sum(
-      _count(latest_model_usage.get(field))
-      for field in (
-        "input_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-      )
-    )
+  latest_input_total = (
+    claude_call_input_tokens(latest_model_usage)
+    if latest_model_usage else None
+  )
   context_windows = [
     _count(details.get("contextWindow"))
     for details in (model_usage or {}).values()
@@ -159,6 +190,11 @@ def _codex_breakdown(value: Any) -> dict[str, int]:
     field: _count(read(field))
     for field in _CODEX_FIELDS
   }
+
+
+def codex_call_input_tokens(call: Any) -> int:
+  """One Codex model call's context input (its ``input_tokens`` includes cache)."""
+  return _codex_breakdown(call)["input_tokens"]
 
 
 def _member(value: Any, field: str) -> Any:

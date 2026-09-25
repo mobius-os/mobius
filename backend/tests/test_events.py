@@ -811,12 +811,12 @@ def test_thinking_survives_interleaved_unknown_event():
 
 
 def test_thinking_survives_interleaved_usage_and_signature():
-  # The full bookkeeping set is transparent to thinking coalescing: a `usage`
+  # The full bookkeeping set is transparent to thinking coalescing: a `context_usage`
   # event and a signature-style unknown_sdk_event between thinking chunks still
   # yield one block. Only a real new content block (text/tool_start/…) splits it.
   blocks = []
   process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
-  process_event({"type": "usage", "input_tokens": 5, "output_tokens": 7}, blocks)
+  process_event({"type": "context_usage", "input_tokens": 5}, blocks)
   process_event(
     {"type": "unknown_sdk_event",
      "kind": "stream:content_block_delta:signature_delta", "raw": {}},

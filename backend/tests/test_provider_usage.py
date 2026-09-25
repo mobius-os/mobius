@@ -334,41 +334,161 @@ async def test_provider_usage_coalesces_concurrent_failed_cold_reads(
   assert first_result["state"] == "unavailable"
 
 
+_READY_CLAUDE_PAYLOAD = {
+  "seven_day": {"utilization": 24, "resets_at": "2099-09-05T03:00:00+00:00"},
+}
+
+
+def _claude_usage_http(monkeypatch, provider_usage, responses):
+  """Serve ``responses`` (status, json) in order to the Claude usage read."""
+  seen = []
+
+  def handler(request):
+    seen.append(request.url)
+    status, body = responses.pop(0)
+    return httpx.Response(status, json=body, headers={"retry-after": "0"})
+
+  real_client = httpx.AsyncClient
+
+  def client(**kwargs):
+    return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+  async def token(_data_dir):
+    return "secret-token"
+
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(
+    provider_usage.providers, "claude_subscription_type", lambda _d: "max",
+  )
+  return seen
+
+
 @pytest.mark.asyncio
-async def test_provider_usage_retries_a_cold_claude_read(
+async def test_cold_claude_read_with_no_windows_is_retried(
   monkeypatch, tmp_path,
 ):
   from app import provider_usage
 
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", (0,))
+  seen = _claude_usage_http(monkeypatch, provider_usage, [
+    (200, {}),
+    (200, _READY_CLAUDE_PAYLOAD),
+  ])
+
+  result = await provider_usage._fetch_claude_usage(str(tmp_path))
+
+  assert len(seen) == 2
+  assert result["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_claude_read_is_refused_without_immediate_retry(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", (0, 0))
+  seen = _claude_usage_http(monkeypatch, provider_usage, [
+    (429, {"error": {"type": "rate_limit_error"}}),
+  ])
+
+  with pytest.raises(provider_usage.ProviderUsageRefused) as refused:
+    await provider_usage._fetch_claude_usage(str(tmp_path))
+
+  assert len(seen) == 1
+  # Claude sends "Retry-After: 0", which is not a usable backoff.
+  assert refused.value.retry_after is None
+
+
+def _scripted_claude_reads(monkeypatch, provider_usage, tmp_path, refusals):
+  """A ready read, then ``refusals`` in order, on a controllable clock."""
   provider_usage._provider_usage_cache.clear()
   provider_usage._provider_usage_locks.clear()
-  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", (0,))
-  calls = 0
-
-  async def fake_snapshot(_provider_id, _data_dir):
-    nonlocal calls
-    calls += 1
-    if calls == 1:
-      return provider_usage._unavailable("Max plan")
-    return {
+  clock = [100.0]
+  monkeypatch.setattr(provider_usage.time, "monotonic", lambda: clock[0])
+  monkeypatch.setattr(
+    provider_usage.providers, "claude_subscription_type", lambda _d: "max",
+  )
+  outcomes = [
+    {
       "state": "ready",
       "plan_label": "Max plan",
       "windows": [{
-        "id": "seven_day",
-        "kind": "weekly",
-        "label": "Weekly",
-        "used_percent": 24,
-        "resets_at": "2099-09-05T03:00:00+00:00",
+        "id": "seven_day", "kind": "weekly", "label": "Weekly",
+        "used_percent": 24, "resets_at": "2099-09-05T03:00:00+00:00",
       }],
       "credit_balance": None,
-    }
+    },
+    *refusals,
+  ]
+  probes = []
+
+  async def fake_snapshot(_provider_id, _data_dir):
+    probes.append(clock[0])
+    outcome = outcomes.pop(0)
+    if isinstance(outcome, Exception):
+      raise outcome
+    return outcome
 
   monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
-  result = await provider_usage.read_provider_usage("claude", str(tmp_path))
+  read = lambda: provider_usage.read_provider_usage("claude", str(tmp_path))
+  return clock, probes, read
 
-  assert calls == 2
-  assert result["state"] == "ready"
-  assert result["stale"] is False
+
+@pytest.mark.asyncio
+async def test_usage_refusal_holds_last_reading_and_backs_off_before_probing(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  refused = provider_usage.ProviderUsageRefused("claude", None)
+  clock, probes, read = _scripted_claude_reads(
+    monkeypatch, provider_usage, tmp_path, [refused, refused],
+  )
+  backoff = provider_usage._PROVIDER_USAGE_REFUSED_BACKOFF_SECONDS
+
+  await read()
+  clock[0] += provider_usage._PROVIDER_USAGE_FRESH_SECONDS
+  first_refusal = await read()
+  assert first_refusal["state"] == "ready" and first_refusal["stale"] is True
+  assert len(probes) == 2
+
+  # Many panes asking during the backoff get the held reading, no probe.
+  clock[0] += backoff - 1
+  held = await read()
+  assert held["stale"] is True and held["windows"][0]["used_percent"] == 24
+  assert len(probes) == 2
+
+  # The next refusal doubles the wait.
+  clock[0] += 1
+  await read()
+  assert len(probes) == 3
+  clock[0] += 2 * backoff - 1
+  await read()
+  assert len(probes) == 3
+
+
+@pytest.mark.asyncio
+async def test_usage_refusal_backoff_never_serves_an_expired_reading(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  clock, probes, read = _scripted_claude_reads(
+    monkeypatch, provider_usage, tmp_path,
+    [provider_usage.ProviderUsageRefused("claude", 3600.0)],
+  )
+
+  await read()
+  clock[0] += provider_usage._PROVIDER_USAGE_FRESH_SECONDS
+  assert (await read())["stale"] is True
+  clock[0] += provider_usage._PROVIDER_USAGE_STALE_SECONDS
+  expired = await read()
+
+  assert expired["state"] == "unavailable"
+  assert expired["plan_label"] == "Max plan"
+  assert len(probes) == 2
 
 
 @pytest.mark.asyncio

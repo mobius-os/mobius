@@ -55,15 +55,46 @@ test('a new chat starts at zero against the selected model context', () => {
     { used: 0, maximum: 258_400 },
   )
   assert.equal(modelContextTokenCounts(registry, 'codex', 'missing'), null)
+  // The first turn is running: the server proves no turn has settled yet.
   assert.deepEqual(resolvedContextTokenCounts({
     provider: 'codex',
-    provider_session_id: null,
-    input_tokens: null,
+    provider_session_id: 'first-thread',
+    input_tokens: 0,
     context_window: null,
   }, registry, 'codex', 'gpt-5.6-sol'), {
     used: 0,
     maximum: 258_400,
   })
+})
+
+test('a running turn shows its latest model call before the turn settles', () => {
+  const registry = { claude: [{ id: 'claude-opus-5-5', context_window: 1_000_000 }] }
+  const settled = {
+    provider: 'claude',
+    provider_session_id: 'session-1',
+    input_tokens: 100_000,
+    context_window: 1_000_000,
+  }
+  // Claude reports no window mid-turn, so the settled one is kept.
+  assert.deepEqual(resolvedContextTokenCounts(
+    settled, registry, 'claude', 'claude-opus-5-5',
+    { live: { provider: 'claude', input_tokens: 240_000, context_window: null } },
+  ), { used: 240_000, maximum: 1_000_000 })
+  // A brand-new chat has only the catalog ceiling.
+  assert.deepEqual(resolvedContextTokenCounts(
+    undefined, registry, 'claude', 'claude-opus-5-5',
+    { noSession: true, live: { provider: 'claude', input_tokens: 30_000 } },
+  ), { used: 30_000, maximum: 1_000_000 })
+  // Codex states its own window with each reading.
+  assert.deepEqual(resolvedContextTokenCounts(
+    null, {}, 'codex', 'gpt-5.6-sol',
+    { live: { provider: 'codex', input_tokens: 50_000, context_window: 258_400 } },
+  ), { used: 50_000, maximum: 258_400 })
+  // A reading from the chat's previous provider never leaks into the new one.
+  assert.deepEqual(resolvedContextTokenCounts(
+    settled, registry, 'claude', 'claude-opus-5-5',
+    { live: { provider: 'codex', input_tokens: 50_000, context_window: 258_400 } },
+  ), { used: 100_000, maximum: 1_000_000 })
 })
 
 test('a chat before its first session estimates from the registry', () => {

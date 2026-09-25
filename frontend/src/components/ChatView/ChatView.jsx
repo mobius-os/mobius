@@ -1784,6 +1784,9 @@ export default function ChatView({
     setChatInfo(newChatSession.chatInfo)
   }, [newChatSession?.chatInfo, newChatSession?.materialized, setChatInfo])
 
+  // The running turn's latest context reading. The pane is keyed by chat, so
+  // it never outlives this chat's stream.
+  const [liveContext, setLiveContext] = useState(null)
   const {
     streamItems,
     latestItemsRef,
@@ -1949,6 +1952,7 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
+    onContextUsage: setLiveContext,
     onSteeredIntoTurn: ({
       ts,
       content,
@@ -4983,15 +4987,23 @@ export default function ChatView({
     }
   }, [chatId, queryClient, refreshContributionOverview])
 
+  const chatProvider = chatInfo?.provider || null
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
-      settingsQueries.providerUsage.invalidate(queryClient)
+      // Only this chat's provider spent allowance. Refreshing every provider
+      // on every pane's turn end multiplied reads of rate-limited services.
+      if (chatProvider) {
+        settingsQueries.providerUsage.invalidate(queryClient, chatProvider)
+      }
       chatQueries.usage.invalidate(queryClient, chatId)
-      chatQueries.currentUsage.invalidate(queryClient, chatId)
+      // The settled run now records what the live reading showed; drop the
+      // live one only once that record is in, so the gauge never steps back.
+      void chatQueries.currentUsage.invalidate(queryClient, chatId)
+        .finally(() => setLiveContext(null))
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, turnActive, queryClient])
+  }, [chatId, chatProvider, turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -6353,6 +6365,7 @@ export default function ChatView({
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
+              liveContext={liveContext}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
