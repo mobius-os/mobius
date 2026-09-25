@@ -1066,3 +1066,16 @@ async def test_install_receipt_keeps_exact_revision_available(monkeypatch):
     "body": {"local_app_id": "app:42:shared-notes"},
     "idempotency_key": "store:install:0000000000000001",
   }
+
+
+def test_existing_github_revisions_must_use_the_root_manifest():
+  """A subdirectory manifest could be listed but never installed or updated
+  from Git, so publication refuses it."""
+  from pydantic import ValidationError
+
+  body = {"repository": "octo-owner/pocket-list", "commit_sha": "a" * 40}
+  assert community.ExistingGitHubRevisionIn(**body).manifest_path == "mobius.json"
+  with pytest.raises(ValidationError):
+    community.ExistingGitHubRevisionIn(
+      **body, manifest_path="apps/pocket-list/mobius.json",
+    )
