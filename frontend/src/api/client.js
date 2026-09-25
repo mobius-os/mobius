@@ -1379,6 +1379,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(plan),
     }),
+    cancelPreparedUpdate: () => apiFetch('/platform/prepared-update', { method: 'DELETE' }),
     parkForAgent: (plan) => apiFetch('/platform/park-for-agent', {
       method: 'POST',
       body: JSON.stringify(plan),

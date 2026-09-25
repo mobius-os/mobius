@@ -25,9 +25,9 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const restartNeeded = level === 'server_restart'
   const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
   const conflict = platform?.state === 'conflict'
-  // An update whose container replacement is still owed must finish before
-  // another is offered; its source would otherwise run on the old image.
-  const finishFirst = platform?.unfinished_update?.stage === 'finish'
+  // A prepared or installed update must finish (restart, or container
+  // replacement) before another is offered.
+  const unfinished = platform?.unfinished_update?.stage === 'finish' ? platform.unfinished_update : null
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
@@ -80,7 +80,9 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
 
   const primary = conflict
     ? { label: platform?.conflict_chat_id ? 'Finish in chat' : 'Finish update', act: update.resolve }
-    : finishFirst
+    : unfinished?.action === 'restart'
+      ? { label: confirmRestart === 'primary' ? 'Confirm restart' : 'Restart to finish', act: () => pressRestart('primary') }
+    : unfinished
       ? { label: 'Finish update', act: () => openReview('finish') }
     : available
       ? { label: 'Review update', act: () => openReview() }

@@ -48,6 +48,9 @@ router = APIRouter(prefix="/api/platform", tags=["platform"])
 
 
 _PLAN_ERROR_MESSAGES = {
+  "prepared_update_swapped": (
+    "This update is already in place. Finish it instead of cancelling it."
+  ),
   "finish_update_first": (
     "Another update is not finished yet. Finish it in Settings before starting a new one."
   ),
@@ -180,6 +183,9 @@ async def get_platform_update_preview(
   there is nothing to update."""
   try:
     if intent == "finish":
+      prepared = await asyncio.to_thread(platform_update.prepared_update_preview)
+      if prepared is not None:
+        return prepared
       target_sha = await asyncio.to_thread(deployment_control.applied_release_sha)
       image_digest = None
       if platform_activation.deployment_kind() == "railway":
@@ -314,6 +320,21 @@ async def park_platform_update_for_agent(
       target_sha=request.target_sha,
       image_digest=request.image_digest,
     )
+  except PlatformUpdateError as exc:
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
+
+
+@router.delete(
+  "/prepared-update",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=204,
+)
+async def cancel_prepared_platform_update(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> None:
+  """Forget a prepared update before it is swapped in; the live checkout never changed."""
+  try:
+    await asyncio.to_thread(platform_update.cancel_prepared_update)
   except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
 

@@ -360,6 +360,24 @@ def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
     context.logger.warning("app runtime migration: %s", warning)
 
 
+async def _complete_platform_swap(context: StartupContext) -> None:
+  """Merge back edits made on the previous source after an update swap.
+
+  Runs before chats are reconciled and resumed. A conflict is parked on a
+  frozen copy and handed to one resolver chat; resumes wait until it is done.
+  """
+  import asyncio
+
+  from app import platform_update
+
+  outcome = await asyncio.to_thread(platform_update.complete_platform_swap)
+  if outcome:
+    context.logger.info("platform update swap: %s", outcome)
+  if outcome == "conflict":
+    with SessionLocal() as db:
+      await platform_update.create_platform_conflict_resolver_chat(db)
+
+
 def _reconcile_startup_chats(context: StartupContext) -> None:
   from app.chat import reconcile_startup_chats
 
@@ -615,6 +633,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("backfill session links", _backfill_session_links),
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
   StartupTask("fix forward chat media", _fix_forward_chat_media),
+  StartupTask("complete platform update swap", _complete_platform_swap),
   StartupTask("read restart authorization", _read_restart_authorization),
   StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
   StartupTask(

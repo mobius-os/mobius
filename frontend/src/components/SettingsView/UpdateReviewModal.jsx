@@ -83,6 +83,18 @@ export default function UpdateReviewModal({
     onResolve()
   }
 
+  // A prepared update has not touched the live checkout, so it can be dropped.
+  async function handleCancelPrepared() {
+    setFixError('')
+    const response = await api.platform.cancelPreparedUpdate()
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      setFixError(body?.detail?.message || 'Couldn’t cancel this update. Try again.')
+      return
+    }
+    onClose()
+  }
+
   async function handleApply() {
     applyAttemptedRef.current = true
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
@@ -200,6 +212,8 @@ export default function UpdateReviewModal({
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
+          {finish && platform?.unfinished_update?.cancellable && !busy && <button type="button"
+            className="settings__btn settings__btn--sm settings__btn--outline" onClick={handleCancelPrepared}>Cancel update</button>}
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
           : containerBlockers && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"

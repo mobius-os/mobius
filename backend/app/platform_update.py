@@ -118,6 +118,15 @@ RECONCILE_LOCK = Path("/data/.platform-reconcile.lock")
 # Durable, browser-safe phase record. Unlike the old process-only dictionary,
 # this is visible when status/progress requests land on another worker.
 UPDATE_PROGRESS_PATH = Path("/data/.platform-update-progress.json")
+# One update prepared on a frozen copy and not yet fully in place. The live
+# checkout keeps serving its current source until the next shutdown swaps the
+# checked update in; boot then merges edits made on the old source meanwhile
+# back on top. See ``prepare``/``swap_in_prepared_update``/``complete_platform_swap``.
+PREPARED_UPDATE_PATH = Path("/data/.platform-prepared-update.json")
+_PREPARED_REF = "refs/mobius/update-prepared"
+# The live state saved at the swap: the previous version plus late edits. The
+# boot script returns to it if the swapped-in version fails its startup check.
+_LATE_REF = "refs/mobius/update-late"
 # Container-local: survives a server restart but never claims a replacement
 # image inherited packages installed in the previous container.
 DEPENDENCY_RECEIPT_PATH = Path("/tmp/mobius-dependency-inputs.json")
@@ -226,6 +235,10 @@ class UnfinishedUpdate(TypedDict):
 
   target_sha: str
   stage: Literal["resolve", "finish"]
+  # What finishing takes: a container replacement, or just a restart.
+  action: Literal["replace", "restart"]
+  # Prepared but not yet in place: dropping it changes nothing live.
+  cancellable: bool
 
 
 _UPDATE_PROGRESS = PlatformUpdateProgress(
@@ -2553,6 +2566,319 @@ def _park_for_repair(
   _write_conflict_flag(target, paths, overlay=parked)
 
 
+class PreparedUpdate(TypedDict):
+  """A checked update waiting to be swapped in, or swapped in and settling."""
+
+  state: Literal["prepared", "swapped", "reverted"]
+  snapshot: str  # the live source the update was prepared from
+  prepared: str  # the checked commit that boots
+  target: str  # the reviewed release it contains
+  image_digest: str | None
+  requires_image: bool
+  late: str | None  # live state saved at the swap, in-progress edits on top
+  late_committed: str | None  # its committed part
+
+
+def read_prepared_update() -> PreparedUpdate | None:
+  try:
+    record = json.loads(PREPARED_UPDATE_PATH.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  if not isinstance(record, dict) or record.get("state") not in {
+    "prepared", "swapped", "reverted",
+  }:
+    return None
+  return PreparedUpdate(
+    state=record["state"],
+    snapshot=str(record.get("snapshot") or ""),
+    prepared=str(record.get("prepared") or ""),
+    target=str(record.get("target") or ""),
+    image_digest=record.get("image_digest") or None,
+    requires_image=bool(record.get("requires_image")),
+    late=record.get("late") or None,
+    late_committed=record.get("late_committed") or None,
+  )
+
+
+def _write_prepared_update(record: PreparedUpdate) -> None:
+  _atomic_write_text(PREPARED_UPDATE_PATH, json.dumps(record, sort_keys=True))
+
+
+def _clear_prepared_update(repo: Path) -> None:
+  PREPARED_UPDATE_PATH.unlink(missing_ok=True)
+  for ref in (_PREPARED_REF, _LATE_REF):
+    _git("update-ref", "-d", ref, repo=repo, check=False)
+
+
+def _prepare(
+  repo: Path, *, snapshot: str, prepared: str, target: str,
+  image_digest: str | None, checkout: Path,
+) -> PreparedUpdate:
+  """Check a finished update on its frozen copy and record it for the swap.
+
+  ``checkout`` holds exactly ``prepared``. Nothing here touches the live
+  checkout: it keeps serving ``snapshot`` plus any later edits until the next
+  shutdown swaps the update in.
+  """
+  from app.restart_util import RestartSourceInvalid, validate_restart_source
+
+  if _changes_python_dependencies(repo, snapshot, prepared):
+    # The running image cannot check source that imports new packages.
+    raise PlatformUpdateError("image_rebuild_required")
+  impact = _incoming_activation_impact(repo, snapshot, prepared)
+  requires_image = (
+    platform_activation.ActivationLevel.IMAGE_REBUILD.value
+    in impact["required_actions"]
+  )
+  if requires_image:
+    differing = _git(
+      "diff", "--name-only", "--no-renames", target, prepared,
+      repo=repo, check=False,
+    ).stdout.split()
+    kept = [path for path in differing if platform_activation.path_is_image_owned(path)]
+    if kept:
+      raise PlatformUpdateError(
+        "The official image would drop these local image-owned changes: "
+        + ", ".join(kept)
+      )
+  try:
+    validate_restart_source(checkout)
+  except RestartSourceInvalid as exc:
+    raise PlatformUpdateError(str(exc)) from exc
+  _git("update-ref", _PREPARED_REF, prepared, repo=repo)
+  record = PreparedUpdate(
+    state="prepared", snapshot=snapshot, prepared=prepared, target=target,
+    image_digest=image_digest, requires_image=requires_image, late=None,
+    late_committed=None,
+  )
+  _write_prepared_update(record)
+  _set_update_progress(
+    PlatformUpdatePhase.COMPLETE, plan_id=None, target_sha=target,
+    image_digest=image_digest, active=False,
+  )
+  return record
+
+
+def prepare_reviewed_update(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+  repo: Path = PLATFORM_REPO,
+) -> PreparedUpdate | ReconcileResult:
+  """Prepare a reviewed update from a snapshot of the live source.
+
+  The merge runs against the committed snapshot only; edits made afterwards
+  are late edits that boot merges back. A conflict parks for the resolver.
+  """
+  with _reconcile_flock():
+    _validate_update_plan(
+      repo, plan_id=plan_id, current_sha=current_sha,
+      target_sha=target_sha, image_digest=image_digest,
+    )
+    carried = _Carried(served=current_sha, pre=current_sha, working=None)
+    equivalent = app_git.merge_with_equivalent_changes(repo, current_sha, target_sha)
+    merged = equivalent or app_git.merge_refs(repo, current_sha, target_sha)
+    base = merged.merge_base_oid or _git(
+      "merge-base", current_sha, target_sha, repo=repo, check=False,
+    ).stdout.strip()
+    outcome = _merged_candidate(
+      repo, carried, target_sha, merged, right=target_sha, base=base,
+      reconciliation=(
+        equivalent.reconciliation if equivalent else app_git.ReconciliationReceipt()
+      ),
+    )
+    if isinstance(outcome, ReconcileResult):
+      flag = _read_conflict_flag() or {}
+      overlay = {**(flag.get("overlay") or {}), "image_digest": image_digest}
+      _write_conflict_flag(target_sha, list(flag.get("paths") or []), overlay=overlay)
+      return outcome
+    with tempfile.TemporaryDirectory(prefix="mobius-prepared-") as tmp:
+      checkout = Path(tmp) / "platform"
+      _git("worktree", "add", "--detach", "-q", str(checkout), outcome.tip, repo=repo)
+      try:
+        return _prepare(
+          repo, snapshot=current_sha, prepared=outcome.tip, target=target_sha,
+          image_digest=image_digest, checkout=checkout,
+        )
+      finally:
+        app_git.remove_overlay_worktree(repo, checkout)
+
+
+async def prepare_platform_update(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+) -> PreparedUpdate | PlatformApplyResult:
+  """Prepare a reviewed update off the event loop.
+
+  Returns the prepared record, or the conflict the review sheet renders (the
+  merge is parked for its resolver and nothing was prepared).
+  """
+  outcome = await asyncio.to_thread(
+    prepare_reviewed_update, plan_id=plan_id, current_sha=current_sha,
+    target_sha=target_sha, image_digest=image_digest,
+  )
+  if not isinstance(outcome, ReconcileResult):
+    return outcome
+  return PlatformApplyResult(
+    state=PlatformUpdateState.CONFLICT.value, needs_restart=False,
+    activation=platform_activation.classify_activation([]),
+    upstream_commit=target_sha, merge_commit=None,
+    conflict_paths=outcome.conflict_paths, chat_id=None,
+    phase=PlatformUpdatePhase.BLOCKED.value,
+    reconciliation=outcome.reconciliation.as_dict(), error=None,
+  )
+
+
+def swap_in_prepared_update(
+  *, cutover: bool, repo: Path = PLATFORM_REPO,
+) -> bool:
+  """At shutdown, after every chat is paused, point the live checkout at the
+  checked update. Everything live (commits and in-progress edits) is saved as
+  one commit under ``_LATE_REF`` first. An update that needs a new image
+  swaps only at its container cutover, never at an unrelated restart.
+  Returns whether the swap happened; failures leave the live source intact.
+  """
+  record = read_prepared_update()
+  if record is None or record["state"] != "prepared":
+    return False
+  if record["requires_image"] and not cutover:
+    return False
+  with _reconcile_flock():
+    local = _local_branch(repo)
+    _reattach_detached_head(repo, local)
+    carried = _carry_working_edits(repo, local)
+    late = carried.pre
+    try:
+      _git("update-ref", _LATE_REF, late, repo=repo)
+      # Record the swap first: if the process dies before the checkout moves,
+      # or boot's guard restores ``late``, boot sees an unswapped checkout and
+      # returns the update to prepared instead of losing the late edits.
+      _write_prepared_update({
+        **record, "state": "swapped", "late": late,
+        "late_committed": carried.served,
+      })
+      _activate_candidate(repo, local, late, record["prepared"])
+    except Exception:
+      log.exception("platform: could not swap in the prepared update")
+      _write_prepared_update(record)
+      _restore_working_edits(repo, local)
+      return False
+    _clear_reconcile_pre()
+    try:
+      app_git.carry_equivalent_change_sources(repo, carried.served, record["prepared"])
+      app_git.retire_landed_equivalent_changes(repo, record["target"])
+    except Exception:
+      log.warning("platform: could not update contribution provenance", exc_info=True)
+    _set_upstream(repo, record["target"])
+    ROLLED_BACK_FLAG.unlink(missing_ok=True)
+    _record_update_activation(repo, record["prepared"], record["target"])
+    return True
+
+
+def cancel_prepared_update(repo: Path = PLATFORM_REPO) -> None:
+  """Forget a prepared update that has not been swapped in.
+
+  Nothing has touched the live checkout yet, so this is always safe; once
+  swapped, the update boots and its late edits are merged back instead.
+  """
+  with _reconcile_flock():
+    record = read_prepared_update()
+    if record is None:
+      return
+    if record["state"] != "prepared":
+      raise PlatformUpdateError("prepared_update_swapped")
+    _clear_prepared_update(repo)
+
+
+def late_edits_pending() -> bool:
+  """Whether edits made on the previous source still await their merge back.
+
+  Automatic chat resumes wait for this, so no agent resumes on a checkout
+  that is missing its own recent edits.
+  """
+  record = read_prepared_update()
+  return record is not None and record["state"] == "swapped"
+
+
+def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
+  """At boot, finish a swap: merge late edits back or park them.
+
+  Returns ``replayed``, ``conflict`` (parked for the resolver), ``reverted``
+  (the boot script returned to the previous version), or None.
+  """
+  record = read_prepared_update()
+  if record is None:
+    return None
+  local = _local_branch(repo)
+  unswapped = PreparedUpdate(
+    **{**record, "state": "prepared", "late": None, "late_committed": None},
+  )
+  if record["state"] == "reverted":
+    # The previous version is back with its recent edits. The update stays
+    # prepared, so the owner can retry Finish (often an interrupted cutover)
+    # or cancel it.
+    _write_rolled_back_flag(
+      record["target"],
+      "The updated version failed its startup check, so Möbius returned to "
+      "the previous version with your recent edits.",
+    )
+    _restore_working_edits(repo, local)
+    _write_prepared_update(unswapped)
+    return "reverted"
+  if record["state"] != "swapped" or not record["late"]:
+    return None
+  with _reconcile_flock():
+    head = _rev(repo, local)
+    if head != record["prepared"]:
+      # The checkout never moved (the swap failed or boot restored it), so
+      # there is nothing to merge back: the update is still just prepared.
+      _restore_working_edits(repo, local)
+      _write_prepared_update(unswapped)
+      return "not_swapped"
+    # The source moved while the server was down: install a changed
+    # dependency lock now; the shell is rebuilt once late edits are back.
+    moved = _activation_paths_between(repo, record["late"], head)
+    if any(path in _FRONTEND_DEPENDENCY_INPUTS for path in moved):
+      installed, error = _sync_frontend_dependencies(repo)
+      if not installed:
+        log.error("platform: frontend dependencies for the update failed: %s", error)
+    # Late edits are local work and the booted update is the incoming
+    # release: the same merge Apply uses, so in-progress edits come back
+    # uncommitted and a conflict parks for a resolver on a frozen copy.
+    late_committed = record["late_committed"] or record["late"]
+    carried = _Carried(
+      served=late_committed, pre=record["late"],
+      working=record["late"] if record["late"] != late_committed else None,
+    )
+    outcome = _merged_candidate(
+      repo, carried, head,
+      app_git.merge_refs(repo, late_committed, head, merge_base=record["snapshot"]),
+      right=head, base=record["snapshot"],
+      reconciliation=app_git.ReconciliationReceipt(),
+    )
+    if isinstance(outcome, ReconcileResult):
+      flag = _read_conflict_flag() or {}
+      _write_conflict_flag(
+        head, list(flag.get("paths") or []),
+        overlay={**(flag.get("overlay") or {}), "replay": True, "live": head},
+      )
+      _invalidate_frontend_build_stamp(repo)
+      return "conflict"
+    if outcome.tip != head:
+      _activate_candidate(repo, local, head, outcome.tip)
+      _clear_reconcile_pre()
+      _restore_working_edits(repo, local)
+    # Dropping the stamp makes the watcher's startup check rebuild the shell.
+    _invalidate_frontend_build_stamp(repo)
+    _clear_prepared_update(repo)
+    return "replayed"
+
+
 def _net_overlay_commit(repo: Path, target: str, tree: str, source: str) -> str:
   """Make the one local commit after upstream; never rewrite the live branch."""
   target_tree = _commit_tree_oid(repo, target)
@@ -2603,14 +2929,13 @@ def _record_update_activation(
 
 
 def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
-  """Finish one parked net-tree resolution through the normal activation gates.
+  """Finish one parked resolution.
 
-  The resolver's answer is one more input to the same final-tree merge Apply
-  runs: live source that changed while it was parked (new commits or
-  uncommitted edits) merges with the answer from the source it was resolved
-  against. Returns ``updated``, ``conflict`` when those later edits overlap
-  the answer (parked again with fresh markers), or ``rolled_back`` when the
-  finished tree fails a gate.
+  An update's answer becomes a prepared update: committed on the reviewed
+  release and checked on the frozen copy, then swapped in at the next shutdown
+  (``prepared``). The live checkout is untouched until then. Late edits parked
+  after an update's boot merge into the live checkout directly (``updated``,
+  ``conflict`` or ``rolled_back``).
   """
   with _reconcile_flock():
     flag = _read_conflict_flag() or {}
@@ -2632,44 +2957,51 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     else:
       committed = _net_overlay_commit(repo, target, answer, source)
       resolved_working = None
-    # The owner's current edits ride along exactly as they would on a fresh
-    # update; they are unwound again below whatever the outcome.
+    # A committed update answer is prepared and swapped in at shutdown. A
+    # conflict with the owner's own uncommitted edits, from an ordinary Apply,
+    # and late edits after a swap finish on the live checkout under the lock.
+    if not parked.get("replay") and parked.get("stage") != "working":
+      _prepare(
+        repo, snapshot=source,
+        prepared=resolved_working[0] if resolved_working else committed,
+        target=target, image_digest=parked.get("image_digest"), checkout=worktree,
+      )
+      app_git.remove_overlay_worktree(repo, worktree)
+      CONFLICT_FLAG.unlink(missing_ok=True)
+      return "prepared"
+    # Late edits were parked against the booted update; live edits made since
+    # that boot merge with the answer from there, and are unwound again below.
+    live = str(parked.get("live") or source)
     _reattach_detached_head(repo, local)
     carried = _carry_working_edits(repo, local)
+    if parked.get("replay") and resolved_working is not None:
+      # A late in-progress edit was resolved against the booted update; it
+      # returns uncommitted on top of whatever is live now.
+      resolved_working = (resolved_working[0], carried.pre)
     try:
       outcome = _merged_candidate(
         repo, carried, target,
-        app_git.merge_refs(repo, carried.served, committed, merge_base=source),
-        right=committed, base=source,
+        app_git.merge_refs(repo, carried.served, committed, merge_base=live),
+        right=committed, base=live,
         reconciliation=app_git.ReconciliationReceipt(),
         resolved_working=resolved_working,
       )
       if isinstance(outcome, ReconcileResult):
-        # Later live edits overlap the answer: the same resolver continues.
         _write_conflict_flag(
           target, outcome.conflict_paths, flag.get("chat_id"),
-          overlay=outcome.overlay,
+          overlay={**(outcome.overlay or {}), "replay": True, "live": carried.served},
         )
         return outcome.status
-      if _changes_python_dependencies(repo, carried.pre, outcome.tip):
-        # A resolver may finish a textual overlap, but the old image still
-        # cannot validate source that imports its newly declared packages.
-        # Leave the parked candidate untouched for a reviewed image operation.
-        raise PlatformUpdateError("image_rebuild_required")
       result = _finalize_update(
         repo, local, pre=carried.pre, tip=outcome.tip, target=target,
         progress=None, reconciliation=outcome.reconciliation,
         overlay=outcome.overlay,
       )
       if result.status == "updated":
-        # Complete the update exactly as an Apply does: its owed activation
-        # keeps it unfinished until the restart or replacement happens, and
-        # the reviewed image stays nameable for Finish.
-        _record_update_activation(repo, result.new_sha, target)
-        _set_update_progress(
-          PlatformUpdatePhase.COMPLETE, plan_id=None, target_sha=target,
-          image_digest=parked.get("image_digest"), active=False,
-        )
+        if parked.get("replay"):
+          _clear_prepared_update(repo)
+        else:
+          _record_update_activation(repo, result.new_sha, target)
       return result.status
     finally:
       _restore_working_edits(repo, local)
@@ -2725,6 +3057,9 @@ def abandon_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     app_git.remove_overlay_worktree(repo, worktree)
     CONFLICT_FLAG.unlink(missing_ok=True)
     _restore_working_edits(repo, _local_branch(repo))
+    if parked.get("replay"):
+      # The late edits stay reachable under their ref; stop holding resumes.
+      PREPARED_UPDATE_PATH.unlink(missing_ok=True)
     return "abandoned"
 
 
@@ -2881,16 +3216,29 @@ def unfinished_update(repo: Path = PLATFORM_REPO) -> UnfinishedUpdate | None:
   Derived from records the updater already keeps: the parked merge and the
   activation remainder an update recorded for its release.
   """
+  prepared = read_prepared_update()
   flag = _read_conflict_flag() if CONFLICT_FLAG.exists() else None
   if flag and flag.get("upstream"):
-    return UnfinishedUpdate(target_sha=str(flag["upstream"]), stage="resolve")
+    return UnfinishedUpdate(
+      target_sha=prepared["target"] if prepared else str(flag["upstream"]),
+      stage="resolve", action="replace", cancellable=False,
+    )
+  if prepared and prepared["state"] in {"prepared", "swapped"}:
+    return UnfinishedUpdate(
+      target_sha=prepared["target"], stage="finish",
+      action="replace" if prepared["requires_image"] else "restart",
+      cancellable=prepared["state"] == "prepared",
+    )
   marker = _read_activation_marker()
   if marker and marker["upstream_sha"] and any(
     platform_activation.classify_activation([path])["level"]
     == platform_activation.ActivationLevel.IMAGE_REBUILD.value
     for path in marker["image_paths"]
   ):
-    return UnfinishedUpdate(target_sha=marker["upstream_sha"], stage="finish")
+    return UnfinishedUpdate(
+      target_sha=marker["upstream_sha"], stage="finish", action="replace",
+      cancellable=False,
+    )
   return None
 
 
@@ -3101,6 +3449,29 @@ def empty_platform_update_preview(
     commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
     blocking_paths=[], blocking_diff=None, blocking_diff_truncated=False,
   )
+
+
+def prepared_update_preview(
+  repo: Path = PLATFORM_REPO,
+) -> PlatformUpdatePreview | None:
+  """Finish review for a prepared update: what its swap still needs."""
+  record = read_prepared_update()
+  if record is None or record["state"] != "prepared":
+    return None
+  current = _update_source_tip(repo)
+  activation = _incoming_activation_impact(
+    repo, record["snapshot"], record["prepared"],
+  )
+  preview = empty_platform_update_preview(
+    current_sha=current, target_sha=record["target"],
+    image_digest=record["image_digest"],
+  )
+  preview.update(
+    state=PlatformUpdateState.ACTIVATION_NEEDED.value, actionable=True,
+    operation="finish", activation=activation, incoming_activation=activation,
+    plan_id=_update_plan_id(current, record["target"], record["image_digest"]),
+  )
+  return preview
 
 
 def _preview_commits(
@@ -3671,17 +4042,16 @@ async def create_platform_conflict_resolver_chat(
 FINISH_UPDATE_INSTRUCTIONS = (
   "finish this same update yourself; the owner's request to resolve it "
   "covers that. Read `mapi '/api/platform/update-preview?intent=finish'`: it "
-  "stays on this release and never offers a newer one. If "
+  "names the prepared release and never offers a newer one. If "
   "`activation.required_actions` includes `image_rebuild`, POST its "
   "`plan_id`, `current_sha`, `target_sha` and `image_digest` to "
-  "`/api/platform/rebuild`; that installs any remaining source and replaces "
-  "the container with the matching image in one step, restarting Möbius "
-  "once, and this chat resumes afterwards to confirm the new version is "
-  "running. Otherwise POST the same plan to `/api/platform/apply` if it is "
-  "still actionable, then use the restart card if `server_restart` remains. "
-  "Never use a plain restart in place of the rebuild; it would run the new "
-  "source on the old image. If it cannot finish, say exactly why: Settings "
-  "keeps offering Finish update for this release until it does."
+  "`/api/platform/rebuild`: the prepared update is swapped in at that "
+  "container cutover and Möbius restarts once. Otherwise request a restart "
+  "with the restart card; the prepared update is swapped in at that restart. "
+  "Either way this chat resumes after boot: confirm the release is running. "
+  "A plain restart never swaps in an update that needs a new image. If it "
+  "cannot finish, say exactly why: Settings keeps offering Finish update for "
+  "this release until it does."
 )
 
 
@@ -3692,6 +4062,20 @@ def _platform_conflict_resolver_message(
 ) -> str:
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
+  if overlay and overlay.get("replay"):
+    return (
+      "Möbius just finished a platform update. Edits made on the previous "
+      "version while it was being finished overlap it in: " + files + ". "
+      "Paused chats resume once these edits are back.\n\n"
+      f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
+      "both the update and the intent of those edits, stage them, then run "
+      "`cd /data/platform/backend && python3 -c \"from app.platform_update "
+      "import continue_platform_overlay_update as c; print(c())\"`. It "
+      "merges your answer into the live checkout with the normal build and "
+      "import checks. If it prints `conflict`, newer live edits overlap your "
+      "answer; resolve the fresh markers and run it again. Backend edits "
+      "load at the next restart."
+    )
   if overlay and overlay.get("mode") == "net":
     blockers = list(overlay.get("blockers") or [])
     opening = (
@@ -3717,12 +4101,11 @@ def _platform_conflict_resolver_message(
       "the intended local behavior and the incoming upstream behavior. Stage "
       "the resolved files there, then run `cd /data/platform/backend && "
       "python3 -c \"from app.platform_update import "
-      "continue_platform_overlay_update as c; print(c())\"`. The updater "
-      "merges your answer with any live edits made meanwhile, makes one "
-      "local commit on the reviewed upstream version, and runs the normal "
-      "build/import and rollback gates. If it prints `conflict`, those live "
-      "edits overlap your answer: the candidate now holds fresh markers, so "
-      "resolve and run the same command again. When it prints `updated`, "
+      "continue_platform_overlay_update as c; print(c())\"`. It commits "
+      "your answer on the reviewed release and runs the same startup check "
+      "the next boot will, without touching the live checkout. Edits other "
+      "chats make meanwhile are not part of this update; they are merged "
+      "back after it boots. When it prints `prepared`, "
       + FINISH_UPDATE_INSTRUCTIONS
     )
   return (

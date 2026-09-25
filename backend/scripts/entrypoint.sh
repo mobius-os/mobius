@@ -261,6 +261,31 @@ _platform_import_probe() {
   _platform_import_probe_dir /data/platform/backend
 }
 
+# A checked platform update is swapped in at shutdown and its previous state
+# (previous version plus edits made meanwhile) saved as one commit. If the
+# swapped-in version still fails its startup check, return to that commit so
+# the owner keeps a working Möbius; the server then reports the update failed.
+_platform_revert_swap() {
+  _swap_record=/data/.platform-prepared-update.json
+  [ -f "$_swap_record" ] || return 1
+  _swap_late="$(python3 -P -c 'import json, sys
+r = json.load(open(sys.argv[1]))
+print(r.get("late") or "" if r.get("state") == "swapped" else "")' "$_swap_record" 2>/dev/null)" || return 1
+  case "$_swap_late" in *[!0-9a-f]*|"") return 1 ;; esac
+  [ "${#_swap_late}" -eq 40 ] || return 1
+  echo "PLATFORM LAYER WARNING: the updated version failed its startup check; returning to the previous version." >&2
+  su -s /bin/sh mobius -c "git -C /data/platform reset -q --hard $_swap_late" || return 1
+  python3 -P -c 'import json, os, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["state"] = "reverted"
+temp = path + ".tmp"
+with open(temp, "w") as handle:
+  handle.write(json.dumps(record, sort_keys=True))
+os.replace(temp, path)' "$_swap_record" || return 1
+  chown mobius:mobius "$_swap_record" 2>/dev/null || true
+}
+
 _platform_clear_empty_target() {
   if [ -e /data/platform ]; then
     if [ -n "$(ls -A /data/platform 2>/dev/null)" ]; then
@@ -502,6 +527,9 @@ else
   if _platform_git_valid; then
     if _platform_import_probe; then
       echo "Platform layer: import probe OK; serving /data/platform/backend."
+      _platform_use_direct
+    elif _platform_revert_swap && _platform_import_probe; then
+      echo "Platform layer: returned to the previous version; serving /data/platform/backend."
       _platform_use_direct
     else
       echo "PLATFORM LAYER WARNING: import probe failed for /data/platform." >&2
