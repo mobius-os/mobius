@@ -1,8 +1,8 @@
-"""Every pinned first-boot app installs on an empty instance.
+"""Every default first-boot app installs on an empty instance.
 
 First boot only logs a failed default-app install, so a platform contract change
-that a pinned package no longer satisfies would otherwise ship silently. This
-fetches the pinned packages from GitHub, so the hermetic suite skips it; CI runs
+that an app's `main` no longer satisfies would otherwise ship silently. This
+fetches the packages from GitHub, so the hermetic suite skips it; CI runs
 it as its own step with MOBIUS_LIVE_BOOTSTRAP=1.
 """
 
@@ -17,11 +17,11 @@ from app.bootstrap import _CORE_BOOTSTRAP_APPS, ensure_bootstrap_apps_installed
 
 pytestmark = pytest.mark.skipif(
   os.environ.get("MOBIUS_LIVE_BOOTSTRAP") != "1",
-  reason="fetches the pinned first-boot apps from GitHub",
+  reason="fetches the first-boot apps from GitHub",
 )
 
 
-def test_empty_instance_installs_every_pinned_bootstrap_app(
+def test_empty_instance_installs_every_bootstrap_app(
   db, monkeypatch, caplog,
 ):
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
