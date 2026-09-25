@@ -58,11 +58,11 @@ read, versioned-write, collection-completeness, subscription, and
 [`building-apps`](backend/scripts/seed-skills/building-apps.md) guide; keep
 those mechanics in that one place rather than copying a second recipe here.
 
-Apps own merge policy and recovery UI. Do not install a generic automatic
-`onConflict` recovery callback from this guide: its asynchronous delivery and
-replay lifecycle must be tested with the app's own domain operations. Preserve
-a conflict visibly and make the app-specific next step deliberate until that
-lifecycle is covered.
+Apps own merge policy and recovery UI. Every app that resolves offline
+conflicts—automatically or by a deliberate owner action—must follow the
+[offline conflict contract](backend/scripts/seed-skills/building-apps.md#offline-conflict-contract):
+acknowledgement and replay semantics, intent normalization, the authoritative
+merge base, and carrying intent onto a recovery write that can queue.
 
 ## Loading and offline UI
 
