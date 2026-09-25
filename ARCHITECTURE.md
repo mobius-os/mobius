@@ -1433,7 +1433,7 @@ Native question futures retain their existing answer/cancel behavior and
 share the same open-card slot as a compatibility path for existing sessions.
 
 Saved options may explicitly set `on_answer: "close"` (default `"resume"`).
-Quiet-capable cards receive immutable option IDs; the browser sends actual
+Every newly saved option receives an immutable ID; the browser sends actual
 selections in `selected_options`, keyed by subquestion ID, alongside the normal
 prompt-keyed `answers`. Free text, including text equal to an option label,
 never acquires option authority. Every subquestion must select only close
