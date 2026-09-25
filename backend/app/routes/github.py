@@ -530,6 +530,12 @@ def _personal_claim_owners(
   return owners, own_claim
 
 
+_POST_PUSH_ATTEMPT_PHASES = frozenset({
+  "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
+  "complete",
+})
+
+
 def _assert_personal_publication_source(
   record: dict,
   owner: _PersonalAttemptOwner,
@@ -542,10 +548,7 @@ def _assert_personal_publication_source(
   # read; no receipt phase by itself is source provenance.
   preflight = (
     _assert_pending_equivalence_before_publication
-    if owner.replay_phase() in {
-      "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
-      "complete",
-    }
+    if owner.replay_phase() in _POST_PUSH_ATTEMPT_PHASES
     else _assert_pending_equivalence_preflight
   )
   # An armed receipt proves only that the owner approved these private inputs.
@@ -6127,6 +6130,28 @@ async def autopilot_update(
       claimed=record,
       action_input=action_input,
     )
+    # The grant, not the installed checkout, authorizes a follow-up: it may
+    # fast-forward only from a head the owner granted or this round pushed.
+    # A signed post-push receipt instead resumes through exact public
+    # reconciliation. Anything else moved the PR outside the loop.
+    live_head = str(live_target.get("head_sha") or "")
+    if (
+      attempt_owner.replay_phase() not in _POST_PUSH_ATTEMPT_PHASES
+      and live_head not in {
+        str(sha)
+        for sha in (fresh_row.granted_head_sha, fresh_row.round_head_sha)
+        if sha
+      }
+    ):
+      raise HTTPException(status_code=409, detail={
+        "message": (
+          "The pull request moved to a head this Autopilot grant does not "
+          "cover. Nothing was pushed."
+        ),
+        "code": "pr_moved_outside_grant",
+        "published": False,
+        "public_head_sha": live_head,
+      })
     attempt_owner.arm_claim()
     record = attempt_owner.recovery_record(record)
     completed_result = _completed_autopilot_update_result(
@@ -6152,18 +6177,15 @@ async def autopilot_update(
           str(live_target.get("head_sha") or ""),
           str(plan.get("head_sha") or ""),
         )
+        # The live head was bound to the grant before arming, and the push is
+        # a compare-and-swap on that head. The installed-source witness stays
+        # mandatory only for after_merge handoffs; otherwise it is recorded
+        # opportunistically below.
         await asyncio.to_thread(partial(
           _assert_personal_publication_source,
           record,
           attempt_owner,
-          # The grant authorizes a follow-up only against the exact PR head
-          # it covered. A reset or unrelated public ref must still prove its
-          # source independently; otherwise source drift could mask a remote
-          # branch change rather than merely the original local commit moving.
-          allow_granted_followup=(
-            str(live_target.get("head_sha") or "")
-            == str(row.granted_head_sha or "")
-          ),
+          allow_granted_followup=True,
         ))
         pr_url, number, record_patch = await asyncio.to_thread(
           _submit_prepared_pr, record, diff_path,
@@ -6221,13 +6243,18 @@ async def autopilot_update(
               **exc.record_patch,
               "updated_at": _now_iso(),
             })
-      if attempt_owner.replay_phase() == "armed":
+      # ``armed`` precedes the signed push_pending phase, so nothing public
+      # happened. Any later phase may have pushed: report unknown (null) and
+      # let the agent read the public head rather than assume either way.
+      unpublished = attempt_owner.replay_phase() == "armed"
+      if unpublished:
         attempt_owner.settle()
       raise HTTPException(
         status_code=exc.status_code,
         detail={
           "message": exc.message,
           **({"code": exc.code} if exc.code else {}),
+          "published": False if unpublished else None,
         },
       )
 
@@ -6251,15 +6278,27 @@ async def autopilot_update(
     if number is not None:
       updated["number"] = number
     _write_record(record_path, updated)
+  # Attribution normalization can amend the reviewed head before the push, so
+  # bind the round (and, on completion, the grant) to the head GitHub now has.
+  pushed_head = str(
+    (record_patch or {}).get("last_submit_push_sha") or body.head_sha
+  )
   if not autopilot.record_action(
     db, app_id, record_id,
-    run_id=body.run_id, action="pushed", head_sha=body.head_sha,
+    run_id=body.run_id, action="pushed", head_sha=pushed_head,
   ):
-    raise HTTPException(
-      status_code=409,
-      detail="The branch was pushed, but this autopilot round has expired.",
-    )
+    # The public effect happened even though the round cannot record it; say
+    # so in a typed field instead of leaving the agent to infer it from prose.
+    raise HTTPException(status_code=409, detail={
+      "message": "The branch was pushed, but this autopilot round has expired.",
+      "code": "round_expired_after_push",
+      "published": True,
+      "public_head_sha": pushed_head,
+    })
   async with fs_locks.app_storage_lock(app_id):
     if attempt_owner.receipt() is not None:
       attempt_owner.settle()
-  return {"status": "ok", "url": pr_url, "number": number}
+  return {
+    "status": "ok", "url": pr_url, "number": number,
+    "published": True, "public_head_sha": pushed_head,
+  }

@@ -892,6 +892,101 @@ def test_injection_diff_outside_allowlist_is_rejected(
   ).exists()
 
 
+@pytest.mark.parametrize("live_head", [_HEAD1, "d" * 40])
+def test_update_binds_to_granted_public_head_not_installed_source(
+  client, owner_token, monkeypatch, live_head,
+):
+  """The grant, not the live checkout, authorizes a follow-up fast-forward."""
+  from app.github_contributions import ContributionSubmitError
+
+  _write_token(login="octocat")
+  app_id, _app_tok = _app_token(client, owner_token, github_access=True)
+  agent_headers = {"Authorization": f"Bearer {owner_token}"}
+  record_id = f"rec-grant-bound-{live_head[:1]}"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  rec = _record(record_id, repo)
+  rec.update({
+    "status": "open", "number": 42, "head_repository": "octocat/app-demo-1",
+    "url": "https://github.com/mobius-os/app-demo/pull/42",
+  })
+  rec["plan"]["head_sha"] = _HEAD2
+  rec["plan"]["diff_sha256"] = hashlib.sha256(_DIFF2.encode()).hexdigest()
+  _mark_reviewed_update(rec)
+  _write_contribution(app_id, record_id, rec, _DIFF2)
+  normalized = "e" * 40
+  pushes = []
+  for name, fake in {
+    "_autopilot_changed_paths": lambda *_a: ["index.jsx"],
+    "_resolve_reviewed_commit": lambda _repo, value, _label: str(value),
+    "_equivalence_source_repo": lambda _record: None,
+    "_assert_reviewed_update_contains_live_head": lambda *_a: None,
+    "_autopilot_live_target": lambda *_a: {
+      "error": None, "head_sha": live_head, "base_branch": "main",
+      "base_sha": _BASE, "title": rec["plan"]["title"],
+      "body": rec["plan"]["body_draft"],
+    },
+    # Autopilot fixes live only in the staging worktree, so the installed
+    # checkout can never subsume them.
+    "_assert_pending_equivalence_preflight": lambda _r: (_ for _ in ()).throw(
+      ContributionSubmitError("not installed", code="source_provenance_mismatch"),
+    ),
+    "_submit_prepared_pr": lambda _r, _d, **_k: (
+      pushes.append(_k["expected_existing_head_sha"])
+      or (rec["url"], 42, {"last_submit_push_sha": normalized})
+    ),
+  }.items():
+    monkeypatch.setattr(github_routes, name, fake)
+
+  db = SessionLocal()
+  try:
+    autopilot.stamp_grant(
+      db, app_id, record_id, head_sha=_HEAD1,
+      target_repo="mobius-os/app-demo", target_pr_number=42,
+      target_head_repository="octocat/app-demo-1",
+      target_branch=_BRANCH, target_repo_path=str(repo.resolve()),
+    )
+    run_id = autopilot.claim_for_round(
+      db, app_id, record_id, attention_key="k", event_at="2026-07-10T00:00:00Z",
+    )["run_id"]
+  finally:
+    db.close()
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update",
+    json={"run_id": run_id, "head_sha": _HEAD2,
+          "diff_sha256": rec["plan"]["diff_sha256"]},
+    headers=agent_headers,
+  )
+  if live_head != _HEAD1:
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == {
+      "message": (
+        "The pull request moved to a head this Autopilot grant does not "
+        "cover. Nothing was pushed."
+      ),
+      "code": "pr_moved_outside_grant",
+      "published": False,
+      "public_head_sha": live_head,
+    }
+    assert pushes == []
+    assert not github_routes.contribution_runtime.personal_attempt_path(
+      app_id, record_id,
+    ).exists()
+    return
+  assert r.status_code == 200, r.text
+  assert r.json()["published"] is True
+  assert r.json()["public_head_sha"] == normalized
+  assert pushes == [_HEAD1]
+  db = SessionLocal()
+  try:
+    # The next round's grant must follow the head GitHub has, including an
+    # attribution-normalized amend of the reviewed commit.
+    assert autopilot.get_row(db, app_id, record_id).round_head_sha == normalized
+  finally:
+    db.close()
+
+
 def test_stale_lease_then_second_failure_escalates(
   client, owner_token, monkeypatch,
 ):
