@@ -92,14 +92,21 @@ def _require_owner(principal: Principal) -> None:
 def _active_rows_or_409(db: Session, chat_id: str, principal=None):
   rows = active_goal_rows(db, chat_id)
   if rows is None:
-    raise HTTPException(
-      status_code=409, detail="This chat has no active Goal to plan."
-    )
+    raise HTTPException(status_code=409, detail={
+      "code": "no_active_goal", "message": "This chat has no active Goal to plan.",
+    })
   if principal is not None and principal.run_id is not None and (
     rows[0].id != principal.run_id or rows[0].status != "running"
   ):
     raise HTTPException(status_code=409, detail="This execution attempt no longer owns the Goal.")
   return rows
+
+
+def _plan_refusal(exc: GoalPlanError) -> HTTPException:
+  """A typed 422: stable code and facts beside the client-neutral message."""
+  return HTTPException(status_code=422, detail={
+    **exc.facts, "code": exc.code, "message": str(exc),
+  })
 
 
 def _publish(chat_id: str, plan: dict[str, Any]) -> None:
@@ -252,7 +259,7 @@ async def put_goal_plan(
         expected_revision=body.expected_revision, tasks=body.tasks,
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)
@@ -289,7 +296,7 @@ async def patch_goal_task(
         },
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)
@@ -337,7 +344,7 @@ async def patch_goal_record(
         next_action=body.next_action, result=body.result,
       )
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, serialize_plan(db, run, goal))
@@ -368,7 +375,7 @@ async def add_goal_task(
                           expected_revision=body.expected_revision,
                           tasks=[*tasks, body.task])
     except GoalPlanError as exc:
-      raise HTTPException(status_code=422, detail=str(exc)) from exc
+      raise _plan_refusal(exc) from exc
     except GoalPlanConflict as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)

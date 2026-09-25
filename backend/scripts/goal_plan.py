@@ -25,6 +25,16 @@ def _settings() -> tuple[str, str, str]:
   return base, token, chat_id
 
 
+# The server names what is wrong by code; this helper names its own flags.
+_REMEDIES = {
+  "no_active_goal": "Promote first, or run `list` then `resume ID`.",
+  "progress_incomplete": (
+    "If every repetition is done, record it in the same update: "
+    "update {task_id} --progress {total}/{total} --status completed"
+  ),
+}
+
+
 def _request(method: str, path: str, body=None):
   base, token, _ = _settings()
   data = None if body is None else json.dumps(body).encode("utf-8")
@@ -45,6 +55,14 @@ def _request(method: str, path: str, body=None):
       detail = json.loads(raw).get("detail", raw)
     except json.JSONDecodeError:
       detail = raw
+    if isinstance(detail, dict):
+      hint = _REMEDIES.get(detail.get("code"), "")
+      try:
+        hint = hint.format(**detail)
+      except (KeyError, IndexError, ValueError):
+        hint = ""
+      message = str(detail.get("message", "")).rstrip(".")
+      detail = f"{message}. {hint}" if hint else message
     raise SystemExit(f"goal-plan request failed ({exc.code}): {detail}") from exc
   except URLError as exc:
     raise SystemExit(f"goal-plan request failed: {exc.reason}") from exc

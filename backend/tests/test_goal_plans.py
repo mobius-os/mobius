@@ -1004,7 +1004,7 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
     json={"expected_revision": 2, "status": "running"}, headers=auth,
   )
   assert premature.status_code == 422
-  assert "dependencies complete" in premature.json()["detail"]
+  assert "dependencies complete" in premature.json()["detail"]["message"]
 
   revision = 2
   for task_id, status in (
@@ -1084,7 +1084,11 @@ def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
     json={"expected_revision": 2, "status": "completed"}, headers=auth,
   )
   assert not_done.status_code == 422
-  assert "repeated progress is full" in not_done.json()["detail"]
+  # A typed refusal: the client names its own one-call fix from the facts.
+  assert not_done.json()["detail"] == {
+    "code": "progress_incomplete", "task_id": "repeat", "current": 2,
+    "total": 3, "message": "repeat cannot complete at 2/3 progress",
+  }
 
   stale = client.patch(
     f"/api/chats/{chat_id}/goal-plan/tasks/repeat",
@@ -1092,15 +1096,11 @@ def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
   )
   assert stale.status_code == 409
 
-  full = client.patch(
-    f"/api/chats/{chat_id}/goal-plan/tasks/repeat",
-    json={"expected_revision": 2, "progress": {"current": 3, "total": 3}},
-    headers=auth,
-  )
-  assert full.status_code == 200, full.text
   completed = client.patch(
     f"/api/chats/{chat_id}/goal-plan/tasks/repeat",
-    json={"expected_revision": 3, "status": "completed"}, headers=auth,
+    json={"expected_revision": 2, "progress": {"current": 3, "total": 3},
+          "status": "completed"},
+    headers=auth,
   )
   assert completed.status_code == 200, completed.text
   assert completed.json()["plan"]["summary"]["completed"] == 1
@@ -1162,7 +1162,7 @@ def test_nested_children_settle_before_parent_becomes_ready_to_verify(
     ]}, headers=auth,
   )
   assert incomplete_parent.status_code == 422
-  assert "children settle" in incomplete_parent.json()["detail"]
+  assert "children settle" in incomplete_parent.json()["detail"]["message"]
 
 
 def test_nested_plan_exposes_ready_sibling_leaves_not_their_parent(
@@ -1211,7 +1211,7 @@ def test_parent_dependency_gates_every_descendant_leaf(
     json={"expected_revision": 1, "status": "running"}, headers=auth,
   )
   assert premature.status_code == 422
-  assert "dependencies complete" in premature.json()["detail"]
+  assert "dependencies complete" in premature.json()["detail"]["message"]
 
   completed = client.patch(
     f"/api/chats/{chat_id}/goal-plan/tasks/first",
@@ -1257,7 +1257,7 @@ def test_mixed_parent_dependency_cycle_is_rejected_before_it_can_deadlock(
     ]}, headers=auth,
   )
   assert response.status_code == 422
-  assert "completion cycle" in response.json()["detail"]
+  assert "completion cycle" in response.json()["detail"]["message"]
 
 
 def test_failed_parent_never_masquerades_as_ready_to_verify(
@@ -1669,7 +1669,7 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
     }, headers=auth,
   )
   assert cycle.status_code == 422
-  assert "cycle" in cycle.json()["detail"]
+  assert "cycle" in cycle.json()["detail"]["message"]
 
   missing = client.put(
     f"/api/chats/{chat_id}/goal-plan",
@@ -1679,7 +1679,7 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
     }, headers=auth,
   )
   assert missing.status_code == 422
-  assert "missing task" in missing.json()["detail"]
+  assert "missing task" in missing.json()["detail"]["message"]
 
   created = client.put(
     f"/api/chats/{chat_id}/goal-plan",
