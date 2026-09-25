@@ -1942,13 +1942,87 @@ def _chat_stack_position(record: dict) -> int:
   return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _is_chat_contribution(record: dict | None) -> bool:
+  return (
+    record is not None
+    and isinstance(record.get("id"), str)
+    and bool(_CONTRIBUTION_ID.match(record["id"]))
+    and record.get("type") == "pr"
+    and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
+  )
+
+
+# Every chat open looks up that chat's contributions, but the ledger is keyed
+# by record, not chat, and only grows. Parsing every record per lookup made
+# each open cost a full ledger parse. Per app, this index maps each record
+# path to its (inode, mtime_ns, size) signature and, for a chat-visible
+# record, its (chat ids, stack key); record writes are atomic replaces, so a
+# changed record changes its signature. Each scan swaps in a fresh dict, so
+# deleted records drop out and concurrent scans cannot corrupt it.
+_chat_ledger_index: dict[int, dict[Path, tuple]] = {}
+
+
+def _read_chat_related_records(
+  app_id: int, contribution_paths: tuple[Path, ...], chat_id: str,
+) -> tuple[list[dict], list[dict]]:
+  """Return (the chat's records plus their stack-mates, the chat's records).
+
+  Blocking file I/O: callers run it off the event loop. Only matching records
+  are parsed in full, and re-checked, since each may have changed after its
+  index entry was taken.
+  """
+  previous = _chat_ledger_index.get(app_id, {})
+  index: dict[Path, tuple] = {}
+  for path in contribution_paths:
+    try:
+      info = path.stat()
+    except OSError:
+      continue
+    signature = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = previous.get(path)
+    if cached is None or cached[0] != signature:
+      record = _read_record_tolerant(path)
+      cached = (signature, (
+        (_contribution_chat_ids(record), _chat_stack_key(record))
+        if _is_chat_contribution(record) else None
+      ))
+    index[path] = cached
+  _chat_ledger_index[app_id] = index
+
+  visible = {path: fields for path, (_sig, fields) in index.items() if fields}
+  stack_keys = {
+    stack_key for chat_ids, stack_key in visible.values()
+    if chat_id in chat_ids and stack_key is not None
+  }
+  related_records = [
+    record for path, (chat_ids, stack_key) in visible.items()
+    if (chat_id in chat_ids or stack_key in stack_keys)
+    and _is_chat_contribution(record := _read_record_tolerant(path))
+  ]
+  records = [
+    record for record in related_records
+    if chat_id in _contribution_chat_ids(record)
+  ]
+  records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+  return related_records, records
+
+
 async def _chat_contribution_documents(
   app_id: int, chat_id: str,
 ) -> tuple[list[dict], list[dict], dict, dict | None]:
-  """Read one coherent path snapshot, then parse records outside its lock."""
+  """Read one coherent path snapshot, then parse records outside its lock.
+
+  Returns (related records, the chat's records, app settings, settlement).
+  Related records are the chat's own plus every record sharing one of their
+  stacks, which is all a chat projection needs from the wider ledger.
+  """
   contribution_dir = _contributions_dir(app_id)
   settlement_path = _chat_settlement_path(app_id, chat_id)
-  async with fs_locks.app_storage_lock(app_id):
+  settings_path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
+  )
+
+  def snapshot() -> tuple[tuple[Path, ...], dict, dict | None]:
     contribution_paths = (
       tuple(
         path for path in contribution_dir.glob("*.json")
@@ -1957,33 +2031,25 @@ async def _chat_contribution_documents(
       if contribution_dir.exists()
       else ()
     )
-    settings_path = (
-      Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
-    )
-    app_settings = _read_record_tolerant(settings_path) or {}
     settlement_document = (
       _read_record_tolerant(settlement_path)
       if settlement_path is not None and settlement_path.is_file()
       else None
     )
+    return (
+      contribution_paths,
+      _read_record_tolerant(settings_path) or {},
+      settlement_document,
+    )
 
-  all_records: list[dict] = []
-  for path in contribution_paths:
-    record = _read_record_tolerant(path)
-    if (
-      record is not None
-      and isinstance(record.get("id"), str)
-      and _CONTRIBUTION_ID.match(record["id"])
-      and record.get("type") == "pr"
-      and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
-    ):
-      all_records.append(record)
-  records = [
-    record for record in all_records
-    if chat_id in _contribution_chat_ids(record)
-  ]
-  records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-  return all_records, records, app_settings, settlement_document
+  async with fs_locks.app_storage_lock(app_id):
+    contribution_paths, app_settings, settlement_document = (
+      await asyncio.to_thread(snapshot)
+    )
+  related_records, records = await asyncio.to_thread(
+    _read_chat_related_records, app_id, contribution_paths, chat_id,
+  )
+  return related_records, records, app_settings, settlement_document
 
 
 def _chat_edit_header_path(line: str) -> str:
@@ -2239,10 +2305,10 @@ async def _chat_work_record_views(
 async def _contribution_work_snapshot(
   db: Session, app_id: int, chat_id: str,
 ) -> dict:
-  all_records, records, _settings, settlement_document = (
+  related_records, records, _settings, settlement_document = (
     await _chat_contribution_documents(app_id, chat_id)
   )
-  del all_records
+  del related_records
   entries = await _recorded_chat_edits(db, chat_id)
   settlements = _settlement_projection(settlement_document)
   github_state = github_auth.read_state() or {}
@@ -2661,7 +2727,7 @@ async def contributions_for_chat(
   """
   _validate_submit_app(app_id, principal, db)
   db.close()
-  all_records, records, app_settings, settlement_document = (
+  related_records, records, app_settings, settlement_document = (
     await _chat_contribution_documents(app_id, chat_id)
   )
 
@@ -2674,13 +2740,13 @@ async def contributions_for_chat(
     key for key in chat_stack_keys
     if any(
       record.get("status") == "prepared" and _chat_stack_key(record) == key
-      for record in all_records
+      for record in related_records
     )
   }
   stack_units = []
   for repo, stack_id in sorted(stack_keys):
     members = [
-      record for record in all_records
+      record for record in related_records
       if _chat_stack_key(record) == (repo, stack_id)
     ]
     try:
@@ -2805,7 +2871,7 @@ async def contribution_coverage_for_chat(
       requested.append(path)
 
   db.close()
-  _all_records, records, _app_settings, _settlement_document = (
+  _related_records, records, _app_settings, _settlement_document = (
     await _chat_contribution_documents(app_id, chat_id)
   )
   latest: dict[str, tuple[datetime, str]] = {}
