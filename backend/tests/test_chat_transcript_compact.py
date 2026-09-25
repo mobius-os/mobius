@@ -112,7 +112,11 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
   assert compact[0] is not messages[0]
   assert compact[0]["interaction_tool_projection_version"] == 1
   assert "content" not in compact[0]
-  assert compact[0]["blocks"][0] == {"type": "text", "content": "Before"}
+  # Renumbered passthrough blocks name their stored index so recorded
+  # activity positions resolve in the stored coordinate system.
+  assert compact[0]["blocks"][0] == {
+    "type": "text", "content": "Before", "raw_index": 0,
+  }
   summary = compact[0]["blocks"][1]
   assert summary == {
     "type": "activity",
@@ -157,7 +161,7 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
     "count": 1,
   }
   assert all("sources" not in block for block in compact[0]["blocks"])
-  assert compact[0]["blocks"][2] == {"type": "text", "content": "After"}
+  assert compact[0]["blocks"][2] == {"type": "text", "content": "After", "raw_index": 4}
   assert messages[0]["blocks"][2]["output"] == "large output"
   assert messages[0]["blocks"][2]["sources"] == [source]
 
@@ -212,7 +216,7 @@ def test_context_compaction_stays_between_separate_activity_runs():
   assert [block["type"] for block in compact[0]["blocks"]] == [
     "activity", "context_compaction", "activity",
   ]
-  assert compact[0]["blocks"][1] == blocks[2]
+  assert compact[0]["blocks"][1] == {**blocks[2], "raw_index": 2}
   assert compact[0]["blocks"][0]["end"] == 2
   assert compact[0]["blocks"][2]["start"] == 3
 
@@ -243,7 +247,7 @@ def test_long_activity_runs_are_split_into_fetchable_ranges():
       "end": 2000,
       "tool_count": 2000,
     },
-    blocks[2000],
+    {**blocks[2000], "raw_index": 2000},
   ]
   assert compact[0]["blocks"][0]["type"] == "activity"
   assert compact[0]["blocks"][0]["end"] - compact[0]["blocks"][0]["start"] == 2000
@@ -341,7 +345,10 @@ def test_compact_route_folds_settled_activity_while_live_turn_waits_for_answer(
       ],
       "tool_count": 1,
     },
-    {"type": "question", "question_id": "question-1", "questions": []},
+    {
+      "type": "question", "question_id": "question-1", "questions": [],
+      "raw_index": 2,
+    },
   ]
   assert "settled reasoning" not in response.text
   assert "settled output" not in response.text
@@ -367,11 +374,13 @@ def test_image_reads_stay_distinctive_and_question_twins_are_not_rendered():
   blocks = compact[0]["blocks"]
 
   assert blocks[0]["type"] == "thinking"
-  assert blocks[1] == messages[0]["blocks"][1]
+  assert blocks[1] == {**messages[0]["blocks"][1], "raw_index": 1}
   assert blocks[2]["type"] == "activity"
   assert blocks[2]["start"] == 2
   assert blocks[2]["end"] == 4
   assert blocks[3]["type"] == "question"
+  # The omitted twin sits at stored index 4; the card keeps its own index.
+  assert blocks[3]["raw_index"] == 5
   assert all(
     block.get("tool") != "request_user_input"
     for block in blocks
@@ -408,7 +417,7 @@ def test_skill_reads_stay_distinctive_in_compact_history():
     block for block in blocks
     if isinstance(block, dict) and block.get("tool_use_id") == "cmd-skills"
   )
-  assert visible_skill_read == skill_read
+  assert visible_skill_read == {**skill_read, "raw_index": 1}
   assert all(
     not (
       block.get("type") == "activity"

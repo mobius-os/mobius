@@ -529,6 +529,10 @@ def compact_messages_for_detail(
     sources = message_sources_for_detail(message)
     redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
     next_blocks: list[dict] = []
+    # Stored-block index of each emitted passthrough block (None for a compact
+    # run, which carries start/end). Recorded activity positions use stored
+    # coordinates, so a renumbered projection must say where each block came from.
+    next_raw: list[int | None] = []
     run: list[tuple[int, dict]] = []
     changed = False
     emitted_activity_projection = False
@@ -544,10 +548,13 @@ def compact_messages_for_detail(
             message_index=message_offset + page_index,
             binding=binding,
           ))
+          next_raw.append(None)
           changed = True
           emitted_activity_projection = True
         else:
-          next_blocks.extend(block for _, block in chunk)
+          for raw_index, block in chunk:
+            next_blocks.append(block)
+            next_raw.append(raw_index)
       run.clear()
 
     for raw_index, block in enumerate(blocks):
@@ -591,7 +598,14 @@ def compact_messages_for_detail(
         changed = True
       else:
         next_blocks.append(block)
+      next_raw.append(raw_index)
     flush()
+    if changed:
+      next_blocks = [
+        {**block, "raw_index": raw}
+        if raw is not None and isinstance(block, dict) else block
+        for block, raw in zip(next_blocks, next_raw, strict=True)
+      ]
 
     if not changed and not sources:
       continue
