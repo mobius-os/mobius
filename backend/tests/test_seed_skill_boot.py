@@ -279,7 +279,7 @@ def test_app_owned_historical_name_is_never_retired(boot):
 def test_missing_history_never_guesses_legacy_ownership(boot):
   module, seed, skills, archive, repo = boot
   _commit(repo, "v1")
-  module._source_revision = lambda: None
+  module.PLATFORM_REPO = repo / "missing"
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("v1")
@@ -295,11 +295,10 @@ def test_missing_history_never_guesses_legacy_ownership(boot):
 
 def test_history_from_another_revision_cannot_authorize_overwrite(boot):
   module, seed, skills, _, repo = boot
-  applied = _commit(repo, "v2")
+  _commit(repo, "v2")
   _git(repo, "checkout", "-q", "-b", "elsewhere")
   _commit(repo, "edit on another revision")
   _git(repo, "checkout", "-q", "main")
-  assert module._source_revision() == applied
   (seed / "sample.md").write_text("v2")
   skills.mkdir(parents=True)
   (skills / "sample.md").write_text("edit on another revision")

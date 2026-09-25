@@ -120,46 +120,23 @@ def _read_records(path: Path, *, platform: bool = False) -> dict | None:
   return records
 
 
-def _git_env() -> dict[str, str]:
-  return {k: v for k, v in os.environ.items() if k not in {
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-    "GIT_COMMON_DIR", "GIT_NAMESPACE",
-  }}
-
-
-def _git_base() -> list[str]:
-  return ["git", "-c", f"safe.directory={PLATFORM_REPO}", "-C", str(PLATFORM_REPO)]
-
-
-def _source_revision() -> str | None:
-  """The committed revision of the checkout whose seeds are being applied."""
-  if not (PLATFORM_REPO / ".git").exists():
-    return None
-  try:
-    sha = subprocess.run(
-      [*_git_base(), "rev-parse", "--verify", "-q", "HEAD^{commit}"],
-      capture_output=True, check=True, timeout=30, env=_git_env(),
-    ).stdout.decode().strip()
-  except (OSError, subprocess.SubprocessError, UnicodeError):
-    return None
-  return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None
-
-
 def _git_history() -> dict[str, set[str]] | None:
-  """Historical seed bytes reachable from the applied checkout's revision.
+  """Historical seed bytes reachable from this checkout's ``HEAD``.
 
   Pin to the same checkout the seeds come from, so a seed only another
   revision carries cannot authorize a rewrite. A shallow baked checkout simply
   proves less, which keeps uncertain copies untouched.
   """
-  revision = _source_revision()
-  if revision is None:
+  if not (PLATFORM_REPO / ".git").exists():
     return None
-  env = _git_env()
-  base = _git_base()
+  env = {k: v for k, v in os.environ.items() if k not in {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  }}
+  base = ["git", "-c", f"safe.directory={PLATFORM_REPO}", "-C", str(PLATFORM_REPO)]
   try:
     listed = subprocess.run(
-      [*base, "log", "--raw", "--no-abbrev", "--no-renames", "--format=", revision, "--", SEED_PATH],
+      [*base, "log", "--raw", "--no-abbrev", "--no-renames", "--format=", "HEAD", "--", SEED_PATH],
       capture_output=True, check=True, timeout=30, env=env,
     ).stdout
     objects: list[tuple[str, str]] = []

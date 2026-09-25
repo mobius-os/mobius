@@ -2288,6 +2288,11 @@ async def sweep_reset_parks(
   restart_deferred = False
   if draining:
     return ContinuationSweepResult()
+  from app.platform_update import late_edits_pending
+  if late_edits_pending():
+    # Chats resume only once edits made on the previous platform source are
+    # back; a resolver chat started meanwhile is not a park and runs normally.
+    return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
   limit_resume_started = False
   restart_resume_started = 0

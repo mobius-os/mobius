@@ -136,9 +136,25 @@ upstream trees once, records the reconciled tree as one local commit on the
 target, and keeps the previous local tip reachable for recovery. A conflict
 stays in an isolated worktree while the old checkout remains served. Working
 edits are carried through as a transient commit and returned uncommitted.
-Finishing a resolution runs the same final-tree merge again with the resolver's
-answer as one input, so live edits made meanwhile are merged in, or re-parked
-with fresh markers when they overlap the answer.
+
+**Prepared updates swap at shutdown.** An update an agent resolves on the
+isolated copy (a committed conflict, or blockers handed over with **Fix with an
+agent**) and every combined source-and-container update are *prepared*, not
+applied: the answer is committed on the reviewed release, checked with the same
+startup check boot runs, and recorded in `.platform-prepared-update.json`. The
+live checkout keeps serving its snapshot, and nothing edited afterwards enters
+the update. The shutdown drain (a restart, or the container cutover when the
+update needs a new image) pauses every chat, saves the live state as one commit
+under `refs/mobius/update-late`, and points the checkout at the prepared commit,
+crash-safe through the reconcile marker. At boot the late edits merge back as
+local work onto the booted update, in-progress edits returning uncommitted; a
+conflict parks on a frozen copy for one resolver chat, and automatic chat
+resumes wait until it is merged. If the swapped-in version fails the boot
+script's startup check, the script returns to the saved commit and the server
+reports the update failed. While an update is parked or prepared, Settings
+offers only Finish update for it and plans for other releases are refused. A
+conflict with the owner's own uncommitted edits during an ordinary Apply still
+finishes on the live checkout under the reconcile lock.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
