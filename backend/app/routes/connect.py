@@ -22,6 +22,7 @@ Owner/app surface:
 
   GET    /api/connect/outbound            list people this Möbius joined
   POST   /api/connect/outbound            paste another Connect command
+  PATCH  /api/connect/outbound/{id}       turn agent access on or off
   DELETE /api/connect/outbound/{id}       revoke that outbound access
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
@@ -644,6 +645,8 @@ class RenameHostBody(BaseModel):
 class CreateOutboundBody(BaseModel):
   label: str = Field(min_length=1, max_length=80)
   command: str = Field(min_length=1, max_length=4096)
+  # Also let commands through this connection act as an agent here.
+  agent: bool = False
 
   @field_validator("label")
   @classmethod
@@ -661,7 +664,8 @@ class CreateOutboundBody(BaseModel):
 async def list_outbound_access(
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
 ) -> dict:
-  return {"connections": connect_outbound.list_profiles()}
+  # ``agent_access`` tells Connect this platform can grant agent access.
+  return {"connections": connect_outbound.list_profiles(), "agent_access": True}
 
 
 @router.post(
@@ -673,9 +677,31 @@ async def create_outbound_access(
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
 ) -> dict:
   try:
-    return await connect_outbound.create_profile(body.label, body.command)
+    return await connect_outbound.create_profile(
+      body.label, body.command, agent=body.agent,
+    )
   except connect_outbound.OutboundConnectError as exc:
     raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class OutboundAgentBody(BaseModel):
+  agent: bool
+
+
+@router.patch(
+  "/outbound/{profile_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def set_outbound_agent_access(
+  profile_id: str,
+  body: OutboundAgentBody,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  """Turn agent access through one granted connection on or off."""
+  try:
+    return await connect_outbound.set_agent_access(profile_id, body.agent)
+  except LookupError as exc:
+    raise HTTPException(status_code=404, detail="No such shared access.") from exc
 
 
 @router.delete(
