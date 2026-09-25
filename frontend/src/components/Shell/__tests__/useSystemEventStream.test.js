@@ -128,6 +128,55 @@ test('unmount during reconnect reconciliation never acquires the stream reader',
 })
 
 
+
+test('the opening event hands over the subscription id until the connection retires', async () => {
+  installBrowser()
+  let finishStream
+  const streamEnded = new Promise(resolve => { finishStream = resolve })
+  let reads = 0
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        return {
+          releaseLock() {},
+          read() {
+            reads += 1
+            if (reads === 1) {
+              return Promise.resolve({
+                done: false,
+                value: new TextEncoder().encode(
+                  'data: {"type":"system_stream_open","subscriptionId":"sub-1"}\n\n',
+                ),
+              })
+            }
+            return streamEnded.then(() => ({ done: true }))
+          },
+        }
+      },
+    },
+  })
+  const { default: useSystemEventStream } = await import(
+    '../../../hooks/useSystemEventStream.js'
+  )
+  const subscriptions = []
+  const events = []
+  const hook = renderHook(
+    useSystemEventStream,
+    event => events.push(event.type),
+    { onSubscription: id => subscriptions.push(id) },
+  )
+  await flushMicrotasks()
+  assert.deepEqual(subscriptions, ['sub-1'])
+  assert.deepEqual(events, [], 'the opening event is not an app-level event')
+
+  finishStream()
+  await flushMicrotasks()
+  assert.deepEqual(subscriptions, ['sub-1', null])
+  hook.unmount()
+})
+
 // A suspended socket can stay pending without an error. The fake clock advances
 // browser lifecycle time, not an agent turn, and each fixture owns its reader.
 async function connectionHarness(t, { onOpen, ignoreAbort = false, stallHeaders = false } = {}) {

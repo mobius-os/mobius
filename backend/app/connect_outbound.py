@@ -32,10 +32,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import timedelta
 from pathlib import Path
 
-from app import connect_runner
+from app import auth, connect_runner, models
 from app.config import get_settings
+from app.database import SessionLocal
 from app.storage_io import atomic_write
 
 
@@ -167,7 +169,65 @@ def _runner_env(profile_id: str) -> dict[str, str]:
   # Tell the far side this runner is supervised here, so its Connect does not
   # offer an install command that would add a second, unsupervised service.
   env[connect_runner.SUPERVISOR_ENV] = "mobius"
+  meta = _read_json(_meta_path(profile_id)) or {}
+  if meta.get("agent") is True:
+    env.update(_agent_env(profile_id))
   return env
+
+
+# Owner-approved agent access through one outbound connection: commands that
+# arrive through it get an agent bearer, so ``mapi`` drives this instance's
+# API like an in-product agent. It is an agent principal (never owner input),
+# and every request re-checks that this connection still exists with agent
+# access on, so revoking either ends it at once.
+AGENT_CLAIM = "connect_agent"
+_AGENT_BEARER_LIFETIME = 3650  # days; revocation is the per-request check
+
+
+def _agent_env(profile_id: str) -> dict[str, str]:
+  with SessionLocal() as db:
+    owner = db.query(models.Owner).first()
+  if owner is None:
+    return {}
+  token = auth.create_access_token(
+    {
+      "sub": owner.username,
+      "agent_chat": f"connect-agent-{profile_id}",
+      AGENT_CLAIM: profile_id,
+    },
+    expires_delta=timedelta(days=_AGENT_BEARER_LIFETIME),
+    token_epoch=owner.token_epoch,
+  )
+  return {"AGENT_TOKEN": token, "API_BASE_URL": get_settings().api_base_url}
+
+
+def agent_access_active(profile_id: str) -> bool:
+  if not _ID_RE.fullmatch(str(profile_id)):
+    return False
+  meta = _read_json(_meta_path(profile_id))
+  # Agent access lives exactly as long as the connection it rides on.
+  return bool(meta) and meta.get("agent") is True and meta.get("status") in {
+    "connecting", "active",
+  }
+
+
+def _set_agent_access(profile_id: str, enabled: bool) -> dict:
+  with _lock:
+    meta = _read_json(_meta_path(profile_id))
+    if meta is None:
+      raise LookupError(profile_id)
+    meta["agent"] = enabled
+    _atomic_json(_meta_path(profile_id), meta)
+    # Relaunch so the runner's environment gains or loses the bearer.
+    if meta.get("status") == "active":
+      _stop_process_tree(profile_id)
+      _owned_processes.pop(profile_id, None)
+      _launch(profile_id)
+    return _public_profile(meta)
+
+
+async def set_agent_access(profile_id: str, enabled: bool) -> dict:
+  return await asyncio.to_thread(_set_agent_access, profile_id, enabled)
 
 
 def _download_relaunch_runners() -> dict[str, bytes]:
@@ -295,6 +355,7 @@ def _public_profile(meta: dict) -> dict:
     "target": parsed.hostname or "Another Möbius",
     "status": status,
     "online": online,
+    "agent": meta.get("agent") is True,
     "created_at": meta.get("created_at"),
   }
 
@@ -331,7 +392,7 @@ def _discard(profile_id: str) -> None:
   shutil.rmtree(_profile_dir(profile_id))
 
 
-def _create_profile(label: str, command: str) -> dict:
+def _create_profile(label: str, command: str, agent: bool = False) -> dict:
   base_url, code = parse_pairing_command(command)
   source = _download_runner(base_url)
   profile_id = "o_" + secrets.token_hex(8)
@@ -341,6 +402,7 @@ def _create_profile(label: str, command: str) -> dict:
     "base_url": base_url,
     "created_at": _now(),
     "status": "connecting",
+    "agent": agent,
   }
   with _lock:
     _profile_dir(profile_id).mkdir(parents=True, mode=0o700)
@@ -374,8 +436,8 @@ def _create_profile(label: str, command: str) -> dict:
     raise
 
 
-async def create_profile(label: str, command: str) -> dict:
-  return await asyncio.to_thread(_create_profile, label, command)
+async def create_profile(label: str, command: str, agent: bool = False) -> dict:
+  return await asyncio.to_thread(_create_profile, label, command, agent)
 
 
 def _process_identity(pid: int) -> tuple[int, int] | None:

@@ -1614,6 +1614,40 @@ def test_restart_park_auto_continues_with_product_marker(
     chat_mod.discard_starting(cid)
 
 
+def test_restart_parks_wait_until_late_platform_edits_are_back(
+  owner_token, monkeypatch,
+):
+  # After a platform update swap, chats resume only once edits made on the
+  # previous source are merged back; then the next sweep resumes them.
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-held-for-late-edits"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-held"
+  monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: nonce)
+  _due_park(cid, token, auto_restart=True, park_reason="restart", restart_nonce=nonce)
+  pending = {"late": True}
+  monkeypatch.setattr(
+    "app.platform_update.late_edits_pending", lambda: pending["late"],
+  )
+
+  try:
+    assert _run_sweep() == []
+    assert scheduled == []
+    pending["late"] = False
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_restart_preserves_a_hidden_owner_group_without_queueing_continue(
   owner_token, monkeypatch,
 ):

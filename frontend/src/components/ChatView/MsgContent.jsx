@@ -38,6 +38,7 @@ import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
+import { waitWokeItsAnswer } from './waitHistory.js'
 import HelperResultCard from './HelperResultCard.jsx'
 
 
@@ -120,17 +121,29 @@ function GoalHistory({ msg }) {
   ))
 }
 
-// Helpers whose results this answer began by receiving lead it.
-function HelperCause({ msg }) {
-  if (msg.role !== 'assistant' || !Array.isArray(msg.helper_causes) || !msg.helper_causes.length) return null
-  return <HelperCauseCard causes={msg.helper_causes} />
+// Whatever started this answer leads it and stays visible while it streams:
+// a recovery resume (projected from its run), a wait that woke the chat, or
+// helpers whose results it began by receiving.
+function AnswerCause({ msg }) {
+  if (msg.role !== 'assistant') return null
+  const waits = (msg.wait_summaries || []).filter(waitWokeItsAnswer)
+  const helpers = Array.isArray(msg.helper_causes) ? msg.helper_causes : []
+  if (!msg.continuation_reason && !waits.length && !helpers.length) return null
+  return (
+    <div className="chat__answer-cause">
+      {msg.continuation_reason && <ContinuationCard msg={msg} />}
+      {waits.map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)}
+      {helpers.length > 0 && <HelperCauseCard causes={helpers} />}
+    </div>
+  )
 }
 
-function WaitHistory({ msg }) {
+// A deliberately stopped wait is an outcome of the answer that owned it.
+function StoppedWaits({ msg }) {
   if (msg.role !== 'assistant' || !Array.isArray(msg.wait_summaries)) return null
-  return msg.wait_summaries.map(summary => (
-    <WaitHistoryCard key={summary.id} summary={summary} />
-  ))
+  return msg.wait_summaries
+    .filter(summary => !waitWokeItsAnswer(summary))
+    .map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)
 }
 
 function MsgContentInner({
@@ -569,7 +582,7 @@ function MsgContentInner({
 
     return (
       <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
-        <HelperCause msg={msg} />
+        <AnswerCause msg={msg} />
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
@@ -628,7 +641,7 @@ function MsgContentInner({
           />
         )}
         {!isStreaming && <GoalHistory msg={msg} />}
-        {!isStreaming && <WaitHistory msg={msg} />}
+        {!isStreaming && <StoppedWaits msg={msg} />}
       </AssistantCopySurface>
     )
   }
@@ -638,7 +651,7 @@ function MsgContentInner({
 
   return (
     <AssistantCopySurface msg={msg}>
-      <HelperCause msg={msg} />
+      <AnswerCause msg={msg} />
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
@@ -667,7 +680,7 @@ function MsgContentInner({
         </div>
       ) : null}
       {!isStreaming && <GoalHistory msg={msg} />}
-      {!isStreaming && <WaitHistory msg={msg} />}
+      {!isStreaming && <StoppedWaits msg={msg} />}
     </AssistantCopySurface>
   )
 }

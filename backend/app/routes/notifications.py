@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -25,7 +24,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
-limiter = Limiter(key_func=get_remote_address)
+
+def _record_sender_bucket(
+  request: Request,
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """Name the rate-limit bucket after the authenticated sender.
+
+  Every app service, app frame, and agent reaches the backend from the same
+  local peer, so a peer-address key made them all share one budget: one busy
+  app could starve every other sender. slowapi's key function only receives
+  the request, and runs after dependencies resolve, so the resolved principal
+  hands its identity over through request.state.
+  """
+  if principal.app_id is not None:
+    request.state.notification_sender = f"app:{principal.app_id}"
+  elif principal.chat_id is not None:
+    request.state.notification_sender = f"agent:{principal.chat_id}"
+  else:
+    request.state.notification_sender = "owner"
+
+
+def _sender_bucket(request: Request) -> str:
+  return request.state.notification_sender
+
+
+limiter = Limiter(key_func=_sender_bucket)
 
 
 @router.post(
@@ -33,9 +57,15 @@ limiter = Limiter(key_func=get_remote_address)
   dependencies=[
     Depends(reject_cross_site),
     Depends(require_nondelegated_owner_or_app_control),
+    Depends(_record_sender_bucket),
   ],
 )
-@limiter.limit("10/minute")
+# Per sender. A chat app sends one notification per inbound message, and a
+# lively group conversation bursts well past a handful a minute; tags collapse
+# those in the OS tray, so volume here is history rows, not popups. One a
+# second sustained is beyond any human conversation yet still caps a runaway
+# loop at 60 history rows a minute for that sender alone.
+@limiter.limit("60/minute")
 def send_notification(
   request: Request,
   body: NotificationSendRequest,
@@ -68,6 +98,7 @@ def send_notification(
     icon=body.icon,
     target=body.target,
     actions=actions_list,
+    tag=body.tag,
   )
   return {"id": notification_id}
 

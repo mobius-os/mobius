@@ -96,8 +96,9 @@ RUN set -eux; \
 # against the release's own checksums file, fetched at build time; a mismatch
 # fails the build. Built for the image arch (amd64|arm64); only the single
 # `gh` binary is installed, docs/man pages are dropped. Placed after the apt
-# layer so a gh bump doesn't bust the apt cache.
-ARG GH_CLI_VERSION=2.97.0
+# layer so a gh bump doesn't bust the apt cache. 2.99+ is needed for
+# `--attach`, which uploads screenshots into PR/issue bodies and comments.
+ARG GH_CLI_VERSION=2.101.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \

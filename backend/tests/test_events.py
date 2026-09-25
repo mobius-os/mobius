@@ -794,36 +794,15 @@ def test_context_compaction_discards_untrusted_display_metadata():
   assert blocks == [{"type": "context_compaction"}]
 
 
-def test_thinking_survives_interleaved_unknown_event():
-  # A provider `ping` heartbeat is forwarded as an "unknown_sdk_event" and lands
-  # BETWEEN two thinking_delta chunks (it can even split mid-word). It must NOT
-  # close the thinking run, else one reasoning pass fragments into many tiny
-  # "Thought for 1 second" blocks. Regression guard for that exact bug.
-  blocks = []
-  process_event({"type": "thinking", "content": "The sl", "ts": 1000}, blocks)
-  process_event(
-    {"type": "unknown_sdk_event", "kind": "stream:ping", "raw": {}}, blocks
-  )
-  process_event({"type": "thinking", "content": "iders move", "ts": 2200}, blocks)
-
-  assert len(blocks) == 1
-  assert blocks[0]["type"] == "thinking"
-  assert blocks[0]["content"] == "The sliders move"
-  assert blocks[0]["duration_ms"] == 1200
-
-
-def test_thinking_survives_interleaved_usage_and_signature():
-  # The full bookkeeping set is transparent to thinking coalescing: a `context_usage`
-  # event and a signature-style unknown_sdk_event between thinking chunks still
-  # yield one block. Only a real new content block (text/tool_start/…) splits it.
+def test_thinking_survives_interleaved_bookkeeping():
+  # Bookkeeping is transparent to thinking coalescing: a `context_usage` or
+  # `done` event between thinking chunks still yields one block. Only a real new
+  # content block (text/tool_start/…) splits it; closing on bookkeeping once
+  # fragmented one reasoning pass into many "Thought for 1 second" blocks.
   blocks = []
   process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
   process_event({"type": "context_usage", "input_tokens": 5}, blocks)
-  process_event(
-    {"type": "unknown_sdk_event",
-     "kind": "stream:content_block_delta:signature_delta", "raw": {}},
-    blocks,
-  )
+  process_event({"type": "queued_turn_starting"}, blocks)
   process_event({"type": "thinking", "content": "b", "ts": 1600}, blocks)
 
   thinking_blocks = [b for b in blocks if b.get("type") == "thinking"]
