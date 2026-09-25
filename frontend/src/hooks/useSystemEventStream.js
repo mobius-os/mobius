@@ -34,10 +34,15 @@ export const SYSTEM_QUICK_WAKE_MS = 10_000
  * The same event types are still forwarded via chat broadcasts for
  * in-chat catch-up coherence. Handlers should be idempotent (theme
  * reload, refreshApps, version bump) so duplicates are harmless.
+ *
+ * `onSubscription(id)` receives the live connection's server subscription id
+ * from its opening event, and `null` once that connection is retired. State
+ * reported against the id (useVisibleAppPresence) lives exactly as long as
+ * the connection on the server.
  */
 export default function useSystemEventStream(
   onEvent,
-  { enabled = true, onOpen = null } = {},
+  { enabled = true, onOpen = null, onSubscription = null } = {},
 ) {
   // Mirror onEvent in a ref so the long-lived effect can call the
   // latest handler without re-running the connection setup whenever
@@ -46,6 +51,8 @@ export default function useSystemEventStream(
   useEffect(() => { onEventRef.current = onEvent }, [onEvent])
   const onOpenRef = useRef(onOpen)
   useEffect(() => { onOpenRef.current = onOpen }, [onOpen])
+  const onSubscriptionRef = useRef(onSubscription)
+  useEffect(() => { onSubscriptionRef.current = onSubscription }, [onSubscription])
 
   useEffect(() => {
     if (!enabled) return undefined
@@ -69,6 +76,7 @@ export default function useSystemEventStream(
       if (!attempt) return
       clearTimeout(attempt.deadline)
       attempt.controller.abort()
+      if (attempt.subscriptionId && !stopped) onSubscriptionRef.current?.(null)
     }
 
     function scheduleRetry() {
@@ -123,6 +131,7 @@ export default function useSystemEventStream(
         startedAt: Date.now(),
         lastReadAt: null,
         deadline: null,
+        subscriptionId: null,
       }
       active = attempt
       armDeadline(attempt)
@@ -173,7 +182,12 @@ export default function useSystemEventStream(
               if (!line.startsWith('data: ')) continue
               try {
                 const ev = JSON.parse(line.slice(6))
-                if (ev && ev.type && ev.type !== 'system_stream_open') {
+                if (ev?.type === 'system_stream_open') {
+                  if (ev.subscriptionId) {
+                    attempt.subscriptionId = ev.subscriptionId
+                    onSubscriptionRef.current?.(ev.subscriptionId)
+                  }
+                } else if (ev && ev.type) {
                   onEventRef.current?.(ev)
                 }
               } catch { /* malformed — skip */ }

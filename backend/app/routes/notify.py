@@ -14,11 +14,12 @@ import asyncio
 import json
 import logging
 import time
+from typing import Annotated
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app import models
@@ -383,8 +384,10 @@ async def stream_system_events(
     try:
       # Hello so the client knows the connection is live before any
       # real event arrives. EventSource clients ignore unknown types
-      # but the message still flushes Caddy / nginx buffers.
-      yield f"data: {json.dumps({'type': 'system_stream_open'})}\n\n"
+      # but the message still flushes Caddy / nginx buffers. It also hands
+      # the shell this subscription's id for report_visible_apps below.
+      hello = {"type": "system_stream_open", "subscriptionId": queue.id}
+      yield f"data: {json.dumps(hello)}\n\n"
       while True:
         if not embed_session_active():
           return
@@ -408,3 +411,35 @@ async def stream_system_events(
     media_type="text/event-stream",
     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
   )
+
+
+class VisibleAppsReport(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  sequence: int = Field(ge=1)
+  app_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+    max_length=64,
+  )
+
+
+@router.post(
+  "/api/events/system/{subscription_id}/visible-apps",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site), Depends(get_current_owner)],
+)
+async def report_visible_apps(
+  subscription_id: str, body: VisibleAppsReport,
+) -> None:
+  """Record which apps the shell on this system stream is visibly showing.
+
+  Async so the update runs on the event loop that owns subscribe/unsubscribe.
+
+  push.notify_owner skips an app's push while any live stream reports that
+  app (presence.has_app_watchers), mirroring chat presence. The report is
+  owned by the stream's subscription and disappears with it; a 404 tells the
+  shell its stream is gone and the next connection must report afresh.
+  """
+  if not get_system_broadcast().report_visible_apps(
+    subscription_id, body.sequence, frozenset(body.app_ids),
+  ):
+    raise HTTPException(status_code=404, detail="System stream not found.")
