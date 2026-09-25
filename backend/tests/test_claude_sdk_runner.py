@@ -1821,16 +1821,18 @@ def test_unhandled_sdk_events_are_logged_not_broadcast(caplog):
   assert "sdk_message:FreshSdkMessage" in logged
 
 
-def test_dispatch_assistant_thinking_block_is_silent():
-  """ThinkingBlock is a snapshot duplicate of streamed thinking_delta —
-  must not re-emit as thinking to avoid doubling the content."""
+def test_dispatch_never_streamed_thinking_block_materialises():
+  """A completed ThinkingBlock with no streamed preview is new content: it is
+  emitted once as thinking (a streamed one becomes thinking_final instead)."""
   bus = _Bus()
   msg = AssistantMessage(
     content=[ThinkingBlock(thinking="reflecting", signature="sig")],
     model="claude-opus",
   )
   dispatch_sdk_message(msg, bus, None)
-  assert bus.events == []
+  assert [(e["type"], e["content"]) for e in bus.events] == [
+    ("thinking", "reflecting"),
+  ]
 
 
 def test_dispatch_assistant_tool_use_emits_tool_start():
@@ -2784,45 +2786,153 @@ def _stream_text_block_start(index: int) -> StreamEvent:
   )
 
 
-def test_claude_text_final_repairs_earlier_block_by_id():
-  """A dropped leading delta on the FIRST of two text blocks in one message is
-  repaired by the authoritative text_final, matched by (message id + index).
+def _stream_block_start(index: int, block_type: str, **fields) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-cbs", session_id="sess-1",
+    event={
+      "type": "content_block_start", "index": index,
+      "content_block": {"type": block_type, **fields},
+    },
+  )
 
-  Before the id was threaded, text_final for the first block landed on the
-  trailing (second) block positionally, so the first block kept its truncated
-  delta accumulation forever (the dropped-leading-token bug).
-  """
+
+def _stream_thinking_delta_at(index: int, thinking: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-thd", session_id="sess-1",
+    event={
+      "type": "content_block_delta", "index": index,
+      "delta": {"type": "thinking_delta", "thinking": thinking},
+    },
+  )
+
+
+def _final(message_id: str, block) -> AssistantMessage:
+  """Claude Code's real shape: ONE completed block per AssistantMessage."""
+  return AssistantMessage(
+    content=[block], model="claude-opus", message_id=message_id,
+  )
+
+
+def _reduce(events: list[dict]) -> list[dict]:
   from app.events import process_event
 
+  blocks: list[dict] = []
+  for event in events:
+    process_event(dict(event), blocks)
+  return blocks
+
+
+def test_claude_text_final_repairs_earlier_block_by_id():
+  """A dropped leading delta on the FIRST of two text blocks in one message is
+  repaired by its completed block, matched by (message id + streamed index).
+
+  Claude Code sends each completed block as its own single-block message, so
+  the identity must come from the stream's block index, not the block's
+  position in that message (always 0).
+  """
   bus = _ChatBus()
-  # One message, TWO text blocks (indices 0 and 1). Block 0's leading delta
-  # ("Al") was dropped, so it accumulates truncated ("pha text here").
   dispatch_sdk_message(_stream_message_start("msg_abc"), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(0), bus, None)
   dispatch_sdk_message(_stream_text_delta_at(0, "pha text here"), bus, None)
   dispatch_sdk_message(_stream_text_block_start(1), bus, None)
   dispatch_sdk_message(_stream_text_delta_at(1, "Beta text"), bus, None)
-  dispatch_sdk_message(
-    AssistantMessage(
-      content=[TextBlock(text="Alpha text here"), TextBlock(text="Beta text")],
-      model="claude-opus",
-      message_id="msg_abc",
-    ),
-    bus, None,
-  )
+  dispatch_sdk_message(_final("msg_abc", TextBlock(text="Alpha text here")), bus, None)
+  dispatch_sdk_message(_final("msg_abc", TextBlock(text="Beta text")), bus, None)
 
-  # Delta and final events carry matching, turn-unique ids.
   text_events = [e for e in bus.events if e["type"] == "text"]
   final_events = [e for e in bus.events if e["type"] == "text_final"]
   assert text_events[0]["text_item_id"] == "msg_abc:0"
-  assert final_events[0]["text_item_id"] == "msg_abc:0"
-  assert final_events[1]["text_item_id"] == "msg_abc:1"
+  assert [e["text_item_id"] for e in final_events] == ["msg_abc:0", "msg_abc:1"]
 
-  # Reduce the emitted events the way the sink does; the first block is repaired.
-  blocks: list[dict] = []
-  for event in bus.events:
-    process_event(event, blocks)
-  texts = [b["content"] for b in blocks if b.get("type") == "text"]
+  texts = [b["content"] for b in _reduce(bus.events) if b.get("type") == "text"]
   assert texts == ["Alpha text here", "Beta text"]
+
+
+def test_claude_text_after_thinking_final_matches_streamed_index():
+  """The common shape [thinking, text]: the text's completed copy arrives as
+  a single-block message but must still name stream index 1, not 0."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "Plan.\n"), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="Plan.\n", signature="s")), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(1), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(1, "ing the fix now."), bus, None)
+  dispatch_sdk_message(_final("m1", TextBlock(text="Applying the fix now.")), bus, None)
+
+  final = [e for e in bus.events if e["type"] == "text_final"]
+  assert final[0]["text_item_id"] == "m1:1"
+  blocks = _reduce(bus.events)
+  assert [b["type"] for b in blocks] == ["thinking", "text"]
+  assert blocks[1]["content"] == "Applying the fix now."
+
+
+def test_completed_thinking_block_restores_a_segment_missing_its_start():
+  """A thought persisted with a paragraph starting mid-sentence is repaired:
+  the completed ThinkingBlock replaces exactly the segment it finishes."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "First idea."), bus, None)
+  dispatch_sdk_message(_stream_block_start(1, "thinking", thinking=""), bus, None)
+  # The leading chunk "The host is " never arrived.
+  dispatch_sdk_message(_stream_thinking_delta_at(1, "running old code."), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="First idea.", signature="s")), bus, None)
+  dispatch_sdk_message(
+    _final("m1", ThinkingBlock(thinking="The host is running old code.", signature="s")),
+    bus, None,
+  )
+
+  finals = [e for e in bus.events if e["type"] == "thinking_final"]
+  assert [e["segment_id"] for e in finals] == ["claude:m1:0", "claude:m1:1"]
+  blocks = _reduce(bus.events)
+  assert len(blocks) == 1
+  assert blocks[0]["content"] == "First idea.\n\nThe host is running old code."
+
+
+def test_completed_thinking_block_is_a_no_op_when_the_stream_was_whole():
+  from app.events import process_event
+
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "Whole thought."), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="Whole thought.", signature="s")), bus, None)
+  blocks: list[dict] = []
+  results = [process_event(dict(e), blocks) for e in bus.events]
+  assert results[-1] is False  # the final changed nothing
+  assert [b["content"] for b in blocks] == ["Whole thought."]
+
+
+def test_thinking_from_separate_model_calls_stays_separate_paragraphs():
+  """Block indices reset per model call; identity includes the message id so
+  two calls' thinking no longer glue into one run-on paragraph."""
+  bus = _ChatBus()
+  for mid, text in (("m1", "Call one."), ("m2", "Call two.")):
+    dispatch_sdk_message(_stream_message_start(mid), bus, None)
+    dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+    dispatch_sdk_message(_stream_thinking_delta_at(0, text), bus, None)
+  blocks = _reduce(bus.events)
+  assert blocks[0]["content"] == "Call one.\n\nCall two."
+
+
+def test_thinking_block_start_payload_is_not_dropped():
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(
+    _stream_block_start(0, "thinking", thinking="The host is "), bus, None,
+  )
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "running old code."), bus, None)
+  assert _reduce(bus.events)[0]["content"] == "The host is running old code."
+
+
+def test_text_block_start_payload_is_not_dropped():
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "text", text="Found "), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(0, "it."), bus, None)
+  texts = [b["content"] for b in _reduce(bus.events) if b.get("type") == "text"]
+  assert texts == ["Found it."]
 
 
 def test_claude_text_events_have_no_id_without_message_id():

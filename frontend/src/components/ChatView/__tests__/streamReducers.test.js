@@ -26,6 +26,7 @@ import {
   restartCardActivityEntries,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
+  replaceThinkingContent,
   anchorReplayedThinking,
   thinkingContentForDisplay,
   thinkingElapsedMs,
@@ -1242,4 +1243,28 @@ test('saved sealed question replay preserves consuming state and cannot reopen a
   const replay = upsertQuestionItem([answered], pending)[0]
   assert.deepEqual(replay.answers, answered.answers)
   assert.equal(replay.response_mode, 'continuation')
+})
+
+test('replaceThinkingContent repairs a live thought in place by thinking_id', () => {
+  let items = appendThinkingChunk([], 'First idea.', 1000, 10000, 'claude:m1:0',
+    { thinking_id: 'think-1' })
+  items = appendThinkingChunk(items, 'running old code.', 1100, 10100,
+    'claude:m1:1', { thinking_id: 'think-1' })
+  items = [...items, { type: 'text', content: 'Next.' }]
+  const repaired = replaceThinkingContent(items, 'think-1',
+    'First idea.\n\nThe host is running old code.')
+  assert.equal(repaired.length, 2)
+  assert.equal(repaired[0].content, 'First idea.\n\nThe host is running old code.')
+  assert.equal(repaired[0].thinking_id, 'think-1')
+  assert.equal(repaired[1].content, 'Next.')
+})
+
+test('replaceThinkingContent adds a thought that never streamed and ignores no-ops', () => {
+  const items = [{ type: 'text', content: 'Hi' }]
+  const added = replaceThinkingContent(items, 'think-2', 'Unseen thought.')
+  assert.equal(added.length, 2)
+  assert.equal(added[1].type, 'thinking')
+  assert.equal(added[1].content, 'Unseen thought.')
+  assert.equal(replaceThinkingContent(added, 'think-2', 'Unseen thought.'), added)
+  assert.equal(replaceThinkingContent(added, null, 'x'), added)
 })

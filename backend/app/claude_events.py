@@ -295,6 +295,54 @@ def _suppressed_tool_ids(bc) -> set[str]:
   return ids
 
 
+def _claude_block_starts(bc) -> dict:
+  """Per-broadcast FIFO of streamed block indices, keyed by (message, kind).
+
+  Claude Code re-sends each completed content block as its OWN single-block
+  AssistantMessage, so the final's position inside that message is always 0
+  while its stream events carry the real content-block index. Recording the
+  index at each ``content_block_start`` lets a completed block reclaim the
+  identity of the stream it completes: the Nth final text (or thinking) block
+  of a message is the Nth streamed block of that kind.
+  """
+  starts = getattr(bc, "_claude_block_starts", None)
+  if starts is None:
+    starts = {}
+    try:
+      bc._claude_block_starts = starts
+    except AttributeError:
+      return {}
+  return starts
+
+
+def _claude_final_index(bc, message_id: str | None, kind: str) -> int | None:
+  """The streamed content-block index a completed block of ``kind`` finishes."""
+  starts = _claude_block_starts(bc)
+  queue = starts.get((message_id, kind))
+  if not queue:
+    return None
+  index = queue.pop(0)
+  if not queue:
+    del starts[(message_id, kind)]
+  return index
+
+
+def _claude_thinking_segment_id(
+  message_id: str | None, index: object,
+) -> str | None:
+  """Turn-unique identity of one Claude thinking content block.
+
+  The content-block index resets on every model call, so the index alone
+  merged separate calls' thinking into one paragraph and could not name the
+  block a completed ThinkingBlock repairs.
+  """
+  if index is None:
+    return None
+  if message_id is None:
+    return f"claude:content:{index}"
+  return f"claude:{message_id}:{index}"
+
+
 def _claude_text_item_id(message_id: str | None, index: object) -> str | None:
   """A turn-unique id for a Claude text content block.
 
@@ -485,10 +533,8 @@ def dispatch_sdk_message(
       if delta_type == "thinking_delta":
         thinking = delta.get("thinking") or delta.get("text") or ""
         if thinking:
-          block_index = event.get("index")
-          segment_id = (
-            f"claude:content:{block_index}"
-            if block_index is not None else None
+          segment_id = _claude_thinking_segment_id(
+            getattr(bc, "current_message_id", None), event.get("index"),
           )
           bc.publish(_thinking_event(thinking, segment_id))
         return current_session_id, None
@@ -505,8 +551,31 @@ def dispatch_sdk_message(
       # text resuming after an AskUserQuestion answer, which otherwise
       # glued together as "answer1.answer2" with no separator.
       cb = event.get("content_block") or {}
-      if isinstance(cb, dict) and cb.get("type") == "text":
+      block_type = cb.get("type") if isinstance(cb, dict) else None
+      message_id = getattr(bc, "current_message_id", None)
+      index = event.get("index")
+      if block_type in ("text", "thinking") and index is not None:
+        _claude_block_starts(bc).setdefault(
+          (message_id, block_type), [],
+        ).append(index)
+      if block_type == "text":
         bc.publish({"type": "text_boundary"})
+        # A block may open with content already present; the deltas carry
+        # only what follows it.
+        initial = cb.get("text")
+        if initial:
+          item_id = _claude_text_item_id(message_id, index)
+          bc.publish({
+            "type": "text", "content": initial,
+            **({"text_item_id": item_id} if item_id else {}),
+          })
+        return current_session_id, None
+      if block_type == "thinking":
+        initial = cb.get("thinking")
+        if initial:
+          bc.publish(_thinking_event(
+            initial, _claude_thinking_segment_id(message_id, index),
+          ))
         return current_session_id, None
     _log_unknown(f"stream:{event_type}", event)
     return current_session_id, None
@@ -519,7 +588,7 @@ def dispatch_sdk_message(
     if usage_state is not None and sdk_msg.usage:
       usage_state["latest_model_usage"] = dict(sdk_msg.usage)
     server_tools: dict[str, str] = {}
-    for content_index, block in enumerate(sdk_msg.content):
+    for block in sdk_msg.content:
       if isinstance(block, ToolUseBlock):
         # Mechanics never reach the transcript — see _MECHANICS_TOOLS. Remember
         # the id so the matching result is dropped with it.
@@ -595,7 +664,22 @@ def dispatch_sdk_message(
         _log_unknown(f"assistant_block:{type(block).__name__}", block)
         continue
       if isinstance(block, ThinkingBlock):
-        # Streamed via thinking_delta already — snapshot duplicate.
+        # The completed block is the record; the thinking_delta stream was
+        # its live preview. Emit it so the reducer replaces the streamed
+        # segment it completes (a no-op when nothing was lost), or
+        # materialises it when no delta for it arrived at all.
+        if block.thinking:
+          index = _claude_final_index(bc, sdk_msg.message_id, "thinking")
+          segment_id = _claude_thinking_segment_id(sdk_msg.message_id, index)
+          if index is None:
+            # Never streamed (no block start seen): it is new content.
+            bc.publish(_thinking_event(block.thinking, segment_id))
+          else:
+            bc.publish({
+              "type": "thinking_final",
+              "content": block.thinking,
+              "segment_id": segment_id,
+            })
         continue
       if isinstance(block, TextBlock):
         # The text already streamed live via text_delta events; this is the
@@ -608,12 +692,15 @@ def dispatch_sdk_message(
         # same message object and so were always durable — this closes the gap
         # for text. Replace, never append: the reducer concatenates plain
         # "text" events, so re-emitting as "text" would double the prose.
-        # The item id (message id + content-block index) matches the streamed
+        # The item id (message id + the STREAMED content-block index, not the
+        # block's position in this single-block message) matches the streamed
         # deltas' id, so events.py replaces THIS block by identity instead of
-        # guessing the trailing text block — the fix for an earlier text block
-        # keeping a dropped leading chunk when a message has several.
+        # guessing the trailing text block.
         if block.text:
-          item_id = _claude_text_item_id(sdk_msg.message_id, content_index)
+          item_id = _claude_text_item_id(
+            sdk_msg.message_id,
+            _claude_final_index(bc, sdk_msg.message_id, "text"),
+          )
           bc.publish({
             "type": "text_final", "content": block.text,
             **({"text_item_id": item_id} if item_id else {}),
