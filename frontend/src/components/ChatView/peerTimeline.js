@@ -95,10 +95,10 @@ export function peerRecordTool(note, chatId) {
     type: 'tool', status: 'done', tool: 'PeerMessage',
     peer_message: sent ? {
       direction: 'send', status: 'sent', peers: [note.recipient_name || 'Agent'],
-      count: 1, kind: note.kind, body: note.body, body_truncated: Boolean(note.truncated), broadcast: note.broadcast,
+      count: 1, kind: note.kind, delivery: note.delivery, body: note.body, body_truncated: Boolean(note.truncated), broadcast: note.broadcast,
     } : {
       direction: 'read', status: 'received', count: 1,
-      notes: [{ sender: note.sender_name || 'Agent', body: note.body, kind: note.kind, body_truncated: Boolean(note.truncated) }],
+      notes: [{ sender: note.sender_name || 'Agent', body: note.body, kind: note.kind, delivery: note.delivery, body_truncated: Boolean(note.truncated) }],
     },
   }
 }

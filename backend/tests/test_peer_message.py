@@ -65,7 +65,7 @@ def test_both_provider_send_identities_open_the_same_marker():
 def test_direct_claude_result_settles_to_resolved_recipient_and_kind():
   settled = settle_peer_message(
     {"direction": "send", "status": "sending"},
-    json.dumps({"messages": [_message()]}),
+    json.dumps({"messages": [_message(delivery="next_turn")]}),
   )
   assert settled == {
     "direction": "send",
@@ -76,6 +76,7 @@ def test_direct_claude_result_settles_to_resolved_recipient_and_kind():
     "body": "The exact candidate is ready.",
     "body_truncated": False,
     "broadcast": False,
+    "delivery": "next_turn",
   }
 
 
@@ -335,6 +336,12 @@ def test_persisted_marker_is_rebounded_before_projection():
   assert len(marker["notes"][0]["sender"]) == 120
   assert marker["notes"][0]["kind"] == "note"
   assert len(marker["notes"][0]["body"]) == MAX_BODY_CHARS
+
+
+def test_persisted_send_marker_keeps_only_a_known_delivery_mode():
+  sent = {"direction": "send", "status": "sent", "peers": ["Reviewer"], "body": "Ready."}
+  assert bounded_peer_message({**sent, "delivery": "interrupt"})["delivery"] == "interrupt"
+  assert "delivery" not in bounded_peer_message({**sent, "delivery": "x" * 5000})
 
 
 def test_send_counts_distinct_recipient_chats_not_deduped_names():
