@@ -1095,16 +1095,14 @@ def _park_pending_update(repo: Path, receipt: dict) -> list[str]:
     if app_git.ref_is_ancestor(worktree, upstream, "HEAD") is True:
       # Merged but not yet a clean answer: uncommitted edits or committed
       # markers are the remaining work.
-      marked = app_git._run(
-        worktree, "grep", "-z", "-lE", install._CONFLICT_MARKER, "HEAD",
-        check=False,
-      ).stdout.split("\0")
+      marked = install.committed_conflict_marker_paths(
+        worktree, "HEAD", upstream,
+      ) or []
       changed = app_git._run(
         worktree, "status", "--porcelain=v1", "-z", "--no-renames",
       ).stdout.split("\0")
       return sorted(
-        {path.removeprefix("HEAD:") for path in marked if path}
-        | {entry[3:] for entry in changed if len(entry) > 3}
+        set(marked) | {entry[3:] for entry in changed if len(entry) > 3}
       )
     # The resolver backed out of its merge. Start over from current `main`.
     app_git.remove_overlay_worktree(repo, worktree)
