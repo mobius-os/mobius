@@ -24,7 +24,6 @@ from app import cron_tz
 from app.manifest_contract import (
   ManifestContractError,
   job_interpreter,
-  require_executable_job,
 )
 
 
@@ -313,7 +312,6 @@ def _job_command(job: Path, app_id: int) -> list[str]:
   """
   with job.open("rb") as script:
     interpreter = job_interpreter(script.read(257))
-  require_executable_job(job.stat().st_mode)
   return [*interpreter, str(job), str(app_id)]
 
 

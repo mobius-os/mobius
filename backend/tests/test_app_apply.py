@@ -432,18 +432,17 @@ def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   assert updated.json()["warnings"] == []
 
 
-def test_local_apply_rejects_a_nonexecutable_scheduled_job(client, auth):
+def test_local_apply_accepts_a_scheduled_job_without_execute_permission(
+  client, auth,
+):
+  """The runner launches the shebang's interpreter, so file mode is irrelevant."""
   source = _source()
   _declare_schedule(source)
   (source / "job.sh").chmod(0o644)
 
-  rejected = _apply(client, auth, source)
+  applied = _apply(client, auth, source)
 
-  assert rejected.status_code == 422, rejected.text
-  assert rejected.json()["detail"] == {
-    "code": "invalid_schedule_job",
-    "message": "Schedule job is not executable.",
-  }
+  assert applied.status_code == 200, applied.text
 
 
 def test_unchanged_local_reapply_retries_failed_schedule_sync(client, auth):

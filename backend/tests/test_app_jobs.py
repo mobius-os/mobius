@@ -506,7 +506,8 @@ def test_wrapper_honors_python_job_shebang(tmp_path, monkeypatch):
   ]
 
 
-def test_wrapper_rejects_nonexecutable_job_before_launch(tmp_path, monkeypatch):
+def test_wrapper_launches_job_without_execute_permission(tmp_path, monkeypatch):
+  """The declared interpreter runs the job, so a lost execute bit is harmless."""
   runner = _load_runner()
   data_dir = tmp_path / "data"
   source = data_dir / "apps" / "portable"
@@ -521,16 +522,21 @@ def test_wrapper_rejects_nonexecutable_job_before_launch(tmp_path, monkeypatch):
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(runner, "_job_context", lambda *_args: context)
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  calls = []
   monkeypatch.setattr(
     runner.subprocess,
     "Popen",
-    lambda *_args, **_kwargs: pytest.fail("invalid job must not launch"),
+    lambda *args, **kwargs: (
+      calls.append((args, kwargs))
+      or types.SimpleNamespace(wait=lambda: 0)
+    ),
   )
   monkeypatch.setattr(runner.sys, "argv", [
     "app-job-runner.py", "57", str(job),
   ])
 
-  assert runner.run() == 4
+  assert runner.run() == 0
+  assert calls[0][0][0] == ["/usr/bin/env", "bash", str(runtime_job), "57"]
 
 
 def test_wrapper_rejects_job_without_shebang(tmp_path, monkeypatch):
