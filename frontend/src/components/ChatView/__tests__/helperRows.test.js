@@ -93,7 +93,7 @@ test('a group with working helpers says so instead of claiming they need attenti
   assert.doesNotMatch(html, /need attention/)
 })
 
-test('a working Subagents-app helper inside a collapsed activity group counts as running and draws its row', async () => {
+test('a working Subagents-app helper inside a collapsed activity group counts as running', async () => {
   const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
   const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
     chatId: 'chat',
@@ -104,7 +104,28 @@ test('a working Subagents-app helper inside a collapsed activity group counts as
     ],
   }))
   assert.match(html, /1 running/)
-  assert.match(html, /chat__helper-working/)
-  // The row opens the helper's conversation in a panel over this chat.
+})
+
+test('an open group draws each helper once, as its launch step, in order', async () => {
+  const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
+  const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'm2:activity:t0', true)
+  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+    chatId: 'chat',
+    surfaceKey: 'm2',
+    entries: [
+      { idx: 0, item: { type: 'tool', tool: 'Bash', input: 'git status', status: 'done', tool_use_id: 't0' } },
+      { idx: 1, item: { type: 'tool', tool: 'mcp__mobius_control__spawn_agent', input: 'audit-login', status: 'done', tool_use_id: 't1' } },
+      { idx: 'h', item: { ...working, delegation_id: 'd1', type: 'helper_result', activityId: working.id } },
+      { idx: 2, item: { type: 'tool', tool: 'Bash', input: 'npm test', status: 'done', tool_use_id: 't2' } },
+    ],
+  }))
+  assert.equal(html.match(/chat__helper-working/g)?.length, 1, 'one row per helper')
+  assert.doesNotMatch(html, /Started helper audit-login/, 'the launch step is the row')
+  const row = html.indexOf('chat__helper-working')
+  assert.ok(html.indexOf('git status') < row && row < html.indexOf('npm test'),
+    'the row stands where the helper was launched')
   assert.match(html, /aria-label="audit-login: [^"]*Open its conversation"/)
+  _resetDisclosureStateForTests()
 })

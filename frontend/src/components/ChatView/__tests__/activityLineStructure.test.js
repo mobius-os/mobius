@@ -104,7 +104,7 @@ test('a delegating stretch keeps helper status and activity under one honest dis
   assert.match(activityStretch, /id=\{timelineId\}[\s\S]*hidden=\{!open\}/,
     'named helpers and their activity stay inside the broad summary disclosure')
   assert.match(activityStretch,
-    /<SubagentChips[\s\S]*subagent=\{tool\.subagent\}/,
+    /<SubagentChips[\s\S]*subagent=\{item\.subagent\}/,
     'helper status rows render inside the activity body')
   assert.doesNotMatch(activityStretch, /helperOpen|toggleHelper/,
     'the transcript has no helper-specific activity mapping, so it has no fake per-helper disclosure')
