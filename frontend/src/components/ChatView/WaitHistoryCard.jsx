@@ -1,7 +1,7 @@
 /* WaitHistoryCard preserves a settled monitor outcome beside chat history. */
 
 import LifecycleIcon, { LifecycleOutcome } from './LifecycleIcon.jsx'
-import { waitHistoryViewModel } from './waitHistory.js'
+import { waitHistoryPlacement, waitHistoryViewModel } from './waitHistory.js'
 
 export default function WaitHistoryCard({ summary }) {
   const view = waitHistoryViewModel(summary)
@@ -9,7 +9,7 @@ export default function WaitHistoryCard({ summary }) {
 
   return (
     <aside
-      className={`chat__goal-history chat__wait-history chat__wait-history--${view.tone}`}
+      className={`chat__goal-history chat__wait-history chat__wait-history--${view.tone} chat__wait-history--${waitHistoryPlacement(summary)}`}
       aria-label={view.ariaLabel}
     >
       <LifecycleIcon kind="wait" />

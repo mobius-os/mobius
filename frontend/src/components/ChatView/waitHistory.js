@@ -20,6 +20,18 @@ const OUTCOMES = {
   cancelled: { kicker: 'Wait stopped', tone: 'stopped', spoken: 'Stopped wait' },
 }
 
+/**
+ * Where a settled wait belongs within the answer the server anchored it to
+ * (`terminal_wait_summaries_by_message_index` in backend/app/chat_waits.py).
+ * A met/expired/failed wait CAUSED that answer — the wake turn starts because
+ * of it — so it leads the answer and shows while that answer is still live,
+ * exactly when the composer's Waiting chip disappears. A deliberate stop is an
+ * outcome of the answer that owned the wait, so it trails it once settled.
+ */
+export function waitHistoryPlacement(summary) {
+  return summary?.status === 'cancelled' ? 'trail' : 'lead'
+}
+
 export function waitHistoryViewModel(summary) {
   const condition = waitConditionLabel(summary?.description)
   const outcome = OUTCOMES[summary?.status]

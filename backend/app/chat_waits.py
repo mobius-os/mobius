@@ -359,6 +359,8 @@ def terminal_wait_summaries_by_message_index(
   their wake was delivered; a deliberate stop stays beside the most recent
   answer that owned the wait. Until a wake answer exists, the latest prior
   answer is a truthful temporary anchor and naturally moves on the next read.
+  The shell's ``waitHistoryPlacement`` renders a wake outcome at the top of its
+  anchor answer (live included) and a deliberate stop after it.
   """
   rows = (
     db.query(models.ChatWait)

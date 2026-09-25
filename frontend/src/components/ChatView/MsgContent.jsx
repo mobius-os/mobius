@@ -37,6 +37,7 @@ import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
+import { waitHistoryPlacement } from './waitHistory.js'
 import HelperResultCard from './HelperResultCard.jsx'
 
 
@@ -119,11 +120,13 @@ function GoalHistory({ msg }) {
   ))
 }
 
-function WaitHistory({ msg }) {
+// `placement` follows waitHistoryPlacement: a wake cause leads its answer
+// (live too), a deliberate stop trails the settled answer that owned it.
+function WaitHistory({ msg, placement }) {
   if (msg.role !== 'assistant' || !Array.isArray(msg.wait_summaries)) return null
-  return msg.wait_summaries.map(summary => (
-    <WaitHistoryCard key={summary.id} summary={summary} />
-  ))
+  return msg.wait_summaries
+    .filter(summary => waitHistoryPlacement(summary) === placement)
+    .map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)
 }
 
 function MsgContentInner({
@@ -562,6 +565,7 @@ function MsgContentInner({
 
     return (
       <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
+        <WaitHistory msg={msg} placement="lead" />
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
@@ -620,7 +624,7 @@ function MsgContentInner({
           />
         )}
         {!isStreaming && <GoalHistory msg={msg} />}
-        {!isStreaming && <WaitHistory msg={msg} />}
+        {!isStreaming && <WaitHistory msg={msg} placement="trail" />}
       </AssistantCopySurface>
     )
   }
@@ -630,6 +634,7 @@ function MsgContentInner({
 
   return (
     <AssistantCopySurface msg={msg}>
+      <WaitHistory msg={msg} placement="lead" />
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
@@ -658,7 +663,7 @@ function MsgContentInner({
         </div>
       ) : null}
       {!isStreaming && <GoalHistory msg={msg} />}
-      {!isStreaming && <WaitHistory msg={msg} />}
+      {!isStreaming && <WaitHistory msg={msg} placement="trail" />}
     </AssistantCopySurface>
   )
 }

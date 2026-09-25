@@ -117,3 +117,38 @@ test('a Restart wait has no fake deadline or generic cancellation control', () =
   assert.doesNotMatch(html, /Stop waiting/)
   assert.doesNotMatch(html, /Sep/)
 })
+
+test('a wait that woke the chat leads its answer while a deliberate stop trails it', async () => {
+  const { waitHistoryPlacement } = await vite.ssrLoadModule(
+    '/src/components/ChatView/waitHistory.js',
+  )
+  assert.deepEqual(
+    ['met', 'expired', 'failed', 'cancelled'].map(status => waitHistoryPlacement({ status })),
+    ['lead', 'lead', 'lead', 'trail'],
+  )
+})
+
+test('the wake cause is visible at the top of the answer while it is still streaming', async () => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'http://localhost/' } }
+  after(() => { globalThis.window = previousWindow })
+  const { default: MsgContent } = await vite.ssrLoadModule(
+    '/src/components/ChatView/MsgContent.jsx',
+  )
+  const msg = {
+    id: 'wait-resume-sample',
+    role: 'assistant',
+    content: 'The runner file is clean now, so I will continue.',
+    wait_summaries: [
+      { id: 'woke', description: 'Runner edits committed', status: 'met', checks_count: 2 },
+      { id: 'stopped', description: 'Obsolete deploy check', status: 'cancelled' },
+    ],
+  }
+  const live = renderToStaticMarkup(createElement(MsgContent, { msg, isStreaming: true }))
+  assert.match(live, /Wait completed/)
+  assert.ok(live.indexOf('Wait completed') < live.indexOf('runner file is clean'))
+  assert.doesNotMatch(live, /Wait stopped/)
+
+  const settled = renderToStaticMarkup(createElement(MsgContent, { msg, isStreaming: false }))
+  assert.ok(settled.indexOf('runner file is clean') < settled.indexOf('Wait stopped'))
+})
