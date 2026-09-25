@@ -26,6 +26,8 @@ import sys
 import threading
 from pathlib import Path
 
+from app.config import import_probe_env
+
 log = logging.getLogger("mobius.restart")
 
 # Grace after SIGTERM before the hard kill — the crash floor. uvicorn's graceful
@@ -77,6 +79,7 @@ def validate_restart_source(platform_root: Path | None = None) -> None:
   ):
     env.pop(key, None)
   env["PYTHONDONTWRITEBYTECODE"] = "1"
+  import_probe_env(env)
   command = [
     sys.executable,
     "-c",

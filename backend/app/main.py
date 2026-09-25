@@ -265,6 +265,9 @@ def _assert_provider_defaults(provider_names) -> None:
 async def lifespan(app):
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
+  # Before anything is spawned: no agent or tool may inherit server secrets.
+  from app.config import withhold_server_secrets_from_children
+  withhold_server_secrets_from_children()
   from app.startup import (
     StartupContext,
     run_startup_plan,

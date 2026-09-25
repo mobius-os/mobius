@@ -136,6 +136,9 @@ find /app/shell-src -path '*/node_modules' -prune -o -exec chmod a+rX {} + 2>/de
 # before the platform import probe because app.main loads settings at import.
 if [ -z "$SECRET_KEY" ]; then
   if [ -f /data/.secret-key ]; then
+    # Re-assert owner-only access on every boot, not only at creation: an
+    # older copy, restore, or permission fallback can leave it world-readable.
+    chmod 600 /data/.secret-key 2>/dev/null || true
     export SECRET_KEY=$(cat /data/.secret-key)
   else
     export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")

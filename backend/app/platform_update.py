@@ -69,6 +69,7 @@ from typing import Callable, Literal, TypedDict
 from sqlalchemy.orm import Session
 
 from app import app_git, platform_activation, runtime_provenance
+from app.config import import_probe_env
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -936,8 +937,9 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
   ``app.platform_update`` — validates the NEW on-disk tree without corrupting its
   own interpreter, and so cwd/env exactly mirror the uvicorn exec. The env scrubs
   ``PYTHONPATH`` (no stray path may shadow ``app``) and the ``GIT_*`` pointers,
-  and keeps ``SECRET_KEY`` / ``DATABASE_URL`` / ``DATA_DIR`` so settings resolve
-  as the served process does. Returns ``(ok, error)``.
+  and keeps ``DATABASE_URL`` / ``DATA_DIR`` so settings resolve as the served
+  process does; the withheld signing key is replaced by an import-only
+  placeholder. Returns ``(ok, error)``.
   """
   backend = repo / "backend"
   env = dict(os.environ)
@@ -946,6 +948,7 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
   ):
     env.pop(var, None)
+  import_probe_env(env)
   try:
     proc = subprocess.run(
       [sys.executable or "python3", "-c", "import app.main"],
