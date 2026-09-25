@@ -3534,8 +3534,15 @@ def _platform_conflict_resolver_message(
       "local commit on the reviewed upstream version, and runs the normal "
       "build/import and rollback gates. If it prints `conflict`, those live "
       "edits overlap your answer: the candidate now holds fresh markers, so "
-      "resolve and run the same command again. Do not report the platform "
-      "active until its separate image/restart actions finish."
+      "resolve and run the same command again. When it prints `updated`, "
+      "read `activation.required_actions` from `mapi /api/platform/status`. "
+      "If it includes `image_rebuild`, the update is not "
+      "finished: ask the owner to press **Finish update** in Settings → "
+      "Updates, which replaces the container with the matching image and "
+      "restarts once. Do not offer a plain restart instead; that would run "
+      "the new source on the old image. Offer a restart only when "
+      "`server_restart` is the sole remaining action. Do not report the "
+      "platform active until those actions finish."
     )
   return (
     "This platform update conflict was recorded by an older updater "

@@ -2269,7 +2269,8 @@ def test_platform_conflict_resolver_message_points_at_the_parked_worktree():
   assert "all marked files together" in content
   assert "merge --no-ff" not in content
   assert "running platform is untouched" in content
-  assert "separate image/restart actions" in content
+  assert "Finish update" in content
+  assert "Do not offer a plain restart instead" in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
