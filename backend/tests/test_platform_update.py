@@ -2641,6 +2641,40 @@ def test_reviewed_image_target_does_not_treat_incoming_dockerfile_as_local(
   ) == ["Dockerfile"]
 
 
+def test_local_image_change_already_in_a_further_changed_target_is_not_a_blocker(
+  clone_env,
+):
+  """A local fix the release already contains, plus more release edits to the
+  same file, loses nothing on replacement; only the merged file decides."""
+  origin, platform = clone_env
+  base = _advance_origin(
+    origin, edits={"Dockerfile": "FROM base\nRUN one\n\n\n\nRUN two\n"},
+    msg="multi-line base",
+  )
+  _git(platform, "fetch", "origin")
+  _git(platform, "merge", "--ff-only", base)
+  _local_commit(
+    platform, edits={"Dockerfile": "FROM base\nRUN one-fixed\n\n\n\nRUN two\n"},
+  )
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM base\nRUN one-fixed\n\n\n\nRUN two-newer\n"},
+    msg="release carries the fix and more",
+  )
+  _git(platform, "fetch", "origin")
+
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=base,
+  ) == []
+
+  _local_commit(
+    platform, edits={"Dockerfile": "FROM base\nRUN one-local-only\n\n\n\nRUN two\n"},
+  )
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=base,
+  ) == ["Dockerfile"]
+
+
 def test_reviewed_image_plan_binds_digest_and_preserves_live_tree(
   clone_env, monkeypatch,
 ):
