@@ -1725,6 +1725,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0064_chat_continuity_journal",
     "0065_run_delivered_input_boundary",
     "0066_retire_chat_continuity_journal",
+    "0067_chat_drawer_covering_index",
   ]
   assert second == first
 

@@ -778,8 +778,11 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  # Drawer projection only. ``has_messages`` is maintained with the transcript
-  # by the Chat model and the two writer bulk-update paths, so this hot query
+  # Drawer projection only, served entirely by the ``ix_chats_drawer`` covering
+  # index (migration 0067): a column read from the row itself would walk past
+  # the inline transcript. A new projected column needs a new migration that
+  # replaces the index under a new name (IF NOT EXISTS matches names only).
+  # ``has_messages`` is maintained with the transcript by the Chat model and the two writer bulk-update paths, so this hot query
   # never reads or decodes the potentially large ``messages`` JSON column.
   # Recents now INCLUDES project chats, each carrying its project so the drawer
   # can render a project chip. The LEFT JOIN attaches the owning live project by
