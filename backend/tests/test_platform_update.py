@@ -4369,6 +4369,25 @@ def test_finish_stays_on_applied_release_when_newer_source_is_available(clone_en
   assert applied != newer
 
 
+def test_finish_targets_the_installed_release_when_the_tracking_ref_lags(clone_env):
+  origin, platform = clone_env
+  older = _served_sha(platform)
+  installed = _advance_origin(origin, edits={"release.txt": "installed release\n"})
+  assert pu.reconcile_clone(platform).status == "updated"
+  # A reviewed Apply can install an exact target fetched outside the tracking
+  # ref, so origin/main may still name the older release afterwards.
+  _git(platform, "update-ref", "refs/remotes/origin/main", older)
+
+  assert pu.applied_release_sha(platform) == installed
+  status = pu.platform_status(platform)
+  assert status["available"] is False
+  assert status["contained_upstream_sha"] == installed
+  preview = pu.platform_update_preview(platform)
+  assert preview["target_sha"] == installed
+  pu.check_for_updates(platform)
+  assert pu.recorded_upstream_sha(platform) == installed
+
+
 def test_finish_can_prove_applied_source_without_a_recorded_marker(clone_env):
   _origin, platform = clone_env
   applied = _served_sha(platform)

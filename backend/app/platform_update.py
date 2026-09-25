@@ -1060,6 +1060,23 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
   return _rev(repo, UPSTREAM_BRANCH) or None
 
 
+def _latest_known_release(repo: Path) -> str | None:
+  """The newest release this clone knows: ``origin/main`` unless it lags.
+
+  A reviewed Apply can install an exact target fetched outside the tracking
+  ref, leaving ``origin/main`` behind the installed ``upstream`` marker until
+  the next check. Treating that older ref as the release would make Finish
+  target an image older than the served source and misreport upstream's own
+  changes as local ones.
+  """
+  remote = _rev(repo, DEFAULT_TARGET_REF) or None
+  installed = recorded_upstream_sha(repo)
+  if remote and installed and _is_ancestor(repo, remote, installed):
+    return installed
+  # A missing tracking ref stays unavailable, never "up to date".
+  return remote
+
+
 def _update_source_tip(repo: Path) -> str:
   """Require readable source before reporting update availability or completion."""
   if not (repo / ".git").exists():
@@ -1081,7 +1098,7 @@ def applied_release_sha(repo: Path = PLATFORM_REPO) -> str:
   """
   with _reconcile_flock():
     current = _update_source_tip(repo)
-    for candidate in (_rev(repo, DEFAULT_TARGET_REF), recorded_upstream_sha(repo)):
+    for candidate in (_latest_known_release(repo), recorded_upstream_sha(repo)):
       if candidate and _is_ancestor(repo, candidate, current):
         return candidate
     raise PlatformUpdateError("applied_release_unavailable")
@@ -2785,7 +2802,7 @@ def platform_status(
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
   )
-  target = _rev(repo, target_sha or DEFAULT_TARGET_REF)
+  target = _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")
   # Managed deployments may select a verified image release whose Git object
@@ -2894,7 +2911,7 @@ def check_for_updates(
       raise PlatformUpdateError("platform_fetch_failed")
     if target_sha and _rev(repo, target_sha) != target_sha:
       raise PlatformUpdateError("image_release_source_unavailable")
-    target = _rev(repo, DEFAULT_TARGET_REF)
+    target = _latest_known_release(repo)
     local = _local_branch(repo)
     if target and _is_ancestor(repo, target, local):
       _set_upstream(repo, target)
@@ -3169,7 +3186,9 @@ def _platform_update_preview_unlocked(
     if _rev(repo, target_sha) != target_sha:
       raise PlatformUpdateError("image_release_source_unavailable")
   local = local_sha
-  target = _rev(repo, target_sha or DEFAULT_TARGET_REF) or None
+  target = (
+    _rev(repo, target_sha) if target_sha else _latest_known_release(repo)
+  ) or None
   if not target:
     raise PlatformUpdateError("platform_target_unavailable")
   available = not _is_ancestor(repo, target, local)
