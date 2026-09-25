@@ -4635,6 +4635,28 @@ def test_blockers_are_fixed_on_a_frozen_copy_and_late_edits_return_after_boot(
   assert pu._is_ancestor(platform, target, _served_sha(platform))
 
 
+def test_finish_of_already_applied_source_still_requires_the_owed_image(
+  clone_env,
+):
+  """Source that already contains the release has no incoming changes, but
+  the running image still owes that release's image work; Finish must keep
+  requiring the replacement instead of refusing it."""
+  origin, platform = clone_env
+  target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
+  pu._fetch(platform)
+  _git(platform, "merge", "--ff-only", target)
+  pu._write_activation_marker(
+    target, ["Dockerfile"], upstream_sha=target, image_paths=["Dockerfile"],
+  )
+  current = _served_sha(platform)
+  plan = _apply_plan(current, target, platform)
+  plan.pop("repo")
+
+  prepared = pu.prepare_reviewed_update(**plan, repo=platform)
+
+  assert prepared["requires_image"] is True
+
+
 def test_finish_can_prove_applied_source_without_a_recorded_marker(clone_env):
   _origin, platform = clone_env
   applied = _served_sha(platform)
