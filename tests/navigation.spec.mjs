@@ -942,6 +942,7 @@ test.describe('Touch navigation', () => {
       })
     })
 
+    const startChatId = await newChatSurface(page).getAttribute('data-chat-id')
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
@@ -974,7 +975,55 @@ test.describe('Touch navigation', () => {
     )
     await expect(painted).toBeFocused()
     await expect(painted).toHaveValue(durableInput)
+
+    // New Chat recorded its Back target under the minted id before the 409
+    // rotated it. History must follow the replacement: Back returns to the chat
+    // the tap left, and Forward restores the replacement, never the unavailable id.
+    await goBack(page)
+    await expect(newChatSurface(page, startChatId)).toBeVisible()
+    await goForward(page)
+    await expect(newChatSurface(page, replacementId)).toBeVisible()
+    await expect(newChatSurface(page, intentId)).toHaveCount(0)
   })
+
+  // Only the mobile drawer carries a history sentinel. The persistent desktop
+  // sidebar and the New Chat shortcut have none, but they are the same user
+  // navigation and owe Back the same target.
+  for (const [source, startNewChat] of [
+    ['the desktop sidebar', async (page) => {
+      await openDrawer(page)
+      await page.getByRole('navigation', { name: 'Primary navigation' })
+        .getByRole('button', { name: 'New chat', exact: true }).click()
+    }],
+    ['the New Chat shortcut', async (page) => {
+      await page.keyboard.press('ControlOrMeta+n')
+    }],
+  ]) {
+    test(`New Chat from ${source} leaves Back a target`, async ({ page }) => {
+      await setup(page, { width: 1280, height: 900 }, { detailForChat: emptyChatDetail })
+      let requestedId = null
+      await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+        if (route.request().method() !== 'POST') return route.fallback()
+        requestedId = route.request().postDataJSON().id
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(createdChat(requestedId)),
+        })
+      })
+
+      const startChatId = await newChatSurface(page).getAttribute('data-chat-id')
+      expect(startChatId).toBeTruthy()
+      await startNewChat(page)
+      await expect.poll(() => requestedId).not.toBeNull()
+      await expect(newChatSurface(page, requestedId)).toBeVisible()
+
+      await goBack(page)
+      await expect(newChatSurface(page, startChatId)).toBeVisible()
+      await goForward(page)
+      await expect(newChatSurface(page, requestedId)).toBeVisible()
+    })
+  }
 
   test('a fast allocation waits for its IDB-only draft before handoff', async ({ page }) => {
     const intentId = '10000000-0000-4000-8000-000000000098'

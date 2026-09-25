@@ -3786,15 +3786,13 @@ export default function Shell({ onInitialVisualReady }) {
       paneId: forceNew ? ws.focusedPaneId : null,
       paneActiveKey: forceNew ? `chat:${chatId}` : null,
     }
-    // Opened from the navigation drawer, New Chat is a navigation like picking a
-    // chat there: it owes Back a target. The programmatic newChat() path already
-    // honours this (drawerPushedRef => navTo); this draft-first path only closed
-    // the drawer, which popped the sentinel and left Back with nowhere to land
-    // inside the shell. Record the entry before the destination is applied, while
-    // the route being left is still current.
-    if (drawerPushedRef.current) {
-      recordChatNavigation(chatId, { paneId: ws.focusedPaneId })
-    }
+    // New Chat is a navigation like picking a chat: it owes Back a target
+    // whether it came from the mobile drawer (retag its sentinel), the
+    // persistent desktop sidebar, or the shortcut (push a nav entry). Record it
+    // before the destination is applied, while the route being left is still
+    // current. A later id rotation needs no retag here: the current entry is
+    // re-stamped from the active route when the replacement is applied.
+    recordChatNavigation(chatId, { paneId: ws.focusedPaneId })
     // The client-minted id is the workspace destination immediately. This
     // mounts ChatView's one canonical composer before the tap task ends; row
     // allocation only unlocks its server runtime and never swaps its owner.
