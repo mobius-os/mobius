@@ -9,6 +9,7 @@ from app import chat as chat_mod
 from app import chat_queue, models, schemas
 from app.broadcast import create_broadcast, remove_broadcast
 from app.chat_writer import StartTurn, alloc_run_token, get_writer
+from app.connectors import ConnectorTurnPlan
 
 
 def _app_row(db, marker):
@@ -28,7 +29,7 @@ def _app_row(db, marker):
 async def _drive_turn(chat_id, monkeypatch, *, expected_include):
   """Run one codex turn with fakes; return the connector plans the runner saw."""
   observed = []
-  granted_plan = object()
+  granted_plan = ConnectorTurnPlan()
 
   def fake_connector_plan(_db, *, include_owner_connectors):
     observed.append(include_owner_connectors)

@@ -119,6 +119,7 @@ from app.events import (
   finalize_blocks,
 )
 from app.providers import (
+  DEFAULT_PROVIDER,
   authenticated_provider_ids,
   effective_agent_settings,
   get_provider,
@@ -5371,7 +5372,7 @@ async def _run_chat_impl_with_db(
   # Names every process this run starts (non-secret; see RUN_MARKER_ENV).
   base_env[RUN_MARKER_ENV] = run_marker(run_token)
   # Helpers default to the delegating agent's own provider (spawn_agent).
-  base_env["MOBIUS_AGENT_PROVIDER"] = provider.name
+  base_env["MOBIUS_AGENT_PROVIDER"] = provider_id or DEFAULT_PROVIDER
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
