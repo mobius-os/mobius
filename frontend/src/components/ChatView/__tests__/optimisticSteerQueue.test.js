@@ -31,11 +31,11 @@ test('accepted deferred steers leave the queue and appear inline immediately', (
   )
   assert.match(
     source,
-    /pendingQueue\.steerReservedMessages\.map\(\(msg, i\) => \{/,
-    'reserved steering rows need an immediate inline presentation',
+    /const reservedSteerMessage = combineOwnerMessagesForDisplay\([\s\S]*?pendingQueue\.steerReservedMessages/,
+    'reserved steering rows need one immediate inline presentation',
   )
   const activeSurfaceAt = source.indexOf('{showActiveAssistantSurface && (')
-  const pendingSteerAt = source.indexOf('{pendingQueue.steerReservedMessages.map')
+  const pendingSteerAt = source.indexOf('{reservedSteerMessage &&')
   const footerAt = source.indexOf('<div ref={footRef} className="chat__foot">')
   assert.ok(
     activeSurfaceAt >= 0 && pendingSteerAt > activeSurfaceAt && pendingSteerAt < footerAt,

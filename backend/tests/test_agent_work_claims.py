@@ -451,3 +451,14 @@ def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
   assert db.get(models.ChatGoal, "claim-goal-first").status == "open"
   row = _claim_row(db)
   assert row.completed_at is None and row.released_at is None
+
+
+def test_work_keys_accept_pr_references_with_hash_and_plus():
+  import pytest
+
+  from app.agent_work_claims import clean_work_key
+
+  key = "pr-update:mobius-os/mobius#1365:5d0e+steer"
+  assert clean_work_key(key) == key
+  with pytest.raises(ValueError, match="# \\+"):
+    clean_work_key("Has Spaces")

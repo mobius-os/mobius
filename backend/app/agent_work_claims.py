@@ -14,14 +14,15 @@ from app import models
 from app.timeutil import now_naive_utc
 
 
-WORK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9:._/@-]{2,255}$")
+# `#` and `+` appear naturally in PR references such as `mobius-os/mobius#1365`.
+WORK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9:._/@#+-]{2,255}$")
 
 
 def clean_work_key(value: str) -> str:
   key = value.strip()
   if not WORK_KEY_RE.fullmatch(key):
     raise ValueError(
-      "work_key must be 3-256 lowercase letters, numbers, or : . _ / @ -"
+      "work_key must be 3-256 lowercase letters, numbers, or : . _ / @ # + -"
     )
   return key
 
