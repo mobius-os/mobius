@@ -27,6 +27,26 @@ function KindBadge({ kind }) {
   )
 }
 
+const DELIVERY_LABEL = {
+  interrupt: 'Interrupt',
+  next_turn: 'Next turn',
+}
+
+function DeliveryBadge({ delivery, record }) {
+  // Arrival during work is evidence and wins: a quiet note can ride in with an
+  // interrupting one. A turn-boundary arrival proves nothing (an interrupt may
+  // have woken an idle agent), so the requested mode stands.
+  const mode = record?.observedDelivery === 'during_work'
+    ? 'interrupt'
+    : delivery || record?.delivery
+  if (!DELIVERY_LABEL[mode]) return null
+  return (
+    <span className={`chat__peer-timing chat__peer-timing--${mode}`}>
+      {DELIVERY_LABEL[mode]}
+    </span>
+  )
+}
+
 export default function PeerMessageCard({ t, chatId, disclosureKey, records: suppliedRecords, onInternalNav }) {
   const linkedRecords = usePeerTimelineRecord(t?.tool_use_id)
   const records = suppliedRecords || linkedRecords || []
@@ -111,12 +131,6 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
         >
           {open && (
           <>
-            {record && <p className="chat__peer-delivery">{record.observedDelivery === 'during_work'
-              ? 'Delivered during work'
-              : record.observedDelivery === 'next_turn' ? 'Delivered at a turn boundary'
-                : record.delivery === 'interrupt' ? 'Immediate delivery requested · not a read receipt'
-                  : record.delivery === 'next_turn' ? 'Next-turn delivery · not a read receipt'
-                    : 'Delivery timing not recorded'}</p>}
             {model.status === 'sent' && (
               <div className="chat__peer-section">
                 <span className="chat__peer-kicker">
@@ -133,7 +147,10 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                   </p>
                 )}
                 <div className="chat__peer-note">
-                  <KindBadge kind={model.kind} />
+                  <span className="chat__peer-note-head">
+                    <KindBadge kind={model.kind} />
+                    <DeliveryBadge delivery={model.delivery} record={record} />
+                  </span>
                   {model.body && <div className="chat__peer-body"><StandardMarkdown text={model.body} onInternalNav={onInternalNav} /></div>}
                   {model.bodyTruncated && (
                     <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
@@ -148,10 +165,11 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                   Received {model.count}
                 </span>}
                 <ul className="chat__peer-list">
-                  {model.notes.map(note => (
+                  {model.notes.map((note, index) => (
                     <li key={note.key} className="chat__peer-note">
                       <span className="chat__peer-note-head">
                         <KindBadge kind={note.kind} />
+                        <DeliveryBadge delivery={note.delivery} record={records[index]} />
                         {model.count > 1 && note.sender && (
                           <span className="chat__peer-from">
                             from {note.sender}

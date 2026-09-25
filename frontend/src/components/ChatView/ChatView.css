@@ -491,6 +491,9 @@
   inset: 0;
   z-index: 210;
   display: grid;
+  /* One track no wider than the overlay: a long code line must scroll inside
+     the dialog, never widen the track it is centred in. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 18px;
   background: rgba(0, 0, 0, 0.46);
@@ -576,6 +579,41 @@
 .chat-summary__layer-body > :first-child { margin-top: 0; }
 .chat-summary__layer-body > :last-child { margin-bottom: 0; }
 .chat-summary__empty { margin: 0; color: var(--muted); }
+
+/* A helper's own conversation (HelperConversation) in the same dialog shell,
+   at a fixed height so live updates never resize it. */
+.helper-convo { width: min(760px, 100%); height: min(820px, calc(100% - 16px)); }
+.helper-convo__heading { min-width: 0; }
+.helper-convo__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.helper-convo__body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+  overscroll-behavior: contain;
+}
+.helper-convo__note { margin: 0; color: var(--muted); font-size: 12px; }
+.helper-convo__text { font-size: 14px; }
+.helper-convo__task {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  font-size: 14px;
+}
+.helper-convo__task-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.helper-convo__task > :last-child > :first-child,
+.helper-convo__text > :first-child > :first-child { margin-top: 0; }
+.helper-convo__task > :last-child > :last-child,
+.helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
 
 /* ── Bubble content ────────────────────────────────── */
 
@@ -1161,7 +1199,8 @@
   line-height: 1.35;
 }
 
-.chat__peer-kind {
+.chat__peer-kind,
+.chat__peer-timing {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -1189,6 +1228,17 @@
 .chat__peer-kind--blocker {
   color: color-mix(in srgb, var(--danger) 78%, var(--text));
   background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+/* Delivery mode is outlined so it never reads as a second message kind. */
+.chat__peer-timing {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--border-light);
+}
+
+.chat__peer-timing--interrupt {
+  color: color-mix(in srgb, var(--danger) 68%, var(--text));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 28%, var(--border));
 }
 
 .chat__peer-excerpt {

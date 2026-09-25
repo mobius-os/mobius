@@ -14,6 +14,7 @@ const PEER_STATUSES = new Set([
 // The Möbius-owned message-kind taxonomy (app.agent_coordination). An unknown
 // value falls back to the neutral "note" so the badge never renders empty.
 const PEER_KINDS = new Set(['note', 'finding', 'request', 'blocker', 'handoff'])
+const PEER_DELIVERIES = new Set(['next_turn', 'interrupt'])
 
 function cleanLabelText(value, limit) {
   if (typeof value !== 'string') return ''
@@ -27,6 +28,10 @@ function cleanBody(value) {
 
 function cleanKind(value) {
   return PEER_KINDS.has(value) ? value : 'note'
+}
+
+function cleanDelivery(value) {
+  return PEER_DELIVERIES.has(value) ? value : null
 }
 
 function cleanNames(value) {
@@ -66,6 +71,7 @@ export function peerMessageCardModel(pm) {
       status: 'sent',
       direction: 'send',
       kind: cleanKind(pm.kind),
+      delivery: cleanDelivery(pm.delivery),
       peers,
       count,
       truncated: count > peers.length,
@@ -87,6 +93,7 @@ export function peerMessageCardModel(pm) {
         key: i,
         sender: cleanLabelText(note?.sender, MAX_NAME_CHARS),
         kind: cleanKind(note?.kind),
+        delivery: cleanDelivery(note?.delivery),
         body,
         bodyTruncated: Boolean(note?.body_truncated),
       })

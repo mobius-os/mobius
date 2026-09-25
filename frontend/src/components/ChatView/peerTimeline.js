@@ -1,4 +1,16 @@
 /* Project retained peer mail onto transcript boundaries without changing delivery or stored messages. */
+/** Stored coordinates of one projected block. Recorded positions name a
+ * boundary in the stored message's blocks; projections that renumber those
+ * blocks (the compact transcript and assistant-fragment folding) declare the
+ * stored range each emitted block came from. */
+export function storedBlockRange(item) {
+  if (item?.type === 'activity' && Number.isInteger(item.start) && Number.isInteger(item.end)) {
+    return { start: item.start, end: item.end }
+  }
+  if (Number.isInteger(item?.raw_index)) return { start: item.raw_index, end: item.raw_index + 1 }
+  return null
+}
+
 export function peerTime(value) {
   if (typeof value === 'number') return value
   if (typeof value !== 'string' || !value) return NaN
@@ -83,10 +95,10 @@ export function peerRecordTool(note, chatId) {
     type: 'tool', status: 'done', tool: 'PeerMessage',
     peer_message: sent ? {
       direction: 'send', status: 'sent', peers: [note.recipient_name || 'Agent'],
-      count: 1, kind: note.kind, body: note.body, body_truncated: Boolean(note.truncated), broadcast: note.broadcast,
+      count: 1, kind: note.kind, delivery: note.delivery, body: note.body, body_truncated: Boolean(note.truncated), broadcast: note.broadcast,
     } : {
       direction: 'read', status: 'received', count: 1,
-      notes: [{ sender: note.sender_name || 'Agent', body: note.body, kind: note.kind, body_truncated: Boolean(note.truncated) }],
+      notes: [{ sender: note.sender_name || 'Agent', body: note.body, kind: note.kind, delivery: note.delivery, body_truncated: Boolean(note.truncated) }],
     },
   }
 }
@@ -152,16 +164,24 @@ export function foldAssistantActivityFragments(
       while (activityEnd < candidateBlocks.length && isActivityBlock(candidateBlocks[activityEnd])) {
         activityEnd += 1
       }
-      const leadingActivity = candidateBlocks
+      // Folding renumbers the candidate's blocks, so each one carries the
+      // stored index its recorded positions refer to; moved blocks also name
+      // the stored message they came from.
+      const storedCandidate = candidateBlocks.map((block, storedIndex) => (
+        storedBlockRange(block) ? block : { ...block, raw_index: storedIndex }
+      ))
+      const leadingActivity = storedCandidate
         .slice(0, activityEnd)
         .filter(block => !isTransparentActivitySeparator(block))
+        .map(block => ({
+          ...block,
+          source_message_id: block.source_message_id ?? candidate.id,
+        }))
       target = { ...target, blocks: [...targetBlocks, ...leadingActivity] }
       rendered[targetIndex] = target
-      const rawBoundary = leadingActivity.reduce((boundary, block) => (
-        block.type === 'activity' && Number.isInteger(block.end)
-          ? Math.max(boundary, block.end)
-          : boundary + 1
-      ), 0)
+      const rawBoundary = storedCandidate
+        .slice(0, activityEnd)
+        .reduce((boundary, block) => Math.max(boundary, storedBlockRange(block).end), 0)
       const candidateNotes = positions.get(candidate.id) || []
       const movingNotes = candidateNotes.filter(note => (
         Number.isInteger(note.display_position?.block_index)
@@ -175,6 +195,7 @@ export function foldAssistantActivityFragments(
             display_position: {
               ...note.display_position,
               assistant_message_id: target.id,
+              source_message_id: note.display_position.source_message_id ?? candidate.id,
             },
           })),
         ])
@@ -183,7 +204,7 @@ export function foldAssistantActivityFragments(
         if (stayingNotes.length) positions.set(candidate.id, stayingNotes)
         else positions.delete(candidate.id)
       }
-      const remaining = candidateBlocks.slice(activityEnd)
+      const remaining = storedCandidate.slice(activityEnd)
       rendered[candidateIndex] = remaining.length
         ? { ...candidate, blocks: remaining }
         : { ...candidate, hidden: true, _folded_activity_fragment: true }
