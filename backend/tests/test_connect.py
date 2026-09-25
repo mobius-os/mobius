@@ -227,6 +227,91 @@ async def test_outbound_profile_keeps_pairing_code_out_of_saved_record(
   assert "remote-secret" not in json.dumps(created)
 
 
+def _saved_outbound(tmp_path, monkeypatch, *, agent, status="active"):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_" + "a" * 16
+  connect_outbound._profile_dir(profile_id).mkdir(parents=True)
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "label": "Alex", "base_url": "https://friend.example",
+    "status": status, "agent": agent,
+  })
+  return profile_id
+
+
+def test_outbound_agent_access_gives_commands_a_revocable_agent_bearer(
+  client, auth, tmp_path, monkeypatch,
+):
+  from app import deps
+
+  profile_id = _saved_outbound(tmp_path, monkeypatch, agent=False)
+  assert "AGENT_TOKEN" not in connect_outbound._runner_env(profile_id)
+
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    **connect_outbound._read_json(connect_outbound._meta_path(profile_id)),
+    "agent": True,
+  })
+  env = connect_outbound._runner_env(profile_id)
+  bearer = {"Authorization": f"Bearer {env['AGENT_TOKEN']}"}
+  assert env["API_BASE_URL"]
+  assert client.get("/api/apps/", headers=bearer).status_code == 200
+  with SessionLocal() as db:
+    principal = deps.get_principal(env["AGENT_TOKEN"], db)
+  # It acts as an agent, so it can never answer owner cards or approvals.
+  assert not deps.is_owner_input_principal(principal)
+
+  # A saved profile outlives restarts; ending the connection ends the bearer.
+  for status in ("ended", "error", "revoked"):
+    meta = connect_outbound._read_json(connect_outbound._meta_path(profile_id))
+    connect_outbound._atomic_json(
+      connect_outbound._meta_path(profile_id), {**meta, "status": status},
+    )
+    assert client.get("/api/apps/", headers=bearer).status_code == 401
+  meta = connect_outbound._read_json(connect_outbound._meta_path(profile_id))
+  connect_outbound._atomic_json(
+    connect_outbound._meta_path(profile_id), {**meta, "status": "active"},
+  )
+  assert client.get("/api/apps/", headers=bearer).status_code == 200
+
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: None)
+  relaunched = []
+  monkeypatch.setattr(connect_outbound, "_launch", relaunched.append)
+  response = client.patch(
+    f"/api/connect/outbound/{profile_id}", headers=auth, json={"agent": False},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["agent"] is False
+  assert relaunched == [profile_id]
+  listed = client.get("/api/connect/outbound", headers=auth).json()
+  assert listed["agent_access"] is True
+  assert listed["connections"][0]["agent"] is False
+  assert client.get("/api/apps/", headers=bearer).status_code == 401
+
+  connect_outbound._discard(profile_id)
+  assert client.patch(
+    f"/api/connect/outbound/{profile_id}", headers=auth, json={"agent": True},
+  ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_outbound_grant_records_the_agent_choice(tmp_path, monkeypatch):
+  profile_id = _saved_outbound(tmp_path, monkeypatch, agent=True)
+  meta = connect_outbound._read_json(connect_outbound._meta_path(profile_id))
+  assert connect_outbound._public_profile(meta)["agent"] is True
+  seen = []
+
+  async def create(label, command, agent=False):
+    seen.append(agent)
+    return {"id": profile_id, "agent": agent}
+
+  monkeypatch.setattr(connect_outbound, "create_profile", create)
+  body = connect_routes.CreateOutboundBody(
+    label="Alex", command="curl https://friend.example | sh", agent=True,
+  )
+  assert (await connect_routes.create_outbound_access(body, None))["agent"]
+  assert seen == [True]
+
+
 def test_outbound_reconcile_records_exits_and_relaunches_orphans(
   tmp_path, monkeypatch,
 ):
@@ -818,7 +903,7 @@ def test_outbound_routes_use_connect_manage_capability(
   assert client.get("/api/connect/outbound", headers=denied).status_code == 403
   granted = _app_auth(client, auth, granted=True)
   assert client.get("/api/connect/outbound", headers=granted).json() == {
-    "connections": [public],
+    "connections": [public], "agent_access": True,
   }
 
 
@@ -836,7 +921,7 @@ def test_outbound_mutations_require_permission_and_report_domain_failures(
   granted = _app_auth(client, auth, granted=True)
   assert client.post(path, headers=granted, json={**body, "label": "  "}).status_code == 422
 
-  async def rejected_pairing(_label, _command):
+  async def rejected_pairing(_label, _command, agent=False):
     raise connect_outbound.OutboundConnectError("Pairing was rejected.")
 
   async def rejected_revocation(_profile_id):

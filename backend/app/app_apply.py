@@ -267,15 +267,18 @@ async def _sync_accepted_app_skills(
     contract = app.capability_contract or {}
     agent = contract.get("agent") if isinstance(contract, dict) else None
     skills = agent.get("skills") if isinstance(agent, dict) else None
-    skills = skills if isinstance(skills, list) else []
-    manifest = {
-      # Store metadata remains authoritative for WHICH skills are approved;
-      # the accepted local source revision owns their current bytes, which
-      # for an approved `<id>/` folder skill are the member files inside it.
-      "skills": skills,
-      "source_files": _local_folder_skill_members(Path(app.source_dir), skills),
-      "version": "accepted-local-revision",
-    }
+    manifest = {"version": "accepted-local-revision"}
+  else:
+    skills = manifest.get("skills")
+  skills = skills if isinstance(skills, list) else []
+  # Metadata decides WHICH skills are approved; the accepted local source owns
+  # their current bytes, which for an approved `<id>/` folder skill are the
+  # member files inside it. A resolved update can add or drop folder members
+  # that a remote manifest's file list does not name.
+  manifest = {
+    **manifest, "skills": skills,
+    "source_files": _local_folder_skill_members(Path(app.source_dir), skills),
+  }
   warnings: list[str] = []
   try:
     await install._sync_app_skills(db, app, manifest, warnings)

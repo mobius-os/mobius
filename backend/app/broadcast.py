@@ -8,6 +8,7 @@ plus live streaming.
 
 import asyncio
 import logging
+import secrets
 import time
 from typing import Optional
 
@@ -324,6 +325,24 @@ def remove_broadcast(chat_id: str):
   _broadcasts.pop(chat_id, None)
 
 
+class SystemSubscription(asyncio.Queue):
+  """One live system-stream subscriber: its event queue plus what that
+  subscriber has reported it is showing.
+
+  `id` is an opaque handle the shell learns from the stream's first event.
+  The shell reports its visibly shown apps against it, so the report lives
+  exactly as long as the connection that carries it — unsubscribe drops both,
+  with no timer or heartbeat to go stale. `visible_app_ids` stays empty for
+  subscribers that never report (internal waiters, embedded chats).
+  """
+
+  def __init__(self):
+    super().__init__(maxsize=256)
+    self.id = secrets.token_urlsafe(16)
+    self.visible_app_ids: frozenset[str] = frozenset()
+    self.visible_apps_sequence = 0
+
+
 class SystemBroadcast:
   """Process-lifetime event bus for shell-level system events
   (theme/app updates, exact resource deletion/recovery, shell rebuilds).
@@ -345,7 +364,7 @@ class SystemBroadcast:
   """
 
   def __init__(self):
-    self.subscribers: list[asyncio.Queue] = []
+    self.subscribers: list[SystemSubscription] = []
 
   def publish(self, event: dict) -> None:
     """Push an event to every live subscriber. Failures (queue full,
@@ -361,12 +380,12 @@ class SystemBroadcast:
           event.get("type", "?"),
         )
 
-  def subscribe(self) -> asyncio.Queue:
+  def subscribe(self) -> SystemSubscription:
     """Returns a queue that receives live events. The caller MUST
     call unsubscribe() in a finally block — a leaked queue keeps
     the subscriber list growing and silently consumes events that
     no one will read."""
-    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    q = SystemSubscription()
     self.subscribers.append(q)
     return q
 
@@ -375,6 +394,27 @@ class SystemBroadcast:
       self.subscribers.remove(q)
     except ValueError:
       pass
+
+  def report_visible_apps(
+    self, subscription_id: str, sequence: int, app_ids: frozenset[str],
+  ) -> bool:
+    """Record the apps a live subscriber is visibly showing.
+
+    Returns False when no live subscription has that id (it disconnected).
+    `sequence` orders one subscriber's reports: a report that arrives after a
+    newer one is ignored, so a delayed "visible" can never overwrite a later
+    "hidden" and silence pushes the owner is no longer looking at.
+    """
+    for sub in self.subscribers:
+      if sub.id == subscription_id:
+        if sequence > sub.visible_apps_sequence:
+          sub.visible_apps_sequence = sequence
+          sub.visible_app_ids = app_ids
+        return True
+    return False
+
+  def app_is_visible(self, app_id: str) -> bool:
+    return any(app_id in sub.visible_app_ids for sub in self.subscribers)
 
 
 _system_broadcast = SystemBroadcast()

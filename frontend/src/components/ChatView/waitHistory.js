@@ -20,6 +20,12 @@ const OUTCOMES = {
   cancelled: { kicker: 'Wait stopped', tone: 'stopped', spoken: 'Stopped wait' },
 }
 
+/** A met, expired or failed wait woke the answer the server anchored it to;
+ * only a deliberate stop belongs to the answer that owned the wait. */
+export function waitWokeItsAnswer(summary) {
+  return summary?.status !== 'cancelled'
+}
+
 export function waitHistoryViewModel(summary) {
   const condition = waitConditionLabel(summary?.description)
   const outcome = OUTCOMES[summary?.status]

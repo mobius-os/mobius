@@ -27,6 +27,7 @@ const REACT_SHIMMED_MODULES = [
   '/components/AppIcon.jsx',
   '/components/Shell/useAppIntentNavigation.js',
   '/components/Shell/useShellUpdateController.js',
+  '/components/Shell/useVisibleAppPresence.js',
   '/hooks/useSystemEventStream.js',
   '/components/ChatView/useFileUpload.js',
   '/components/ChatView/usePaginationLifecycle.js',

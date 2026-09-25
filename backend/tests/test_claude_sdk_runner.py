@@ -4,8 +4,8 @@ These tests exercise `dispatch_sdk_message` directly with hand-built
 SDK message instances so the unit doesn't spin up the Claude
 subprocess or the SDK transport. The dispatch is the load-bearing
 behavior we care about: every SDK message type either translates
-into a Möbius event or surfaces as `unknown_sdk_event`. Nothing
-silently disappears.
+into a Möbius event or is logged as unhandled. Unhandled events are
+never broadcast.
 """
 
 from __future__ import annotations
@@ -1797,22 +1797,28 @@ async def test_precompact_hook_publishes_context_compaction_marker(monkeypatch):
   } in bus.events
 
 
-def test_dispatch_input_json_delta_emits_unknown(monkeypatch):
-  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
-  bus = _Bus()
-  msg = _stream_delta("input_json_delta", partial_json="{\"a\":")
-  dispatch_sdk_message(msg, bus, None)
-  assert len(bus.events) == 1
-  assert bus.events[0]["type"] == "unknown_sdk_event"
-  assert bus.events[0]["kind"] == "stream:content_block_delta:input_json_delta"
+def test_unhandled_sdk_events_are_logged_not_broadcast(caplog):
+  """No client renders unhandled provider events. Broadcasting them made the
+  per-token progress events (thinking-token counters, tool-input fragments)
+  most of a busy chat's stream and of every reconnect replay."""
 
+  class FreshSdkMessage:  # Stand-in for a hypothetical future SDK type.
+    pass
 
-def test_dispatch_unknown_delta_silent_when_disabled(monkeypatch):
-  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "0")
   bus = _Bus()
-  msg = _stream_delta("signature_delta", signature="abc")
-  dispatch_sdk_message(msg, bus, None)
+  with caplog.at_level("DEBUG", logger="app.claude_events"):
+    for message in (
+      _stream_delta("input_json_delta", partial_json="{\"a\":"),
+      SystemMessage(subtype="thinking_tokens", data={"estimated_tokens": 1}),
+      FreshSdkMessage(),
+    ):
+      dispatch_sdk_message(message, bus, None)
+
   assert bus.events == []
+  logged = caplog.text
+  assert "stream:content_block_delta:input_json_delta" in logged
+  assert "system:thinking_tokens" in logged
+  assert "sdk_message:FreshSdkMessage" in logged
 
 
 def test_dispatch_assistant_thinking_block_is_silent():
@@ -2429,40 +2435,6 @@ def test_dispatch_init_system_message_is_silent():
   msg = SystemMessage(subtype="init", data={"hello": "world"})
   dispatch_sdk_message(msg, bus, None)
   assert bus.events == []
-
-
-def test_dispatch_unknown_system_subtype_emits_unknown(monkeypatch):
-  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
-  bus = _Bus()
-  msg = SystemMessage(subtype="brand_new_thing", data={"x": 1})
-  dispatch_sdk_message(msg, bus, None)
-  assert len(bus.events) == 1
-  assert bus.events[0]["type"] == "unknown_sdk_event"
-  assert bus.events[0]["kind"] == "system:brand_new_thing"
-
-
-def test_dispatch_unknown_system_subtype_silent_when_disabled(monkeypatch):
-  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "0")
-  bus = _Bus()
-  msg = SystemMessage(subtype="brand_new_thing", data={"x": 1})
-  dispatch_sdk_message(msg, bus, None)
-  assert bus.events == []
-
-
-def test_dispatch_completely_unknown_sdk_class_emits_unknown(monkeypatch):
-  """An SDK message class the dispatcher doesn't know about still
-  surfaces — never silently dropped."""
-  monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
-
-  class FreshSdkMessage:  # Stand-in for a hypothetical future SDK type.
-    def __init__(self) -> None:
-      self.field = "value"
-
-  bus = _Bus()
-  dispatch_sdk_message(FreshSdkMessage(), bus, None)
-  assert len(bus.events) == 1
-  assert bus.events[0]["type"] == "unknown_sdk_event"
-  assert "FreshSdkMessage" in bus.events[0]["kind"]
 
 
 # ---------------------------------------------------------------------------

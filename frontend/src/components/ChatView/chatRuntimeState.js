@@ -47,7 +47,10 @@ export function supersedeResumedPauseBlocks(messages) {
     const message = messages[index]
     if (message?.hidden) continue
 
-    if (isContinuationMessage(message) && previousVisibleIndex >= 0) {
+    // A recovery run's answer carries its projected continuation reason.
+    const resumes = isContinuationMessage(message)
+      || (message?.role === 'assistant' && !!message.continuation_reason)
+    if (resumes && previousVisibleIndex >= 0) {
       const previous = projected[previousVisibleIndex]
       const blocks = Array.isArray(previous?.blocks) ? previous.blocks : []
       const tail = blocks.at(-1)

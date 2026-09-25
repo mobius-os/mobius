@@ -193,6 +193,7 @@ import useDesktopSidebar, {
 import useWorkspaceSession from './useWorkspaceSession.js'
 import useDeferredNewChatMaterialization from './useDeferredNewChatMaterialization.js'
 import useShellUpdateController from './useShellUpdateController.js'
+import useVisibleAppPresence from './useVisibleAppPresence.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import useShellShortcuts from '../../hooks/useShellShortcuts.js'
@@ -3252,7 +3253,12 @@ export default function Shell({ onInitialVisualReady }) {
     queryClient,
     refreshApps,
   ])
-  useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
+  const [systemSubscriptionId, setSystemSubscriptionId] = useState(null)
+  useSystemEventStream(handleSystemEvent, {
+    onOpen: reconcileSystemStateOnOpen,
+    onSubscription: setSystemSubscriptionId,
+  })
+  useVisibleAppPresence(systemSubscriptionId, visibleAppIds)
 
   // Service-worker messages arrive on navigator.serviceWorker, not the window
   // message bus used by AppCanvas. Keep this listener limited to notification

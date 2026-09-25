@@ -149,6 +149,7 @@ def _prepare_owner_notification(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  tag: str | None = None,
   notification_id: str | None = None,
 ) -> tuple[str, _PreparedPush | None]:
   """Persist and announce one notification, returning optional push work.
@@ -172,6 +173,9 @@ def _prepare_owner_notification(
     - target: in-scope deep-link only — '/shell/?app=<id>' or
       '/shell/?chat=<id>'.
       Clients treat it as UNTRUSTED and fail closed on anything else.
+    - tag: optional grouping key for the OS notification only (history rows
+      are unaffected). It is namespaced as '<source_type>:<source_id>:<tag>'
+      so a producer can replace only its own earlier pushes.
   """
   notification_id = notification_id or str(uuid.uuid4())
   if db.query(models.Notification.id).filter(
@@ -254,10 +258,15 @@ def _prepare_owner_notification(
   })
 
   # Skip push when a live SSE subscriber is already watching the
-  # source chat — the in-tab UX surfaces the event there. presence
-  # owns this contract so we don't have to reach across modules
-  # into broadcast internals.
-  if source_id and presence.has_watchers(source_id):
+  # source — the in-tab UX surfaces the event there. presence owns this
+  # contract so we don't have to reach across modules into broadcast
+  # internals. An app source's id names an app, not a chat, so it is
+  # watched through the shell's reported visible apps instead.
+  watched = (
+    presence.has_app_watchers(source_id) if source_type == "app"
+    else presence.has_watchers(source_id)
+  )
+  if watched:
     return notification_id, None
 
   if _is_quiet_maintenance_push(source_type=source_type):
@@ -270,6 +279,7 @@ def _prepare_owner_notification(
     "icon": icon,
     "target": target,
     "actions": actions,
+    "tag": f"{source_type}:{source_id or ''}:{tag}" if tag else None,
   }
 
   subscriptions = [
@@ -331,6 +341,7 @@ def notify_owner(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  tag: str | None = None,
   notification_id: str | None = None,
 ) -> str:
   """Save a notification and synchronously deliver its optional Web Push."""
@@ -344,6 +355,7 @@ def notify_owner(
     icon=icon,
     target=target,
     actions=actions,
+    tag=tag,
     notification_id=notification_id,
   )
   if prepared is not None:
@@ -362,6 +374,7 @@ async def notify_owner_async(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  tag: str | None = None,
   notification_id: str | None = None,
 ) -> str:
   """Save a notification, then deliver Web Push without blocking the loop."""
@@ -375,6 +388,7 @@ async def notify_owner_async(
     icon=icon,
     target=target,
     actions=actions,
+    tag=tag,
     notification_id=notification_id,
   )
   if prepared is not None:

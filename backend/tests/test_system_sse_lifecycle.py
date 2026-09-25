@@ -70,6 +70,9 @@ async def test_system_stream_first_yield_subscribes_and_close_unsubscribes(
     first = await iterator.__anext__()
     assert "system_stream_open" in first
     assert len(broadcast.subscribers) == 1
+    # The hello names this subscription so the shell can report against it.
+    hello = json.loads(first.removeprefix("data: "))
+    assert hello["subscriptionId"] == broadcast.subscribers[0].id
   finally:
     await iterator.aclose()
 

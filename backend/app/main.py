@@ -141,9 +141,11 @@ def _probe_runtime_database_schema() -> dict | None:
 
   The boot verdict is intentionally sticky, but it cannot describe a database
   changed by another process after startup. The deployment healthcheck calls
-  this bounded catalog probe every 30 seconds. A failure is sticky until a
+  this bounded catalog probe every 30 seconds. Lost tables are sticky until a
   clean restart because database-owning background services may already be in
   an incoherent state even if an operator repairs the file underneath them.
+  An unreachable database only fails this probe: a momentary failure recovers
+  on the next one, and a lasting one keeps failing the deployment healthcheck.
   """
   if _DATABASE_RUNTIME_FAILURE:
     return dict(_DATABASE_RUNTIME_FAILURE)
@@ -153,9 +155,7 @@ def _probe_runtime_database_schema() -> dict | None:
     logging.getLogger(__name__).error(
       "runtime database readiness probe failed: %s", exc,
     )
-    failure = {"reason": "database_runtime_unavailable"}
-    _set_database_runtime_failure(failure)
-    return failure
+    return {"reason": "database_runtime_unavailable"}
   missing = sorted(set(Base.metadata.tables) - present)
   if not missing:
     return None
@@ -265,6 +265,9 @@ def _assert_provider_defaults(provider_names) -> None:
 async def lifespan(app):
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
+  # Before anything is spawned: no agent or tool may inherit server secrets.
+  from app.config import withhold_server_secrets_from_children
+  withhold_server_secrets_from_children()
   from app.startup import (
     StartupContext,
     run_startup_plan,

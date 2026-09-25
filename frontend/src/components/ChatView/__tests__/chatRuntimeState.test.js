@@ -132,6 +132,27 @@ test('a continuation supersedes the resumable pause it completed', () => {
   assert.equal(messages[0].blocks.length, 2)
 })
 
+test('a recovery answer supersedes the pause it resumed without a transcript marker', () => {
+  const pause = {
+    role: 'assistant',
+    blocks: [
+      { type: 'text', content: 'Work before the restart.' },
+      { type: 'error', resumable: true, message: 'Paused for restart.' },
+    ],
+  }
+  const recovered = {
+    role: 'assistant',
+    id: 'auto-retry-sample',
+    continuation_reason: 'restart',
+    content: 'Picking up.',
+  }
+
+  const displayed = supersedeResumedPauseBlocks([pause, recovered])
+
+  assert.deepEqual(displayed[0].blocks, [pause.blocks[0]])
+  assert.equal(displayed[1], recovered)
+})
+
 test('a pause-only row disappears once its continuation marker replaces it', () => {
   const messages = [
     {

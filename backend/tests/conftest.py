@@ -26,7 +26,8 @@ if (
 
 # Set env vars before importing app modules.
 _tmp = tempfile.mkdtemp()
-os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
+_TEST_SECRET_KEY = "test-secret-key-at-least-32-characters-long"
+os.environ["SECRET_KEY"] = _TEST_SECRET_KEY
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["DOMAIN"] = "localhost"
@@ -115,6 +116,15 @@ from app.routes.notifications import limiter as notifications_limiter
 app.state.limiter.enabled = False
 auth_limiter.enabled = False
 notifications_limiter.enabled = False
+
+
+@pytest.fixture(autouse=True)
+def _test_secret_key_in_environment():
+  """A test that runs the app lifespan withholds SECRET_KEY from the process
+  environment, as production does; later tests that rebuild settings still
+  need the fixed test key there."""
+  yield
+  os.environ["SECRET_KEY"] = _TEST_SECRET_KEY
 
 
 @pytest.fixture(autouse=True)

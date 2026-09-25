@@ -447,7 +447,7 @@ def test_outbound_sharing_keeps_external_owner_control_boundary(
   auths, _app_id = _external_control_auth(client, owner_token, db)
   calls = []
 
-  async def create(label, command):
+  async def create(label, command, agent=False):
     calls.append(("create", label))
     return {"id": "o_0123456789abcdef"}
 

@@ -118,3 +118,37 @@ test('out-of-scope targets still fall back to root', () => {
   assert.equal(safeTarget('/app/5'), '/')
   assert.equal(safeTarget('javascript:alert(1)'), '/')
 })
+
+// Run the whole push worker against a fake ServiceWorkerGlobalScope so the
+// push handler is exercised as the browser would drive it.
+function loadPushWorker() {
+  const listeners = {}
+  const shown = []
+  const self = {
+    location: { origin: 'https://mobius.test' },
+    addEventListener: (type, fn) => { listeners[type] = fn },
+    skipWaiting: () => {},
+    registration: {
+      showNotification: async (title, options) => { shown.push({ title, options }) },
+    },
+    clients: { claim: async () => {} },
+  }
+  Function('self', `"use strict"; ${SOURCE}`)(self)
+  async function push(data) {
+    let pending = null
+    listeners.push({ data: { json: () => data }, waitUntil: p => { pending = p } })
+    await pending
+  }
+  return { push, shown }
+}
+
+test('a tagged push replaces its predecessor and still alerts', async () => {
+  const worker = loadPushWorker()
+  await worker.push({ title: 'New message', tag: 'app:7:dm:alice.example' })
+  await worker.push({ title: 'Untagged' })
+  assert.equal(worker.shown[0].options.tag, 'app:7:dm:alice.example')
+  assert.equal(worker.shown[0].options.renotify, true)
+  // Browsers reject renotify without a tag, so an untagged push sets neither.
+  assert.equal('tag' in worker.shown[1].options, false)
+  assert.equal('renotify' in worker.shown[1].options, false)
+})

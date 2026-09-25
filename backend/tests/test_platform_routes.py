@@ -43,6 +43,7 @@ def test_update_progress_returns_observable_phase(client, auth, monkeypatch):
     lambda: {
       "plan_id": "a" * 64,
       "target_sha": "2" * 40,
+      "image_digest": None,
       "phase": "building",
       "active": True,
       "error": None,
@@ -303,6 +304,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "conflict_paths": [], "conflict_chat_id": None,
       "newer_updates_available": False,
       "rollback_target_sha": None, "rollback_error": None,
+      "unfinished_update": None,
       "overlay": None,
     }
 
