@@ -8,7 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage } from './_chatSession.mjs'
+import { createChat, sendMessage, waitForComposerSendable } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
 import { mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
@@ -1198,6 +1198,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
@@ -1226,6 +1227,7 @@ test.describe('Enter key — desktop (no touch)', () => {
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Desktop send test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     // Should NOT be on empty state — message was sent.
@@ -1301,6 +1303,7 @@ test.describe('Scroll after stream end', () => {
     // Send message → stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Long response test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
@@ -1404,6 +1407,7 @@ test.describe('Connection recovery', () => {
     // Send message → first stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Recovery test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
@@ -1459,6 +1463,7 @@ test.describe('Connection recovery', () => {
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Reconnect test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(

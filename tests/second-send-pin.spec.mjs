@@ -11,7 +11,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+import { createChat, sendMessage, waitForChatShell, waitForComposerSendable } from './_chatSession.mjs'
 
 attachCleanup()
 
@@ -426,6 +426,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
   // Send 2. The POST resolves fast (retarget fires); the SSE pauses ~1.3s.
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill('Second user message')
+  await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
   await page.keyboard.press('Enter')
 
   // DURING the pause: wait for the optimistic row to render (POST + retarget

@@ -6,6 +6,7 @@
  */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 import { testChatAgentSettings, installMockAgentProvider, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -235,6 +236,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
     const surface = page.locator('[data-chat-surface="painted"]')
     const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Ask while I follow')
+    await waitForComposerSendable(surface)
     await page.keyboard.press('Enter')
     if (releaseReadiness) {
       await expect(surface.locator('.queued__row').filter({ hasText: 'Ask while I follow' })).toBeVisible()

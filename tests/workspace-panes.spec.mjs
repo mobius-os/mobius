@@ -24,6 +24,7 @@ import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import { DRAG_HOLD_HAPTIC_MS, PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
 import { settledBox } from './_geometry.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
@@ -287,6 +288,7 @@ async function sampleDesktopDrawerToggle(page) {
 async function sendInPane(page, chatId, text) {
   const pane = page.locator(`[data-tab-key="chat:${chatId}"]`)
   await pane.getByRole('textbox', { name: 'Message Möbius…' }).fill(text)
+  await waitForComposerSendable(pane)
   await page.keyboard.press('Enter')
   await expect(pane.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>
