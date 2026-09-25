@@ -26,42 +26,6 @@ def control_client(codex: Any) -> Any:
   return client
 
 
-async def start_turn_for_handle(
-  codex: Any,
-  thread_id: str,
-  wire_input: Any,
-  *,
-  params: Any,
-) -> tuple[Any, Any]:
-  """Start a turn with the subscription reserved for its handle.
-
-  The pinned SDK buffers notifications while ``turn/start`` is in flight only
-  when its private ``_start_turn(..., for_handle=True)`` seam is used. Calling
-  the public low-level ``turn_start`` first and subscribing afterward loses a
-  fast completion and leaves the low-level default subscription registered.
-  Keep that version-specific ownership rule inside this contract boundary.
-  """
-  client = control_client(codex)
-  start = getattr(client, "_start_turn", None)
-  if not callable(start):
-    raise CodexSdkContractError(
-      "openai-codex API broken: AsyncCodexClient._start_turn missing — "
-      "pin a known-good version"
-    )
-  started, subscription = await start(
-    thread_id,
-    wire_input,
-    params=params,
-    for_handle=True,
-  )
-  if subscription is None:
-    raise CodexSdkContractError(
-      "openai-codex API broken: handle turn returned no subscription — "
-      "pin a known-good version"
-    )
-  return started, subscription
-
-
 def app_server_pid(codex: Any) -> int | None:
   """Return the private app-server child PID when the pinned SDK exposes it."""
   client = getattr(codex, "_client", None)

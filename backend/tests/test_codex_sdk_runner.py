@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
@@ -3567,112 +3568,6 @@ def test_codex_config_overrides_disable_competing_native_goal_runtime(monkeypatc
 
 
 
-def test_read_delegation_config_selects_container_safe_landlock():
-  ordinary = codex_sdk_runner._codex_config_overrides(
-    allow_multi_agent=False,
-  )
-  delegated = codex_sdk_runner._codex_config_overrides(
-    allow_multi_agent=False,
-    delegated_read_sandbox=True,
-  )
-
-  assert "features.use_legacy_landlock=true" not in ordinary
-  assert "features.use_legacy_landlock=true" in delegated
-  assert "features.network_proxy.enabled=true" not in ordinary
-  assert "features.network_proxy.enabled=true" in delegated
-  assert any(
-    "localhost" in override and '"127.0.0.1" = "allow"' in override
-    for override in delegated
-  )
-
-
-def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
-  from openai_codex import ApprovalMode
-  from openai_codex.generated.v2_all import (
-    Turn,
-    TurnCompletedNotification,
-    TurnStatus,
-  )
-  from openai_codex.models import Notification
-
-  captured = {}
-
-  class EarlyCompletionSubscription:
-    def __init__(self):
-      self.events = [Notification(
-        method="turn/completed",
-        payload=TurnCompletedNotification(
-          threadId="thread-read-network",
-          turn=Turn(
-            id="turn-read-network",
-            items=[],
-            status=TurnStatus.completed,
-          ),
-        ),
-      )]
-      self.closed = False
-
-    def next(self):
-      return self.events.pop(0)
-
-    def close(self):
-      self.closed = True
-
-  class FakeClient:
-    async def _start_turn(
-      self, thread_id, wire_input, *, params, for_handle,
-    ):
-      captured.update(
-        thread_id=thread_id,
-        wire_input=wire_input,
-        params=params,
-        for_handle=for_handle,
-      )
-      subscription = EarlyCompletionSubscription()
-      captured["subscription"] = subscription
-      # The completion is already available before _start_turn returns. A
-      # second, late subscription would begin after it and miss the event.
-      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network")), subscription
-
-    def _subscribe_turn_notifications(self, _turn_id):
-      raise AssertionError("the handle must own the turn/start subscription")
-
-  class FakeCodex:
-    def __init__(self):
-      self._client = FakeClient()
-
-    async def _ensure_initialized(self):
-      captured["initialized"] = True
-
-  thread = SimpleNamespace(id="thread-read-network", _codex=FakeCodex())
-
-  handle = asyncio.run(codex_sdk_runner._start_codex_turn(
-    thread,
-    "delegate through localhost",
-    cwd="/data",
-    model=None,
-    effort=None,
-    summary=None,
-    delegated_read=True,
-    approval_mode=ApprovalMode.deny_all,
-  ))
-
-  policy = captured["params"].sandbox_policy.root
-  assert captured["initialized"] is True
-  assert captured["for_handle"] is True
-  assert handle.id == "turn-read-network"
-  assert policy.type == "readOnly"
-  assert policy.network_access is True
-  assert captured["params"].approval_policy.root.value == "never"
-
-  async def collect_events():
-    return [event async for event in handle.stream()]
-
-  events = asyncio.run(collect_events())
-  assert [event.method for event in events] == ["turn/completed"]
-  assert captured["subscription"].closed is True
-
-
 def test_delegated_codex_approval_guard_fails_closed():
   sync = SimpleNamespace(_approval_handler=None)
   codex = SimpleNamespace(_client=SimpleNamespace(_sync=sync))
@@ -3691,11 +3586,14 @@ def test_delegated_codex_approval_guard_fails_closed():
 
 
 @pytest.mark.parametrize(
-  "scope, expected_sandbox, expected_approval, expects_landlock",
+  "scope, expected_sandbox, expected_approval",
   [
-    (None, "full-access", "auto_review", False),
-    ("read", "read-only", "deny_all", True),
-    ("write", "full-access", "deny_all", False),
+    (None, "full-access", "auto_review"),
+    # Codex 0.156+ needs bubblewrap for any filesystem-restricted policy and
+    # the container cannot start it, so Codex's sandbox stays off and Möbius
+    # confines the read app-server with Landlock instead.
+    ("read", "full-access", "deny_all"),
+    ("write", "full-access", "deny_all"),
   ],
 )
 @pytest.mark.parametrize("session_id", [None, "thread-policy"])
@@ -3704,7 +3602,6 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   scope,
   expected_sandbox,
   expected_approval,
-  expects_landlock,
   session_id,
 ):
   completed = SimpleNamespace(id="turn-policy", usage=None, error=None)
@@ -3716,6 +3613,14 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
     )]),
   )
   captured = {}
+  paths = {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+    "setpriv": "/usr/bin/setpriv",
+  }
+  monkeypatch.setattr(
+    codex_sdk_runner.shutil, "which", lambda name: paths.get(name),
+  )
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
@@ -3739,13 +3644,6 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   monkeypatch.setattr(
     codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
   )
-  if scope == "read":
-    async def fake_start_turn(thread, user_message, **_kwargs):
-      return await thread.turn(user_message)
-
-    monkeypatch.setattr(
-      codex_sdk_runner, "_start_codex_turn", fake_start_turn,
-    )
   policy = None if scope is None else SimpleNamespace(scope=scope)
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
@@ -3771,10 +3669,62 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
       top_level=scope is None,
     )
   }
-  assert (
-    "features.use_legacy_landlock=true" in overrides
-  ) is expects_landlock
+  assert not any("use_legacy_landlock" in override for override in overrides)
+  launch = captured["config"].kwargs["launch_args_override"]
+  confined = "--landlock-access" in launch
+  assert confined is (scope == "read")
+  assert launch[0] == "/usr/bin/setsid"
+  assert launch[launch.index("/usr/local/bin/codex") - 1] == (
+    "--" if confined else "/usr/bin/setsid"
+  )
   assert result["error"] is None
+
+
+def test_read_confinement_fails_closed_without_setpriv(monkeypatch):
+  paths = {"setsid": "/usr/bin/setsid"}
+  monkeypatch.setattr(
+    codex_sdk_runner.shutil, "which", lambda name: paths.get(name),
+  )
+
+  with pytest.raises(codex_sdk_runner.CodexReadConfinementUnavailable):
+    codex_sdk_runner._codex_app_server_launch_args(
+      "/usr/local/bin/codex", [], read_only_writable_roots=[],
+    )
+
+
+def test_read_confinement_blocks_workspace_writes_on_this_kernel(tmp_path):
+  import subprocess
+
+  if not shutil.which("setpriv"):
+    pytest.skip("setpriv unavailable")
+  workspace = tmp_path / "workspace"
+  scratch = tmp_path / "scratch"
+  workspace.mkdir()
+  scratch.mkdir()
+  (workspace / "f.txt").write_text("before\n")
+  prefix = codex_sdk_runner._landlock_read_only_prefix([str(scratch)])
+  probe = subprocess.run(
+    [*prefix, "true"], capture_output=True, text=True, check=False,
+  )
+  if probe.returncode != 0:
+    pytest.skip(f"Landlock unavailable: {probe.stderr.strip()}")
+
+  result = subprocess.run(
+    [
+      *prefix, "sh", "-c",
+      'cat f.txt; echo after > f.txt; touch new; '
+      'touch "$1/ok" && echo scratch-ok; echo x > /dev/null && echo null-ok',
+      "sh", str(scratch),
+    ],
+    cwd=workspace, capture_output=True, text=True, check=False,
+  )
+
+  assert "before" in result.stdout
+  assert "scratch-ok" in result.stdout
+  assert "null-ok" in result.stdout
+  assert (workspace / "f.txt").read_text() == "before\n"
+  assert not (workspace / "new").exists()
+  assert (scratch / "ok").exists()
 
 
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
