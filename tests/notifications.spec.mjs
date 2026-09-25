@@ -4,6 +4,7 @@
  * route-mocked, so this spec never reads or writes backend rows.
  */
 import { test, expect } from '@playwright/test'
+import { emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CHAT_ID = '20000000-0000-4000-8000-000000000001'
@@ -91,7 +92,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200, contentType: 'application/json',
-      body: JSON.stringify({ messages: [], total: 0, offset: 0, running: false, pending_messages: [], runtime_revision: 0 }),
+      body: JSON.stringify(emptyChatPage()),
     })
   })
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => route.fulfill({ status: 204, body: '' }))

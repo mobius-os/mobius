@@ -16,14 +16,10 @@ test('external hostile framer gets only an inert document without a grant', asyn
   const chatApiRequests = []
   const pageErrors = []
   const diagnostics = []
-  // A frame sandboxed without allow-same-origin makes the navigator.serviceWorker
-  // GETTER throw on read. That report is the sandbox doing its job, and it is not
-  // raised by this app: the captured stack carries no application frame at all
-  // (at <anonymous>:3:15), and the shell document already skips worker
-  // registration on this route. Ignore that one environment-level message so the
-  // assertion keeps testing what this case is named for -- that a hostile framer
-  // gets an inert document and no chat API access -- instead of failing on a
-  // browser restriction the app cannot prevent.
+  // In a frame sandboxed without allow-same-origin, reading
+  // navigator.serviceWorker throws from the browser itself (no app frame on the
+  // stack). Ignore that one message; the case asserts that a hostile framer
+  // gets an inert document and no chat API access.
   const SANDBOX_SW_NOTICE = "Failed to read the 'serviceWorker' property from 'Navigator'"
   page.on('pageerror', (error) => {
     if (error.message.includes(SANDBOX_SW_NOTICE)) return

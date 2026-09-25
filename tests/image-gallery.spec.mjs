@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CHAT_ID = '70000000-0000-4000-8000-000000000007'
@@ -57,9 +58,7 @@ async function setupGallery(page, viewport) {
         ],
         total: 2,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })

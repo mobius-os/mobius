@@ -7,6 +7,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -147,9 +148,7 @@ test('cold historical activity reveals once at its final height', async ({ page 
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })
@@ -286,9 +285,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })
@@ -424,9 +421,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })

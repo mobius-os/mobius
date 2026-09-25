@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Hold the acknowledgement beyond the keyboard-close transition so the test
@@ -106,11 +106,8 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running,
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running }),
         run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
       }),
     })
@@ -125,10 +122,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         messages: serverMessages,
         total: serverMessages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running }),
         run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
         provider: 'codex',
         ...testChatAgentSettings(),
@@ -305,11 +299,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running,
           active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
-          runtime_revision: 0,
+          ...runtimeSnapshot({ running }),
         }),
       })
       if (raceArmed) runtimeRaceReturned.resolve()
@@ -326,28 +317,15 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         messages: history,
         total: history.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running }),
         provider: 'codex',
         ...testChatAgentSettings(),
       }),
     })
   })
 
-  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
-  // body.ready === true (plus a boot_id) before treating the app as
-  // delivery-ready. Without it, doSend's queuesBehindActiveTurn gate
-  // observes deliveryReady=false and takes the queued path instead of the
-  // fresh-send path this test depends on (localStartRequestRef never gets
-  // set, so the race "protection" it measures is never engaged) -- see
-  // fresh-send-runtime-race.spec.mjs's identical fix for the full trace.
-  await page.route(/\/api\/ready$/, route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ ready: true, boot_id: 'idle-start-race-fixture-boot' }),
-  }))
+  // The race under test is only engaged on the fresh-send path, never the queued one.
+  await mockDeliveryReady(page)
   const readinessProbed = page.waitForResponse(/\/api\/ready$/)
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',

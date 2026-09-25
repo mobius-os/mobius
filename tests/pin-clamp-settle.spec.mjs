@@ -31,7 +31,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 
 attachCleanup()
 
@@ -91,29 +91,6 @@ async function installChunkedStreams(page, streams) {
       }))
     }
   }, streams)
-}
-
-// Creates the chat via the API rather than clicking through the drawer's
-// New Chat button — see tests/_chatSession.mjs. This file's tests are about
-// the pin/clamp scroll behavior, not the drawer's own open/close UI, so the
-// API-created pattern is a strict improvement here.
-async function newChat(page) {
-  await createChat(page, 'pin-clamp-settle', { waitFor: 'empty-wrap' })
-}
-
-async function sendMessage(page, text) {
-  const previousCount = await page.locator('[data-chat-surface="painted"] .chat__msg--user').count()
-  // `.chat__scroll` already exists after the first exchange. Waiting only for
-  // that container lets a busy CI worker measure the previous user message
-  // before React commits the new pinned row. Synchronize on the state this
-  // helper is responsible for creating, then allow the pin's layout pass.
-  await sharedSendMessage(page, text, { wait: 'scroll', timeout: 3000, settle: false })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(previousCount + 1, {
-    timeout: 3000,
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').last()).toContainText(text)
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
 /** Engage FOLLOW_BOTTOM via a real gesture so a subsequent send pins
@@ -221,7 +198,7 @@ test.use({ serviceWorkers: 'block' })
 
 test('Deep second send pins flush to top after the post-send layout settle (no halfway clamp)', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
 
   // First response is long → the second user message lands DEEP in the
   // list (large offsetTop ⇒ pin target needs a spacer).
@@ -280,7 +257,7 @@ test('Keyboard close cannot retire a pin before a short stream settles', async (
     ],
   ])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -325,7 +302,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
     [2600, { type: 'done' }],
   ]])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
   await sendMessage(page, 'Keep this prompt still, then follow')
 
   // The first small frame must consume blank reservation without moving the
@@ -367,7 +344,7 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
     [1700, { type: 'done' }],
   ]])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
   await sendMessage(page, 'Let me scroll while this runs')
   await expect(page.locator('[data-chat-surface="painted"]').getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
 

@@ -24,7 +24,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-canvas.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, mockDeliveryReady, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -91,37 +91,20 @@ async function setupShellBasics(page) {
       body: JSON.stringify({ ok: true }),
     })
   )
-  // With an empty GET /api/chats list (setupAppRoutes below), Shell's
-  // bootstrap effect auto-creates a starter chat via POST /api/chats. The
-  // blanket catch-all above answers that with a 204 + empty body, which
-  // fails response.json() (a 204 has no body) and surfaces as "Couldn't
-  // start a new chat" instead of ever settling into the requested app view.
+  // With no chats, Shell auto-creates a starter chat; the catch-all's 204
+  // would fail that create before the app view settles.
   await page.route(/\/api\/chats$/, route => {
     if (route.request().method() !== 'POST') return route.fallback()
     return route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: 'bootstrap-chat', title: 'New chat', messages: [],
-        pending_messages: [], total: 0, offset: 0, running: false,
-        pending_question_id: null, runtime_revision: 0,
+        id: 'bootstrap-chat', title: 'New chat', ...emptyChatPage(),
       }),
     })
   })
-  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
-  // body.ready === true (plus a boot_id) before treating the app as
-  // delivery-ready; the blanket '/api/' catch-all above only returns '{}'
-  // for GETs, which is reachable but never ready. Without this, Shell's
-  // chat bootstrap sees deliveryReady=false and renders NewChatLanding's
-  // offline fallback ("You're offline — a new chat needs the network")
-  // instead of ever reaching the requested app canvas.
-  await page.route(/\/api\/ready$/, route =>
-    route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ready: true, boot_id: 'test-boot' }),
-    })
-  )
+  // Without it the chat bootstrap renders the offline New Chat fallback instead of the canvas.
+  await mockDeliveryReady(page)
   await page.route(/\/api\/theme$/, route =>
     route.fulfill({
       status: 200,
@@ -212,9 +195,7 @@ async function setupAppRoutes(page, appId, frameHTML) {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: pathname.split('/').pop(), title: 'New chat', messages: [],
-        pending_messages: [], total: 0, offset: 0, running: false,
-        pending_question_id: null, runtime_revision: 0,
+        id: pathname.split('/').pop(), title: 'New chat', ...emptyChatPage(),
       }),
     })
   })

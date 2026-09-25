@@ -11,6 +11,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -107,11 +108,8 @@ for (const scenario of SCENARIOS) {
           // The build-phase rail is a live-run surface. Keep the fixture's
           // turn active; a durable question intentionally does not reattach
           // its stream, so its active goal owns the same progress rail.
-          running: true,
+          ...runtimeSnapshot({ running: true, pending_question_id: pendingQuestionId }),
           active_goal_objective: goalObjective,
-          pending_question_id: pendingQuestionId,
-          runtime_revision: 0,
-          pending_messages: [],
         }),
       })
     })
@@ -121,11 +119,8 @@ for (const scenario of SCENARIOS) {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          running: true,
+          ...runtimeSnapshot({ running: true, pending_question_id: pendingQuestionId }),
           active_goal_objective: goalObjective,
-          pending_messages: [],
-          pending_question_id: pendingQuestionId,
-          runtime_revision: 0,
         }),
       })
     })
@@ -268,9 +263,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })

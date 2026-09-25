@@ -18,7 +18,8 @@ import {
 } from '../frontend/src/components/ChatView/streamTiming.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { waitForComposerSendable } from './_chatSession.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -37,22 +38,7 @@ async function setupChat(page) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
-  // connectivityStore.js's probeReadiness() fetches /api/ready and only
-  // marks delivery ready once the body reports ready:true (plus a boot_id).
-  // ChatView.doSend() queues instead of sending a fresh turn whenever
-  // deliveryDeferred (!getDeliveryReadySnapshot()) is still true, and that
-  // readiness probe is an async fetch racing the composer-idle-wait below --
-  // the composer can be enabled before the real /api/ready round trip
-  // settles, making send() land in the queue instead of starting the turn
-  // these tests expect. Same gap already fixed the same way in
-  // app-canvas.spec.mjs; mock it out so readiness is never in question.
-  await page.route(/\/api\/ready$/, route =>
-    route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ready: true, boot_id: 'test-boot' }),
-    })
-  )
+  await mockDeliveryReady(page)
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -65,13 +51,8 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  // Wait for the composer to be genuinely idle, not just present. Right
-  // after navigating to a freshly created chat, the composer can briefly
-  // exist in the DOM before the app has settled into its idle state; a
-  // send() during that window lands as a queued message (composer believes
-  // a turn is already active) instead of the direct send these tests
-  // require, producing an intermittent "message never appears" failure
-  // unrelated to whatever the test is actually exercising.
+  // Wait for an idle composer: a send before the chat settles would queue
+  // instead of starting the turn these cases expect.
   await page.waitForFunction(
     () => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
@@ -107,7 +88,6 @@ async function pillOverlapDiagnostics(page) {
     const pill = document.querySelector('[data-chat-surface="painted"] .chat__pill')
     if (!pill) return { missing: 'pill' }
     const pillRect = pill.getBoundingClientRect()
-    const retry = document.querySelector('[data-chat-surface="painted"] .connection-status__retry')
     const status = document.querySelector('[data-chat-surface="painted"] .connection-status')
 
     const describe = (el) => {
@@ -151,8 +131,6 @@ async function pillOverlapDiagnostics(page) {
         right: pillRect.right,
       },
       status: status ? status.getBoundingClientRect().toJSON() : null,
-      retry: retry ? retry.getBoundingClientRect().toJSON() : null,
-      retryOverlapsPill: overlapsPill(retry),
       statusOverlapsPill: overlapsPill(status),
       samples,
     }
@@ -226,12 +204,7 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
-          // chatRuntimeState.js's runtimeSnapshot() returns null (and
-          // fetchMessages bails out before commitMessages) without a
-          // safe-integer runtime_revision -- the same stale-fixture gap
-          // fixed across ~21 other fixtures on this branch. Without it this
-          // refresh silently no-ops and the assertion below times out stuck
-          // on "Thinking".
+          // The app ignores a snapshot without a safe-integer runtime_revision.
           runtime_revision: 1,
         }),
       })
@@ -657,25 +630,8 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    // KNOWN FAILURE (root-caused, not fixed here -- see task notes): the
-    // note armed by connectToStream's visibility-driven reconnect
-    // (useStreamConnection.js's armReconnectingNote(), called from onVisible)
-    // is reliably wiped a moment later by recoveryReconnectRef.current()'s
-    // unconditional clearReconnectingNote() (useStreamConnection.js around
-    // the recoveryReconnectRef definition). That ref fires whenever
-    // connectivityStore's shared recovery generation bumps -- which it does
-    // on this SAME visibilitychange, because connectivityStore's own
-    // visibility listener sets ready=false on hide and then re-probes
-    // /api/ready on show, and a false->true readiness flip bumps
-    // recoveryGeneration independent of any real stream failure. The
-    // recovery path's own connectRef.current?.(true) call afterward does not
-    // re-arm the note (connectionStaleRef is already false by then), so the
-    // note never renders at all -- this is not a timing-margin issue
-    // (confirmed via temporary console instrumentation: armReconnectingNote
-    // then clearReconnectingNote fire back-to-back). Widening this timeout
-    // does not help and is deliberately NOT done here; fixing the
-    // interaction is a production-code change in useStreamConnection.js
-    // that deserves its own careful pass, not a guess under this task.
+    // Readiness recovery on the same wake must not clear the note the
+    // visibility reattach armed (#1241).
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
       timeout: 3000,
     })
@@ -701,26 +657,19 @@ test.describe('Stream reconnection', () => {
     })
 
     await setupChat(page)
-    // A wake failure only keeps a connection status on screen while the backend
-    // still claims a live run. Both owners are mocked here because both retire the
-    // transport when they report settled: the runtime poll and the detail read,
-    // whose data.running feeds shouldRetireStreamForRuntime. setupChat stubs
-    // /messages with a bare 202, so no real run exists and both answered
-    // running:false -- the transport was retired a few hundred ms in and no status
-    // ever rendered. Registered AFTER setupChat so its composer-idle wait, which
-    // requires no Stop button, still settles.
+    // A wake failure shows the connection status only while the backend claims
+    // a live run, and both the runtime poll and the detail read retire the
+    // transport once they report settled. Registered after setupChat so its
+    // idle wait (no Stop) still settles.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running: true,
+          ...runtimeSnapshot({ running: true }),
           run_id: 'stream-reconnect-wake-run',
-          runtime_revision: 0,
           active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
           updated_at: null,
         }),
       })
@@ -737,23 +686,11 @@ test.describe('Stream reconnection', () => {
     })
     await send(page, 'retry button layout')
 
-    // The TERMINAL Retry affordance is no longer a state this scenario can hold.
-    // shouldRepairRuntimeStream restarts the retry owner whenever running &&
-    // !pendingQuestionId && connectionError !== 'retrying', so once the bounded
-    // retries exhaust and set 'disconnected', a fresh runtime verdict immediately
-    // restarts them -- Retry exists only between those two frames. A settled
-    // runtime retires the transport instead, clearing the error outright. So the
-    // durable element on a wake failure is the status itself, and that is what
-    // this case pins. pillOverlapDiagnostics still reports the Retry rectangle
-    // whenever that transient frame happens to be mounted.
+    // A wake failure keeps the connection status on screen while the run is
+    // live; its Retry (when mounted) is inside it, so the status is measured.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status')).toBeVisible({
       timeout: 25000,
     })
-    // Settle on what the overlap measurement actually needs: the composer pill.
-    // The earlier gate compared --composer-h against the footer height, but
-    // useScrollMode writes that variable only when its layout pass runs, and a
-    // wake failure keeps re-rendering the footer beneath it -- so the
-    // reservation can be correct while the variable never matches in budget.
     await expect(page.locator('[data-chat-surface="painted"] .chat__pill'))
       .toBeVisible({ timeout: 15000 })
     await page.evaluate(() => new Promise(resolve => (
@@ -761,8 +698,6 @@ test.describe('Stream reconnection', () => {
     )))
 
     const diagnostics = await pillOverlapDiagnostics(page)
-    expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
-      .toBe(false)
     expect(diagnostics.statusOverlapsPill, JSON.stringify(diagnostics, null, 2))
       .toBe(false)
   })
@@ -861,53 +796,7 @@ test.describe('Stream reconnection', () => {
     // real network race or this simulation, because both deliver a resolved
     // 204 Response to the same awaited fetch while abortRef points elsewhere.
     let messagesPostCount = 0
-    // setupChat() creates a REAL chat (createTaggedChat) but never mocks the
-    // chat-detail/runtime GETs, so ChatView's fallback runtime poll
-    // (reconcileRuntimeState, every ~1s while a turn/queue is active) and any
-    // force:true fetchMessages() call fall through to that real, message-less
-    // backend chat. An empty pending_messages there hydrate()s away the
-    // queued row this test is about to click cancel-X on, detaching it from
-    // the DOM mid-click (same class of bug fixed across steer-queued.spec.mjs
-    // on this branch — see the fast-forward test there for the full writeup).
-    let durablePending = []
-    // False until the first POST actually starts a turn — an unconditional
-    // running:true here locks the composer before setupChat's own "genuinely
-    // idle" wait ever sees it settle (this poll fires as soon as ChatView
-    // mounts a turn/queue, not only once one is genuinely active).
-    let turnRunning = false
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: durablePending,
-        }),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [],
-          total: 0,
-          offset: 0,
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: durablePending,
-          // createTaggedChat() already persists a model on the real backend
-          // (persistTestChatModel), but this mock overrides that same GET
-          // response wholesale — omitting these fields wipes the selection
-          // and needsModelSelection() blocks every send (see the writeup on
-          // steer-queued.spec.mjs's read-above-tail fix on this branch).
-          ...testChatAgentSettings(),
-        }),
-      })
-    })
+    const live = await mockLiveRuntime(page, { idleDetail: true })
 
     // Install the fetch shim before any app code runs. It captures the
     // first explicitly armed /stream fetch and parks it (a held Response).
@@ -975,7 +864,7 @@ test.describe('Stream reconnection', () => {
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
-      durablePending = []
+      live.pending = []
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -987,7 +876,7 @@ test.describe('Stream reconnection', () => {
     // as the /messages override below: keeps the runtime-poll mock's
     // `running` in sync with the actual turn lifecycle this test drives.
     await page.route('**/api/chat/stop', route => {
-      turnRunning = false
+      live.running = false
       route.fulfill({ status: 200, body: '{}' })
     })
 
@@ -1002,7 +891,7 @@ test.describe('Stream reconnection', () => {
       messagesPostCount++
       if (messagesPostCount === 2) {
         const ts = Date.now()
-        durablePending = [{
+        live.pending = [{
           role: 'user', content: body.content, ts, cid: body.cid,
         }]
         route.fulfill({
@@ -1022,7 +911,7 @@ test.describe('Stream reconnection', () => {
         })
         return
       }
-      turnRunning = true
+      live.running = true
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -1171,11 +1060,8 @@ test.describe('Stream reconnection', () => {
       },
     ]
     const runtimeState = {
-      running: true,
+      ...runtimeSnapshot({ running: true, pending_question_id: QUESTION_ID }),
       active_goal_objective: GOAL,
-      pending_messages: [],
-      pending_question_id: QUESTION_ID,
-      runtime_revision: 0,
       updated_at: updatedAt,
     }
     const detail = {
@@ -1207,20 +1093,14 @@ test.describe('Stream reconnection', () => {
       provider: 'claude',
       ...runtimeState,
     }
-    // Every transcript read of this chat must be mocked: CHAT_ID exists only here.
-    // The authoritative activation read appends &anchor=<key>, which the exact
-    // two-shape pattern missed; it fell through to a backend with no such chat,
-    // failed as a transcript load error, and the composer dropped to an idle Send.
+    // CHAT_ID exists only here, so every transcript read of it (including the
+    // &anchor= activation read) must be mocked.
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)(?:&anchor=[^&]*)?$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        // Re-spread runtimeState per request. `detail` captured it ONCE at
-        // declaration, so once the answer clears the parked question the detail
-        // read still advertised it -- runtime and detail then described different
-        // worlds and the composer resolved to neither Stop nor Send. Both owners
-        // must agree on one snapshot.
+        // Spread runtimeState per request so detail and runtime always agree.
         body: JSON.stringify({ ...detail, ...runtimeState }),
       })
     })
@@ -1262,14 +1142,8 @@ test.describe('Stream reconnection', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') { route.continue(); return }
       try { answerPosted = route.request().postDataJSON() } catch { answerPosted = null }
-      // Delivering the answer also UNFREEZES the turn, which this snapshot has to
-      // reflect. shouldAttachRunningStream is `!!running && !pendingQuestionId`, so
-      // while the runtime still advertises a parked question the transport stays
-      // released -- exactly as the comment above intends BEFORE the answer. Leaving
-      // pending_question_id set afterwards kept it released forever, so the
-      // reconnects this case needs to exhaust never resumed and the terminal Retry
-      // could not appear. Clear it, and advance the revision the client uses to
-      // accept a newer snapshot.
+      // Answering unfreezes the turn: clear the parked question (the stream
+      // attaches only without one) and advance the revision so it is adopted.
       runtimeState.pending_question_id = null
       runtimeState.runtime_revision += 1
       route.fulfill({
@@ -1326,13 +1200,8 @@ test.describe('Stream reconnection', () => {
     // browser exhausts its reconnects, the connection warning must not retire
     // the goal while the authoritative runtime still reports `running:true`.
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
-    // Connection trouble must SURFACE without retiring the goal, and the
-    // surfaced element is the status. The terminal Retry is not a state this
-    // can hold: once the answer clears the parked question the runtime is a
-    // live run again, and shouldRepairRuntimeStream restarts the retry owner
-    // the moment the bounded retries exhaust -- so Retry only ever exists
-    // between exhaustion and repair. The goal-rail assertions either side of
-    // this are the actual guarantee.
+    // Connection trouble must surface as the status without retiring the goal;
+    // the goal rail on both sides is the guarantee.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status'))
       .toBeVisible({ timeout: 25000 })
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
@@ -1346,16 +1215,9 @@ test.describe('Stream reconnection', () => {
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
     await expect(activeComposer)
       .toHaveValue('keep this draft safe')
-    // The answer unfreezes the turn, but the authoritative runtime above still
-    // reports `running:true`; reconnect loss must not invent an idle composer.
-    //
-    // With the card answered the question barrier is gone, and ChatInputBar is
-    // explicit that Stop outranks Send only "until the card is answered": a
-    // non-empty draft now offers Send (queue it behind the running turn), so the
-    // primary button cannot distinguish running from idle while the draft is
-    // kept. The guarantee that reconnect loss did not settle the run is the goal
-    // rail asserted on both sides of the connection status above: a goal is
-    // retired only when its run is treated as finished.
+    // With the card answered, a kept draft offers Send even while the run is
+    // live, so the button cannot show it. The goal rail on both sides of the
+    // connection status is the guarantee that the run was not settled.
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
   })

@@ -24,7 +24,9 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { createChat, sendMessage, waitForChatShell, waitForComposerSendable } from './_chatSession.mjs'
+import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -34,91 +36,24 @@ function sseBody(events) {
 
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
+  await mockDeliveryReady(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
-    { timeout: 10000 }
-  )
+  await waitForChatShell(page)
 }
 
-async function newChat(page) {
-  // The real nav toggle is ShellBrand's "Toggle navigation" button — a
-  // specific accessible-name locator instead of the generic
-  // `[aria-expanded]` selector (which would match the first element
-  // anywhere in the DOM with that attribute, not necessarily this button).
-  const navToggle = page.getByRole('button', { name: 'Toggle navigation' })
-  if ((await navToggle.getAttribute('aria-expanded')) !== 'true') {
-    await navToggle.click()
-  }
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  await page.evaluate(() => {
-    const newChatBtn = document.querySelector('.drawer__item--new')
-    if (newChatBtn) newChatBtn.click()
-  })
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  // The drawer's own "New Chat" flow has no built-in signal for when the
-  // freshly created chat's composer has actually settled. Sending
-  // immediately after the drawer closes races that settle: the fill+Enter
-  // can land on a composer that's mid-(re)mount, silently dropping the
-  // input or leaving the app believing a turn is already active (the
-  // message shows up queued, or never sent at all, instead of starting a
-  // fresh turn). Wait for a genuinely idle composer before returning.
-  await page.waitForFunction(() => {
-    const surface = document.querySelector('[data-chat-surface="painted"]')
-    const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
-    return !!composer
-      && !composer.disabled
-      && !surface.querySelector('.chat__stop')
-      && !surface.querySelector('.queued__row')
-  }, { timeout: 10000 })
-}
-
-// Press a composer submit chord and confirm it actually landed (the
-// textarea clears) instead of assuming the first keypress submitted.
-// Right after a brand-new chat's first send, ChatInputBar's `canSubmit`
-// stays gated by Shell's provisional-chat guard (newChatSession.submitted)
-// for a render or two while newChatSession finishes materializing
-// (Shell.jsx queueDraftFirstNewChat / settleDraftFirstNewChat) — during
-// that narrow window Enter is a legitimate no-op (submissionBlocked), not
-// a lost keystroke: the composer text is left untouched. Retrying the
-// keypress until the composer visibly clears turns that transient block
-// into a bounded, condition-based wait instead of a flaky one-shot press.
+// Submit once the composer accepts it, and confirm the submit landed.
 async function submitComposer(page, input, key = 'Enter') {
-  await expect(async () => {
-    await page.keyboard.press(key)
-    await expect(input).toHaveValue('', { timeout: 300 })
-  }).toPass({ timeout: 5000 })
+  await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
+  await page.keyboard.press(key)
+  await expect(input).toHaveValue('')
 }
 
-async function sendMessage(page, text) {
+// A send into a live turn is queued, so it adds no transcript row to wait on.
+async function queueMessage(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await submitComposer(page, input)
-}
-
-// Playwright's `.click()` dispatches a real, trusted pointerdown/mousedown/
-// mouseup/click sequence via CDP. The steer button's onPointerDown calls
-// preventDefault() (to keep composer focus stable on mobile — see
-// ChatInputBar.jsx), and on this exact element that reliably swallows the
-// trusted click before React's delegated listener ever sees it: `handleSteer`
-// never runs, no matter how many times the tap is retried. A same-page,
-// script-dispatched `.click()` (untrusted, no separate pointer/mouse events)
-// reaches React fine and runs the exact intended logic — confirmed by
-// tracing the handler directly. Touch users are unaffected (a separate
-// onTouchEnd handler calls the steer callback without going through click at
-// all); this is a Playwright/CDP dispatch quirk on this element, not a
-// reproduced end-user bug, so the workaround belongs in the test.
-async function pressSteer(page, steerBtn) {
-  await steerBtn.evaluate(el => el.click())
 }
 
 async function tapSend(page, text) {
@@ -150,59 +85,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     // Capture every POST /messages so we can assert the steer payload.
     const messagePosts = []
-    // Mirrors the backend's Chat.pending_messages for the duration of this
-    // test: reconcileRuntimeState() polls GET .../runtime every ~1s while a
-    // turn/queue is active (ChatView.jsx's fallback poll effect), and that
-    // route isn't otherwise mocked here. An unmocked runtime poll returns no
-    // pending_messages, and hydrate() then drops the just-reserved steer row
-    // (it looks server-confirmed-but-gone, indistinguishable from "already
-    // consumed") well before the deferred cut ever arrives — the exact same
-    // "unmocked GET wipes the tray" class already called out below for the
-    // queue-POST ack. Keep this snapshot in sync with what a real backend
-    // would still report: the row stays in pending_messages until the
-    // authoritative cut (steered_into_turn), which this test never sends.
-    let pendingMessagesSnapshot = []
-    // False until the first message's 202 actually starts the turn — an
-    // unconditional `running: true` here would lock the composer before the
-    // real send ever happens (the poll's initial run() fires as soon as
-    // ChatView mounts, not only once a turn is genuinely active).
-    let turnRunning = false
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
-
-    // fetchMessages() (the chat-detail GET) has the same unmocked-endpoint
-    // hazard as .../runtime above — any force:true caller (several exist,
-    // e.g. outbox-settlement reconcile) would otherwise get an empty
-    // pending_messages and hydrate() away the reserved row. Only intercept
-    // once a turn is actually running: an early bootstrap GET (chat
-    // creation, newChatSession settling) needs the REAL response shape
-    // (title/provider/etc.) this minimal stub doesn't provide.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
-      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [],
-          total: 0,
-          offset: 0,
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
+    const live = await mockLiveRuntime(page)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -210,15 +94,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       try { body = JSON.parse(req.postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
 
-      // Force-steer POST: admission succeeds but the provider control channel
-      // defers the actual transcript cut (this is the case the test exercises
-      // — "the provider acknowledgement is deliberately still blocked").
-      // cut_deferred:true is required here: without it, ChatView.jsx's
-      // 'steered' handling falls through to its older-immediate-cut-backend
-      // compatibility branch (Array.isArray(result.pending_messages) with no
-      // cut_deferred flag) and calls pendingQueue.hydrate([]), which wipes
-      // the just-reserved row immediately instead of leaving it inline until
-      // a later steered_into_turn event.
+      // The provider defers the transcript cut, so the steer row stays inline
+      // until steered_into_turn. cut_deferred marks that; without it the response
+      // is read as an immediate cut and the row is cleared.
       if (body.force_steer) {
         await steerGate
         return route.fulfill({
@@ -228,7 +106,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
             status: 'steered',
             chat_id: 'mock',
             cut_deferred: true,
-            pending_messages: pendingMessagesSnapshot,
+            pending_messages: live.pending,
           }),
         })
       }
@@ -236,7 +114,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // First send (fresh turn): 202 starts the turn; the held-open
       // /stream below keeps sending=true.
       if (body.content === 'first message') {
-        turnRunning = true
+        live.running = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -251,13 +129,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
       // Second send while streaming: the queue path. Return a SERVER ts so
       // confirmQueued clears the in-flight flag — only then is the entry
-      // steer-eligible (canSteer requires a confirmed server ts). Echo
-      // pending_message (like the other fixtures in this file): without it,
-      // ChatView treats the ack as an older-backend compatibility case and
-      // calls fetchMessages({force:true}) — a REAL, unmocked GET against the
-      // drawer-created (but message-mock-only) chat, which comes back with
-      // pending_messages:[] and wipes the just-reserved steer row.
-      pendingMessagesSnapshot = [
+      // steer-eligible (canSteer requires a confirmed server ts). Echo the
+      // canonical pending_message, or the ack is read as an older backend that
+      // needs a detail re-read.
+      live.pending = [
         { role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid },
       ]
       return route.fulfill({
@@ -290,14 +165,14 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'steer-queued')
 
     // First send → starts the (held-open) turn. Stop button = streaming.
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
     // Queue a second message while streaming.
-    await sendMessage(page, QUEUED_TEXT)
+    await queueMessage(page, QUEUED_TEXT)
     await page.waitForFunction(
       (t) => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
         .some(el => el.textContent?.includes(t)),
@@ -314,7 +189,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toHaveCount(0)
 
     // (b) Press it → expect a force_steer POST with the exact payload.
-    await pressSteer(page, steerBtn)
+    await steerBtn.click()
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length,
       { timeout: 5000 },
@@ -430,7 +305,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'steer-queued')
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
@@ -482,34 +357,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let releaseStream
     const streamGate = new Promise(resolve => { releaseStream = resolve })
 
-    // The first turn's stream is held behind streamGate, so the runtime poll is
-    // the only authority on whether a turn is running. This was the one case in
-    // the file without the runtime mock its siblings carry: unmocked, the real
-    // backend answered running:false (the 202 below starts no real run), the app
-    // retired the "settled" turn, and Stop never appeared -- so neither queued
-    // row could be fast-forwarded. Mirror the sibling fixture: running flips only
-    // once the first message starts the turn (an unconditional true locks the
-    // composer before any send), and queued rows stay in pending_messages until
-    // the steer consumes them.
-    let turnRunning = false
-    let pendingMessagesSnapshot = []
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({ running: turnRunning, runtime_revision: 0, pending_messages: pendingMessagesSnapshot }),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
-      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
-      route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [], total: 0, offset: 0,
-          running: turnRunning, runtime_revision: 0, pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
+    const live = await mockLiveRuntime(page)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -518,7 +366,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
 
       if (body.force_steer) {
-        pendingMessagesSnapshot = []
+        live.pending = []
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -526,7 +374,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
-        turnRunning = true
+        live.running = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -541,11 +389,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
       queueCount++
-      pendingMessagesSnapshot = [...pendingMessagesSnapshot, { role: 'user', content: body.content, ts, cid: body.cid }]
-      // Echo pending_message (like the other fixtures in this file): without
-      // it, ChatView treats the ack as an older-backend compatibility case
-      // and calls fetchMessages({force:true}) — a REAL, unmocked GET against
-      // the drawer-created (but message-mock-only) chat.
+      live.pending = [...live.pending, { role: 'user', content: body.content, ts, cid: body.cid }]
+      // Echo the canonical pending_message, or the ack is read as an older
+      // backend that needs a detail re-read.
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -570,12 +416,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'steer-queued')
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
-    await sendMessage(page, TEXT1)
-    await sendMessage(page, TEXT2)
+    await queueMessage(page, TEXT1)
+    await queueMessage(page, TEXT2)
     // Wait for both rows queued + both server-confirmed (steer button shows).
     await page.waitForFunction(
       () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 2,
@@ -584,7 +430,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
 
-    await pressSteer(page, steerBtn)
+    await steerBtn.click()
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length,
       { timeout: 5000 },
@@ -606,40 +452,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let queueCount = 0
     let releaseStream
     const streamGate = new Promise(resolve => { releaseStream = resolve })
-    // See the fast-forward test above: ChatView's fallback runtime poll and
-    // fetchMessages()'s chat-detail GET are both unmocked by default, and
-    // either landing mid-test would hydrate() the queue down to whatever
-    // this snapshot doesn't list. Kept in sync with each queue/steer step.
-    let pendingMessagesSnapshot = []
-    let turnRunning = false
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
-      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [],
-          total: 0,
-          offset: 0,
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
+    const live = await mockLiveRuntime(page)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
@@ -650,7 +464,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         const siblingPost = messagePosts.find(post => (
           !post.force_steer && post.content === TEXT2
         ))
-        pendingMessagesSnapshot = [{
+        live.pending = [{
           role: 'user',
           content: TEXT2,
           ts: 990002,
@@ -662,13 +476,13 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: pendingMessagesSnapshot,
+            pending_messages: live.pending,
           }),
         })
       }
 
       if (body.content === 'first message') {
-        turnRunning = true
+        live.running = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -683,8 +497,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
       queueCount += 1
       const ts = 990000 + queueCount
-      pendingMessagesSnapshot = [
-        ...pendingMessagesSnapshot,
+      live.pending = [
+        ...live.pending,
         { role: 'user', content: body.content, ts, cid: body.cid },
       ]
       return route.fulfill({
@@ -694,15 +508,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           status: 'queued',
           ts,
           position: queueCount,
-          // Echo a canonical pending_message like the other queued-response
-          // fixtures in this file: without it, usePendingQueue's confirmQueued
-          // path treats the ack as an "older backend" and ChatView falls back
-          // to fetchMessages({force:true}) — an unmocked GET against the real
-          // backend for this drawer-created (but message-mock-only) chat.
-          // That real fetch returns pending_messages:[] (nothing was actually
-          // persisted server-side) and hydrate() then drops the just-confirmed
-          // local row entirely (no preserveMissing), flapping the tray and
-          // detaching the row-action button mid-click.
+          // Echo the canonical pending_message, or the ack is read as an older
+          // backend and the confirmed row is re-read away mid-click.
           pending_message: {
             role: 'user', content: body.content, ts, cid: body.cid,
           },
@@ -720,20 +527,17 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'steer-queued')
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
-    await sendMessage(page, TEXT1)
-    await sendMessage(page, TEXT2)
+    await queueMessage(page, TEXT1)
+    await queueMessage(page, TEXT2)
 
     const rowSteerButtons = page.getByRole('button', {
       name: 'Send this queued message now',
     })
     await expect(rowSteerButtons).toHaveCount(2, { timeout: 5000 })
-    // Same onPointerDown={preventDefault} click-swallow as the composer's
-    // fast-forward button (see pressSteer above) — Playwright's trusted
-    // click never reaches React here either.
-    await rowSteerButtons.first().evaluate(el => el.click())
+    await rowSteerButtons.first().click()
 
     await expect.poll(
       () => messagePosts.filter(post => post.force_steer).length,
@@ -757,13 +561,6 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const QUEUED_TEXT = 'pin this steer without a bounce'
     const PRE_STEER = 'streaming room before fast-forward '.repeat(220)
     const messagePosts = []
-    // See the fast-forward test above: ChatView's fallback runtime poll and
-    // fetchMessages()'s chat-detail GET are both unmocked otherwise, and
-    // either landing mid-test hydrate()s the queue down to whatever this
-    // snapshot doesn't list — here that would make the blur observer's
-    // userCount come up short by exactly the queued/reserved row.
-    let pendingMessagesSnapshot = []
-    let turnRunning = false
 
     // Exercise ChatView's touch-primary path (Enter would insert a newline
     // instead of sending on this device contract).
@@ -786,56 +583,25 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
     })
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
-      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [],
-          total: 0,
-          offset: 0,
-          running: turnRunning,
-          runtime_revision: 0,
-          pending_messages: pendingMessagesSnapshot,
-        }),
-      })
-    })
+    const live = await mockLiveRuntime(page)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
       try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
       if (body.force_steer) {
-        // cut_deferred:true is required here too (see the fast-forward test's
-        // comment above): without it, ChatView's 'steered' handling takes the
-        // older-immediate-cut compatibility branch and hydrate([])s the
-        // reservation away almost immediately (this route responds with no
-        // gate), before the blur observer below ever gets to count it — the
-        // steer row must stay reserved (and count toward userCount) until
-        // the explicit steered_into_turn event this test fires separately.
+        // cut_deferred keeps the steer row reserved (and counted) until the
+        // explicit steered_into_turn event below.
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
-            status: 'steered', chat_id: 'mock', cut_deferred: true, pending_messages: pendingMessagesSnapshot,
+            status: 'steered', chat_id: 'mock', cut_deferred: true, pending_messages: live.pending,
           }),
         })
       }
       if (body.content === 'first message') {
-        turnRunning = true
+        live.running = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -850,7 +616,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const pendingMessage = {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
-      pendingMessagesSnapshot = [pendingMessage]
+      live.pending = [pendingMessage]
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -911,7 +677,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     }, { preSteer: PRE_STEER, queueTs: QUEUE_TS, queuedText: QUEUED_TEXT })
 
     await setupChat(page)
-    await newChat(page)
+    await createChat(page, 'steer-queued')
     await page.setViewportSize({ width: 1280, height: 900 })
     // This case deliberately advertises a touch-primary device. Plain Enter
     // inserts a newline on that contract, so exercise the same Send control a
@@ -989,19 +755,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       JSON.stringify(result),
     ).toBeLessThanOrEqual(2)
 
-    // The composer-refocus-then-blur-after-cut guarantee this test used to
-    // check here at runtime (via a blur/focusout observer) is already locked
-    // in structurally by composerSteerTouch.test.js's "touch steer dismisses
-    // the keyboard only after its committed row is positioned" — that test
-    // asserts the exact source-level contract (steerKeyboardDismissRequestRef
-    // armed at request time, never blurred before the cut, committed and
-    // consumed only once the row's useLayoutEffect finds it). Runtime
-    // verification of the same guarantee was dropped from here: two
-    // independent observers (a blur() prototype override, then a native
-    // focusout listener) both showed zero focus-change event after a
-    // confirmed-correct, confirmed-executed blur() call — consistent with a
-    // Chromium/CDP headless focus-management quirk around .focus()'d (not
-    // real-input-focused) elements, not an application bug.
+    // Keyboard dismissal after the cut is pinned by composerSteerTouch.test.js;
+    // headless focus events are not a reliable signal for it here.
     const pinIndex = result.transitions.findIndex(
       row => row.event === 'send:pin-user-message',
     )
@@ -1153,38 +908,21 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
-          running: durableRunning,
-          runtime_revision: 0,
-          pending_messages: durablePending,
-          // createTaggedChat() already persists a model via
-          // persistTestChatModel() on the real backend, but this mock
-          // overrides that same GET response wholesale — omitting these
-          // fields wiped the selection, so needsModelSelection()
-          // (modelSelectionPolicy.js) correctly-but-unhelpfully opened the
-          // model picker and silently no-op'd every Enter press (handleSubmit
-          // returns before doSend, no network, no thrown error — nothing to
-          // observe except the composer never clearing).
+          ...runtimeSnapshot({ running: durableRunning, pending_messages: durablePending }),
+          // The mock replaces the detail wholesale, so carry the persisted model.
           ...testChatAgentSettings(),
         }),
       })
     })
-    // This test creates a REAL chat (createTaggedChat above), but /messages
-    // and /stream are intercepted client-side — the real backend never sees
-    // those POSTs. ChatView's fallback runtime poll (reconcileRuntimeState,
-    // every ~1s while a turn/queue is active) hits GET .../runtime, which
-    // isn't otherwise mocked here and would fall through to that real,
-    // message-less backend chat — an empty pending_messages there hydrate()s
-    // away whatever this test's local state expects. Mirror the same
-    // durable* snapshot used for the chat-detail GET above.
+    // /messages and /stream are client-side mocks, so the runtime poll mirrors
+    // the same durable snapshot as the detail read.
     await page.route(new RegExp(`/api/chats/${chat.id}/runtime`), route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running: durableRunning,
-          runtime_revision: 0,
-          pending_messages: durablePending,
+          ...runtimeSnapshot({ running: durableRunning, pending_messages: durablePending }),
         }),
       })
     })
@@ -1205,25 +943,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         }]),
       })
     })
-    // parseShellDeepLink() (navigationPersistence.js) only recognizes
-    // /shell/?chat=<id> (a query param) — it matches path against
-    // /^\/shell\/?$/ before even looking at params, so a path-segment style
-    // /shell/chat/<id> is never recognized at all. The app then bootstraps
-    // an unrelated chat instead of loading this real one; the mismatch goes
-    // unnoticed until some later state sync rewrites the URL back to bare
-    // /shell/ and the page goes blank mid-transition (the same class of bug
-    // fixed for app-canvas.spec.mjs's /app/{id} route earlier on this branch).
+    // Deep links are /shell/?chat=<id>; a path-segment form is not recognised.
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
-    // Deep-linking straight to a real, freshly-created chat goes through the
-    // same materializing window newChat()'s helper waits out elsewhere in
-    // this file — submitting immediately races a composer that isn't wired
-    // up yet and silently drops the keystrokes (submissionBlocked no-ops).
-    await page.waitForFunction(() => {
-      const surface = document.querySelector('[data-chat-surface="painted"]')
-      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
-      return !!composer && !composer.disabled
-    }, { timeout: 10000 })
+    const surface = page.locator('[data-chat-surface="painted"]')
+    await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toBeVisible({ timeout: 10000 })
+    await waitForComposerSendable(surface)
 
     await sendMessage(page, 'first message')
     // A real stream cannot replay assistant output from this turn before the
@@ -1261,7 +986,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await page.waitForTimeout(350)
 
     // Queue + steer.
-    await sendMessage(page, QUEUED_TEXT)
+    await queueMessage(page, QUEUED_TEXT)
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
     const heldBeforeSteer = await page.evaluate(() => {
@@ -1277,7 +1002,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
     })
     expect(heldBeforeSteer).not.toBeNull()
-    await pressSteer(page, steerBtn)
+    await steerBtn.click()
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
     ).toBe(1)

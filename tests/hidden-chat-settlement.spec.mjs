@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 attachCleanup()
@@ -48,24 +49,17 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({ json: {
       id: a.id, title: 'Hidden settlement', provider: 'codex',
-      messages, total: messages.length, offset: 0, running,
-      pending_messages: [], pending_question_id: null, runtime_revision: 0,
+      messages, total: messages.length, offset: 0,
+      ...runtimeSnapshot({ running }),
       run_id: 'settlement-run-1',
     } })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    // run_id must be present (matches the real /runtime response,
-    // routes/chats.py _latest_run_snapshot) even once running flips false --
-    // it identifies which run just settled. Without it,
-    // shouldRecoverSettledRuntime never fires (its runtimeRunId check requires
-    // a truthy id), so a hidden chat whose SSE stream never got the terminal
-    // event has no other path to notice the run finished.
+    // The real runtime keeps run_id after running flips false; it identifies
+    // the run that settled, which is how a hidden chat notices completion.
     return route.fulfill({
-      json: {
-        running, pending_messages: [], pending_question_id: null,
-        runtime_revision: 0, run_id: 'settlement-run-1',
-      },
+      json: { ...runtimeSnapshot({ running }), run_id: 'settlement-run-1' },
     })
   })
   await page.clock.install()

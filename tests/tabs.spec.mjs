@@ -18,6 +18,7 @@ import { waitForComposerSendable } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import { settledBox } from './_geometry.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const APP_ID = 990001
@@ -117,9 +118,7 @@ async function persistMockedMessageOnReload(page, chat, text) {
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-        runtime_revision: 0,
+        ...runtimeSnapshot(),
       }),
     })
   })

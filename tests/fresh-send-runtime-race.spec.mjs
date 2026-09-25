@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -15,19 +15,8 @@ attachCleanup()
 
 test('an idle runtime snapshot cannot retire an unacknowledged fresh send', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
-  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
-  // body.ready === true (plus a boot_id) before treating the app as
-  // delivery-ready. Without this, deliveryReady stayed false through this
-  // whole test (confirmed via a debug log at doSend's branch decision), so
-  // doSend took the QUEUED path instead of the FRESH SEND PATH -- the one
-  // that sets localStartRequestRef, the exact protection this test exists to
-  // exercise. The queued path never sets it, so the race "protection" was
-  // never engaged and every assertion here was accidentally vacuous.
-  await page.route(/\/api\/ready$/, route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ ready: true, boot_id: 'fresh-send-race-fixture-boot' }),
-  }))
+  // The protection under test is only engaged on the fresh-send path, never the queued one.
+  await mockDeliveryReady(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   const chat = await createTaggedChat(page, 'fresh-send-runtime-race')
   expect(chat?.id).toBeTruthy()
@@ -57,13 +46,9 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       }),
     })
   })
-  // Without this, the real backend's SSE endpoint gets hit for a chat with
-  // no active run (the /messages POST above is entirely intercepted and
-  // never reaches the server), closes almost immediately, and onStreamEnd's
-  // continues:false branch calls fetchMessages({force:true, authoritative:
-  // true}) on its own -- a completely different source of the exact
-  // detailReadsAfterSend this test measures, independent of the runtime-poll
-  // race it's named for. Hold it open for the same window as the POST.
+  // Hold the stream open for the same window as the POST: an early EOF would
+  // trigger its own authoritative detail read, a second source of the reads
+  // this case counts.
   await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), async route => {
     await releaseAcknowledgement.promise
     await route.fulfill({ status: 204, body: '' })
@@ -74,11 +59,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: false,
+        ...runtimeSnapshot(),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
       }),
     })
     if (raceArmed) idleSnapshotReturned.resolve()
@@ -91,13 +73,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       contentType: 'application/json',
       body: JSON.stringify({
         id: chat.id,
-        messages: [],
-        total: 0,
-        offset: 0,
-        running: false,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...emptyChatPage(),
         provider: 'claude',
         ...testChatAgentSettings(),
       }),

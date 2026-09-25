@@ -23,7 +23,7 @@
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import * as tabModel from '../frontend/src/components/Shell/tabModel.js'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -34,11 +34,8 @@ async function mockIdleChatRuntime(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: false,
+        ...runtimeSnapshot(),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -79,13 +76,7 @@ async function bootSeededWorkspace(page, viewport, ws) {
       body: JSON.stringify({
         id: requestedId,
         title: 'Seeded',
-        messages: [],
-        total: 0,
-        offset: 0,
-        running: false,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...emptyChatPage(),
         session_id: null,
         provider: 'codex',
         created_by_app_id: null,
@@ -252,13 +243,7 @@ async function transientClassCount(page) {
 
 function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
   const detail = {
-    messages: [],
-    total: 0,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-    pending_question_id: null,
-    runtime_revision: 0,
+    ...emptyChatPage(),
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -726,12 +711,7 @@ test('an explicit Builder cover carries its own selection into Standard and pres
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
   await expect.poll(() => explicitCreates).toBe(1)
-  // [data-new-chat-presentation] was removed by 45955a65 ("Make fresh chats
-  // use one canonical composer") -- NewChatLanding's separate presentation
-  // wrapper is gone, and the composer now renders directly inside the
-  // canonical painted chat surface for both new and existing chats. This is
-  // a two-pane Builder layout, so a bare [data-chat-surface="painted"]
-  // matches both tabs; scope to the tab that owns the newly created chat.
+  // Both Builder panes paint a chat surface; scope to the new chat's tab.
   const presentation = page.locator(`[data-chat-id="${explicitId}"][data-chat-surface="painted"]`)
   const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
@@ -739,23 +719,10 @@ test('an explicit Builder cover carries its own selection into Standard and pres
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  // Not asserting the explicit chat's surface un-paints here: Shell
-  // deliberately keeps the outgoing chat painted as an inert same-world
-  // cover until the incoming chat reports a stable frame (Shell.jsx
-  // ~4760-4763), so this can still show data-chat-surface="painted"
-  // during the handoff. The localStorage assertion below is the real proof of
-  // which tab Standard adopted.
-  //
-  // Standard adopts the EXPLICIT chat, not the older 'aaa' slot. paneModel is
-  // explicit that this is the contract: selectFocusedBuilderTabForStandard() is
-  // setSingleScreen(ws, focusedSlotSeed(ws)), whose comment states "the visible
-  // selection is the user's current navigation intent and must beat the older
-  // Standard slot". focusedSlotSeed reads the focused pane's ACTIVE tab, which
-  // after New chat in Builder is this new chat -- an allocation still in flight
-  // is not excluded. This case previously expected the cover to be retired
-  // first so 'aaa' would win; that is no longer how an exit resolves. What it
-  // still guards is below and unchanged: the exit must allocate NO replacement
-  // chat, and the parked draft and intent must survive.
+  // The outgoing chat may stay painted as an inert cover until the incoming
+  // one is stable, so the stored slot is the proof of what Standard adopted:
+  // the explicit (focused) chat, not the older slot. The exit must allocate
+  // no replacement chat, and the parked draft and intent must survive.
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({

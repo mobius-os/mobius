@@ -294,7 +294,7 @@ test('a staged update can review another release before one restart', async ({ p
   await expect(review).toBeVisible()
   // Opening Settings does not move focus; PlatformUpdates restores focus to its
   // action only after a review closes, which the end of this case asserts.
-  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
   await review.click()
 
@@ -305,7 +305,7 @@ test('a staged update can review another release before one restart', async ({ p
   await expect(dialog).toHaveCount(0)
   await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
-  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart', exact: true })).toBeVisible()
 })
 
 test('staged-update actions stack without overflow in a narrow settings pane', async ({ page }) => {
@@ -337,7 +337,7 @@ test('staged-update actions stack without overflow in a narrow settings pane', a
   expect(box.x).toBeGreaterThanOrEqual(0)
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
   await expect(page.getByRole('button', { name: 'Review update' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
 })
 
@@ -672,20 +672,19 @@ test('a failed container result survives reopening Settings without an unsolicit
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('server restart completion asks before restarting and cancellation performs no mutation', async ({ page }) => {
+test('server restart completion confirms on the pressed button and an unconfirmed prompt performs no mutation', async ({ page }) => {
   const state = { current: 'restart_needed', overrides: { available: false, needs_restart: true,
     activation: { level: 'server_restart', required_actions: ['server_restart'], deployment: 'self_hosted', reasons: [], guidance: [] } } }
   await mockPlatform(page, state)
   const updates = await openSettings(page)
   await updates.getByRole('button', { name: 'Restart to finish' }).click()
-  const confirmation = updates.getByRole('group', { name: 'Confirm restart' })
-  await expect(confirmation).toBeVisible()
-  await expect(confirmation.getByRole('button', { name: 'Restart now' })).toBeEnabled()
-  await expect(confirmation).toContainText('briefly pauses active chats')
+  // The first press arms that same button as its own confirmation.
+  await expect(updates.getByRole('button', { name: 'Confirm restart' })).toBeEnabled()
+  await expect(updates.getByText(/briefly pauses active chats/)).toBeVisible()
   expect(state.unexpectedMutations).toEqual([])
-  await confirmation.getByRole('button', { name: 'Not now' }).click()
-  await expect(confirmation).toHaveCount(0)
-  await expect(updates.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
+  // Left unconfirmed, the prompt expires and nothing restarts.
+  await expect(updates.getByRole('button', { name: 'Restart to finish' })).toBeVisible({ timeout: 6000 })
+  await expect(updates.getByText(/briefly pauses active chats/)).toHaveCount(0)
   expect(state.unexpectedMutations).toEqual([])
 })
 

@@ -8,9 +8,10 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage as sharedSendMessage } from './_chatSession.mjs'
+import { createChat, sendMessage } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
+import { mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -48,17 +49,6 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   )
 }
 
-async function newChat(page) {
-  // Worker-tagged chat created via the API, then navigated to via the
-  // supported deep link — see tests/_chatSession.mjs. A valid persisted
-  // workspace wins over the legacy active-chat mirror.
-  return createChat(page)
-}
-
-async function sendMessage(page, text) {
-  await sharedSendMessage(page, text)
-}
-
 async function waitForChatMode(page, chatId, kind, timeout = 3000) {
   await expect.poll(
     () => page.evaluate(id => {
@@ -93,25 +83,13 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
 // the mocks stay authoritative for the whole test.
 test.use({ serviceWorkers: 'block' })
 
-// Settle delivery readiness deterministically for EVERY case in this file.
-// connectivityStore marks the composer delivery-ready only once /api/ready
-// reports ready:true with a boot_id, and a send made before that probe lands is
-// QUEUED locally (.queued__row, "Queued to send") instead of started. The
-// composer can be enabled before the real round trip settles, so every send
-// here raced it. This lives in a hook rather than setup() because several
-// cases navigate on their own; nothing in this file exercises readiness itself.
-test.beforeEach(async ({ page }) => {
-  await page.route(/\/api\/ready$/, route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ ready: true, boot_id: 'frontend-spec-boot' }),
-  }))
-})
+// Every send in this file expects a started turn; none exercises readiness.
+test.beforeEach(async ({ page }) => { await mockDeliveryReady(page) })
 
 test.describe('Input behavior', () => {
   test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.evaluate(el => {
@@ -196,7 +174,7 @@ test.describe('Input behavior', () => {
     })
 
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     await page.getByRole('button', { name: 'Voice input' }).click()
     await expect(page.getByRole('button', { name: 'Stop recording' })).toBeVisible()
@@ -209,7 +187,7 @@ test.describe('Input behavior', () => {
 
   test('1. Input clears after send', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test message')
 
     const value = await page.evaluate(
@@ -220,7 +198,7 @@ test.describe('Input behavior', () => {
 
   test('2. Empty input does not send', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     // Try to send empty
     await page.keyboard.press('Enter')
@@ -235,7 +213,7 @@ test.describe('Input behavior', () => {
 
   test('3. Send button appears when input has text', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     // Initially no send button (voice button instead)
     const hasSend = await page.evaluate(
@@ -252,7 +230,7 @@ test.describe('Input behavior', () => {
 test.describe('Message rendering', () => {
   test('4. User message renders with correct class', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Hello world')
 
     const userMsg = await page.evaluate(() => {
@@ -268,7 +246,7 @@ test.describe('Message rendering', () => {
 
   test('5. Multiple messages render in order', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First')
 
     // Stop and send second
@@ -288,7 +266,7 @@ test.describe('Message rendering', () => {
 
   test('6. Thinking dots show while agent is processing', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test thinking')
 
     const hasThinking = await page.evaluate(
@@ -325,7 +303,7 @@ test.describe('Message rendering', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Render markdown')
 
     const result = await page.evaluate(() => {
@@ -424,7 +402,7 @@ test.describe('Message rendering', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me something')
 
     // Wait for question card to appear.
@@ -508,7 +486,7 @@ test.describe('Message rendering', () => {
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me')
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
     await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'A' }).click()
@@ -550,7 +528,7 @@ test.describe('Message rendering', () => {
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me')
 
     // Only ONE question card should render (the real one).
@@ -636,7 +614,7 @@ test.describe('App canvas', () => {
 test.describe('Scroll position', () => {
   test('10. PageUp position saved on navigate, restored on return', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -677,9 +655,7 @@ test.describe('Scroll position', () => {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
-          runtime_revision: 0,
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -752,7 +728,7 @@ test.describe('Scroll position', () => {
 
   test('10b. Leaving auto-scroll restores the exact old tail, not content grown while away', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -786,9 +762,7 @@ test.describe('Scroll position', () => {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
-          runtime_revision: 0,
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -877,7 +851,7 @@ test.describe('Scroll position', () => {
 
   test('10c. A paginated return anchor survives the latest-page refresh', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -910,9 +884,7 @@ test.describe('Scroll position', () => {
           messages: allMessages.slice(start, before),
           total: allMessages.length,
           offset: start,
-          running: false,
-          pending_messages: [],
-          runtime_revision: 0,
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -991,7 +963,7 @@ test.describe('Scroll position', () => {
 
   test('10d. Running chat presents before catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -1043,9 +1015,7 @@ test.describe('Scroll position', () => {
           messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
           total: 4,
           offset: 0,
-          running: returning,
-          pending_messages: [],
-          runtime_revision: 0,
+          ...runtimeSnapshot({ running: returning }),
         }),
       })
     })
@@ -1090,14 +1060,10 @@ test.describe('Scroll position', () => {
     // remains outside Chromium's native lazy-load range at the initial tail.
     // Bring it into range before recording the settled reading coordinate.
     await page.locator('[data-chat-surface="painted"] .md-image').scrollIntoViewIfNeeded()
-    // This fixture's two ~56-paragraph transcripts plus image round-trip made
-    // this decode wait marginal under loaded local Docker runs even with no
-    // artificial fetch delay on the initial image — widened alongside the
-    // other checkpoints in this test for the same reason.
     await page.waitForFunction(() => {
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!img?.complete && img.naturalWidth > 0
-    }, undefined, { timeout: 20000 })
+    }, undefined, { timeout: 10000 })
     await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="entry-anchor"]')
@@ -1163,27 +1129,6 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
-    // KNOWN FAILURE (root-caused, not fixed here): this shell keeps an open
-    // SSE stream, which makes Chromium treat the page as bfcache-ineligible,
-    // so this history.back() lands as a hard document reload instead of a
-    // same-document popstate -- confirmed via temporary console
-    // instrumentation (a `framenavigated` to a bare /shell/ URL fired with NO
-    // popstate at all). On that hard reload, boot falls back to
-    // moebius_active_chat in localStorage -- which is whichever chat this tab
-    // was LEAVING, not the one Back actually landed on -- because neither
-    // resolveInitialNav() (useNavigation.js) nor useWorkspaceSession's
-    // persisted workspace-blob restore ever consult window.history.state,
-    // the one signal the browser still hands the fresh document that
-    // reflects where Back/Forward actually landed. A `history.state`-aware
-    // fix was tried and reverted: it made resolveInitialNav resolve the
-    // correct chat, but useWorkspaceSession's blob restore is consulted
-    // first and wins whenever a blob exists, so the wrong chat still
-    // painted -- and the same change broke several same-document Back cases
-    // in navigation.spec.mjs that rely on the existing popstate-only
-    // contract. Widening this timeout does not help (confirmed via
-    // --repeat-each=3: fails identically every run, not a race). Fixing this
-    // needs a coordinated change across both restore paths, done as its own
-    // careful pass rather than under this task.
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
@@ -1249,7 +1194,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
@@ -1277,7 +1222,7 @@ test.describe('Enter key — desktop (no touch)', () => {
 
   test('10b. Enter sends on desktop', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Desktop send test')
@@ -1289,7 +1234,7 @@ test.describe('Enter key — desktop (no touch)', () => {
 
   test('10c. Shift+Enter inserts newline on desktop', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
@@ -1351,7 +1296,7 @@ test.describe('Scroll after stream end', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     // Send message → stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
@@ -1434,9 +1379,7 @@ test.describe('Connection recovery', () => {
           ],
           total: 2,
           offset: 0,
-          running: false,
-          pending_messages: [],
-          runtime_revision: 0,
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -1456,7 +1399,7 @@ test.describe('Connection recovery', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     // Send message → first stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
@@ -1512,7 +1455,7 @@ test.describe('Connection recovery', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Reconnect test')

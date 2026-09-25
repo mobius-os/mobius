@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -37,17 +37,13 @@ async function installStreamMock(page, firstItems) {
         return realFetch(input, init)
       }
       const current = streamIndex++
-      // The follow-up turn has already settled server-side by the time its stream
-      // attaches, so there is no broadcast: answer 204. Past the broadcast-
-      // registration window that is terminal, and the app performs its
-      // authoritative terminal refresh -- the settled-answer handoff this case
-      // exists to observe, landing while the second send is pinned.
+      // The follow-up has already settled server-side when its stream attaches,
+      // so the terminal 204 drives the authoritative refresh this case observes
+      // while the second send is pinned.
       if (current >= 1) return Promise.resolve(new Response(null, { status: 204 }))
-      const items = current === 0
-        ? initialItems
-        : [{ type: 'thinking', content: 'Checking the follow-up.' }]
-      const delay = current === 0 ? 0 : 300
-      const doneAfter = current === 0 ? 420 : 1800
+      const items = initialItems
+      const delay = 0
+      const doneAfter = 420
       const encoder = new TextEncoder()
       return Promise.resolve(new Response(new ReadableStream({
         start(controller) {
@@ -124,11 +120,8 @@ async function mountScenario(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running,
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running }),
         run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
       }),
     })
@@ -144,10 +137,7 @@ async function mountScenario(page) {
         messages,
         total: messages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running }),
         run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
         provider: 'codex',
         ...testChatAgentSettings(),
@@ -240,23 +230,15 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
       })
       if (window.__handoffSampling) schedule()
     }
-    // Measure each frame AFTER it renders. A read inside requestAnimationFrame
-    // forces layout before that frame's ResizeObserver step, so it observes
-    // geometry the scroll owner corrects before paint -- traced here as one
-    // 54px sample with the repair-pin write 1ms later and identical row
-    // heights either side. A task queued from rAF runs once the frame has
-    // painted, so these samples are what the owner actually saw.
+    // Sample after each frame has painted. A read inside rAF forces layout
+    // before the frame's ResizeObserver repair and sees geometry that never paints.
     const schedule = () => requestAnimationFrame(() => setTimeout(sample, 0))
     schedule()
   })
 
-  // The handoff is performed by the authoritative TERMINAL refresh, not by the
-  // send itself. A fresh send no longer reads the transcript: it canonicalises
-  // its optimistic row from the 202 (same cid, server ts), so waiting for the
-  // send to hand the settled row over waited for a read that never happens.
-  // The follow-up stream above answers 204 once its turn has settled, which
-  // past the broadcast-registration window triggers that terminal refresh
-  // while the new send is pinned -- the exact overlap this case guards.
+  // The terminal refresh, not the send, performs the handoff: a fresh send
+  // canonicalises its row from the 202. The follow-up's 204 triggers that
+  // refresh while the new send is pinned.
   await page.keyboard.press('Enter')
   await page.waitForFunction(ts => {
     const rows = document.querySelectorAll(

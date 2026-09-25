@@ -11,7 +11,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 
 attachCleanup()
 
@@ -44,18 +44,6 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await waitForChatShell(page)
-}
-
-// Creates the chat via the API rather than clicking through the drawer's
-// New Chat button — see tests/_chatSession.mjs. This file's tests are about
-// the second-send pin behavior, not the drawer's own open/close UI, so the
-// API-created pattern is a strict improvement here.
-async function newChat(page) {
-  await createChat(page, 'second-send-pin', { waitFor: 'empty-wrap' })
-}
-
-async function sendMessage(page, text) {
-  await sharedSendMessage(page, text, { wait: 'scroll', timeout: 3000 })
 }
 
 /** Engage FOLLOW_BOTTOM via a real gesture (pointerdown + scroll to the
@@ -129,7 +117,7 @@ test('Second send from auto-scroll pins to viewport top through the full SSE flo
     { type: 'done' },
   ]
   await setupWithSSE(page, events)
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   // Send 1, wait for the stream + promote to settle.
   await sendMessage(page, 'First user message')
@@ -183,7 +171,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     { type: 'text', content: 'First response paragraph. '.repeat(60) },
     { type: 'done' },
   ])
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
   await gestureToBottom(page)
@@ -306,7 +294,7 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
     { type: 'done' },
   ]
   await setupWithSSE(page, events)
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -428,7 +416,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 })
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)

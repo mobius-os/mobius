@@ -40,7 +40,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/bootstrap.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -111,13 +111,7 @@ async function routeShell(page, {
       const detail = {
         id,
         title,
-        messages: [],
-        pending_messages: [],
-        total: 0,
-        offset: 0,
-        running: false,
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...emptyChatPage(),
         session_id: null,
         provider: 'claude',
         created_by_app_id: null,
@@ -162,10 +156,8 @@ async function routeShell(page, {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detail || {
-        id, title: 'New chat', messages: [],
-        pending_messages: [], total: 0, offset: 0, running: false,
-        pending_question_id: null, session_id: null, provider: 'claude',
-        runtime_revision: 0,
+        id, title: 'New chat', ...emptyChatPage(),
+        session_id: null, provider: 'claude',
         effective_agent_settings: {}, has_assistant_turns: false,
       }),
     })
@@ -416,37 +408,11 @@ test.describe('Unauthenticated startup', () => {
       .toBeVisible({ timeout: 10000 })
   })
 
-  // This test described a flow that no longer exists as written:
-  // - `auth_mode: 'mobius_sso'` was never a real value; the backend only
-  //   ever returns 'local' or 'mobius' (backend/app/routes/auth.py:159-163).
-  // - The auto-redirect to `/api/auth/sso/start` it waited for doesn't
-  //   exist either; the real login-start route is
-  //   `/api/auth/mobius/login/start` (auth.py:1226), and that route itself
-  //   404s without an *already-configured* owner -- it can't be the answer
-  //   for this configured:false window.
-  //
-  // The scenario this was trying to protect is real, though: backend/app/
-  // routes/auth.py:146-164's setup_status doc comment says a managed
-  // deployment with no owner yet "must still close the local setup path
-  // and present the managed login rather than an attacker-creatable
-  // password owner" -- but frontend/src/App.jsx:362 renders <SetupWizard>
-  // unconditionally whenever configured===false, and SetupWizard.jsx has
-  // no auth_mode branch at all. So today, a managed deployment caught in
-  // the window before its external broker link completes (_ensure_managed_
-  // owner, auth.py:167-229) shows the local password setup form instead of
-  // any managed-sign-in messaging.
-  //
-  // This is NOT an exploitable gap: POST /api/auth/setup independently
-  // 403s with "Managed sign-in is enabled for this deployment" whenever
-  // mobius_sso_enabled (auth.py:297-301), so submitting that form cannot
-  // actually create a local owner. It is a real UX gap: the owner sees a
-  // password-setup form that can only fail, with no explanation.
-  //
-  // Fixing this needs an actual product decision on what that waiting
-  // screen should say/do (poll setup/status? show a static message?),
-  // which is out of scope here. Marked fixme rather than deleted or
-  // rewritten to assert the current fall-through as correct, so this
-  // stays visible until that screen exists.
+  // A managed deployment with no owner yet must present managed sign-in, not
+  // the local password setup. Today the setup wizard renders for any
+  // configured:false state. POST /api/auth/setup still refuses a local owner
+  // under managed sign-in, so this is a UX gap, not an access gap; the waiting
+  // screen needs a product decision before this can pass.
   test.fixme(
     'managed deployment shows a managed-sign-in screen while the broker link is pending, not the local password setup form',
     async ({ page }) => {

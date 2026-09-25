@@ -6,7 +6,7 @@
  * and POST must mirror that state or a terminal refresh correctly turns their
  * transient question card into read-only history.
  */
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
@@ -35,18 +35,9 @@ export async function mockPendingQuestionState(page, questionId) {
 
     const path = new URL(request.url()).pathname
     const runtime = {
-      running: false,
+      ...runtimeSnapshot({ pending_question_id: pendingQuestionId }),
       active_goal_objective: null,
-      pending_messages: [],
-      pending_question_id: pendingQuestionId,
       updated_at: null,
-      // ChatView's runtimeSnapshot() (chatRuntimeState.js) requires this
-      // field to be a safe non-negative integer or the whole snapshot is
-      // treated as unparseable and throws CHAT_RUNTIME_OUT_OF_ORDER. The
-      // real backend always includes it (routes/chats.py
-      // _latest_run_snapshot defaults to 0 for a chat with no
-      // ChatRunUpdate row yet).
-      runtime_revision: 0,
     }
     return route.fulfill({
       status: 200,

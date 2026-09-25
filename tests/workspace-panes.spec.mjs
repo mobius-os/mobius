@@ -22,7 +22,7 @@ import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
-import { PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
+import { DRAG_HOLD_HAPTIC_MS, PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
 import { settledBox } from './_geometry.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -94,34 +94,21 @@ async function holdLogo(page, brand) {
   const startedInBuilder = await brand.evaluate(element => (
     element.classList.contains('shell__brand--builder')
   ))
-  // Settled, for the same reason the drag helpers measure that way: the brand
-  // sits in the shell header beside the connectivity status, which resizes as
-  // connectivity resolves and slides the logo sideways. A press aimed at a
-  // stale centre misses the logo, so no hold ever starts and this reads as the
-  // hold class never appearing -- indistinguishable from a slow host, which is
-  // why widening the budget alone never settled it.
+  // The brand shares the header with the connectivity status, which resizes as
+  // it resolves; press the settled centre so the hold actually starts.
   const box = await settledBox(brand)
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   await page.mouse.down()
-  // Under a loaded CI runner the 450ms hold can complete between pointerdown
-  // returning and the first assertion. Accept either owned boundary: the live
-  // hold class or the mode flip it commits, then require the completed flip.
-  //
-  // Reproduced locally (--repeat-each=3): a bare 3000ms budget flakes under the
-  // resource contention of concurrent local Docker e2e runs — the pointerdown's
-  // CDP round trip alone can eat a meaningful slice of that window before the
-  // page-side rAF loop ever starts ticking, leaving too little of the 3s left
-  // for the 450ms hold to land. Widened rather than restructured: the predicate
-  // itself already accepts the earliest-observable boundary; this is purely a
-  // slow-host allowance, not a logic gap.
+  // A loaded runner can complete the 450ms hold before the first read, so accept
+  // either the live hold class or the flip it commits, then require the flip.
   await expect.poll(() => brand.evaluate((element, wasBuilder) => (
     element.classList.contains('is-holding')
       || element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 8000 }).toBe(true)
+  ), startedInBuilder), { timeout: 3000 }).toBe(true)
   await expect.poll(() => brand.evaluate((element, wasBuilder) => (
     !element.classList.contains('is-holding')
       && element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 8000 }).toBe(true)
+  ), startedInBuilder), { timeout: 3000 }).toBe(true)
   await page.mouse.up()
 }
 
@@ -917,16 +904,9 @@ async function touchDrag(
   const cdp = await page.context().newCDPSession(page)
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
   const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
-  // The press-and-hold drag stage is a bare setTimeout(PRESS_DRAG_HOLD_MS)
-  // inside the pointer session, with no DOM marker, so a fixed sleep only
-  // GUESSES that it has fired. Under main-thread load that timer runs late,
-  // the first move lands while `held` is still false, and touchTabMoveIntent
-  // reads the move as a scroll -- the drag never starts and the case fails
-  // with the tab order simply unchanged, which is what made these flaky.
-  // navigator.vibrate(8) is the real side effect production performs at that
-  // exact moment (arm's own cue is vibrate(10), so the two never alias), so
-  // observe it instead of racing it. The stage stays open until
-  // PRESS_MENU_HOLD_MS, leaving a wide window for the move that follows.
+  // The drag stage is a bare timer with no DOM marker; observe its haptic
+  // (the arm cue differs) instead of sleeping past it. The stage stays open
+  // until PRESS_MENU_HOLD_MS, leaving room for the move that follows.
   if (awaitDragHold) {
     await page.evaluate(() => {
       window.__dragHoldCues = []
@@ -943,8 +923,8 @@ async function touchDrag(
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
   if (awaitDragHold) {
     await page.waitForFunction(
-      () => (window.__dragHoldCues || []).includes(8),
-      null,
+      cue => (window.__dragHoldCues || []).includes(cue),
+      DRAG_HOLD_HAPTIC_MS,
       { timeout: 5000 },
     )
   }
@@ -1137,13 +1117,8 @@ test.describe('Workspace drag (PR3)', () => {
   test('dragging a tab onto another strip inserts it there (move, no new pane)', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragStrip')
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    // Resolve the destination strip AFTER the drag arms. Arming is not inert --
-    // it builds the scene and can re-tile the workspace (in single mode it
-    // unfolds the builder world outright), so a box measured beforehand can
-    // describe a layout that no longer exists by the time the pointer travels.
-    // A stale target lands the tab back in its own pane, which is exactly the
-    // p0-instead-of-p1 result this case saw under load. resolveTarget exists
-    // for this; the caret cases already use it.
+    // Resolve the destination strip after the drag arms: arming can re-tile the
+    // workspace, so an earlier box may describe a layout that no longer exists.
     await mouseDrag(page, src, 0, 0, {
       resolveTarget: async () => {
         const strip = await settledBox(page.locator('[data-pane-strip="p1"]'))
@@ -1248,10 +1223,7 @@ test.describe('Workspace drag (PR3)', () => {
     const { c, b } = await bootThreeTab(page, 'touchDrag')
     await page.setViewportSize(PHONE)
     await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
-    // A viewport switch re-lays out every strip (phone projection, tab widths),
-    // and a box read during that reflow is stale by the time the gesture
-    // travels -- under load the drop lands short and nothing moves. Settle
-    // first, then measure.
+    // A viewport switch re-lays out every strip; measure after it settles.
     await waitStripSettled(page)
     const target = await settledBox(page.locator(`[data-tab-key="chat:${b.id}"]`))
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
@@ -1271,10 +1243,7 @@ test.describe('Workspace drag (PR3)', () => {
   test('phone horizontal touch-drag reorders tabs in the same strip after a short hold', async ({ page }) => {
     const { a, c } = await bootThreeTab(page, 'touchReorder')
     await page.setViewportSize(PHONE)
-    // A viewport switch re-lays out every strip (phone projection, tab widths),
-    // and a box read during that reflow is stale by the time the gesture
-    // travels -- under load the drop lands short and nothing moves. Settle
-    // first, then measure.
+    // A viewport switch re-lays out every strip; measure after it settles.
     await waitStripSettled(page)
     const target = await settledBox(page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
@@ -1333,10 +1302,7 @@ test.describe('Workspace drag (PR3)', () => {
     const divider = page.locator('.workspace__divider').first()
     await expect(divider).toBeVisible({ timeout: 4000 })
     const before = (await readWs(page)).layout.ratio
-    // A viewport switch re-lays out every strip (phone projection, tab widths),
-    // and a box read during that reflow is stale by the time the gesture
-    // travels -- under load the drop lands short and nothing moves. Settle
-    // first, then measure.
+    // A viewport switch re-lays out every strip; measure after it settles.
     const box = await settledBox(divider)
     await touchDrag(page, divider, box.x + box.width / 2, box.y + box.height / 2 + 90)
     await expect.poll(async () => (await readWs(page)).layout.ratio, {
@@ -1456,14 +1422,8 @@ test.describe('Workspace view-mode toggle', () => {
     const chat = await createTaggedChat(page, 'phonePreview')
     const appId = 990111
     await mockApps(page, [{ id: appId, name: 'Phone Preview', chatId: chat.id }])
-    // The preview CTA is the composer's icon-drop button, and its source of
-    // truth is this chat's app-artifact rows — not the app list and not the
-    // app_preview_ready event, which only places the app in the workspace.
-    // projectChatAppArtifacts derives has_unseen_chat_update from
-    // `seen_at !== touched_at`, and appArtifactAttentionDecision queues only an
-    // app whose touch ADVANCED since the last poll, so an unseen touch is what
-    // mounts the button. This app exists client-side only, so the real endpoint
-    // answers [] and the CTA could never appear.
+    // The preview CTA is driven by this chat's app-artifact rows: an unseen,
+    // advanced touch mounts it. The app exists only client-side, so mock them.
     await page.route(
       new RegExp(`/api/apps/chat-artifacts/${chat.id}$`),
       route => (route.request().method() === 'GET'
@@ -1764,15 +1724,9 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
 
     // Wedge sequence: re-enter, then exit -> re-enter -> exit with sub-beat gaps.
-    // At no moment may the two deal classes co-exist (mutual exclusion), and it
-    // must always settle collapsed. The sub-beat gaps below (90ms/20ms/60ms) are
-    // deliberate gesture timing — they place the re-enter/exit presses inside the
-    // exit beat to reproduce the wedge race — so keep them; what changes is HOW
-    // the mutual-exclusion invariant is checked: a MutationObserver watching
-    // every class-list mutation for the whole sequence (the same continuous-
-    // observation pattern app-apply-lifecycle.spec.mjs uses for its frame-add
-    // watcher) instead of 3 point-in-time snapshots that could straddle the real
-    // overlap window under CI load.
+    // The two deal classes must never co-exist and must settle collapsed. The
+    // sub-beat gaps (90ms, 80ms) place the presses inside the exit beat; a
+    // MutationObserver checks exclusion continuously, not by snapshot.
     await page.evaluate(() => {
       window.__mobiusBuilderPhaseWitness = { sawBoth: false }
       const observer = new MutationObserver(() => {
@@ -1788,8 +1742,7 @@ test.describe('Workspace view-mode toggle', () => {
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit1
     await page.waitForTimeout(90)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // re-enter within the exit beat
-    await page.waitForTimeout(20)
-    await page.waitForTimeout(60)
+    await page.waitForTimeout(80)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit2
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)

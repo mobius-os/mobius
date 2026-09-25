@@ -5,7 +5,7 @@
  * cannot move the card before the continuation actually renders.
  */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
-import { testChatAgentSettings, installMockAgentProvider } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings, installMockAgentProvider, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -165,11 +165,8 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          // Echo the ACCEPTED message. The send intent is retired by
-          // correlating this response back to the cid that was posted; a bare
-          // { status: 'started' } leaves it unretired, so the outbox drain
-          // re-sends the same turn and the case sees two POSTs where the
-          // contract is one. Sibling fixtures already answer this shape.
+          // Echo the accepted message so the send intent retires; otherwise the
+          // outbox re-sends the turn.
           body: JSON.stringify({ status: 'started', message: acceptedMessage }),
         })
       }
@@ -198,11 +195,8 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       height: scenario.viewport.initialHeight,
     })
     const runtimeState = () => ({
-      running: turnStarted,
+      ...runtimeSnapshot({ running: turnStarted, pending_question_id: pendingQuestionId }),
       active_goal_objective: null,
-      pending_messages: [],
-      pending_question_id: pendingQuestionId,
-      runtime_revision: 0,
       updated_at: null,
     })
     await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {

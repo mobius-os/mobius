@@ -8,7 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const NAV_CHATS = [
@@ -27,48 +27,9 @@ const NAV_CHATS = [
   running: false,
 }))
 
-// Carries the same chat-detail contract as emptyChatDetail below. The two had
-// drifted: this one still answered with only the five fields the surface needed
-// when it was written, so a chat opened through it never reached display-ready.
-// Shell only marks its initial visual ready through that callback once a
-// concrete chat is active, and App holds #splash up until it fires -- so the
-// launch cover stayed over the whole viewport and swallowed every click, which
-// is why these cases died on `<div id="splash"> intercepts pointer events`
-// rather than on anything to do with navigation. The New Chat cases passed
-// throughout because they use emptyChatDetail, which was kept current.
-function navChatDetail(id, assistantContent = 'Fixture response') {
-  return {
-    messages: [
-      { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
-      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
-    ],
-    total: 2,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-    pending_question_id: null,
-    runtime_revision: 0,
-    session_id: null,
-    provider: 'codex',
-    created_by_app_id: null,
-    agent_settings_json: { model: 'gpt-5.6-sol' },
-    effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
-    has_assistant_turns: true,
-    auto_resume_on_limit: false,
-    auto_resume_on_restart: true,
-    updated_at: '2026-01-01T00:02:00Z',
-  }
-}
-
 function emptyChatDetail() {
   return {
-    messages: [],
-    total: 0,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-    pending_question_id: null,
-    runtime_revision: 0,
+    ...emptyChatPage(),
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -78,6 +39,20 @@ function emptyChatDetail() {
     auto_resume_on_limit: false,
     auto_resume_on_restart: true,
     updated_at: '2026-01-01T00:02:00Z',
+  }
+}
+
+// A chat opened with history must carry the full chat-detail contract too, or
+// the shell never reaches display-ready and the launch cover keeps the page.
+function navChatDetail(id, assistantContent = 'Fixture response') {
+  return {
+    ...emptyChatDetail(),
+    messages: [
+      { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
+      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
+    ],
+    total: 2,
+    has_assistant_turns: true,
   }
 }
 
@@ -230,11 +205,8 @@ async function setup(
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: false,
+        ...runtimeSnapshot(),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -391,7 +363,7 @@ async function closeDrawerToggle(page) {
   if (wasOpen) await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 }
 
-/** Trigger browser back via history.back().
+/** Traverse shell history with history.back()/forward().
  *  Uses evaluate to fire within the SPA rather than Playwright's page.goBack
  *  which triggers a real page navigation.
  *
@@ -402,29 +374,21 @@ async function closeDrawerToggle(page) {
  *  dispatch synchronously-ish) instead of guessing a flat delay is enough for
  *  the app's history listener + React to settle, then allow one settle frame
  *  for the render it triggers to commit. */
-async function goBack(page) {
-  await page.evaluate(() => {
+async function traverseHistory(page, direction) {
+  await page.evaluate((dir) => {
     window.__navPopstateSeen = false
     window.addEventListener('popstate', () => { window.__navPopstateSeen = true }, { once: true })
-    history.back()
-  })
+    if (dir === 'back') history.back()
+    else history.forward()
+  }, direction)
   await page.waitForFunction(() => window.__navPopstateSeen === true, { timeout: 5000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
 }
 
-async function goForward(page) {
-  await page.evaluate(() => {
-    window.__navPopstateSeen = false
-    window.addEventListener('popstate', () => { window.__navPopstateSeen = true }, { once: true })
-    history.forward()
-  })
-  await page.waitForFunction(() => window.__navPopstateSeen === true, { timeout: 5000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
-}
+const goBack = page => traverseHistory(page, 'back')
+const goForward = page => traverseHistory(page, 'forward')
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -473,11 +437,8 @@ test.describe('Navigation basics', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running: runtimeRunning,
+          ...runtimeSnapshot({ running: runtimeRunning }),
           active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
-          runtime_revision: 0,
           updated_at: null,
         }),
       })
@@ -552,10 +513,8 @@ test.describe('Navigation basics', () => {
   test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
     const chats = NAV_CHATS.map((chat, index) => ({
       ...chat,
-      running: index < 2,
+      ...runtimeSnapshot({ running: index < 2 }),
       owner_input_kind: index === 0 ? 'secure_input' : null,
-      pending_question_id: null,
-      runtime_revision: 0,
     }))
     await setup(page, { width: 1512, height: 861 }, { chats })
 
@@ -1390,13 +1349,8 @@ test.describe('Desktop sidebar navigation', () => {
       pinned_at: index === 1 ? '2026-09-12T12:00:30' : null,
     }))
     let listRequests = 0
-    // Identify the focus refresh by ARMING, not by count. The shell cancels
-    // and reissues its drawer read whenever the system connection opens
-    // (fetchFreshShellList: "Cancellation is part of the read"), so boot can
-    // make one list request or two depending on when that connection lands.
-    // On CI the second boot read became "request #2" and was aborted by the
-    // page before this case even fired its focus event -- the held request was
-    // already dead, fulfill threw, and staleListFinished never flipped.
+    // Identify the focus refresh by arming the hold, not by request count:
+    // boot may issue one or two (cancelled) list reads.
     let holdArmed = false
     let staleListHeld = false
     let staleListFinished = false

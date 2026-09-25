@@ -4,6 +4,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -76,11 +77,8 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: true,
+        ...runtimeSnapshot({ running: true }),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
       }),
     })
   })
@@ -94,10 +92,7 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
         messages: [userMessage],
         total: 1,
         offset: 0,
-        running: true,
-        pending_messages: [],
-        pending_question_id: null,
-        runtime_revision: 0,
+        ...runtimeSnapshot({ running: true }),
         provider: 'claude',
       }),
     })
@@ -165,10 +160,16 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     const blocks = row?.querySelector('.md-blocks')
     const rowRect = row?.getBoundingClientRect()
     const paragraphRect = paragraph?.getBoundingClientRect()
+    const meta = row?.querySelector('.chat__msg-meta')
+    const metaStyle = meta ? getComputedStyle(meta) : null
     return {
       blocksHeight: blocks?.getBoundingClientRect().height ?? -1,
-      // Measured within the answer row: the settled turn also reveals its
-      // metadata footer below the answer, which moves the whole followed row.
+      rowHeight: rowRect?.height ?? -1,
+      // The metadata row's net contribution to the answer row's flow.
+      metaFlow: metaStyle
+        ? parseFloat(metaStyle.marginTop) + meta.getBoundingClientRect().height
+          + parseFloat(metaStyle.marginBottom)
+        : 0,
       paragraphOffset: paragraphRect && rowRect
         ? paragraphRect.top - rowRect.top
         : null,
@@ -186,14 +187,15 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   )))
   const settled = await measure()
 
-  // Terminal promotion also reveals the turn's metadata footer
-  // (.chat__msg-meta--visible), a few pixels taller than its reserved room, and
-  // a followed view scrolls with it. That footer is separate from the cursor.
-  // The cursor contract is that removing it leaves the answer's own flow alone:
-  // the rendered blocks keep their height, the followed paragraph keeps its
-  // place in the row, and the view is still pinned to the live tail.
+  // Removing the cursor leaves the answer's own flow alone: the rendered blocks
+  // keep their height and the followed paragraph keeps its place in the row.
   expect(Math.abs(settled.blocksHeight - live.blocksHeight)).toBeLessThanOrEqual(1)
   expect(Math.abs(settled.paragraphOffset - live.paragraphOffset)).toBeLessThanOrEqual(1)
-  // bottomGap is derived from fractional scrollTop, hence the sub-pixel allowance.
+  // The settled turn also mounts its metadata row, whose top margin is not
+  // cancelled by its reserved height. That is the ONLY growth accepted: the row
+  // grows by exactly the metadata row's flow, and the followed view stays
+  // pinned to the tail (bottomGap derives from fractional scrollTop).
+  expect(Math.abs((settled.rowHeight - live.rowHeight) - (settled.metaFlow - live.metaFlow)))
+    .toBeLessThanOrEqual(1)
   expect(Math.abs(settled.bottomGap - live.bottomGap)).toBeLessThanOrEqual(1.5)
 })
