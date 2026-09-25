@@ -52,14 +52,25 @@ def _post(path: str, payload: dict) -> dict:
 def main() -> None:
   parser = argparse.ArgumentParser(
     description=(
-      "Commit the resolution checkout (if needed), merge any edits made to the "
-      "live app meanwhile, and install the update."
+      "Install a committed update resolution, merging any edits made to the "
+      "live app meanwhile."
     ),
   )
   parser.add_argument("source_dir", help="/data/apps/<slug> or its resolution checkout")
-  # Accepted for resolver chats started before finishing became the only step.
+  # Resolver chats started on an earlier release may still use these.
   parser.add_argument("--finalize", action="store_true", help=argparse.SUPPRESS)
+  parser.add_argument("--reviewed-tree", help=argparse.SUPPRESS)
+  parser.add_argument("--review", action="store_true", help=argparse.SUPPRESS)
+  parser.add_argument("--policy", help=argparse.SUPPRESS)
   args = parser.parse_args()
+  if args.review or args.policy:
+    print(
+      "Policy and review steps no longer exist. Reread "
+      "/data/shared/skills/resolving-app-git.md: reconcile, commit, then run "
+      "this command with only the app path.",
+      file=sys.stderr,
+    )
+    raise SystemExit(2)
 
   try:
     path = Path(args.source_dir).resolve(strict=True)

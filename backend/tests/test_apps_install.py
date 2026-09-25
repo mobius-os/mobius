@@ -2159,8 +2159,9 @@ def test_trusted_origin_first_adoption_conflict_resolves_and_finalizes(
   checkout = install.pending_update_worktree(repo)
   assert app_git.merge_in_progress(checkout)
   assert not (repo / ".git" / "MERGE_HEAD").exists()
-  (checkout / "index.jsx").write_text(resolved, encoding="utf-8")
-  (checkout / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  _resolve_in(checkout, {
+    "index.jsx": resolved, "mobius.json": json.dumps(manifest),
+  })
 
   db.expire_all()
   row = db.query(models.App).filter(models.App.id == app_id).one()
@@ -2946,6 +2947,11 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
   assert pending_update.json()["pending_update_state"] == "needs_resolution"
+  _resolve_in(checkout, {})
+  resolved_update = client.get(
+    f"/api/apps/{payload['id']}/update-check", headers=auth,
+  )
+  assert resolved_update.json()["pending_update_state"] == "replay_pending"
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
   )
@@ -3048,7 +3054,7 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   checkout = app_dir / ".git" / "mobius-pending-update" / "worktree"
-  (checkout / "index.jsx").write_text(resolved)
+  _resolve_in(checkout, {"index.jsx": resolved})
   pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
   bundle = Path(installed.json()["compiled_path"])
   old_bundle = bundle.read_bytes()
@@ -3159,7 +3165,7 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   checkout = app_dir / ".git" / "mobius-pending-update" / "worktree"
-  (checkout / "index.jsx").write_text(resolved)
+  _resolve_in(checkout, {"index.jsx": resolved})
 
   replay_responses = {
     base + "index.jsx": (200, jsx_v2.encode()),
@@ -3368,6 +3374,14 @@ def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
 
 
+def _resolve_in(checkout: Path, files: dict[str, str]) -> None:
+  """Act as the resolver: write the reconciled files and commit them."""
+  for rel, text in files.items():
+    (checkout / rel).write_text(text, encoding="utf-8")
+  app_git._run(checkout, "add", "-A")
+  app_git._run(checkout, "commit", "-q", "--no-edit")
+
+
 def _conflicted_app(client, auth, base, slug):
   manifest = {**MANIFEST_NEWS, "id": slug}
   installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
@@ -3403,22 +3417,28 @@ def _finish(client, auth, app_dir, replay):
     )
 
 
-def test_finishing_refuses_markers_and_incomplete_resolutions(
+def test_finishing_installs_only_a_committed_resolution(
   client, auth, bypass_url_validation,
 ):
-  """Finishing commits the checkout itself, but never markers and never an
-  answer that does not contain the update."""
+  """Finish never stages on the resolver's behalf: uncommitted work, committed
+  markers, and an answer without the update are all refused."""
   from app import install
 
   base = "https://finish-guard.test/repo/"
   app_id, app_dir, replay = _conflicted_app(client, auth, base, "finish-guard")
   checkout = install.pending_update_worktree(app_dir)
 
-  unresolved = _finish(client, auth, app_dir, replay)
-  assert unresolved.status_code == 409, unresolved.text
-  assert unresolved.json()["detail"]["code"] == "conflicts_remaining"
+  uncommitted = _finish(client, auth, app_dir, replay)
+  assert uncommitted.status_code == 409, uncommitted.text
+  assert uncommitted.json()["detail"]["code"] == "resolution_not_committed"
 
-  app_git._run(checkout, "merge", "--abort")
+  app_git._run(checkout, "add", "-A")
+  app_git._run(checkout, "commit", "-q", "--no-edit")
+  markers = _finish(client, auth, app_dir, replay)
+  assert markers.status_code == 409, markers.text
+  assert markers.json()["detail"]["code"] == "conflicts_remaining"
+
+  app_git._run(checkout, "reset", "-q", "--hard", "HEAD~1")
   incomplete = _finish(client, auth, app_dir, replay)
   assert incomplete.status_code == 409, incomplete.text
   assert incomplete.json()["detail"]["code"] == "resolution_incomplete"
@@ -3427,12 +3447,159 @@ def test_finishing_refuses_markers_and_incomplete_resolutions(
   reopened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
   assert reopened.status_code == 200, reopened.text
   assert app_git.merge_in_progress(checkout)
-  (checkout / "index.jsx").write_text(
-    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
-  )
+  _resolve_in(checkout, {
+    "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  })
   finished = _finish(client, auth, app_dir, replay)
   assert finished.status_code == 200, finished.text
   assert "RESOLVED TITLE" in (app_dir / "index.jsx").read_text()
+
+  # A retry whose first response was lost reports the finished update.
+  again = _finish(client, auth, app_dir, replay)
+  assert again.status_code == 200, again.text
+  assert again.json()["mode"] == "updated"
+
+
+def test_interrupted_or_legacy_finish_converges_by_rerunning(
+  client, auth, bypass_url_validation,
+):
+  """When `main` already contains the update but the receipt remains (an
+  earlier release's resolver committed there, or an install was interrupted),
+  the update is ready to install rather than stuck."""
+  from app import install
+
+  base = "https://legacy-finish.test/repo/"
+  app_id, app_dir, replay = _conflicted_app(client, auth, base, "legacy-finish")
+  app_git.remove_overlay_worktree(app_dir, install.pending_update_worktree(app_dir))
+  # The earlier release merged in the served folder and committed there.
+  app_git._run(app_dir, "merge", "--no-commit", "--no-ff", "upstream", check=False)
+  (app_dir / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "LEGACY TITLE"),
+  )
+  assert app_git.commit_local(app_dir, "resolve app update")
+
+  state = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert state.json()["pending_update_state"] == "replay_pending"
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  finished = _finish(client, auth, app_dir, replay)
+  assert finished.status_code == 200, finished.text
+  assert "LEGACY TITLE" in (app_dir / "index.jsx").read_text()
+
+
+def _conflicted_app_with_local_file(client, auth, base, slug):
+  manifest = {**MANIFEST_NEWS, "id": slug}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_dir = Path(get_settings().data_dir) / "apps" / slug
+  (app_dir / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"),
+  )
+  (app_dir / "local-only.js").write_text("export const local = true\n")
+  upstream = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  conflicted = _update_v2(
+    client, auth, base, {**manifest, "version": "2.0.0"}, upstream,
+  )
+  assert conflicted.json()["mode"] == "conflict", conflicted.text
+  app_id = installed.json()["id"]
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  replay = {
+    base + "index.jsx": (200, upstream.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  return app_id, app_dir, replay, upstream
+
+
+def test_files_the_resolver_deletes_stay_deleted(client, auth, bypass_url_validation):
+  """The installed tree is the resolver's commit, deletions included."""
+  from app import install
+
+  base = "https://resolver-delete.test/repo/"
+  _app_id, app_dir, replay, _upstream = _conflicted_app_with_local_file(
+    client, auth, base, "resolver-delete",
+  )
+  checkout = install.pending_update_worktree(app_dir)
+  (checkout / "index.jsx").write_text(
+    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  )
+  app_git._run(checkout, "rm", "-q", "local-only.js")
+  _resolve_in(checkout, {})
+
+  finished = _finish(client, auth, app_dir, replay)
+  assert finished.status_code == 200, finished.text
+  assert not (app_dir / "local-only.js").exists()
+  assert "local-only.js" not in app_git._run(app_dir, "ls-files").stdout
+
+
+def test_taking_the_update_exactly_removes_local_only_files(
+  client, auth, bypass_url_validation,
+):
+  from app import install
+
+  base = "https://resolver-exact.test/repo/"
+  _app_id, app_dir, replay, upstream = _conflicted_app_with_local_file(
+    client, auth, base, "resolver-exact",
+  )
+  checkout = install.pending_update_worktree(app_dir)
+  app_git._run(checkout, "read-tree", "-u", "--reset", "upstream")
+  _resolve_in(checkout, {})
+
+  finished = _finish(client, auth, app_dir, replay)
+  assert finished.status_code == 200, finished.text
+  assert (app_dir / "index.jsx").read_text() == upstream
+  assert not (app_dir / "local-only.js").exists()
+
+
+def test_a_finish_that_stopped_after_its_receipt_is_repeat_safe(
+  client, auth, bypass_url_validation,
+):
+  """Cleanup removes the receipt first; leftover checkout residue must not
+  turn a finished update into an error or block package acceptance."""
+  from app import install
+
+  base = "https://finish-residue.test/repo/"
+  app_id, app_dir, replay = _conflicted_app(client, auth, base, "finish-residue")
+  checkout = install.pending_update_worktree(app_dir)
+  _resolve_in(checkout, {
+    "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  })
+  assert _finish(client, auth, app_dir, replay).status_code == 200
+  checkout.mkdir(parents=True)  # residue of a cleanup that stopped early
+
+  again = _finish(client, auth, app_dir, replay)
+  assert again.status_code == 200, again.text
+  assert not checkout.exists()
+  package = client.post(
+    "/api/apps/apply", headers=auth,
+    json={"source_dir": str(app_dir), "accept_local_package": True},
+  )
+  assert package.json().get("detail", {}).get("code") != "update_pending", package.text
+  assert client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "accept_reviewed_upstream_exact"},
+  ).status_code == 422
+
+
+def test_accepting_local_package_waits_for_the_pending_update(
+  client, auth, bypass_url_validation,
+):
+  """Finishing installs the reviewed package metadata, so accepting local
+  metadata meanwhile is refused instead of being silently overwritten."""
+  base = "https://package-wait.test/repo/"
+  _app_id, app_dir, _replay = _conflicted_app(client, auth, base, "package-wait")
+  ordinary = client.post(
+    "/api/apps/apply", headers=auth, json={"source_dir": str(app_dir)},
+  )
+  assert ordinary.status_code == 200, ordinary.text
+  package = client.post(
+    "/api/apps/apply", headers=auth,
+    json={"source_dir": str(app_dir), "accept_local_package": True},
+  )
+  assert package.status_code == 409, package.text
+  assert package.json()["detail"]["code"] == "update_pending"
 
 
 def test_overlapping_live_edit_sends_finish_back_to_the_resolver(
@@ -3447,9 +3614,9 @@ def test_overlapping_live_edit_sends_finish_back_to_the_resolver(
   app_id, app_dir, replay = _conflicted_app(client, auth, base, "late-overlap")
   checkout = install.pending_update_worktree(app_dir)
   entry = app_dir / "index.jsx"
-  (checkout / "index.jsx").write_text(
-    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
-  )
+  _resolve_in(checkout, {
+    "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  })
   late = JSX_MULTI.replace("ORIGINAL TITLE", "LATE TITLE")
   entry.write_text(late)
 
@@ -3459,9 +3626,9 @@ def test_overlapping_live_edit_sends_finish_back_to_the_resolver(
   assert entry.read_text() == late
 
   app_git._run(checkout, "merge", "main", check=False)
-  (checkout / "index.jsx").write_text(
-    JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED LATE TITLE"),
-  )
+  _resolve_in(checkout, {
+    "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED LATE TITLE"),
+  })
   finished = _finish(client, auth, app_dir, replay)
   assert finished.status_code == 200, finished.text
   assert "RESOLVED LATE TITLE" in entry.read_text()

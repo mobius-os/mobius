@@ -531,10 +531,10 @@ class AppConflictResolverChatOut(BaseModel):
 
 
 class AppConflictResolverChatRequest(BaseModel):
-  # Published App Store releases still send the whole-tree policy they used to
-  # choose. There is one resolution now (keep local work, take the update), so
-  # the field is accepted and ignored.
-  resolution_policy: str | None = Field(default=None, max_length=64)
+  # The published App Store still names the one resolution there is: keep
+  # local work while taking the update. Any other choice is refused rather
+  # than silently replaced.
+  resolution_policy: Literal["preserve_local"] | None = None
 
 
 class ProviderCodeRequest(BaseModel):

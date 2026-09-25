@@ -660,6 +660,18 @@ async def apply_source_revision(
       "`git commit` or undo it with `git merge --abort`, then apply again.",
       status_code=409,
     )
+  if accept_local_package and app is not None:
+    from app import install
+
+    if install.pending_update_receipt_file(source_path).is_file():
+      # Finishing the pending update installs its reviewed package metadata;
+      # accepting local metadata now would be silently overwritten by it.
+      raise AppApplyError(
+        "update_pending",
+        "Finish this app's pending Store update before accepting local "
+        "package declarations.",
+        status_code=409,
+      )
   if accept_local_package and (
     app is None or app.manifest_url is None
   ):

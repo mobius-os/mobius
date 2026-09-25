@@ -50,14 +50,26 @@ git -C "$W" diff upstream
 Local code that relies on something the update removed or changed must be
 adapted or dropped, and the owner told which.
 
-If the owner asks for the update exactly as published, take it with
-`git -C "$W" checkout upstream -- .` (and delete local-only files) before
-finishing; that discards their local source changes, so confirm first.
+If the owner wants the update exactly as published, replace the whole tree
+with it, which discards their local source changes (confirm first unless the
+prompt says they already chose it):
 
-## Finish
+```bash
+git -C "$W" read-tree -u --reset upstream
+```
 
-One command commits the checkout (no separate `git commit` needed), merges any
-edits made to the live app meanwhile, and installs the update:
+## Commit, then finish
+
+Stage exactly what you intend (`git -C "$W" status` shows every changed and
+untracked file) and commit. Git refuses while any path is unresolved:
+
+```bash
+git -C "$W" add <paths>
+git -C "$W" commit --no-edit
+```
+
+Then one command merges any edits made to the live app meanwhile and installs
+the update:
 
 ```bash
 python "$SCRIPTS_DIR/resolve_app_update.py" /data/apps/<slug>
@@ -68,9 +80,8 @@ assets, icon, seeds, schedule, and skills as one transaction; a failure leaves
 the previous app served and the resolution intact for a retry.
 
 If it reports `resolution_behind_local_edits`, someone edited the live app in
-the same places while you worked. Run `git -C "$W" merge main`, reconcile, and
-finish again. Any other refusal names what to fix; fix it in the checkout and
-run the same command.
+the same places while you worked. Run `git -C "$W" merge main`, reconcile,
+commit, and finish again. Any other refusal names what to fix.
 
 The successful JSON response (`"mode": "updated"`) is the completion signal:
 the private checkout and pending receipt are removed. Leave a short chat note

@@ -1242,33 +1242,62 @@ def pending_update_worktree(source_dir: str | Path) -> Path:
   return Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "worktree"
 
 
+_CONFLICT_MARKER = r"^(<{7,} |>{7,} )"
+
+
+def has_committed_conflict_markers(repo: str | Path, ref: str) -> bool:
+  """Whether ``ref`` commits a labelled conflict boundary; errors count."""
+  found = app_git._run(
+    Path(repo), "grep", "-qE", _CONFLICT_MARKER, ref, check=False,
+  )
+  return found.returncode != 1
+
+
 def committed_pending_resolution(
   source_dir: str | Path, upstream_commit: str,
 ) -> str | None:
   """The resolver's committed answer for ``upstream_commit``, if it has one.
 
-  Only a commit that contains the pending upstream and carries no conflict
-  markers counts; an in-progress merge or uncommitted edits do not.
+  The answer is the private checkout's commit, and only when it contains the
+  pending upstream, nothing is left uncommitted or mid-merge, and it commits no
+  conflict markers. Git has already refused to commit any unresolved path.
   """
   worktree = pending_update_worktree(source_dir)
   if (
     not (worktree / ".git").exists()
     or app_git.merge_in_progress(worktree)
+    or app_git.worktree_dirty(worktree)
     or app_git.ref_is_ancestor(worktree, upstream_commit, "HEAD") is not True
+    or has_committed_conflict_markers(worktree, "HEAD")
   ):
     return None
-  markers = app_git._run(
-    worktree, "grep", "-lE", r"^(<<<<<<< |>>>>>>> )", "HEAD", check=False,
-  )
-  if markers.returncode == 0:
-    return None
   return app_git._run(worktree, "rev-parse", "HEAD").stdout.strip()
+
+
+def pending_update_resolved(source_dir: str | Path, upstream_commit: str) -> bool:
+  """Whether nothing but installation is left for this pending update.
+
+  Either the private checkout holds a committed answer, or ``main`` already
+  contains the upstream: a resolver from an earlier release committed there,
+  or an install moved ``main`` and was interrupted before completing. In both
+  cases rerunning the installer promotes it; the receipt stays until then.
+  """
+  return (
+    app_git.ref_is_ancestor(source_dir, upstream_commit, app_git.LOCAL_BRANCH)
+    is True
+    or committed_pending_resolution(source_dir, upstream_commit) is not None
+  )
 
 
 def _drop_pending_update_worktree(source_dir: str | Path) -> None:
   worktree = pending_update_worktree(source_dir)
   if os.path.lexists(worktree):
     app_git.remove_overlay_worktree(source_dir, worktree)
+
+
+def pending_update_receipt_file(source_dir: str | Path) -> Path:
+  """The durable "not installed yet" marker of a pending update."""
+  return Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "receipt.json"
 
 
 def pending_conflict_update_receipt_present(source_dir: str | Path) -> bool:
@@ -1605,6 +1634,10 @@ def _verify_git_install_candidate(
 
 
 def clear_pending_conflict_update(source_dir: str | Path) -> None:
+  # The receipt is the durable "not installed yet" marker, so it goes first. A
+  # crash afterwards leaves only a stray checkout, which the next conflict or
+  # resolver replaces.
+  pending_update_receipt_file(source_dir).unlink(missing_ok=True)
   _drop_pending_update_worktree(source_dir)
   shutil.rmtree(
     Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
@@ -4441,6 +4474,16 @@ async def install_from_manifest(
           merge_base_override=git_merge_base_override,
         )
 
+      if (
+        mode != "conflict" and merge_applied and merge_existing_source
+        and not force_core_store_update
+      ):
+        # The merged tree is the complete answer, so every tracked path it
+        # lacks goes: a file a resolver deleted as well as one upstream removed.
+        dropped_source_paths |= await asyncio.to_thread(
+          _read_upstream_source_paths, git_source_dir, app_git.LOCAL_BRANCH,
+        ) - set(source_tree)
+
       # The disk-write phase runs INSIDE the same held lock for the Git path so
       # no source commit interleaves between the merge decision and the write; a
       # conflict skips it (the source stays the local edits, served by the prior
@@ -4582,7 +4625,6 @@ async def install_from_manifest(
     # Success: drop any .bak snapshots we made — the new bundle is
     # now the canonical one.
     journal.cleanup_superseded()
-    clear_pending_conflict_update(app.source_dir)
 
   except CompileError as exc:
     app_name = str(
@@ -4619,6 +4661,12 @@ async def install_from_manifest(
     candidate=candidate,
     warnings=warnings,
   )
+  # Only now is the update fully converged. Until the receipt goes, a retry
+  # reruns this whole install, post-commit effects included.
+  try:
+    clear_pending_conflict_update(app.source_dir)
+  except (OSError, subprocess.SubprocessError):
+    log.warning("install: could not clear the finished pending update", exc_info=True)
 
   return InstallResult(
     app=app,
