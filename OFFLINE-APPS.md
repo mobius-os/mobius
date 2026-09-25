@@ -1,12 +1,12 @@
 # Offline mini-apps
 
 Offline support is an app-level product choice, not a requirement for every
-Möbius app. This document defines the shared platform/app contract for apps
-that choose to support it. The implementation map remains in
-[`ARCHITECTURE.md`](ARCHITECTURE.md); practical instructions live in the seeded
+Möbius app. For apps that choose it, this is the canonical platform/app
+contract. [`ARCHITECTURE.md`](ARCHITECTURE.md) explains the underlying platform
+implementation; the seeded
 [`building-apps`](backend/scripts/seed-skills/building-apps.md) and
 [`building-apps-quickstart`](backend/scripts/seed-skills/building-apps-quickstart.md)
-guides.
+guides turn the contract into build steps.
 
 ## Ownership
 

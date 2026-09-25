@@ -481,7 +481,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 |------|------|
 | `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps inside the shared opaque frame used by both workspace and standalone hosts. Offline outbox + read-through cache live here |
 | `frontend/public/app-frame.html` | The opaque mini-app frame: error UI, parent module broker, runtime bootstrap, and postMessage isolation |
-| `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
+| `frontend/src/sw.js` | Service worker: precache + mini-app code and standalone cache strategies |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `connectivityStore.js`, `navHistory.js`, `errorLog.js`, etc. |
 
@@ -1680,9 +1680,9 @@ they race the shell's indexed cursor and break Safari's source-state fallback.
 
 ## Service worker + offline
 
-These service-worker mechanics sit beneath the app-facing
-[offline mini-app contract](OFFLINE-APPS.md), which defines the ownership,
-storage, conflict, UI, and verification model.
+For the app-facing contract—what Möbius supplies and what each app owns—see
+[Offline mini-apps](OFFLINE-APPS.md). This section documents the service-worker
+implementation beneath that contract.
 
 Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/app_runtime.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 

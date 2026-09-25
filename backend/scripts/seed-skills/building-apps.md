@@ -322,7 +322,9 @@ platform any of those concepts. Keep the receipt bounded and print it last.
 
 Persist app data through `window.mobius.storage` — injected into EVERY mini-app before your module loads, so make it your DEFAULT (not raw `fetch`). It's a read-through wrapper over the storage API: reads are instant (local cache, revalidated in the background) and keep working offline (last-known value overlaid with pending writes — read-your-writes); writes made offline queue and auto-sync on reconnect. Raw `fetch('/api/storage/...')` inside an app has no offline queue/cache and silently drops offline writes.
 
-**Boundary:** Every app owns its data model. Offline support is a product choice, not a default requirement; choose it when it materially benefits the app's use case or preserves an existing product promise. Möbius supplies isolated cached storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. When offline behavior is part of the app's contract, the app chooses what to warm, whether partial data is safe, how conflicts reconcile, and its offline UI. Keep domain merge logic out of the platform.
+Storage caching and queuing apply to every app; they do not depend on
+`offline_capable`. That flag is a separate product and standalone-surface
+promise, covered under *Offline-capable apps* below.
 
 ```jsx
 // read: your data, or null if the path is absent (never written/removed/404).
@@ -534,7 +536,12 @@ Online-only apps may still use an explicit `https://esm.sh/...` dynamic import w
 
 ## Offline-capable apps (opt-in)
 
-Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json` only after testing a cold offline reload; `apply_app.py` applies it with the accepted source revision.
+Offline support is an app-level product choice. Before implementing it, read
+the canonical contract at `/data/platform/OFFLINE-APPS.md`; it defines the
+platform/app ownership boundary, completeness and conflict rules, UI states,
+and verification matrix.
+
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json` only after running the contract's cold-reload verification for every surface the app claims to support; `apply_app.py` applies it with the accepted source revision.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
 
