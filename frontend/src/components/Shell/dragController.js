@@ -49,6 +49,10 @@ export const PRESS_DRAG_HOLD_MS = 180
 // `contextmenu` preventDefault plus callout/selection disable in the binding),
 // not by staying under the browser's own threshold, so this can sit past it.
 export const PRESS_MENU_HOLD_MS = 600
+// Touch haptics: a distinct pulse when a hold grabs the item (drag stage) and
+// when movement arms a drag, so the two cues are never confused.
+export const DRAG_HOLD_HAPTIC_MS = 8
+export const DRAG_ARM_HAPTIC_MS = 10
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop; the

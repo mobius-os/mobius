@@ -4,7 +4,7 @@ import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
   flingReleaseVelocity,
-  PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
+  PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS, DRAG_HOLD_HAPTIC_MS, DRAG_ARM_HAPTIC_MS,
   crossedDrawerExit,
   rootEdgeAllowed,
 } from './dragController.js'
@@ -400,7 +400,7 @@ export default function useWorkspaceDrag({
         ensureOverlays()
         positionChip(start.x, start.y, isTouch, key)
         preGlow(scene)
-        if (isTouch && !held && navigator.vibrate) { try { navigator.vibrate(10) } catch { /* unsupported */ } }
+        if (isTouch && !held && navigator.vibrate) { try { navigator.vibrate(DRAG_ARM_HAPTIC_MS) } catch { /* unsupported */ } }
         if (sourceKind === 'drawer') {
           const drawer = document.getElementById('navigation-drawer')
           if (drawer) {
@@ -421,7 +421,7 @@ export default function useWorkspaceDrag({
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
-          if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
+          if (navigator.vibrate) { try { navigator.vibrate(DRAG_HOLD_HAPTIC_MS) } catch { /* unsupported */ } }
           holdTimer = setTimeout(() => {
             if (cancelled || cleaned || armed || scrolling) return
             const point = { ...lastPoint }
