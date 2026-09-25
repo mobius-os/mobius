@@ -80,7 +80,6 @@ from app.manifest_contract import (
   REQUIRED_STRING_FIELDS,
   ManifestContractError,
   job_interpreter,
-  require_executable_job,
   skill_member_paths,
   static_asset_entries,
   validate_manifest_contract,
@@ -3562,12 +3561,6 @@ async def _activate_install_source(
         static_dests=list(plan.static_assets),
         job_name=plan.job_name,
       )
-
-  if plan.job_name:
-    try:
-      require_executable_job((source_dir / plan.job_name).stat().st_mode)
-    except (OSError, ManifestContractError) as exc:
-      raise HTTPException(400, str(exc)) from exc
 
   _write_static_assets(
     source_dir,

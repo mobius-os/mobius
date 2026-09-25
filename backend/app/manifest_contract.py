@@ -121,12 +121,6 @@ def job_interpreter(job: bytes) -> tuple[str, ...]:
   return interpreter
 
 
-def require_executable_job(mode: int) -> None:
-  """Reject a scheduled job that its accepted package cannot execute."""
-  if not mode & 0o111:
-    _fail("Schedule job is not executable.")
-
-
 def validate_slug_field(value, field: str) -> None:
   if not isinstance(value, str) or not value:
     _fail(f"Manifest `{field}` must be a non-empty string.")

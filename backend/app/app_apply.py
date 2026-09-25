@@ -42,7 +42,6 @@ from app.manifest_contract import (
   STATIC_ASSETS_TOTAL_MAX,
   ManifestContractError,
   job_interpreter,
-  require_executable_job,
   static_asset_entries,
   validate_manifest_contract,
   validate_repo_relative_path,
@@ -716,9 +715,7 @@ async def apply_source_revision(
         job_name = schedule.get("job") if isinstance(schedule, dict) else None
         if job_name:
           try:
-            job_path = snapshot_dir / job_name
-            job_interpreter(job_path.read_bytes())
-            require_executable_job(job_path.stat().st_mode)
+            job_interpreter((snapshot_dir / job_name).read_bytes())
           except (OSError, ManifestContractError) as exc:
             raise AppApplyError(
               "invalid_schedule_job", str(exc), status_code=422,
