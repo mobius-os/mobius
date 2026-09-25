@@ -683,6 +683,19 @@ def _chat_detail_response(
       projected_message["wait_summaries"] = summaries
       next_page[relative_index] = projected_message
     page = next_page
+  from app.continuations import recovery_reasons_by_run_id
+  recovery_reasons = recovery_reasons_by_run_id(db, chat.id, [
+    message["id"] for message in page
+    if message.get("role") == "assistant" and isinstance(message.get("id"), str)
+  ])
+  if recovery_reasons:
+    page = [
+      {**message, "continuation_reason": recovery_reasons[message["id"]]}
+      if message.get("role") == "assistant"
+      and message.get("id") in recovery_reasons
+      else message
+      for message in page
+    ]
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   # The picker's current model must match what a message would actually use. A

@@ -4042,8 +4042,16 @@
 .chat__wait-history { --lifecycle-tone: var(--accent); }
 .chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
 .chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
-/* A wake cause opens the answer it started, so its gap sits below it. */
-.chat__wait-history--lead { margin-top: 0; margin-bottom: 10px; }
+
+/* What started an answer sits above its first line. */
+.chat__answer-cause {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.chat__answer-cause .chat__goal-history { margin-top: 0; }
 
 .chat__lifecycle-icon {
   display: inline-flex;

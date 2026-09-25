@@ -37,7 +37,7 @@ import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
-import { waitHistoryPlacement } from './waitHistory.js'
+import { waitWokeItsAnswer } from './waitHistory.js'
 import HelperResultCard from './HelperResultCard.jsx'
 
 
@@ -120,12 +120,25 @@ function GoalHistory({ msg }) {
   ))
 }
 
-// `placement` follows waitHistoryPlacement: a wake cause leads its answer
-// (live too), a deliberate stop trails the settled answer that owned it.
-function WaitHistory({ msg, placement }) {
+// Whatever started this answer leads it and stays visible while it streams:
+// a recovery resume (projected from its run) or a wait that woke the chat.
+function AnswerCause({ msg }) {
+  if (msg.role !== 'assistant') return null
+  const waits = (msg.wait_summaries || []).filter(waitWokeItsAnswer)
+  if (!msg.continuation_reason && !waits.length) return null
+  return (
+    <div className="chat__answer-cause">
+      {msg.continuation_reason && <ContinuationCard msg={msg} />}
+      {waits.map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)}
+    </div>
+  )
+}
+
+// A deliberately stopped wait is an outcome of the answer that owned it.
+function StoppedWaits({ msg }) {
   if (msg.role !== 'assistant' || !Array.isArray(msg.wait_summaries)) return null
   return msg.wait_summaries
-    .filter(summary => waitHistoryPlacement(summary) === placement)
+    .filter(summary => !waitWokeItsAnswer(summary))
     .map(summary => <WaitHistoryCard key={summary.id} summary={summary} />)
 }
 
@@ -565,7 +578,7 @@ function MsgContentInner({
 
     return (
       <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
-        <WaitHistory msg={msg} placement="lead" />
+        <AnswerCause msg={msg} />
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
@@ -624,7 +637,7 @@ function MsgContentInner({
           />
         )}
         {!isStreaming && <GoalHistory msg={msg} />}
-        {!isStreaming && <WaitHistory msg={msg} placement="trail" />}
+        {!isStreaming && <StoppedWaits msg={msg} />}
       </AssistantCopySurface>
     )
   }
@@ -634,7 +647,7 @@ function MsgContentInner({
 
   return (
     <AssistantCopySurface msg={msg}>
-      <WaitHistory msg={msg} placement="lead" />
+      <AnswerCause msg={msg} />
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
@@ -663,7 +676,7 @@ function MsgContentInner({
         </div>
       ) : null}
       {!isStreaming && <GoalHistory msg={msg} />}
-      {!isStreaming && <WaitHistory msg={msg} placement="trail" />}
+      {!isStreaming && <StoppedWaits msg={msg} />}
     </AssistantCopySurface>
   )
 }

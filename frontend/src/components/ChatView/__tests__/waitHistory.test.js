@@ -118,17 +118,7 @@ test('a Restart wait has no fake deadline or generic cancellation control', () =
   assert.doesNotMatch(html, /Sep/)
 })
 
-test('a wait that woke the chat leads its answer while a deliberate stop trails it', async () => {
-  const { waitHistoryPlacement } = await vite.ssrLoadModule(
-    '/src/components/ChatView/waitHistory.js',
-  )
-  assert.deepEqual(
-    ['met', 'expired', 'failed', 'cancelled'].map(status => waitHistoryPlacement({ status })),
-    ['lead', 'lead', 'lead', 'trail'],
-  )
-})
-
-test('the wake cause is visible at the top of the answer while it is still streaming', async () => {
+test('what started an answer leads it while live; a stopped wait trails the settled answer', async () => {
   const previousWindow = globalThis.window
   globalThis.window = { location: { href: 'http://localhost/' } }
   after(() => { globalThis.window = previousWindow })
@@ -136,19 +126,24 @@ test('the wake cause is visible at the top of the answer while it is still strea
     '/src/components/ChatView/MsgContent.jsx',
   )
   const msg = {
-    id: 'wait-resume-sample',
+    id: 'auto-retry-sample',
     role: 'assistant',
-    content: 'The runner file is clean now, so I will continue.',
+    content: 'Picking up the interrupted work.',
+    continuation_reason: 'restart',
     wait_summaries: [
-      { id: 'woke', description: 'Runner edits committed', status: 'met', checks_count: 2 },
+      ...['met', 'expired', 'failed'].map(status => ({
+        id: status, description: `Check ${status}`, status,
+      })),
       { id: 'stopped', description: 'Obsolete deploy check', status: 'cancelled' },
     ],
   }
   const live = renderToStaticMarkup(createElement(MsgContent, { msg, isStreaming: true }))
-  assert.match(live, /Wait completed/)
-  assert.ok(live.indexOf('Wait completed') < live.indexOf('runner file is clean'))
+  const answer = live.indexOf('Picking up')
+  for (const cause of ['Server restarted', 'Wait completed', 'Wait reached its deadline', 'Wait check failed']) {
+    assert.ok(live.indexOf(cause) >= 0 && live.indexOf(cause) < answer, cause)
+  }
   assert.doesNotMatch(live, /Wait stopped/)
 
   const settled = renderToStaticMarkup(createElement(MsgContent, { msg, isStreaming: false }))
-  assert.ok(settled.indexOf('runner file is clean') < settled.indexOf('Wait stopped'))
+  assert.ok(settled.indexOf('Picking up') < settled.indexOf('Wait stopped'))
 })
