@@ -6472,7 +6472,11 @@ def test_known_origin_check_never_falls_back_to_http(tmp_path):
   ) as http_import:
     with pytest.raises(RuntimeError, match="offline"):
       asyncio.run(_fetch_update_candidate(
-        tmp_path, "https://raw.githubusercontent.com/acme/source/main/mobius.json", strict=True,
+        tmp_path, "https://raw.githubusercontent.com/acme/source/main/mobius.json",
+        installed_manifest_url=(
+          "https://raw.githubusercontent.com/acme/source/main#manifest-id=source"
+        ),
+        strict=True,
       ))
   http_import.assert_not_called()
 
@@ -6532,12 +6536,10 @@ def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
     ["git", "-C", str(work), "push", "-q", str(bare), "main"], check=True,
   )
 
-  with patch(
-    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
-  ):
-    candidate = fetch_git_install_candidate(
-      installed, "https://example.invalid/mobius.json", strict=True,
-    )
+  candidate = fetch_git_install_candidate(
+    installed, "https://example.invalid/mobius.json",
+    git_source=(bare.as_uri(), "main"), strict=True,
+  )
 
   assert candidate.commit == second
   assert candidate.manifest["version"] == "2.0.0"
@@ -6698,7 +6700,9 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   upstream_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   manifest_v2 = {**manifest_v1, "version": "2.0.0"}
 
-  async def advance_during_fetch(_repo, _manifest_url, *, strict=True):
+  async def advance_during_fetch(
+    _repo, _manifest_url, *, installed_manifest_url, strict=True,
+  ):
     current_upstream = app_git.record_upstream(
       repo,
       {"index.jsx": upstream_v2.encode()},

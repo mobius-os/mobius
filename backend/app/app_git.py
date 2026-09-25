@@ -2453,6 +2453,36 @@ def set_origin_url(source_dir: str | Path, url: str) -> None:
   _run(repo, "remote", "set-url", "origin", url)
 
 
+def same_origin(left: str | None, right: str | None) -> bool:
+  """Whether two remote URLs name the same repository.
+
+  GitHub repository paths are case-insensitive and accept an optional ``.git``
+  suffix, so every origin identity check shares this one comparison.
+  """
+  if not left or not right:
+    return False
+  normalize = lambda value: value.rstrip("/").removesuffix(".git").lower()
+  return normalize(left) == normalize(right)
+
+
+def adopt_origin(source_dir: str | Path, url: str) -> None:
+  """Record the known origin of an imported checkout that never had one.
+
+  Only the remote is added; ``main``, ``upstream`` and the working tree stay
+  untouched, so the next reviewed Store update performs the one-time lineage
+  adoption through the installer's trusted synthetic-baseline path. An
+  existing, different origin is a conflicting identity, never overwritten.
+  """
+  repo = Path(source_dir)
+  if not is_repo(repo):
+    raise RuntimeError("source directory is not a git repository")
+  current = origin_url(repo)
+  if current is None:
+    _run(repo, "remote", "add", "origin", url)
+  elif not same_origin(current, url):
+    raise RuntimeError("source repository already has a different origin")
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 

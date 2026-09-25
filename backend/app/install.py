@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session
 from app import (
   activity,
   app_git,
+  community_source,
   data_git,
   drawer_pins,
   fs_locks,
@@ -347,6 +348,20 @@ def _derive_repo_ref(manifest_url: str) -> tuple[str, str] | None:
   return f"https://github.com/{org}/{repo}.git", ref
 
 
+async def resolve_git_source(manifest_url: str) -> tuple[str, str] | None:
+  """Return the Git ``(origin_url, ref)`` a package URL installs from.
+
+  A root raw-GitHub manifest names its repository directly. A community Store
+  URL names a registry package whose revisions are exact publisher commits, so
+  the registry is asked which commit it serves (``community_source``). Every
+  other URL has no Git source and keeps the local-import install path.
+  """
+  repo_ref = _derive_repo_ref(manifest_url)
+  if repo_ref is not None:
+    return repo_ref
+  return await community_source.resolve_git_source(manifest_url)
+
+
 def _normalize_raw_base(raw_base: str) -> str:
   """Return a fetch base suitable for joining manifest-relative paths."""
   if not isinstance(raw_base, str) or not raw_base.strip():
@@ -502,16 +517,18 @@ def _trusted_origin_catalog_identity_matches(
 def _trusted_catalog_origin_matches(
   app: models.App,
   source_url: str,
+  registry_origin: str | None = None,
 ) -> bool:
-  """Whether an app checkout has the canonical catalog repository origin."""
-  expected_origin = _trusted_catalog_origin_url(source_url)
+  """Whether an app checkout has its package's trusted repository origin.
+
+  A canonical ``mobius-os`` catalog URL names its origin by shape. A community
+  registry package's origin is vouched for by the registry that also serves its
+  bytes (``community_source``), passed as ``registry_origin``.
+  """
+  expected_origin = _trusted_catalog_origin_url(source_url) or registry_origin
   if expected_origin is None:
     return False
-  actual_origin = app_git.origin_url(app.source_dir)
-  return bool(
-    actual_origin
-    and actual_origin.rstrip("/") == expected_origin.rstrip("/")
-  )
+  return app_git.same_origin(app_git.origin_url(app.source_dir), expected_origin)
 
 
 def _find_ref_independent_catalog_row(
@@ -2550,17 +2567,18 @@ def fetch_git_install_candidate(
   source_dir: str | Path,
   source_url: str,
   *,
+  git_source: tuple[str, str],
   source_identity: str | None = None,
   strict: bool = True,
 ) -> GitInstallCandidate:
-  """Fetch one Git ref, then read the complete package from its exact commit."""
-  repo_ref = _derive_repo_ref(source_url)
-  if repo_ref is None:
-    raise ValueError("update source is not a root Git repository package")
-  expected_origin, ref = repo_ref
+  """Fetch one Git ref, then read the complete package from its exact commit.
+
+  ``git_source`` is ``resolve_git_source(source_url)``: resolution may need the
+  registry's network answer, so async callers resolve before this thread hop.
+  """
+  expected_origin, ref = git_source
   actual_origin = app_git.origin_url(source_dir)
-  normalize = lambda value: value.rstrip("/").removesuffix(".git").lower()
-  if actual_origin is None or normalize(actual_origin) != normalize(expected_origin):
+  if not app_git.same_origin(actual_origin, expected_origin):
     raise ValueError("installed Git origin does not match update source")
   commit = app_git.fetch_origin_ref(source_dir, ref)
   return read_git_install_candidate(
@@ -2931,8 +2949,13 @@ def _select_install_target(
   source: str,
   expected_app_id: int | None,
   publication_handoff_app_id: int | None = None,
+  registry_origin: str | None = None,
 ) -> InstallTarget:
-  """Resolve install/update/adoption identity without mutating the target row."""
+  """Resolve install/update/adoption identity without mutating the target row.
+
+  ``registry_origin`` is the Git origin the community registry named for a
+  community package URL; see ``_trusted_catalog_origin_matches``.
+  """
   manifest = candidate.manifest
   manifest_id = manifest["id"]
   package_id = manifest.get("package_id")
@@ -3075,7 +3098,9 @@ def _select_install_target(
       and _catalog_identity_matches(
         existing.manifest_url, source_for_key, manifest_id,
       )
-      and _trusted_catalog_origin_matches(existing, source_for_key)
+      and _trusted_catalog_origin_matches(
+        existing, source_for_key, registry_origin,
+      )
     ),
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
@@ -3823,6 +3848,33 @@ async def install_from_manifest(
   fetched_capability_digest = candidate.capability_digest
   candidate_digest = candidate.candidate_digest
   sched = manifest.get("schedule")
+  # The package's real Git source. A community package's origin comes from its
+  # registry, which also makes that origin trusted for legacy adoption. This
+  # deliberately fails closed: a registry outage blocks even a reviewed update,
+  # and a revision published between the mirror fetch and this lookup fails
+  # clone verification below; both are retryable and change nothing.
+  try:
+    repo_ref = (
+      await resolve_git_source(manifest_url)
+      if manifest_url is not None else None
+    )
+  except community_source.CommunitySourceUnavailable as exc:
+    raise HTTPException(
+      409,
+      detail={
+        "code": "git_install_unavailable",
+        "message": (
+          "The community Store could not confirm this app's Git source. "
+          "Nothing was changed; retry shortly."
+        ),
+      },
+    ) from exc
+  registry_origin = (
+    repo_ref[0]
+    if repo_ref is not None
+    and community_source.community_package(manifest_url) is not None
+    else None
+  )
 
   # Phase 2: immutable identity/update decision. No writes occur here.
   target = _select_install_target(
@@ -3832,6 +3884,7 @@ async def install_from_manifest(
     source=source,
     expected_app_id=reviewed_app_id or expected_app_id,
     publication_handoff_app_id=publication_handoff_app_id,
+    registry_origin=registry_origin,
   )
   await _authorize_source_handoff(target, candidate)
   existing = target.existing
@@ -3893,9 +3946,6 @@ async def install_from_manifest(
   # Git reconciliation below. Source completeness is a publication contract;
   # locally retained modules in a clean merge are outside that contract.
   published_source_tree = dict(source_tree)
-  repo_ref = (
-    _derive_repo_ref(manifest_url) if manifest_url is not None else None
-  )
   cloned_install = False
   cloned_update = False
   # A one-time migration may have captured current source in a local Git

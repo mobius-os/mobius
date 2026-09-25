@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  app_jobs, app_recency, chat_app_artifacts, chat_queue, community_source,
+  drawer_pins, fs_locks,
   icon_cache, models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
@@ -1218,17 +1219,38 @@ async def _fetch_update_candidate(
   repo: Path,
   manifest_url: str,
   *,
+  installed_manifest_url: str,
   strict: bool,
 ):
-  """Fetch one Git candidate; Store updates have no parallel HTTP transport."""
+  """Fetch one Git candidate; Store updates have no parallel HTTP transport.
+
+  Callers hold the app's source lock. A community package imported before its
+  Git origin was recorded adopts its registry-named origin here (remote only;
+  no managed ref or file changes), so its first reviewed update can take the
+  installer's trusted lineage-adoption path instead of staying unknown. Only
+  the installed package's own registry id may supply that origin; a candidate
+  for another package is rejected later and must leave no trace.
+  """
   from app import install
 
-  if install._derive_repo_ref(manifest_url) is None or not app_git.has_origin(repo):
+  git_source = await install.resolve_git_source(manifest_url)
+  if git_source is None:
+    raise ValueError("app has no root Git update source")
+  package = community_source.community_package(manifest_url)
+  installed_package = community_source.community_package(installed_manifest_url)
+  if (
+    package is not None
+    and installed_package is not None
+    and package[0] == installed_package[0]
+  ):
+    await asyncio.to_thread(app_git.adopt_origin, repo, git_source[0])
+  if not await asyncio.to_thread(app_git.has_origin, repo):
     raise ValueError("app has no root Git update source")
   return await asyncio.to_thread(
     install.fetch_git_install_candidate,
     repo,
     manifest_url,
+    git_source=git_source,
     strict=strict,
   )
 
@@ -1315,6 +1337,9 @@ async def update_check(
   still surfaces as an update. The fetch updates only Git's candidate metadata
   and object database: it never changes the working tree, ``main``,
   ``upstream``, or the App row, so it is safe to call on every Store open.
+  (A community package without a recorded origin also gains the ``origin``
+  remote its registry names, including when an App Store manager token asks;
+  see ``_fetch_update_candidate``.)
 
   ``manifest_url`` is an optional live catalog candidate. Installed provenance
   remains immutable; when a candidate is supplied, its package identity must
@@ -1446,6 +1471,7 @@ async def update_check(
       candidate = await _fetch_update_candidate(
         repo,
         fetch_manifest_url,
+        installed_manifest_url=installed_manifest_url,
         strict=False,
       )
       pending, pending_state = await asyncio.to_thread(
@@ -1628,6 +1654,7 @@ async def update_candidate_preview(
       candidate = await _fetch_update_candidate(
         repo,
         fetch_manifest_url,
+        installed_manifest_url=installed_manifest_url,
         strict=True,
       )
       if manifest_url is not None and not _update_candidate_matches_installed(
@@ -1641,6 +1668,10 @@ async def update_candidate_preview(
       )
     except HTTPException:
       raise
+    except community_source.CommunitySourceUnavailable as exc:
+      raise HTTPException(
+        503, "The community Store is unavailable. Try again shortly.",
+      ) from exc
     except (
       OSError, subprocess.SubprocessError, RuntimeError, TypeError, ValueError,
     ) as exc:
