@@ -34,7 +34,7 @@ test('empty active payload still displays anchored activity exactly once', () =>
   assert.equal(html.split('aria-label="Received from Colleague"').length, 2)
 })
 
-test('busy-parent helper result renders once at the same recorded frontier', () => {
+test('a helper row renders once at its recorded position', () => {
   const result = {
     id: 'delegation:review:completed', activityId: 'delegation:review:completed',
     type: 'helper_result', status: 'completed', task_key: 'Review',
@@ -49,12 +49,14 @@ test('busy-parent helper result renders once at the same recorded frontier', () 
     { msg: message, chatId: 'chat', messageKey: 'answer' },
     helperContext,
   )
-  assert.ok(html.indexOf('Earlier') < html.indexOf('Helper finished · Review'))
-  assert.ok(html.indexOf('Helper finished · Review') < html.indexOf('Later response'))
-  assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
+  const row = html.indexOf('chat__helper-row')
+  assert.ok(html.indexOf('Earlier') < row)
+  assert.ok(row < html.indexOf('Later response'))
+  assert.equal(html.split('chat__helper-row').length, 2, 'the helper row renders once')
+  assert.match(html, /Review/)
 })
 
-test('multiple helper completions join one surrounding activity disclosure', () => {
+test('multiple helper rows join one surrounding activity disclosure', () => {
   const blocks = [
     { type: 'tool', tool: 'Bash', tool_use_id: 'command', status: 'done' },
     { type: 'thinking', thinking_id: 'thought', content: 'Reviewing', duration_ms: 1000 },
@@ -78,8 +80,9 @@ test('multiple helper completions join one surrounding activity disclosure', () 
 
   assert.equal((html.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
   assert.match(html, /Ran a command, exchanged messages, edited code/)
-  assert.match(html, /Helper finished · First review/)
-  assert.match(html, /Helper finished · Second review/)
+  assert.match(html, /First review/)
+  assert.match(html, /Second review/)
+  assert.equal((html.match(/chat__helper-row/g) || []).length, 2)
 })
 
 test('later peer messages share one high-level exchange and list each message inside', () => {

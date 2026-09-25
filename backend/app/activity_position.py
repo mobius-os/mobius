@@ -19,15 +19,28 @@ def record_activity_position(db, chat_id: str, event_id: str) -> None:
   ).on_conflict_do_nothing(index_elements=["chat_id", "event_id"]))
 
 
-def attach_activity_positions(db, chat_id: str, events: list[dict]) -> None:
-  """Attach only the requested chat's evidence after ordinary visibility checks."""
+def attach_activity_positions(
+  db, chat_id: str, events: list[dict],
+  fallback_ids: dict[str, str] | None = None,
+) -> None:
+  """Attach only the requested chat's evidence after ordinary visibility checks.
+
+  ``fallback_ids`` names an older event id whose recorded position an event
+  inherits when it has none of its own.
+  """
   if not events:
     return
+  fallback_ids = fallback_ids or {}
+  wanted = [event["id"] for event in events]
+  wanted += [fallback_ids[event_id] for event_id in wanted if event_id in fallback_ids]
   positions = dict(db.query(
     models.ChatActivityPosition.event_id, models.ChatActivityPosition.position,
   ).filter(
     models.ChatActivityPosition.chat_id == chat_id,
-    models.ChatActivityPosition.event_id.in_([event["id"] for event in events]),
+    models.ChatActivityPosition.event_id.in_(wanted),
   ).all())
   for event in events:
-    event["display_position"] = positions.get(event["id"])
+    position = positions.get(event["id"])
+    if position is None and event["id"] in fallback_ids:
+      position = positions.get(fallback_ids[event["id"]])
+    event["display_position"] = position

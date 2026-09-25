@@ -20,6 +20,7 @@ import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
+import HelperCauseCard from './HelperCauseCard.jsx'
 import { isContinuationMessage } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
@@ -117,6 +118,12 @@ function GoalHistory({ msg }) {
   return msg.goal_summaries.map(summary => (
     <GoalHistoryCard key={summary.id} summary={summary} />
   ))
+}
+
+// Helpers whose results this answer began by receiving lead it.
+function HelperCause({ msg }) {
+  if (msg.role !== 'assistant' || !Array.isArray(msg.helper_causes) || !msg.helper_causes.length) return null
+  return <HelperCauseCard causes={msg.helper_causes} />
 }
 
 function WaitHistory({ msg }) {
@@ -562,6 +569,7 @@ function MsgContentInner({
 
     return (
       <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
+        <HelperCause msg={msg} />
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
@@ -630,6 +638,7 @@ function MsgContentInner({
 
   return (
     <AssistantCopySurface msg={msg}>
+      <HelperCause msg={msg} />
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div

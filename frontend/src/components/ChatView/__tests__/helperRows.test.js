@@ -75,13 +75,15 @@ test('a working helper without a known step says it is working', () => {
   assert.match(html, /Claude · claude-opus-4-8 · Working/)
 })
 
-test('a finished helper names its engine and how long it took', () => {
+test('a finished helper keeps its row with its engine and how long it took', () => {
   const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
     chatId: 'chat',
     event: { ...working, id: 'delegation:d1:completed', status: 'completed', delegation_id: 'd1',
              provider: 'claude', model: 'claude-opus-4-8', duration_ms: 12_000, body: 'Done.' },
   }))
-  assert.match(html, /Helper finished · audit-login · Claude · claude-opus-4-8 · 12s/)
+  assert.match(html, /audit-login/)
+  assert.match(html, /Claude · claude-opus-4-8 · Finished/)
+  assert.match(html, /12s/)
 })
 
 test('a group with working helpers says so instead of claiming they need attention', () => {
@@ -127,5 +129,26 @@ test('an open group draws each helper once, as its launch step, in order', async
   assert.ok(html.indexOf('git status') < row && row < html.indexOf('npm test'),
     'the row stands where the helper was launched')
   assert.match(html, /aria-label="audit-login: [^"]*Open its conversation"/)
+  _resetDisclosureStateForTests()
+})
+
+test('a finished helper stays its launch step: one settled row, counted as done', async () => {
+  const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
+  const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'm3:activity:t0', true)
+  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+    chatId: 'chat',
+    surfaceKey: 'm3',
+    entries: [
+      { idx: 0, item: { type: 'tool', tool: 'Bash', input: 'git status', status: 'done', tool_use_id: 't0' } },
+      { idx: 1, item: { type: 'tool', tool: 'mcp__mobius_control__spawn_agent', input: 'audit-login', status: 'done', tool_use_id: 't1' } },
+      { idx: 'h', item: { ...working, status: 'completed', duration_ms: 98_000, delegation_id: 'd1', type: 'helper_result', activityId: working.id } },
+    ],
+  }))
+  assert.match(html, /1 done/)
+  assert.equal(html.match(/chat__helper-row/g)?.length, 1, 'one row per helper')
+  assert.doesNotMatch(html, /Started helper audit-login/)
+  assert.match(html, /Finished/)
   _resetDisclosureStateForTests()
 })

@@ -1,6 +1,5 @@
-/* Helper results expand in place; reading activity never resumes its parent. */
+/* A helper's one activity row; opening its conversation never resumes its parent. */
 import { useEffect, useId, useRef, useState } from 'react'
-import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { ArrowDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import './SubagentChips.css'
 import { peerTime } from './peerTimeline.js'
@@ -40,51 +39,61 @@ function useElapsed(startedAt, running) {
 }
 
 
-function openHelperChat(click, childChatId, onInternalNav) {
-  if (!onInternalNav || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return
-  click.preventDefault()
-  onInternalNav(new URL(`/shell?chat=${encodeURIComponent(childChatId)}`, window.location.origin))
+// What a settled helper's row says in place of its live step.
+const SETTLED = {
+  completed: ['done', 'Finished'],
+  failed: ['failed', 'Failed'],
+  needs_review: ['failed', 'Needs review'],
 }
 
-/* A still-working helper is a live row like Claude's own helper rows: its
-   name, provider and model, what it is doing now, and a running clock. One tap
-   opens its conversation over this chat, read-only and updating live. */
-export function WorkingHelperRow({ event, chatId, onInternalNav }) {
+/* A helper's one row, from launch to result: its name, provider and model,
+   then what it is doing now with a running clock, or how it ended and how long
+   it took. One tap opens its conversation (task, steps and result) over this
+   chat, read-only and updating live while it works. */
+export function HelperRow({ event, chatId, onInternalNav }) {
   const [open, setOpen] = useState(false)
   const rowRef = useRef(null)
   const name = event.task_key || 'Helper'
+  const working = isWorkingHelper({ ...event, type: 'helper_result' })
   const paused = event.status === 'paused'
-  const elapsed = useElapsed(event.started_at, !paused)
-  const step = paused ? 'Paused' : helperStep(event) || 'Working'
-  const sub = [helperEngine(event), step].filter(Boolean).join(' · ')
+  const live = useElapsed(event.started_at, working && !paused)
+  const [dot, outcome] = working
+    ? [paused ? 'failed' : 'running', paused ? 'Paused' : helperStep(event) || 'Working']
+    : SETTLED[event.status] || ['failed', 'Stopped']
+  const elapsed = working
+    ? live
+    : Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
+  const sub = [helperEngine(event), outcome].filter(Boolean).join(' · ')
   const canOpen = !!(chatId && event.delegation_id)
+  const running = working && !paused
   const body = <>
-    <span className={`chat__subagent-dot ${paused ? 'chat__subagent-dot--failed' : 'chat__subagent-dot--running'}`} aria-hidden="true" />
+    <span className={`chat__subagent-dot chat__subagent-dot--${dot}`} aria-hidden="true" />
     <span className="chat__subagent-body">
       <span className="chat__subagent-name">
         <span className="chat__subagent-name-text">{name}</span>
-        <span className="chat__subagent-name-sweep" aria-hidden="true">{name}</span>
+        {running && <span className="chat__subagent-name-sweep" aria-hidden="true">{name}</span>}
       </span>
       <span className="chat__subagent-sub">{sub}</span>
     </span>
     {elapsed && <span className="chat__subagent-elapsed">{elapsed}</span>}
     {canOpen && <ChevronRight className="chat__subagent-open" width={14} height={14} aria-hidden="true" />}
   </>
-  return <div ref={rowRef} className="chat__subagents-list chat__helper-working">
+  const rowClass = `chat__subagent${running ? ' chat__subagent--running' : ''}`
+  return <div ref={rowRef} className={`chat__subagents-list chat__helper-row${working ? ' chat__helper-working' : ''}`}>
     {canOpen
       ? <button
           type="button"
-          className="chat__subagent chat__subagent--openable chat__subagent--running"
+          className={`${rowClass} chat__subagent--openable`}
           aria-label={`${name}: ${sub}. Open its conversation`}
           aria-haspopup="dialog"
           onClick={() => setOpen(true)}
         >{body}</button>
-      : <div className="chat__subagent chat__subagent--running">{body}</div>}
+      : <div className={rowClass}>{body}</div>}
     {open && <HelperConversation
       chatId={chatId}
       taskId={event.delegation_id}
       name={name}
-      status={paused ? 'stopped' : 'running'}
+      status={working ? (paused ? 'stopped' : 'running') : dot === 'done' ? 'done' : event.status === 'failed' ? 'failed' : 'stopped'}
       host={rowRef.current?.closest('.chat')}
       onClose={() => setOpen(false)}
       onInternalNav={onInternalNav}
@@ -93,68 +102,7 @@ export function WorkingHelperRow({ event, chatId, onInternalNav }) {
 }
 
 export default function HelperResultCard({ event, chatId, onInternalNav }) {
-  if (isWorkingHelper({ ...event, type: 'helper_result' })) {
-    return <WorkingHelperRow event={event} chatId={chatId} onInternalNav={onInternalNav} />
-  }
-  return <FinishedHelperCard event={event} chatId={chatId} onInternalNav={onInternalNav} />
-}
-
-function FinishedHelperCard({ event, chatId, onInternalNav }) {
-  const [open, setOpen] = useDisclosureState(chatId, event.id)
-  const [viewing, setViewing] = useState(false)
-  const headerRef = useRef(null)
-  const detailRef = useRef(null)
-  const headerId = useId()
-  const detailId = useId()
-  const status = event.status === 'completed' ? 'Helper finished' : event.status === 'failed' ? 'Helper failed' : 'Helper stopped'
-  const duration = Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
-  const label = [
-    `${status}${event.task_key ? ` · ${event.task_key}` : ''}`,
-    helperEngine(event),
-    duration,
-  ].filter(Boolean).join(' · ')
-  const time = peerTime(event.created_at)
-  const date = Number.isFinite(time) ? new Date(time) : null
-  const delivery = event.consumption === 'incorporated'
-    ? 'Incorporated by the agent'
-    : event.consumption === 'available'
-      ? 'Available to the agent · opening this does not resume work'
-      : event.consumption === 'notified'
-        ? 'Delivery recorded · agent incorporation is not known · opening this does not resume work'
-        : 'Agent incorporation is not known · opening this does not resume work'
-  return <div className="chat__tool chat__tool--done chat__tool--compact chat__peer-tool">
-    <button ref={headerRef} id={headerId} type="button" className="chat__tool-header"
-      aria-expanded={open} aria-controls={detailId} aria-label={label}
-      onClick={() => {
-        preserveTogglePosition(headerRef.current, detailRef.current)
-        setOpen(value => !value)
-      }}>
-      <span className="chat__tool-icon" data-tool-kind="agents" aria-hidden="true"><ArrowDown width={14} height={14} /></span>
-      <span className="chat__tool-name" title={label}>{label}</span>
-      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={formatDateTime(date)}>{formatTime(date)}</time>}
-    </button>
-    <div ref={detailRef} id={detailId} className="chat__tool-detail chat__peer-detail" role="region"
-      aria-labelledby={headerId} tabIndex={open ? 0 : undefined} hidden={!open}>
-      {open && <>
-        <p className="chat__peer-delivery">{delivery}</p>
-        <div className="chat__peer-body"><StandardMarkdown text={event.body || 'No written result.'} onInternalNav={onInternalNav} /></div>
-        {event.result_truncated && <span className="chat__peer-excerpt">Excerpt — full result in the helper chat</span>}
-        {event.child_chat_id && <div className="chat__peer-links">
-          {event.delegation_id && <button type="button" className="chat__peer-link-button" onClick={() => setViewing(true)}>View conversation</button>}
-          <a href={`/shell?chat=${encodeURIComponent(event.child_chat_id)}`} onClick={click => openHelperChat(click, event.child_chat_id, onInternalNav)}>Open helper chat</a>
-        </div>}
-      </>}
-    </div>
-    {viewing && <HelperConversation
-      chatId={chatId}
-      taskId={event.delegation_id}
-      name={event.task_key || 'Helper'}
-      status={event.status === 'completed' ? 'done' : event.status === 'failed' ? 'failed' : 'stopped'}
-      host={headerRef.current?.closest('.chat')}
-      onClose={() => setViewing(false)}
-      onInternalNav={onInternalNav}
-    />}
-  </div>
+  return <HelperRow event={event} chatId={chatId} onInternalNav={onInternalNav} />
 }
 
 export function HelperResultGroupCard({ events, chatId, onInternalNav }) {

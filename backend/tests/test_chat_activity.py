@@ -152,21 +152,21 @@ def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
   assert second.status_code == 200, second.text
   second_page = second.json()
   assert [item["id"] for item in second_page["events"]] == [
-    "delegation:helper-same-time:completed",
+    "delegation:helper-same-time:running",
   ]
   helper = second_page["events"][0]
   assert helper == {
-    "id": "delegation:helper-same-time:completed",
+    "id": "delegation:helper-same-time:running",
     "type": "helper_result",
     "created_at": stamp.isoformat(),
     "delegation_id": "helper-same-time",
     "task_key": "task-same-time",
     "provider": "claude",
     "model": "claude-sonnet-4-6",
+    "started_at": stamp.isoformat(),
     "duration_ms": 0,
+    "activity": None,
     "status": "completed",
-    "body": "result same-time",
-    "result_truncated": False,
     "child_chat_id": "child-same-time",
     "source_work_id": "goal-same-time",
     "consumption": "available",
@@ -177,7 +177,7 @@ def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
     item["id"] for item in [*first_page["events"], *second_page["events"]]
   }
   assert "peer:zz-hidden-direct" not in all_ids
-  assert "delegation:helper-other-parent:completed" not in all_ids
+  assert "delegation:helper-other-parent:running" not in all_ids
 
 
 def test_terminal_inline_helper_without_acceptance_evidence_is_unknown(
@@ -198,7 +198,7 @@ def test_terminal_inline_helper_without_acceptance_evidence_is_unknown(
   assert response.status_code == 200, response.text
   event = response.json()["events"][0]
   assert event["consumption"] == "unknown"
-  assert event["body"] == "result inline-history"
+  assert "body" not in event  # the result is read in the helper's conversation
 
 
 def test_disconnected_blocking_attachment_claim_does_not_imply_incorporation(
@@ -262,23 +262,26 @@ def test_source_only_activity_uses_the_derived_status_terminal_contract(
 
   response = client.get("/api/chats/source-only-parent/activity", headers=auth)
   assert response.status_code == 200, response.text
-  assert response.json()["events"] == [{
-    "id": "delegation:helper-source-review:completed",
+  # Every helper has its one row; only the derived terminal contract settles it.
+  events = {event["delegation_id"]: event for event in response.json()["events"]}
+  assert events["helper-source-review"] == {
+    "id": "delegation:helper-source-review:running",
     "type": "helper_result",
     "created_at": stamp.isoformat(),
     "delegation_id": "helper-source-review",
     "task_key": "task-source-review",
     "provider": "claude",
     "model": "claude-sonnet-4-6",
+    "started_at": stamp.isoformat(),
     "duration_ms": None,
+    "activity": None,
     "status": "needs_review",
-    "body": "source result source-review",
-    "result_truncated": False,
     "child_chat_id": "child-source-review",
     "source_work_id": "goal-source-review",
     "consumption": "unknown",
     "display_position": None,
-  }]
+  }
+  assert events["helper-source-fake-terminal"]["status"] == "starting"
 
 
 def test_activity_route_requires_exact_chat_access_and_valid_cursor(
@@ -294,8 +297,9 @@ def test_activity_route_requires_exact_chat_access_and_valid_cursor(
   assert client.get("/api/chats/missing/activity", headers=auth).status_code == 404
 
 
-def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
+def test_a_settled_helper_keeps_its_launch_position(db):
   import asyncio
+  from app.activity_position import record_activity_position
   from app.broadcast import ChatBroadcast
   from app.chat_activity import chat_activity_page
   from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
@@ -306,16 +310,17 @@ def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
   _helper(db, suffix='position', parent_chat_id=parent_id,
           created_at=datetime(2026, 9, 9), notify=False)
   db.commit()
-  sink = ChatEventSink(ChatBroadcast(parent_id), chat_id=parent_id,
-                       )
+  sink = ChatEventSink(ChatBroadcast(parent_id), chat_id=parent_id)
   register_active_sink(parent_id, sink)
   try:
     sink.publish({'type': 'text', 'content': 'before'})
-    asyncio.run(wake_parent_after_child_settled('child-position'))
-    sink.publish({'type': 'text', 'content': ' after answer'})
+    record_activity_position(db, parent_id, 'delegation:helper-position:running')
+    db.commit()
+    sink.publish({'type': 'text', 'content': ' after the launch'})
     asyncio.run(wake_parent_after_child_settled('child-position'))
     db.expire_all()
     event = chat_activity_page(db, parent_id)['events'][0]
+    assert event['status'] == 'completed'
     assert event['display_position'] == {
       'assistant_message_id': sink.assistant_message_id,
       'block_index': 0, 'text_offset': 6,
@@ -323,3 +328,47 @@ def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
     assert db.get(models.Chat, parent_id).messages == []
   finally:
     unregister_active_sink(parent_id, sink)
+
+
+def test_a_helper_settled_before_launch_rows_keeps_its_recorded_place(db):
+  from app.chat_activity import chat_activity_page
+
+  parent_id = 'helper-legacy-parent'
+  db.add(models.Chat(id=parent_id, messages=[]))
+  _helper(db, suffix='legacy', parent_chat_id=parent_id,
+          created_at=datetime(2026, 9, 9), notify=False)
+  db.add(models.ChatActivityPosition(
+    chat_id=parent_id, event_id='delegation:helper-legacy:completed',
+    position={'assistant_message_id': 'old-answer', 'block_index': 2},
+  ))
+  db.commit()
+  event = chat_activity_page(db, parent_id)['events'][0]
+  assert event['id'] == 'delegation:helper-legacy:running'
+  assert event['display_position'] == {'assistant_message_id': 'old-answer', 'block_index': 2}
+
+
+def test_an_answer_names_the_helpers_whose_results_started_it(client, auth, db):
+  stamp = datetime(2026, 9, 9, 4, 0)
+  db.add(models.Chat(id="cause-parent", title="Cause", messages=[
+    {"id": "run-woken", "role": "assistant", "content": "Both reviews are in.", "ts": 1},
+    {"id": "run-plain", "role": "assistant", "content": "Earlier answer.", "ts": 0},
+  ]))
+  _helper(db, suffix="cause", parent_chat_id="cause-parent", created_at=stamp)
+  db.add(models.ChatRun(
+    id="run-woken", root_run_id="run-woken", chat_id="cause-parent",
+    status="completed",
+    activity_delivery_json={"delegation_ids": ["helper-cause"]},
+  ))
+  db.add(models.ChatRun(
+    id="run-plain", root_run_id="run-plain", chat_id="cause-parent",
+    status="completed",
+  ))
+  db.commit()
+
+  response = client.get("/api/chats/cause-parent", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = {m.get("id"): m for m in response.json()["messages"]}
+  assert messages["run-woken"]["helper_causes"] == [
+    {"delegation_id": "helper-cause", "task_key": "task-cause", "status": "completed"},
+  ]
+  assert "helper_causes" not in messages["run-plain"]

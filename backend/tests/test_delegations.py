@@ -1961,7 +1961,8 @@ def test_cancelling_an_owner_settles_descendants_before_the_parent(db):
   assert leaf.cancelled_at <= owner.cancelled_at
 
 
-def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypatch):
+def test_a_cancelled_helper_keeps_its_launch_row(db, monkeypatch):
+  from app.activity_position import record_activity_position
   from app.chat_activity import chat_activity_page
 
   parent_id, _child, delegation_id = _seed_delegation(
@@ -1972,6 +1973,8 @@ def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypa
     "app.chat_event_sink.active_sink_activity_position",
     lambda chat_id: frontier if chat_id == parent_id else None,
   )
+  record_activity_position(db, parent_id, f"delegation:{delegation_id}:running")
+  db.commit()
   published = []
   monkeypatch.setattr(
     delegations_mod, "publish_chat_activity_changed", published.append,

@@ -21,7 +21,7 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
 import { mergePositionedActivityEntries } from './activityPosition.js'
 import { restartCardActivityEntries } from './streamReducers.js'
-import HelperResultCard, { WorkingHelperRow } from './HelperResultCard.jsx'
+import HelperResultCard, { HelperRow } from './HelperResultCard.jsx'
 import { isWorkingHelper } from './workingHelper.js'
 
 // The helper a Möbius spawn_agent call started (its label input is the name).
@@ -317,25 +317,28 @@ function GroupedActivityStretch({
     .filter(it => it?.type === 'tool' && agentHelperEntries(it).length > 0)
   const subagentHelpers = subagentTools
     .flatMap(it => agentHelperEntries(it).map(([, helper]) => helper))
-  // A still-working Subagents-app helper launched in this stretch is a helper
-  // row like the Task/Agent ones: counted in the header, drawn with the rows.
-  const workingDelegations = entries
+  // A Subagents-app helper's one row (live, then settled) is counted in the
+  // header like the Task/Agent ones and drawn where it was launched.
+  const helperRows = entries
     .map(e => e?.item)
-    .filter(isWorkingHelper)
-  const workingByName = new Map(workingDelegations.map(it => [it.task_key, it]))
+    .filter(it => it?.type === 'helper_result')
+  const helperByName = new Map(helperRows.map(it => [it.task_key, it]))
   const launchedHere = new Set(
-    entries.map(e => spawnedHelperName(e?.item)).filter(name => workingByName.has(name)),
+    entries.map(e => spawnedHelperName(e?.item)).filter(name => helperByName.has(name)),
   )
+  const workingRows = helperRows.filter(isWorkingHelper).length
   const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
-    + workingDelegations.length
+    + workingRows
   const failedHelpers = subagentHelpers.filter(
     h => h.status === 'failed' || h.status === 'killed' || h.status === 'stopped'
+  ).length + helperRows.filter(
+    it => !isWorkingHelper(it) && it.status !== 'completed'
   ).length
-  const doneHelpers = subagentHelpers.length + workingDelegations.length
+  const doneHelpers = subagentHelpers.length + helperRows.length
     - runningHelpers - failedHelpers
   // Count successes and failures separately: a failed/killed helper is not
   // "done", and the header must not label a red-dotted row as done.
-  const subagentCount = subagentHelpers.length + workingDelegations.length > 0
+  const subagentCount = subagentHelpers.length + helperRows.length > 0
     ? [
         runningHelpers > 0 ? `${runningHelpers} running` : null,
         doneHelpers > 0 ? `${doneHelpers} done` : null,
@@ -480,25 +483,15 @@ function GroupedActivityStretch({
               />
             )
           }
-          // A working helper's row stands where it was launched: its own
-          // spawn call draws it, so its anchored event draws nothing more.
-          if (isWorkingHelper(item)) {
-            if (launchedHere.has(item.task_key)) return null
+          // A helper's one row stands where it was launched: its own spawn
+          // call draws it, so its anchored event draws nothing more.
+          if (item.type === 'helper_result' && launchedHere.has(item.task_key)) return null
+          const launched = helperByName.get(spawnedHelperName(item))
+          if (launched) {
             return (
-              <WorkingHelperRow
-                key={item.activityId || item.id || idx}
-                event={item}
-                chatId={chatId}
-                onInternalNav={onInternalNav}
-              />
-            )
-          }
-          const working = workingByName.get(spawnedHelperName(item))
-          if (working) {
-            return (
-              <WorkingHelperRow
+              <HelperRow
                 key={assistantBlockKey(item, idx)}
-                event={working}
+                event={launched}
                 chatId={chatId}
                 onInternalNav={onInternalNav}
               />
