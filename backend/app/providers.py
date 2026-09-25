@@ -169,6 +169,15 @@ _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
 _AGENT_SETTINGS_LOCK = threading.RLock()
 
 
+
+# Claude Code features Möbius owns itself. Auto-memory keeps a parallel,
+# unmanaged note store under the Claude login directory and injects its index
+# into every Claude request; Möbius memory is the Memory app, so the CLI's own
+# is disabled for every Claude process Möbius launches.
+CLAUDE_CLI_POLICY_ENV: dict[str, str] = {
+  "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
 class _SettingsOverride(Protocol):
   """Structural boundary for the Pydantic override accepted by this module."""
 
@@ -816,6 +825,7 @@ class ClaudeProvider(BaseProvider):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
     if creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(creds.parent)
+    env.update(CLAUDE_CLI_POLICY_ENV)
     # Per-chat agent-browser session.  Every agent-browser invocation
     # spawned by the SDK runner picks up AGENT_BROWSER_SESSION via env,
     # so each chat gets its own isolated Chrome instance and they
@@ -890,6 +900,7 @@ class CodexProvider(BaseProvider):
     )
     if claude_creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(claude_creds.parent)
+      env.update(CLAUDE_CLI_POLICY_ENV)
     # Match Claude's per-chat agent-browser isolation. Without this, Codex
     # turns that invoke `agent-browser` all attach to the CLI's global
     # "default" session; a browser launched by one Codex chat can then leak

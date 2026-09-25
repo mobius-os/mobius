@@ -51,3 +51,18 @@ def test_codex_runner_declares_no_register():
   from app import codex_sdk_runner
 
   assert not hasattr(codex_sdk_runner, "_CONCISE_REGISTER")
+
+
+def test_register_states_the_harness_facts_the_replaced_default_gave():
+  """Möbius replaces Claude Code's default prompt, whose harness section tells
+  the model that visible text is the reply. Without it, updates meant for the
+  partner ended up in folded thinking."""
+  reg = claude_sdk_runner._CONCISE_REGISTER
+  assert reg.index("# Harness") < reg.index("# Concise register")
+  for required in (
+    "Text you write outside tool calls is your reply",
+    "thinking is folded away and is not a reply",
+    "A denied tool call",
+    "Report outcomes faithfully",
+  ):
+    assert required in reg, f"register dropped harness fact: {required!r}"
