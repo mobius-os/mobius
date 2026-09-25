@@ -25,6 +25,8 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const restartNeeded = level === 'server_restart'
   const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
   const conflict = platform?.state === 'conflict'
+  // One update at a time: an unfinished one is the only update action offered.
+  const unfinished = platform?.unfinished_update || null
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
@@ -76,7 +78,11 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   }
 
   const primary = conflict
-    ? { label: platform?.conflict_chat_id ? 'Open chat' : 'Resolve in chat', act: update.resolve }
+    ? { label: platform?.conflict_chat_id ? 'Finish in chat' : 'Finish update', act: update.resolve }
+    : unfinished?.stage === 'apply' || (unfinished?.stage === 'finish' && imageNeeded)
+      ? { label: 'Finish update', act: () => openReview('finish') }
+    : unfinished?.stage === 'finish' && restartNeeded
+      ? { label: confirmRestart === 'primary' ? 'Confirm restart' : 'Restart to finish', act: () => pressRestart('primary') }
     : available
       ? { label: 'Review update', act: () => openReview() }
       : imageNeeded
@@ -138,7 +144,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           restoreFocusRef={actionRef} inertBoundaryRef={inertBoundaryRef}
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
-          onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
+          onResolve={update.resolve} onCancelUpdate={update.cancelUnfinished} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
           resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} onRefreshReview={update.clearError} applyProgress={update.progress} />
       )}
     </section>

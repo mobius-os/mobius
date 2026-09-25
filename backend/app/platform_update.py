@@ -206,15 +206,32 @@ class PlatformUpdateProgress(TypedDict):
 
   plan_id: str | None
   target_sha: str | None
+  # Managed deployments pin the reviewed image with the release, so an update
+  # left unfinished can still be finished after a newer image is published.
+  image_digest: str | None
   phase: str
   active: bool
   error: str | None
   updated_at: float
 
 
+class UnfinishedUpdate(TypedDict):
+  """The one owner-started update that must finish before another starts.
+
+  ``resolve``: its merge is parked for a resolver. ``apply``: it stopped
+  before installing (blocked, failed or handed to an agent). ``finish``: it
+  installed, and its restart or container replacement is still owed.
+  """
+
+  target_sha: str
+  stage: Literal["resolve", "apply", "finish"]
+  image_digest: str | None
+
+
 _UPDATE_PROGRESS = PlatformUpdateProgress(
   plan_id=None,
   target_sha=None,
+  image_digest=None,
   phase=PlatformUpdatePhase.IDLE.value,
   active=False,
   error=None,
@@ -282,6 +299,9 @@ class PlatformStatus(TypedDict):
   newer_updates_available: bool
   rollback_target_sha: str | None
   rollback_error: str | None
+  # While set, Settings offers only Finish update for this exact release and
+  # no newer release is offered or accepted.
+  unfinished_update: UnfinishedUpdate | None
 
 
 class PlatformApplyResult(TypedDict):
@@ -450,6 +470,11 @@ def platform_update_progress() -> PlatformUpdateProgress:
           if isinstance(payload.get("target_sha"), str)
           else None
         ),
+        image_digest=(
+          payload.get("image_digest")
+          if isinstance(payload.get("image_digest"), str)
+          else None
+        ),
         phase=(
           payload.get("phase")
           if payload.get("phase") in {phase.value for phase in PlatformUpdatePhase}
@@ -474,12 +499,14 @@ def _set_update_progress(
   target_sha: str | None,
   active: bool,
   error: str | None = None,
+  image_digest: str | None = None,
 ) -> None:
   """Publish one phase transition from either the event loop or worker thread."""
   with _PROGRESS_LOCK:
     _UPDATE_PROGRESS.update(
       plan_id=plan_id,
       target_sha=target_sha,
+      image_digest=image_digest,
       phase=phase.value,
       active=active,
       error=error,
@@ -509,6 +536,7 @@ def _finish_interrupted_update_progress() -> None:
     PlatformUpdatePhase.FAILED,
     plan_id=progress["plan_id"],
     target_sha=progress["target_sha"],
+    image_digest=progress["image_digest"],
     active=False,
     error=(
       "Möbius restarted before this update finished. Review the update again "
@@ -559,6 +587,9 @@ def _validate_update_plan(
   resolved = _rev(repo, target_sha)
   if resolved != target_sha:
     raise PlatformUpdateError("update_plan_target_missing")
+  pending = unfinished_update(repo)
+  if pending and pending["target_sha"] != target_sha:
+    raise PlatformUpdateError("finish_update_first")
 
 
 def _scrubbed_git_env(repo: Path) -> dict:
@@ -2768,6 +2799,95 @@ def boot_guard_sync() -> str:
     return boot_guard_clean_served_tree(PLATFORM_REPO)
 
 
+def unfinished_update(repo: Path = PLATFORM_REPO) -> UnfinishedUpdate | None:
+  """The owner-started update that is not finished yet, if any.
+
+  Derived from the records the updater already keeps: the parked conflict,
+  the activation remainder an Apply recorded for its release, and the
+  progress record of the last started update.
+  """
+  flag = _read_conflict_flag() if CONFLICT_FLAG.exists() else None
+  if flag and flag.get("upstream"):
+    return UnfinishedUpdate(
+      target_sha=str(flag["upstream"]), stage="resolve", image_digest=None,
+    )
+  progress = platform_update_progress()
+  marker = _read_activation_marker()
+  if marker and marker["upstream_sha"]:
+    # Only work this release's own finish can do: its official-image paths
+    # and restart-level paths. Local-only image changes are not the update's.
+    owed = set(marker["image_paths"]) | {
+      path for path in marker["paths"]
+      if platform_activation.classify_activation([path])["level"]
+      == platform_activation.ActivationLevel.SERVER_RESTART.value
+    }
+    if owed:
+      target = marker["upstream_sha"]
+      return UnfinishedUpdate(
+        target_sha=target, stage="finish",
+        image_digest=(
+          progress["image_digest"] if progress["target_sha"] == target else None
+        ),
+      )
+  target = progress["target_sha"] or ""
+  if (
+    not progress["active"]
+    and progress["phase"] in {
+      PlatformUpdatePhase.BLOCKED.value, PlatformUpdatePhase.FAILED.value,
+    }
+    and re.fullmatch(r"[0-9a-f]{40}", target)
+    and not _is_ancestor(repo, target, _rev(repo, "HEAD") or "HEAD")
+  ):
+    return UnfinishedUpdate(
+      target_sha=target, stage="apply", image_digest=progress["image_digest"],
+    )
+  return None
+
+
+def start_unfinished_update(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+  repo: Path = PLATFORM_REPO,
+) -> UnfinishedUpdate:
+  """Record that the owner started this reviewed update without installing it.
+
+  Used when a review hands the update to an agent (for example to preserve
+  local changes first), so Settings keeps offering Finish update for exactly
+  this release until it is installed or cancelled.
+  """
+  with _reconcile_flock():
+    _validate_update_plan(
+      repo, plan_id=plan_id, current_sha=current_sha,
+      target_sha=target_sha, image_digest=image_digest,
+    )
+    if not unfinished_update(repo):
+      _set_update_progress(
+        PlatformUpdatePhase.BLOCKED, plan_id=plan_id, target_sha=target_sha,
+        image_digest=image_digest, active=False,
+        error="This update is waiting for its blockers to be resolved.",
+      )
+    pending = unfinished_update(repo)
+    if not pending:
+      raise PlatformUpdateError("update_plan_stale")
+    return pending
+
+
+def cancel_unfinished_update(repo: Path = PLATFORM_REPO) -> None:
+  """Stop tracking an update that never installed; installed ones must finish."""
+  with _reconcile_flock():
+    pending = unfinished_update(repo)
+    if pending is None:
+      return
+    if pending["stage"] != "apply":
+      raise PlatformUpdateError("unfinished_update_installed")
+    _set_update_progress(
+      PlatformUpdatePhase.IDLE, plan_id=None, target_sha=None, active=False,
+    )
+
+
 def platform_status(
   repo: Path = PLATFORM_REPO,
   *,
@@ -2823,8 +2943,8 @@ def platform_status(
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
     # `target` is the last-fetched origin/main. If it strictly descends the
-    # version this conflict is pinned to, newer releases stacked up behind the
-    # one being resolved — Settings can then offer one combined review+resolve.
+    # version this conflict is pinned to, newer releases stacked up behind it.
+    # They wait until this one finishes (see ``unfinished_update``).
     conflict_target = flag.get("upstream")
     newer_available = bool(
       target and conflict_target and target != conflict_target
@@ -2845,6 +2965,7 @@ def platform_status(
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
       newer_updates_available=newer_available,
       rollback_target_sha=None, rollback_error=None,
+      unfinished_update=unfinished_update(repo),
       )
 
   # A freshly published GHCR revision may not yet be in this clone's object
@@ -2880,6 +3001,7 @@ def platform_status(
     newer_updates_available=False,
     rollback_target_sha=(rollback or {}).get("target"),
     rollback_error=(rollback or {}).get("error"),
+    unfinished_update=unfinished_update(repo),
   )
 
 
@@ -3352,6 +3474,7 @@ def _apply_platform_update_sync(
       PlatformUpdatePhase.PREPARING,
       plan_id=plan_id,
       target_sha=target_sha,
+      image_digest=image_digest,
       active=True,
     )
 
@@ -3360,6 +3483,7 @@ def _apply_platform_update_sync(
         phase,
         plan_id=plan_id,
         target_sha=target_sha,
+        image_digest=image_digest,
         active=True,
       )
 
@@ -3440,6 +3564,7 @@ def _apply_platform_update_sync(
         final_phase,
         plan_id=plan_id,
         target_sha=target_sha,
+        image_digest=image_digest,
         active=False,
         error=res.error if state is PlatformUpdateState.ROLLED_BACK else None,
       )
@@ -3463,6 +3588,7 @@ def _apply_platform_update_sync(
         phase,
         plan_id=plan_id,
         target_sha=target_sha,
+        image_digest=image_digest,
         active=False,
         error=str(exc)[:_ERROR_EXCERPT_CHARS] or exc.__class__.__name__,
       )
@@ -3513,6 +3639,25 @@ async def create_platform_conflict_resolver_chat(
   return result
 
 
+# Shared by every agent the owner asks to unblock an update: the owner's request
+# covers finishing that exact update, through the same controls Settings uses.
+FINISH_UPDATE_INSTRUCTIONS = (
+  "finish this same update yourself; the owner's request to resolve it "
+  "covers that. Read `mapi '/api/platform/update-preview?intent=finish'`: it "
+  "stays on this release and never offers a newer one. If "
+  "`activation.required_actions` includes `image_rebuild`, POST its "
+  "`plan_id`, `current_sha`, `target_sha` and `image_digest` to "
+  "`/api/platform/rebuild`; that installs any remaining source and replaces "
+  "the container with the matching image in one step, restarting Möbius "
+  "once, and this chat resumes afterwards to confirm the new version is "
+  "running. Otherwise POST the same plan to `/api/platform/apply` if it is "
+  "still actionable, then use the restart card if `server_restart` remains. "
+  "Never use a plain restart in place of the rebuild; it would run the new "
+  "source on the old image. If it cannot finish, say exactly why: Settings "
+  "keeps offering Finish update for this release until it does."
+)
+
+
 def _platform_conflict_resolver_message(
   target_sha: str,
   conflict_paths: list[str],
@@ -3535,14 +3680,7 @@ def _platform_conflict_resolver_message(
       "build/import and rollback gates. If it prints `conflict`, those live "
       "edits overlap your answer: the candidate now holds fresh markers, so "
       "resolve and run the same command again. When it prints `updated`, "
-      "read `activation.required_actions` from `mapi /api/platform/status`. "
-      "If it includes `image_rebuild`, the update is not "
-      "finished: ask the owner to press **Finish update** in Settings → "
-      "Updates, which replaces the container with the matching image and "
-      "restarts once. Do not offer a plain restart instead; that would run "
-      "the new source on the old image. Offer a restart only when "
-      "`server_restart` is the sole remaining action. Do not report the "
-      "platform active until those actions finish."
+      + FINISH_UPDATE_INSTRUCTIONS
     )
   return (
     "This platform update conflict was recorded by an older updater "

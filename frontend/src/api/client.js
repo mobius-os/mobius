@@ -1379,6 +1379,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(plan),
     }),
+    startUnfinishedUpdate: (plan) => apiFetch('/platform/unfinished-update', {
+      method: 'POST',
+      body: JSON.stringify(plan),
+    }),
+    cancelUnfinishedUpdate: () => apiFetch('/platform/unfinished-update', { method: 'DELETE' }),
     conflictResolverChat: () => apiFetch('/platform/conflict-resolver-chat', {
       method: 'POST',
     }),

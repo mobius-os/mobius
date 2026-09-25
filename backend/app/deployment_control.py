@@ -643,6 +643,9 @@ async def _request_reviewed_rebuild_transaction(
         "update_plan_target_missing": (
           "The reviewed release source is unavailable. Refresh and try again shortly."
         ),
+        "finish_update_first": (
+          "Another update is not finished yet. Finish it in Settings before starting a new one."
+        ),
       }
       raise DeploymentControlError(
         code,

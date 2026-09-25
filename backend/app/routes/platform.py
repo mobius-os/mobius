@@ -48,6 +48,12 @@ router = APIRouter(prefix="/api/platform", tags=["platform"])
 
 
 _PLAN_ERROR_MESSAGES = {
+  "finish_update_first": (
+    "Another update is not finished yet. Finish it in Settings before starting a new one."
+  ),
+  "unfinished_update_installed": (
+    "This update is already installed. Finish it in Settings instead of cancelling it."
+  ),
   "update_plan_stale": (
     "Möbius changed since this preview. Refresh and review the update again."
   ),
@@ -176,6 +182,15 @@ async def get_platform_update_preview(
   release source and local read failures are explicit; neither means that
   there is nothing to update."""
   try:
+    pending = await asyncio.to_thread(platform_update.unfinished_update)
+    if pending and pending["stage"] == "apply":
+      # A started update that never installed is finished by reviewing that
+      # same release again, never a newer one.
+      return await asyncio.to_thread(
+        platform_update.platform_update_preview,
+        target_sha=pending["target_sha"],
+        image_digest=pending["image_digest"],
+      )
     if intent == "finish":
       target_sha = await asyncio.to_thread(deployment_control.applied_release_sha)
       image_digest = None
@@ -295,6 +310,39 @@ async def rebuild_reviewed_platform_update(
       status_code=exc.status_code,
       detail={"code": exc.code, "message": exc.message},
     ) from exc
+
+
+@router.post("/unfinished-update", dependencies=[Depends(reject_cross_site)])
+async def start_unfinished_platform_update(
+  request: PlatformApplyIn,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> platform_update.UnfinishedUpdate:
+  """Keep a reviewed update as the one to finish while an agent unblocks it."""
+  try:
+    return await asyncio.to_thread(
+      platform_update.start_unfinished_update,
+      plan_id=request.plan_id,
+      current_sha=request.current_sha,
+      target_sha=request.target_sha,
+      image_digest=request.image_digest,
+    )
+  except PlatformUpdateError as exc:
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
+
+
+@router.delete(
+  "/unfinished-update",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=204,
+)
+async def cancel_unfinished_platform_update(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> None:
+  """Drop an update that never installed; an installed one must finish."""
+  try:
+    await asyncio.to_thread(platform_update.cancel_unfinished_update)
+  except PlatformUpdateError as exc:
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
 
 
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])

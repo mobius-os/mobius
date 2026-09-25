@@ -30,7 +30,7 @@ function blockingPathLabel(path) {
 }
 
 export default function UpdateReviewModal({
-  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
+  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve, onCancelUpdate,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
   restoreFocusRef, inertBoundaryRef,
 }) {
@@ -85,6 +85,7 @@ export default function UpdateReviewModal({
   const activation = preview?.activation
   const rebuildUpdate = reviewedUpdateUsesContainerRebuild(preview)
   const finish = preview?.operation === 'finish' || intent === 'finish'
+  const cancellable = platform?.unfinished_update?.stage === 'apply' && !!onCancelUpdate
   const hasResult = ['conflict', 'rolled_back'].includes(resultState)
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
@@ -184,6 +185,8 @@ export default function UpdateReviewModal({
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
+          {cancellable && !busy && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline"
+            onClick={async () => { if (await onCancelUpdate()) onClose() }}>Cancel update</button>}
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
           : repairReason ? <>

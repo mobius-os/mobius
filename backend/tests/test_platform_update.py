@@ -191,6 +191,12 @@ def clone_env(tmp_path, monkeypatch):
     "UPDATE_PROGRESS_PATH",
     tmp_path / ".update-progress.json",
   )
+  # The reader falls back to the last in-process record; start each clone clean.
+  monkeypatch.setattr(pu, "_UPDATE_PROGRESS", pu.PlatformUpdateProgress(
+    plan_id=None, target_sha=None, image_digest=None,
+    phase=pu.PlatformUpdatePhase.IDLE.value, active=False, error=None,
+    updated_at=0.0,
+  ))
   monkeypatch.setenv("BUILD_SHA", "test-sha")
   origin = _make_origin(tmp_path)
   platform = _clone_platform(tmp_path, origin)
@@ -2269,8 +2275,10 @@ def test_platform_conflict_resolver_message_points_at_the_parked_worktree():
   assert "all marked files together" in content
   assert "merge --no-ff" not in content
   assert "running platform is untouched" in content
-  assert "Finish update" in content
-  assert "Do not offer a plain restart instead" in content
+  assert "finish this same update yourself" in content
+  assert "update-preview?intent=finish" in content
+  assert "/api/platform/rebuild" in content
+  assert "Never use a plain restart in place of the rebuild" in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
@@ -4400,6 +4408,47 @@ def test_finish_refuses_a_branch_reset_below_the_installed_release(clone_env):
   # even though the lagging tracking ref names one it does.
   with pytest.raises(pu.PlatformUpdateError, match="applied_release_unavailable"):
     pu.applied_release_sha(platform)
+
+
+def test_a_started_update_stays_the_only_one_until_it_installs(clone_env):
+  origin, platform = clone_env
+  current = _served_sha(platform)
+  pinned = _advance_origin(origin, edits={"release.txt": "pinned\n"})
+  pu._fetch(platform)
+  plan = _apply_plan(current, pinned, platform)
+  plan.pop("repo")
+
+  pending = pu.start_unfinished_update(**plan, repo=platform)
+  assert pending == {"target_sha": pinned, "stage": "apply", "image_digest": None}
+  assert pu.platform_status(platform)["unfinished_update"] == pending
+
+  # A newer release is neither reviewed nor accepted until this one finishes.
+  newer = _advance_origin(origin, edits={"release.txt": "newer\n"})
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=newer)
+  with pytest.raises(pu.PlatformUpdateError, match="finish_update_first"):
+    pu._validate_update_plan(
+      platform, plan_id=preview["plan_id"], current_sha=current,
+      target_sha=newer,
+    )
+
+  pu.cancel_unfinished_update(platform)
+  assert pu.unfinished_update(platform) is None
+
+
+def test_an_installed_update_owes_its_finish_until_the_restart(clone_env):
+  origin, platform = clone_env
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300")})
+  assert pu.reconcile_clone(platform).status == "updated"
+  pu.mark_activation_needed(
+    _served_sha(platform), ["backend/app/main.py"],
+    upstream_sha=target, repo=platform,
+  )
+
+  assert pu.unfinished_update(platform)["stage"] == "finish"
+  with pytest.raises(pu.PlatformUpdateError, match="unfinished_update_installed"):
+    pu.cancel_unfinished_update(platform)
 
 
 def test_finish_can_prove_applied_source_without_a_recorded_marker(clone_env):
