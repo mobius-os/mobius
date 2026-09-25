@@ -1462,12 +1462,40 @@ def _self_resuming_helper_rows(
     .all()
   )
   waiting_statuses = ACTIVE_DELEGATION_STATUSES | WAKE_ELIGIBLE_STATUSES
+  delivered = _delivered_to_live_parent_runs(
+    db, {row.parent_chat_id for row in rows},
+  )
   projected = []
   for row in rows:
+    if row.id in delivered:
+      continue
     status, _run, _result = derived_status(db, row, load_result=False)
     if status in waiting_statuses:
       projected.append((row, status))
   return projected
+
+
+def _delivered_to_live_parent_runs(
+  db: Session, parent_chat_ids: set[str],
+) -> set[str]:
+  """Helper results already handed to a parent run that has not settled.
+
+  Finalize latches ``parent_woken_at`` only when that run ends, but from
+  delivery onward the receiving run, not the helper, owns the next move.
+  Otherwise the turn that incorporates a result could never complete its Goal.
+  """
+  if not parent_chat_ids:
+    return set()
+  delivered: set[str] = set()
+  for (envelope,) in db.query(models.ChatRun.activity_delivery_json).filter(
+    models.ChatRun.chat_id.in_(parent_chat_ids),
+    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    models.ChatRun.activity_delivery_json.is_not(None),
+  ).all():
+    ids = envelope.get("delegation_ids") if isinstance(envelope, dict) else None
+    if isinstance(ids, list):
+      delivered.update(ids)
+  return delivered
 
 
 def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
