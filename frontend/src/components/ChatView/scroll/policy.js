@@ -102,6 +102,15 @@ export function modeAfterSpacerResize(mode, spacerH) {
 }
 
 
+/** Whether a content resize re-applies a tracking mode. A FOLLOW_BOTTOM resize
+ * driven by the focused inline answer editor is the reader typing, not the live
+ * tail advancing: following it scrolls the card being written in by a line per
+ * Shift+Enter. Tail growth in the same batch is followed on the next firing the
+ * editor does not drive. */
+export function resizeReappliesMode(kind, { editorResized = false } = {}) {
+  return !(kind === 'FOLLOW_BOTTOM' && editorResized)
+}
+
 /** A short stream ended before filling its reservation: retain the pin
  * identity but retire its live-only automatic-follow handoff. */
 export function settledPinMode(mode) {

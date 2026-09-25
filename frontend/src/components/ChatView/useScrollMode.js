@@ -123,6 +123,7 @@ import {
   readerScrollEscapeDirection,
   scrollAuthorityAllowsCommit,
   settledPinMode,
+  resizeReappliesMode,
   shouldPinSend,
   terminalLayoutAuthority,
 } from './scroll/policy.js'
@@ -1630,12 +1631,8 @@ export default function useScrollMode({
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
-    //                   glued to the tail. EXCEPT a firing driven by the
-    //                   focused inline answer editor: that growth is the
-    //                   reader's own typing, not new tail content, and
-    //                   following it moved the whole conversation one line per
-    //                   Shift+Enter. revealFocusedQuestionEditor owns that case
-    //                   (the browser already keeps the caret in view).
+    //                   glued to the tail (except the reader's own typing in
+    //                   the inline answer editor; see resizeReappliesMode).
     //   ANCHOR_AT     — during the reveal window, re-applied every firing
     //                   (lazy renderers — KaTeX, highlight.js, markdown
     //                   re-wrap — settle in the first ~1s and shift the
@@ -1706,13 +1703,7 @@ export default function useScrollMode({
         // every late renderer or font swap becomes a visible jump.
         || (k === 'ANCHOR_AT' && !revealedRef.current)
       ) {
-        // The inline answer editor growing is the reader typing, not the live
-        // tail advancing. Following it here ran BEFORE the editor-resize path
-        // below and scrolled the transcript by each new line, so the card the
-        // reader is writing in slid upward under them. Any genuine tail growth
-        // in the same batch is picked up by the next firing that is not the
-        // editor's -- the turn is parked on the question meanwhile.
-        if (!(k === 'FOLLOW_BOTTOM' && editorResized)) {
+        if (resizeReappliesMode(k, { editorResized })) {
           writeMode(
             scrollEl,
             modeRef.current,

@@ -28,6 +28,7 @@ import {
   editLocalIntent,
   retryRejectedIntent,
   discardRejectedIntent,
+  holdInteractiveDispatch,
 } from '../chatOutbox.js'
 import { sendDraftIdentity } from '../sendAttemptIdentity.js'
 import { retireInteractiveIntent } from '../useStreamConnection.js'
@@ -396,6 +397,58 @@ test('one transport failure preserves order and stops the drain burst', async ()
   await drain(request)
   assert.equal(calls.length, 1)
   assert.equal((await list()).length, 2)
+})
+
+test('an interactively held intent keeps its chat out of the drain until released', async () => {
+  const release = holdInteractiveDispatch('held1')
+  // Distinct enqueue times, so the drain's createdAt order is the send order.
+  mock.timers.enable({ apis: ['Date'], now: 1_000 })
+  try {
+    await enqueue({ chatId: 'c1', cid: 'held1', body: { content: 'mine', cid: 'held1' } })
+    mock.timers.tick(1)
+    await enqueue({ chatId: 'c1', cid: 'after1', body: { content: 'behind', cid: 'after1' } })
+    mock.timers.tick(1)
+    await enqueue({ chatId: 'c2', cid: 'other1', body: { content: 'other chat', cid: 'other1' } })
+  } finally {
+    mock.timers.reset()
+  }
+  const releases = []
+  const unsubscribe = subscribeOutboxChanges(change => {
+    if (change.kind === 'release') releases.push(change)
+  })
+  try {
+    const { calls, request } = mockRequest(() => httpResponse(202))
+    await drain(request)
+    // The held chat keeps its order; an unrelated chat still delivers.
+    assert.deepEqual(calls.map(call => call.record.cid), ['other1'])
+
+    // The drain stepped around the held chat, so releasing re-wakes it once.
+    release()
+    release()
+    assert.deepEqual(releases, [{ kind: 'release', requestDelivery: true }])
+
+    await drain(request)
+    assert.deepEqual(calls.map(call => call.record.cid), ['other1', 'held1', 'after1'])
+  } finally {
+    unsubscribe()
+  }
+})
+
+test('releasing a hold the drain never stepped around requests no delivery', async () => {
+  // A failed interactive send is retried on the next readiness edge, not
+  // immediately by the drain its own release would otherwise wake.
+  const releases = []
+  const unsubscribe = subscribeOutboxChanges(change => {
+    if (change.kind === 'release') releases.push(change)
+  })
+  try {
+    const release = holdInteractiveDispatch('held2')
+    await enqueue({ chatId: 'c1', cid: 'held2', body: { content: 'mine', cid: 'held2' } })
+    release()
+    assert.deepEqual(releases, [])
+  } finally {
+    unsubscribe()
+  }
 })
 
 test('an auth rejection is kept but attempted only once per loaded document', async () => {
