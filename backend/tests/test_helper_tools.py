@@ -18,6 +18,10 @@ from tests.test_delegations import _seed_delegation
 
 
 def _control(monkeypatch, **env):
+  # Start from a clean baseline: the suite must not depend on the runner's own
+  # helper-host identity, which is present whenever it runs inside a host.
+  for name in ("MOBIUS_HELPER_HOST", "MOBIUS_CALLER_ENV_FILE"):
+    monkeypatch.delenv(name, raising=False)
   for name, value in env.items():
     monkeypatch.setenv(name, value)
   path = Path(__file__).resolve().parents[1] / "scripts" / "mobius_control_mcp.py"
