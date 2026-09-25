@@ -9,7 +9,7 @@ ad-hoc debug endpoints.
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app import models
@@ -36,6 +36,7 @@ from app.questions import question_memory_diagnostics
 from app.resource_pressure import resource_status
 from app.runner_registry import RunnerKind, registry
 from app.secure_inputs import secure_input_memory_diagnostics
+from app.stack_sampler import ProfileInProgress, sample_thread_stacks
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
@@ -292,6 +293,23 @@ def debug_memory(
     "allocations": allocation_report(limit=allocation_limit),
     "oom_events": recent_oom_events(get_settings().data_dir, limit=10),
   }
+
+
+@router.get("/profile")
+def debug_profile(
+  _owner: models.Owner = Depends(get_current_owner),
+  seconds: float = Query(default=10, ge=1, le=60),
+):
+  """Sample every backend thread for ``seconds`` and rank busy hot spots.
+
+  Stands in for py-spy, which the container's missing ptrace capability
+  blocks. Occupies one worker thread for the window; 409 while another
+  profile runs.
+  """
+  try:
+    return sample_thread_stacks(seconds)
+  except ProfileInProgress as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/logs")
