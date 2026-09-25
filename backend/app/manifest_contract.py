@@ -64,6 +64,12 @@ def is_folder_skill_member(name: str) -> bool:
   return name == FOLDER_SKILL_ENTRY or _SKILL_FILENAME_OK.fullmatch(name) is not None
 
 
+def folder_skill_id(entry: str) -> str | None:
+  """The `<id>` of a `<id>/` folder-skill manifest entry, else None."""
+  match = _SKILL_FOLDER_OK.fullmatch(entry)
+  return match.group(1) if match else None
+
+
 def skill_member_paths(manifest: dict) -> list[str]:
   """Every source file a validated manifest's `skills` materializes, in order.
 

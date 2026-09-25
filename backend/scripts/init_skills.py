@@ -24,6 +24,7 @@ _APP_IMPORT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _APP_IMPORT_ROOT not in sys.path:
   sys.path.insert(0, _APP_IMPORT_ROOT)
 
+from app.manifest_contract import folder_skill_id, is_folder_skill_member  # noqa: E402
 from app.storage_io import atomic_write  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -86,6 +87,14 @@ def _writable(path: Path) -> None:
     pass
 
 
+def _app_folder_skill_id(name: str) -> str | None:
+  """Folder id of an app-owned `<id>/<member>.md` record, else None."""
+  folder, sep, member = name.partition("/")
+  if not sep or not is_folder_skill_member(member):
+    return None
+  return folder if folder_skill_id(f"{folder}/") else None
+
+
 def _read_records(path: Path, *, platform: bool = False) -> dict | None:
   if path.is_symlink():
     return None
@@ -100,11 +109,13 @@ def _read_records(path: Path, *, platform: bool = False) -> dict | None:
   if not isinstance(records, dict):
     return None
   for name, record in records.items():
-    if (
-      not isinstance(name, str) or Path(name).name != name
-      or not name.endswith(".md") or not isinstance(record, dict)
-    ):
+    if not isinstance(name, str) or not isinstance(record, dict):
       return None
+    # Platform seeds are flat. App records may also name a member of a
+    # `<id>/` folder skill, exactly as the manifest contract installs them.
+    if name != Path(name).name or not name.endswith(".md"):
+      if platform or _app_folder_skill_id(name) is None:
+        return None
     if platform:
       baseline = record.get("baseline_sha256")
       upstream = record.get("upstream_sha256")
@@ -234,7 +245,11 @@ def init() -> None:
     print("init_skills: seed tree contains an unexpected file type; no seed changes made")
     return
   seed_files = {path.name: path for path in candidates}
-  app_owned = {name for name, rec in app_records.items() if isinstance(rec, dict)}
+  # A folder skill owns its whole `<id>` name, even while deactivated.
+  app_owned = {
+    f"{folder}.md" if (folder := _app_folder_skill_id(name)) else name
+    for name in app_records
+  }
   installed_owned = {name for name, rec in installed.items() if isinstance(rec, dict)}
 
   # A removed platform seed leaves discovery, but its exact bytes are always
