@@ -729,9 +729,47 @@ def test_late_conflicting_commit_is_pinned_while_the_frozen_release_activates(
   assert pending["release_sha"] == _served_sha(platform)
   assert pending["paths"] == ["backend/app/main.py"]
 
-  # Integrating the pinned work retires the pending projection.
+  # Merely making the ref an ancestor does not prove its content was kept.
   _git(platform, "merge", "-q", "-s", "ours", "-m", "take late later", ref)
+  assert pu.platform_status(platform)["late_changes"]["ref"] == ref
+  # Retiring the recovery ref is the explicit completion step.
+  _git(platform, "update-ref", "-d", ref)
   assert pu.platform_status(platform)["late_changes"] is None
+
+
+def test_another_late_edit_cannot_replace_an_unresolved_recovery_record(clone_env):
+  origin, platform = clone_env
+  _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={"backend/app/late.py": "FIRST = True\n"})
+  assert pu.continue_platform_overlay_update(platform) == "updated_late_changes_pending"
+  first = pu.platform_status(platform)["late_changes"]
+  served = _served_sha(platform)
+
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'NEXT'"),
+  })
+  parked = pu.reconcile_clone(platform)
+  assert parked.status == "conflict"
+  worktree = Path(parked.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'BOTH AGAIN'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+  (platform / "backend/app/foo.py").write_text("VALUE = 'SECOND'\n")
+
+  with pytest.raises(pu.PlatformUpdateError, match="Saved edits from an earlier"):
+    pu.continue_platform_overlay_update(platform)
+  assert _served_sha(platform) == served
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'SECOND'\n"
+  assert pu.platform_status(platform)["late_changes"]["ref"] == first["ref"]
+  assert _git(platform, "show", f"{first['ref']}:backend/app/late.py").stdout == (
+    "FIRST = True\n"
+  )
+  assert _git(
+    platform, "for-each-ref", "--format=%(refname)",
+    "refs/mobius/platform-late-changes/",
+  ).stdout.splitlines() == [first["ref"]]
+  assert not pu.LATE_SNAPSHOT_FLAG.exists()
 
 
 def test_saved_late_work_remains_visible_after_another_release(clone_env):
@@ -1182,6 +1220,59 @@ def test_offline_fetch_serves_current_unchanged(clone_env, monkeypatch):
 
 # --- uncommitted working-tree edits are never lost --------------------------
 
+def test_original_dirty_edit_survives_a_committed_conflict_resolution(clone_env):
+  origin, platform = clone_env
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'"),
+  })
+  (platform / "backend/app/foo.py").write_text("VALUE = 'BEFORE APPLY'\n")
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
+  })
+  parked = pu.reconcile_clone(platform)
+  assert parked.status == "conflict" and parked.overlay["stage"] == "committed"
+  worktree = Path(parked.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'BOTH'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  assert "LINE_A = 'BOTH'" in (platform / "backend/app/main.py").read_text()
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'BEFORE APPLY'\n"
+  assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
+    " M backend/app/foo.py",
+  ]
+  assert pu.platform_status(platform)["late_changes"] is None
+
+
+def test_original_dirty_edit_conflicting_with_resolution_stops_before_activation(
+  clone_env,
+):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'"),
+  })
+  (platform / "backend/app/foo.py").write_text("VALUE = 'BEFORE APPLY'\n")
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'"),
+    "backend/app/foo.py": "VALUE = 'UPSTREAM'\n",
+  })
+  parked = pu.reconcile_clone(platform)
+  assert parked.status == "conflict" and parked.overlay["stage"] == "committed"
+  worktree = Path(parked.overlay["worktree"])
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'BOTH'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+
+  with pytest.raises(pu.PlatformUpdateError, match="working edits present before Apply"):
+    pu.continue_platform_overlay_update(platform)
+  assert _served_sha(platform) == pre
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'BEFORE APPLY'\n"
+  assert pu.platform_status(platform)["late_changes"] is None
+  assert worktree.exists() and pu.CONFLICT_FLAG.exists()
+
 def test_uncommitted_edits_come_back_uncommitted(clone_env):
   origin, platform = clone_env
   # An uncommitted local edit on disk (no commit) + a disjoint upstream deploy.
@@ -1237,8 +1328,9 @@ def test_new_uncommitted_edits_are_pinned_across_a_parked_conflict(clone_env):
     " M backend/app/foo.py",
   ]
 
-  # The owner keeps editing while the conflict is parked. The resolver's
-  # frozen answer lands; the newer dirty tree stays pinned for a later merge.
+  # The owner keeps editing while the conflict is parked. The original dirty
+  # edit remains in the frozen answer; only the newer version is saved for a
+  # later merge.
   (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY AGAIN'\n")
   worktree = Path(res.overlay["worktree"])
   (worktree / "backend/app/main.py").write_text(
@@ -1253,6 +1345,10 @@ def test_new_uncommitted_edits_are_pinned_across_a_parked_conflict(clone_env):
     "Reconcile local platform source with reviewed upstream",
   ]
   assert "LINE_A = 'BOTH'" in (platform / "backend/app/main.py").read_text()
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+  assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
+    " M backend/app/foo.py",
+  ]
   pending = pu.platform_status(platform)["late_changes"]
   assert pending["uncommitted"] is True
   assert _git(platform, "show", f"{pending['ref']}:backend/app/foo.py").stdout == "VALUE = 'DIRTY AGAIN'\n"

@@ -130,11 +130,13 @@ The owner's customizations end up *on top of* the current release, as if they'd 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
 - **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
-The platform clone uses the same fix-forward shape at repository scale. It
-fetches the selected target, fast-forwards when local `main` is fully contained
-in it, and otherwise replays the still-local overlay as a linear series on top
-of the target. Changes proven to have landed upstream are retired instead of
-being carried forever under a different commit identity.
+The platform clone fetches the selected target and fast-forwards when local
+`main` is already contained in it. Otherwise it compares the final local and
+upstream trees once, records the reconciled tree as one local commit on the
+target, and keeps the previous local tip reachable for recovery. A conflict
+stays in an isolated worktree while the old checkout remains served. Working
+edits present before Apply are carried separately and returned uncommitted;
+edits made while a conflict is being resolved are saved for post-update review.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
@@ -158,9 +160,9 @@ and any newly added runtime module stay image-owned.
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or replay the local overlay onto the selected target (commit-stray-edits-first, off-tree conflict handling, post-replay import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or merge the final trees once into an isolated candidate (off-tree conflict handling, import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise a linear replay of the still-local overlay onto the selected target. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply records the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise compares the final trees once rather than replaying historical local commits. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -565,11 +567,11 @@ Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
-fetches `origin/main`, commits any stray working-tree edits, and then
-fast-forwards or replays the still-local overlay onto that target. A conflict
-stays in an isolated candidate worktree while the last-served commit remains
-live, and a post-replay `import app.main` probe rolls back rather than serving a
-broken tree. (It reuses `app_git`'s isolated git env +
+fetches `origin/main`, snapshots working edits, and then fast-forwards or
+compares the final local and upstream trees once. A conflict stays in an
+isolated candidate worktree while the last-served commit remains live; the
+resolved tree is frozen before activation. An `import app.main` probe rolls
+back rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
 `commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
 maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
@@ -607,7 +609,7 @@ back to the baked backend, so the live container remains reachable to inspect.
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe and validation of its served identity broker. Startup may finish or undo
 an update interrupted during its own filesystem transaction, but it never
-fetches or selects a newer release. Fetching and replaying local commits happen
+fetches or selects a newer release. Fetching and reconciling local source happen
 only through the reviewed updater. An invalid existing clone or broker selects
 the complete baked platform without overwriting, quarantining, or reseeding the
 broken tree. Owner-data disaster recovery is the separate

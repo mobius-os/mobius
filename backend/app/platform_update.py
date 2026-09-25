@@ -2230,7 +2230,8 @@ def _recover_late_snapshot(
   if restored_old:
     _retire_late_snapshot(repo, carried)
     return "restored"
-  if _pending_late_changes(repo, _rev(repo, local)) is not None:
+  pending = _pending_late_changes(repo)
+  if pending is not None and pending.get("late_sha") == carried.pre:
     LATE_SNAPSHOT_FLAG.unlink(missing_ok=True)
   return "pending"
 
@@ -2290,7 +2291,8 @@ def _settle_late_snapshot(
     False if restored_on_release
     else _restore_rejected_late_snapshot(repo, local, carried)
   )
-  pending = _pending_late_changes(repo, _rev(repo, local)) is not None
+  saved = _pending_late_changes(repo)
+  pending = saved is not None and saved.get("late_sha") == carried.pre
   if carried.working and pending:
     # The pending record now owns this pin. Unwinding a resolved dirty tree
     # must not discard newer live bytes saved for the post-boot merge.
@@ -2830,6 +2832,11 @@ def _activate_frozen_release(
   """Run every activation gate on the frozen release, pinning later work."""
   late: dict | None = None
   if planned.late_paths:
+    if _pending_late_changes(repo) is not None:
+      raise PlatformUpdateError(
+        "Saved edits from an earlier platform update still need review. "
+        "Resolve them before this update can save another late edit."
+      )
     # Pin before the branch moves: carried.pre holds every late commit and
     # the uncommitted edits. The record is written first and survives only a
     # successful activation, so status never claims pending work that the
@@ -2865,8 +2872,8 @@ def _activate_frozen_release(
       LATE_CHANGES_FLAG.unlink(missing_ok=True)
 
 
-def _pending_late_changes(repo: Path, local: str) -> dict | None:
-  """Late work pinned by an activated frozen release and not yet integrated."""
+def _pending_late_changes(repo: Path) -> dict | None:
+  """Saved work still awaiting explicit integration or retirement."""
   try:
     record = json.loads(LATE_CHANGES_FLAG.read_text())
   except (OSError, ValueError):
@@ -2877,17 +2884,17 @@ def _pending_late_changes(repo: Path, local: str) -> dict | None:
   ref = str(record.get("ref") or "")
   if not (_is_sha(release) and _is_sha(late) and ref.startswith(_LATE_CHANGES_REF_PREFIX)):
     return None
-  if (
-    _rev(repo, ref) != late
-    or _is_ancestor(repo, str(late), local)
-  ):
+  # An ancestry check cannot prove the saved tree was integrated: `git merge
+  # -s ours` makes the ref an ancestor while deliberately discarding its bytes.
+  # Keep the recovery notice until the owner explicitly retires the saved ref.
+  if _rev(repo, ref) != late:
     return None
   return record
 
 
 def _late_changes_status(repo: Path, local: str) -> dict | None:
   """One status shape for saved post-resolution work and interrupted restores."""
-  late = _pending_late_changes(repo, local)
+  late = _pending_late_changes(repo)
   if late is not None:
     return late
   stranded = _read_late_snapshot(repo)
@@ -2939,9 +2946,29 @@ def _resolved_release(
       "Stage every intended resolution before continuing the update."
     )
   if str(parked.get("stage") or "committed") != "working":
+    release = _net_overlay_commit(repo, target, tree, source)
+    original_working = str(parked.get("pre") or "")
+    if original_working and original_working != source:
+      dirty = app_git.merge_refs(
+        repo, original_working, release, merge_base=source,
+      )
+      if dirty.status == "conflict":
+        raise PlatformUpdateError(
+          "The working edits present before Apply also conflict with the "
+          "resolved release. Resolve them before this update can activate."
+        )
+      if not dirty.merged_tree_oid:
+        raise PlatformUpdateError("The original working edits could not be merged.")
+      return {
+        "target": target, "source": source, "release": release,
+        "working_release": _working_overlay_commit(
+          repo, release, dirty.merged_tree_oid,
+        ),
+        "working_source": original_working,
+      }
     return {
       "target": target, "source": source,
-      "release": _net_overlay_commit(repo, target, tree, source),
+      "release": release,
       "working_release": None, "working_source": None,
     }
   committed = str(parked.get("right") or "")
