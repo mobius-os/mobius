@@ -3,8 +3,10 @@
 Offline support is an app-level product choice, not a requirement for every
 Möbius app. This document defines the shared platform/app contract for apps
 that choose to support it. The implementation map remains in
-[`ARCHITECTURE.md`](ARCHITECTURE.md); practical app-building instructions live
-in the seeded `building-apps` guides.
+[`ARCHITECTURE.md`](ARCHITECTURE.md); practical instructions live in the seeded
+[`building-apps`](backend/scripts/seed-skills/building-apps.md) and
+[`building-apps-quickstart`](backend/scripts/seed-skills/building-apps-quickstart.md)
+guides.
 
 ## Ownership
 

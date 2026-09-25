@@ -124,8 +124,8 @@ bright decision wheel, a tactile stack of cards—then support it with restraine
 chrome. Visual richness should come from hierarchy, composition, motion, and
 state feedback, not extra screens.
 
-The manifest should truthfully describe the local app. A typical private,
-offline-safe app uses:
+The manifest should truthfully describe the local app. A typical private app
+uses:
 
 ```json
 {
@@ -135,15 +135,16 @@ offline-safe app uses:
   "description": "One useful sentence.",
   "entry": "index.jsx",
   "icon": "icon.png",
-  "offline_capable": true,
+  "offline_capable": false,
   "permissions": {},
   "source_files": []
 }
 ```
 
 List every imported sibling source file in `source_files`. Set
-`offline_capable` to `true` only when every required read and write works
-without the network. The manifest's `icon` is the package-artwork source of
+`offline_capable` to `true` when offline use materially benefits the app and
+only when every required read and write works without the network. The
+manifest's `icon` is the package-artwork source of
 truth: apply validates and materializes that exact accepted file, so do not
 upload a second copy after applying. The apply helper also applies the offline
 flag and versioned `capabilities` object; do not patch the app row separately.
@@ -155,9 +156,6 @@ and conflict delivery; the app chooses what data to warm and owns completeness
 decisions, reconciliation, and UI. If offline logic depends on complete
 collection membership, use `storage.listWithStatus()` and treat
 `complete:false` as unavailable, not empty.
-
-The public rationale and full verification matrix are in
-`/data/platform/OFFLINE-APPS.md` (`OFFLINE-APPS.md` at the repository root).
 
 ### 3. Apply once early, then after each coherent revision
 

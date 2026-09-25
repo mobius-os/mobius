@@ -90,10 +90,6 @@ Say what you need in your own words: “Build a News app for the topics I follow
 
 Apps can be anything: a daily news brief, a drum machine, a 3D runner, a bilingual reader with its own agent inside. Install what others built from the App Store, then publish your own. Every app is a public repository under the [Möbius OS organization](https://github.com/mobius-os), so sharing an app is sharing a repo.
 
-Apps may be online-only or deliberately support offline use. The shared
-platform/app contract for caching, queued writes, conflict recovery, and
-verification is documented in [OFFLINE-APPS.md](OFFLINE-APPS.md).
-
 ![The App Store: the official catalog, searchable](assets/product/app-store.png)
 
 ## 100x your productivity, together

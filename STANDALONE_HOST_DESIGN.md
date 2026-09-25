@@ -60,9 +60,6 @@ to drive the frame's `mobius:nav-*` protocol.
 
 ## Preserved standalone behavior
 
-The host boundary below is complemented by the app-facing offline ownership
-and verification contract in [`OFFLINE-APPS.md`](OFFLINE-APPS.md).
-
 - stable manifest identity, scope, icon and display mode;
 - install prompt plus platform-specific manual instructions;
 - optional icon customization before installation;

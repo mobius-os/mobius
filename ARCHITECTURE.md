@@ -1680,9 +1680,9 @@ they race the shell's indexed cursor and break Safari's source-state fallback.
 
 ## Service worker + offline
 
-This section maps the platform implementation. The app-facing ownership,
-storage, conflict, UI, and verification contract is documented in
-[`OFFLINE-APPS.md`](OFFLINE-APPS.md).
+These service-worker mechanics sit beneath the app-facing
+[offline mini-app contract](OFFLINE-APPS.md), which defines the ownership,
+storage, conflict, UI, and verification model.
 
 Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/app_runtime.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 
@@ -1699,7 +1699,7 @@ protected lane. No recursive crawler is implied: a future offline-capable packag
 needs an explicit manifest/static-assets warm contract. The controlled-page
 regression pins the cached entry as packaged content rather than shell HTML.
 
-Install-time precache includes the Vite shell plus the D3/Pixi classic scripts Memory loads by URL. Package imports are already inside each compiled app artifact and must not be duplicated in the shell precache. Runtime `/vendor/` remains `CacheFirst` for explicit public assets. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
+Install-time precache includes the Vite shell plus the D3/Pixi classic scripts Memory loads by URL. Package imports are already inside each compiled app artifact and must not be duplicated in the shell precache. Runtime `/vendor/` remains `CacheFirst` for explicit public assets. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens, while in-shell code warm-up and storage behavior are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
 Shell rebuilds never own document navigation. `shell_rebuilt`, agent-authored
 `shell_apply_now`, and resume-time worker discovery collapse into one

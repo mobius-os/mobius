@@ -324,9 +324,6 @@ Persist app data through `window.mobius.storage` — injected into EVERY mini-ap
 
 **Boundary:** Every app owns its data model. Offline support is a product choice, not a default requirement; choose it when it materially benefits the app's use case or preserves an existing product promise. Möbius supplies isolated cached storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. When offline behavior is part of the app's contract, the app chooses what to warm, whether partial data is safe, how conflicts reconcile, and its offline UI. Keep domain merge logic out of the platform.
 
-The public rationale and full verification matrix are in
-`/data/platform/OFFLINE-APPS.md` (`OFFLINE-APPS.md` at the repository root).
-
 ```jsx
 // read: your data, or null if the path is absent (never written/removed/404).
 const notes = (await window.mobius.storage.get('notes.json')) || []
@@ -394,8 +391,9 @@ Keep that variable inside the helper process. Never echo it, pass it on a comman
 // read the value AND its server version, merge, then write conditionally
 const { value, version } = await window.mobius.storage.getWithVersion('index.json')
 const next = mergeInMyItem(value || [])   // YOUR merge — add your item, don't overwrite theirs
+const guard = version ? { ifMatch: version } : { ifNoneMatch: true }
 try {
-  await window.mobius.storage.durableWrite('index.json', next, { ifMatch: version })
+  await window.mobius.storage.durableWrite('index.json', next, guard)
 } catch (e) {
   if (e.code === 'conflict') { /* someone wrote first — re-read (getWithVersion) and retry */ }
   else throw e
@@ -404,7 +402,7 @@ try {
 
 `durableWrite({ ifMatch: version })` sends the version as an `If-Match`; the server rejects a stale write with a `DurableWriteError` whose `code === 'conflict'` (`retryable: true`). The runtime does NOT loop for you — you own the merge, so re-read and retry on conflict. For a create-only write pass `{ ifNoneMatch: true }` (conflicts if the path already exists). If the data is naturally per-record, one file per record sidesteps contention entirely — reach for CAS only when writers genuinely share one file. (A React list document can let `window.mobius.createUseDocument(React)`'s `useDocument(path, {mode:'cas'})` do the read-merge-retry for you.)
 
-For conditional writes that can queue offline, pass a small JSON `conflictContext` describing the **mutation intent**, not merely the resulting whole document, and recover through `storage.onConflict(async conflict => ...)`. Several offline writes to the same path coalesce to the newest value, while the runtime preserves their opaque contexts in order. Always normalize with `storage.conflictContextItems(conflict.conflictContext)` and apply every returned intent to a fresh versioned read before the recovery write. The callback must resolve truthy only after that recovery is durable; returning `false` keeps the conflict for replay after an app-frame reload. The combined contexts remain bounded to 64 KiB; beyond that bound the runtime retains separate queued writes rather than silently dropping intent.
+For conditional writes that can queue offline, pass a small JSON `conflictContext` describing the **mutation intent**, not merely the resulting whole document. Register recovery only when `window.mobius.runtimeFeatures.authoritativeVersionedReads === true`; an older runtime cannot promise a safe merge base. In `storage.onConflict(async conflict => ...)`, re-read with `getWithVersion()` and return `false` if that result is offline. Normalize with `storage.conflictContextItems(conflict.conflictContext)`, apply every retained intent, and write with the fresh version guard. Resolve truthy only after `durableWrite()` reports `durability === 'synced'`; a queued result or another conflict returns `false` so recovery replays after reconnect or remount. Do not infer server acceptance from a separate `pendingCount()` check. The combined contexts remain bounded to 64 KiB; beyond that bound the runtime retains separate queued writes rather than silently dropping intent.
 
 **Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
@@ -536,11 +534,9 @@ Online-only apps may still use an explicit `https://esm.sh/...` dynamic import w
 
 ## Offline-capable apps (opt-in)
 
-Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json`; `apply_app.py` applies it with the accepted source revision. Set it true only after testing a cold offline reload.
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json` only after testing a cold offline reload; `apply_app.py` applies it with the accepted source revision.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
-
-Only set `offline_capable` when the app genuinely works offline. A network-dependent app marked offline-capable caches stale/empty state and looks broken — leave those at the default.
 
 ---
 
