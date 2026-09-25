@@ -5245,6 +5245,13 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+  // Stay quiet while an automatic retry is scheduled; the timer is set in the
+  // same batch as the error phase, so this render already sees it.
+  const showActivationRetry = (
+    activationPhase === 'error'
+    && !loadError
+    && cachedActivationRecoveryRef.current.timer == null
+  )
 
   // Transcript geometry reads force a synchronous layout of the whole
   // transcript, so they follow its size (content, spacer, and viewport) rather
@@ -6296,6 +6303,24 @@ export default function ChatView({
             resourcePause={resourcePause}
             onCancel={handleCancelWait}
           />
+        )}
+        {showActivationRetry && (
+          <div
+            className="chat__offline-note chat__offline-note--error chat__activation-retry"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+          >
+            <span>Chat activation still needs a retry before sending.</span>
+            <button
+              type="button"
+              className="chat__empty-action"
+              onPointerDown={event => event.preventDefault()}
+              onClick={retryActivation}
+            >
+              Retry
+            </button>
+          </div>
         )}
         <ConnectionStatus
           error={connectionError}
