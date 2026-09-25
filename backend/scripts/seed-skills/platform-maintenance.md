@@ -113,6 +113,7 @@ Use the existing authenticated diagnostics instead of adding temporary routes:
 mapi /api/debug/status | python3 -m json.tool
 mapi "/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
 mapi "/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
+mapi "/api/debug/profile?seconds=15" | python3 -m json.tool
 ```
 
 (`mapi` fills in auth + base URL.)
@@ -123,6 +124,10 @@ payload totals; its `runtime_memory.payload_sizing` field points to the detailed
 `memory` for processes, maps, runtime-owner payloads, GC diagnostics, and
 optional allocation tracing. Add `deep=true` only when a GC object-type walk is
 actually needed.
+
+When the backend is slow or CPU-bound, `profile` samples every thread in-process
+(py-spy cannot attach inside the container) and ranks the busy app frames and
+stacks. It occupies one worker for the window, and one profile runs at a time.
 
 ---
 
