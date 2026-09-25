@@ -265,15 +265,22 @@ manifest, layered by how always-on they are:
   (a `publish.md` section, say), so agents re-read only the core plus the one
   file a step needs. Contribute
   ships `contributing/` this way.
-- **A system-prompt fragment (always-on, while installed).** `"system_app":
-  true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
-  entry) — the file is appended to the base constitution (`core.md`) for EVERY
+- **A system-prompt fragment (always-on, while installed).**
+  `"system_prompt": "<name>.md"` (also a root-level `source_files` entry) —
+  the file is appended to the base constitution (`core.md`) for EVERY
   chat's system prompt, but ONLY while the app is installed; uninstall removes it
   and the prompt returns to exactly `core.md`
   (`backend/app/system_prompts.py` → `compose_system_prompt`). Use it for a
   short, always-relevant default the agent should carry without being asked, and
   keep it tight — it costs tokens on every session. Memory ships `memory-core.md`;
   Artifacts ships `artifacts-core.md` (its proactive-visual default). Max 256 KB.
+- **Agent tools (callable by every agent run, while installed).** `"tools"`:
+  up to 16 entries of exactly `name` (`^[a-z][a-z0-9_]{0,39}$`),
+  `description`, and `input_schema` (a JSON Schema `object`). Requires a
+  `service`: agents see `<app slug>_<name>`, and each call reaches the service
+  as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
+  app's own authority (`backend/app/app_tools.py`). Keep tools few and safe to
+  call from any chat or helper.
 
 **Why the split matters — `core.md` stays app-agnostic.** The base constitution
 describes only what is true with no apps installed. Anything that depends on a
