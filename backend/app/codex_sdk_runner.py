@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures as _cf
 import functools
+import json
 import logging
 import os
 import signal
@@ -109,6 +110,18 @@ _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
   """Supply the configured-data fallback without overriding provider setup."""
   env.setdefault("CODEX_HOME", str(Path(data_dir) / "cli-auth" / "codex"))
+
+
+def _codex_log_dir_override(data_dir: str) -> str:
+  """Write Codex logs under /data/logs, not inside the credential home.
+
+  /data/logs is already excluded from owner Git and backups and is sized as
+  logs, and agents may inspect it; CODEX_HOME is reserved for credentials and
+  resumable provider state, which agents must not touch.
+  """
+  log_dir = Path(data_dir) / "logs" / "codex"
+  log_dir.mkdir(parents=True, exist_ok=True)
+  return f"log_dir={json.dumps(str(log_dir))}"
 
 
 def _process_group_capture_delay(elapsed: float) -> float:
@@ -1574,6 +1587,7 @@ async def _run_codex_sdk_turn(
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
+  config_overrides.append(_codex_log_dir_override(runtime_data_dir))
   # A read Delegation may write only Codex's own state, its deliverable
   # directory, and scratch space; the rest of /data stays read-only.
   launch_args = _codex_app_server_launch_args(

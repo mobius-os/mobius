@@ -29,6 +29,15 @@ def test_codex_home_fallback_follows_data_dir_without_overriding_provider_env():
   assert explicit == {"CODEX_HOME": "/provider-owned/codex"}
 
 
+def test_codex_logs_live_outside_the_credential_home(tmp_path):
+  log_dir = tmp_path / "logs" / "codex"
+
+  assert codex_sdk_runner._codex_log_dir_override(str(tmp_path)) == (
+    f'log_dir="{log_dir}"'
+  )
+  assert log_dir.is_dir()
+
+
 # Mirrors the installed SDK:
 # - ErrorNotification: /usr/local/lib/python3.12/site-packages/openai_codex/generated/v2_all.py:6958
 # - CodexRpcError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:24
@@ -1221,6 +1230,9 @@ def test_explicit_data_dir_keeps_out_of_band_runner_off_server_settings(
   assert FakeAsyncCodex.last.config.kwargs["env"]["CODEX_HOME"] == str(
     tmp_path / "cli-auth" / "codex"
   )
+  assert FakeAsyncCodex.last.config.kwargs["config_overrides"][-1:] == [
+    f'log_dir="{tmp_path / "logs" / "codex"}"',
+  ]
 
 
 def test_new_goal_uses_one_ordinary_provider_attempt(monkeypatch):
