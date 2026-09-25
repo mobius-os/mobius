@@ -3157,7 +3157,7 @@ def _submit_prepared_pr(
     expected_base, expected_head, expected_diff = _git_ops._assert_fresh(
       record, diff_path, repo, branch,
     )
-    _git_ops._assert_coauthor_trailer(repo, branch)
+    _git_ops._assert_coauthor_trailer(repo, branch, record)
     if existing_head_repository is not None:
       # Updating a known PR is not the same routing decision as creating a new
       # one. Its live identity fixes the destination repository regardless of
@@ -4039,7 +4039,7 @@ def _preflight_prepared_stack(
       _git_ops._git(repo, "checkout", "-q", branch)
       _git_ops._assert_clean_worktree(repo)
       _git_ops._assert_fresh(record, row["diff_path"], repo, branch)
-      _git_ops._assert_coauthor_trailer(repo, branch)
+      _git_ops._assert_coauthor_trailer(repo, branch, record)
       # This runs under the complete review/source lock set acquired by the
       # route. It is the last local-source boundary before any stack layer can
       # push, not merely a review-card hint that can go stale before Send.
@@ -4510,7 +4510,7 @@ def _advance_merged_parent_successor(
         "changed.",
         code="review_refresh_needed",
       )
-    _git_ops._assert_coauthor_trailer(repo, branch)
+    _git_ops._assert_coauthor_trailer(repo, branch, record)
     _git_ops._assert_head_attribution(
       repo, branch, author_name=author_name, author_email=author_email,
     )
@@ -4840,7 +4840,7 @@ def _land_reviewed_stack(rows: list[dict]) -> tuple[str, str]:
       _, resolved_head, _ = _git_ops._assert_fresh(
         record, row["diff_path"], repo, branch,
       )
-      _git_ops._assert_coauthor_trailer(repo, branch)
+      _git_ops._assert_coauthor_trailer(repo, branch, record)
       _git_ops._assert_upstream_branch_at(
         repo, upstream_repo, branch, resolved_head,
       )
