@@ -1,6 +1,7 @@
 """Dependency-free manifest contract shared by install and preflight."""
 
 from collections.abc import Mapping
+import json
 from urllib.parse import unquote, urlparse
 import re
 import shlex
@@ -37,6 +38,9 @@ PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
+AGENT_TOOLS_MAX = 16
+AGENT_TOOL_DESCRIPTION_MAX = 2000
+AGENT_TOOL_SCHEMA_MAX_BYTES = 8 * 1024
 MAX_JOB_SHEBANG_BYTES = 256
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -53,6 +57,7 @@ _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
 _SKILL_FOLDER_OK = re.compile(r"^([a-z0-9][a-z0-9._-]*)/$")
 FOLDER_SKILL_ENTRY = "SKILL.md"
 _PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
+_AGENT_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class ManifestContractError(ValueError):
@@ -270,6 +275,61 @@ def static_asset_entries(value) -> dict[str, str]:
   _fail("Manifest `static_assets` must be an object or array.")
 
 
+def validate_agent_tools(tools, *, has_service: bool) -> None:
+  """Validate the tools an app contributes to every agent run.
+
+  A tool is only a declaration: the platform calls it through the app's own
+  reviewed `service`, so there is no second execution path to review.
+  """
+  if not has_service:
+    _fail(
+      "Manifest `tools` requires a `service`: the platform calls each tool "
+      "through the app's service."
+    )
+  if not isinstance(tools, list) or len(tools) > AGENT_TOOLS_MAX:
+    _fail(f"Manifest `tools` must be an array with at most {AGENT_TOOLS_MAX} entries.")
+  names: set[str] = set()
+  for index, tool in enumerate(tools):
+    field = f"tools[{index}]"
+    if not isinstance(tool, Mapping) or set(tool) != {
+      "name", "description", "input_schema",
+    }:
+      _fail(
+        f"Manifest `{field}` must contain exactly `name`, `description`, "
+        "and `input_schema`."
+      )
+    name = tool["name"]
+    if not isinstance(name, str) or _AGENT_TOOL_NAME.fullmatch(name) is None:
+      _fail(f"Manifest `{field}.name` must match `^[a-z][a-z0-9_]{{0,39}}$`.")
+    if name in names:
+      _fail(f"Manifest `tools` repeats the name {name!r}.")
+    names.add(name)
+    description = tool["description"]
+    if (
+      not isinstance(description, str)
+      or not description.strip()
+      or len(description) > AGENT_TOOL_DESCRIPTION_MAX
+    ):
+      _fail(
+        f"Manifest `{field}.description` must be 1-"
+        f"{AGENT_TOOL_DESCRIPTION_MAX} characters."
+      )
+    schema = tool["input_schema"]
+    if not isinstance(schema, Mapping) or schema.get("type") != "object":
+      _fail(f"Manifest `{field}.input_schema` must be a JSON Schema object type.")
+    try:
+      encoded = json.dumps(schema, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+      raise ManifestContractError(
+        f"Manifest `{field}.input_schema` must be plain JSON."
+      ) from exc
+    if len(encoded) > AGENT_TOOL_SCHEMA_MAX_BYTES:
+      _fail(
+        f"Manifest `{field}.input_schema` exceeds "
+        f"{AGENT_TOOL_SCHEMA_MAX_BYTES} bytes."
+      )
+
+
 def validate_manifest_contract(manifest) -> None:
   """Validate every manifest shape/path rule enforced before installation."""
   if not isinstance(manifest, Mapping):
@@ -407,7 +467,7 @@ def validate_manifest_contract(manifest) -> None:
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 
-  for field in ("offline_capable", "embeds_agent", "system_app"):
+  for field in ("offline_capable", "embeds_agent"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
 
@@ -815,13 +875,12 @@ def validate_manifest_contract(manifest) -> None:
           f"`{entry}{FOLDER_SKILL_ENTRY}` in `source_files`."
         )
 
+  tools = manifest.get("tools")
+  if tools is not None:
+    validate_agent_tools(tools, has_service=service is not None)
+
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:
-    if manifest.get("system_app") is not True:
-      _fail(
-        "Manifest `system_prompt` requires `system_app: true` so global "
-        "agent-prompt authority is explicit and owner-reviewable."
-      )
     if (
       not isinstance(system_prompt, str)
       or not system_prompt.endswith(".md")

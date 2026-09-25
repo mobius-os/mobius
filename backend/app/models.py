@@ -246,7 +246,7 @@ class Chat(Base):
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
   # recomposes installed-app fragments for an already-started chat. Installing,
-  # updating, or uninstalling a system app therefore affects only chats that
+  # updating, or uninstalling an app therefore affects only chats that
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
@@ -1167,9 +1167,10 @@ class App(Base):
   # Only live installed rows are composed at chat start. Soft-uninstall changes
   # future chats while existing snapshots and app data remain recoverable.
   system_prompt_file = Column(String(255), nullable=True, default=None)
-  # Explicit manifest identity for apps that participate in the agent/system
-  # lifecycle.  This flag grants nothing by itself; the individual manifest
-  # declarations remain the capabilities and the install review is consent.
+  # Retired: apps no longer have a "system" class. Any installed app may
+  # declare a prompt fragment, skills, or agent tools, and install review is
+  # the consent. Nothing reads this column; it stays so an older baked
+  # platform started as a fallback can still load this table.
   system_app = Column(Boolean, nullable=False, default=False)
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.

@@ -224,7 +224,7 @@ def _read_skill_text() -> str:
   """Return only the cached platform constitution.
 
   App-owned fragments are composed and snapshotted separately when a chat
-  starts its first turn. Installing, updating, or uninstalling a system app
+  starts its first turn. Installing, updating, or uninstalling an app
   therefore affects chats started afterwards, never an existing conversation.
   The tracked platform constitution has a process-lifetime cache, so an edit
   or platform update takes effect after server restart. If the live checkout
@@ -5066,7 +5066,7 @@ async def _run_chat_impl_with_db(
 
   # On the first message of a session, gather bounded recent-chat digests and
   # the skills inventory as one-time startup context. Knowledge-graph data is
-  # never pulled here; an installed system app may teach the agent to make a
+  # never pulled here; an installed app may teach the agent to make a
   # separate prompt-scoped recall call.
   #
   # Startup context belongs to the first-turn system prompt, not the user
@@ -5421,7 +5421,7 @@ async def _run_chat_impl_with_db(
         )
         db.rollback()
 
-  # A per-chat custom prompt replaces the base constitution, but system-app
+  # A per-chat custom prompt replaces the base constitution, but installed-app
   # contributions are still part of the ONE prompt snapshot selected when the
   # chat starts. Provider SDKs receive those same immutable bytes on every
   # request; live app state is never recomposed for an established chat.

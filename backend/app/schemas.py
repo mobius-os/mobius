@@ -259,7 +259,8 @@ class AppOut(BaseModel):
   # Root-level manifest file composed into the agent prompt while this app is
   # live. Informational so install UIs can surface the privileged declaration.
   system_prompt_file: str | None = None
-  system_app: bool = False
+  # Reviewed agent tools this app contributes to every agent run.
+  agent_tools: list[dict] = []
   chat_log_access: ChatLogAccess = "none"
   capability_contract: dict | None = None
   created_at: datetime

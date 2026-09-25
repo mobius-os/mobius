@@ -91,8 +91,14 @@ def codex_turn_mcp_config(
   control_enabled: bool,
   top_level: bool = True,
   coordination_enabled: bool = True,
+  app_tool_names: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
-  """Merge local control tools with one detached Codex connector snapshot."""
+  """Merge local control tools with one detached Codex connector snapshot.
+
+  ``app_tool_names`` are the install-reviewed tools live apps serve through the
+  same control server (app/app_tools.py); they are approved by exact name like
+  the platform's own primitives.
+  """
   servers: dict[str, Any] = {}
   if connector_plan is not None and connector_plan.codex_config:
     configured = connector_plan.codex_config.get("mcp_servers")
@@ -115,7 +121,7 @@ def codex_turn_mcp_config(
       # would silently bless a future tool.
       "tools": {
         name: {"approval_mode": "approve"}
-        for name in tool_names
+        for name in (*tool_names, *app_tool_names)
       },
       # Codex intentionally starts stdio MCP children with a minimal
       # environment. Forward only the run-bound names this trusted local

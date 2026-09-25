@@ -166,7 +166,8 @@ def _response_headers(value) -> dict[str, str]:
 
 
 async def invoke_service(
-  app, owner, request_envelope: dict,
+  app, owner, request_envelope: dict, *,
+  timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
 ) -> tuple[int, object, dict[str, str], str | None]:
   service = service_contract(
     app, access="public" if request_envelope.get("public") else "self",
@@ -243,7 +244,7 @@ async def invoke_service(
       try:
         _written, stdout, stderr, returncode = await asyncio.wait_for(
           asyncio.gather(write_task, stdout_task, stderr_task, process.wait()),
-          timeout=SERVICE_TIMEOUT_SECONDS,
+          timeout=timeout_seconds,
         )
       except (TimeoutError, ValueError) as exc:
         await _stop_process(process, write_task, stdout_task, stderr_task)

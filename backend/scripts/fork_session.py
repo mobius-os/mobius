@@ -5,6 +5,11 @@ This module intentionally has one success path: the provider forks the named
 session and the coaching prompt runs inside that fork. Missing, expired, or
 unforkable sessions fail loudly. Stored chat messages are never used to seed a
 replacement agent.
+
+``after_call_id`` narrows the fork to a *call moment*: the fork's context ends
+right after that provider tool call's result, and nothing later in the turn or
+session is visible. The id is the provider's own id for the model's call
+(Claude ``toolu_...`` tool_use id; Codex ``ctc_...`` response item id).
 """
 
 from __future__ import annotations
@@ -15,9 +20,11 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Any, Callable
+import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +59,22 @@ class ForkResult:
   answer: str
   method: str = "session_fork"
   exact_session_fork: bool = True
+  # The call whose result ends the fork's context; None forks the whole session.
+  after_call_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _CodexHistoryCut:
+  """Model-visible history of a Codex thread through one call's output."""
+
+  items: tuple[dict[str, Any], ...]
+  base_instructions: str | None
+  model: str | None
+  model_provider: str | None
+
+
+class _CodexAck(BaseModel):
+  model_config = ConfigDict(extra="ignore")
 
 
 class _CodexMcpSurface(BaseModel):
@@ -217,7 +240,12 @@ async def _assert_codex_mcp_isolated(codex: Any, thread_id: str) -> None:
 
 
 def _validated_result(
-  *, provider: str, source_session_id: str, forked_session_id: str, answer: str
+  *,
+  provider: str,
+  source_session_id: str,
+  forked_session_id: str,
+  answer: str,
+  after_call_id: str | None,
 ) -> ForkResult:
   forked_session_id = (forked_session_id or "").strip()
   answer = (answer or "").strip()
@@ -232,7 +260,68 @@ def _validated_result(
     source_session_id=source_session_id,
     forked_session_id=forked_session_id,
     answer=answer,
+    after_call_id=after_call_id,
   )
+
+
+def _provider_session_uuid(provider: str, session_id: str) -> str:
+  """Session ids name transcript files, so only a real UUID may reach a glob."""
+  try:
+    return str(uuid.UUID(session_id))
+  except ValueError as exc:
+    raise ForkError(f"{provider} session id is not a UUID: {session_id}") from exc
+
+
+def _single_session_file(provider: str, pattern_root: Path, pattern: str) -> Path:
+  matches = sorted(pattern_root.glob(pattern))
+  if not matches:
+    raise ForkError(f"{provider} session transcript not found")
+  if len(matches) > 1:
+    raise ForkError(f"{provider} session transcript is ambiguous")
+  return matches[0]
+
+
+def _transcript_entries(path: Path):
+  """Yield decoded JSONL entries; a line still being written is skipped."""
+  try:
+    with path.open(encoding="utf-8") as handle:
+      for line in handle:
+        try:
+          entry = json.loads(line)
+        except ValueError:
+          continue
+        if isinstance(entry, dict):
+          yield entry
+  except OSError as exc:
+    raise ForkError(f"could not read session transcript: {exc}") from exc
+
+
+def _claude_tool_result_uuid(transcript: Path, call_id: str) -> str:
+  """Return the uuid of the user entry that carries ``call_id``'s tool result.
+
+  Claude resumes *at* an entry, so cutting at the tool_result entry keeps the
+  result visible. Cutting at the assistant tool_use entry instead leaves an
+  unanswered call that Claude fills with "[Tool result missing ...]".
+  """
+  found: set[str] = set()
+  for entry in _transcript_entries(transcript):
+    if entry.get("type") != "user":
+      continue
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+      continue
+    if any(
+      isinstance(block, dict)
+      and block.get("type") == "tool_result"
+      and block.get("tool_use_id") == call_id
+      for block in content
+    ) and isinstance(entry.get("uuid"), str) and entry["uuid"]:
+      found.add(entry["uuid"])
+  if not found:
+    raise ForkError(f"Claude session has no recorded result for call {call_id}")
+  if len(found) > 1:
+    raise ForkError(f"Claude session records call {call_id} more than once")
+  return found.pop()
 
 
 def _fork_claude(
@@ -240,16 +329,31 @@ def _fork_claude(
   cwd: str,
   prompt: str,
   *,
+  after_call_id: str | None = None,
   runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> ForkResult:
   env = _coaching_env()
   env.setdefault("CLAUDE_CONFIG_DIR", "/data/cli-auth/claude")
+  cut: list[str] = []
+  if after_call_id is not None:
+    # Never pass --resume-drops-turn: it rejects the mid-turn cuts a call
+    # moment usually is.
+    transcript = _single_session_file(
+      "Claude",
+      Path(env["CLAUDE_CONFIG_DIR"]) / "projects",
+      f"*/{_provider_session_uuid('Claude', source_session_id)}.jsonl",
+    )
+    cut = [
+      "--resume-session-at="
+      + _claude_tool_result_uuid(transcript, after_call_id)
+    ]
   proc = runner(
     [
       "claude",
       "--resume",
       source_session_id,
       "--fork-session",
+      *cut,
       "--print",
       prompt,
       "--output-format",
@@ -278,6 +382,7 @@ def _fork_claude(
     source_session_id=source_session_id,
     forked_session_id=str(payload.get("session_id") or ""),
     answer=str(payload.get("result") or ""),
+    after_call_id=after_call_id,
   )
 
 
@@ -302,11 +407,85 @@ def _load_codex_sdk() -> tuple[Any, Any, Any, Any]:
   )
 
 
+def _codex_rollout(codex_home: Path, thread_id: str) -> Path:
+  return _single_session_file(
+    "Codex",
+    codex_home / "sessions",
+    f"**/rollout-*-{_provider_session_uuid('Codex', thread_id)}.jsonl",
+  )
+
+
+def _codex_history_through_call(
+  rollout: Path, call_id: str
+) -> _CodexHistoryCut:
+  """Replay a rollout's model-visible items up to one call's output.
+
+  ``thread/fork`` only cuts at turn boundaries (its ``path``/``history``
+  params are unstable), so the cut is rebuilt from the rollout the way Codex
+  itself resumes: response items in order, with a ``compacted`` entry's
+  replacement history standing in for everything before it.
+
+  ``call_id`` is the model's response item id (``ctc_...``). Codex calls MCP
+  tools from inside a code-mode ``exec`` script, so that item is usually the
+  exec ``custom_tool_call`` and the cut lands after the whole script's output.
+
+  Developer items are dropped: the new thread writes its own developer context
+  for the read-only coaching policy, and replaying the source run's would
+  restate tools and permissions the coach does not have.
+  """
+  items: list[dict[str, Any]] = []
+  base_instructions = model = model_provider = None
+  wire_call_id: str | None = None
+
+  def keep(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("role") != "developer"
+
+  for entry in _transcript_entries(rollout):
+    kind = entry.get("type")
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+      continue
+    if kind == "session_meta":
+      instructions = payload.get("base_instructions")
+      if isinstance(instructions, dict):
+        instructions = instructions.get("text")
+      base_instructions = instructions if isinstance(instructions, str) else None
+      model_provider = payload.get("model_provider") or None
+    elif kind == "turn_context":
+      model = payload.get("model") or model
+    elif kind == "compacted" and isinstance(
+      payload.get("replacement_history"), list
+    ):
+      items = [item for item in payload["replacement_history"] if keep(item)]
+    elif kind == "response_item" and keep(payload):
+      items.append(payload)
+      if wire_call_id is None and payload.get("id") == call_id:
+        wire_call_id = payload.get("call_id")
+        if not isinstance(wire_call_id, str) or not wire_call_id:
+          raise ForkError(f"Codex item {call_id} is not a tool call")
+      elif (
+        wire_call_id is not None
+        and payload.get("type")
+        in {"function_call_output", "custom_tool_call_output"}
+        and payload.get("call_id") == wire_call_id
+      ):
+        return _CodexHistoryCut(
+          items=tuple(items),
+          base_instructions=base_instructions,
+          model=model,
+          model_provider=model_provider,
+        )
+  if wire_call_id is None:
+    raise ForkError(f"Codex session has no recorded call {call_id}")
+  raise ForkError(f"Codex session has no recorded output for call {call_id}")
+
+
 async def _fork_codex_async(
   source_session_id: str,
   cwd: str,
   prompt: str,
   *,
+  after_call_id: str | None = None,
   sdk_loader: Callable[[], tuple[Any, Any, Any, Any]] | None = None,
   mcp_inventory_runner: Callable[
     ..., subprocess.CompletedProcess[str]
@@ -324,12 +503,20 @@ async def _fork_codex_async(
     data_dir = codex_home.parents[1]
   except IndexError as exc:
     raise ForkError("Codex home cannot resolve its storage owner") from exc
+  cut = (
+    None
+    if after_call_id is None
+    else _codex_history_through_call(
+      _codex_rollout(codex_home, source_session_id), after_call_id
+    )
+  )
   config_overrides = _codex_mcp_isolation_overrides(
     cwd,
     env,
     runner=mcp_inventory_runner,
   )
   config = CodexConfig(
+    codex_bin=shutil.which("codex"),
     cwd=cwd,
     env=env,
     config_overrides=config_overrides,
@@ -341,13 +528,29 @@ async def _fork_codex_async(
   ownership = await acquire_codex_session_activity_async(data_dir)
   try:
     async with AsyncCodex(config) as codex:
-      thread = await codex.thread_fork(
-        source_session_id,
-        approval_mode=ApprovalMode.deny_all,
-        cwd=cwd,
-        sandbox=Sandbox.read_only,
-      )
+      if cut is None:
+        thread = await codex.thread_fork(
+          source_session_id,
+          approval_mode=ApprovalMode.deny_all,
+          cwd=cwd,
+          sandbox=Sandbox.read_only,
+        )
+      else:
+        thread = await codex.thread_start(
+          approval_mode=ApprovalMode.deny_all,
+          base_instructions=cut.base_instructions,
+          cwd=cwd,
+          model=cut.model,
+          model_provider=cut.model_provider,
+          sandbox=Sandbox.read_only,
+        )
       await _assert_codex_mcp_isolated(codex, str(thread.id or ""))
+      if cut is not None:
+        await codex._client.request(
+          "thread/inject_items",
+          {"threadId": thread.id, "items": list(cut.items)},
+          response_model=_CodexAck,
+        )
       result = await thread.run(
         prompt,
         approval_mode=ApprovalMode.deny_all,
@@ -364,11 +567,17 @@ async def _fork_codex_async(
     source_session_id=source_session_id,
     forked_session_id=str(thread.id or ""),
     answer=str(result.final_response or ""),
+    after_call_id=after_call_id,
   )
 
 
 def fork_session(
-  provider: str, source_session_id: str, cwd: str, prompt: str
+  provider: str,
+  source_session_id: str,
+  cwd: str,
+  prompt: str,
+  *,
+  after_call_id: str | None = None,
 ) -> ForkResult:
   provider = provider.strip().lower()
   if provider not in {"claude", "codex"}:
@@ -379,15 +588,23 @@ def fork_session(
     raise ForkError("a coaching prompt is required")
   if not Path(cwd).is_dir():
     raise ForkError(f"working directory does not exist: {cwd}")
+  if after_call_id is not None and not after_call_id.strip():
+    raise ForkError("a call moment needs the provider's call id")
   if provider == "claude":
     try:
-      return _fork_claude(source_session_id, cwd, prompt)
+      return _fork_claude(
+        source_session_id, cwd, prompt, after_call_id=after_call_id
+      )
     except ForkError:
       raise
     except Exception as exc:
       raise ForkError(f"Claude exact-session fork failed: {exc}") from exc
   try:
-    return asyncio.run(_fork_codex_async(source_session_id, cwd, prompt))
+    return asyncio.run(
+      _fork_codex_async(
+        source_session_id, cwd, prompt, after_call_id=after_call_id
+      )
+    )
   except ForkError:
     raise
   except Exception as exc:

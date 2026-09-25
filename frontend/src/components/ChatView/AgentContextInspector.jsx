@@ -345,7 +345,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
       {
         key: 'system_prompt',
         title: 'System prompt',
-        description: 'Core rules plus installed system-app additions, captured once when the chat\u2019s first turn starts.',
+        description: 'Core rules plus installed-app additions, captured once when the chat\u2019s first turn starts.',
         value: data.system_prompt,
         type: 'markdown',
       },
