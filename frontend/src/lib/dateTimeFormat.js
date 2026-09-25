@@ -19,17 +19,22 @@ function ordinal(day) {
   }
 }
 
+// Constructing an Intl formatter costs far more than formatting with one, and
+// transcripts label every row on each render, so each formatter is built once.
+const TIME_FORMAT = new Intl.DateTimeFormat('en-GB', {
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+const YEAR_FORMAT = new Intl.DateTimeFormat('en-GB', { year: 'numeric' })
+
 export function formatTime(value) {
   const date = asDate(value)
   if (!date) return ''
-  return new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-  }).format(date)
+  return TIME_FORMAT.format(date)
 }
 
 export function formatDateTime(value) {
   const date = asDate(value)
   if (!date) return ''
-  const year = new Intl.DateTimeFormat('en-GB', { year: 'numeric' }).format(date)
+  const year = YEAR_FORMAT.format(date)
   return `${ordinal(date.getDate())} ${MONTHS[date.getMonth()]} ${year}, ${formatTime(date)}`
 }

@@ -2837,10 +2837,14 @@ export default function ChatView({
       // activity, and report blocks. React cannot interrupt one DOM commit, so
       // prepare that hidden destination in prefix-complete frame-sized slices.
       // Each await yields a real paint opportunity to the outgoing chat and
-      // drawer. Only the final authoritative frame settles loading/readiness,
-      // preserving the existing hide-then-reveal scroll contract.
+      // drawer. Every commit also pays a fixed cost (the whole view renders),
+      // so while commits stay under ~48ms each one skips twice as many planned
+      // frames as the last. Only the final authoritative frame settles
+      // loading/readiness, preserving the existing hide-then-reveal contract.
       setInitialEntryPhase('preparing')
-      for (const frame of renderFrames) {
+      const lastFrame = renderFrames.length - 1
+      let stride = 1
+      for (let frameIndex = 0; ; frameIndex = Math.min(lastFrame, frameIndex + stride)) {
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
@@ -2850,7 +2854,12 @@ export default function ChatView({
         // React may batch state updates across async task yields and discard
         // every intermediate prefix. Commit each hidden slice explicitly; the
         // flush is scoped to this cold, off-screen preparation path only.
-        flushSync(() => applyMessagesToView(frame, refreshed.offset))
+        const commitStartedAt = performance.now()
+        flushSync(() => applyMessagesToView(
+          renderFrames[frameIndex], refreshed.offset,
+        ))
+        if (frameIndex === lastFrame) break
+        if (performance.now() - commitStartedAt < 48) stride *= 2
       }
       settleRuntime(runtime, refreshed.messages)
     }
@@ -3024,21 +3033,11 @@ export default function ChatView({
       })
   }
 
-  // A tall viewport or an unusually compact page can have older history but no
-  // scroll range. Fill only until scrolling becomes possible; subsequent pages
-  // remain user-driven and bounded.
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el || loadingOlder.current || loading || offset <= 0) return
-    if (olderHistoryShouldLoad(el)) loadOlderMessages()
-  })
-
   // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
   // writes scrollTop, so it lives outside the scroll controller's ownership
-  // gates. Recomputed from every scroll event (gesture or programmatic) and
-  // from every commit via the dependency-less layout effect below: a stream
-  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
-  // tick re-renders this component. The guarded setState keeps those
+  // gates. Recomputed from every scroll event and from the transcript
+  // ResizeObserver below: a stream growing beneath a held ANCHOR_AT emits no
+  // scroll event, but it does resize the list. The guarded setState keeps
   // recomputes render-free until the boolean actually flips.
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
@@ -3046,7 +3045,6 @@ export default function ChatView({
     const away = !!el && !isNearPhysicalBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
-  useLayoutEffect(updateJumpToLatest)
 
   function handleScroll() {
     updateJumpToLatest()
@@ -5235,6 +5233,31 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+
+  // Transcript geometry reads force a synchronous layout of the whole
+  // transcript, so they follow its size (content, spacer, and viewport) rather
+  // than running after every commit. A tall viewport or an unusually compact
+  // page can have older history but no scroll range: fill only until
+  // scrolling becomes possible; later pages remain user-driven and bounded.
+  // Observation reports an initial size, so re-subscribing when loading or
+  // the loaded page changes re-checks both.
+  const hasTranscript = !showEmpty && !showLoadError
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) {
+      updateJumpToLatest()
+      return
+    }
+    const observer = new ResizeObserver(() => {
+      updateJumpToLatest()
+      if (!loadingOlder.current && !loading && offset > 0
+          && olderHistoryShouldLoad(el)) loadOlderMessages()
+    })
+    observer.observe(el)
+    observer.observe(el.querySelector('.chat__list'))
+    observer.observe(spacerRef.current)
+    return () => observer.disconnect()
+  }, [chatId, hasTranscript, loading, offset]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
