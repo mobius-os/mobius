@@ -467,8 +467,9 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   theming = (seed_dir / "theming.md").read_text()
 
   assert "preview_app.sh" in quickstart
-  assert "--review" in resolving
-  assert "--finalize --reviewed-tree" in resolving
+  assert "mobius-pending-update/worktree" in resolving
+  assert 'resolve_app_update.py" /data/apps/<slug>' in resolving
+  assert "--reviewed-tree" not in resolving
   assert "deployment's external Recovery action" in theming
   assert "`/recover` →" not in theming
   assert "`/recover/chat`" not in theming

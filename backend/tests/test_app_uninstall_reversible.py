@@ -653,7 +653,7 @@ def test_app_read_endpoints_hide_tombstoned(
   for path in (
     f"/api/apps/{app_id}",
     f"/api/apps/{app_id}/validate",
-    f"/api/apps/{app_id}/update-preview",
+    f"/api/apps/{app_id}/update-candidate-preview",
   ):
     assert client.get(path, headers=auth).status_code == 404, path
 

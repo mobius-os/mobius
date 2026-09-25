@@ -650,20 +650,26 @@ async def apply_source_revision(
       "The app no longer owns this source directory.",
       status_code=409,
     )
-  if app is not None and app.manifest_url is not None:
+  # A pending Store update is reconciled in its own private checkout, so it
+  # never blocks ordinary edits here; finishing it merges them in. Only a
+  # half-finished Git merge in this directory itself can't become a revision.
+  if await asyncio.to_thread(app_git.merge_in_progress, source_path):
+    raise AppApplyError(
+      "merge_in_progress",
+      "This app directory has an unfinished Git merge. Finish it with "
+      "`git commit` or undo it with `git merge --abort`, then apply again.",
+      status_code=409,
+    )
+  if accept_local_package and app is not None:
     from app import install
 
-    receipt = (
-      source_path / ".git" / install._PENDING_UPDATE_DIR / "receipt.json"
-    )
-    if (
-      receipt.is_file()
-      or await asyncio.to_thread(app_git.merge_in_progress, source_path)
-    ):
+    if install.pending_update_receipt_file(source_path).is_file():
+      # Finishing the pending update installs its reviewed package metadata;
+      # accepting local metadata now would be silently overwritten by it.
       raise AppApplyError(
-        "update_resolution_required",
-        "This Store app has a pending update. Resolve it with "
-        "resolve_app_update.py instead of applying an ordinary edit.",
+        "update_pending",
+        "Finish this app's pending Store update before accepting local "
+        "package declarations.",
         status_code=409,
       )
   if accept_local_package and (
