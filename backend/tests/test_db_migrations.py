@@ -1726,6 +1726,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0065_run_delivered_input_boundary",
     "0066_retire_chat_continuity_journal",
     "0067_chat_drawer_covering_index",
+    "0068_rename_inkling_to_evolve",
   ]
   assert second == first
 
@@ -4421,3 +4422,50 @@ def test_recovery_control_migration_is_nullable_idempotent_and_preserves_runs(tm
     assert conn.execute(text("SELECT id, status, continuation_json FROM chat_runs")).one() == (
       "old-run", "running", None,
     )
+
+
+def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
+  tmp_path, monkeypatch,
+):
+  """The model service renamed Evolve; saved choices follow exactly once."""
+  import json as _json
+  from sqlalchemy import text
+  from app.schema_migrations import _rename_inkling_to_evolve
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(_json.dumps({
+    "model": "inkling",
+    "model_by_provider": {"mobius": "inkling", "claude": "claude-opus-4-8"},
+    "background_agents": {"providers": [
+      {"provider": "mobius", "model": "inkling"},
+      {"provider": "codex", "model": "gpt-5.6-terra"},
+    ]},
+  }))
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  eng = create_engine(f"sqlite:///{tmp_path / 'rename.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE chats (id TEXT PRIMARY KEY, agent_settings_json JSON)"))
+    for chat_id, value in (
+      ("a", {"model": "inkling", "effort": "low"}),
+      ("b", {"model": "spark"}),
+      ("c", {"model": "claude-opus-4-8", "note": "inkling"}),
+    ):
+      conn.execute(text("INSERT INTO chats VALUES (:id, :v)"), {"id": chat_id, "v": _json.dumps(value)})
+
+  _rename_inkling_to_evolve(eng)
+  _rename_inkling_to_evolve(eng)
+
+  with eng.begin() as conn:
+    stored = dict(conn.execute(text("SELECT id, agent_settings_json FROM chats")).fetchall())
+  assert _json.loads(stored["a"]) == {"model": "evolve", "effort": "low"}
+  assert _json.loads(stored["b"]) == {"model": "spark"}
+  assert _json.loads(stored["c"]) == {"model": "claude-opus-4-8", "note": "inkling"}
+  assert _json.loads((shared / "agent-settings.json").read_text()) == {
+    "model": "evolve",
+    "model_by_provider": {"mobius": "evolve", "claude": "claude-opus-4-8"},
+    "background_agents": {"providers": [
+      {"provider": "mobius", "model": "evolve"},
+      {"provider": "codex", "model": "gpt-5.6-terra"},
+    ]},
+  }

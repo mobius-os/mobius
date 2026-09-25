@@ -1014,7 +1014,7 @@ class MobiusProvider(BaseProvider):
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"] if self.declaration else "inkling")}',
+      f'model={quote(self.declaration["default_model"] if self.declaration else "evolve")}',
       'model_provider="mobius_trial"',
       f"model_catalog_json={quote(str(catalog_path or self._catalog_path()))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
