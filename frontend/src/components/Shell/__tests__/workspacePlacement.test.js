@@ -817,7 +817,7 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
     'a mounted local start remains authoritative over a temporarily idle row')
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chatId\)/,
     'open chats and durable running chats reconcile even when run events were missed')
-  assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{ onOpen: reconcileSystemStateOnOpen \}\)/)
+  assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{\s*onOpen: reconcileSystemStateOnOpen[,\s]/)
 })
 
 test('stale pending updates offer the canonical review surface', () => {
