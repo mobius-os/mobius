@@ -84,6 +84,21 @@ def test_runtime_schema_loss_fails_readiness_and_stays_degraded(
     main_module._set_database_runtime_failure(None)
 
 
+def test_an_unreachable_database_fails_the_probe_without_degrading_the_api(
+  client, monkeypatch,
+):
+  """A failed open under load must not 503 every later request until restart."""
+  def unreachable(_engine):
+    raise OperationalError("SELECT 1", {}, Exception("unable to open database file"))
+
+  main_module._set_database_runtime_failure(None)
+  monkeypatch.setattr(main_module, "inspect_database", unreachable)
+  assert client.get("/api/ready").status_code == 503
+  assert main_module._database_degraded_payload() is None
+  monkeypatch.undo()
+  assert client.get("/api/ready").status_code == 200
+
+
 def test_schema_gap_fails_serviceability_but_not_reachability(client):
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"
