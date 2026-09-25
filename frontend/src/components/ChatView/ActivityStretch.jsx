@@ -16,6 +16,7 @@ import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
+import { agentHelperEntries } from './toolTasks.js'
 import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
 import { mergePositionedActivityEntries } from './activityPosition.js'
@@ -304,15 +305,13 @@ function GroupedActivityStretch({
   // count on the header — the header's activity word already reads "Working in
   // the background", so the count is the only addition. The Task ToolBlock is
   // NOT hidden: its output/expand stays reachable in the expanded timeline.
+  // Shell tasks are commands, not helpers (toolTasks.js): they neither add a
+  // row nor count toward "N running".
   const subagentTools = entries
     .map(e => e?.item)
-    .filter(it => it?.type === 'tool'
-      && it.subagent
-      && typeof it.subagent === 'object'
-      && Object.keys(it.subagent).length > 0)
+    .filter(it => it?.type === 'tool' && agentHelperEntries(it).length > 0)
   const subagentHelpers = subagentTools
-    .flatMap(it => Object.values(it.subagent))
-    .filter(h => h && typeof h === 'object')
+    .flatMap(it => agentHelperEntries(it).map(([, helper]) => helper))
   const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
   const failedHelpers = subagentHelpers.filter(
     h => h.status === 'failed' || h.status === 'killed' || h.status === 'stopped'
@@ -517,10 +516,7 @@ export default function ActivityStretch({
   onInternalNav,
 }) {
   const loneItem = entries[0]?.item
-  const loneHasHelpers = loneItem?.type === 'tool'
-    && loneItem.subagent
-    && typeof loneItem.subagent === 'object'
-    && Object.keys(loneItem.subagent).length > 0
+  const loneHasHelpers = loneItem?.type === 'tool' && agentHelperEntries(loneItem).length > 0
   // A lone ordinary activity needs no redundant parent. A lone delegation does:
   // its broad background-work rollup is context for the named helper rows.
   if (entries.length === 1 && !detailRef && !detailSegments && !loneHasHelpers) {

@@ -209,9 +209,15 @@ test('applyTaskEvent no-ops on a malformed event (no task_id)', () => {
   assert.equal(applyTaskEvent(base, { type: 'task_start' }, 1000), base)
 })
 
-test('a task_start only matches a Task/Agent tool, not an unrelated tool', () => {
-  const base = [{ type: 'tool', tool: 'Bash', status: 'running', tool_use_id: 'toolu_A' }]
-  assert.equal(applyTaskEvent(base, startEvent(), 1000), base, 'Bash is not a delegating tool')
+test('a shell task attaches to the command that started it, like the persisted view', () => {
+  const base = [{ type: 'tool', tool: 'Bash', status: 'done', tool_use_id: 'toolu_A' }]
+  const next = applyTaskEvent(base, { ...startEvent(), task_type: 'local_bash' }, 1000)
+  assert.equal(next[0].subagent[Object.keys(next[0].subagent)[0]].task_type, 'local_bash')
+})
+
+test('a task_start for an unknown tool_use_id is a no-op', () => {
+  const base = [{ type: 'tool', tool: 'Bash', status: 'running', tool_use_id: 'toolu_OTHER' }]
+  assert.equal(applyTaskEvent(base, startEvent(), 1000), base)
 })
 
 // ---------------------------------------------------------------------------

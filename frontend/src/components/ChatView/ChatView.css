@@ -1843,6 +1843,18 @@
   align-self: auto;
 }
 
+/* A command still running in the background: its elapsed clock at the row's
+   end. Shown only while it runs. */
+.chat__tool-elapsed {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--muted); /* CONTRACT: low-contrast metadata */
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums; /* ticking seconds don't jitter the row */
+}
+
 /* A failed child inside an already-expanded activity tints toward danger.
    Direct compact transcript rows stay neutral until explicitly opened. */
 .chat__tool:not(.chat__tool--compact).chat__tool--failed .chat__tool-name {

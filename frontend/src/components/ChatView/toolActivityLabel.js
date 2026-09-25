@@ -1,6 +1,7 @@
 import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { appActivityLabel } from './appActivityCard.js'
+import { runningBackgroundTask } from './toolTasks.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -190,10 +191,12 @@ export function toolCallLabel(tool) {
   const verbs = INSTANCE_VERBS.get(name)
   if (!verbs) return name + (input ? `: ${input}` : '')
 
-  const verb = tool?.status === 'running' ? verbs[0] : verbs[1]
+  // A command still running in the background reads as running, not "Ran".
+  const running = tool?.status === 'running' || !!runningBackgroundTask(tool)
+  const verb = running ? verbs[0] : verbs[1]
   if (input) return `${verb} ${input}`
 
-  const category = tool?.status === 'running'
+  const category = running
     ? toolActivitySingular(toolActivityLabel(name))
     : toolActivityPastSingular(toolActivityPastLabel(name) || name)
   return category
