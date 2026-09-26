@@ -709,3 +709,18 @@ def test_app_chat_excluded_from_history_list(client, owner_token, db):
 def test_app_chats_create_requires_auth(client):
   r = client.post("/api/app-chats", json={"title": "x"})
   assert r.status_code == 401
+
+
+def test_an_app_chat_keeps_the_name_its_app_gave_it(client, owner_token, db):
+  _app_id, app_token = _make_app(client, owner_token, "named-chat")
+  auth = {"Authorization": f"Bearer {app_token}"}
+  named = client.post("/api/app-chats", json={"title": "Reflection — 2026-09-26"}, headers=auth)
+  unnamed = client.post("/api/app-chats", json={}, headers=auth)
+
+  locked = {
+    row.id: row.title_locked
+    for row in db.query(models.Chat).filter(
+      models.Chat.id.in_([named.json()["id"], unnamed.json()["id"]]),
+    )
+  }
+  assert locked == {named.json()["id"]: True, unnamed.json()["id"]: False}
