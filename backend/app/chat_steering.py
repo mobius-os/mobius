@@ -18,6 +18,22 @@ def has_live_steerable_turn(chat_id: str, provider: str) -> bool:
   )
 
 
+def steering_preserves_inflight_work(provider: str) -> bool:
+  """Whether steering a message into a live turn leaves in-flight tools running.
+
+  Codex injects the steered text natively into the running turn, so a tool call
+  already in flight keeps running. Claude has no in-band inject: its only
+  mid-turn lever is `client.interrupt()`, which aborts the in-flight step. The
+  delegation wake path consults this before steering an unsolicited helper
+  result into a running parent, and otherwise defers to after-turn delivery so
+  the parent's live tool call is never cut. Owner-authored steers interrupt by
+  design regardless.
+  """
+  if provider == "claude":
+    return claude_sdk_runner.STEER_PRESERVES_INFLIGHT_WORK
+  return codex_sdk_runner.STEER_PRESERVES_INFLIGHT_WORK
+
+
 async def steer_into_active_turn(
   provider: str,
   chat_id: str,

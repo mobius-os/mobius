@@ -1078,6 +1078,69 @@ def test_running_parent_retains_result_for_next_context_without_queueing(
   assert "Finished while busy." in delivery.text
 
 
+def _seed_running_steerable_parent(db, monkeypatch, *, suffix, provider):
+  """A parent mid-turn on `provider` with a live, steerable turn registered.
+
+  Records every steer the wake path attempts and returns that log alongside the
+  ids, so a test can assert whether a finished helper's result is steered in.
+  """
+  import app.chat_steering as steering
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix=suffix,
+    result_blocks=[{"type": "text", "content": "Finished while busy."}],
+  )
+  db.get(models.Chat, parent_id).provider = provider
+  db.add(make_goal_run(db,
+    id=f"root-{suffix}", root_run_id=f"root-{suffix}",
+    chat_id=parent_id, status="running", provider=provider,
+    started_at=now_naive_utc(),
+  ))
+  db.commit()
+  steered = []
+
+  async def fake_steer(steer_provider, chat_id, content, *_args, **_kwargs):
+    steered.append((steer_provider, chat_id, content))
+    return True
+
+  monkeypatch.setattr(chat_mod, "is_chat_running", lambda _chat_id: True)
+  monkeypatch.setattr(steering, "has_live_steerable_turn", lambda *_a, **_k: True)
+  monkeypatch.setattr(steering, "steer_into_active_turn", fake_steer)
+  return parent_id, child_id, delegation_id, steered
+
+
+def test_live_claude_turn_is_not_steered_a_helper_result(db, monkeypatch):
+  """Claude steering interrupts the in-flight tool call, so a helper result is
+  left for after-turn delivery even when a steerable turn is live."""
+  parent_id, child_id, delegation_id, steered = _seed_running_steerable_parent(
+    db, monkeypatch, suffix="steer-claude", provider="claude",
+  )
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert steered == []
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
+  assert db.get(models.Chat, parent_id).pending_messages == []
+  assert delegations_mod.build_delegation_result_context(
+    db, parent_id,
+  ).delegation_ids == (delegation_id,)
+
+
+def test_live_codex_turn_is_steered_a_helper_result(db, monkeypatch):
+  """Codex steering injects natively without interrupting, so a helper result
+  is steered straight into the live turn and marked delivered."""
+  parent_id, child_id, delegation_id, steered = _seed_running_steerable_parent(
+    db, monkeypatch, suffix="steer-codex", provider="codex",
+  )
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  (steer_provider, chat_id, content), = steered
+  assert steer_provider == "codex" and chat_id == parent_id
+  assert "Finished while busy." in content
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is not None
+
+
 def test_owner_question_remains_authoritative_over_delayed_helper_result(
   db,
 ):

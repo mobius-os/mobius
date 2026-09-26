@@ -810,6 +810,14 @@ def _steer_redirect_message(texts: list[str], *, from_person: bool) -> str:
   )
 
 
+# A Claude steer has no in-band inject: `ActiveClaudeClient.steer` cuts the live
+# turn with `client.interrupt()`, aborting whatever tool call is in flight (the
+# model redoes it after reading the steered text). Steering therefore does NOT
+# preserve an in-flight tool call, which the delegation wake path consults
+# before steering an unsolicited helper result into a running parent.
+STEER_PRESERVES_INFLIGHT_WORK = False
+
+
 async def steer_into_active_turn(
   chat_id: str,
   text: str,

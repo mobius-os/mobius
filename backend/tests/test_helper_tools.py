@@ -213,13 +213,21 @@ def test_a_working_or_stopped_helper_cannot_be_messaged(client, owner_token, db)
 # ----------------------------------------------------------------- live delivery
 
 
-def _running_parent(db, suffix):
+def _running_parent(db, suffix, *, provider="codex"):
+  """Seed a helper whose parent is mid-turn on `provider`.
+
+  Defaults to Codex, whose steer injects natively and leaves an in-flight tool
+  call running, so the live steer-delivery path is exercised. Claude's steer
+  interrupts the turn, so a Claude parent is deliberately never steered a helper
+  result — that contrast is covered in test_delegations.
+  """
   parent_id, child_id, delegation_id = _seed_delegation(
     db, suffix=suffix, result_blocks=[{"type": "text", "content": "Done while you worked."}],
   )
+  db.get(models.Chat, parent_id).provider = provider
   db.add(make_goal_run(db,
     id=f"root-{suffix}", root_run_id=f"root-{suffix}",
-    chat_id=parent_id, status="running", provider="claude",
+    chat_id=parent_id, status="running", provider=provider,
     started_at=now_naive_utc(),
   ))
   db.commit()
