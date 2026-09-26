@@ -178,4 +178,5 @@ def test_programmatic_start_callers_share_one_model_guard():
     "app/platform_update.py:spawn_platform_conflict_chat",
     "app/routes/apps.py:_start_conflict_resolver_turn",
     "app/routes/contribution_reviews.py:start_reviews",
+    "app/routes/delegations.py:message_delegation",
   }

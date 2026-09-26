@@ -140,3 +140,42 @@ def test_thinking_trace_endpoint_404s_when_settled_and_missing(
         headers=auth,
     )
     assert r.status_code == 404
+
+
+def test_sink_publishes_a_repaired_thought_once_and_skips_no_op_finals(db):
+  """A completed thinking block that restores a lost chunk reaches live
+  clients as the repaired whole thought, addressed by thinking_id; a final
+  that matches the stream is not re-sent (no duplicate thought on the wire)."""
+  from app.agent_activity import EMPTY_AGENT_ACTIVITY_BINDING
+  from app.chat_event_sink import ChatEventSink
+
+  class Bus:
+    def __init__(self):
+      self.events = []
+
+    def publish(self, event):
+      self.events.append(dict(event))
+
+  bus = Bus()
+  sink = ChatEventSink(
+    bus, "chat-think-repair",
+    agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
+  )
+  sink.publish({"type": "thinking", "content": "First idea.",
+                "segment_id": "claude:m1:0"})
+  sink.publish({"type": "thinking", "content": "running old code.",
+                "segment_id": "claude:m1:1"})
+  sink.publish({"type": "thinking_final", "content": "First idea.",
+                "segment_id": "claude:m1:0"})
+  sink.publish({"type": "thinking_final",
+                "content": "The host is running old code.",
+                "segment_id": "claude:m1:1"})
+
+  finals = [e for e in bus.events if e["type"] == "thinking_final"]
+  assert len(finals) == 1
+  thought = sink.assistant_blocks[0]
+  assert finals[0]["thinking_id"] == thought["thinking_id"]
+  assert finals[0]["thinking_content"] == (
+    "First idea.\n\nThe host is running old code."
+  )
+  assert thought["content"] == finals[0]["thinking_content"]

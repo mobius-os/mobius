@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the always-on per-chat summary store, and nothing else.
 
-Knowledge-graph initialization belongs to an installed system app. The base
+Knowledge-graph initialization belongs to an installed app. The base
 platform only guarantees the directory used by each chat's title/Digest/Summary
 note exists and is writable by the agent.
 """

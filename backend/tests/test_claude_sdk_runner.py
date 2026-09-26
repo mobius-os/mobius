@@ -128,7 +128,6 @@ async def _run_turn(
   prompt: str = "hello",
   session_id: str | None = None,
   cwd: str = "/tmp",
-  db=None,
   **kwargs,
 ) -> dict:
   return await run_claude_sdk_turn(
@@ -139,8 +138,6 @@ async def _run_turn(
     chat_id=chat_id,
     skill_text="system",
     bc=_ChatBus() if bc is None else bc,
-    pending_questions={},
-    db=db,
     **kwargs,
   )
 
@@ -287,8 +284,6 @@ async def test_claude_connection_secret_file_closes_when_connect_fails(
     chat_id=f"claude-mcp-{expected_error}",
     skill_text="system",
     bc=_ChatBus(),
-    pending_questions={},
-    db=None,
     connector_plan=plan,
   )
 
@@ -334,8 +329,6 @@ async def test_claude_connection_secret_file_closes_when_connect_is_cancelled(
     chat_id="claude-mcp-cancelled",
     skill_text="system",
     bc=_ChatBus(),
-    pending_questions={},
-    db=None,
     connector_plan=plan,
   ))
 
@@ -1530,18 +1523,18 @@ async def test_stop_timeout_preserves_runner_completion_future():
 
 @pytest.mark.asyncio
 async def test_force_stop_signals_claude_group_only_once(monkeypatch):
-  calls: list[int] = []
+  calls: list[tuple[int, str]] = []
   monkeypatch.setattr(
     claude_sdk_runner,
-    "_terminate_claude_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_claude_processes",
+    lambda pgid, run_marker: calls.append((pgid, run_marker)) or True,
   )
 
   class _Client:
     async def interrupt(self):
       return None
 
-  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop", run_marker="run-1")
   handle.set_process_group_id(4321)
   first = asyncio.create_task(handle.force_stop(timeout=1))
   while not calls:
@@ -1550,7 +1543,7 @@ async def test_force_stop_signals_claude_group_only_once(monkeypatch):
 
   assert await first is True
   assert await handle.force_stop(timeout=1) is True
-  assert calls == [4321]
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
@@ -1583,7 +1576,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
     ))
     db.commit()
 
-    result = asyncio.run(_run_turn("claude-early", db=db))
+    result = asyncio.run(_run_turn("claude-early"))
 
     assert result["session_id"] == "sess-early"
     db.expire_all()
@@ -1732,12 +1725,17 @@ async def test_claude_new_and_resumed_turns_exclude_native_owner_questions(
   monkeypatch, session_id,
 ):
   clients = _install_fake_client(monkeypatch)
+  bus = _Bus()
   await _run_turn(
-    "chat-owner-question", bc=_Bus(), cwd="/data", session_id=session_id,
+    "chat-owner-question", bc=bus, cwd="/data", session_id=session_id,
   )
   assert {"AskUserQuestion", "request_user_input"} <= set(
     clients[0].options.disallowed_tools
   )
+  for name in ("AskUserQuestion", "request_user_input"):
+    denied = await clients[0].options.can_use_tool(name, {}, None)
+    assert isinstance(denied, PermissionResultDeny)
+  assert not any(event.get("type") == "question" for event in bus.events)
 
 
 @pytest.mark.asyncio
@@ -1762,7 +1760,8 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   assert options.system_prompt.startswith("system")
   assert "# Concise register" in options.system_prompt
   assert "# Execution lifetimes in Möbius" in options.system_prompt
-  assert "TaskOutput(block=true)" in options.system_prompt
+  assert "TaskOutput" not in options.system_prompt
+  assert 'until [ -e "$TMPDIR/job.exit" ]' in options.system_prompt
   assert "confirm its saved receipt" in options.system_prompt
   assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
@@ -1821,16 +1820,18 @@ def test_unhandled_sdk_events_are_logged_not_broadcast(caplog):
   assert "sdk_message:FreshSdkMessage" in logged
 
 
-def test_dispatch_assistant_thinking_block_is_silent():
-  """ThinkingBlock is a snapshot duplicate of streamed thinking_delta —
-  must not re-emit as thinking to avoid doubling the content."""
+def test_dispatch_never_streamed_thinking_block_materialises():
+  """A completed ThinkingBlock with no streamed preview is new content: it is
+  emitted once as thinking (a streamed one becomes thinking_final instead)."""
   bus = _Bus()
   msg = AssistantMessage(
     content=[ThinkingBlock(thinking="reflecting", signature="sig")],
     model="claude-opus",
   )
   dispatch_sdk_message(msg, bus, None)
-  assert bus.events == []
+  assert [(e["type"], e["content"]) for e in bus.events] == [
+    ("thinking", "reflecting"),
+  ]
 
 
 def test_dispatch_assistant_tool_use_emits_tool_start():
@@ -2625,10 +2626,13 @@ async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   assert "create_goal" in disallowed
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
   finite_tools = {
-    "Bash", "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows",
-    "Agent",
+    "Bash", "TaskStop", "Workflow", "Workflows",
   }
   assert not disallowed.intersection(finite_tools)
+  # Like its parent, a helper delegates with Möbius spawn_agent; Claude's own
+  # helper tool is off for every agent, so the child still inherits exactly
+  # the parent's tools.
+  assert set(claude_sdk_runner._CLAUDE_BUILTIN_HELPER_TOOLS) <= disallowed
 
   can_use_tool = captured["options"].can_use_tool
   for tool_name in finite_tools:
@@ -2708,55 +2712,6 @@ def test_precompact_log_trigger_extracts_and_is_defensive():
   assert _precompact_log_trigger("not-a-dict") is None
 
 
-def test_dispatch_suppresses_task_output_wait_events():
-  """TaskOutput is the agent waiting on work it started — not owner activity.
-
-  Möbius's ultracode reminder makes the agent re-issue a ten-minute wait until
-  the work lands, so surfacing these rendered a long turn as a repeating
-  "retrieval_status: timeout" wall that reads as the product failing.
-  """
-  bus = _Bus()
-  wait = AssistantMessage(
-    content=[ToolUseBlock(id="poll-1", name="TaskOutput", input={
-      "task_id": "wf-1", "block": True, "timeout": 600000,
-    })],
-    model="claude",
-  )
-  dispatch_sdk_message(wait, bus, None)
-  assert bus.events == [], bus.events
-
-  result = UserMessage(content=[ToolResultBlock(
-    tool_use_id="poll-1",
-    content="<retrieval_status>timeout</retrieval_status>",
-  )])
-  dispatch_sdk_message(result, bus, None)
-  # Symmetric: no orphan tool_output/tool_end for a block never opened.
-  assert bus.events == [], bus.events
-
-
-def test_dispatch_still_surfaces_ordinary_tools_alongside_a_suppressed_wait():
-  bus = _Bus()
-  msg = AssistantMessage(
-    content=[
-      ToolUseBlock(id="poll-2", name="TaskOutput", input={"task_id": "wf-2"}),
-      ToolUseBlock(id="read-1", name="Read", input={"file_path": "/tmp/x.md"}),
-    ],
-    model="claude",
-  )
-  dispatch_sdk_message(msg, bus, None)
-  starts = [e for e in bus.events if e["type"] == "tool_start"]
-  assert [e["tool"] for e in starts] == ["Read"]
-  assert all(e.get("tool_use_id") != "poll-2" for e in bus.events)
-
-  # The real tool's result still flows; only the wait's is dropped.
-  dispatch_sdk_message(
-    UserMessage(content=[ToolResultBlock(tool_use_id="read-1", content="ok")]),
-    bus,
-    None,
-  )
-  assert [e["type"] for e in bus.events if e["type"] == "tool_end"] == ["tool_end"]
-
-
 def _stream_message_start(message_id: str) -> StreamEvent:
   return StreamEvent(
     uuid="evt-ms", session_id="sess-1",
@@ -2784,45 +2739,153 @@ def _stream_text_block_start(index: int) -> StreamEvent:
   )
 
 
-def test_claude_text_final_repairs_earlier_block_by_id():
-  """A dropped leading delta on the FIRST of two text blocks in one message is
-  repaired by the authoritative text_final, matched by (message id + index).
+def _stream_block_start(index: int, block_type: str, **fields) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-cbs", session_id="sess-1",
+    event={
+      "type": "content_block_start", "index": index,
+      "content_block": {"type": block_type, **fields},
+    },
+  )
 
-  Before the id was threaded, text_final for the first block landed on the
-  trailing (second) block positionally, so the first block kept its truncated
-  delta accumulation forever (the dropped-leading-token bug).
-  """
+
+def _stream_thinking_delta_at(index: int, thinking: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-thd", session_id="sess-1",
+    event={
+      "type": "content_block_delta", "index": index,
+      "delta": {"type": "thinking_delta", "thinking": thinking},
+    },
+  )
+
+
+def _final(message_id: str, block) -> AssistantMessage:
+  """Claude Code's real shape: ONE completed block per AssistantMessage."""
+  return AssistantMessage(
+    content=[block], model="claude-opus", message_id=message_id,
+  )
+
+
+def _reduce(events: list[dict]) -> list[dict]:
   from app.events import process_event
 
+  blocks: list[dict] = []
+  for event in events:
+    process_event(dict(event), blocks)
+  return blocks
+
+
+def test_claude_text_final_repairs_earlier_block_by_id():
+  """A dropped leading delta on the FIRST of two text blocks in one message is
+  repaired by its completed block, matched by (message id + streamed index).
+
+  Claude Code sends each completed block as its own single-block message, so
+  the identity must come from the stream's block index, not the block's
+  position in that message (always 0).
+  """
   bus = _ChatBus()
-  # One message, TWO text blocks (indices 0 and 1). Block 0's leading delta
-  # ("Al") was dropped, so it accumulates truncated ("pha text here").
   dispatch_sdk_message(_stream_message_start("msg_abc"), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(0), bus, None)
   dispatch_sdk_message(_stream_text_delta_at(0, "pha text here"), bus, None)
   dispatch_sdk_message(_stream_text_block_start(1), bus, None)
   dispatch_sdk_message(_stream_text_delta_at(1, "Beta text"), bus, None)
-  dispatch_sdk_message(
-    AssistantMessage(
-      content=[TextBlock(text="Alpha text here"), TextBlock(text="Beta text")],
-      model="claude-opus",
-      message_id="msg_abc",
-    ),
-    bus, None,
-  )
+  dispatch_sdk_message(_final("msg_abc", TextBlock(text="Alpha text here")), bus, None)
+  dispatch_sdk_message(_final("msg_abc", TextBlock(text="Beta text")), bus, None)
 
-  # Delta and final events carry matching, turn-unique ids.
   text_events = [e for e in bus.events if e["type"] == "text"]
   final_events = [e for e in bus.events if e["type"] == "text_final"]
   assert text_events[0]["text_item_id"] == "msg_abc:0"
-  assert final_events[0]["text_item_id"] == "msg_abc:0"
-  assert final_events[1]["text_item_id"] == "msg_abc:1"
+  assert [e["text_item_id"] for e in final_events] == ["msg_abc:0", "msg_abc:1"]
 
-  # Reduce the emitted events the way the sink does; the first block is repaired.
-  blocks: list[dict] = []
-  for event in bus.events:
-    process_event(event, blocks)
-  texts = [b["content"] for b in blocks if b.get("type") == "text"]
+  texts = [b["content"] for b in _reduce(bus.events) if b.get("type") == "text"]
   assert texts == ["Alpha text here", "Beta text"]
+
+
+def test_claude_text_after_thinking_final_matches_streamed_index():
+  """The common shape [thinking, text]: the text's completed copy arrives as
+  a single-block message but must still name stream index 1, not 0."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "Plan.\n"), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="Plan.\n", signature="s")), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(1), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(1, "ing the fix now."), bus, None)
+  dispatch_sdk_message(_final("m1", TextBlock(text="Applying the fix now.")), bus, None)
+
+  final = [e for e in bus.events if e["type"] == "text_final"]
+  assert final[0]["text_item_id"] == "m1:1"
+  blocks = _reduce(bus.events)
+  assert [b["type"] for b in blocks] == ["thinking", "text"]
+  assert blocks[1]["content"] == "Applying the fix now."
+
+
+def test_completed_thinking_block_restores_a_segment_missing_its_start():
+  """A thought persisted with a paragraph starting mid-sentence is repaired:
+  the completed ThinkingBlock replaces exactly the segment it finishes."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "First idea."), bus, None)
+  dispatch_sdk_message(_stream_block_start(1, "thinking", thinking=""), bus, None)
+  # The leading chunk "The host is " never arrived.
+  dispatch_sdk_message(_stream_thinking_delta_at(1, "running old code."), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="First idea.", signature="s")), bus, None)
+  dispatch_sdk_message(
+    _final("m1", ThinkingBlock(thinking="The host is running old code.", signature="s")),
+    bus, None,
+  )
+
+  finals = [e for e in bus.events if e["type"] == "thinking_final"]
+  assert [e["segment_id"] for e in finals] == ["claude:m1:0", "claude:m1:1"]
+  blocks = _reduce(bus.events)
+  assert len(blocks) == 1
+  assert blocks[0]["content"] == "First idea.\n\nThe host is running old code."
+
+
+def test_completed_thinking_block_is_a_no_op_when_the_stream_was_whole():
+  from app.events import process_event
+
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "Whole thought."), bus, None)
+  dispatch_sdk_message(_final("m1", ThinkingBlock(thinking="Whole thought.", signature="s")), bus, None)
+  blocks: list[dict] = []
+  results = [process_event(dict(e), blocks) for e in bus.events]
+  assert results[-1] is False  # the final changed nothing
+  assert [b["content"] for b in blocks] == ["Whole thought."]
+
+
+def test_thinking_from_separate_model_calls_stays_separate_paragraphs():
+  """Block indices reset per model call; identity includes the message id so
+  two calls' thinking no longer glue into one run-on paragraph."""
+  bus = _ChatBus()
+  for mid, text in (("m1", "Call one."), ("m2", "Call two.")):
+    dispatch_sdk_message(_stream_message_start(mid), bus, None)
+    dispatch_sdk_message(_stream_block_start(0, "thinking", thinking=""), bus, None)
+    dispatch_sdk_message(_stream_thinking_delta_at(0, text), bus, None)
+  blocks = _reduce(bus.events)
+  assert blocks[0]["content"] == "Call one.\n\nCall two."
+
+
+def test_thinking_block_start_payload_is_not_dropped():
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(
+    _stream_block_start(0, "thinking", thinking="The host is "), bus, None,
+  )
+  dispatch_sdk_message(_stream_thinking_delta_at(0, "running old code."), bus, None)
+  assert _reduce(bus.events)[0]["content"] == "The host is running old code."
+
+
+def test_text_block_start_payload_is_not_dropped():
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_message_start("m1"), bus, None)
+  dispatch_sdk_message(_stream_block_start(0, "text", text="Found "), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(0, "it."), bus, None)
+  texts = [b["content"] for b in _reduce(bus.events) if b.get("type") == "text"]
+  assert texts == ["Found it."]
 
 
 def test_claude_text_events_have_no_id_without_message_id():
@@ -2837,3 +2900,116 @@ def test_claude_text_events_have_no_id_without_message_id():
   )
   emitted = [e for e in bus.events if e["type"] in ("text", "text_final")]
   assert emitted and all("text_item_id" not in e for e in emitted)
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_person_message_is_framed_as_owed_a_visible_reply():
+  """A person's mid-turn message must not be absorbed as silent context.
+
+  "Continue the same task" framing let agents fold an owner's question into
+  their work and answer it only in hidden thinking. Visible rows are framed
+  as a message needing a visible reply; hidden agent carriers (helper
+  results, peer notes) stay context. The distinction resets with the buffer.
+  """
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-framing")
+  handle.mark_generating()
+
+  await handle.steer(
+    "helper finished", [{"role": "user", "cid": "c1", "hidden": True,
+                         "kind": "delegation_result"}], ["c1"],
+  )
+  assert handle.steer_from_person is False
+  await handle.steer("why not X?", [{"role": "user", "cid": "c2"}], ["c2"])
+  assert handle.steer_from_person is True
+
+  texts = handle.take_steer_for_requery(interrupt_landed=True)
+  assert texts == ["helper finished", "why not X?"]
+  assert handle.steer_from_person is False
+
+  person = claude_sdk_runner._steer_redirect_message(texts, from_person=True)
+  assert person.startswith("The partner sent this message while you were")
+  assert "visible response" in person
+  assert "why not X?" in person and "helper finished" in person
+
+  context = claude_sdk_runner._steer_redirect_message(
+    ["peer note"], from_person=False,
+  )
+  assert context.startswith("New context arrived while you were working.")
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_person_steer_framing():
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-stop")
+  handle.mark_generating()
+  await handle.steer("stop that", [{"role": "user", "cid": "c3"}], ["c3"])
+  assert handle.steer_from_person is True
+  handle.mark_finished()
+  await handle.interrupt()
+  assert handle.pending_steer == []
+  assert handle.steer_from_person is False
+
+
+def _clean_zero_block_result(session_id: str = "sess-1"):
+  """A clean, zero-block resume terminal — the synthetic-no-op shape."""
+  return ResultMessage(
+    subtype="success",
+    duration_ms=20,
+    duration_api_ms=15,
+    is_error=False,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason="end_turn",
+    total_cost_usd=0.01,
+    usage={"input_tokens": 1, "output_tokens": 0},
+  )
+
+
+@pytest.mark.asyncio
+async def test_zero_block_resume_never_replays_the_original_prompt(monkeypatch):
+  """A clean empty result does not prove that the original request had no
+  side effects. The chat finalizer, not this runner, owns the resumable marker."""
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield _clean_zero_block_result(session_id="sess-1")
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  bus = _ChatBus()
+  bus.assistant_blocks = []
+
+  result = await _run_turn("noop-chat", bc=bus, prompt="do it", session_id="sess-1")
+  assert clients[0].queries == ["do it"]
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_selected_model_does_not_fall_back_silently(monkeypatch):
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="error_during_execution",
+        duration_ms=20,
+        duration_api_ms=15,
+        is_error=True,
+        num_turns=0,
+        session_id="sess-1",
+        total_cost_usd=0.0,
+        result="Selected model may not exist or you may not have access",
+      )
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn(
+    "rejected-model", agent_settings={"model": "claude-opus-4-8"},
+  )
+
+  assert len(clients) == 1
+  assert clients[0].queries == ["hello"]
+  assert clients[0].options.model == "claude-opus-4-8"
+  assert result["error"] == "Selected model may not exist or you may not have access"

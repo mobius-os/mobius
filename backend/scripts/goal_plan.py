@@ -27,7 +27,10 @@ def _settings() -> tuple[str, str, str]:
 
 # The server names what is wrong by code; this helper names its own flags.
 _REMEDIES = {
-  "no_active_goal": "Promote first, or run `list` then `resume ID`.",
+  "no_active_goal": (
+    "Promote first, or run `list` then `resume ID`. To save this chat's "
+    "name, digest, or summary, use checkpoint_chat; this script plans Goals."
+  ),
   "progress_incomplete": (
     "If every repetition is done, record it in the same update: "
     "update {task_id} --progress {total}/{total} --status completed"
@@ -74,7 +77,7 @@ def _attach_for_write(chat_id: str) -> dict:
   goal = (payload or {}).get("goal") if isinstance(payload, dict) else None
   goal_id = goal.get("id") if isinstance(goal, dict) else None
   if not goal_id:
-    raise SystemExit("No Goal to update. Promote first, or run `list` then `resume ID`.")
+    raise SystemExit(f"No Goal to update. {_REMEDIES['no_active_goal']}")
   _request(
     "POST", f"/api/chats/{chat_id}/goal/resume", {"goal_id": goal_id},
   )

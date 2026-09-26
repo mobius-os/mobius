@@ -5386,6 +5386,92 @@ def _add_chat_drawer_covering_index(eng) -> None:
     ))
 
 
+def _add_chat_pending_queue_index(eng) -> None:
+  """Let the idle-queue watchdog find queued input without reading transcripts.
+
+  SQLite stores each row's transcript JSON inline, before ``pending_messages``,
+  so reading that column for every chat walks every transcript's overflow
+  chain. This partial index holds only live chats whose queue is non-empty,
+  normally a handful. The sweep's filter repeats this predicate term for term
+  so SQLite can use it. Other databases store large values out of line; the
+  index is only an optimization, so a schema lacking a column skips it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if eng.dialect.name != "sqlite":
+    return
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("chats")}
+  if not {"id", "deleted_at", "pending_messages"} <= columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_pending_queue ON chats (id) "
+      "WHERE deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
+    ))
+def _add_delegation_goal_task(eng) -> None:
+  """Record which Goal plan task each helper works on.
+
+  Helpers used to be matched to plan tasks only when their name equalled a
+  task id. Existing rows keep exactly that link; new helpers record it at spawn.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  if "goal_task_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE delegations ADD COLUMN goal_task_id VARCHAR(128) NULL"
+    ))
+    conn.execute(text("UPDATE delegations SET goal_task_id = task_key"))
+
+
+def _add_delegation_result_identity(eng) -> None:
+  """Record helper-result delivery per result instead of per helper.
+
+  A follow-up starts a new child run and owes a new result, so delivery is now
+  the child run id whose result reached the parent. An existing delivery
+  timestamp covered the helper's latest run at the time: message_agent cleared
+  it on every follow-up, so a set timestamp always refers to that run. The
+  timestamp columns stay unmapped for a baked fallback platform, which reads
+  only them: during such a fallback, results delivered since this migration
+  may be delivered once more (a repeat, never a loss).
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  # A result settled before any child run existed (source work that failed
+  # or finished before starting) is recorded as delegations.SETTLED_BEFORE_START.
+  latest_child_run = (
+    "COALESCE((SELECT r.id FROM chat_runs r "
+    "WHERE r.chat_id = delegations.child_chat_id "
+    "ORDER BY r.started_at DESC, r.id DESC LIMIT 1), 'settled-before-start')"
+  )
+  with eng.begin() as conn:
+    for column, legacy in (
+      ("delivered_run_id", "parent_woken_at"),
+      ("incorporated_run_id", "result_incorporated_at"),
+    ):
+      if column not in columns:
+        conn.execute(text(
+          f"ALTER TABLE delegations ADD COLUMN {column} VARCHAR(64) NULL"
+        ))
+      if legacy in columns:
+        conn.execute(text(
+          f"UPDATE delegations SET {column} = {latest_child_run} "
+          f"WHERE {column} IS NULL AND {legacy} IS NOT NULL"
+        ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5464,6 +5550,9 @@ _SCHEMA_MIGRATIONS = (
   ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
   ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
   ("0068_rename_inkling_to_evolve", _rename_inkling_to_evolve),
+  ("0069_chat_pending_queue_index", _add_chat_pending_queue_index),
+  ("0070_delegation_goal_task", _add_delegation_goal_task),
+  ("0071_delegation_result_identity", _add_delegation_result_identity),
 )
 
 

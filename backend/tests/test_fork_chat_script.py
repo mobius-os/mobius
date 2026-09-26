@@ -20,12 +20,13 @@ from fork_session import (  # noqa: E402
   ForkResult,
   _assert_codex_mcp_isolated,
   _codex_mcp_isolation_overrides,
+  _codex_turn_of_call,
   _fork_claude,
   _fork_codex_async,
   _load_codex_sdk,
   _parse_invocation,
 )
-from fork_chat import _chat_session, coach_chat  # noqa: E402
+from fork_chat import _chat_session, coach_chat, main as fork_chat_main  # noqa: E402
 
 
 def test_platform_coaching_helpers_are_directly_executable():
@@ -192,6 +193,7 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn(tmp_path, monkeypatch):
         FakeConfig,
         FakeApprovalMode,
         FakeSandbox,
+        None,
       ),
       mcp_inventory_runner=mcp_inventory_runner,
     )
@@ -345,8 +347,8 @@ def test_chat_coaching_delegates_only_to_its_exact_provider_session(tmp_path):
   _seed_db(db_dir / "ultimate.db")
   seen = {}
 
-  def driver(provider, session_id, cwd, prompt):
-    seen["args"] = (provider, session_id, cwd, prompt)
+  def driver(provider, session_id, cwd, prompt, *, after_call_id):
+    seen["args"] = (provider, session_id, cwd, prompt, after_call_id)
     return ForkResult(
       provider=provider,
       source_session_id=session_id,
@@ -356,7 +358,9 @@ def test_chat_coaching_delegates_only_to_its_exact_provider_session(tmp_path):
 
   payload = coach_chat("chat-1", "coach", data_dir=tmp_path, driver=driver)
 
-  assert seen["args"] == ("codex", "source-session", str(tmp_path), "coach")
+  assert seen["args"] == (
+    "codex", "source-session", str(tmp_path), "coach", None,
+  )
   assert payload == {
     "chat_id": "chat-1",
     "provider": "codex",
@@ -365,6 +369,7 @@ def test_chat_coaching_delegates_only_to_its_exact_provider_session(tmp_path):
     "answer": "answer",
     "method": "session_fork",
     "exact_session_fork": True,
+    "after_call_id": None,
   }
 
 
@@ -402,3 +407,330 @@ def test_deleted_chat_cannot_be_coached(tmp_path):
 
   with pytest.raises(ForkError, match="deleted chats cannot be forked"):
     _chat_session(db, "chat-1")
+
+
+# --- Call moments: fork the provider session at one tool call ---------------
+
+CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555"
+CODEX_THREAD = "01a0c949-5dea-7260-820a-a2e43a6dbb93"
+
+
+def _write_jsonl(path: Path, entries):
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(
+    "".join(json.dumps(entry) + "\n" for entry in entries) + '{"partial',
+    encoding="utf-8",
+  )
+
+
+def _claude_transcript(config_dir: Path):
+  def tool_use(uuid, call_id):
+    return {
+      "type": "assistant",
+      "uuid": uuid,
+      "message": {"content": [{"type": "tool_use", "id": call_id}]},
+    }
+
+  def tool_result(uuid, call_id):
+    return {
+      "type": "user",
+      "uuid": uuid,
+      "sourceToolAssistantUUID": f"a-{call_id}",
+      "message": {"content": [{"type": "tool_result", "tool_use_id": call_id}]},
+    }
+
+  _write_jsonl(
+    config_dir / "projects" / "-data" / f"{CLAUDE_SESSION}.jsonl",
+    [
+      {"type": "user", "uuid": "u-prompt", "message": {"content": "hi"}},
+      tool_use("a-toolu_A", "toolu_A"),
+      tool_use("a-toolu_B", "toolu_B"),
+      tool_result("u-result-A", "toolu_A"),
+      tool_result("u-result-B", "toolu_B"),
+      {"type": "assistant", "uuid": "a-later", "message": {"content": "later"}},
+    ],
+  )
+
+
+def test_claude_call_moment_resumes_at_that_calls_tool_result_entry(
+  tmp_path, monkeypatch
+):
+  _claude_transcript(tmp_path)
+  monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+  seen = {}
+
+  def runner(args, **kwargs):
+    seen["args"] = args
+    return subprocess.CompletedProcess(
+      args,
+      0,
+      stdout=json.dumps({"session_id": "fork", "result": "at the moment"}),
+      stderr="",
+    )
+
+  result = _fork_claude(
+    CLAUDE_SESSION, "/data", "coach", after_call_id="toolu_A", runner=runner,
+  )
+
+  assert seen["args"] == [
+    "claude", "--resume", CLAUDE_SESSION, "--fork-session",
+    "--resume-session-at=u-result-A",
+    "--print", "coach", "--output-format", "json",
+    "--restricted", "--strict-mcp-config", "--tools", "",
+  ]
+  assert result.after_call_id == "toolu_A"
+  assert result.forked_session_id == "fork"
+
+
+def test_claude_call_moment_without_recorded_result_fails_before_forking(
+  tmp_path, monkeypatch
+):
+  _claude_transcript(tmp_path)
+  monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+  def runner(args, **kwargs):
+    raise AssertionError("must not fork the whole session instead")
+
+  with pytest.raises(ForkError, match="no recorded result for call toolu_Z"):
+    _fork_claude(
+      CLAUDE_SESSION, "/data", "coach", after_call_id="toolu_Z", runner=runner,
+    )
+  with pytest.raises(ForkError, match="not a UUID"):
+    _fork_claude("../*", "/data", "coach", after_call_id="toolu_A", runner=runner)
+
+
+def _codex_rollout_file(codex_home: Path, entries) -> Path:
+  path = (
+    codex_home / "sessions" / "2026" / "09" / "25"
+    / f"rollout-2026-09-25T10-00-00-{CODEX_THREAD}.jsonl"
+  )
+  _write_jsonl(path, entries)
+  return path
+
+
+def _item(kind, **fields):
+  return {"type": "response_item", "payload": {"type": kind, **fields}}
+
+
+def _turn_started(turn_id):
+  return {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn_id}}
+
+
+def _codex_entries():
+  # The shape Codex 0.157 writes: each turn opens with task_started, and the
+  # turn's items (developer context included) follow it.
+  return [
+    {"type": "session_meta", "payload": {"id": CODEX_THREAD}},
+    _turn_started("turn-1"),
+    _item("message", id="msg_1", role="user", content="do the thing"),
+    {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+    _item("custom_tool_call", id="ctc_A", call_id="call_A", name="exec"),
+    _item("custom_tool_call_output", call_id="call_A"),
+    _item("message", id="msg_2", role="assistant", content="later in turn 1"),
+    {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-1"}},
+    _turn_started("turn-2"),
+    _item("custom_tool_call", id="ctc_B", call_id="call_B", name="exec"),
+    _item("custom_tool_call_output", call_id="call_B"),
+  ]
+
+
+@pytest.mark.parametrize(("call_id", "turn_id"), [("ctc_A", "turn-1"), ("ctc_B", "turn-2")])
+def test_codex_call_moment_is_the_turn_that_made_the_call(tmp_path, call_id, turn_id):
+  rollout = _codex_rollout_file(tmp_path, _codex_entries())
+
+  assert _codex_turn_of_call(rollout, call_id) == turn_id
+
+
+@pytest.mark.parametrize(
+  ("entries", "call_id", "expected"),
+  [
+    (_codex_entries(), "ctc_missing", "no recorded call ctc_missing"),
+    (
+      [_item("custom_tool_call", id="ctc_A", call_id="call_A")],
+      "ctc_A",
+      "records call ctc_A outside a turn",
+    ),
+  ],
+)
+def test_codex_call_moment_without_a_recorded_turn_fails(
+  tmp_path, entries, call_id, expected
+):
+  rollout = _codex_rollout_file(tmp_path, entries)
+
+  with pytest.raises(ForkError, match=expected):
+    _codex_turn_of_call(rollout, call_id)
+
+
+def test_codex_call_moment_forks_the_session_through_the_calls_turn(
+  tmp_path, monkeypatch
+):
+  codex_home = tmp_path / "cli-auth" / "codex"
+  _codex_rollout_file(codex_home, _codex_entries())
+  monkeypatch.setenv("CODEX_HOME", str(codex_home))
+  monkeypatch.setattr(fork_session_module.shutil, "which", lambda name: f"/bin/{name}")
+  calls = {"requests": []}
+
+  class FakeConfig:
+    def __init__(self, **kwargs):
+      calls["config"] = kwargs
+
+  class FakeThread:
+    def __init__(self, codex, thread_id):
+      self.id = thread_id
+
+    async def run(self, prompt, **kwargs):
+      calls["run"] = (prompt, kwargs)
+      return SimpleNamespace(error=None, final_response="coached")
+
+  class FakeClient:
+    async def thread_fork(self, thread_id, params):
+      calls["fork"] = (thread_id, params)
+      return SimpleNamespace(thread=SimpleNamespace(id="moment-thread"))
+
+    async def request(self, method, params, *, response_model):
+      calls["requests"].append((method, params))
+      return response_model.model_validate({"data": []})
+
+  class FakeCodex:
+    def __init__(self, config):
+      self._client = FakeClient()
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def thread_fork(self, *args, **kwargs):
+      raise AssertionError("a call moment must not fork the whole session")
+
+  result = asyncio.run(
+    _fork_codex_async(
+      CODEX_THREAD,
+      "/data",
+      "coach",
+      after_call_id="ctc_A",
+      sdk_loader=lambda: (
+        FakeCodex,
+        FakeConfig,
+        SimpleNamespace(deny_all="deny_all"),
+        SimpleNamespace(read_only="read-only"),
+        FakeThread,
+      ),
+      mcp_inventory_runner=lambda args, **kw: subprocess.CompletedProcess(
+        args, 0, stdout="[]", stderr="",
+      ),
+    )
+  )
+
+  assert calls["config"]["codex_bin"] == "/bin/codex"
+  assert calls["fork"] == (CODEX_THREAD, {
+    "lastTurnId": "turn-1",
+    "cwd": "/data",
+    "approvalPolicy": "never",
+    "sandbox": "read-only",
+  })
+  assert [method for method, _ in calls["requests"]] == ["mcpServerStatus/list"]
+  assert calls["requests"][0][1]["threadId"] == "moment-thread"
+  assert calls["run"] == (
+    "coach",
+    {"approval_mode": "deny_all", "cwd": "/data", "sandbox": "read-only"},
+  )
+  assert result == ForkResult(
+    provider="codex",
+    source_session_id=CODEX_THREAD,
+    forked_session_id="moment-thread",
+    answer="coached",
+    after_call_id="ctc_A",
+  )
+  assert (result.method, result.exact_session_fork) == ("session_fork", True)
+
+
+def _seed_run(db: Path, *, run_id="run-1", chat_id="chat-1", provider="codex",
+              provider_session_id="run-session"):
+  with sqlite3.connect(db) as con:
+    con.execute(
+      "create table if not exists chat_runs (id text primary key, chat_id text, "
+      "provider text, provider_session_id text)"
+    )
+    con.execute(
+      "insert into chat_runs values (?, ?, ?, ?)",
+      (run_id, chat_id, provider, provider_session_id),
+    )
+
+
+def _moment(**overrides):
+  return {
+    "chat_id": "chat-1",
+    "run_id": "run-1",
+    "provider": "codex",
+    "call_id": "ctc_A",
+    **overrides,
+  }
+
+
+def _moment_db(tmp_path):
+  db_dir = tmp_path / "db"
+  db_dir.mkdir()
+  db = db_dir / "ultimate.db"
+  _seed_db(db, session_id="chat-current-session")
+  return db
+
+
+def test_chat_call_moment_forks_the_runs_session_after_that_call(tmp_path):
+  _seed_run(_moment_db(tmp_path))
+  seen = {}
+
+  def driver(provider, session_id, cwd, prompt, *, after_call_id):
+    seen["args"] = (provider, session_id, cwd, prompt, after_call_id)
+    return ForkResult(
+      provider=provider,
+      source_session_id=session_id,
+      forked_session_id="fork",
+      answer="answer",
+      after_call_id=after_call_id,
+    )
+
+  payload = coach_chat(
+    "chat-1", "coach", moment=_moment(), data_dir=tmp_path, driver=driver,
+  )
+
+  assert seen["args"] == ("codex", "run-session", str(tmp_path), "coach", "ctc_A")
+  assert payload["after_call_id"] == "ctc_A"
+
+
+@pytest.mark.parametrize(
+  ("run", "moment", "expected"),
+  [
+    ({}, _moment(chat_id="chat-2"), "different chat"),
+    ({"chat_id": "chat-2"}, _moment(), "run not found in this chat"),
+    ({}, _moment(run_id="run-missing"), "run not found in this chat"),
+    ({"provider": "claude"}, _moment(), "does not match its run"),
+    ({"provider": None}, _moment(), "does not match its run"),
+    ({"provider_session_id": None}, _moment(), "no exact provider session"),
+    ({}, _moment(call_id=""), "needs string chat_id"),
+    ({}, ["not", "an", "object"], "needs string chat_id"),
+  ],
+)
+def test_chat_call_moment_mismatch_fails_without_whole_session_fallback(
+  tmp_path, run, moment, expected
+):
+  _seed_run(_moment_db(tmp_path), **run)
+
+  def driver(*args, **kwargs):
+    raise AssertionError("a bad moment must never reach any fork")
+
+  with pytest.raises(ForkError, match=expected):
+    coach_chat("chat-1", "coach", moment=moment, data_dir=tmp_path, driver=driver)
+
+
+def test_chat_call_moment_cli_passes_the_parsed_moment(
+  tmp_path, monkeypatch, capsys
+):
+  _seed_run(_moment_db(tmp_path), provider_session_id=None)
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+  assert fork_chat_main([
+    "--after-call", json.dumps(_moment()), "chat-1", "coach",
+  ]) == 1
+  assert "no exact provider session" in capsys.readouterr().err

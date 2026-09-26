@@ -34,7 +34,6 @@ from claude_agent_sdk.types import (
 
 from app import claude_sdk_runner
 from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
-from app.database import SessionLocal
 
 
 class _ChatBus:
@@ -113,8 +112,8 @@ def test_phantom_session_id_never_persisted(monkeypatch):
   """
   persisted: list[str] = []
 
-  async def _record_persist(db, chat_id, session_id):
-    del db, chat_id
+  async def _record_persist(chat_id, session_id):
+    del chat_id
     persisted.append(session_id)
 
   monkeypatch.setattr(
@@ -142,30 +141,24 @@ def test_phantom_session_id_never_persisted(monkeypatch):
 
   monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
 
-  db = SessionLocal()
-  try:
-    result = asyncio.run(
-      run_claude_sdk_turn(
-        user_message="hello",
-        session_id=None,
-        base_env={},
-        cwd="/tmp",
-        chat_id="chat-phantom",
-        skill_text="system",
-        bc=_ChatBus(),
-        pending_questions={},
-        db=db,
-      )
+  result = asyncio.run(
+    run_claude_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-phantom",
+      skill_text="system",
+      bc=_ChatBus(),
     )
+  )
 
-    # Neither non-root id is persisted; only REAL is.
-    assert "PHANTOM" not in persisted
-    assert "CHILD" not in persisted
-    assert persisted == ["REAL"]
-    # The returned session id is the resumable one.
-    assert result["session_id"] == "REAL"
-  finally:
-    db.close()
+  # Neither non-root id is persisted; only REAL is.
+  assert "PHANTOM" not in persisted
+  assert "CHILD" not in persisted
+  assert persisted == ["REAL"]
+  # The returned session id is the resumable one.
+  assert result["session_id"] == "REAL"
 
 
 def test_resumable_true_when_transcript_present(tmp_path):

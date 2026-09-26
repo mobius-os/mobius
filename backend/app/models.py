@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
-  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
+  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, text,
+  true,
 )
 
 from sqlalchemy.orm import column_property, relationship, validates
@@ -176,6 +177,17 @@ class Chat(Base):
   """A chat conversation with the agent."""
 
   __tablename__ = "chats"
+  # The idle-queue sweep pins this partial index with INDEXED BY (see
+  # chat._nonempty_pending_queues), so every SQLite database must have it:
+  # migration 0069 adds it to existing ones and create_all to fresh ones.
+  __table_args__ = (
+    Index(
+      "ix_chats_pending_queue", "id",
+      sqlite_where=text(
+        "deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
+      ),
+    ).ddl_if(dialect="sqlite"),
+  )
 
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
@@ -246,7 +258,7 @@ class Chat(Base):
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
   # recomposes installed-app fragments for an already-started chat. Installing,
-  # updating, or uninstalling a system app therefore affects only chats that
+  # updating, or uninstalling an app therefore affects only chats that
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
@@ -514,6 +526,9 @@ class Delegation(Base):
   # child chat or weakening the idempotency key.
   parent_root_run_id = Column(String(64), nullable=False, index=True)
   task_key = Column(String(128), nullable=False)
+  # The parent Goal plan task this helper works on, recorded at spawn. The
+  # helper's name is free; this is what places it under its task.
+  goal_task_id = Column(String(128), nullable=True, default=None)
   child_chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True
   )
@@ -536,16 +551,21 @@ class Delegation(Base):
   notify_parent_on_complete = Column(
     Boolean, nullable=False, default=False
   )
-  # Delivery-channel latch. Depending on the workflow, this may mean provider
-  # admission, an owner notification, or a historical terminal delivery; it is
-  # not universal proof that an agent incorporated the result. Until set, the
-  # owning Delegation/child result remains available to a later real context
-  # checkpoint even when Stop fences automatic continuation.
-  parent_woken_at = Column(DateTime, nullable=True, default=None)
-  # Exact acceptance evidence. Only terminal Finalize stamps this in the same
-  # commit as the assistant response which incorporated the admitted helper
-  # envelope. Historical delivery latches deliberately remain NULL/unknown.
-  result_incorporated_at = Column(DateTime, nullable=True, default=None)
+  # A helper produces one result per child run: a follow-up (message_agent)
+  # starts a new run and so owes a new result. Delivery is therefore recorded
+  # as the child ChatRun id whose result reached the parent, never as a flag on
+  # the helper: a record naming an earlier run can never cover a later result.
+  # The current result is owed while the latest child run differs from this.
+  # Depending on the workflow, delivery may mean provider admission, an owner
+  # notification, or a historical terminal delivery; it is not proof that an
+  # agent incorporated the result. See delegations.current_result_undelivered.
+  delivered_run_id = Column(String(64), nullable=True, default=None)
+  # Exact acceptance evidence for one result. Only terminal Finalize records
+  # it, in the same commit as the assistant response which incorporated the
+  # admitted helper envelope. Historical deliveries remain NULL/unknown.
+  # (The retired parent_woken_at/result_incorporated_at timestamp columns stay
+  # in the table unmapped because a baked fallback platform may still map them.)
+  incorporated_run_id = Column(String(64), nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable
   # work id makes retries attach; the explicit intent supports a small durable
@@ -1167,9 +1187,10 @@ class App(Base):
   # Only live installed rows are composed at chat start. Soft-uninstall changes
   # future chats while existing snapshots and app data remain recoverable.
   system_prompt_file = Column(String(255), nullable=True, default=None)
-  # Explicit manifest identity for apps that participate in the agent/system
-  # lifecycle.  This flag grants nothing by itself; the individual manifest
-  # declarations remain the capabilities and the install review is consent.
+  # Retired: apps no longer have a "system" class. Any installed app may
+  # declare a prompt fragment, skills, or agent tools, and install review is
+  # the consent. Nothing reads this column; it stays so an older baked
+  # platform started as a fallback can still load this table.
   system_app = Column(Boolean, nullable=False, default=False)
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.

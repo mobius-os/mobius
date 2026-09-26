@@ -47,6 +47,20 @@ def test_normalize_claude_usage_keeps_current_and_model_windows():
   assert snapshot["windows"][0]["resets_at"] == "2026-07-30T17:00:00+00:00"
 
 
+def test_a_window_past_its_limit_shows_full_instead_of_vanishing():
+  """An over-limit reading is the one the owner most needs to see."""
+  from app.provider_usage import normalize_claude_usage
+
+  snapshot = normalize_claude_usage({
+    "seven_day": {"utilization": 104.5, "resets_at": "2026-10-03T03:00:00Z"},
+    "five_hour": {"utilization": -3, "resets_at": "2026-10-03T03:00:00Z"},
+  })
+
+  weekly = [w for w in snapshot["windows"] if w["kind"] == "weekly"]
+  assert [w["used_percent"] for w in weekly] == [100]
+  assert [w["id"] for w in snapshot["windows"]] == ["seven_day"]
+
+
 def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   from app.provider_usage import normalize_codex_usage
 
@@ -230,7 +244,7 @@ def test_normalizers_report_unavailable_without_inventing_limits():
   }
 
 
-def test_provider_usage_reads_only_requested_plan(monkeypatch):
+def test_provider_usage_reads_only_requested_plan(monkeypatch, tmp_path):
   from app import provider_usage
 
   provider_usage._provider_usage_cache.clear()
@@ -243,7 +257,7 @@ def test_provider_usage_reads_only_requested_plan(monkeypatch):
     return {"state": "ready", "windows": [{"id": "primary"}]}
 
   monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
-  body = asyncio.run(provider_usage.read_provider_usage("codex", "/data"))
+  body = asyncio.run(provider_usage.read_provider_usage("codex", str(tmp_path)))
 
   assert body["state"] == "ready"
   assert body["stale"] is False
@@ -2005,3 +2019,77 @@ async def test_claude_reset_receipt_outcome_precedes_account_count_change(
 
   assert result == {**receipt, "reconciled": True}
   assert not intent_path.exists()
+
+
+WEEKLY_READY = {
+  "state": "ready",
+  "plan_label": "Max plan",
+  "windows": [{
+    "id": "seven_day", "kind": "weekly", "label": "Weekly",
+    "used_percent": 42, "resets_at": "2099-09-05T03:00:00+00:00",
+  }],
+  "credit_balance": None,
+}
+
+
+def test_the_last_reading_survives_a_restart_while_the_provider_refuses(
+  monkeypatch, tmp_path,
+):
+  """A restart empties memory, and the first reads after it are often refused.
+
+  The last good reading bridges that gap as a stale gauge instead of the
+  weekly figure vanishing until the provider answers again.
+  """
+  from app import provider_usage
+
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  answers = [WEEKLY_READY]
+
+  async def fake_snapshot(_provider_id, _data_dir):
+    answer = answers.pop(0)
+    if isinstance(answer, Exception):
+      raise answer
+    return answer
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
+  first = asyncio.run(provider_usage.read_provider_usage("claude", str(tmp_path)))
+  assert first["state"] == "ready"
+
+  provider_usage._provider_usage_cache.clear()  # the restart
+  answers.append(provider_usage.ProviderUsageRefused("claude", None))
+  after_restart = asyncio.run(
+    provider_usage.read_provider_usage("claude", str(tmp_path))
+  )
+
+  assert after_restart["state"] == "ready"
+  assert after_restart["stale"] is True
+  assert after_restart["windows"][0]["used_percent"] == 42
+  # The refusal backoff still holds: a second request does not probe again.
+  assert asyncio.run(
+    provider_usage.read_provider_usage("claude", str(tmp_path))
+  )["stale"] is True
+
+
+def test_a_saved_reading_past_the_stale_bound_is_not_served(monkeypatch, tmp_path):
+  import json
+  import time
+
+  from app import provider_usage
+
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  path = provider_usage._last_reading_path(str(tmp_path), "claude")
+  path.parent.mkdir(parents=True)
+  path.write_text(json.dumps({
+    "observed_at": time.time() - provider_usage._PROVIDER_USAGE_STALE_SECONDS - 5,
+    "snapshot": WEEKLY_READY,
+  }))
+
+  async def refused(_provider_id, _data_dir):
+    raise provider_usage.ProviderUsageRefused("claude", None)
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", refused)
+  body = asyncio.run(provider_usage.read_provider_usage("claude", str(tmp_path)))
+
+  assert body["state"] == "unavailable"

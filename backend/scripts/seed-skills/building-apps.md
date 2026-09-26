@@ -257,13 +257,22 @@ manifest, layered by how always-on they are:
   (a `publish.md` section, say), so agents re-read only the core plus the one
   file a step needs. Contribute
   ships `contributing/` this way.
-- **A system-prompt fragment (always-on, while installed).** `"system_app":
-  true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
-  entry) — the file is appended to the base system prompt for EVERY chat, but
-  ONLY while the app is installed; uninstall removes it. Use it for a short,
+- **A system-prompt fragment (always-on, while installed).**
+  `"system_prompt": "<name>.md"` (also a root-level `source_files` entry) —
+  the file is appended to the base system prompt for EVERY chat, but ONLY while
+  the app is installed; uninstall removes it. Use it for a short,
   always-relevant default the agent should carry without being asked, and keep
   it tight — it costs tokens on every session. Memory ships `memory-core.md`;
   Pages ships `pages-core.md`. Max 256 KB.
+- **Agent tools (callable by every agent run, while installed).** `"tools"`:
+  up to 16 entries of exactly `name` (`^[a-z][a-z0-9_]{0,39}$`),
+  `description`, and `input_schema` (a JSON Schema `object`). Requires a
+  `service`: agents see `<app slug>_<name>`, and each call reaches the service
+  as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
+  app's own authority (`backend/app/app_tools.py`). Helpers get the tools too:
+  the request's `actor` has `delegated: true` for a helper and
+  `access: "read"` for a read-only one, so refuse any change for a read-only
+  caller. Keep tools few.
 
 Anything that depends on your app being installed belongs in its fragment (the
 always-on default) and/or its skill (the how-to). A not-installed app then

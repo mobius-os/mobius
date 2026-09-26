@@ -3272,6 +3272,9 @@ def create_app_chat(
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
+    # An app that names its chat chose that name deliberately, like an owner
+    # rename: neither the first message nor a generated name replaces it.
+    title_locked=bool(body.title),
     messages=[],
     provider=provider,
     agent_settings_json=agent_settings,
@@ -3428,7 +3431,7 @@ async def patch_app_chat(
   """Updates runtime metadata for a chat owned by the calling app.
 
   An embedded app may configure its custom base prompt while the chat is still
-  empty. Once the first turn starts, the complete platform + system-app prompt
+  empty. Once the first turn starts, the complete platform + installed-app prompt
   is immutable for that chat; changing it requires a new chat.
   """
   if principal.app_id is None:

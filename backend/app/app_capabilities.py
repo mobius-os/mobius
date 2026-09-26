@@ -523,7 +523,6 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   system_prompt = manifest.get("system_prompt")
   contract = {
     "schema": CONTRACT_SCHEMA,
-    "system_app": bool(manifest.get("system_app", False)),
     "agent": {
       "system_prompt": (
         {
@@ -535,6 +534,9 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       ),
       "skills": sorted(set(manifest.get("skills") or [])),
       "embeds_agent": bool(manifest.get("embeds_agent", False)),
+      # Complete declarations, not just names: the reviewed contract is what
+      # agent runs list, so an update that rewords a tool is visible in review.
+      "tools": deepcopy(list(manifest.get("tools") or [])),
     },
     "data": {
       "chat_logs": {
@@ -618,6 +620,15 @@ def runtime_declaration_from_contract(
   return declaration
 
 
+def agent_tools_from_contract(contract: dict[str, Any] | None) -> list[dict[str, Any]]:
+  """Return the reviewed agent-tool declarations from an accepted contract."""
+  agent = contract.get("agent") if isinstance(contract, dict) else None
+  tools = agent.get("tools") if isinstance(agent, dict) else None
+  if not isinstance(tools, list):
+    return []
+  return [deepcopy(tool) for tool in tools if isinstance(tool, dict)]
+
+
 def contract_from_app_state(
   app: Any,
   *,
@@ -625,6 +636,7 @@ def contract_from_app_state(
   public_access: dict[str, Any] | None = None,
   contract_permissions: dict[str, Any] | None = None,
   service: dict[str, Any] | None | object = _PRESERVE_SERVICE,
+  tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
@@ -641,8 +653,9 @@ def contract_from_app_state(
     public_access = public_access_declaration_from_contract(
       getattr(app, "capability_contract", None),
     )
+  if tools is None:
+    tools = agent_tools_from_contract(getattr(app, "capability_contract", None))
   manifest = {
-    "system_app": bool(getattr(app, "system_app", False)),
     "system_prompt": getattr(app, "system_prompt_file", None),
     "embeds_agent": bool(getattr(app, "embeds_agent", False)),
     "permissions": {
@@ -670,6 +683,7 @@ def contract_from_app_state(
     "offline": getattr(app, "offline_contract", None),
     "capabilities": capabilities,
     "public_access": public_access,
+    "tools": tools,
   }
   if service is _PRESERVE_SERVICE and isinstance(
     getattr(app, "capability_contract", None), dict,

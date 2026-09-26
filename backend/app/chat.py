@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, or_
+from sqlalchemy import Text, cast, func, literal_column, or_, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -119,6 +119,7 @@ from app.events import (
   finalize_blocks,
 )
 from app.providers import (
+  DEFAULT_PROVIDER,
   authenticated_provider_ids,
   effective_agent_settings,
   get_provider,
@@ -224,7 +225,7 @@ def _read_skill_text() -> str:
   """Return only the cached platform constitution.
 
   App-owned fragments are composed and snapshotted separately when a chat
-  starts its first turn. Installing, updating, or uninstalling a system app
+  starts its first turn. Installing, updating, or uninstalling an app
   therefore affects chats started afterwards, never an existing conversation.
   The tracked platform constitution has a process-lifetime cache, so an edit
   or platform update takes effect after server restart. If the live checkout
@@ -1345,6 +1346,39 @@ def _pending_head_is_stale(
   return timestamp <= now_ms - age_ms
 
 
+def _nonempty_pending_queues(db: Session) -> list:
+  """Project live chats whose pending queue is non-empty.
+
+  SQLite stores the transcript inline before ``pending_messages``, so reading
+  that column for every chat walks every transcript; on a cold page cache that
+  blocked the event loop for 20-40 s. The partial index
+  ``ix_chats_pending_queue`` (migration 0069) lists only non-empty queues.
+  Without ANALYZE statistics SQLite prefers ``ix_chats_drawer``'s
+  ``deleted_at`` equality and reads every row anyway, so the plan is pinned
+  with INDEXED BY. Other databases store large values out of line.
+  """
+  columns = (
+    models.Chat.id, models.Chat.pending_messages, models.Chat.pending_question_id,
+  )
+  if db.get_bind().dialect.name == "sqlite":
+    return db.execute(
+      text(
+        "SELECT chats.id, chats.pending_messages, chats.pending_question_id "
+        "FROM chats INDEXED BY ix_chats_pending_queue "
+        "WHERE chats.deleted_at IS NULL "
+        "AND CAST(chats.pending_messages AS TEXT) != '[]'"
+      ).columns(*columns),
+    ).all()
+  return (
+    db.query(*columns)
+    .filter(
+      models.Chat.deleted_at.is_(None),
+      cast(models.Chat.pending_messages, Text) != literal_column("'[]'"),
+    )
+    .all()
+  )
+
+
 async def sweep_idle_pending_chats(db: Session) -> list[str]:
   """Claim and start old pending queues whose chat has no run owner."""
   log = _get_logger()
@@ -1358,15 +1392,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # ~204 MiB allocation spike and left ~169 MiB in CPython/glibc arenas after
     # the rows were released. The queue is the candidate index; load one full
     # Chat only after its projected pending head proves old enough to recover.
-    candidates = (
-      db.query(
-        models.Chat.id,
-        models.Chat.pending_messages,
-        models.Chat.pending_question_id,
-      )
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
+    candidates = _nonempty_pending_queues(db)
   except Exception:
     log.exception("sweep_idle_pending_chats: query failed")
     return started
@@ -2750,7 +2776,7 @@ async def _admit_provider_execution(
   run_gen: int | None,
   *,
   has_peer_context_delivery: bool = False,
-  activity_delegation_ids: tuple[str, ...] = (),
+  activity_results: tuple[tuple[str, str], ...] = (),
 ) -> bool:
   """Cross provider entry only while this exact turn still owns execution.
 
@@ -2765,7 +2791,7 @@ async def _admit_provider_execution(
       chat_id=chat_id,
       run_token=run_token,
       has_peer_context_delivery=has_peer_context_delivery,
-      activity_delegation_ids=activity_delegation_ids,
+      activity_results=activity_results,
     )))
   except Exception:
     if not _run_generation_superseded(chat_id, run_gen):
@@ -3502,11 +3528,9 @@ _MODEL_CAPACITY_ERROR_MARKERS = (
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
 
-  Substring match on the display error (mirrors `_should_retry_without_model`
-  in claude_sdk_runner). Deliberately broad — the cost of a false positive is
-  only that the queue is parked for the user to resend (never lost), while a
-  false negative reinstates the limit storm. A genuinely transient one-off
-  error does NOT match, so the queue still flows through a blip.
+  Substring match on the display error. A false positive only parks the queue
+  for manual resend; a false negative reinstates the limit storm. A transient
+  one-off error does not match, so the queue flows through a blip.
 
   The marker list is grounded in the ACTUAL Anthropic limit strings seen in
   prod chat.log: "You've hit your weekly limit · resets ...", "... session
@@ -3924,7 +3948,7 @@ async def _complete_turn(
   parked_until: datetime | None = None,
   park_reason: str | None = None,
   provider_free: bool = False,
-  activity_delegation_ids: tuple[str, ...] = (),
+  activity_results: tuple[tuple[str, str], ...] = (),
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -4084,7 +4108,7 @@ async def _complete_turn(
       db, chat_id, sink.run_token or "",
     )
   incorporate_activity_delivery = (
-    ending_status == "completed" and bool(activity_delegation_ids)
+    ending_status == "completed" and bool(activity_results)
   )
   try:
     if (
@@ -4616,6 +4640,11 @@ async def run_chat(
         await wake_parent_after_child_settled(chat_id)
     except Exception:
       _get_logger().debug("delegation parent-wake skipped", exc_info=True)
+    # As a parent: helper results that finished during this turn are handed
+    # over now rather than on the periodic recovery sweep.
+    if chat_id and runtime_settled:
+      from app.delegations import deliver_results_after_parent_settled
+      await deliver_results_after_parent_settled(chat_id)
 
     # A contribution action pressed while this source turn was active is a
     # durable accepted job, not a hidden message queued behind the turn. Once
@@ -4868,6 +4897,46 @@ def _build_provider_skills_block(
   return _build_available_skills_block(data_dir)
 
 
+def _helper_host_key(db, run_policy, *, provider_id: str, connector_plan):
+  """The shared helper host a delegated turn runs in, or None for its own process.
+
+  One host per parent chat and setup (provider, access scope, working
+  directory, connected services), so helpers of different chats or setups
+  never share a process, environment, or permissions. See helper_hosts.
+  """
+  if run_policy is None:
+    return None
+  from app import helper_hosts
+  if not helper_hosts.hosts_enabled():
+    return None
+  row = db.query(models.Delegation.parent_chat_id).filter(
+    models.Delegation.id == run_policy.delegation_id,
+  ).first()
+  if row is None:
+    return None
+  # Identity only: capabilities are freshly minted every turn, so hashing
+  # their values would give each turn a host of its own.
+  connectors = None
+  if connector_plan is not None:
+    connectors = {
+      "codex_config": connector_plan.codex_config,
+      "claude_servers": sorted(
+        (name, server.get("url")) for name, server in connector_plan.claude_servers.items()
+      ),
+      "codex_env": sorted(connector_plan.codex_env),
+    }
+  # Claude fixes a helper's model on the host's helper definitions, so its
+  # hosts are also per model; a Codex thread chooses its model per turn.
+  model = run_policy.model if provider_runtime_kind(get_provider(provider_id)) == "claude_sdk" else None
+  return helper_hosts.HostKey(
+    parent_chat_id=row[0],
+    provider_id=provider_id,
+    scope=run_policy.scope,
+    cwd=run_policy.cwd,
+    setup=helper_hosts.setup_digest(connectors, model),
+  )
+
+
 async def _run_chat_impl(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -5040,7 +5109,7 @@ async def _run_chat_impl_with_db(
 
   # On the first message of a session, gather bounded recent-chat digests and
   # the skills inventory as one-time startup context. Knowledge-graph data is
-  # never pulled here; an installed system app may teach the agent to make a
+  # never pulled here; an installed app may teach the agent to make a
   # separate prompt-scoped recall call.
   #
   # Startup context belongs to the first-turn system prompt, not the user
@@ -5159,7 +5228,7 @@ async def _run_chat_impl_with_db(
   # owner turns intentionally receive every available result in this chat;
   # automatic activity continuations are bound to their exact source work so
   # one logical root cannot admit or consume a sibling root's result.
-  activity_delegation_ids: tuple[str, ...] = ()
+  activity_results: tuple[tuple[str, str], ...] = ()
   if run_policy is None and chat_id:
     from app.delegations import (
       activity_continuation_delivery_source_work_id,
@@ -5173,7 +5242,7 @@ async def _run_chat_impl_with_db(
     activity_delivery = build_delegation_result_context(
       db, chat_id, source_work_id=activity_source_work_id,
     )
-    activity_delegation_ids = activity_delivery.delegation_ids
+    activity_results = activity_delivery.results
     if activity_delivery.text:
       if is_slash_command:
         user_message = f"{user_message}\n\n{activity_delivery.text}"
@@ -5301,6 +5370,11 @@ async def _run_chat_impl_with_db(
   if agent_token is not None:
     base_env["AGENT_TOKEN"] = agent_token
   base_env.update(app_context_env)
+  from app.process_groups import RUN_MARKER_ENV, run_marker
+  # Names every process this run starts (non-secret; see RUN_MARKER_ENV).
+  base_env[RUN_MARKER_ENV] = run_marker(run_token)
+  # Helpers default to the delegating agent's own provider (spawn_agent).
+  base_env["MOBIUS_AGENT_PROVIDER"] = provider_id or DEFAULT_PROVIDER
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
@@ -5395,7 +5469,7 @@ async def _run_chat_impl_with_db(
         )
         db.rollback()
 
-  # A per-chat custom prompt replaces the base constitution, but system-app
+  # A per-chat custom prompt replaces the base constitution, but installed-app
   # contributions are still part of the ONE prompt snapshot selected when the
   # chat starts. Provider SDKs receive those same immutable bytes on every
   # request; live app state is never recomposed for an established chat.
@@ -5575,6 +5649,9 @@ async def _run_chat_impl_with_db(
       _publish_chat_run_finished(chat_id)
     db.close()
     return disposition
+  helper_host_key = _helper_host_key(
+    db, run_policy, provider_id=provider_id, connector_plan=connector_turn_plan,
+  )
   data_dir = Path(settings.data_dir)
   cwd = (
     run_policy.cwd
@@ -5613,12 +5690,13 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
+
       if not await _admit_provider_execution(
         chat_id,
         run_token or "",
         run_gen,
         has_peer_context_delivery=coordination_message_through is not None,
-        activity_delegation_ids=activity_delegation_ids,
+        activity_results=activity_results,
       ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -5642,6 +5720,7 @@ async def _run_chat_impl_with_db(
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
+        helper_host_key=helper_host_key,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5715,7 +5794,7 @@ async def _run_chat_impl_with_db(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
       close_browser=True,
-      activity_delegation_ids=(activity_delegation_ids if not err else ()),
+      activity_results=(activity_results if not err else ()),
       **park_kwargs,
     )
 
@@ -5754,7 +5833,9 @@ async def _run_chat_impl_with_db(
     # scope — _resumable lives in claude_sdk_runner and is imported.
     from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
     claude_session_id = session_id
-    if session_id and not _resumable(
+    # A helper on a shared host resumes through its host (or is reseeded
+    # there); only a private Claude session needs a resumable transcript.
+    if helper_host_key is None and session_id and not _resumable(
       session_id, cwd, sdk_env.get("CLAUDE_CONFIG_DIR")
     ):
       if run_policy is not None and not run_policy.allow_session_reseed:
@@ -5806,33 +5887,50 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.providers import skills_enabled as _skills_enabled
+
       if not await _admit_provider_execution(
         chat_id,
         run_token or "",
         run_gen,
         has_peer_context_delivery=coordination_message_through is not None,
-        activity_delegation_ids=activity_delegation_ids,
+        activity_results=activity_results,
       ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
           provider_id=provider_id, cost_usd=0, close_browser=False,
         )
-      runner_result = await run_claude_sdk_turn(
-        user_message=user_message,
-        session_id=claude_session_id,
-        base_env=sdk_env,
-        cwd=cwd,
-        chat_id=chat_id,
-        skill_text=system_prompt,
-        bc=sink,
-        pending_questions=questions._pending,
-        db=db,
-        agent_settings=runner_agent_settings,
-        skills_enabled=_skills_enabled(settings.data_dir),
-        run_policy=run_policy,
-        connector_plan=connector_turn_plan,
-        coordination_enabled=coordination_tools_enabled,
-      )
+      if helper_host_key is not None:
+        from app.claude_helper_host import run_claude_host_turn
+        runner_result = await run_claude_host_turn(
+          user_message=user_message,
+          session_id=claude_session_id,
+          base_env=sdk_env,
+          chat_id=chat_id,
+          skill_text=system_prompt,
+          bc=sink,
+          agent_settings=runner_agent_settings,
+          skills_enabled=_skills_enabled(settings.data_dir),
+          run_policy=run_policy,
+          connector_plan=connector_turn_plan,
+          resumed_context=resumed_context_fallback,
+          helper_host_key=helper_host_key,
+          data_dir=settings.data_dir,
+        )
+      else:
+        runner_result = await run_claude_sdk_turn(
+          user_message=user_message,
+          session_id=claude_session_id,
+          base_env=sdk_env,
+          cwd=cwd,
+          chat_id=chat_id,
+          skill_text=system_prompt,
+          bc=sink,
+          agent_settings=runner_agent_settings,
+          skills_enabled=_skills_enabled(settings.data_dir),
+          run_policy=run_policy,
+          connector_plan=connector_turn_plan,
+          coordination_enabled=coordination_tools_enabled,
+        )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
@@ -5895,7 +5993,7 @@ async def _run_chat_impl_with_db(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
       close_browser=True,
-      activity_delegation_ids=(activity_delegation_ids if not err else ()),
+      activity_results=(activity_results if not err else ()),
       **park_kwargs,
     )
 

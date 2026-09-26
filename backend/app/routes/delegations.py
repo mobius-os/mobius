@@ -46,6 +46,9 @@ class DelegationSubmit(BaseModel):
   effort: str | None = Field(default=None, max_length=32)
   scope: str
   cwd: str | None = Field(default=None, max_length=1024)
+  # The parent Goal plan task this helper works on; omitted means the plan's
+  # single running task, if there is exactly one.
+  plan_task: str | None = Field(default=None, min_length=1, max_length=128)
   # Wake the parent chat with the result when the child settles. Defaults on for
   # the owner-agent subagent path; a pure-poll caller can pass False.
   notify_parent_on_complete: bool = True
@@ -225,11 +228,17 @@ async def submit_or_attach(
       if requested_cwd is None and existing is not None
       else requested_cwd or normalize_cwd(None)
     )
+    from app.goal_plans import GoalPlanError, helper_plan_task
+    try:
+      goal_task_id = helper_plan_task(db, parent.id, body.plan_task)
+    except GoalPlanError as exc:
+      raise HTTPException(status_code=422, detail=str(exc)) from exc
     intent = DelegationIntent(
       app_id=body.app_id,
       parent_chat_id=parent.id,
       parent_root_run_id=root_id,
       task_key=body.task_key,
+      goal_task_id=goal_task_id,
       prompt=body.prompt,
       provider=body.provider,
       model=selection["model"],
@@ -415,6 +424,77 @@ async def cancel_delegation(
   publish_plan_for_delegation(db, row)
   publish_parent_waiting_changed(row.parent_chat_id)
   return payload
+
+
+class DelegationMessage(BaseModel):
+  message: str = Field(min_length=1, max_length=200_000)
+
+  @field_validator("message")
+  @classmethod
+  def _clean_message(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("message must not be empty")
+    return value
+
+
+@router.post(
+  "/{delegation_id}/messages",
+  status_code=202,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def message_delegation(
+  delegation_id: str,
+  body: DelegationMessage,
+  principal: Principal = Depends(get_delegation_principal),
+  db: Session = Depends(get_db),
+):
+  """Give a settled helper a follow-up turn with its history intact.
+
+  Only the helper's own parent chat may message it. The follow-up is the
+  helper's next user turn; its result reaches the parent exactly like the
+  first one (live into a running parent turn, or by waking it). That result
+  is a new child run, so it is owed without resetting any delivery record.
+  A helper that is still working is refused rather than interrupted: the
+  parent waits for its result or stops it.
+  """
+  row = _row_for_principal(db, delegation_id, principal)
+  if principal.chat_id and principal.chat_id != row.parent_chat_id:
+    raise HTTPException(
+      status_code=403, detail="Only the helper's parent chat may message it.",
+    )
+  status, _, _ = derived_status(db, row, load_result=False)
+  if status == "cancelled":
+    raise HTTPException(status_code=409, detail="This helper was stopped.")
+  if status in ACTIVE_DELEGATION_STATUSES:
+    raise HTTPException(
+      status_code=409,
+      detail="The helper is still working. Wait for its result, or stop it.",
+    )
+  from app import chat_queue
+  from app.chat_start import start_programmatic_chat_turn
+  async with chat_queue.get_transition_lock(row.child_chat_id):
+    db.rollback()
+    row = _row_for_principal(db, delegation_id, principal)
+    if row.cancelled_at is not None:
+      raise HTTPException(status_code=409, detail="This helper was stopped.")
+    row.notify_parent_on_complete = True
+    db.commit()
+    started = await start_programmatic_chat_turn(
+      chat_id=row.child_chat_id,
+      title=f"Delegation · {row.task_key}",
+      content=body.message,
+      provider=row.provider,
+      initiated_by_app_id=row.app_id,
+    )
+  if not started:
+    raise HTTPException(
+      status_code=409, detail="The helper could not start a follow-up turn now.",
+    )
+  db.rollback()
+  row = _row_for_principal(db, delegation_id, principal)
+  publish_parent_waiting_changed(row.parent_chat_id)
+  return serialize_delegation(db, row, include_result=False)
 
 
 async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str]:

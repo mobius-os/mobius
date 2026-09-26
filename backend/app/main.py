@@ -71,6 +71,7 @@ from app import activity, models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
+  app_tools_router,
   auth_router,
   app_chat_router,
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
@@ -268,6 +269,10 @@ async def lifespan(app):
   # Before anything is spawned: no agent or tool may inherit server secrets.
   from app.config import withhold_server_secrets_from_children
   withhold_server_secrets_from_children()
+  # Helper hosts belong to one server process. Any a crashed predecessor left
+  # behind are ended; their helpers' durable turns recover like any other.
+  from app import helper_hosts
+  helper_hosts.end_orphaned_hosts()
   from app.startup import (
     StartupContext,
     run_startup_plan,
@@ -322,6 +327,10 @@ async def lifespan(app):
     activity.flush_request_errors()
     from app.saved_secure_inputs import shutdown as stop_sealed_consumers
     await stop_sealed_consumers()
+    try:
+      await helper_hosts.MANAGER.close_all()
+    except Exception as exc:
+      _log.error("helper host shutdown failed: %s", exc, exc_info=True)
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
     # Do not leave a stopped owner published after lifespan exits. Re-entering
@@ -919,6 +928,7 @@ app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
+app.include_router(app_tools_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)

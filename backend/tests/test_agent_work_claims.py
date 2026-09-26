@@ -441,16 +441,51 @@ def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
   from app.goals import update_goal_record
 
   _owned_goal_claim(db)
-  with pytest.raises(GoalPlanError, match="Not an open work claim"):
+  with pytest.raises(GoalPlanError, match="Not an open work claim") as refused:
     update_goal_record(
       db, db.get(models.ChatRun, "claim-run-first"),
       db.get(models.ChatGoal, "claim-goal-first"), 1,
       result="Merged", finished_claims=[KEY + ":typo"],
     )
+  # The refusal shows the key the Goal really holds, so the retry is verbatim.
+  assert f"Open claims held here: {KEY}." in str(refused.value)
   db.expire_all()
   assert db.get(models.ChatGoal, "claim-goal-first").status == "open"
   row = _claim_row(db)
   assert row.completed_at is None and row.released_at is None
+
+
+def test_finishing_a_retyped_key_names_the_exact_keys_this_chat_holds(db):
+  """A shortened or suffix-less key is refused, never matched by guesswork.
+
+  The refusal lists only the caller chat's open claims, so the next call can
+  settle the real claim verbatim and another chat's claims stay unlisted.
+  """
+  owner, first, second = _fixture(db)
+  held = "github:mobius-os/mobius:pr:1388:14aa63986fb205fb6c32ed91af0512a4:merge"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=held, summary="Merge the reviewed PR")
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key="github:mobius-os/mobius:pr:9:abc:update",
+             summary="Another chat's action")
+
+  with pytest.raises(ValueError, match="No work claim exists") as refused:
+    finish_work(db, owner_id=owner.id, chat_id=first.id,
+                work_key="github:mobius-os/mobius:pr:1388:14aa6398",
+                outcome="Merged", release=False)
+  message = str(refused.value)
+  assert f"Open claims held here: {held}." in message
+  assert "pr:9:abc" not in message
+
+  db.rollback()
+  finished = finish_work(db, owner_id=owner.id, chat_id=first.id,
+                         work_key=held, outcome="Merged", release=False)
+  assert finished.claim["state"] == "completed"
+
+  with pytest.raises(ValueError, match="No open work claims are held here"):
+    finish_work(db, owner_id=owner.id, chat_id=first.id,
+                work_key="github:mobius-os/mobius:pr:1:x:merge",
+                outcome="Merged", release=False)
 
 
 def test_work_keys_accept_pr_references_with_hash_and_plus():

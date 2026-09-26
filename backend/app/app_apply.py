@@ -526,7 +526,6 @@ def _apply_explicit_package_runtime(
     app.embeds_agent = bool(manifest["embeds_agent"])
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
@@ -571,7 +570,6 @@ def _apply_local_manifest_runtime(
   app.embeds_agent = bool(manifest.get("embeds_agent", False))
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
@@ -585,6 +583,7 @@ def _apply_local_manifest_runtime(
     public_access=runtime_fields["public_access"],
     contract_permissions=manifest.get("permissions") or {},
     service=service,
+    tools=list(manifest.get("tools") or []),
   )
 
 
@@ -611,7 +610,6 @@ def _live_runtime_state(app: models.App) -> tuple:
     app.embeds_agent,
     app.offline_contract,
     app.system_prompt_file,
-    app.system_app,
     app.project_templates_json,
     app.package_id,
     app.source_identity,
