@@ -523,7 +523,6 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   system_prompt = manifest.get("system_prompt")
   contract = {
     "schema": CONTRACT_SCHEMA,
-    "system_app": bool(manifest.get("system_app", False)),
     "agent": {
       "system_prompt": (
         {
@@ -642,7 +641,6 @@ def contract_from_app_state(
       getattr(app, "capability_contract", None),
     )
   manifest = {
-    "system_app": bool(getattr(app, "system_app", False)),
     "system_prompt": getattr(app, "system_prompt_file", None),
     "embeds_agent": bool(getattr(app, "embeds_agent", False)),
     "permissions": {

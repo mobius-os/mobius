@@ -3784,14 +3784,13 @@ def test_verified_publication_handoff_connects_identity_across_source_conflict(
   assert result.app.share_with_apps == "read"
 
 
-def test_core_app_store_self_update_overwrites_local_conflict(
+def test_core_app_store_self_update_uses_the_same_conflict_policy(
   client, auth, bypass_url_validation,
 ):
-  """The App Store must be able to update itself from the App Store.
+  """The App Store has no upstream-wins exception.
 
-  For normal apps, a same-hunk local/upstream conflict returns
-  mode='conflict'. For the canonical mobius-os App Store, upstream wins
-  so an old store cannot get permanently wedged behind its own local edit.
+  Its local edits are owner work like any other app's. A same-hunk conflict
+  keeps the current Store served and routes through the ordinary resolver.
   """
   base = "https://raw.githubusercontent.com/mobius-os/app-store/main/"
   m = {
@@ -3814,25 +3813,13 @@ def test_core_app_store_self_update_overwrites_local_conflict(
     r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   payload = r2.json()
-  assert payload["mode"] == "update"
-  assert payload["version"] == "2.0.0"
-  assert payload["conflict_paths"] == []
-  assert payload["reconciliation"]["unresolved_conflict_paths"] == []
-  assert any(
-    "previous local edits were saved for recovery" in w
-    for w in payload["warnings"]
-  )
-  app_dir = jsx_file.parent
-  refs = app_git._run(
-    app_dir, "for-each-ref", "--format=%(refname)",
-    "refs/mobius/app-pre-update/",
-  ).stdout.splitlines()
-  assert len(refs) == 1
-  assert app_git._run(app_dir, "show", f"{refs[0]}:index.jsx").stdout == local
+  assert payload["mode"] == "conflict"
+  assert payload["conflict_paths"] == ["index.jsx"]
+  assert not any("core App Store self-update" in w for w in payload["warnings"])
 
   served = jsx_file.read_text()
-  assert served == jsx_v2
-  assert "LOCAL STORE TITLE" not in served
+  assert served == local
+  assert "LOCAL STORE TITLE" in served
   assert "<<<<<<<" not in served
 
   from app.models import App
@@ -3840,8 +3827,8 @@ def test_core_app_store_self_update_overwrites_local_conflict(
   db = SessionLocal()
   try:
     app = db.query(App).filter(App.slug == "store").first()
-    assert app.version == "2.0.0"
-    assert app.jsx_source == jsx_v2
+    assert app.version == "1.0.0"
+    assert app.jsx_source == JSX_MULTI
   finally:
     db.close()
 

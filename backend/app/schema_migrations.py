@@ -5386,6 +5386,33 @@ def _add_chat_drawer_covering_index(eng) -> None:
     ))
 
 
+def _add_chat_pending_queue_index(eng) -> None:
+  """Let the idle-queue watchdog find queued input without reading transcripts.
+
+  SQLite stores each row's transcript JSON inline, before ``pending_messages``,
+  so reading that column for every chat walks every transcript's overflow
+  chain. This partial index holds only live chats whose queue is non-empty,
+  normally a handful. The sweep's filter repeats this predicate term for term
+  so SQLite can use it. Other databases store large values out of line; the
+  index is only an optimization, so a schema lacking a column skips it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if eng.dialect.name != "sqlite":
+    return
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("chats")}
+  if not {"id", "deleted_at", "pending_messages"} <= columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_pending_queue ON chats (id) "
+      "WHERE deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5464,6 +5491,7 @@ _SCHEMA_MIGRATIONS = (
   ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
   ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
   ("0068_rename_inkling_to_evolve", _rename_inkling_to_evolve),
+  ("0069_chat_pending_queue_index", _add_chat_pending_queue_index),
 )
 
 

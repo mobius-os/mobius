@@ -1523,18 +1523,18 @@ async def test_stop_timeout_preserves_runner_completion_future():
 
 @pytest.mark.asyncio
 async def test_force_stop_signals_claude_group_only_once(monkeypatch):
-  calls: list[int] = []
+  calls: list[tuple[int, str]] = []
   monkeypatch.setattr(
     claude_sdk_runner,
-    "_terminate_claude_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_claude_processes",
+    lambda pgid, run_marker: calls.append((pgid, run_marker)) or True,
   )
 
   class _Client:
     async def interrupt(self):
       return None
 
-  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop", run_marker="run-1")
   handle.set_process_group_id(4321)
   first = asyncio.create_task(handle.force_stop(timeout=1))
   while not calls:
@@ -1543,7 +1543,7 @@ async def test_force_stop_signals_claude_group_only_once(monkeypatch):
 
   assert await first is True
   assert await handle.force_stop(timeout=1) is True
-  assert calls == [4321]
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
@@ -2897,6 +2897,61 @@ def test_claude_text_events_have_no_id_without_message_id():
   )
   emitted = [e for e in bus.events if e["type"] in ("text", "text_final")]
   assert emitted and all("text_item_id" not in e for e in emitted)
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_person_message_is_framed_as_owed_a_visible_reply():
+  """A person's mid-turn message must not be absorbed as silent context.
+
+  "Continue the same task" framing let agents fold an owner's question into
+  their work and answer it only in hidden thinking. Visible rows are framed
+  as a message needing a visible reply; hidden agent carriers (helper
+  results, peer notes) stay context. The distinction resets with the buffer.
+  """
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-framing")
+  handle.mark_generating()
+
+  await handle.steer(
+    "helper finished", [{"role": "user", "cid": "c1", "hidden": True,
+                         "kind": "delegation_result"}], ["c1"],
+  )
+  assert handle.steer_from_person is False
+  await handle.steer("why not X?", [{"role": "user", "cid": "c2"}], ["c2"])
+  assert handle.steer_from_person is True
+
+  texts = handle.take_steer_for_requery(interrupt_landed=True)
+  assert texts == ["helper finished", "why not X?"]
+  assert handle.steer_from_person is False
+
+  person = claude_sdk_runner._steer_redirect_message(texts, from_person=True)
+  assert person.startswith("The partner sent this message while you were")
+  assert "visible response" in person
+  assert "why not X?" in person and "helper finished" in person
+
+  context = claude_sdk_runner._steer_redirect_message(
+    ["peer note"], from_person=False,
+  )
+  assert context.startswith("New context arrived while you were working.")
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_person_steer_framing():
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-stop")
+  handle.mark_generating()
+  await handle.steer("stop that", [{"role": "user", "cid": "c3"}], ["c3"])
+  assert handle.steer_from_person is True
+  handle.mark_finished()
+  await handle.interrupt()
+  assert handle.pending_steer == []
+  assert handle.steer_from_person is False
 
 
 def _clean_zero_block_result(session_id: str = "sess-1"):

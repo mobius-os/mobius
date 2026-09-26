@@ -108,7 +108,6 @@ def test_validator_rejects_manifest_type_holes_and_missing_package_files(tmp_pat
   {"schedule": {"default": "0 0 * * * *"}},
   {"schedule": {"initialize_on_install": True}},
   {"schedule": {"job": "job.sh", "user_configurable": "yes"}},
-  {"system_app": "yes"},
   {"system_prompt": "prompt.md"},
   {"entry": "src/index.jsx"},
   {"entry": "main.jsx"},
@@ -124,21 +123,19 @@ def test_shared_contract_and_installer_reject_the_same_manifest(update, tmp_path
   assert exc.value.status_code == 400
 
 
-def test_system_prompt_requires_explicit_system_app_identity(tmp_path):
+def test_system_prompt_needs_no_app_class(tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   manifest = json.loads((tmp_path / "mobius.json").read_text())
   manifest.update({
-    "source_files": ["prompt.md"],
+    "source_files": [*manifest.get("source_files", []), "prompt.md"],
     "system_prompt": "prompt.md",
   })
-  (tmp_path / "prompt.md").write_text("System contribution")
+  (tmp_path / "prompt.md").write_text("Agent contribution")
   (tmp_path / "mobius.json").write_text(json.dumps(manifest))
 
   result = _run(tmp_path)
-  assert result.returncode == 1
-  assert "system_app: true" in result.stderr
-  with pytest.raises(HTTPException, match="system_app: true"):
-    _validate_manifest(manifest)
+  assert result.returncode == 0, result.stderr
+  _validate_manifest(manifest)
 
 
 def test_project_templates_validate_ids_lists_and_confined_file_paths(tmp_path):
