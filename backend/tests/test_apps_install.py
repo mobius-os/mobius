@@ -3338,6 +3338,7 @@ def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   async def fake_start_turn(db, chat_id, title, content, provider):
     assert app_git.merge_in_progress(checkout)
     assert str(checkout) in content
+    assert "update to v2.0.0" in content
     return True
 
   monkeypatch.setattr(
