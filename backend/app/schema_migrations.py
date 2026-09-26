@@ -5291,6 +5291,72 @@ def _retire_chat_continuity_journal(eng) -> None:
         os.replace(temporary, path)
 
 
+def _rename_inkling_to_evolve(eng) -> None:
+  """Follow the model service's rename of Möbius's Evolve model.
+
+  The service now serves Evolve (Qwen3.8 Max) as ``evolve`` and rejects the
+  old ``inkling`` id, so a saved choice still naming it could not run. Only a
+  ``model`` field exactly equal to ``inkling`` changes, in chat settings, the
+  shared agent settings (including background-agent providers), and a
+  helper's stored model.
+  """
+  import json as _json
+  import os as _os
+  from pathlib import Path as _Path
+  from sqlalchemy import inspect as sa_inspect, text
+
+  def renamed(value):
+    changed = False
+    if isinstance(value, dict):
+      for key, item in value.items():
+        if key == "model" and item == "inkling":
+          value[key] = "evolve"
+          changed = True
+        elif isinstance(item, (dict, list)):
+          changed = renamed(item) or changed
+    elif isinstance(value, list):
+      for item in value:
+        changed = renamed(item) or changed
+    return changed
+
+  inspector = sa_inspect(eng)
+  if "chats" in inspector.get_table_names() and "agent_settings_json" in {
+    c["name"] for c in inspector.get_columns("chats")
+  }:
+    with eng.begin() as conn:
+      rows = conn.execute(text(
+        "SELECT id, agent_settings_json FROM chats "
+        "WHERE agent_settings_json LIKE '%inkling%'"
+      )).fetchall()
+      for chat_id, raw in rows:
+        try:
+          settings = _json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+          continue
+        if renamed(settings):
+          conn.execute(
+            text("UPDATE chats SET agent_settings_json = :value WHERE id = :id"),
+            {"value": _json.dumps(settings), "id": chat_id},
+          )
+  # A helper's stored model overrides its chat's settings on every later run.
+  if "delegations" in inspector.get_table_names() and "model" in {
+    c["name"] for c in inspector.get_columns("delegations")
+  }:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE delegations SET model = 'evolve' WHERE model = 'inkling'"
+      ))
+  shared = _Path(_os.environ.get("DATA_DIR", "/data")) / "shared" / "agent-settings.json"
+  try:
+    settings = _json.loads(shared.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return
+  if renamed(settings):
+    tmp = shared.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _os.replace(tmp, shared)
+
+
 def _add_chat_drawer_covering_index(eng) -> None:
   """Serve the drawer's chat list from an index instead of chat rows.
 
@@ -5397,6 +5463,7 @@ _SCHEMA_MIGRATIONS = (
   ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
   ("0066_retire_chat_continuity_journal", _retire_chat_continuity_journal),
   ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
+  ("0068_rename_inkling_to_evolve", _rename_inkling_to_evolve),
 )
 
 
