@@ -2503,6 +2503,13 @@ async def run_codex_sdk_turn(
     await reclaim_provider_cache("codex")
 
 
+# A Codex steer is native mid-turn injection: `ActiveCodexTurn.steer` calls
+# `turn.steer(message)` and never interrupts, so a tool call already in flight
+# keeps running while the injected text folds into the same turn. Steering
+# therefore preserves in-flight work.
+STEER_PRESERVES_INFLIGHT_WORK = True
+
+
 async def steer_into_active_turn(
   chat_id: str,
   message: str,

@@ -2461,7 +2461,11 @@ async def steer_results_into_running_parent(
   import app.chat_queue as chat_queue
   from app import questions
   from app.chat import is_chat_running, is_draining
-  from app.chat_steering import has_live_steerable_turn, steer_into_active_turn
+  from app.chat_steering import (
+    has_live_steerable_turn,
+    steer_into_active_turn,
+    steering_preserves_inflight_work,
+  )
   from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
   from app.database import SessionLocal
 
@@ -2476,6 +2480,16 @@ async def steer_results_into_running_parent(
       if is_draining() or questions.is_waiting(parent_chat_id):
         return False
       provider = chat.provider or "claude"
+      if not steering_preserves_inflight_work(provider):
+        # Steering this provider's live turn would interrupt an in-flight tool
+        # call: Claude's only mid-turn lever is client.interrupt(), which aborts
+        # the running step, and the CLI then reports that to the model as an
+        # owner rejection ("...STOP what you are doing and wait for the user"),
+        # so the parent stops as if the owner declined. An unsolicited helper
+        # result must never cut such a turn — leave it to after-turn delivery
+        # (deliver_results_after_parent_settled / the wake sweep). Owner-authored
+        # steers keep interrupting by design.
+        return False
       if not has_live_steerable_turn(parent_chat_id, provider):
         return False
       # Never jump ahead of owner-authored or other queued work.
