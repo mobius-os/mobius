@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.12.0"
+SERVER_VERSION = "1.13.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -220,6 +220,8 @@ def _agent_api_call(
   method: str,
   path: str,
   payload: dict[str, Any] | None = None,
+  *,
+  timeout: float = 10,
 ) -> dict[str, Any]:
   """Call one run-bound local endpoint without importing the backend app."""
   base, token = _agent_api_settings()
@@ -236,7 +238,7 @@ def _agent_api_call(
     },
   )
   try:
-    with urlopen(request, timeout=10) as response:
+    with urlopen(request, timeout=timeout) as response:
       raw = response.read()
   except HTTPError as exc:
     detail = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -293,9 +295,9 @@ def _initialize_result(params: Any) -> dict[str, Any]:
   )
   tools = _available_tool_names()
   instructions = (
-    "Run-bound Möbius controls. Delegate to helper agents with spawn_agent "
-    "(any connected provider or model); their results arrive in this chat "
-    "automatically."
+    "Run-bound Möbius controls, plus tools from installed apps (named "
+    "<app>_<tool>). Delegate to helper agents with spawn_agent (any connected "
+    "provider or model); their results arrive in this chat automatically."
   )
   if any(name in PEER_TOOLS for name in tools):
     instructions += (
@@ -319,10 +321,56 @@ def _available_tool_names() -> tuple[str, ...]:
   return DELEGATED_TOOLS
 
 
+# Installed apps contribute their own tools through this same server, so an
+# agent run starts no extra process for them. The backend owns the listing and
+# runs each call through the app's reviewed service (backend app/app_tools.py).
+APP_TOOLS_PATH = "/api/agent/app-tools/"
+# Slightly above the backend's limit so its own timeout error is what arrives.
+APP_TOOL_CALL_TIMEOUT_SECONDS = 615
+
+
+def _app_tool_listings() -> list[dict[str, Any]]:
+  """Live app tools for this run; none when the run cannot list them."""
+  try:
+    listed = _agent_api_call("GET", APP_TOOLS_PATH).get("tools")
+  except RuntimeError:
+    return []
+  if not isinstance(listed, list):
+    return []
+  return [
+    tool for tool in listed
+    if isinstance(tool, dict)
+    and isinstance(tool.get("name"), str)
+    and tool["name"] not in _TOOL_DEFINITIONS
+  ]
+
+
 def _tools_list_result() -> dict[str, Any]:
   return {
-    "tools": [_TOOL_DEFINITIONS[name] for name in _available_tool_names()],
+    "tools": [
+      *(_TOOL_DEFINITIONS[name] for name in _available_tool_names()),
+      *_app_tool_listings(),
+    ],
   }
+
+
+def _call_app_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]:
+  try:
+    response = _agent_api_call(
+      "POST",
+      f"{APP_TOOLS_PATH}call",
+      {
+        "name": name,
+        "arguments": arguments,
+        "meta": meta if isinstance(meta, dict) else {},
+      },
+      timeout=APP_TOOL_CALL_TIMEOUT_SECONDS,
+    )
+  except RuntimeError as exc:
+    return _tool_result(str(exc), is_error=True)
+  return _tool_result(
+    response.get("result", ""), is_error=response.get("is_error") is True,
+  )
 
 
 def _call_promote_goal(arguments: dict[str, Any]) -> dict:
@@ -1129,6 +1177,10 @@ def _call_tool(params: Any) -> dict[str, Any]:
   if not isinstance(arguments, dict):
     return _tool_result("Tool arguments must be an object.", is_error=True)
   with _CallerEnv(arguments):
+    if isinstance(name, str) and name not in _TOOL_DEFINITIONS and any(
+      tool["name"] == name for tool in _app_tool_listings()
+    ):
+      return _call_app_tool(name, arguments, params.get("_meta"))
     return _call_tool_as_caller(name, arguments)
 
 

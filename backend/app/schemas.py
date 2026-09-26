@@ -236,6 +236,14 @@ class AppOut(BaseModel):
 
   @computed_field
   @property
+  def agent_tools(self) -> list[dict]:
+    """Reviewed agent tools this app contributes to every agent run."""
+    from app.app_capabilities import agent_tools_from_contract
+
+    return agent_tools_from_contract(self.capability_contract)
+
+  @computed_field
+  @property
   def icon_url(self) -> str | None:
     """Versioned public reference to the effective accepted icon asset."""
     if not self.has_icon:
