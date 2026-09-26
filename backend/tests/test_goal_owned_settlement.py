@@ -731,3 +731,100 @@ def test_rollover_needs_something_a_successor_can_run(db, chat, tasks, automatic
 
   handoff = goal_terminal_handoff(db, chat.id, "goal-run")
   assert handoff.automatic_allowed is automatic
+
+
+SETTLED_RUNNING_GOAL = {"version": 1, "tasks": [{
+  "id": "finish", "title": "Finish", "status": "completed", "depends_on": [],
+}]}
+
+
+def _complete(db, result="Verified: checks green"):
+  from app.goals import update_goal_record
+
+  goal = db.get(models.ChatGoal, "goal-run")
+  return update_goal_record(
+    db, db.get(models.ChatRun, "goal-run"), goal, goal.revision, result=result,
+  )
+
+
+@pytest.mark.parametrize("outcome", ["met", "expired", "failed"])
+def test_verified_completion_takes_delivery_of_its_fired_wait(db, chat, outcome):
+  """The running turn saw the outcome its Wait was watching for.
+
+  The Wait's resume could only be delivered after this turn, so it held the
+  Goal open; the verified completion is that delivery, and no resume later
+  wakes the finished Goal.
+  """
+  from app import chat_waits
+
+  _add_goal_run(db, chat, plan=SETTLED_RUNNING_GOAL)
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="Upstream checks finishing", kind="timer", delay_secs=60,
+  )
+  wait.status = outcome
+  db.commit()
+
+  assert _complete(db)["status"] == "completed"
+  db.expire_all()
+  assert db.get(models.ChatWait, wait.id).resume_delivered_at is not None
+
+
+def test_armed_wait_still_blocks_completion_and_is_named(db, chat):
+  """An armed Wait is live observation: only its owner may drop it."""
+  from app import chat_waits
+  from app.goal_plans import GoalPlanError
+
+  _add_goal_run(db, chat, plan=SETTLED_RUNNING_GOAL)
+  fired = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="Earlier gate", kind="timer", delay_secs=60,
+  )
+  fired.status = "met"
+  armed = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="Release gate", kind="timer", delay_secs=60,
+  )
+  db.commit()
+
+  with pytest.raises(GoalPlanError) as refused:
+    _complete(db)
+  message = str(refused.value)
+  assert f"armed Wait {armed.id} (Release gate)" in message
+  assert "cancel_wait" in message
+  db.expire_all()
+  # A refused completion consumes nothing: the fired Wait still resumes.
+  assert db.get(models.ChatWait, fired.id).resume_delivered_at is None
+  assert db.get(models.ChatGoal, "goal-run").status == "open"
+
+
+def test_completion_withdraws_the_queued_resume_of_its_fired_wait(db, chat):
+  """The Wait fired mid-turn and queued its resume; the same turn then verified
+  the outcome and completed. The queued resume is now stale and must not start
+  a turn for the finished Goal, while other queued messages stay."""
+  import asyncio
+
+  from app import chat_waits
+  from app.goals import settle_after_goal_completion
+
+  _add_goal_run(db, chat, plan=SETTLED_RUNNING_GOAL)
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="Checks finishing", kind="timer", delay_secs=60,
+  )
+  wait.status = "met"
+  chat.pending_messages = [{
+    "role": "user", "content": "A wait you declared has completed.",
+    "ts": 1, "cid": f"wait-result-{wait.id}", "hidden": True,
+    "kind": "wait_result", "source_work_id": "goal-run",
+  }, {"role": "user", "content": "Owner follow-up", "ts": 2, "cid": "owner-1"}]
+  db.commit()
+
+  assert _complete(db)["status"] == "completed"
+  asyncio.run(settle_after_goal_completion(chat.id))
+
+  db.expire_all()
+  assert db.get(models.ChatWait, wait.id).resume_delivered_at is not None
+  assert [m["cid"] for m in db.get(models.Chat, chat.id).pending_messages] == [
+    "owner-1",
+  ]

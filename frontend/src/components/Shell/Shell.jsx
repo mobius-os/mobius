@@ -114,6 +114,7 @@ import {
   currentReusableEmptyChat,
   failedNewChatPresentation,
   mergeChatListWithCreatedGuards,
+  newChatIsAllocating,
   newChatPresentationIsCurrent,
   readNewChatIntent,
   reconcileCreatedChatGuard,
@@ -2788,6 +2789,13 @@ export default function Shell({ onInitialVisualReady }) {
       chatsLoadedRef.current = true
       return
     }
+    if (newChatIsAllocating(newChatPresentationRef.current, prev)) {
+      // New Chat mounted this id before its row exists. Probing now would read
+      // "not created yet" as deletion, close the owner's composer mid-typing,
+      // and let the empty-slot repair create a second chat.
+      chatsLoadedRef.current = true
+      return
+    }
 
     // Drawer-list absence is not deletion evidence: /api/chats is a filtered view
     // that hides app-attributed chats and can lag a new chat, and (like every list
@@ -2802,6 +2810,7 @@ export default function Shell({ onInitialVisualReady }) {
       // Stale-guard: the active chat can change while the probe is in flight, so a
       // verdict for an old restore target must never navigate.
       if (cancelled || activeChatIdRef.current !== probedChatId) return
+      if (newChatIsAllocating(newChatPresentationRef.current, probedChatId)) return
       if (verdict === 'deleted') {
         knownExistingOffListChatIdsRef.current.delete(probedChatId)
         // The restored chat is genuinely gone: close its tab in its pane. Builder

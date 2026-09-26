@@ -155,8 +155,12 @@ def _percent(raw: Any, *, precision: int = 1) -> float | int | None:
     value = float(raw)
   except (TypeError, ValueError):
     return None
-  if not 0 <= value <= 100:
+  if not 0 <= value:
     return None
+  # Past the limit (for example on extra usage) a provider can report more
+  # than 100%. That is the reading that matters most, so show it as full
+  # rather than dropping the whole window.
+  value = min(value, 100.0)
   rounded = round(value, precision)
   return int(rounded) if rounded.is_integer() else rounded
 
@@ -1123,6 +1127,50 @@ def _cache_key(provider_id: str, data_dir: str) -> tuple[str, str]:
   return (str(Path(data_dir).resolve()), provider_id)
 
 
+def _last_reading_path(data_dir: str, provider_id: str) -> Path:
+  return Path(data_dir) / ".provider-usage" / f"{provider_id}-last-reading.json"
+
+
+def _remember_reading(provider_id: str, data_dir: str, snapshot: dict) -> None:
+  """Keep the last good reading on disk so a restart does not erase it.
+
+  The in-memory cache already bridges short outages with a recent reading;
+  a restart is such an outage, and the provider often refuses the first
+  reads after it, so without this the gauge vanished for minutes.
+  """
+  try:
+    atomic_write(
+      _last_reading_path(data_dir, provider_id),
+      json.dumps({"observed_at": time.time(), "snapshot": snapshot}) + "\n",
+      mode=0o600,
+    )
+  except OSError:
+    log.debug("%s usage reading not persisted", provider_id, exc_info=True)
+
+
+def _restored_reading(
+  provider_id: str, data_dir: str,
+) -> _CachedProviderUsage | None:
+  """The reading from before a restart, aged by the time since it was taken.
+
+  It is due for a probe at once and served only while the ordinary stale
+  rules allow (recent enough and no reset has passed).
+  """
+  try:
+    saved = json.loads(_last_reading_path(data_dir, provider_id).read_text())
+    age = max(0.0, time.time() - float(saved["observed_at"]))
+    snapshot = saved["snapshot"]
+  except (OSError, ValueError, KeyError, TypeError):
+    return None
+  if not isinstance(snapshot, dict) or snapshot.get("state") != "ready":
+    return None
+  return _CachedProviderUsage(
+    observed_at=time.monotonic() - age,
+    next_check_at=0.0,
+    snapshot=snapshot,
+  )
+
+
 def _stale_reading_is_servable(cached: _CachedProviderUsage, now: float) -> bool:
   """A fallback reading never outlives the stale bound or a provider reset."""
   return (
@@ -1242,6 +1290,10 @@ async def read_provider_usage(
       return held
 
     prior = _provider_usage_cache.get(key)
+    if prior is None:
+      prior = _restored_reading(provider_id, data_dir)
+      if prior is not None:
+        _provider_usage_cache[key] = prior
     refusals = 0
     try:
       snapshot = await _provider_snapshot(provider_id, data_dir)
@@ -1269,10 +1321,12 @@ async def read_provider_usage(
         next_check_at=next_check_at,
         snapshot=ready,
       )
+      _remember_reading(provider_id, data_dir, ready)
       return copy.deepcopy(ready)
 
     if snapshot.get("state") == "disconnected":
       _provider_usage_cache.pop(key, None)
+      _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
       return snapshot
 
     if (

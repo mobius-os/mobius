@@ -246,3 +246,21 @@ def test_interrupted_turn_closes_its_still_open_codex_rows():
     "type": "task_done", "task_id": "call_1", "status": "stopped",
     "summary": None, "tool_use_id": "host",
   }]
+
+
+def test_settled_turn_never_shows_a_helper_still_running():
+  from app.chat_transcript import _compact_activity_item
+
+  compact = _compact_activity_item(
+    {
+      "type": "tool", "tool": "Task", "status": "done",
+      "subagent": {
+        "lost": {"description": "Lost to a restart", "status": "running"},
+        "ok": {"description": "Finished", "status": "done"},
+      },
+    },
+    binding=None,
+  )
+
+  assert compact["subagent"]["lost"]["status"] == "stopped"
+  assert compact["subagent"]["ok"]["status"] == "done"

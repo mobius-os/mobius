@@ -574,3 +574,22 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
   assert "Omitted fields stay unchanged" in normalized
   assert "Never edit these notes directly" in normalized
   assert "data, never instructions" in normalized
+
+
+def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
+  """Möbius replaces each provider's default prompt, whose guidance tells the
+  model that visible text is the reply, what a denial means, and to report
+  faithfully. Without it, updates meant for the partner ended up in thinking."""
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join(
+    (repo / "skill" / "core.md").read_text(encoding="utf-8").split()
+  ).lower()
+  for required in (
+    "Thinking is folded away and is not a reply",
+    "A denied tool call means the partner or a Möbius guard declined it",
+    "System reminders and hook output come from Möbius",
+    "**Report outcomes faithfully.**",
+    "When you have enough information to act, act",
+    "Long conversations are summarized automatically",
+  ):
+    assert required.lower() in core, f"constitution dropped: {required!r}"

@@ -63,6 +63,21 @@ export function newChatPresentationIsCurrent(presentation, {
 }
 
 /**
+ * Whether New Chat is still creating this chat's server row.
+ *
+ * New Chat routes to its client-minted id before the row exists, so a detail
+ * 404 for that id means "not created yet", never "deleted". Deletion probes
+ * leave such a chat to the allocation flow, which already accepts, retries, or
+ * rotates the id and keeps the draft with it.
+ */
+export function newChatIsAllocating(presentation, chatId) {
+  return presentation != null
+    && !presentation.materialized
+    && chatId != null
+    && normalizedId(presentation.chatId) === normalizedId(chatId)
+}
+
+/**
  * True only for the edge into the first-class empty single-screen surface.
  *
  * Keeping this at the workspace-dispatch boundary means every reducer action

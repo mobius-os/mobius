@@ -30,6 +30,10 @@ parse_option() {
   esac
 
   case "$1" in
+    -w|--write-out|--write-out=*) chooses_write_out=true ;;
+  esac
+
+  case "$1" in
     -X|--request) OPTION_VALUE_KIND=request; OPTION_TAKES_NEXT=true; return ;;
     --request=*)
       OPTION_VALUE_KIND=request; OPTION_VALUE="${1#*=}"
@@ -60,9 +64,10 @@ parse_option() {
       OPTION_VALUE_ATTACHED=true; return ;;
     --fail|--fail-with-body|--silent|--show-error|--include|--head|--get|\
     --no-buffer|--compressed|--globoff)
-      if [[ "$1" == --get ]]; then
-        uses_get=true
-      fi
+      case "$1" in
+        --get) uses_get=true ;;
+        --fail|--fail-with-body) chooses_fail=true ;;
+      esac
       return ;;
     --*)
       OPTION_INVALID=true
@@ -83,13 +88,15 @@ parse_option() {
       X) OPTION_VALUE_KIND=request ;;
       H) OPTION_VALUE_KIND=header ;;
       d) OPTION_VALUE_KIND=data ;;
-      F|T|o|D|w|m|E) OPTION_VALUE_KIND=other ;;
+      w) OPTION_VALUE_KIND=other; chooses_write_out=true ;;
+      F|T|o|D|m|E) OPTION_VALUE_KIND=other ;;
       # Boolean short flags used by the documented mapi recipes.  Unknown
       # flags must fail closed: curl's short-option grammar lets an earlier
       # value-taking flag consume the remainder, so skipping a character can
       # make mapi and curl disagree about whether the next argv is a URL.
       G) uses_get=true; continue ;;
-      s|S|f|g|i|I|N|v) continue ;;
+      f) chooses_fail=true; continue ;;
+      s|S|g|i|I|N|v) continue ;;
       *) OPTION_INVALID=true; return ;;
     esac
     OPTION_VALUE="${options:index+1}"
@@ -136,6 +143,8 @@ has_body=false
 has_content_type=false
 has_api_target=false
 uses_get=false
+chooses_fail=false
+chooses_write_out=false
 pending_value_kind=""
 pending_option=""
 for argument in "$@"; do
@@ -221,4 +230,41 @@ curl_args=(-q --globoff -sS -H "Authorization: Bearer $AGENT_TOKEN")
 if $has_body && ! $uses_get && ! $has_content_type; then
   curl_args+=(-H "Content-Type: application/json")
 fi
-exec curl "${curl_args[@]}" "${resolved[@]}"
+# An HTTP error must not look like success: exit non-zero (curl's 22) while
+# still printing the response body that explains it. curl refuses --fail and
+# --fail-with-body together, so an explicit caller choice wins.
+if ! $chooses_fail; then
+  curl_args+=(--fail-with-body)
+fi
+if $chooses_write_out; then
+  exec curl "${curl_args[@]}" "${resolved[@]}"
+fi
+
+# A successful empty reply (often 204 after a write) would otherwise print
+# nothing at all. curl reports the status on stderr through a marker line that
+# this filter turns into one short note; stdout still streams untouched.
+status_marker="mapi-status:"
+note_empty_success() {
+  local line exit_code http_code size
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$status_marker"* ]]; then
+      read -r exit_code http_code size <<< "${line#"$status_marker"}"
+      if [[ "$exit_code" == 0 && "$http_code" == 2?? && "$size" == 0 ]]; then
+        printf 'mapi: HTTP %s, empty response (success)\n' "$http_code"
+      fi
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
+curl_args+=(
+  -w "%{stderr}${status_marker}%{exitcode} %{http_code} %{size_download}\n"
+)
+# curl's stdout goes straight to the caller (fd 3); only its stderr is piped.
+set +e
+{
+  curl "${curl_args[@]}" "${resolved[@]}" 2>&1 >&3 3>&- \
+    | note_empty_success >&2
+  curl_status="${PIPESTATUS[0]}"
+} 3>&1
+exit "$curl_status"
