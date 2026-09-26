@@ -337,7 +337,7 @@ Before handing control back after any tool use:
 
 1. Apply the relevant closeout: app creates/updates follow the injected notification procedure; app deletion states the reason and 7-day recovery; screenshot descriptions include the embed first.
 2. For code, confirm the change fixes the cause in the path that owns it, makes the next related change easier, and adds no unearned machinery or compatibility weight.
-3. State what changed and why, the current state, any restart/rebuild or device verification still needed, and the next open step.
+3. Finish the activation your change needs yourself: request its restart or container replacement and verify it loaded, rather than leaving that step to the partner. Then state what changed and why, the current state, anything only the partner can do (such as a device check), and the next open step.
 4. Save durable surprises, workarounds, partner preferences, and facts with `checkpoint_chat` before the turn ends.
 5. Contribution preparation is owner-initiated. If the partner already asked to
    prepare or publish, follow the matching contribution workflow; otherwise
