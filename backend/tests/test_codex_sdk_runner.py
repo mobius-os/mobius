@@ -1,5 +1,4 @@
 import asyncio
-import signal
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -969,8 +968,8 @@ def test_active_codex_force_stop_signals_group_only_once(monkeypatch):
   calls: list[int] = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: calls.append(pgid) or True,
   )
 
   async def _scenario() -> None:
@@ -3856,22 +3855,16 @@ def test_process_group_capture_poll_backs_off_after_startup_window():
   assert codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS > 0
 
 
-def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
+def test_codex_cleanup_ends_the_group_and_the_runs_own_commands(monkeypatch):
   calls = []
-  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
   monkeypatch.setattr(
-    codex_sdk_runner.os,
-    "killpg",
-    lambda pgid, sig: calls.append((pgid, sig)),
+    codex_sdk_runner,
+    "terminate_agent_processes",
+    lambda pgid, **kw: calls.append((pgid, kw["run_marker"])) or True,
   )
 
-  assert codex_sdk_runner._terminate_codex_process_group(
-    4321, grace_seconds=0,
-  ) is True
-  assert calls == [
-    (4321, signal.SIGTERM),
-    (4321, signal.SIGKILL),
-  ]
+  assert codex_sdk_runner._terminate_codex_processes(4321, "run-1") is True
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
@@ -3917,8 +3910,8 @@ def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
   monkeypatch.setattr(
     codex_sdk_runner,
@@ -3974,8 +3967,8 @@ def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
@@ -4034,8 +4027,8 @@ def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4103,8 +4096,8 @@ def test_run_codex_sdk_turn_cancel_during_threaded_start_waits_then_reaps(
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4173,8 +4166,8 @@ def test_run_codex_sdk_turn_start_failure_preserves_deferred_cancellation(
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4261,7 +4254,7 @@ def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
   monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
   monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
 
-  def reap(pgid):
+  def reap(pgid, _run_marker):
     assert pgid == 4321
     assert close_finished.is_set()
     order.append("reap")
@@ -4269,7 +4262,7 @@ def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
 
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
+    "_terminate_codex_processes",
     reap,
   )
 

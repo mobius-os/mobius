@@ -1523,18 +1523,18 @@ async def test_stop_timeout_preserves_runner_completion_future():
 
 @pytest.mark.asyncio
 async def test_force_stop_signals_claude_group_only_once(monkeypatch):
-  calls: list[int] = []
+  calls: list[tuple[int, str]] = []
   monkeypatch.setattr(
     claude_sdk_runner,
-    "_terminate_claude_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_claude_processes",
+    lambda pgid, run_marker: calls.append((pgid, run_marker)) or True,
   )
 
   class _Client:
     async def interrupt(self):
       return None
 
-  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop", run_marker="run-1")
   handle.set_process_group_id(4321)
   first = asyncio.create_task(handle.force_stop(timeout=1))
   while not calls:
@@ -1543,7 +1543,7 @@ async def test_force_stop_signals_claude_group_only_once(monkeypatch):
 
   assert await first is True
   assert await handle.force_stop(timeout=1) is True
-  assert calls == [4321]
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
