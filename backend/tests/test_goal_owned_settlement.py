@@ -188,6 +188,8 @@ async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_make_goal_
   monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw))
 
   assert await chat_waits._deliver_resume(wait.id) is True
+  # Scheduling is not delivery; the resume turn latches it at admission.
+  assert chat_waits.claim_admitted_wait_result(chat.id, f"wait-resume-{wait.id}")
   assert await chat_waits._deliver_resume(wait.id) is False
 
   db.expire_all()

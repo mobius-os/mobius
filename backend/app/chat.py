@@ -2796,7 +2796,20 @@ async def _admit_provider_execution(
   except Exception:
     if not _run_generation_superseded(chat_id, run_gen):
       raise
-  return not _run_generation_superseded(chat_id, run_gen)
+  if _run_generation_superseded(chat_id, run_gen):
+    return False
+  # Admission is delivery: a Wait result this turn carries counts as received
+  # now, not when the turn was scheduled, so a turn that never reached its
+  # provider leaves the Wait owed for another attempt.
+  from app.chat_waits import claim_admitted_wait_result
+  try:
+    claim_admitted_wait_result(chat_id, run_token)
+  except Exception:
+    _get_logger().warning(
+      "wait result latch failed at admission chat_id=%s run_token=%s",
+      chat_id, run_token, exc_info=True,
+    )
+  return True
 
 
 def _log_superseded_run(chat_id: str, phase: str) -> None:
