@@ -51,7 +51,7 @@ ARG CODEX_VERSION=0.157.0
 ARG CODEX_SDK_VERSION=0.157.0
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux \
+    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux xxd \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
