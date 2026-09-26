@@ -60,6 +60,7 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  isShellListUrl,
   requiresLiveShellList,
   SHELL_DOCUMENT_POLICY_REVISION,
   isImmutableAppAsset,
@@ -650,9 +651,7 @@ registerRoute(
 // next refetch. NetworkFirst returns the live list when online and still
 // falls back to the cached list offline (cold-drawer render preserved).
 registerRoute(
-  ({ url }) =>
-    url.origin === self.location.origin &&
-    (url.pathname === '/api/chats' || url.pathname === '/api/apps/'),
+  ({ url }) => url.origin === self.location.origin && isShellListUrl(url),
   new NetworkFirst({
     cacheName: SHELL_DATA_CACHE,
     // KEPT at 5s deliberately. Workbox returns a cache fallback as a

@@ -374,3 +374,11 @@ test('authoritative shell reads bypass offline fallback while ordinary reads kee
   }
   assert.equal(requiresLiveShellList(new Request('https://mobius.test/api/theme', { cache: 'no-store' })), false)
 })
+
+test('scoped chat row reads never enter the offline shell-list cache', async () => {
+  const { isShellListUrl, requiresLiveShellList } = await import('../../sw-cache-policy.js')
+  assert.equal(isShellListUrl(new URL('https://mobius.test/api/chats')), true)
+  const scoped = 'https://mobius.test/api/chats?ids=a&ids=b'
+  assert.equal(isShellListUrl(new URL(scoped)), false)
+  assert.equal(requiresLiveShellList(new Request(scoped, { cache: 'no-store' })), false)
+})

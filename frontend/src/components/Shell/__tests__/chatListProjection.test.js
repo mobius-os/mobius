@@ -8,6 +8,7 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
+  withRefreshedChatRows,
   withoutSettledLocalChatRuns,
 } from '../chatListProjection.js'
 
@@ -174,4 +175,27 @@ test('owner-input event normalization supports both shell generations', () => {
   assert.deepEqual(ownerInputChangeFromEvent({
     questionId: null,
   }), { kind: null, questionId: null })
+})
+
+test('a scoped row refresh replaces, adds, and drops only the requested chats', () => {
+  const rows = [
+    { id: 'kept', title: 'untouched' },
+    { id: 'run', title: 'old', running: false },
+    { id: 'gone', title: 'deleted elsewhere' },
+  ]
+  const next = withRefreshedChatRows(
+    rows,
+    ['run', 'gone', 'fresh'],
+    [
+      { id: 'run', title: 'old', running: true },
+      { id: 'fresh', title: 'created server-side' },
+      { id: 'kept', title: 'must not be applied: not requested' },
+    ],
+  )
+  assert.deepEqual(next, [
+    { id: 'kept', title: 'untouched' },
+    { id: 'run', title: 'old', running: true },
+    { id: 'fresh', title: 'created server-side' },
+  ])
+  assert.equal(next[0], rows[0])
 })

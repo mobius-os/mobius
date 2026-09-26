@@ -139,6 +139,7 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
+  withRefreshedChatRows,
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
@@ -213,6 +214,10 @@ const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
 // they need a short deadline rather than holding notifications behind a stalled request.
 const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
+// Run/wait events arriving this close together share one scoped rows read.
+const CHAT_ROW_REFRESH_BATCH_MS = 250
+// Matches the server's per-request id bound; a larger burst reads the full list.
+const CHAT_ROW_REFRESH_MAX_IDS = 200
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -2373,6 +2378,42 @@ export default function Shell({ onInitialVisualReady }) {
       return next
     })
   }, [queryClient])
+  // Run and wait events each change a few rows. Re-reading the complete list
+  // per event sent ~1 MB per event to every open window while agents worked,
+  // so a burst of events coalesces into one read of just those rows. Full
+  // reads remain the owner of first load, reconnects, and list mutations.
+  const pendingChatRowIdsRef = useRef(new Set())
+  const chatRowRefreshTimerRef = useRef(null)
+  const refreshChatRows = useCallback((chatId) => {
+    if (chatId == null) return
+    pendingChatRowIdsRef.current.add(String(chatId))
+    if (chatRowRefreshTimerRef.current != null) return
+    chatRowRefreshTimerRef.current = setTimeout(async () => {
+      chatRowRefreshTimerRef.current = null
+      const ids = [...pendingChatRowIdsRef.current]
+      pendingChatRowIdsRef.current = new Set()
+      // A full read already in flight began before these events and would
+      // overwrite their rows on arrival, so replace it with a fresh full read.
+      if (
+        ids.length > CHAT_ROW_REFRESH_MAX_IDS
+        || queryClient.isFetching({ queryKey: chatQueries.keys.all }) > 0
+      ) {
+        void refreshChats()
+        return
+      }
+      try {
+        const fresh = await jsonOrThrow(
+          await api.chats.rows(ids), 'chat rows fetch failed:',
+        )
+        projectChatList(rows => reconcileCreatedChats(
+          withRefreshedChatRows(rows, ids, fresh),
+        ))
+      } catch {
+        void refreshChats()
+      }
+    }, CHAT_ROW_REFRESH_BATCH_MS)
+  }, [projectChatList, queryClient, reconcileCreatedChats, refreshChats])
+  useEffect(() => () => clearTimeout(chatRowRefreshTimerRef.current), [])
   const markChatOwnerActivity = useCallback((chatId) => {
     const at = new Date().toISOString()
     projectChatList(rows => withChatOwnerActivity(rows, chatId, at))
@@ -3083,7 +3124,7 @@ export default function Shell({ onInitialVisualReady }) {
         // Reconcile ChatView immediately and refresh the compact list so its
         // Waiting card and Recents marker agree across tabs and reconnects.
         markChatRunReconcile(ev.chatId)
-        void invalidateShellListCache('chats').then(refreshChats)
+        refreshChatRows(ev.chatId)
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
@@ -3097,7 +3138,7 @@ export default function Shell({ onInitialVisualReady }) {
         // must not masquerade as a fresh owner interaction. Reconcile every
         // start so durable owner activity, rather than the transient run
         // signal, owns the Recents position.
-        void invalidateShellListCache('chats').then(refreshChats)
+        refreshChatRows(ev.chatId)
       }
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
@@ -3117,7 +3158,7 @@ export default function Shell({ onInitialVisualReady }) {
         // Failure attention is durable and versioned on the run transition.
         // Refresh the compact list rather than guessing from transcript text;
         // planned restart parks therefore remain neutral automatically.
-        void invalidateShellListCache('chats').then(refreshChats)
+        refreshChatRows(chatId)
         // Project agents write directly into the project directory. Refresh
         // every mounted folder query for that project so generated artifacts
         // appear as soon as the run finishes, without polling the filesystem.
@@ -3203,7 +3244,7 @@ export default function Shell({ onInitialVisualReady }) {
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
     markStreamingAcknowledged, markStreamingEnd,
     onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
-    refreshApps, refreshChats, tombstoneRoute, warmAppCode,
+    refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for

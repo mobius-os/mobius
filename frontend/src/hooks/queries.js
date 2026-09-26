@@ -27,6 +27,7 @@ const chatAppArtifactsKey = chatId => [
 const projectsKey = ['projects']
 const projectTemplatesKey = ['projects', 'templates']
 const chatsKey = ['chats']
+const CHAT_LIST_FOCUS_REVALIDATE_MS = 5 * 60_000
 const chatUsageRootKey = ['chat-usage']
 const chatUsageKey = chatId => [...chatUsageRootKey, chatId]
 const chatCurrentUsageRootKey = ['chat-current-usage']
@@ -248,9 +249,15 @@ function useChatsQuery({ reconcile } = {}) {
     // The system stream accelerates drawer updates, but its process-local
     // events are intentionally not replayed after a restart and browsers may
     // suspend it without a clean disconnect. The list is the durable owner of
-    // running and owner-input state, so every real return/reconnect revalidates
-    // it even when the persisted query snapshot is still inside staleTime.
-    refetchOnWindowFocus: 'always',
+    // running and owner-input state, so every network reconnect revalidates it,
+    // and a return to the window does once the list is older than
+    // CHAT_LIST_FOCUS_REVALIDATE_MS. Event row refreshes keep a live window's
+    // list current, so revalidating on every focus only re-sent ~1 MB.
+    refetchOnWindowFocus: query => (
+      Date.now() - query.state.dataUpdatedAt > CHAT_LIST_FOCUS_REVALIDATE_MS
+        ? 'always'
+        : false
+    ),
     refetchOnReconnect: 'always',
   })
 }

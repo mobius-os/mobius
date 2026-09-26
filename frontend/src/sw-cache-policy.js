@@ -419,7 +419,12 @@ export function entriesToTrim(existingKeys, max) {
 // Authoritative shell reconciliation must never mistake an offline snapshot
 // for live truth. Ordinary list reads keep their NetworkFirst offline fallback.
 export function requiresLiveShellList(request) {
-  const { pathname } = new URL(request.url)
-  return request.cache === 'no-store'
-    && (pathname === '/api/chats' || pathname === '/api/apps/')
+  return request.cache === 'no-store' && isShellListUrl(new URL(request.url))
+}
+
+// The offline projection is the complete list. A scoped read such as
+// `/api/chats?ids=…` is live-only: caching it would add a stale entry per id set.
+export function isShellListUrl(url) {
+  return url.search === ''
+    && (url.pathname === '/api/chats' || url.pathname === '/api/apps/')
 }
