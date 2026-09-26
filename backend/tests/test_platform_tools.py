@@ -783,3 +783,18 @@ def test_unlisted_names_are_never_forwarded_to_apps(monkeypatch):
   assert result["isError"] is True
   assert "unavailable" in result["content"][0]["text"]
   assert all(method == "GET" for method, *_ in calls)
+
+
+def test_app_tool_timeouts_are_ordered_service_then_control_then_provider():
+  """The control script's HTTP wait sits between the service's own timeout and
+  the provider-facing tool timeout, so the app's own timeout error is what the
+  agent sees rather than a control or provider cutoff."""
+  from app import app_tools
+
+  control = _control_module()
+
+  assert (
+    app_tools.TOOL_TIMEOUT_SECONDS
+    < control.APP_TOOL_CALL_TIMEOUT_SECONDS
+    < platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS
+  )
