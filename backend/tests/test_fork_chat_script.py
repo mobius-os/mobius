@@ -19,8 +19,8 @@ from fork_session import (  # noqa: E402
   ForkError,
   ForkResult,
   _assert_codex_mcp_isolated,
-  _codex_history_through_call,
   _codex_mcp_isolation_overrides,
+  _codex_turn_of_call,
   _fork_claude,
   _fork_codex_async,
   _load_codex_sdk,
@@ -193,6 +193,7 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn(tmp_path, monkeypatch):
         FakeConfig,
         FakeApprovalMode,
         FakeSandbox,
+        None,
       ),
       mcp_inventory_runner=mcp_inventory_runner,
     )
@@ -408,7 +409,7 @@ def test_deleted_chat_cannot_be_coached(tmp_path):
     _chat_session(db, "chat-1")
 
 
-# --- Call moments: fork right after one tool call's result -----------------
+# --- Call moments: fork the provider session at one tool call ---------------
 
 CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555"
 CODEX_THREAD = "01a0c949-5dea-7260-820a-a2e43a6dbb93"
@@ -511,75 +512,56 @@ def _item(kind, **fields):
   return {"type": "response_item", "payload": {"type": kind, **fields}}
 
 
+def _turn_started(turn_id):
+  return {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn_id}}
+
+
 def _codex_entries():
+  # The shape Codex 0.157 writes: each turn opens with task_started, and the
+  # turn's items (developer context included) follow it.
   return [
-    {
-      "type": "session_meta",
-      "payload": {
-        "id": CODEX_THREAD,
-        "base_instructions": {"text": "constitution"},
-        "model_provider": "openai",
-      },
-    },
-    {"type": "turn_context", "payload": {"model": "gpt-source"}},
-    _item("message", role="developer", content="source permissions"),
-    _item("message", role="user", content="do the thing"),
+    {"type": "session_meta", "payload": {"id": CODEX_THREAD}},
+    _turn_started("turn-1"),
+    _item("message", id="msg_1", role="user", content="do the thing"),
+    {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
     _item("custom_tool_call", id="ctc_A", call_id="call_A", name="exec"),
+    _item("custom_tool_call_output", call_id="call_A"),
+    _item("message", id="msg_2", role="assistant", content="later in turn 1"),
+    {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-1"}},
+    _turn_started("turn-2"),
     _item("custom_tool_call", id="ctc_B", call_id="call_B", name="exec"),
-    _item("custom_tool_call_output", id="ctco_B", call_id="call_B"),
-    _item("custom_tool_call_output", id="ctco_A", call_id="call_A"),
-    _item("message", role="assistant", content="after the call"),
+    _item("custom_tool_call_output", call_id="call_B"),
   ]
 
 
-def test_codex_call_moment_history_ends_at_that_calls_output(tmp_path):
+@pytest.mark.parametrize(("call_id", "turn_id"), [("ctc_A", "turn-1"), ("ctc_B", "turn-2")])
+def test_codex_call_moment_is_the_turn_that_made_the_call(tmp_path, call_id, turn_id):
   rollout = _codex_rollout_file(tmp_path, _codex_entries())
 
-  cut = _codex_history_through_call(rollout, "ctc_B")
-
-  assert [item.get("id") for item in cut.items] == [None, "ctc_A", "ctc_B", "ctco_B"]
-  assert all(item.get("role") != "developer" for item in cut.items)
-  assert (cut.base_instructions, cut.model, cut.model_provider) == (
-    "constitution", "gpt-source", "openai",
-  )
-
-
-def test_codex_call_moment_replays_compaction_instead_of_older_items(tmp_path):
-  entries = _codex_entries()
-  entries.insert(4, {
-    "type": "compacted",
-    "payload": {"replacement_history": [
-      {"type": "message", "role": "developer", "content": "stale"},
-      {"type": "compaction", "encrypted_content": "summary"},
-    ]},
-  })
-  rollout = _codex_rollout_file(tmp_path, entries)
-
-  cut = _codex_history_through_call(rollout, "ctc_A")
-
-  assert [item["type"] for item in cut.items] == [
-    "compaction", "custom_tool_call", "custom_tool_call",
-    "custom_tool_call_output", "custom_tool_call_output",
-  ]
+  assert _codex_turn_of_call(rollout, call_id) == turn_id
 
 
 @pytest.mark.parametrize(
   ("entries", "call_id", "expected"),
   [
     (_codex_entries(), "ctc_missing", "no recorded call ctc_missing"),
-    (_codex_entries()[:6], "ctc_A", "no recorded output for call ctc_A"),
+    (
+      [_item("custom_tool_call", id="ctc_A", call_id="call_A")],
+      "ctc_A",
+      "records call ctc_A outside a turn",
+    ),
   ],
 )
-def test_codex_call_moment_without_recorded_call_output_fails(
+def test_codex_call_moment_without_a_recorded_turn_fails(
   tmp_path, entries, call_id, expected
 ):
   rollout = _codex_rollout_file(tmp_path, entries)
 
   with pytest.raises(ForkError, match=expected):
-    _codex_history_through_call(rollout, call_id)
+    _codex_turn_of_call(rollout, call_id)
 
 
-def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
+def test_codex_call_moment_forks_the_session_through_the_calls_turn(
   tmp_path, monkeypatch
 ):
   codex_home = tmp_path / "cli-auth" / "codex"
@@ -593,13 +575,18 @@ def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
       calls["config"] = kwargs
 
   class FakeThread:
-    id = "moment-thread"
+    def __init__(self, codex, thread_id):
+      self.id = thread_id
 
     async def run(self, prompt, **kwargs):
-      calls["run"] = prompt
+      calls["run"] = (prompt, kwargs)
       return SimpleNamespace(error=None, final_response="coached")
 
   class FakeClient:
+    async def thread_fork(self, thread_id, params):
+      calls["fork"] = (thread_id, params)
+      return SimpleNamespace(thread=SimpleNamespace(id="moment-thread"))
+
     async def request(self, method, params, *, response_model):
       calls["requests"].append((method, params))
       return response_model.model_validate({"data": []})
@@ -615,11 +602,7 @@ def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
       return None
 
     async def thread_fork(self, *args, **kwargs):
-      raise AssertionError("a call moment must not fork the whole thread")
-
-    async def thread_start(self, **kwargs):
-      calls["start"] = kwargs
-      return FakeThread()
+      raise AssertionError("a call moment must not fork the whole session")
 
   result = asyncio.run(
     _fork_codex_async(
@@ -632,6 +615,7 @@ def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
         FakeConfig,
         SimpleNamespace(deny_all="deny_all"),
         SimpleNamespace(read_only="read-only"),
+        FakeThread,
       ),
       mcp_inventory_runner=lambda args, **kw: subprocess.CompletedProcess(
         args, 0, stdout="[]", stderr="",
@@ -640,20 +624,18 @@ def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
   )
 
   assert calls["config"]["codex_bin"] == "/bin/codex"
-  assert calls["start"] == {
-    "approval_mode": "deny_all",
-    "base_instructions": "constitution",
+  assert calls["fork"] == (CODEX_THREAD, {
+    "lastTurnId": "turn-1",
     "cwd": "/data",
-    "model": "gpt-source",
-    "model_provider": "openai",
+    "approvalPolicy": "never",
     "sandbox": "read-only",
-  }
-  methods = [method for method, _ in calls["requests"]]
-  assert methods == ["mcpServerStatus/list", "thread/inject_items"]
-  injected = calls["requests"][1][1]
-  assert injected["threadId"] == "moment-thread"
-  assert injected["items"][-1]["id"] == "ctco_A"
-  assert "after the call" not in json.dumps(injected["items"])
+  })
+  assert [method for method, _ in calls["requests"]] == ["mcpServerStatus/list"]
+  assert calls["requests"][0][1]["threadId"] == "moment-thread"
+  assert calls["run"] == (
+    "coach",
+    {"approval_mode": "deny_all", "cwd": "/data", "sandbox": "read-only"},
+  )
   assert result == ForkResult(
     provider="codex",
     source_session_id=CODEX_THREAD,
@@ -661,6 +643,7 @@ def test_codex_call_moment_starts_a_thread_seeded_only_through_the_call(
     answer="coached",
     after_call_id="ctc_A",
   )
+  assert (result.method, result.exact_session_fork) == ("session_fork", True)
 
 
 def _seed_run(db: Path, *, run_id="run-1", chat_id="chat-1", provider="codex",

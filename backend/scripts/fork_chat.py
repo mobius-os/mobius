@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Resolve a Möbius chat to an exact provider session and coach its fork.
 
-A *call moment* narrows the fork to right after one app tool call. It is the
-JSON object recorded when an agent called an app tool::
+A *call moment* narrows the fork to one app tool call (fork_session.py says
+where each provider's fork ends). It is the JSON object recorded when an agent
+called an app tool::
 
   {"chat_id": str, "run_id": str, "provider": "claude"|"codex", "call_id": str}
 
@@ -152,7 +153,7 @@ def _parser() -> argparse.ArgumentParser:
     type=moment_json,
     dest="moment",
     metavar="MOMENT_JSON",
-    help="fork right after this recorded call moment instead of the session end",
+    help="fork at this recorded call moment instead of the session end",
   )
   parser.add_argument("chat_id")
   parser.add_argument("prompt")

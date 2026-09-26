@@ -2,7 +2,8 @@
 # fork-chat.sh [--json] [--after-call '<call moment json>'] <chat_id> "<coaching prompt>"
 #
 # Resolves the chat's provider session and delegates to the exact-session fork
-# driver. With --after-call, the fork ends right after that app tool call.
+# driver. With --after-call, the fork ends at that app tool call (Claude:
+# right after its result; Codex: at the end of the turn that made it).
 # It never reconstructs a session from stored messages.
 set -euo pipefail
 

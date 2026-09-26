@@ -6,10 +6,12 @@ session and the coaching prompt runs inside that fork. Missing, expired, or
 unforkable sessions fail loudly. Stored chat messages are never used to seed a
 replacement agent.
 
-``after_call_id`` narrows the fork to a *call moment*: the fork's context ends
-right after that provider tool call's result, and nothing later in the turn or
-session is visible. The id is the provider's own id for the model's call
-(Claude ``toolu_...`` tool_use id; Codex ``ctc_...`` response item id).
+``after_call_id`` narrows the fork to a *call moment*. The id is the
+provider's own id for the model's call (Claude ``toolu_...`` tool_use id;
+Codex ``ctc_...`` response item id), and the provider still does the fork.
+Claude resumes at that call's result, so nothing later is visible. Codex forks
+only at turn boundaries, so its fork ends with the turn that made the call:
+the rest of that turn is visible, and no later turn is.
 """
 
 from __future__ import annotations
@@ -59,22 +61,9 @@ class ForkResult:
   answer: str
   method: str = "session_fork"
   exact_session_fork: bool = True
-  # The call whose result ends the fork's context; None forks the whole session.
+  # The call the fork was taken at; None forks the whole session. Claude's
+  # fork ends right after the call's result, Codex's after the call's turn.
   after_call_id: str | None = None
-
-
-@dataclass(frozen=True)
-class _CodexHistoryCut:
-  """Model-visible history of a Codex thread through one call's output."""
-
-  items: tuple[dict[str, Any], ...]
-  base_instructions: str | None
-  model: str | None
-  model_provider: str | None
-
-
-class _CodexAck(BaseModel):
-  model_config = ConfigDict(extra="ignore")
 
 
 class _CodexMcpSurface(BaseModel):
@@ -386,7 +375,7 @@ def _fork_claude(
   )
 
 
-def _load_codex_sdk() -> tuple[Any, Any, Any, Any]:
+def _load_codex_sdk() -> tuple[Any, Any, Any, Any, Any]:
   """Load Codex through the platform's pinned wire-compatibility boundary."""
   # The platform runner owns compatibility between the pinned Python SDK and
   # the matching app-server wire format. Reuse that exact provider boundary
@@ -397,6 +386,7 @@ def _load_codex_sdk() -> tuple[Any, Any, Any, Any]:
   if backend not in sys.path:
     sys.path.insert(0, backend)
   from app.codex_sdk_runner import _sdk_imports
+  from openai_codex import AsyncThread
 
   sdk = _sdk_imports()
   return (
@@ -404,6 +394,7 @@ def _load_codex_sdk() -> tuple[Any, Any, Any, Any]:
     sdk["CodexConfig"],
     sdk["ApprovalMode"],
     sdk["Sandbox"],
+    AsyncThread,
   )
 
 
@@ -415,69 +406,26 @@ def _codex_rollout(codex_home: Path, thread_id: str) -> Path:
   )
 
 
-def _codex_history_through_call(
-  rollout: Path, call_id: str
-) -> _CodexHistoryCut:
-  """Replay a rollout's model-visible items up to one call's output.
+def _codex_turn_of_call(rollout: Path, call_id: str) -> str:
+  """Return the id of the Codex turn in which the model made ``call_id``.
 
-  ``thread/fork`` only cuts at turn boundaries (its ``path``/``history``
-  params are unstable), so the cut is rebuilt from the rollout the way Codex
-  itself resumes: response items in order, with a ``compacted`` entry's
-  replacement history standing in for everything before it.
-
-  ``call_id`` is the model's response item id (``ctc_...``). Codex calls MCP
-  tools from inside a code-mode ``exec`` script, so that item is usually the
-  exec ``custom_tool_call`` and the cut lands after the whole script's output.
-
-  Developer items are dropped: the new thread writes its own developer context
-  for the read-only coaching policy, and replaying the source run's would
-  restate tools and permissions the coach does not have.
+  Each turn opens with a ``task_started`` event naming it, before any of the
+  turn's items. ``call_id`` is the model's response item id (``ctc_...``).
+  Codex calls MCP tools from inside a code-mode ``exec`` script, so that item
+  is usually the exec ``custom_tool_call``.
   """
-  items: list[dict[str, Any]] = []
-  base_instructions = model = model_provider = None
-  wire_call_id: str | None = None
-
-  def keep(item: Any) -> bool:
-    return isinstance(item, dict) and item.get("role") != "developer"
-
+  turn_id = None
   for entry in _transcript_entries(rollout):
-    kind = entry.get("type")
     payload = entry.get("payload")
     if not isinstance(payload, dict):
       continue
-    if kind == "session_meta":
-      instructions = payload.get("base_instructions")
-      if isinstance(instructions, dict):
-        instructions = instructions.get("text")
-      base_instructions = instructions if isinstance(instructions, str) else None
-      model_provider = payload.get("model_provider") or None
-    elif kind == "turn_context":
-      model = payload.get("model") or model
-    elif kind == "compacted" and isinstance(
-      payload.get("replacement_history"), list
-    ):
-      items = [item for item in payload["replacement_history"] if keep(item)]
-    elif kind == "response_item" and keep(payload):
-      items.append(payload)
-      if wire_call_id is None and payload.get("id") == call_id:
-        wire_call_id = payload.get("call_id")
-        if not isinstance(wire_call_id, str) or not wire_call_id:
-          raise ForkError(f"Codex item {call_id} is not a tool call")
-      elif (
-        wire_call_id is not None
-        and payload.get("type")
-        in {"function_call_output", "custom_tool_call_output"}
-        and payload.get("call_id") == wire_call_id
-      ):
-        return _CodexHistoryCut(
-          items=tuple(items),
-          base_instructions=base_instructions,
-          model=model,
-          model_provider=model_provider,
-        )
-  if wire_call_id is None:
-    raise ForkError(f"Codex session has no recorded call {call_id}")
-  raise ForkError(f"Codex session has no recorded output for call {call_id}")
+    if entry.get("type") == "event_msg" and payload.get("type") == "task_started":
+      turn_id = payload.get("turn_id")
+    elif entry.get("type") == "response_item" and payload.get("id") == call_id:
+      if isinstance(turn_id, str) and turn_id:
+        return turn_id
+      raise ForkError(f"Codex session records call {call_id} outside a turn")
+  raise ForkError(f"Codex session has no recorded call {call_id}")
 
 
 async def _fork_codex_async(
@@ -486,15 +434,14 @@ async def _fork_codex_async(
   prompt: str,
   *,
   after_call_id: str | None = None,
-  sdk_loader: Callable[[], tuple[Any, Any, Any, Any]] | None = None,
+  sdk_loader: Callable[[], tuple[Any, Any, Any, Any, Any]] | None = None,
   mcp_inventory_runner: Callable[
     ..., subprocess.CompletedProcess[str]
   ] = subprocess.run,
 ) -> ForkResult:
-  if sdk_loader is None:
-    AsyncCodex, CodexConfig, ApprovalMode, Sandbox = _load_codex_sdk()
-  else:
-    AsyncCodex, CodexConfig, ApprovalMode, Sandbox = sdk_loader()
+  AsyncCodex, CodexConfig, ApprovalMode, Sandbox, AsyncThread = (
+    sdk_loader or _load_codex_sdk
+  )()
 
   env = _coaching_env()
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
@@ -503,10 +450,10 @@ async def _fork_codex_async(
     data_dir = codex_home.parents[1]
   except IndexError as exc:
     raise ForkError("Codex home cannot resolve its storage owner") from exc
-  cut = (
+  last_turn_id = (
     None
     if after_call_id is None
-    else _codex_history_through_call(
+    else _codex_turn_of_call(
       _codex_rollout(codex_home, source_session_id), after_call_id
     )
   )
@@ -528,7 +475,7 @@ async def _fork_codex_async(
   ownership = await acquire_codex_session_activity_async(data_dir)
   try:
     async with AsyncCodex(config) as codex:
-      if cut is None:
+      if last_turn_id is None:
         thread = await codex.thread_fork(
           source_session_id,
           approval_mode=ApprovalMode.deny_all,
@@ -536,21 +483,16 @@ async def _fork_codex_async(
           sandbox=Sandbox.read_only,
         )
       else:
-        thread = await codex.thread_start(
-          approval_mode=ApprovalMode.deny_all,
-          base_instructions=cut.base_instructions,
-          cwd=cwd,
-          model=cut.model,
-          model_provider=cut.model_provider,
-          sandbox=Sandbox.read_only,
-        )
+        # The SDK's thread_fork does not take the app-server's lastTurnId yet;
+        # these are the wire forms of the same deny_all/read-only settings.
+        forked = await codex._client.thread_fork(source_session_id, {
+          "lastTurnId": last_turn_id,
+          "cwd": cwd,
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+        })
+        thread = AsyncThread(codex, forked.thread.id)
       await _assert_codex_mcp_isolated(codex, str(thread.id or ""))
-      if cut is not None:
-        await codex._client.request(
-          "thread/inject_items",
-          {"threadId": thread.id, "items": list(cut.items)},
-          response_model=_CodexAck,
-        )
       result = await thread.run(
         prompt,
         approval_mode=ApprovalMode.deny_all,
