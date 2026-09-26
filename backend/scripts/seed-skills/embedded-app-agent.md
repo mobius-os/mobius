@@ -151,6 +151,17 @@ picks it up the same way it picks up your edits.
 
 ---
 
+## No external resources — they can hang the preview
+
+The preview runs in the in-app browser under a strict `default-src 'self'`
+CSP. An off-origin resource referenced at load time (a Google Fonts `<link>` or
+`@import`, a CDN script or stylesheet, an external image or webfont) does not
+just fail quietly: it can hang page load, leaving links, buttons, and scrolling
+dead while the user sees a "loading timeout". When the user reports both
+something not working and a loading timeout, `grep` the build for `https://`
+first. Fix it by dropping the dependency: use a system font stack, vendor any
+asset same-origin, and never ship a CDN link "just in case".
+
 ## First tool call is the task
 
 Your first tool call should do the work — `Read` the file that needs editing,

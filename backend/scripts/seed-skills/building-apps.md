@@ -11,7 +11,7 @@ quickstart plus visual-testing pair is complete.
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. `AppCanvas`-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
-Standalone `/apps/<slug>/` launches use a trusted signed outer host that renders the same `AppCanvas` opaque frame as the workspace. The outer host owns authentication, manifest/offline identity, installation, and error chrome; app-authored code receives only its app-scoped token inside the opaque frame and never executes in the top-level owner origin. A cookie-backed owner-trusted service still belongs on the shared service gateway; a mutually untrusted service or genuinely independent PWA still needs its own dedicated origin. Neither belongs inside an ordinary mini-app.
+Standalone `/apps/<slug>/` launches render the same opaque app frame as the workspace; app-authored code never runs with the owner's credentials in either place.
 
 ## Choose the execution tier before wrapping
 
@@ -19,16 +19,10 @@ Standalone `/apps/<slug>/` launches use a trusted signed outer host that renders
 |---|---|---|
 | Normal JSX app using scoped storage/chat/fetch | Ordinary shell-mounted mini-app (opaque frame) | Add `allow-same-origin` or read owner storage |
 | Existing packaged static game/tool nested by a wrapper | `/app-embeds/by-id/<appId>/…` entry document, response-sandboxed and heartbeat-gated | Frame `/app-assets/`, reveal on iframe `load`, or grant null-origin credentials |
-| Owner-trusted cookie-backed backend which may trust sibling services | Shared service gateway plus a shell-owned direct adapter; ask for a platform integration | Nest `/services/<slug>` below the ordinary opaque app or fall back to the shell origin |
-| Mutually untrusted service or genuinely independent PWA | Dedicated distinct origin plus a shell-owned direct adapter | Put it on the shared gateway or claim that paths create isolation |
+| A separate backend service or an independent PWA | Ask for a platform integration; a separate service needs its own origin outside the mini-app | Nest `/services/<slug>` below the ordinary opaque app or fall back to the shell origin |
 
-The shared gateway is one origin, configured once, with one path per explicitly
-enabled service. It isolates that owner-trusted group from the Möbius shell but
-does not isolate services from one another: paths do not partition localStorage
-or same-origin fetch. Cookies must remain host-only and path-scoped; the gateway
-host must expose only enabled service prefixes. Use a dedicated origin when a
-service cannot trust its siblings or owns an independent PWA identity. Opacity
-is a permission boundary, not a substitute for origin-bound browser features.
+Opacity is a permission boundary, not a substitute for origin-bound browser
+features.
 
 ---
 
@@ -120,11 +114,9 @@ Runtime smoke checks for this class of app:
   layout, and say so in the handoff. A wide screenshot of a phone-first app is
   a misleading verification artifact, even if the runtime smoke test passed.
 
-If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` git tree, that is installer noise, not app source; re-run the installer on a backend that includes the static-asset backup fix.
-
 ### What to watch for
 
-The wrapper is a thin Möbius app around someone else's build. The gotchas, learned the hard way adapting one:
+The wrapper is a thin Möbius app around someone else's build. The gotchas:
 
 1. **Shape: a thin `index.jsx` wrapper around an iframe.** The wrapper mounts the build's entry HTML from `/app-embeds/by-id/${appId}/index.html` and stays small — branded loader/error state plus the iframe, nothing more. Never navigate a document through ordinary `/app-assets`: that lane remains clickjacking-protected and is not the nested-document boundary. The build's own files are declared in `mobius.json` `static_assets` as a map of *logical path → build file*. Set `offline_capable: false` unless EVERY asset the build pulls is warm/offline-safe.
 
@@ -132,17 +124,17 @@ The wrapper is a thin Möbius app around someone else's build. The gotchas, lear
 
 3. **No external CDNs.** `/app-embeds` is stricter than an ordinary compiled mini-app: its script/style/font/connect/img/media/worker policy names only the enumerated self/data/blob sources and does **not** allow `esm.sh`. Package every runtime dependency, font, wasm/decoder, model and media file in `static_assets`. **Grep the build for `https://`** before mounting; disable unused CDN defaults rather than leaving a silent CSP failure. A packaged document cannot attach the wrapper's app bearer to `/api/proxy`, so do not treat that owner-authenticated route as a general asset fallback.
 
-4. **Heartbeat, never `load` or a wrapper prefetch.** Mount the nested iframe immediately behind branded coverage. Its response sandbox makes the document origin `null`; a wrapper `fetch('/app-embeds/...')` is therefore a null-origin CORS request, duplicates the download, and previously enabled cache-poisoning probes. Keep the child hidden until an exact `event.source === iframe.contentWindow`, `event.origin === 'null'`, app-specific ready heartbeat sent after the child UI's first successful commit. Chromium fires iframe `load` for XFO/CSP/error documents too. On timeout, retain branded error/Retry UI; never reveal native browser error chrome.
+4. **Heartbeat, never `load` or a wrapper prefetch.** Mount the nested iframe immediately behind branded coverage. Its response sandbox makes the document origin `null`; a wrapper `fetch('/app-embeds/...')` is therefore a null-origin CORS request and duplicates the download. Keep the child hidden until an exact `event.source === iframe.contentWindow`, `event.origin === 'null'`, app-specific ready heartbeat sent after the child UI's first successful commit. Chromium fires iframe `load` for XFO/CSP/error documents too. On timeout, retain branded error/Retry UI; never reveal native browser error chrome.
 
 5. **Theme the wrapper chrome.** The loader and error states use `var(--bg) / var(--surface) / var(--text) / var(--border) / var(--accent)` and `var(--font)`, and honor `prefers-reduced-motion` on any spinner — so the chrome tracks the owner's theme instead of clashing with the embedded build.
 
-6. **Keep `static_assets` consistent, tracked, and exact.** Hashed filenames (`main.4f2a.js`) change on every rebuild, so a stale manifest is a broken app. The release packager must remove obsolete bundles, regenerate manifest paths, ensure every declared source is Git-tracked (ignored `build/static/` files do not ship merely because they exist locally), and reject undeclared build output. Prove the package from a clean clone. Legacy CRA chunk hashes may rotate across build directories because their license/source-map references contain their own emitted filename; normalize only that name when checking semantic equality rather than rewriting the bundler.
+6. **Keep `static_assets` consistent, tracked, and exact.** Hashed filenames (`main.4f2a.js`) change on every rebuild, so a stale manifest is a broken app. After each rebuild, remove obsolete bundles, regenerate manifest paths, make sure every declared source is Git-tracked (ignored `build/static/` files do not ship merely because they exist locally), and reject undeclared build output. Prove the package from a clean clone.
 
-7. **Null-origin subresources need scoped CORS.** The `/app-embeds/` lane intentionally returns `Access-Control-Allow-Origin: null` without credentials so fonts and JS `fetch`/XHR loaders for models, textures and audio work. Do not broaden owner APIs or add credentials; they still require a scoped bearer. Every response in the namespace—including SVG/XML/JS/CSS/media—keeps CSP `sandbox` so a browser-document-capable asset can never regain the Möbius origin when framed externally.
+7. **Null-origin subresources need scoped CORS.** The `/app-embeds/` lane intentionally returns `Access-Control-Allow-Origin: null` without credentials so fonts and JS `fetch`/XHR loaders for models, textures and audio work. Owner APIs still require a scoped bearer, so a packaged document cannot call them. Every response in the namespace—including SVG/XML/JS/CSS/media—keeps CSP `sandbox` so a browser-document-capable asset can never regain the Möbius origin when framed externally.
 
 8. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
 
-9. **Mark invented business details as PLACEHOLDERS.** When localizing or rebranding a site (a garage, a shop, a clinic), any address, phone number, price, or testimonial you didn't get from the owner is fabricated — flag it as a placeholder the owner must replace (an inline `<!-- PLACEHOLDER: real address -->` plus a line in your handoff), don't present an invented Sarajevo address and phone as finished contact facts. Made-up contact info reads as done and ships a lie.
+9. **Mark invented business details as PLACEHOLDERS.** When localizing or rebranding a site (a garage, a shop, a clinic), any address, phone number, price, or testimonial you didn't get from the owner is fabricated — flag it as a placeholder the owner must replace (an inline `<!-- PLACEHOLDER: real address -->` plus a line in your handoff), don't present an invented address and phone number as finished contact facts. Made-up contact info reads as done and ships a lie.
 
 (This is the technical packaging/wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
 
@@ -162,7 +154,7 @@ When the partner asks to share a local-first app as a repo, make the existing so
 
 ### Verify your own output — don't make the owner the test loop
 
-Confirm the change works before handing control back, especially for a bug the owner already reported once: bouncing the same fix back unverified ("hit Build/preview and tell me if it works") is the failure mode, and it compounds when you claim "fixed" twice without ever checking. You can't drive the live shell UI yourself — it needs the owner's password — so verify by the strongest available proxy and SAY which one you used and where it stopped: byte-check the served code (`curl` the compiled module / static asset and grep for the fix), walk the full dependency chain over HTTP (each import/asset returns 200, not the SPA HTML fallback), and curl the actual `/api/...` path end-to-end so a broken link or no-op handler shows up before the owner finds it. Name the verification ceiling you hit ("compiled module carries the fix and `/api/storage/...` round-trips; I can't drive the live tap myself, so confirm the anchor scrolls on your end") instead of ending every turn by punting the test to the owner.
+Confirm the change works before handing control back, especially for a bug the owner already reported once: bouncing the same fix back unverified ("hit Build/preview and tell me if it works") is the failure mode, and it compounds when you claim "fixed" twice without ever checking. Drive the app yourself with the authenticated browser helpers in `visual-testing.md`. Where something is still out of reach (a real-device gesture, a push arriving on a phone), verify by the strongest available proxy and SAY which one you used and where it stopped: byte-check the served code (`curl` the compiled module / static asset and grep for the fix), walk the full dependency chain over HTTP (each import/asset returns 200, not the SPA HTML fallback), and curl the actual `/api/...` path end-to-end so a broken link or no-op handler shows up before the owner finds it. Name the verification ceiling you hit ("compiled module carries the fix and `/api/storage/...` round-trips; I can't test the long-press on a real phone, so confirm it on your device") instead of ending every turn by punting the test to the owner.
 
 ### Right-size the effort — check in before a big dig
 
@@ -180,9 +172,9 @@ locally?" is one quick turn; the same fix arrived at through ten minutes of
 unattended investigation and a full rewrite is exactly what the owner
 experiences as "it took forever and did way too much." Match the depth of the
 dig to the size and clarity of the ask: a vague or tiny prompt earns an early
-check-in, not a maximal solo run. The propose-before-build instinct from the top
-of this file applies to fixes too — name what you found and the smallest fix
-that addresses it, then go, instead of guessing big and over-working.
+check-in, not a maximal solo run. Propose before you build, for fixes too —
+name what you found and the smallest fix that addresses it, then go, instead
+of guessing big and over-working.
 
 ### Don't fabricate — clarify, then cite or hedge
 
@@ -255,8 +247,8 @@ manifest, layered by how always-on they are:
   (also a root-level entry in `source_files`) is copied to
   `/data/shared/skills/<name>.md` on install and deactivated on uninstall. It
   is a *reference the agent Reads when a matching task comes up*, not always in
-  context — use it for how-to detail: build steps, workflows, gotchas. Artifacts
-  ships `artifacts.md`. Max 5 per app, ≤ 256 KB per file; ids are a global
+  context — use it for how-to detail: build steps, workflows, gotchas. Pages
+  ships `pages.md`. Max 5 per app, ≤ 256 KB per file; ids are a global
   namespace, so pick a distinctive one so two apps can't collide.
   A long skill can instead be a **folder**: `"skills": ["<id>/"]` ships
   `<id>/SKILL.md` plus sibling `.md` files directly inside the folder (each
@@ -265,22 +257,18 @@ manifest, layered by how always-on they are:
   (a `publish.md` section, say), so agents re-read only the core plus the one
   file a step needs. Contribute
   ships `contributing/` this way.
-- **A system-prompt fragment (always-on, while installed).** `"system_app":
-  true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
-  entry) — the file is appended to the base constitution (`core.md`) for EVERY
-  chat's system prompt, but ONLY while the app is installed; uninstall removes it
-  and the prompt returns to exactly `core.md`
-  (`backend/app/system_prompts.py` → `compose_system_prompt`). Use it for a
-  short, always-relevant default the agent should carry without being asked, and
-  keep it tight — it costs tokens on every session. Memory ships `memory-core.md`;
-  Artifacts ships `artifacts-core.md` (its proactive-visual default). Max 256 KB.
+- **A system-prompt fragment (always-on, while installed).**
+  `"system_prompt": "<name>.md"` (also a root-level `source_files` entry) —
+  the file is appended to the base system prompt for EVERY chat, but ONLY while
+  the app is installed; uninstall removes it. Use it for a short,
+  always-relevant default the agent should carry without being asked, and keep
+  it tight — it costs tokens on every session. Memory ships `memory-core.md`;
+  Pages ships `pages-core.md`. Max 256 KB.
 
-**Why the split matters — `core.md` stays app-agnostic.** The base constitution
-describes only what is true with no apps installed. Anything that depends on a
-specific app being present belongs in that app's `system_prompt` fragment (the
-always-on default) and/or its `skills` file (the how-to) — never in `core.md`.
-A not-installed app then contributes nothing, and the owner can see which
-installed apps extend the prompt in the Skills app.
+Anything that depends on your app being installed belongs in its fragment (the
+always-on default) and/or its skill (the how-to). A not-installed app then
+contributes nothing, and the owner can see which installed apps extend the
+prompt in the Skills app.
 
 ### App-owned agent activity cards
 
@@ -403,7 +391,7 @@ try {
 
 For conditional writes that can queue offline, pass a small JSON `conflictContext` describing the **mutation intent**, not merely the resulting whole document, and recover through `storage.onConflict(async conflict => ...)`. Several offline writes to the same path coalesce to the newest value, while the runtime preserves their opaque contexts in order. Always normalize with `storage.conflictContextItems(conflict.conflictContext)` and apply every returned intent to a fresh versioned read before the recovery write. The callback must resolve truthy only after that recovery is durable; returning `false` keeps the conflict for replay after an app-frame reload. The combined contexts remain bounded to 64 KiB; beyond that bound the runtime retains separate queued writes rather than silently dropping intent.
 
-**Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
+**Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes. If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
 ### The `.json`-no-envelope trap (silent data loss)
 
@@ -415,7 +403,7 @@ For `.json` storage paths the body IS the document. The envelope form `{content:
 
 ### Enumerate, don't probe
 
-There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Inside an app, use `storage.listWithStatus('prefix/')` when logic depends on knowing membership is complete: `complete:true` is a server or last-known complete membership snapshot with queued writes overlaid; `complete:false` is useful partial knowledge, never proof that the directory is empty. `storage.list()` returns the best-known entries array and is sufficient for non-authoritative display. Outside an app, use `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (immediate children, `?limit=` ≤500, opaque `?cursor=`). For JSON record collections, runtime `{includeContent:true}` or raw HTTP `?include_content=true` adds parsed small-file content within strict byte bounds; a complete listing does not guarantee every body is cached, so destructive work must also stop if any required `get()` is unavailable.
+There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is an anti-pattern that leaves an app showing empty — you can't know what an app stored by guessing; you enumerate. Inside an app, use `storage.listWithStatus('prefix/')` when logic depends on knowing membership is complete: `complete:true` is a server or last-known complete membership snapshot with queued writes overlaid; `complete:false` is useful partial knowledge, never proof that the directory is empty. `storage.list()` returns the best-known entries array and is sufficient for non-authoritative display. Outside an app, use `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (immediate children, `?limit=` ≤500, opaque `?cursor=`). For JSON record collections, runtime `{includeContent:true}` or raw HTTP `?include_content=true` adds parsed small-file content within strict byte bounds; a complete listing does not guarantee every body is cached, so destructive work must also stop if any required `get()` is unavailable.
 
 ### Raw storage API (cron, agent, cross-app `shared/`, non-`.json` blobs)
 
@@ -492,7 +480,7 @@ useEffect(() => {
 }, [])
 ```
 
-Signals land as app-attributed `app_signal` records in the platform activity stream. Each carries a stable client ID, its original `occurred_at` time, and a server-assigned ingestion time; Reflection deduplicates replayed IDs and uses the original time for its 24-hour window. During migration Reflection also reads legacy `signals.jsonl` files written by older cached runtimes. Its nightly `per-app-digest.json` counts signal names and surfaces the last five semantic error messages (`last_5_errors`); apps do not need to read the raw stream.
+Signals land as app-attributed `app_signal` records in the platform activity stream. Each carries a stable client ID, its original `occurred_at` time, and a server-assigned ingestion time; Reflection deduplicates replayed IDs and uses the original time for its 24-hour window. Its nightly `per-app-digest.json` counts signal names and surfaces the last five semantic error messages (`last_5_errors`); apps do not need to read the raw stream.
 
 **You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Reflection.
 
@@ -525,7 +513,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 
 Never hardcode `/vendor/three@<version>/…`. The bare `'three'` specifier is compiled against the platform's pinned version, bundled with the app, and works from the opaque frame offline.
 
-Do not make an offline-capable app depend on an absolute CDN import. A dynamic `https://esm.sh/...` import bypasses the app bundle, fails cold offline, and can strand the entire render path. If a package is not in the supported list, add it deliberately to the platform compiler (`frontend/package.json` plus `BUNDLED_RUNTIME_LIBS`) and validate the resulting bundle size. Keep the browser-level module under the parent broker's 8 MiB transfer cap.
+Do not make an offline-capable app depend on an absolute CDN import. A dynamic `https://esm.sh/...` import bypasses the app bundle, fails cold offline, and can strand the entire render path. If a package is not in the supported list, it needs a deliberate platform change (see `mobius-development.md`); do not work around it with a CDN import in an offline-capable app. Keep the browser-level module under the parent broker's 8 MiB transfer cap.
 
 Online-only apps may still use an explicit `https://esm.sh/...` dynamic import when the tradeoff is intentional, but it is never part of the offline guarantee and must have a visible failure state.
 
@@ -929,7 +917,7 @@ function navPushAndAwaitAck(label) {
 }
 
 async function openArticle(article) {
-  try { await navPushAndAwaitAck('klix-article') } catch { return }  // shell rejected; stay on the list
+  try { await navPushAndAwaitAck('article-detail') } catch { return }  // shell rejected; stay on the list
   setSelectedArticle(article)  // safe to render the nested view now
 }
 
@@ -978,7 +966,7 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 - The host caps pending sentinels at 20 per app. On overflow it responds `{type:'moebius:nav-push-rejected', requestId}` — the helper above rejects its promise, so you simply don't render the nested view. If you bypass the helper, treat a rejection as a hard "stay where you are" and do NOT increment your local counter, or your count drifts above the host's permanently and the next `nav-pop` consumes the wrong sentinel.
 - The `requestId` is optional on the wire (the shell echoes whatever you send), but use a fresh id per push when multiple can be in flight — a stale ack can otherwise resolve a later promise.
 
-**Across app switches:** app-sentinels are preserved across drawer-driven app switches. Nest 2 levels in Klix, drawer-tap to Notes, and the user gets browser-style back (first back returns to Klix showing its nested view, then unwinds Klix, last back exits). Your iframe stays mounted in the LRU cache while invisible, so its state is preserved — just respond to `moebius:nav-back` correctly even when currently invisible (by the time it arrives, your iframe is visible again).
+**Across app switches:** app-sentinels are preserved across drawer-driven app switches. Nest 2 levels in app A, drawer-tap to app B, and the user gets browser-style back (first back returns to app A showing its nested view, then unwinds app A, last back exits). Your iframe stays mounted in the LRU cache while invisible, so its state is preserved — just respond to `moebius:nav-back` correctly even when currently invisible (by the time it arrives, your iframe is visible again).
 
 **Forward restoration:** the runtime retains each reversible entry's handlers.
 After Back it keeps the entry dormant; when browser Forward revisits the same

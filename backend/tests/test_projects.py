@@ -693,7 +693,7 @@ def test_ordinary_page_is_not_misidentified_as_builder_output(
   (source / "index.jsx").write_text("export default function App() {}")
   catalog_app = models.App(
     name="Artifacts", description="Standalone work", jsx_source="",
-    slug="pages", source_dir=str(source), system_app=True,
+    slug="pages", source_dir=str(source),
   )
   db.add(catalog_app)
   db.commit()
@@ -737,7 +737,7 @@ def test_local_app_import_manages_existing_source_once_without_runtime_data(
   }))
   app = models.App(
     name="My local app", description="Made in chat", jsx_source="",
-    slug="my-local-app", source_dir=str(source), system_app=False,
+    slug="my-local-app", source_dir=str(source),
   )
   db.add(app)
   db.commit()
@@ -801,7 +801,7 @@ def test_app_owned_artifact_import_manages_declared_sources_in_place(
   (latex_source / "index.jsx").write_text("export default function App() {}")
   catalog_app = models.App(
     name="Artifacts", description="Standalone work", jsx_source="",
-    slug="pages", source_dir=str(artifacts_source), system_app=True,
+    slug="pages", source_dir=str(artifacts_source),
   )
   latex_app = models.App(
     name="LaTeX", description="Documents", jsx_source="",
@@ -1332,7 +1332,7 @@ def standalone_native_app(db):
   root.mkdir(parents=True)
   (root / "index.jsx").write_text("export default function App(){return null}")
   (root / "mobius.json").write_text(json.dumps({"entry": "index.jsx", "name": "Native"}))
-  app = models.App(name="Native", description="", jsx_source="", slug="linked-native", source_dir=str(root), system_app=False)
+  app = models.App(name="Native", description="", jsx_source="", slug="linked-native", source_dir=str(root))
   db.add(app)
   db.commit()
   db.refresh(app)
@@ -1378,7 +1378,7 @@ def test_failed_link_commit_never_removes_existing_source(client, auth, monkeypa
 
 def test_unavailable_page_catalog_does_not_hide_native_apps(client, auth, db, standalone_native_app):
   source_app, root = standalone_native_app
-  catalog = models.App(name="Pages", description="", jsx_source="", slug="pages", source_dir=str(root.parent / "pages"), system_app=True)
+  catalog = models.App(name="Pages", description="", jsx_source="", slug="pages", source_dir=str(root.parent / "pages"))
   db.add(catalog)
   db.commit()
   listed = client.get("/api/projects/import-sources", headers=auth)

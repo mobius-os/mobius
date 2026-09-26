@@ -80,7 +80,6 @@ from app.manifest_contract import (
   REQUIRED_STRING_FIELDS,
   ManifestContractError,
   job_interpreter,
-  require_executable_job,
   skill_member_paths,
   static_asset_entries,
   validate_manifest_contract,
@@ -203,10 +202,6 @@ _STATIC_ASSETS_MANIFEST = managed_paths.STATIC_ASSETS_MANIFEST
 _STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
 _STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
-UPDATE_RESOLUTION_POLICIES = frozenset({
-  "preserve_local",
-  "accept_reviewed_upstream_exact",
-})
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so Rolldown can bundle the import graph. The shared
@@ -773,33 +768,6 @@ def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   return f"{_canonical_base(url_or_base)}#manifest-id={manifest_id}"
 
 
-def _should_force_core_store_update(
-  source: str, manifest_id: str, canonical_manifest_url: str,
-) -> bool:
-  """Core App Store self-updates must not wedge behind their own local edits.
-
-  Normal apps preserve local edits and surface conflicts for an agent to
-  resolve. The App Store is the installer for resolving those conflicts, so
-  letting its own update conflict creates a dead-end: the user presses Update,
-  the backend records upstream, but the running store remains old forever. For
-  the canonical mobius-os App Store only, the published upstream source wins.
-  """
-  parsed = urlparse(canonical_manifest_url)
-  path_parts = [
-    unquote(part)
-    for part in parsed.path.split("/")
-    if part
-  ]
-  return (
-    source == "store"
-    and manifest_id == "store"
-    and parsed.hostname == "raw.githubusercontent.com"
-    and path_parts[:2] == ["mobius-os", "app-store"]
-  )
-
-
-
-
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -1205,7 +1173,9 @@ def stage_pending_conflict_update(
   outlive the request. The digest binds every fetched source/static/icon/seed
   byte; replay refetches and refuses to promote if any byte moved. The receipt
   lives under ``.git`` and is replaced atomically, so a restart sees either the
-  previous complete candidate or the new complete candidate, never a gap.
+  previous complete candidate or the new complete candidate, never a gap. A
+  newer conflicting release supersedes any resolution parked for an older one;
+  the same release conflicting again keeps the resolver's checkout.
   """
   repo = Path(source_dir)
   git_dir = repo / ".git"
@@ -1213,18 +1183,110 @@ def stage_pending_conflict_update(
   if target.is_symlink():
     raise ValueError("pending update path must not be a symlink")
   target.mkdir(parents=True, exist_ok=True)
+  try:
+    previous = json.loads((target / "receipt.json").read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    previous = None
+  if not isinstance(previous, dict) or (
+    previous.get("upstream_commit") != upstream_commit
+  ):
+    _drop_pending_update_worktree(repo)
   atomic_write(target / "receipt.json", json.dumps({
-    "schema": 3,
+    "schema": 4,
     "app_id": app_id,
     "upstream_commit": upstream_commit,
     "manifest": manifest,
     "raw_base": raw_base,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
-    "resolution_policy": None,
-    "reviewed_tree_oid": None,
     "merge_base_override": merge_base_override,
   }, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def pending_update_worktree(source_dir: str | Path) -> Path:
+  """The private checkout where a resolver reconciles one pending update.
+
+  It lives inside the app's own git directory, so the served source directory
+  never holds a half-merged tree: ordinary edits and applies keep working
+  while a resolver works, and finalization merges those late edits with the
+  resolution through the same three-way merge every update uses.
+  """
+  return Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "worktree"
+
+
+_CONFLICT_MARKER = r"^(<{7,} |>{7,} )"
+
+
+def committed_conflict_marker_paths(
+  repo: str | Path, ref: str, upstream_commit: str,
+) -> list[str] | None:
+  """Paths the resolution changed from upstream that commit a conflict
+  boundary. Unchanged upstream content is never a conflict, even if it
+  legitimately contains such a line. None when Git cannot tell."""
+  repo = Path(repo)
+  changed = app_git._run(
+    repo, "diff", "--name-only", "-z", upstream_commit, ref, check=False,
+  )
+  if changed.returncode != 0:
+    return None
+  paths = [path for path in changed.stdout.split("\0") if path]
+  if not paths:
+    return []
+  found = app_git._run(
+    repo, "grep", "-z", "-lE", _CONFLICT_MARKER, ref, "--",
+    *(f":(literal){path}" for path in paths),
+    check=False,
+  )
+  if found.returncode > 1:
+    return None
+  return [p.removeprefix(f"{ref}:") for p in found.stdout.split("\0") if p]
+
+
+def committed_pending_resolution(
+  source_dir: str | Path, upstream_commit: str,
+) -> str | None:
+  """The resolver's committed answer for ``upstream_commit``, if it has one.
+
+  The answer is the private checkout's commit, and only when it contains the
+  pending upstream, nothing is left uncommitted or mid-merge, and it commits no
+  conflict markers. Git has already refused to commit any unresolved path.
+  """
+  worktree = pending_update_worktree(source_dir)
+  if (
+    not (worktree / ".git").exists()
+    or app_git.merge_in_progress(worktree)
+    or app_git.worktree_dirty(worktree)
+    or app_git.ref_is_ancestor(worktree, upstream_commit, "HEAD") is not True
+    or committed_conflict_marker_paths(worktree, "HEAD", upstream_commit) != []
+  ):
+    return None
+  return app_git._run(worktree, "rev-parse", "HEAD").stdout.strip()
+
+
+def pending_update_resolved(source_dir: str | Path, upstream_commit: str) -> bool:
+  """Whether nothing but installation is left for this pending update.
+
+  Either the private checkout holds a committed answer, or ``main`` already
+  contains the upstream: a resolver from an earlier release committed there,
+  or an install moved ``main`` and was interrupted before completing. In both
+  cases rerunning the installer promotes it; the receipt stays until then.
+  """
+  return (
+    app_git.ref_is_ancestor(source_dir, upstream_commit, app_git.LOCAL_BRANCH)
+    is True
+    or committed_pending_resolution(source_dir, upstream_commit) is not None
+  )
+
+
+def _drop_pending_update_worktree(source_dir: str | Path) -> None:
+  worktree = pending_update_worktree(source_dir)
+  if os.path.lexists(worktree):
+    app_git.remove_overlay_worktree(source_dir, worktree)
+
+
+def pending_update_receipt_file(source_dir: str | Path) -> Path:
+  """The durable "not installed yet" marker of a pending update."""
+  return Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "receipt.json"
 
 
 def pending_conflict_update_receipt_present(source_dir: str | Path) -> bool:
@@ -1237,7 +1299,12 @@ def pending_conflict_update_receipt_present(source_dir: str | Path) -> bool:
 def read_pending_conflict_update_receipt(
   source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
 ) -> dict | None:
-  """Read validated pending metadata without loading potentially large assets."""
+  """Read validated pending metadata without loading potentially large assets.
+
+  Receipts written by earlier releases (schemas 1-3) carried a resolution
+  policy and a reviewed tree; both are ignored because the resolver's own
+  commit is now the complete answer.
+  """
   root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
   receipt_path = root / "receipt.json"
   if root.is_symlink() or receipt_path.is_symlink():
@@ -1246,19 +1313,14 @@ def read_pending_conflict_update_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
   except (OSError, ValueError):
     return None
-  schema = receipt.get("schema") if isinstance(receipt, dict) else None
-  policy = (
-    receipt.get("resolution_policy") if schema in (2, 3) else None
-  ) if isinstance(receipt, dict) else None
-  reviewed_tree_oid = (
-    receipt.get("reviewed_tree_oid") if schema in (2, 3) else None
-  ) if isinstance(receipt, dict) else None
+  if not isinstance(receipt, dict):
+    return None
+  schema = receipt.get("schema")
   merge_base_override = (
-    receipt.get("merge_base_override") if schema == 3 else None
-  ) if isinstance(receipt, dict) else None
+    receipt.get("merge_base_override") if schema in (3, 4) else None
+  )
   if (
-    not isinstance(receipt, dict)
-    or schema not in (1, 2, 3)
+    schema not in (1, 2, 3, 4)
     or receipt.get("app_id") != app_id
     or not upstream_commit
     or receipt.get("upstream_commit") != upstream_commit
@@ -1266,16 +1328,6 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
-    or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
-    or (
-      reviewed_tree_oid is not None
-      and (
-        not isinstance(reviewed_tree_oid, str)
-        or not re.fullmatch(
-          r"(?:[0-9a-f]{40}|[0-9a-f]{64})", reviewed_tree_oid,
-        )
-      )
-    )
     or (
       merge_base_override is not None
       and (
@@ -1287,70 +1339,7 @@ def read_pending_conflict_update_receipt(
     )
   ):
     return None
-  # Schema 1 receipts can survive a rolling restart. Normalize them in memory;
-  # the first explicit policy choice upgrades the durable receipt atomically.
-  receipt["resolution_policy"] = policy
-  receipt["reviewed_tree_oid"] = reviewed_tree_oid
   receipt["merge_base_override"] = merge_base_override
-  return receipt
-
-
-def _write_pending_conflict_update_receipt(
-  source_dir: str | Path, receipt: dict,
-) -> None:
-  target = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "receipt.json"
-  atomic_write(
-    target,
-    json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n",
-  )
-
-
-def set_pending_conflict_update_policy(
-  source_dir: str | Path,
-  *,
-  app_id: int,
-  upstream_commit: str,
-  policy: str,
-) -> dict:
-  """Bind one owner-selected whole-tree policy to the pending candidate."""
-  if policy not in UPDATE_RESOLUTION_POLICIES:
-    raise ValueError("invalid update resolution policy")
-  receipt = read_pending_conflict_update_receipt(
-    source_dir,
-    app_id=app_id,
-    upstream_commit=upstream_commit,
-  )
-  if receipt is None:
-    raise ValueError("pending update receipt is missing or stale")
-  policy_changed = receipt["resolution_policy"] != policy
-  receipt["schema"] = max(int(receipt.get("schema") or 1), 2)
-  receipt["resolution_policy"] = policy
-  if policy_changed or policy != "preserve_local":
-    receipt["reviewed_tree_oid"] = None
-  _write_pending_conflict_update_receipt(source_dir, receipt)
-  return receipt
-
-
-def set_pending_conflict_update_review(
-  source_dir: str | Path,
-  *,
-  app_id: int,
-  upstream_commit: str,
-  tree_oid: str,
-) -> dict:
-  """Persist the exact complete source tree the agent reviewed."""
-  if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tree_oid):
-    raise ValueError("invalid reviewed tree oid")
-  receipt = read_pending_conflict_update_receipt(
-    source_dir,
-    app_id=app_id,
-    upstream_commit=upstream_commit,
-  )
-  if receipt is None or receipt["resolution_policy"] != "preserve_local":
-    raise ValueError("preserve-local policy is not selected")
-  receipt["schema"] = max(int(receipt.get("schema") or 1), 2)
-  receipt["reviewed_tree_oid"] = tree_oid
-  _write_pending_conflict_update_receipt(source_dir, receipt)
   return receipt
 
 
@@ -1634,6 +1623,11 @@ def _verify_git_install_candidate(
 
 
 def clear_pending_conflict_update(source_dir: str | Path) -> None:
+  # The receipt is the durable "not installed yet" marker, so it goes first. A
+  # crash afterwards leaves only a stray checkout, which the next conflict or
+  # resolver replaces.
+  pending_update_receipt_file(source_dir).unlink(missing_ok=True)
+  _drop_pending_update_worktree(source_dir)
   shutil.rmtree(
     Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
     ignore_errors=True,
@@ -2595,7 +2589,6 @@ class InstallTarget:
   adopting_trusted_origin: bool
   trusted_catalog_origin: bool
   canonical_manifest_url: str
-  force_core_store_update: bool
   origin_migration: tuple[str, str] | None
   package_id: str | None
   source_identity: str | None
@@ -2945,9 +2938,6 @@ def _select_install_target(
   canonical_manifest_url = _canonical_identity_key(
     source_for_key, manifest_id,
   )
-  force_core_store_update = _should_force_core_store_update(
-    source, manifest_id, canonical_manifest_url,
-  )
   existing = _find_install_identity_row(
     db,
     source_url=requested_source,
@@ -3078,7 +3068,6 @@ def _select_install_target(
       and _trusted_catalog_origin_matches(existing, source_for_key)
     ),
     canonical_manifest_url=canonical_manifest_url,
-    force_core_store_update=force_core_store_update,
     origin_migration=origin_migration,
     package_id=package_id,
     source_identity=candidate.source_identity,
@@ -3352,7 +3341,6 @@ async def _prepare_app_row(
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
     system_prompt_file=manifest.get("system_prompt") or None,
-    system_app=bool(manifest.get("system_app", False)),
     capability_contract=capability_contract,
     project_templates_json=manifest.get("project_templates") or None,
   )
@@ -3475,7 +3463,6 @@ def _apply_manifest_metadata(
     app.embeds_agent = bool(manifest["embeds_agent"])
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.capability_contract = capability_contract
   # Projects workspace: declared project templates travel with the package
   # identity, so apply them here alongside the other manifest metadata for
@@ -3558,12 +3545,6 @@ async def _activate_install_source(
         job_name=plan.job_name,
       )
 
-  if plan.job_name:
-    try:
-      require_executable_job((source_dir / plan.job_name).stat().st_mode)
-    except (OSError, ManifestContractError) as exc:
-      raise HTTPException(400, str(exc)) from exc
-
   _write_static_assets(
     source_dir,
     plan.static_assets,
@@ -3621,8 +3602,6 @@ async def install_from_manifest(
   expected_app_id: int | None = None,
   expected_upstream_commit: str | None = None,
   expected_candidate_digest: str | None = None,
-  resolution_policy: str | None = None,
-  reviewed_resolution_tree_oid: str | None = None,
   publication_handoff_app_id: int | None = None,
 ) -> InstallResult:
   """Return a structured durable install/update/conflict outcome.
@@ -3667,8 +3646,6 @@ async def install_from_manifest(
       we never catch + swallow anything that would land the DB or
       filesystem in a half state.
   """
-  if resolution_policy not in ({None} | UPDATE_RESOLUTION_POLICIES):
-    raise ValueError("invalid update resolution policy")
   reviewed_update_fields = (
     reviewed_app_id,
     reviewed_upstream_commit,
@@ -3680,13 +3657,6 @@ async def install_from_manifest(
     value is not None for value in reviewed_update_fields
   ):
     raise ValueError("reviewed update identity is incomplete")
-  if resolution_policy is not None and expected_upstream_commit is None:
-    raise ValueError("update resolution policy requires a pending replay")
-  if (
-    reviewed_resolution_tree_oid is not None
-    and resolution_policy != "preserve_local"
-  ):
-    raise ValueError("reviewed resolution tree requires preserve-local policy")
   if publication_handoff_app_id is not None:
     if source != "publication_handoff":
       raise ValueError("publication handoff requires its dedicated source")
@@ -3838,7 +3808,6 @@ async def install_from_manifest(
   revive_after_commit = bool(existing and existing.deleted_at is not None)
   mode = target.mode
   canonical_manifest_url = target.canonical_manifest_url
-  force_core_store_update = target.force_core_store_update
 
   warnings: list[str] = []
   conflict_paths: list[str] = []
@@ -4022,24 +3991,6 @@ async def install_from_manifest(
           await asyncio.to_thread(
             app_git.abort_in_progress_merge, git_source_dir,
           )
-        if reviewed_resolution_tree_oid is not None:
-          # The resolver reviewed the complete source tree. A writer can edit
-          # it after the route's check but before this installer takes the
-          # source lock. Reject that drift before committing it to main.
-          replay_snapshot = await asyncio.to_thread(
-            app_git.snapshot_worktree, git_source_dir,
-          )
-          if replay_snapshot.tree_oid != reviewed_resolution_tree_oid:
-            raise HTTPException(
-              409,
-              detail={
-                "code": "reviewed_tree_changed",
-                "message": (
-                  "The resolved source changed after review. Review the "
-                  "complete tree again before finalizing."
-                ),
-              },
-            )
         # Update of an app already on the Git model. First capture any
         # unapplied on-disk draft onto `main` so the divergence check and any
         # merge see the real local source.
@@ -4070,16 +4021,6 @@ async def install_from_manifest(
             git_source_dir, prev_upstream_commit,
           )
         )
-        if resolution_policy == "accept_reviewed_upstream_exact":
-          if expected_upstream_commit is None:
-            raise RuntimeError(
-              "exact-upstream policy requires a pending update replay"
-            )
-          # The installer already owns the safe whole-tree upstream-wins path:
-          # journaled source replacement, compile, metadata/assets, and one
-          # replay commit. The explicit policy simply selects that path even
-          # though local main diverged; no reset or parallel rollback exists.
-          diverged = False
         if expected_upstream_commit is not None:
           current_upstream = await asyncio.to_thread(
             app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
@@ -4240,17 +4181,6 @@ async def install_from_manifest(
             app_git.UPSTREAM_BRANCH,
           )
         dropped_source_paths = previous_upstream_paths - new_upstream_paths
-        if resolution_policy == "accept_reviewed_upstream_exact":
-          local_tree = await asyncio.to_thread(
-            app_git.read_ref_tree, git_source_dir, app_git.LOCAL_BRANCH,
-          )
-          local_source_paths = {
-            rel for rel in local_tree if rel not in _MERGED_NON_SOURCE
-          }
-          # Exact means the complete tracked upstream source tree, including
-          # absence: local-only tracked files must not survive the journaled
-          # write and be recommitted by the replay.
-          dropped_source_paths |= local_source_paths - new_upstream_paths
         if not diverged:
           # No local edits → upstream wins outright for the whole tree; it is
           # `source_tree` as fetched for synthetic repos, or the full
@@ -4301,7 +4231,41 @@ async def install_from_manifest(
           # Local diverged: fold the new upstream into the local edits with
           # a three-way merge that touches neither `main` nor the working
           # tree, then act on the clean-vs-conflict verdict.
-          if git_merge_base_override is not None:
+          # A resolver may already have committed this upstream merged with
+          # `main` as it was when the update was parked. Installing the same
+          # release (the resolver's finish, or the Store's Update button) then
+          # combines edits that landed on `main` since with that answer through
+          # the same three-way merge; only an overlap goes back to the resolver.
+          # Key on the upstream ref just recorded: app.upstream_commit is only
+          # refreshed after this for sources imported without a Git origin.
+          resolved_commit = await asyncio.to_thread(
+            committed_pending_resolution,
+            git_source_dir,
+            await asyncio.to_thread(
+              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+            ),
+          )
+          if resolved_commit is not None:
+            merge = await asyncio.to_thread(
+              app_git.merge_refs,
+              git_source_dir,
+              app_git.LOCAL_BRANCH,
+              resolved_commit,
+            )
+            if merge.status == "conflict":
+              raise HTTPException(
+                409,
+                detail={
+                  "code": "resolution_behind_local_edits",
+                  "message": (
+                    "The app was edited while this update was being resolved, "
+                    "and those edits overlap the resolution. Finish it in the "
+                    "update's resolver chat."
+                  ),
+                  "conflict_paths": merge.conflict_paths,
+                },
+              )
+          elif git_merge_base_override is not None:
             merge = await asyncio.to_thread(
               app_git.merge_refs,
               git_source_dir,
@@ -4325,66 +4289,51 @@ async def install_from_manifest(
             )
           reconciliation = merge.reconciliation
           if merge.status == "conflict":
-            if force_core_store_update:
-              # The Store must remain able to update itself even when its own
-              # source conflicts. Pin its full local tip before choosing the
-              # reviewed upstream tree so that choice is recoverable.
-              recovery_ref = await asyncio.to_thread(
-                app_git.preserve_local_tip_for_recovery, git_source_dir,
-              )
-              log.info("Store source saved before self-update: %s", recovery_ref)
-              warnings.append(
-                "App Store updated; previous local edits were saved "
-                "for recovery"
-              )
-              # This is an intentional upstream choice, not an unresolved
-              # merge. The displaced local tip is the recovery receipt.
-              reconciliation = app_git.ReconciliationReceipt()
-              divergence = "fast_forward"
+            # Every app, including the App Store itself, keeps local edits on
+            # a real conflict; the Store stays served and resolves through the
+            # same owner-gated resolver instead of overwriting local work.
+            # JSON manifests can reconcile serialization drift and disjoint
+            # edits structurally. Other files retain the APP_VERSION-only
+            # rule. Any remaining overlap leaves the whole update untouched
+            # for the owner to resolve.
+            benign = await asyncio.to_thread(
+              app_git.resolve_benign_conflict,
+              git_source_dir, merge.conflict_paths,
+              merge_base=git_merge_base_override,
+            )
+            resolved_source = None
+            if benign is not None:
+              resolved_source = {
+                rel: data for rel, data in benign.tree.items()
+                if rel not in _MERGED_NON_SOURCE
+              }
+            if resolved_source is not None and entry_key in resolved_source:
+              source_tree = resolved_source
+              divergence = "clean_merge"
               merge_applied = True
-            else:
-              # JSON manifests can reconcile serialization drift and disjoint
-              # edits structurally. Other files retain the APP_VERSION-only
-              # rule. Any remaining overlap leaves the whole update untouched
-              # for the owner to resolve.
-              benign = await asyncio.to_thread(
-                app_git.resolve_benign_conflict,
-                git_source_dir, merge.conflict_paths,
-                merge_base=git_merge_base_override,
+              warnings.append(
+                "auto-resolved a benign update conflict "
+                "(no semantic overlap between local edits and upstream)"
               )
-              resolved_source = None
-              if benign is not None:
-                resolved_source = {
-                  rel: data for rel, data in benign.tree.items()
-                  if rel not in _MERGED_NON_SOURCE
-                }
-              if resolved_source is not None and entry_key in resolved_source:
-                source_tree = resolved_source
-                divergence = "clean_merge"
-                merge_applied = True
-                warnings.append(
-                  "auto-resolved a benign update conflict "
-                  "(no semantic overlap between local edits and upstream)"
-                )
-                reconciliation = app_git.ReconciliationReceipt(
-                  proven_present=reconciliation.proven_present,
-                  local_only_paths=reconciliation.local_only_paths,
-                  new_upstream_paths=reconciliation.new_upstream_paths,
-                  compatible_paths=reconciliation.compatible_paths,
-                  provenance_refs_used=reconciliation.provenance_refs_used,
-                )
-                # Exec bits come from the same merged tree the resolution was
-                # built on, mirroring the clean-merge branch above.
-                git_exec_paths = await asyncio.to_thread(
-                  app_git.read_tree_exec_paths,
-                  git_source_dir, benign.tree_oid,
-                )
-              else:
-                # Never rebase local. The app stays served with its current
-                # bundle + source; the new upstream is recorded for a later
-                # agent-resolution pass. Switch to conflict mode below.
-                mode = "conflict"
-                conflict_paths = merge.conflict_paths
+              reconciliation = app_git.ReconciliationReceipt(
+                proven_present=reconciliation.proven_present,
+                local_only_paths=reconciliation.local_only_paths,
+                new_upstream_paths=reconciliation.new_upstream_paths,
+                compatible_paths=reconciliation.compatible_paths,
+                provenance_refs_used=reconciliation.provenance_refs_used,
+              )
+              # Exec bits come from the same merged tree the resolution was
+              # built on, mirroring the clean-merge branch above.
+              git_exec_paths = await asyncio.to_thread(
+                app_git.read_tree_exec_paths,
+                git_source_dir, benign.tree_oid,
+              )
+            else:
+              # Never rebase local. The app stays served with its current
+              # bundle + source; the new upstream is recorded for a later
+              # agent-resolution pass. Switch to conflict mode below.
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths
           else:
             # Clean merge: the WHOLE merged tree is what we write + compile.
             # Read it in full (one path for one and many files) and drop the
@@ -4472,8 +4421,8 @@ async def install_from_manifest(
         # Conflict: leave the working tree exactly as it was. The app keeps
         # serving its prior good bundle and Settings/App Store surface the
         # conflict paths. Only the owner's click-gated resolver endpoint
-        # materializes a REAL working-tree merge conflict (markers +
-        # MERGE_HEAD) for the agent to resolve with ordinary git.
+        # materializes the real merge (markers + MERGE_HEAD), and it does so
+        # in the app's private resolution checkout, never in this tree.
         # `app.jsx_source` stays the LOCAL source and the upstream provenance
         # (upstream_commit / upstream_jsx_sha, set above) persists for the
         # later resolution.
@@ -4490,6 +4439,13 @@ async def install_from_manifest(
           candidate_digest=candidate_digest,
           merge_base_override=git_merge_base_override,
         )
+
+      if mode != "conflict" and merge_applied and merge_existing_source:
+        # The merged tree is the complete answer, so every tracked path it
+        # lacks goes: a file a resolver deleted as well as one upstream removed.
+        dropped_source_paths |= await asyncio.to_thread(
+          _read_upstream_source_paths, git_source_dir, app_git.LOCAL_BRANCH,
+        ) - set(source_tree)
 
       # The disk-write phase runs INSIDE the same held lock for the Git path so
       # no source commit interleaves between the merge decision and the write; a
@@ -4632,7 +4588,6 @@ async def install_from_manifest(
     # Success: drop any .bak snapshots we made — the new bundle is
     # now the canonical one.
     journal.cleanup_superseded()
-    clear_pending_conflict_update(app.source_dir)
 
   except CompileError as exc:
     app_name = str(
@@ -4669,6 +4624,12 @@ async def install_from_manifest(
     candidate=candidate,
     warnings=warnings,
   )
+  # Only now is the update fully converged. Until the receipt goes, a retry
+  # reruns this whole install, post-commit effects included.
+  try:
+    clear_pending_conflict_update(app.source_dir)
+  except (OSError, subprocess.SubprocessError):
+    log.warning("install: could not clear the finished pending update", exc_info=True)
 
   return InstallResult(
     app=app,

@@ -90,7 +90,8 @@ PROMOTE_GOAL_DESCRIPTION = (
   "turns bounded work into a multi-stage outcome. Do not use for questions, "
   "honest one-turn work, or delegated children. After promotion, publish a "
   "Goal plan immediately when the outcome has two or more independently "
-  "verifiable stages or branches. A Goal record does not execute prose plans."
+  "verifiable stages or branches, using the goal_plan.py script named in the "
+  "result. A Goal record does not execute prose plans."
 )
 DECLARE_WAIT_DESCRIPTION = (
   "Persist the top-level chat's sole cross-turn wait so it resumes "
@@ -168,10 +169,7 @@ def _promote_goal(objective: str) -> dict:
     "objective": payload["objective"],
     "goal_id": payload["root_run_id"],
     "run_id": payload["run_id"],
-    "next_action": (
-      "If this outcome has multiple verifiable stages or branches, publish "
-      "its Goal plan now. The Goal record does not execute a prose checklist."
-    ),
+    "next_action": _GOALS.PLAN_NEXT_ACTION,
   }
 
 

@@ -297,3 +297,44 @@ def test_idle_pending_sweep_stands_down_while_draining(monkeypatch):
   assert scheduled == []
   _active_status, _messages, pending = _read(chat_id)
   assert [m["content"] for m in pending] == ["recover me"]
+
+
+def test_idle_pending_sweep_finds_queues_without_reading_transcripts(monkeypatch):
+  """The minute watchdog must not walk every chat's inline transcript.
+
+  SQLite stores the transcript before ``pending_messages``, so a candidate
+  query that reads that column from every row stalls the event loop on a cold
+  page cache. The candidate query goes through the partial pending-queue index
+  and still finds the one real queue among empty ones.
+  """
+  from app import schema_migrations
+
+  # Both indexes exist on a real install; without ANALYZE statistics SQLite
+  # otherwise prefers the drawer index's deleted_at equality.
+  schema_migrations._add_chat_drawer_covering_index(engine)
+  schema_migrations._add_chat_pending_queue_index(engine)
+  chat_id = "idle-indexed-pending"
+  _seed_pending(chat_id, age_secs=180)
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(id="idle-empty-queue", title="empty", provider="claude",
+                       messages=[{"role": "user", "content": "x", "ts": 1}]))
+    db.commit()
+  finally:
+    db.close()
+  statements = []
+
+  def _capture(_conn, _cursor, statement, _params, _context, _many):
+    if "pending_messages" in statement and "FROM chats" in statement:
+      statements.append(statement)
+
+  event.listen(engine, "before_cursor_execute", _capture)
+  try:
+    swept, _scheduled = _sweep(monkeypatch)
+  finally:
+    event.remove(engine, "before_cursor_execute", _capture)
+
+  assert swept == [chat_id]
+  with engine.connect() as conn:
+    plan = conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statements[0]).fetchall()
+  assert any("ix_chats_pending_queue" in row[-1] for row in plan), plan

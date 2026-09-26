@@ -2,6 +2,7 @@
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -1249,6 +1250,31 @@ def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
     f"Overflow note {MAX_CONTEXT_MESSAGES:02d}",
   ]
   assert "messages_truncated" not in later_snapshot
+
+
+def test_next_turn_context_delivers_a_note_at_the_send_cap_whole(db):
+  """A note the sender was allowed to write arrives complete, never clipped."""
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  current = make_goal_run(db,
+    id="scout-long-note-run", root_run_id="scout-long-note-run",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=previous_started + timedelta(seconds=100),
+  )
+  body = ("Reply on the review: " + "detail " * 700)[:4000].rstrip() + " END"
+  db.add_all([current, models.AgentCoordinationMessage(
+    id="long-note", room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id="long-note-send", send_target_key=chats["scout"].id,
+    to_chat_id=chats["scout"].id, kind="finding", body=body,
+    created_at=previous_started + timedelta(seconds=1),
+  )])
+  db.commit()
+
+  context = build_coordination_context(db, chats["scout"].id, current.id)
+  assert json.dumps(body, ensure_ascii=False)[1:-1] in context
+  assert "…" not in context
 
 
 def test_unadmitted_turn_does_not_consume_peer_context(db):

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, or_
+from sqlalchemy import Text, cast, func, literal_column, or_, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -225,7 +225,7 @@ def _read_skill_text() -> str:
   """Return only the cached platform constitution.
 
   App-owned fragments are composed and snapshotted separately when a chat
-  starts its first turn. Installing, updating, or uninstalling a system app
+  starts its first turn. Installing, updating, or uninstalling an app
   therefore affects chats started afterwards, never an existing conversation.
   The tracked platform constitution has a process-lifetime cache, so an edit
   or platform update takes effect after server restart. If the live checkout
@@ -1346,6 +1346,39 @@ def _pending_head_is_stale(
   return timestamp <= now_ms - age_ms
 
 
+def _nonempty_pending_queues(db: Session) -> list:
+  """Project live chats whose pending queue is non-empty.
+
+  SQLite stores the transcript inline before ``pending_messages``, so reading
+  that column for every chat walks every transcript; on a cold page cache that
+  blocked the event loop for 20-40 s. The partial index
+  ``ix_chats_pending_queue`` (migration 0069) lists only non-empty queues.
+  Without ANALYZE statistics SQLite prefers ``ix_chats_drawer``'s
+  ``deleted_at`` equality and reads every row anyway, so the plan is pinned
+  with INDEXED BY. Other databases store large values out of line.
+  """
+  columns = (
+    models.Chat.id, models.Chat.pending_messages, models.Chat.pending_question_id,
+  )
+  if db.get_bind().dialect.name == "sqlite":
+    return db.execute(
+      text(
+        "SELECT chats.id, chats.pending_messages, chats.pending_question_id "
+        "FROM chats INDEXED BY ix_chats_pending_queue "
+        "WHERE chats.deleted_at IS NULL "
+        "AND CAST(chats.pending_messages AS TEXT) != '[]'"
+      ).columns(*columns),
+    ).all()
+  return (
+    db.query(*columns)
+    .filter(
+      models.Chat.deleted_at.is_(None),
+      cast(models.Chat.pending_messages, Text) != literal_column("'[]'"),
+    )
+    .all()
+  )
+
+
 async def sweep_idle_pending_chats(db: Session) -> list[str]:
   """Claim and start old pending queues whose chat has no run owner."""
   log = _get_logger()
@@ -1359,15 +1392,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # ~204 MiB allocation spike and left ~169 MiB in CPython/glibc arenas after
     # the rows were released. The queue is the candidate index; load one full
     # Chat only after its projected pending head proves old enough to recover.
-    candidates = (
-      db.query(
-        models.Chat.id,
-        models.Chat.pending_messages,
-        models.Chat.pending_question_id,
-      )
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
+    candidates = _nonempty_pending_queues(db)
   except Exception:
     log.exception("sweep_idle_pending_chats: query failed")
     return started
@@ -2718,15 +2743,6 @@ def _publish_chat_run_finished(chat_id: str) -> None:
     })
 
 
-def _publish_chat_scratch_releasable(chat_id: str) -> None:
-  """Hint that physical turn cleanup finished; consumers recheck ownership."""
-  if chat_id:
-    get_system_broadcast().publish({
-      "type": "chat_scratch_releasable",
-      "chatId": chat_id,
-    })
-
-
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
   if registry.is_alive(chat_id):
@@ -3512,11 +3528,9 @@ _MODEL_CAPACITY_ERROR_MARKERS = (
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
 
-  Substring match on the display error (mirrors `_should_retry_without_model`
-  in claude_sdk_runner). Deliberately broad — the cost of a false positive is
-  only that the queue is parked for the user to resend (never lost), while a
-  false negative reinstates the limit storm. A genuinely transient one-off
-  error does NOT match, so the queue still flows through a blip.
+  Substring match on the display error. A false positive only parks the queue
+  for manual resend; a false negative reinstates the limit storm. A transient
+  one-off error does not match, so the queue flows through a blip.
 
   The marker list is grounded in the ACTUAL Anthropic limit strings seen in
   prod chat.log: "You've hit your weekly limit · resets ...", "... session
@@ -4619,23 +4633,6 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
-    if runtime_settled and chat_id:
-      # chat_run_finished is intentionally earlier for responsive shell UI.
-      # Scratch needs a stricter physical boundary: _run_chat_impl has returned
-      # after browser cleanup, and a complete empty process inventory proves no
-      # detached Chromium session still inherits this turn's TMPDIR. The
-      # scratch owner rechecks both runtime and durable run identity again.
-      try:
-        browser_scan = await asyncio.to_thread(
-          browser_profiles.browser_session_targets_for_chat, chat_id,
-        )
-        if browser_scan.idle:
-          _publish_chat_scratch_releasable(chat_id)
-      except Exception:
-        _get_logger().debug(
-          "agent scratch release hint skipped chat_id=%s",
-          chat_id, exc_info=True,
-        )
     # Parent progress must not wait on optional summary generation.
     try:
       if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
@@ -5112,7 +5109,7 @@ async def _run_chat_impl_with_db(
 
   # On the first message of a session, gather bounded recent-chat digests and
   # the skills inventory as one-time startup context. Knowledge-graph data is
-  # never pulled here; an installed system app may teach the agent to make a
+  # never pulled here; an installed app may teach the agent to make a
   # separate prompt-scoped recall call.
   #
   # Startup context belongs to the first-turn system prompt, not the user
@@ -5376,8 +5373,6 @@ async def _run_chat_impl_with_db(
   from app.process_groups import RUN_MARKER_ENV, run_marker
   # Names every process this run starts (non-secret; see RUN_MARKER_ENV).
   base_env[RUN_MARKER_ENV] = run_marker(run_token)
-  # Helpers default to the delegating agent's own provider (spawn_agent).
-  base_env["MOBIUS_AGENT_PROVIDER"] = provider_id or DEFAULT_PROVIDER
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
@@ -5472,7 +5467,7 @@ async def _run_chat_impl_with_db(
         )
         db.rollback()
 
-  # A per-chat custom prompt replaces the base constitution, but system-app
+  # A per-chat custom prompt replaces the base constitution, but installed-app
   # contributions are still part of the ONE prompt snapshot selected when the
   # chat starts. Provider SDKs receive those same immutable bytes on every
   # request; live app state is never recomposed for an established chat.
@@ -5900,40 +5895,20 @@ async def _run_chat_impl_with_db(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
           provider_id=provider_id, cost_usd=0, close_browser=False,
         )
-      if helper_host_key is not None:
-        from app.claude_helper_host import run_claude_host_turn
-        runner_result = await run_claude_host_turn(
-          user_message=user_message,
-          session_id=claude_session_id,
-          base_env=sdk_env,
-          chat_id=chat_id,
-          skill_text=system_prompt,
-          bc=sink,
-          agent_settings=runner_agent_settings,
-          skills_enabled=_skills_enabled(settings.data_dir),
-          run_policy=run_policy,
-          connector_plan=connector_turn_plan,
-          resumed_context=resumed_context_fallback,
-          helper_host_key=helper_host_key,
-          data_dir=settings.data_dir,
-        )
-      else:
-        runner_result = await run_claude_sdk_turn(
-          user_message=user_message,
-          session_id=claude_session_id,
-          base_env=sdk_env,
-          cwd=cwd,
-          chat_id=chat_id,
-          skill_text=system_prompt,
-          bc=sink,
-          pending_questions=questions._pending,
-          db=db,
-          agent_settings=runner_agent_settings,
-          skills_enabled=_skills_enabled(settings.data_dir),
-          run_policy=run_policy,
-          connector_plan=connector_turn_plan,
-          coordination_enabled=coordination_tools_enabled,
-        )
+      runner_result = await run_claude_sdk_turn(
+        user_message=user_message,
+        session_id=claude_session_id,
+        base_env=sdk_env,
+        cwd=cwd,
+        chat_id=chat_id,
+        skill_text=system_prompt,
+        bc=sink,
+        agent_settings=runner_agent_settings,
+        skills_enabled=_skills_enabled(settings.data_dir),
+        run_policy=run_policy,
+        connector_plan=connector_turn_plan,
+        coordination_enabled=coordination_tools_enabled,
+      )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:

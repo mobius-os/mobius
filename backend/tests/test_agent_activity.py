@@ -76,6 +76,17 @@ def test_receipt_keeps_host_identity_and_app_owned_presentation():
   }
 
 
+def test_paged_operation_key_survives_and_malformed_keys_are_dropped():
+  # Pages of one app operation share this key so the chat shows one row.
+  pending = activity_from_command(COMMAND_TEXT, BINDING)
+  kept = activity_from_result(pending, _receipt(operation_key="lk-1:read:ab12"), 0)
+  assert kept["operation_key"] == "lk-1:read:ab12"
+  for bad in ("", "has space", "x" * 161, 7, "<script>"):
+    dropped = activity_from_result(pending, _receipt(operation_key=bad), 0)
+    assert "operation_key" not in dropped
+    assert dropped["label"] == "Found 2 relevant notes"
+
+
 def test_receipt_cannot_change_identity_or_claim_success_after_process_failure():
   pending = activity_from_command(COMMAND_TEXT, BINDING)
   assert activity_from_result(

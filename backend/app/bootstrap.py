@@ -24,52 +24,26 @@ from app.install import install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
 
-# The Store is part of the recovery path, so first boot must install the exact
-# revision reviewed with this platform release rather than whatever happens to
-# be at a mutable branch tip. The catalog has no release tags yet; pinning the
-# reviewed commit provides the same immutable input until it does.
-BOOTSTRAP_STORE_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-store/"
-  "9c56083770772993a0fdc0c77df4c3b93cc36a46/mobius.json"
-)
+# Every default app installs from its catalog repository's `main`, so a new
+# deployment starts on the latest version of each app; later versions arrive
+# through the Store's ordinary update flow. Nothing here freezes a revision:
+# `tests/test_bootstrap_live.py` (its own CI step) installs this whole set on an
+# empty instance so a `main` that no longer installs on this platform fails CI
+# instead of silently leaving new deployments without the app.
+_MANIFEST_URL = "https://raw.githubusercontent.com/mobius-os/{repo}/main/mobius.json"
 
-# The Skills app (browse/install ecosystem skills + the skill-agent chat).
-# Canonical home is the app-skills catalog repo. PINNED to a reviewed commit,
-# never a mutable branch: core and app releases pair explicitly — this pin
-# names the newest app revision reviewed against THIS platform's API surface,
-# and bumping it is a deliberate platform commit that rides the same release.
-# (Now v2.0.0 — compat badges, catalog browser — which requires this platform's
-# skills API; pinned here as core #146 and app #4 merged together in this
-# release. The prior v1.1.2 pin needed no skills API and ran on any core.)
-BOOTSTRAP_SKILLS_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-skills/"
-  "113210883ddab380a01da1443e61600439d23b2a/mobius.json"
+BOOTSTRAP_STORE_MANIFEST_URL = _MANIFEST_URL.format(repo="app-store")
+BOOTSTRAP_SKILLS_MANIFEST_URL = _MANIFEST_URL.format(repo="app-skills")
+BOOTSTRAP_MEMORY_MANIFEST_URL = _MANIFEST_URL.format(repo="app-memory")
+BOOTSTRAP_REFLECTION_MANIFEST_URL = _MANIFEST_URL.format(repo="app-reflection")
+BOOTSTRAP_INTEGRATIONS_MANIFEST_URL = _MANIFEST_URL.format(
+  repo="app-integrations",
 )
-
-BOOTSTRAP_MEMORY_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-memory/main/mobius.json"
+BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = _MANIFEST_URL.format(
+  repo="app-connections",
 )
-BOOTSTRAP_REFLECTION_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-reflection/main/mobius.json"
-)
-BOOTSTRAP_INTEGRATIONS_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-integrations/main/mobius.json"
-)
-BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
-)
-BOOTSTRAP_IDENTITY_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-mobius-you/main/mobius.json"
-)
-# Social (federated community board + direct messages). PINNED to a reviewed
-# commit, never a mutable branch tip: first boot installs the exact audited
-# revision that ships with this release, matching Store/Skills. This is a plain
-# manifest install — the same generic mechanism as every other bootstrap app —
-# not app-specific first-boot policy in the platform.
-BOOTSTRAP_SOCIAL_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-social/"
-  "5cb40d86953f689ee376fa45d39bcd07d7bd5f42/mobius.json"
-)
+BOOTSTRAP_IDENTITY_MANIFEST_URL = _MANIFEST_URL.format(repo="app-mobius-you")
+BOOTSTRAP_SOCIAL_MANIFEST_URL = _MANIFEST_URL.format(repo="app-social")
 
 
 @dataclass(frozen=True)

@@ -586,7 +586,6 @@ class ActiveCodexTurn:
     process_group_id: int | None = None,
     sink: Any | None = None,
     run_marker: str | None = None,
-    shared_host: bool = False,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
@@ -596,9 +595,6 @@ class ActiveCodexTurn:
     self._process_group_id = process_group_id
     # Names this turn's commands, which live outside the app-server's group.
     self._run_marker = run_marker
-    # On a shared helper host the process group is the host's: a hard stop
-    # interrupts this turn and ends only its own marked commands.
-    self._shared_host = shared_host
     # A retained PGID must never be signalled twice: after the first kill the
     # kernel may eventually reuse that number for an unrelated process group.
     self._force_stop_started = False
@@ -1909,7 +1905,6 @@ async def _run_codex_sdk_turn(
         process_group_id=process_group_id,
         sink=bc,
         run_marker=base_env.get(RUN_MARKER_ENV),
-        shared_host=helper_host is not None,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -2394,15 +2389,6 @@ async def _run_codex_sdk_turn(
     # worker keeps the short grace period off the FastAPI event loop; shield
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
-    if helper_host is not None:
-      # Unload this helper's thread (its tool servers exit with it) before
-      # ending its leftover commands; the host itself stays up.
-      await asyncio.shield(helper_host.unload_thread(current_session_id))
-      if not helper_host.alive:
-        from app import helper_hosts
-        await asyncio.shield(helper_hosts.MANAGER.discard(helper_host))
-    if turn_env_file is not None:
-      turn_env_file.remove()
     run_marker = base_env.get(RUN_MARKER_ENV)
     if (
       (process_group_id is not None or run_marker)

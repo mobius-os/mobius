@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import threading
 import warnings
+from collections import OrderedDict
 
 from PIL import Image
 
@@ -19,7 +22,34 @@ class InvalidIcon(ValueError):
 
 
 def normalize_icon(raw: bytes) -> bytes:
-  """Return one bounded square RGB/RGBA PNG for install, apply, or override."""
+  """Return one bounded square RGB/RGBA PNG for install, apply, or override.
+
+  Normalization is pure, and every update check and candidate fetch feeds the
+  same unchanged icons through it to rebuild package digests; the optimized
+  PNG encode costs 0.1-0.3 s of CPU per icon. Remember recent outputs by the
+  source bytes' hash so repeated checks reuse the identical result.
+  """
+  key = hashlib.sha256(raw).digest()
+  with _normalized_lock:
+    cached = _normalized.get(key)
+    if cached is not None:
+      _normalized.move_to_end(key)
+      return cached
+  result = _normalize_uncached(raw)
+  with _normalized_lock:
+    _normalized[key] = result
+    _normalized.move_to_end(key)
+    while len(_normalized) > _NORMALIZED_CACHE_SIZE:
+      _normalized.popitem(last=False)
+  return result
+
+
+_NORMALIZED_CACHE_SIZE = 128
+_normalized: OrderedDict[bytes, bytes] = OrderedDict()
+_normalized_lock = threading.Lock()
+
+
+def _normalize_uncached(raw: bytes) -> bytes:
   try:
     image = Image.open(io.BytesIO(raw))
     # Header dimensions are available before load(), so reject oversized

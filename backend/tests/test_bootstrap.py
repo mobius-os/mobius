@@ -86,14 +86,6 @@ def _installed_default_rows(created_at, *, deleted=()):
   ]
 
 
-def test_recovery_store_bootstrap_is_pinned_to_an_immutable_commit():
-  """A fresh boot cannot silently install a newly moved Store branch tip."""
-  assert re.search(
-    r"/mobius-os/app-store/[0-9a-f]{40}/mobius\.json$",
-    BOOTSTRAP_STORE_MANIFEST_URL,
-  )
-
-
 @pytest.mark.asyncio
 async def test_explicit_skip_needs_neither_database_nor_catalog(monkeypatch):
   monkeypatch.setenv("MOEBIUS_SKIP_BOOTSTRAP", "1")
@@ -477,8 +469,10 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
 
 
 
-_SKILLS_MAIN_MANIFEST = (
-  "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
+# Skills as earlier releases installed it: from a fixed commit, not `main`.
+_SKILLS_COMMIT_MANIFEST = (
+  "https://raw.githubusercontent.com/mobius-os/app-skills/"
+  "113210883ddab380a01da1443e61600439d23b2a/mobius.json"
 )
 
 
@@ -486,20 +480,19 @@ _SKILLS_MAIN_MANIFEST = (
 async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
   db, monkeypatch,
 ):
-  """F-1: the pinned bootstrap URL names a COMMIT, but a skills row installed at
-  `main` is the SAME app (identity is the repo, not the ref) — bootstrap must
-  recognize it and never reinstall a duplicate."""
+  """F-1: bootstrap installs from `main`, but a skills row installed from an
+  earlier release's fixed commit is the SAME app (identity is the repo, not the
+  ref) — bootstrap must recognize it and never reinstall a duplicate."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key, _trusted_catalog_repo_base
 
-  # Guard: this test is only meaningful while the pin is a non-`main` ref.
   assert _trusted_catalog_repo_base(BOOTSTRAP_SKILLS_MANIFEST_URL) == (
     "https://raw.githubusercontent.com/mobius-os/app-skills"
   )
   db.add(models.App(
     source_dir="/tmp/mobius-tests/skills",
     id=50, name="Skills", slug="skills",
-    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+    manifest_url=_canonical_identity_key(_SKILLS_COMMIT_MANIFEST, "skills"),
   ))
   db.commit()
 
@@ -513,15 +506,16 @@ async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
 
 @pytest.mark.asyncio
 async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
-  """F-1: an owner uninstalled skills (a tombstone) at `main`; a commit-pinned
-  bootstrap must still see it and NOT silently reinstall past the uninstall."""
+  """F-1: an owner uninstalled skills (a tombstone) installed from a fixed
+  commit; bootstrap from `main` must still see it and NOT silently reinstall
+  past the uninstall."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
   db.add(models.App(
     source_dir="/tmp/mobius-tests/skills",
     id=51, name="Skills", slug="skills",
-    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+    manifest_url=_canonical_identity_key(_SKILLS_COMMIT_MANIFEST, "skills"),
     deleted_at=datetime.now(timezone.utc),
   ))
   db.commit()

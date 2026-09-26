@@ -9,24 +9,12 @@ Design choices:
 - Owner questions use the provider-neutral Möbius `request_question` control:
   it saves a durable terminal card and starts exactly one continuation when
   answered. Claude's native `AskUserQuestion` / `request_user_input` tools are
-  excluded from new turn inventories so a visually identical, process-bound
+  excluded on new and resumed turns so a visually identical, process-bound
   wait cannot bypass that lifecycle.
 - `ClaudeSDKClient` is used instead of one-shot `query()` because
   Möbius needs the bidirectional control surface: explicit `connect()`,
   `query()`, streaming `receive_response()`, and external
   `interrupt()` support for Stop.
-- `AskUserQuestion` is intercepted via the SDK's `can_use_tool`
-  callback (NOT PreToolUse/PostToolUse hooks). The callback parks a
-  future in the shared `pending_questions` registry, broadcasts the
-  question event, and awaits the user's answer. When the answer
-  arrives (POST /messages with body.answers, resolved by
-  routes/chats_stream.py), the callback returns
-  `PermissionResultAllow(updated_input={"questions": ..., "answers": ...})`
-  — the SDK then runs `AskUserQuestion` with the answers as input and
-  the tool's headless implementation echoes them back as the result
-  the model sees. PreToolUse/PostToolUse was explored and rejected:
-  the SDK does NOT fire PostToolUse for AskUserQuestion in headless
-  mode, so the two-hook flow never worked.
 - Stop and steer support is wired through the shared runner registry. The
   caller looks up the registered `ActiveClaudeClient` handle and
   interrupts the live SDK client while this runner keeps draining
@@ -106,11 +94,6 @@ from app.process_groups import (
   RUN_MARKER_ENV,
   terminate_agent_processes,
 )
-from app.question_bridge import (
-  QuestionOverlapError,
-  QuestionPersistenceError,
-  park_question,
-)
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 
@@ -189,11 +172,11 @@ async def _await_control_mcp_ready(
 # constitution handed to every provider. A runner MAY append its own small,
 # provider-authored behavioral register on top of that shared base — the narrow,
 # deliberate exception that module's contract now allows. The Codex runner
-# declares none, so it is unaffected. This is the Claude runner's concise
-# register: appended AFTER the constitution, never substituted for it.
+# declares none, so it is unaffected. This is the Claude runner's register:
+# appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Keep replies proportionate: lead with the result and skip preamble. Match length to what the partner needs: brief for simple answers, complete for findings, decisions, and anything they must act on. Brevity never drops substance: a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -391,30 +374,16 @@ def _claude_thinking_config(model: str | None) -> dict[str, str] | None:
   return None
 
 
-def _should_retry_without_model(error_text: str | None) -> bool:
-  """True when Claude rejected the explicit model selection."""
-  if not error_text:
-    return False
-  text = error_text.lower()
-  return (
-    "selected model" in text
-    and "may not exist or you may not have access" in text
-  )
-
-
-async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
+async def _persist_session_id(chat_id: str, session_id: str | None) -> None:
   """Best-effort early persistence for provider resume continuity.
 
   Advances two records from the same sighting: the CURRENT-session pointer on
   the chat row (via the single-writer actor, since it lives on the hot Chat
   row), and the append-only ``chat_session_links`` map. The link write goes
   through ``record_session_link_async``, which commits on its OWN short-lived
-  session in a worker thread — NOT the runner's ``db`` (which chat.py closes
-  before the long run, and which the later ``Chat.session_id`` save reuses), so
-  a link-write stall or failure can neither block the loop nor poison that
-  shared session. The ``db`` argument is unused here now, kept for the call
-  signature. The link record is what survives the provider switch / session
-  reset that later NULLs ``Chat.session_id``.
+  session in a worker thread, so a link-write stall or failure can neither
+  block the loop nor poison the chat's session. The link record survives a
+  provider switch / session reset that later NULLs ``Chat.session_id``.
   """
   if not chat_id or not session_id:
     return
@@ -504,6 +473,11 @@ class ActiveClaudeClient:
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
     self.pending_steer: list[str] = []
+    # Whether any buffered steer is a person's visible message rather than an
+    # agent-originated carrier (helper result, peer note), which the transcript
+    # marks `hidden`. It decides how the requery frames the text: a person is
+    # owed a visible reply, while machine context is folded into the work.
+    self.steer_from_person = False
     # Transcript-side payload for the buffered steers: the steered user rows +
     # any queued rows they consume. The RUNNER drives the transcript split
     # (seal the pre-interrupt A1, append these user rows, reset the sink for
@@ -588,6 +562,8 @@ class ActiveClaudeClient:
     if user_msgs and not appended_any:
       return True
     self.pending_steer.append(text)
+    if any(not m.get("hidden") for m in user_msgs or ()):
+      self.steer_from_person = True
     if consume_pending_cids:
       buffered_consume = set(self._steer_consume_cids)
       for cid in consume_pending_cids:
@@ -640,6 +616,7 @@ class ActiveClaudeClient:
     if interrupt_landed and self._interrupt_owner == "steer":
       self._interrupt_owner = None
     texts, self.pending_steer = self.pending_steer, []
+    self.steer_from_person = False
     return texts
 
   def claim_owner_card_end(self) -> bool:
@@ -719,6 +696,7 @@ class ActiveClaudeClient:
     """
     self._interrupt_owner = "stop"
     self.pending_steer = []
+    self.steer_from_person = False
     self._steer_user_msgs = []
     self._steer_consume_cids = []
     await self._client.interrupt()
@@ -800,8 +778,23 @@ class ActiveClaudeClient:
       self._finished.set_result(None)
 
 
-def _steer_redirect_message(text: str) -> str:
-  """Frame owner or product context on the still-connected client."""
+def _steer_redirect_message(texts: list[str], *, from_person: bool) -> str:
+  """Frame mid-turn input for the requery on the still-connected client.
+
+  A person's message is a conversational turn, not context to absorb: framing
+  it as "continue the same task" let agents fold a question into their work
+  and never answer it where the partner can see. Agent-originated carriers
+  (helper results, peer notes) remain context for the ongoing work.
+  """
+  text = "\n\n".join(texts)
+  if from_person:
+    return (
+      "The partner sent this message while you were working. Reply to it in "
+      "your visible response before continuing: answer any question and "
+      "acknowledge any correction or change of direction. Then continue the "
+      "task as the message directs:\n\n"
+      f"{text}"
+    )
   return (
     "New context arrived while you were working. Incorporate it according "
     "to its stated authority and continue the same task:\n\n"
@@ -1133,8 +1126,6 @@ async def run_claude_sdk_turn(
   chat_id: str,
   skill_text: str,
   bc,
-  pending_questions: dict,
-  db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
   run_policy=None,
@@ -1152,8 +1143,6 @@ async def run_claude_sdk_turn(
     skill_text: Möbius skill/system prompt text, passed as the system
       prompt on every turn (including resumes).
     bc: Chat broadcast object with a publish(event) method.
-    pending_questions: Shared AskUserQuestion registry owned by chat.py.
-    db: SQLAlchemy session used by runner-side persistence.
     skills_enabled: When True, offer SDK skills to the agent
       (`setting_sources` including user+project + `skills="all"`). This
       is behavior-shifting and defaults OFF so the skill-observability
@@ -1185,19 +1174,8 @@ async def run_claude_sdk_turn(
   )
   base_env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
 
-  # Canonical AskUserQuestion handling via can_use_tool, per
-  # https://code.claude.com/docs/en/agent-sdk/user-input
-  # The SDK does NOT fire PostToolUse for AskUserQuestion (empirically
-  # confirmed). The correct injection point is `can_use_tool`: return
-  # PermissionResultAllow with updated_input containing the original
-  # questions array plus an `answers` dict {question_text: label}.
-  # The SDK then runs the tool with that input and the model sees the
-  # answers as the tool's result.
-  #
-  # `bypassPermissions` would skip the can_use_tool callback entirely —
-  # use the documented dummy PreToolUse keepalive + default permission
-  # mode so the callback fires only on AskUserQuestion (other tools are
-  # auto-approved by the keepalive hook returning continue_=True).
+  # Keep the SDK callback for tool policy and skill-read observability.
+  # Native owner-question tools are disabled on every launch, including resumes.
   async def can_use_tool(
     tool_name: str,
     input_data: dict[str, Any],
@@ -1211,84 +1189,31 @@ async def run_claude_sdk_turn(
           "ends. A delegated child must return the condition to its parent."
         )
       )
+    if tool_name in _CLAUDE_NATIVE_OWNER_INPUT_TOOLS:
+      return PermissionResultDeny(
+        message="Use a Möbius saved owner-input card instead."
+      )
     if run_policy is not None:
       top_level_controls = {
-        "create_goal", "update_goal", "get_goal", "request_user_input",
+        "create_goal", "update_goal", "get_goal",
       }
       if tool_name in top_level_controls:
         return PermissionResultDeny(
           message="Delegated child tasks cannot manage the parent Goal."
         )
-      if tool_name == "AskUserQuestion":
-        return PermissionResultDeny(
-          message=(
-            "Delegated child tasks cannot park on an owner question; return the "
-            "blocker to the parent instead."
-          )
-        )
       return PermissionResultAllow(updated_input=input_data)
-    # Auto-approve every tool except AskUserQuestion — this preserves
-    # the "trust the agent" posture (no tool gating) while still
-    # intercepting AskUserQuestion for the partner UX. The callback is
-    # also the canonical observation point for skill-file Reads (the
+    # Auto-approve the other tools, preserving the trust-the-agent posture.
+    # This is also the observation point for skill-file Reads (the
     # agent loads /data/shared/skills/*.md via Read, not the Skill
     # tool); the observe call is fire-and-forget and never blocks or
     # fails the tool.
-    if tool_name != "AskUserQuestion":
-      observe_skill_file_read(
-        tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
-        tool_use_id=getattr(context, "tool_use_id", None),
-      )
-      return PermissionResultAllow(updated_input=input_data)
-
-    questions = input_data.get("questions", [])
-    if not isinstance(questions, list):
-      questions = []
-
-    try:
-      answers = await park_question(
-        chat_id=chat_id,
-        questions=questions,
-        bc=bc,
-        pending_questions=pending_questions,
-      )
-    except QuestionOverlapError as exc:
-      return PermissionResultDeny(
-        message=str(exc)
-      )
-    except QuestionPersistenceError as exc:
-      log.error(
-        "AskUserQuestion save-before-broadcast failed chat_id=%s: %s",
-        chat_id, exc,
-      )
-      return PermissionResultDeny(
-        message=(
-          "Could not save the question (persistence unavailable); not "
-          "asking. Please try again."
-        )
-      )
-
-    except asyncio.CancelledError:
-      return PermissionResultDeny(
-        message="AskUserQuestion cancelled."
-      )
-
-    # Per docs: return updated_input with BOTH the original questions
-    # array AND an answers dict {question_text: selected_label}.
-    # The SDK passes this through as the tool input; AskUserQuestion's
-    # implementation in headless mode echoes the answers back as the
-    # tool result the model sees.
-    return PermissionResultAllow(
-      updated_input={
-        "questions": questions,
-        "answers": answers,
-      }
+    observe_skill_file_read(
+      tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
+      tool_use_id=getattr(context, "tool_use_id", None),
     )
+    return PermissionResultAllow(updated_input=input_data)
 
-  # Required workaround per the SDK docs: a dummy PreToolUse hook
-  # returning continue_=True keeps the stream open so can_use_tool can
-  # be invoked. Without this, the stream closes before the callback
-  # fires. See https://code.claude.com/docs/en/agent-sdk/user-input
+  # The SDK requires a PreToolUse hook to keep can_use_tool active.
   async def keepalive_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
@@ -1420,7 +1345,7 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-  async def _run_once(model_override: str | None) -> RunnerResult:
+  async def _run_once() -> RunnerResult:
     nonlocal current_session_id, cost_usd, active_client
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
@@ -1505,9 +1430,9 @@ async def run_claude_sdk_turn(
       options_kwargs.update(restricted_options)
     if skills_enabled:
       options_kwargs["skills"] = "all"
-    if model_override:
-      options_kwargs["model"] = model_override
-    thinking_config = _claude_thinking_config(model_override)
+    if _model:
+      options_kwargs["model"] = _model
+    thinking_config = _claude_thinking_config(_model)
     if thinking_config is not None:
       options_kwargs["thinking"] = thinking_config
     if _effort:
@@ -1623,10 +1548,6 @@ async def run_claude_sdk_turn(
       active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
 
-      # At most one automatic re-query per turn (see the synthetic-resume
-      # recovery in the terminal branch below), so a genuinely-empty resume
-      # can never loop.
-      did_auto_requery = False
       # Provider-native finite work can finish after its spawning turn, or even
       # immediately before that turn's ResultMessage. Keep its exact
       # continuation boundary across the requery loop so neither ordering is
@@ -1656,7 +1577,7 @@ async def run_claude_sdk_turn(
           ) and is_root_conversation_message(sdk_msg):
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
-              await _persist_session_id(db, chat_id, incoming_session_id)
+              await _persist_session_id(chat_id, incoming_session_id)
           if isinstance(
             sdk_msg, (StreamEvent, AssistantMessage),
           ) and is_root_conversation_message(sdk_msg):
@@ -1710,6 +1631,7 @@ async def run_claude_sdk_turn(
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut or a saved owner card may end a later segment.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
               sdk_msg.stop_reason == "interrupt"
@@ -1722,47 +1644,14 @@ async def run_claude_sdk_turn(
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             break
-          # Recover a synthetic no-op RESUME. When a resumed session's prior
-          # turn was interrupted (e.g. a server restart with a dangling
-          # background task), the Claude CLI can spend the resumed turn
-          # RECONCILING state — it writes a synthetic "No response requested."
-          # close-out and returns a CLEAN terminal (is_error False) WITHOUT ever
-          # running the model on the real prompt, so the sink accrues zero
-          # blocks and the reply silently vanishes (proven from CLI transcripts:
-          # the "continue" case, chat 04ef66df). Re-ask the same prompt ONCE to
-          # force a real answer — exactly what a manual re-send recovers, and
-          # what a second reconciled turn produced in the wild. Bounded by
-          # did_auto_requery so a legitimately-empty resume cannot loop; if the
-          # retry is also empty the finalize backstop records a retry marker.
-          if (
-            session_id is not None            # a resume (non-first turn)
-            and sdk_msg.stop_reason != "interrupt"  # a clean end, not our interrupt
-            and not active_client.owner_card_end  # nor our card end (may be tool_use/null)
-            and not active_client.interrupt_requested  # Stop is terminal
-            and not terminal.get("error")     # clean terminal (is_error False)
-            and terminal.get("api_error_status") != 429  # not a bare 429/park
-            and not active_client.pending_steer
-            and not did_auto_requery
-            and helper_result is None         # nor a helper follow-up
-            and len(bc.assistant_blocks) == 0  # zero blocks: the synthetic no-op
-          ):
-            # The `stop_reason != "interrupt"` guard is load-bearing: the block
-            # above now defuses an interrupt terminal's error to None, so
-            # `not terminal.get("error")` alone would let a steer-interrupt that
-            # raced turn-end (session_id set, blocks reset to [] by the seal)
-            # masquerade as a synthetic no-op and silently re-run the ORIGINAL
-            # prompt — re-executing its side effects and dropping the resumable
-            # Paused note. An interrupt is never a synthetic no-op resume.
-            did_auto_requery = True
-            log.info(
-              "claude resume produced no reply (synthetic no-op); "
-              "auto-requerying once chat_id=%s", chat_id,
-            )
-            await client.query(turn_message)
-            break
+          # Do not replay a clean result with no visible reply: no content is
+          # not proof that no work ran. The chat finalizer persists a resumable
+          # lost-reply marker instead of risking duplicate side effects.
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
@@ -1782,6 +1671,7 @@ async def run_claude_sdk_turn(
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
           # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=False,
           )
@@ -1790,7 +1680,9 @@ async def run_claude_sdk_turn(
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             continue
           break
@@ -1880,11 +1772,6 @@ async def run_claude_sdk_turn(
       current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
       if current_handle is active_client:
         registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)
-      pending = pending_questions.get(chat_id)
-      if pending is not None and not pending.future.done():
-        pending.future.cancel()
-      if pending is not None:
-        pending_questions.pop(chat_id, None)
       try:
         await client.disconnect()
       finally:
@@ -1923,12 +1810,4 @@ async def run_claude_sdk_turn(
         if deferred_cancel is not None:
           raise deferred_cancel
 
-  result = await _run_once(_model)
-  if _model and _should_retry_without_model(result.get("error")):
-    log.warning(
-      "Claude model %r unavailable for chat %s; retrying without explicit model",
-      _model,
-      chat_id,
-    )
-    return await _run_once(None)
-  return result
+  return await _run_once()

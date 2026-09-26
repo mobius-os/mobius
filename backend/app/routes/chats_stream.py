@@ -202,6 +202,10 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "build_phase",
   # A complete current reading; the log keeps only the newest.
   "context_usage",
+  # A running helper's current activity line: live-only (never persisted into
+  # the snapshot's blocks) and coalesced to the newest tick per task, so a
+  # viewer who opens the chat mid-run still sees what each helper is doing.
+  "task_progress",
   "goal_plan_updated",
   "goal_activated",
   "chat_run_finished",

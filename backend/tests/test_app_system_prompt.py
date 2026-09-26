@@ -34,7 +34,6 @@ def _manifest(**over):
     "entry": "index.jsx",
     "source_files": ["memory-core.md"],
     "system_prompt": "memory-core.md",
-    "system_app": True,
   }
   value.update(over)
   return value
@@ -67,15 +66,15 @@ def test_only_live_app_fragments_are_composed_in_stable_order(db, tmp_path):
   db.add_all([
     models.App(
       id=20, name="two", slug="two", source_dir=str(second),
-      system_prompt_file="fragment.md", system_app=True,
+      system_prompt_file="fragment.md",
     ),
     models.App(
       id=10, name="one", slug="one", source_dir=str(first),
-      system_prompt_file="fragment.md", system_app=True,
+      system_prompt_file="fragment.md",
     ),
     models.App(
       id=5, name="gone", slug="gone", source_dir=str(gone),
-      system_prompt_file="fragment.md", system_app=True,
+      system_prompt_file="fragment.md",
       deleted_at=datetime.now(UTC),
     ),
   ])
@@ -94,7 +93,7 @@ def test_lingering_fragment_is_inert_after_soft_uninstall(db, tmp_path):
   (source / "memory-core.md").write_text("GRAPH INSTRUCTIONS", encoding="utf-8")
   app = models.App(
     name="Memory", slug="memory", source_dir=str(source),
-    system_prompt_file="memory-core.md", system_app=True,
+    system_prompt_file="memory-core.md",
   )
   db.add(app)
   db.commit()
@@ -131,17 +130,17 @@ def test_install_persists_system_prompt_capability(
   assert "RETRIEVE ON DEMAND" in compose_system_prompt("BASE", db)
 
 
-def test_system_app_suffix_also_applies_to_custom_chat_prompts(monkeypatch, db):
+def test_installed_app_suffix_also_applies_to_custom_chat_prompts(monkeypatch, db):
   monkeypatch.setattr(
     "app.system_prompts.compose_system_prompt",
-    lambda base, db: base + "\n\n<!-- installed system app: memory -->\nRECALL\n",
+    lambda base, db: base + "\n\n<!-- installed app: memory -->\nRECALL\n",
   )
   row = models.Chat(id="custom", title="Custom", messages=[])
   db.add(row)
   db.commit()
 
   assert prompt_for_chat(row, "CUSTOM", db, persist=True) == (
-    "CUSTOM\n\n<!-- installed system app: memory -->\nRECALL\n"
+    "CUSTOM\n\n<!-- installed app: memory -->\nRECALL\n"
   )
 
 
@@ -152,7 +151,7 @@ def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
   fragment.write_text("MEMORY V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="memory", source_dir=str(source),
-    system_prompt_file="memory-core.md", system_app=True,
+    system_prompt_file="memory-core.md",
   )
   first = models.Chat(id="first", title="First", messages=[])
   second = models.Chat(id="second", title="Second", messages=[])
@@ -177,14 +176,14 @@ def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
   db.commit()
 
 
-def test_system_app_update_changes_only_chats_started_after_update(db):
+def test_app_update_changes_only_chats_started_after_update(db):
   source = Path(get_settings().data_dir) / "apps" / "updated-memory"
   source.mkdir(parents=True)
   fragment = source / "memory-core.md"
   fragment.write_text("MEMORY V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="updated-memory", source_dir=str(source),
-    system_prompt_file="memory-core.md", system_app=True,
+    system_prompt_file="memory-core.md",
   )
   first = models.Chat(id="before-update", title="Before", messages=[])
   second = models.Chat(id="after-update", title="After", messages=[])
@@ -225,7 +224,7 @@ def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
   fragment.write_text("V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="preview-memory", source_dir=str(source),
-    system_prompt_file="memory-core.md", system_app=True,
+    system_prompt_file="memory-core.md",
   )
   row = models.Chat(id="preview", title="Preview", messages=[])
   db.add_all([app, row])
@@ -256,17 +255,24 @@ def test_rollout_backfill_freezes_started_chats_but_not_empty_drafts(db):
   assert empty.system_prompt_snapshot_id is None
 
 
-def test_non_system_app_fragment_is_inert(db):
+def test_any_installed_app_may_contribute_a_fragment(db):
+  """No app class gates prompt authority: the install review is the consent."""
   source = Path(get_settings().data_dir) / "apps" / "ordinary"
   source.mkdir(parents=True)
-  (source / "fragment.md").write_text("MUST NOT LOAD", encoding="utf-8")
+  (source / "fragment.md").write_text("ORDINARY RULE", encoding="utf-8")
   db.add(models.App(
     name="Ordinary", slug="ordinary", source_dir=str(source),
-    system_prompt_file="fragment.md", system_app=False,
+    system_prompt_file="fragment.md",
   ))
   db.commit()
 
-  assert compose_system_prompt("BASE", db) == "BASE"
+  composed = compose_system_prompt("BASE", db)
+  assert composed.startswith("BASE\n\n<!-- installed app: ordinary; source_dir: ")
+  assert composed.endswith("ORDINARY RULE\n")
+
+
+def test_manifest_prompt_no_longer_needs_a_system_flag():
+  _validate_manifest(_manifest())
 
 
 def test_symlink_fragment_is_never_read(db, tmp_path):
@@ -277,7 +283,7 @@ def test_symlink_fragment_is_never_read(db, tmp_path):
   (source / "fragment.md").symlink_to(secret)
   db.add(models.App(
     name="Memory", slug="memory", source_dir=str(source),
-    system_prompt_file="fragment.md", system_app=True,
+    system_prompt_file="fragment.md",
   ))
   db.commit()
 

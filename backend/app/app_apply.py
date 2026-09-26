@@ -42,7 +42,6 @@ from app.manifest_contract import (
   STATIC_ASSETS_TOTAL_MAX,
   ManifestContractError,
   job_interpreter,
-  require_executable_job,
   static_asset_entries,
   validate_manifest_contract,
   validate_repo_relative_path,
@@ -527,7 +526,6 @@ def _apply_explicit_package_runtime(
     app.embeds_agent = bool(manifest["embeds_agent"])
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
@@ -572,7 +570,6 @@ def _apply_local_manifest_runtime(
   app.embeds_agent = bool(manifest.get("embeds_agent", False))
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
@@ -612,7 +609,6 @@ def _live_runtime_state(app: models.App) -> tuple:
     app.embeds_agent,
     app.offline_contract,
     app.system_prompt_file,
-    app.system_app,
     app.project_templates_json,
     app.package_id,
     app.source_identity,
@@ -650,20 +646,26 @@ async def apply_source_revision(
       "The app no longer owns this source directory.",
       status_code=409,
     )
-  if app is not None and app.manifest_url is not None:
+  # A pending Store update is reconciled in its own private checkout, so it
+  # never blocks ordinary edits here; finishing it merges them in. Only a
+  # half-finished Git merge in this directory itself can't become a revision.
+  if await asyncio.to_thread(app_git.merge_in_progress, source_path):
+    raise AppApplyError(
+      "merge_in_progress",
+      "This app directory has an unfinished Git merge. Finish it with "
+      "`git commit` or undo it with `git merge --abort`, then apply again.",
+      status_code=409,
+    )
+  if accept_local_package and app is not None:
     from app import install
 
-    receipt = (
-      source_path / ".git" / install._PENDING_UPDATE_DIR / "receipt.json"
-    )
-    if (
-      receipt.is_file()
-      or await asyncio.to_thread(app_git.merge_in_progress, source_path)
-    ):
+    if install.pending_update_receipt_file(source_path).is_file():
+      # Finishing the pending update installs its reviewed package metadata;
+      # accepting local metadata now would be silently overwritten by it.
       raise AppApplyError(
-        "update_resolution_required",
-        "This Store app has a pending update. Resolve it with "
-        "resolve_app_update.py instead of applying an ordinary edit.",
+        "update_pending",
+        "Finish this app's pending Store update before accepting local "
+        "package declarations.",
         status_code=409,
       )
   if accept_local_package and (
@@ -710,9 +712,7 @@ async def apply_source_revision(
         job_name = schedule.get("job") if isinstance(schedule, dict) else None
         if job_name:
           try:
-            job_path = snapshot_dir / job_name
-            job_interpreter(job_path.read_bytes())
-            require_executable_job(job_path.stat().st_mode)
+            job_interpreter((snapshot_dir / job_name).read_bytes())
           except (OSError, ManifestContractError) as exc:
             raise AppApplyError(
               "invalid_schedule_job", str(exc), status_code=422,

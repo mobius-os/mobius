@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select, review, and finalize an owner-approved Store update resolution."""
+"""Finish a pending Store app update from its private resolution checkout."""
 
 import argparse
 import json
@@ -8,6 +8,10 @@ from pathlib import Path
 import sys
 import urllib.error
 import urllib.request
+
+# The resolver's checkout lives inside the app's git directory; either path
+# names the same pending update.
+_CHECKOUT_SUFFIX = (".git", "mobius-pending-update", "worktree")
 
 
 def _post(path: str, payload: dict) -> dict:
@@ -26,7 +30,7 @@ def _post(path: str, payload: dict) -> dict:
     method="POST",
   )
   try:
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=300) as response:
       return json.loads(response.read())
   except urllib.error.HTTPError as exc:
     body = exc.read().decode(errors="replace")
@@ -38,63 +42,48 @@ def _post(path: str, payload: dict) -> dict:
       json.dumps(detail, ensure_ascii=False)
       if isinstance(detail, dict) else detail
     )
-    print(f"App update resolution failed ({exc.code}): {rendered}", file=sys.stderr)
+    print(f"App update was not finished ({exc.code}): {rendered}", file=sys.stderr)
     raise SystemExit(1) from exc
   except urllib.error.URLError as exc:
-    print(f"App update resolution failed: {exc.reason}", file=sys.stderr)
+    print(f"App update was not finished: {exc.reason}", file=sys.stderr)
     raise SystemExit(1) from exc
 
 
 def main() -> None:
   parser = argparse.ArgumentParser(
-    description="Select, review, or finalize a pending Store app update.",
+    description=(
+      "Install a committed update resolution, merging any edits made to the "
+      "live app meanwhile."
+    ),
   )
-  parser.add_argument("source_dir")
-  action = parser.add_mutually_exclusive_group(required=True)
-  action.add_argument(
-    "--policy",
-    choices=("preserve-local", "exact-upstream"),
-  )
-  action.add_argument("--review", action="store_true")
-  action.add_argument("--finalize", action="store_true")
-  parser.add_argument("--reviewed-tree")
+  parser.add_argument("source_dir", help="/data/apps/<slug> or its resolution checkout")
+  # Resolver chats started on an earlier release may still use these.
+  parser.add_argument("--finalize", action="store_true", help=argparse.SUPPRESS)
+  parser.add_argument("--reviewed-tree", help=argparse.SUPPRESS)
+  parser.add_argument("--review", action="store_true", help=argparse.SUPPRESS)
+  parser.add_argument("--policy", help=argparse.SUPPRESS)
   args = parser.parse_args()
-  if args.reviewed_tree and not args.finalize:
-    parser.error("--reviewed-tree is only valid with --finalize")
+  if args.review or args.policy:
+    print(
+      "Policy and review steps no longer exist. Reread "
+      "/data/shared/skills/resolving-app-git.md: reconcile, commit, then run "
+      "this command with only the app path.",
+      file=sys.stderr,
+    )
+    raise SystemExit(2)
 
   try:
-    source_dir = str(Path(args.source_dir).resolve(strict=True))
+    path = Path(args.source_dir).resolve(strict=True)
   except (OSError, RuntimeError) as exc:
     print(f"Cannot resolve app source directory: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc
-  if not Path(source_dir).is_dir():
+  if path.parts[-3:] == _CHECKOUT_SUFFIX:
+    path = path.parents[2]
+  if not path.is_dir():
     print("App source path is not a directory.", file=sys.stderr)
     raise SystemExit(1)
 
-  if args.policy:
-    policy = {
-      "preserve-local": "preserve_local",
-      "exact-upstream": "accept_reviewed_upstream_exact",
-    }[args.policy]
-    result = _post(
-      "resolve-update/policy",
-      {"source_dir": source_dir, "policy": policy},
-    )
-    print(json.dumps(result, ensure_ascii=False))
-    return
-
-  if args.review:
-    result = _post("resolve-update/review", {"source_dir": source_dir})
-    print(f"upstream_commit={result['upstream_commit']}")
-    print(f"tree_oid={result['tree_oid']}")
-    print("--- complete resolved source diff ---")
-    print(result["diff"], end="" if result["diff"].endswith("\n") else "\n")
-    return
-
-  payload = {"source_dir": source_dir}
-  if args.reviewed_tree:
-    payload["reviewed_tree_oid"] = args.reviewed_tree
-  result = _post("resolve-update", payload)
+  result = _post("resolve-update", {"source_dir": str(path)})
   print(json.dumps(result, ensure_ascii=False))
 
 

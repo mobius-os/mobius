@@ -580,48 +580,6 @@
 .chat-summary__layer-body > :last-child { margin-bottom: 0; }
 .chat-summary__empty { margin: 0; color: var(--muted); }
 
-/* A helper's own conversation (HelperConversation) in the same dialog shell,
-   at a fixed height so live updates never resize it. */
-.helper-convo { width: min(760px, 100%); height: min(820px, calc(100% - 16px)); }
-.helper-convo__heading { min-width: 0; flex: 1 1 auto; }
-.helper-convo__open {
-  flex: none;
-  align-self: center;
-  color: var(--accent); /* CONTRACT: link-coloured action in the dialog head */
-  font-size: 13px;
-  text-underline-offset: 3px;
-}
-.helper-convo__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.helper-convo__body {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-bottom: 4px;
-  overscroll-behavior: contain;
-}
-.helper-convo__note { margin: 0; color: var(--muted); font-size: 12px; }
-.helper-convo__text { font-size: 14px; }
-.helper-convo__task {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  background: var(--bg);
-  font-size: 14px;
-}
-.helper-convo__task-label {
-  display: block;
-  margin-bottom: 2px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-.helper-convo__task > :last-child > :first-child,
-.helper-convo__text > :first-child > :first-child { margin-top: 0; }
-.helper-convo__task > :last-child > :last-child,
-.helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
-
 /* ── Bubble content ────────────────────────────────── */
 
 .chat__text {
@@ -2488,6 +2446,9 @@
      attached (see .chat__pill--with-attach). `.chat__input` subtracts this
      from the composer's share of the visible height, so the pill's TOTAL
      height stays the same whether or not a file is attached. */
+  /* The text row's padding on every side it touches. Attaching a file only
+     adds room ABOVE the row (`--pill-pad-top` in .chat__pill--with-attach), so
+     the text and the action buttons never shift when a file comes or goes. */
   --pill-pad: 4px;
   --pill-border: 1px;
   --composer-input-floor: 48px;
@@ -3226,10 +3187,13 @@
      A hand-summed constant would re-introduce exactly the drift `--attach-card`
      was added to remove: change the tray padding and the growth cap would
      silently reserve the wrong row, with nothing to catch it. */
-  --pill-pad: 8px;
+  --pill-pad-top: 8px;
   --pill-gap: 6px;
   --tray-pad-top: 2px;
   --tray-pad-bottom: 4px;
+  /* The tray, not the pill, takes the extra side inset, so cards keep their
+     10px edge gap while the text row stays exactly where it was. */
+  --tray-pad-inline: 6px;
   /* In a short keyboard viewport a fixed 96px card can exceed the pill's
      entire half-room budget before the input row is counted. Spend that budget
      in one place: preserve the row's 40px action target, then compact the
@@ -3240,7 +3204,7 @@
   --composer-stack-chrome: calc(
     var(--tray-pad-top) + var(--tray-pad-bottom)
     + var(--pill-gap)
-    + var(--pill-pad) * 2
+    + var(--pill-pad-top) + var(--pill-pad)
     + var(--pill-border) * 2
   );
   --composer-attach-card: clamp(
@@ -3255,7 +3219,7 @@
   flex-direction: column;
   align-items: stretch;
   gap: var(--pill-gap);
-  padding: var(--pill-pad);
+  padding: var(--pill-pad-top) var(--pill-pad) var(--pill-pad);
   border-radius: 22px;
   --composer-reserve: calc(
     var(--composer-attach-card)
@@ -3282,7 +3246,7 @@
   gap: 8px;
   /* Block padding comes from the pill's tokens above, which the growth cap
      reserves against. The fallbacks keep this rule correct on its own. */
-  padding: var(--tray-pad-top, 2px) 2px var(--tray-pad-bottom, 4px);
+  padding: var(--tray-pad-top, 2px) var(--tray-pad-inline, 2px) var(--tray-pad-bottom, 4px);
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0;

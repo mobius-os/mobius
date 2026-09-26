@@ -64,6 +64,12 @@ def is_folder_skill_member(name: str) -> bool:
   return name == FOLDER_SKILL_ENTRY or _SKILL_FILENAME_OK.fullmatch(name) is not None
 
 
+def folder_skill_id(entry: str) -> str | None:
+  """The `<id>` of a `<id>/` folder-skill manifest entry, else None."""
+  match = _SKILL_FOLDER_OK.fullmatch(entry)
+  return match.group(1) if match else None
+
+
 def skill_member_paths(manifest: dict) -> list[str]:
   """Every source file a validated manifest's `skills` materializes, in order.
 
@@ -113,12 +119,6 @@ def job_interpreter(job: bytes) -> tuple[str, ...]:
   if not interpreter or not interpreter[0].startswith("/"):
     _fail("Schedule job shebang must name an absolute interpreter.")
   return interpreter
-
-
-def require_executable_job(mode: int) -> None:
-  """Reject a scheduled job that its accepted package cannot execute."""
-  if not mode & 0o111:
-    _fail("Schedule job is not executable.")
 
 
 def validate_slug_field(value, field: str) -> None:
@@ -407,7 +407,7 @@ def validate_manifest_contract(manifest) -> None:
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 
-  for field in ("offline_capable", "embeds_agent", "system_app"):
+  for field in ("offline_capable", "embeds_agent"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
 
@@ -817,11 +817,6 @@ def validate_manifest_contract(manifest) -> None:
 
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:
-    if manifest.get("system_app") is not True:
-      _fail(
-        "Manifest `system_prompt` requires `system_app: true` so global "
-        "agent-prompt authority is explicit and owner-reviewable."
-      )
     if (
       not isinstance(system_prompt, str)
       or not system_prompt.endswith(".md")

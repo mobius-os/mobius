@@ -625,7 +625,7 @@ def test_providers_models_accepts_app_token(client, auth):
   )["id"]
 
   from app.auth import create_access_token
-  from app.providers import DEFAULT_VISIBLE_MODELS, invalidate_model_cache
+  from app.providers import DEFAULT_HIDDEN_MODELS, KNOWN_MODELS, invalidate_model_cache
   invalidate_model_cache()
   app_token = create_access_token({
     "sub": "test", "scope": "app", "app_id": app_id,
@@ -637,8 +637,10 @@ def test_providers_models_accepts_app_token(client, auth):
   assert r.status_code == 200, r.text
   body = r.json()
   # The same curated defaults the owner sees, not a one-model fallback stub.
-  assert {m["id"] for m in body["claude"]} == DEFAULT_VISIBLE_MODELS["claude"]
-  assert {m["id"] for m in body["codex"]} == DEFAULT_VISIBLE_MODELS["codex"]
+  for provider_id in ("claude", "codex"):
+    assert {m["id"] for m in body[provider_id]} == (
+      set(KNOWN_MODELS[provider_id]) - DEFAULT_HIDDEN_MODELS[provider_id]
+    )
   assert len(body["claude"]) > 1 and len(body["codex"]) > 1
 
 
@@ -906,7 +908,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   `list_models` falls back to KNOWN_MODELS — exercise that path and
   pin the response shape mini-apps depend on (id + name, plus a
   tier on Claude rows)."""
-  from app.providers import DEFAULT_VISIBLE_MODELS, KNOWN_MODELS, invalidate_model_cache, sync_app_model_providers
+  from app.providers import DEFAULT_HIDDEN_MODELS, KNOWN_MODELS, invalidate_model_cache, sync_app_model_providers
   from app.config import get_settings
   sync_app_model_providers(get_settings().data_dir, force=True)
   invalidate_model_cache()
@@ -917,15 +919,15 @@ def test_providers_models_returns_known_models_on_missing_creds(
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5-1",
-    "claude-fable-5", "claude-sonnet-5",
+    "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5",
     "claude-opus-4-8", "claude-sonnet-4-6",
   ]
   codex_ids = [m["id"] for m in body["codex"]]
   assert codex_ids == [
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
   ]
-  assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
-  assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
+  assert set(claude_ids) == set(KNOWN_MODELS["claude"]) - DEFAULT_HIDDEN_MODELS["claude"]
+  assert set(codex_ids) == set(KNOWN_MODELS["codex"]) - DEFAULT_HIDDEN_MODELS["codex"]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"

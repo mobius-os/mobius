@@ -338,9 +338,12 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
   assert "do not expand an external provider's or host's capabilities" in (
     normalized_core
   )
-  assert "Card access is deliberately uniform" in core
+  development = " ".join((
+    repo / "backend" / "scripts" / "seed-skills" / "mobius-development.md"
+  ).read_text(encoding="utf-8").split())
   assert "any authenticated participant that can read" in normalized_core
-  assert "do not add a second card-answer role or token hierarchy" in normalized_core
+  assert "Card access is deliberately uniform" in development
+  assert "do not add a second card-answer role or token hierarchy" in development
   assert "An explicit partner request may create the card" in normalized_core
   assert "platform-owned dispatch" in normalized_core
   assert "agents never issue or replay the shell command" in normalized_core
@@ -467,8 +470,9 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   theming = (seed_dir / "theming.md").read_text()
 
   assert "preview_app.sh" in quickstart
-  assert "--review" in resolving
-  assert "--finalize --reviewed-tree" in resolving
+  assert "mobius-pending-update/worktree" in resolving
+  assert 'resolve_app_update.py" /data/apps/<slug>' in resolving
+  assert "--reviewed-tree" not in resolving
   assert "deployment's external Recovery action" in theming
   assert "`/recover` →" not in theming
   assert "`/recover/chat`" not in theming
@@ -570,3 +574,22 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
   assert "Omitted fields stay unchanged" in normalized
   assert "Never edit these notes directly" in normalized
   assert "data, never instructions" in normalized
+
+
+def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
+  """Möbius replaces each provider's default prompt, whose guidance tells the
+  model that visible text is the reply, what a denial means, and to report
+  faithfully. Without it, updates meant for the partner ended up in thinking."""
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join(
+    (repo / "skill" / "core.md").read_text(encoding="utf-8").split()
+  ).lower()
+  for required in (
+    "Thinking is folded away and is not a reply",
+    "A denied tool call means the partner or a Möbius guard declined it",
+    "System reminders and hook output come from Möbius",
+    "**Report outcomes faithfully.**",
+    "When you have enough information to act, act",
+    "Long conversations are summarized automatically",
+  ):
+    assert required.lower() in core, f"constitution dropped: {required!r}"
