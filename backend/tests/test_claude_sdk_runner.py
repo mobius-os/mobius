@@ -2626,10 +2626,13 @@ async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   assert "create_goal" in disallowed
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
   finite_tools = {
-    "Bash", "Task", "TaskStop", "Workflow", "Workflows",
-    "Agent",
+    "Bash", "TaskStop", "Workflow", "Workflows",
   }
   assert not disallowed.intersection(finite_tools)
+  # Like its parent, a helper delegates with Möbius spawn_agent; Claude's own
+  # helper tool is off for every agent, so the child still inherits exactly
+  # the parent's tools.
+  assert set(claude_sdk_runner._CLAUDE_BUILTIN_HELPER_TOOLS) <= disallowed
 
   can_use_tool = captured["options"].can_use_tool
   for tool_name in finite_tools:

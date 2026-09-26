@@ -5432,6 +5432,46 @@ def _add_delegation_goal_task(eng) -> None:
     conn.execute(text("UPDATE delegations SET goal_task_id = task_key"))
 
 
+def _add_delegation_result_identity(eng) -> None:
+  """Record helper-result delivery per result instead of per helper.
+
+  A follow-up starts a new child run and owes a new result, so delivery is now
+  the child run id whose result reached the parent. An existing delivery
+  timestamp covered the helper's latest run at the time: message_agent cleared
+  it on every follow-up, so a set timestamp always refers to that run. The
+  timestamp columns stay unmapped for a baked fallback platform, which reads
+  only them: during such a fallback, results delivered since this migration
+  may be delivered once more (a repeat, never a loss).
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  # A result settled before any child run existed (source work that failed
+  # or finished before starting) is recorded as delegations.SETTLED_BEFORE_START.
+  latest_child_run = (
+    "COALESCE((SELECT r.id FROM chat_runs r "
+    "WHERE r.chat_id = delegations.child_chat_id "
+    "ORDER BY r.started_at DESC, r.id DESC LIMIT 1), 'settled-before-start')"
+  )
+  with eng.begin() as conn:
+    for column, legacy in (
+      ("delivered_run_id", "parent_woken_at"),
+      ("incorporated_run_id", "result_incorporated_at"),
+    ):
+      if column not in columns:
+        conn.execute(text(
+          f"ALTER TABLE delegations ADD COLUMN {column} VARCHAR(64) NULL"
+        ))
+      if legacy in columns:
+        conn.execute(text(
+          f"UPDATE delegations SET {column} = {latest_child_run} "
+          f"WHERE {column} IS NULL AND {legacy} IS NOT NULL"
+        ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5512,6 +5552,7 @@ _SCHEMA_MIGRATIONS = (
   ("0068_rename_inkling_to_evolve", _rename_inkling_to_evolve),
   ("0069_chat_pending_queue_index", _add_chat_pending_queue_index),
   ("0070_delegation_goal_task", _add_delegation_goal_task),
+  ("0071_delegation_result_identity", _add_delegation_result_identity),
 )
 
 

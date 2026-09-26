@@ -1,14 +1,15 @@
 ---
 name: claude
-description: Compatibility pointer for handing bounded work to Claude from a Codex turn. Prefer the installed Subagents capability; use the direct connected Claude CLI only when that app is absent.
+description: Compatibility pointer for handing bounded work to Claude from a Codex turn. Start a Claude helper with the Möbius spawn_agent tool; use the direct connected Claude CLI only when the Subagents app is absent.
 ---
 
 # Delegating to Claude
 
 When the **Subagents** app is installed, read the complete `subagents` skill and
-use its guarded helper. It owns provider enablement, configured model/effort,
-durable identity, restart recovery, nested work, and parent wake-up. Do not run
-`claude -p` alongside that mechanism.
+start a Claude helper with the Möbius `spawn_agent` tool (`provider: claude`).
+It owns provider enablement, configured model/effort, durable identity,
+restart recovery, nested work, and delivering the result to this chat. Do not
+run `claude -p` alongside that mechanism.
 
 Only when the app is genuinely absent may you use the connected CLI fallback.
 Confirm `CLAUDE_CONFIG_DIR` and the `claude` executable exist, preserve any

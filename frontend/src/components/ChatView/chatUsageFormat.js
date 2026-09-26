@@ -61,7 +61,7 @@ export function formatUsageMenuText(totals) {
   return parts.join(' · ')
 }
 
-function modelDisplayName(modelId, registry, provider) {
+export function modelDisplayName(modelId, registry, provider) {
   if (typeof modelId !== 'string' || !modelId.trim()) return null
   const id = modelId.trim()
   const preferred = Array.isArray(registry?.[provider]) ? registry[provider] : []

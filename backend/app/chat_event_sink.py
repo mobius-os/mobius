@@ -1070,6 +1070,11 @@ class ChatEventSink:
     # live transcript surface.
     if event_type in ("tool_start", "tool_input"):
       self._stash_full_edit_diff(event)
+    if event_type in ("tool_start", "tool_input"):
+      # A helper's parent shows what the helper is doing right now. Claude
+      # names the tool on tool_start and sends its text on tool_input.
+      from app.delegations import note_helper_activity
+      note_helper_activity(self.chat_id, event.get("tool"), event.get("input"))
 
     # Contract rule 6: reduce a large tool_output to a bounded excerpt and stash
     # its full text BEFORE process_event (which copies content onto the block)

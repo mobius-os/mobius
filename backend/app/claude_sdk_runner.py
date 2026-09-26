@@ -193,10 +193,10 @@ the foreground with `until [ -e "$TMPDIR/job.exit" ]; do sleep 5; done` and
 read the log; an output file alone is not completion, and a bare leading
 `sleep N` is refused. For an external condition that must outlive this turn,
 declare a durable Möbius Wait and confirm its saved receipt. Never end with
-"I'm waiting" on a Bash task, an output file, or ListAgents. Native
-Agent/Workflow work is also turn-local; join and synthesize it. Durable
-delegated work belongs to the installed Subagents capability, whose own
-receipt owns the later wake.
+"I'm waiting" on a Bash task, an output file, or ListAgents. Workflow work
+is also turn-local; join and synthesize it. Helpers started with the Möbius
+`spawn_agent` tool are durable: their results reach this chat by themselves,
+so never wait on them.
 """
 # Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
 # Provider-native schedulers cannot render its card, survive the same restart
@@ -226,6 +226,14 @@ _CLAUDE_UNUSED_BUILTINS = (
   "PushNotification",
 )
 
+# Helpers are Möbius's: agents delegate with the Möbius `spawn_agent` tool,
+# whose helpers run on any provider, outlive the turn, and share a helper host
+# (see helper_hosts). Claude's own helper tool (Agent, formerly Task) is off.
+# Workflows keep their own lifecycle for the owner's top effort tier.
+_CLAUDE_BUILTIN_HELPER_TOOLS = (
+  "Agent",
+  "Task",
+)
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
 # helper fallbacks, which print the same receipt. Naming them keeps the card-end
@@ -1396,6 +1404,7 @@ async def run_claude_sdk_turn(
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
       "disallowed_tools": [
+        *_CLAUDE_BUILTIN_HELPER_TOOLS,
         *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
         *_CLAUDE_NATIVE_OWNER_INPUT_TOOLS,
         *_CLAUDE_UNUSED_BUILTINS,

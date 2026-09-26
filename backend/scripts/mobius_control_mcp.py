@@ -52,7 +52,20 @@ WORK_OWNERSHIP_TOOLS = (
   CLAIM_AGENT_WORK_TOOL,
   FINISH_AGENT_WORK_TOOL,
 )
+SPAWN_AGENT_TOOL = "spawn_agent"
+MESSAGE_AGENT_TOOL = "message_agent"
+STOP_AGENT_TOOL = "stop_agent"
+LIST_AGENTS_TOOL = "list_agents"
+# Möbius-owned helpers: every provider delegates through these, and a helper
+# can use them too (nesting).
+HELPER_TOOLS = (
+  SPAWN_AGENT_TOOL,
+  MESSAGE_AGENT_TOOL,
+  STOP_AGENT_TOOL,
+  LIST_AGENTS_TOOL,
+)
 OWNER_TOOLS = (
+  *HELPER_TOOLS,
   PROMOTE_GOAL_TOOL,
   DECLARE_WAIT_TOOL,
   CANCEL_WAIT_TOOL,
@@ -62,7 +75,14 @@ OWNER_TOOLS = (
   *WORK_OWNERSHIP_TOOLS,
   CHECKPOINT_CHAT_TOOL,
 )
-DELEGATED_TOOLS = (*PEER_TOOLS, *WORK_OWNERSHIP_TOOLS, CHECKPOINT_CHAT_TOOL)
+DELEGATED_TOOLS = (*HELPER_TOOLS, *PEER_TOOLS, *WORK_OWNERSHIP_TOOLS, CHECKPOINT_CHAT_TOOL)
+# A helper turn's identity when it runs inside a shared helper host: the
+# process environment belongs to the whole host, so the turn's own values
+# come from a private per-turn file (see backend app/helper_hosts.py).
+CALLER_ENV_FILE_ENV = "MOBIUS_CALLER_ENV_FILE"
+HELPER_HOST_ENV = "MOBIUS_HELPER_HOST"
+CALLER_ENV_ARGUMENT = "_mobius_caller_env_file"
+DEFAULT_SUBAGENTS_HELPER = "/data/apps/subagents/subagents.py"
 PROMOTE_GOAL_DESCRIPTION = (
   "Promote the current ordinary top-level owner turn into a durable, "
   "platform-owned Goal after the goal-planning criteria are satisfied. "
@@ -276,8 +296,8 @@ def _initialize_result(params: Any) -> dict[str, Any]:
   tools = _available_tool_names()
   instructions = (
     "Run-bound Möbius controls, plus tools from installed apps (named "
-    "<app>_<tool>). Provider-native subagent tools only manage the current "
-    "turn's temporary subagent tree."
+    "<app>_<tool>). Delegate to helper agents with spawn_agent (any connected "
+    "provider or model); their results arrive in this chat automatically."
   )
   if any(name in PEER_TOOLS for name in tools):
     instructions += (
@@ -520,6 +540,224 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
 
 
+def _parse_env_file(path: str) -> dict[str, str]:
+  """Read a helper turn's ``export NAME=value`` file without a shell."""
+  import shlex
+  values: dict[str, str] = {}
+  try:
+    text = Path(path).read_text(encoding="utf-8")
+  except OSError:
+    return values
+  for line in text.splitlines():
+    line = line.strip()
+    if not line.startswith("export "):
+      continue
+    name, sep, raw = line[len("export "):].partition("=")
+    if sep and name.isidentifier():
+      parsed = shlex.split(raw) if raw else [""]
+      values[name] = parsed[0] if parsed else ""
+  return values
+
+
+def _load_caller_env_file() -> None:
+  """Codex host: this server serves exactly one helper turn; adopt its file."""
+  path = os.environ.get(CALLER_ENV_FILE_ENV)
+  if path:
+    os.environ.update(_parse_env_file(path))
+
+
+_load_caller_env_file()
+
+
+class _CallerEnv:
+  """Claude host: one server serves every helper, so identity is per call.
+
+  The host's hook stamps the calling helper's env file into the arguments
+  (the model never supplies it). Honored only inside a helper host.
+  """
+
+  def __init__(self, arguments: dict[str, Any]):
+    path = arguments.pop(CALLER_ENV_ARGUMENT, None)
+    self._values = (
+      _parse_env_file(path)
+      if isinstance(path, str) and os.environ.get(HELPER_HOST_ENV) else {}
+    )
+    self._saved: dict[str, str | None] = {}
+
+  def __enter__(self) -> None:
+    for name, value in self._values.items():
+      self._saved[name] = os.environ.get(name)
+      os.environ[name] = value
+
+  def __exit__(self, *_exc: Any) -> None:
+    for name, value in self._saved.items():
+      if value is None:
+        os.environ.pop(name, None)
+      else:
+        os.environ[name] = value
+
+
+_SUBAGENTS_APP: dict[str, Any] = {}
+
+
+def _subagents_app() -> ModuleType:
+  """The Subagents app owns provider switches, defaults, and model names."""
+  path = os.environ.get("MOBIUS_SUBAGENT_HELPER") or DEFAULT_SUBAGENTS_HELPER
+  if not Path(path).is_file():
+    raise RuntimeError(
+      "Helpers need the Subagents app, which is not installed."
+    )
+  stamp = (path, Path(path).stat().st_mtime_ns)
+  cached = _SUBAGENTS_APP.get("module")
+  if cached is not None and _SUBAGENTS_APP.get("stamp") == stamp:
+    return cached
+  spec = importlib.util.spec_from_file_location("mobius_subagents_app", path)
+  if spec is None or spec.loader is None:
+    raise RuntimeError("The Subagents app helper could not be loaded.")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  _SUBAGENTS_APP.update(module=module, stamp=stamp)
+  return module
+
+
+def _this_chat() -> str:
+  chat_id = (os.environ.get("CHAT_ID") or "").strip()
+  if not chat_id:
+    raise RuntimeError("This run is not attached to a chat.")
+  return chat_id
+
+
+def _helper_rows() -> list[dict[str, Any]]:
+  listed = _agent_api_call(
+    "GET", f"/api/delegations?parent_chat_id={_this_chat()}&limit=200",
+  )
+  items = listed.get("items") if isinstance(listed, dict) else None
+  return [row for row in items or [] if isinstance(row, dict)]
+
+
+def _find_helper(reference: Any) -> dict[str, Any]:
+  if not isinstance(reference, str) or not reference.strip():
+    raise ValueError("helper must be a helper name or id from spawn_agent")
+  reference = reference.strip()
+  for row in _helper_rows():  # newest first
+    if reference in (row.get("id"), row.get("task_key")):
+      return row
+  raise ValueError(f"No helper named {reference!r} in this chat.")
+
+
+def _helper_view(row: dict[str, Any], *, result: bool = False) -> dict[str, Any]:
+  view = {
+    "helper": row.get("task_key"),
+    "helper_id": row.get("id"),
+    "provider": row.get("provider"),
+    "model": row.get("model"),
+    "access": row.get("scope"),
+    "status": row.get("status"),
+  }
+  if result and row.get("result"):
+    view["result"] = row["result"]
+  return view
+
+
+def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
+  allowed = {"name", "task", "access", "provider", "model", "effort", "cwd"}
+  if not set(arguments).issubset(allowed):
+    raise ValueError("spawn_agent received unknown arguments")
+  name, task = arguments.get("name"), arguments.get("task")
+  access = arguments.get("access")
+  if not isinstance(name, str) or not name.strip():
+    raise ValueError("name is required")
+  if not isinstance(task, str) or not task.strip():
+    raise ValueError("task is required")
+  if access not in ("read", "write"):
+    raise ValueError("access must be read or write")
+  app = _subagents_app()
+  try:
+    snapshot = app.snapshot()
+  except Exception as exc:
+    raise RuntimeError(f"Subagents settings are unavailable: {exc}") from exc
+  explicit = isinstance(arguments.get("provider"), str)
+  provider = (
+    arguments.get("provider")
+    or os.environ.get("MOBIUS_AGENT_PROVIDER")
+    or "claude"
+  )
+  model = arguments.get("model")
+  effort = arguments.get("effort")
+  states = snapshot.get("providers") or {}
+  if provider in states:
+    state = states[provider]
+    if not state.get("connected"):
+      raise RuntimeError(f"{provider.title()} is not connected.")
+    if not state.get("enabled") and not explicit:
+      raise RuntimeError(
+        f"{provider.title()} helpers are paused in the Subagents app; pass "
+        "another provider, or this one explicitly if the owner asked for it."
+      )
+    try:
+      model = app._resolve_model(provider, model, state)
+    except Exception as exc:
+      raise ValueError(str(exc)) from exc
+    effort = effort or state.get("default_effort")
+  elif provider != "mobius":
+    raise ValueError(f"Unknown helper provider {provider!r}.")
+  body = {
+    "app_id": snapshot.get("app_id"),
+    "parent_chat_id": _this_chat(),
+    "task_key": name.strip(),
+    "prompt": task.strip(),
+    "provider": provider,
+    "model": model,
+    "effort": effort,
+    "scope": access,
+    "notify_parent_on_complete": True,
+  }
+  if isinstance(arguments.get("cwd"), str) and arguments["cwd"].strip():
+    body["cwd"] = arguments["cwd"].strip()
+  row = _agent_api_call("POST", "/api/delegations", body)
+  view = _helper_view(row)
+  view["note"] = (
+    "Started in the background. Its result arrives in this chat by itself: "
+    "during this turn if it is still running, otherwise by waking this chat. "
+    "Keep working or end your turn; do not poll."
+  )
+  return view
+
+
+def _call_message_agent(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"helper", "message"}:
+    raise ValueError("message_agent needs exactly helper and message")
+  message = arguments.get("message")
+  if not isinstance(message, str) or not message.strip():
+    raise ValueError("message must not be empty")
+  row = _find_helper(arguments.get("helper"))
+  updated = _agent_api_call(
+    "POST", f"/api/delegations/{row['id']}/messages", {"message": message},
+  )
+  view = _helper_view(updated)
+  view["note"] = "Follow-up started; its result arrives in this chat by itself."
+  return view
+
+
+def _call_stop_agent(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"helper"}:
+    raise ValueError("stop_agent needs exactly helper")
+  row = _find_helper(arguments.get("helper"))
+  return _helper_view(
+    _agent_api_call("POST", f"/api/delegations/{row['id']}/cancel", {}),
+  )
+
+
+def _call_list_agents(arguments: dict[str, Any]) -> dict:
+  if not set(arguments).issubset({"helper"}):
+    raise ValueError("list_agents takes only an optional helper")
+  if arguments.get("helper"):
+    row = _find_helper(arguments["helper"])
+    detail = _agent_api_call("GET", f"/api/delegations/{row['id']}")
+    return _helper_view(detail, result=True)
+  return {"helpers": [_helper_view(row) for row in _helper_rows()]}
+
+
 def _call_checkpoint_chat(arguments: dict[str, Any]) -> str:
   if not arguments or not set(arguments).issubset({"title", "digest", "summary"}):
     raise ValueError("checkpoint_chat takes one or more of title, digest, summary")
@@ -546,6 +784,83 @@ _TOOL_DEFINITIONS = {
         "digest": {"type": "string", "maxLength": 1000},
         "summary": {"type": "string", "maxLength": 8000},
       },
+    },
+  },
+  SPAWN_AGENT_TOOL: {
+    "name": SPAWN_AGENT_TOOL,
+    "description": (
+      "Start one helper agent in the background on a bounded task and return "
+      "at once. For parallel work, start several in the same step. A helper "
+      "can run on any connected provider and model (defaults come from the "
+      "Subagents app) and has the same tools you do, but it does not see this "
+      "conversation: write a self-contained task with the files, constraints, "
+      "and what done looks like. Its result arrives in this chat by itself, "
+      "during this turn if you are still working or by waking the chat after "
+      "you end it, so never poll. access=read forbids file changes."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short stable name, e.g. review-auth-flow. Reusing it attaches to the same helper instead of starting another.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        },
+        "task": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "access": {"type": "string", "enum": ["read", "write"]},
+        "provider": {
+          "type": "string", "enum": ["claude", "codex", "mobius"],
+          "description": "Omit to use this chat's provider.",
+        },
+        "model": {"type": "string", "description": "Model id or alias; omit for the default."},
+        "effort": {"type": "string", "description": "Reasoning effort; omit for the default."},
+        "cwd": {"type": "string", "description": "Working directory under /data; omit for /data."},
+      },
+      "required": ["name", "task", "access"],
+      "additionalProperties": False,
+    },
+  },
+  MESSAGE_AGENT_TOOL: {
+    "name": MESSAGE_AGENT_TOOL,
+    "description": (
+      "Give a finished helper a follow-up task. It keeps its full history, "
+      "and its new result arrives in this chat by itself. A helper that is "
+      "still working cannot be messaged; wait for its result or stop it."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "helper": {"type": "string", "description": "Helper name or id."},
+        "message": {"type": "string", "minLength": 1, "maxLength": 200000},
+      },
+      "required": ["helper", "message"],
+      "additionalProperties": False,
+    },
+  },
+  STOP_AGENT_TOOL: {
+    "name": STOP_AGENT_TOOL,
+    "description": (
+      "Stop a helper for good, including any command it is running. Use when "
+      "its work is no longer wanted; a stopped helper cannot be messaged."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {"helper": {"type": "string", "description": "Helper name or id."}},
+      "required": ["helper"],
+      "additionalProperties": False,
+    },
+  },
+  LIST_AGENTS_TOOL: {
+    "name": LIST_AGENTS_TOOL,
+    "description": (
+      "List this chat's helpers and their status, or pass one helper to see "
+      "its latest result. Results are delivered automatically; use this to "
+      "re-read one, not to wait."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {"helper": {"type": "string", "description": "Optional helper name or id."}},
+      "additionalProperties": False,
     },
   },
   REQUEST_APPROVAL_TOOL: {
@@ -836,6 +1151,10 @@ _TOOL_DEFINITIONS = {
 }
 
 _TOOL_HANDLERS = {
+  SPAWN_AGENT_TOOL: _call_spawn_agent,
+  MESSAGE_AGENT_TOOL: _call_message_agent,
+  STOP_AGENT_TOOL: _call_stop_agent,
+  LIST_AGENTS_TOOL: _call_list_agents,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
   REQUEST_RESTART_TOOL: _call_request_restart,
@@ -854,21 +1173,23 @@ def _call_tool(params: Any) -> dict[str, Any]:
   if not isinstance(params, dict):
     return _tool_result("Tool call must be an object.", is_error=True)
   name = params.get("name")
-  if isinstance(name, str) and name not in _TOOL_DEFINITIONS and any(
-    tool["name"] == name for tool in _app_tool_listings()
-  ):
-    arguments = params.get("arguments")
-    if not isinstance(arguments, dict):
-      return _tool_result("Tool arguments must be an object.", is_error=True)
-    return _call_app_tool(name, arguments, params.get("_meta"))
+  arguments = params.get("arguments")
+  if not isinstance(arguments, dict):
+    return _tool_result("Tool arguments must be an object.", is_error=True)
+  with _CallerEnv(arguments):
+    if isinstance(name, str) and name not in _TOOL_DEFINITIONS and any(
+      tool["name"] == name for tool in _app_tool_listings()
+    ):
+      return _call_app_tool(name, arguments, params.get("_meta"))
+    return _call_tool_as_caller(name, arguments)
+
+
+def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]:
   if name not in _available_tool_names():
     return _tool_result("Tool is unavailable for this agent run.", is_error=True)
   handler = _TOOL_HANDLERS.get(name) if isinstance(name, str) else None
   if handler is None:
     return _tool_result("Unknown tool.", is_error=True)
-  arguments = params.get("arguments")
-  if not isinstance(arguments, dict):
-    return _tool_result("Tool arguments must be an object.", is_error=True)
   try:
     return _tool_result(handler(arguments))
   except Exception as exc:  # Tool failures are data; keep the MCP server alive.

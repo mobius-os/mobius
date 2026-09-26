@@ -33,7 +33,14 @@
   justify-content: space-between;
   gap: 12px;
 }
-.helper-convo__heading { min-width: 0; }
+.helper-convo__heading { min-width: 0; flex: 1 1 auto; }
+.helper-convo__open {
+  flex: none;
+  align-self: center;
+  color: var(--accent); /* CONTRACT: link-coloured action in the dialog head */
+  font-size: 13px;
+  text-underline-offset: 3px;
+}
 .helper-convo__title {
   margin: 0;
   overflow: hidden;

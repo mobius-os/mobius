@@ -136,15 +136,6 @@ _CODEX_PROMPT_CONTROL_OVERRIDES = [
 ]
 
 
-def _env_flag_on(name: str, *, default: bool) -> bool:
-  """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
-  anything else enables; unset falls back to ``default``."""
-  raw = os.environ.get(name)
-  if raw is None:
-    return default
-  return raw.strip().lower() not in ("off", "0", "false", "no", "")
-
-
 def _codex_config_overrides() -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
@@ -154,22 +145,12 @@ def _codex_config_overrides() -> list[str]:
 
   Owner questions are deliberately absent here: the Möbius control MCP's
   durable ``request_question`` is the sole owner-facing question capability.
-  Multi-agent (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
-  ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
-  activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
-  ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
-  uvicorn — a runtime rollback that needs no image rebuild, since the overrides
-  are read fresh per turn.
 
-  When enabled, the tool namespace is PINNED to ``agents``. Codex #31864: the
-  pinned SDK source still DEFAULTS multi_agent_v2's spawn_agent tool to the
-  ``collaboration`` namespace, which gpt-5.6 reserves, so the Responses API can
-  reject the tool schema on EVERY turn (not only spawn turns). A live probe on
-  0.144.5 spawned a sub-agent cleanly under the observed default, but the model
-  rollout is server-side and mutable — so we do not depend on that observation:
-  pinning ``agents`` (the reporter-confirmed bypass in #31864) keeps enablement
-  robust to a rollout change, not just to the binary we probed. Re-run the
-  delegate probe after any @openai/codex bump.
+  Helpers are Möbius's too: agents delegate with ``spawn_agent`` on the
+  Möbius control server, whose helpers run on any provider, outlive the turn,
+  and share a helper host (see ``helper_hosts``). Codex's own helper tools are
+  therefore switched off in both generations — note ``multi_agent`` (v1) is on
+  by default, so disabling only ``multi_agent_v2`` would leave it offered.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
   # Disabling only default_mode_request_user_input leaves the native tool
@@ -177,12 +158,10 @@ def _codex_config_overrides() -> list[str]:
   overrides.append("tools.experimental_request_user_input.enabled=false")
   # One provider turn per Möbius admission; never enable a competing loop.
   overrides.append("features.goals=false")
-  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
-    overrides += [
-      "features.multi_agent_v2.enabled=true",
-      "features.multi_agent_v2.tool_namespace=agents",
-      "suppress_unstable_features_warning=true",
-    ]
+  overrides += [
+    "features.multi_agent=false",
+    "features.multi_agent_v2.enabled=false",
+  ]
   return overrides
 
 

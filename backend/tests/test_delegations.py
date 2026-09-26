@@ -668,8 +668,9 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   policy = policy_for_chat(db, child.id)
   assert policy is not None
   assert policy.allow_session_reseed is False
-  assert "$MOBIUS_SUBAGENT_HELPER" in policy.system_prompt
-  assert "provider-native helper tools" in policy.system_prompt
+  # Helpers delegate through Möbius, never provider-native helper tools.
+  assert "spawn_agent" in policy.system_prompt
+  assert "provider-native" not in policy.system_prompt
   assert "top-level parent owns any durable Möbius Wait" in policy.system_prompt
   assert "/data/cli-auth and /data/.secret-key as protected by default" in (
     policy.system_prompt
@@ -762,10 +763,12 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
   assert third.root_run_id == "physical-3"
 
 
-def test_delegated_codex_config_routes_questions_up_but_keeps_native_agents():
+def test_delegated_codex_config_routes_questions_up_and_delegates_through_mobius():
   overrides = _codex_config_overrides()
   assert "tools.experimental_request_user_input.enabled=false" in overrides
-  assert "features.multi_agent_v2.enabled=true" in overrides
+  # Helpers delegate with Möbius spawn_agent, never Codex's own helper tools.
+  assert "features.multi_agent=false" in overrides
+  assert "features.multi_agent_v2.enabled=false" in overrides
   assert "features.goals=false" in overrides
 
 
@@ -837,7 +840,6 @@ def _seed_delegation(
     cwd="/data/platform",
     prompt_sha256=hashlib.sha256(b"Do the bounded task.").hexdigest(),
     notify_parent_on_complete=notify,
-    parent_woken_at=None,
     cancelled_at=now_naive_utc() if cancelled else None,
   ))
   if child_status is not None:
@@ -896,7 +898,7 @@ def test_background_helper_projection_owns_waiting_until_parent_wake(
   assert serialize_background_helpers(db, parent_id)["count"] == 1
 
   delegation = db.get(models.Delegation, delegation_id)
-  delegation.parent_woken_at = now_naive_utc()
+  delegation.delivered_run_id = "child-run-waiting-owner"
   db.commit()
   assert background_helper_chat_ids(db, [parent_id]) == set()
   assert background_helper_goal_ids(db, parent_id) == set()
@@ -953,6 +955,12 @@ def test_terminal_helper_publishes_one_exact_chat_activity_hint(
     "type": "chat_activity_changed",
     "chatId": parent_id,
   }]
+
+
+def _current_result(db, delegation_id):
+  """The exact (Delegation, child run) result a context would admit."""
+  run_id = delegations_mod.current_result_run_ids(db, [delegation_id])[delegation_id]
+  return ((delegation_id, run_id),)
 
 
 def _seed_idle_parent_wake_root(
@@ -1024,7 +1032,7 @@ def test_child_completion_starts_one_non_message_checkpoint_for_waiting_parent(
     "chat_id": parent_id,
     "root_run_id": root_run_id,
     "run_token": delegations_mod._activity_continuation_run_id(
-      db.get(models.Delegation, delegation_id),
+      db, db.get(models.Delegation, delegation_id),
     ),
     "source_work_id": "root-activity-wait",
     "activity_id": delegation_id,
@@ -1033,7 +1041,7 @@ def test_child_completion_starts_one_non_message_checkpoint_for_waiting_parent(
   db.expire_all()
   assert db.get(models.Chat, parent_id).messages == before
   assert db.get(models.Chat, parent_id).pending_messages == []
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
 
   # Scheduling is not consumption. Until provider success, a restart-safe
   # sweep retries the same stable activity identity rather than minting work.
@@ -1105,7 +1113,7 @@ def test_stopped_parent_fences_delayed_result_until_owner_work(
   db.commit()
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
 
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == (delegation_id,)
@@ -1124,7 +1132,7 @@ def test_activity_continuation_writer_changes_run_state_not_messages(db):
   before_messages = list(parent.messages or [])
   before_pending = list(parent.pending_messages or [])
   run_token = delegations_mod._activity_continuation_run_id(
-    db.get(models.Delegation, delegation_id),
+    db, db.get(models.Delegation, delegation_id),
   )
 
   result = get_writer().submit(StartActivityContinuation(
@@ -1158,7 +1166,7 @@ def test_activity_scope_keeps_goal_source_distinct_from_physical_root(db):
     db, delegation_id, goal_objective="Ship the bounded goal",
   )
   row = db.get(models.Delegation, delegation_id)
-  run_token = delegations_mod._activity_continuation_run_id(row)
+  run_token = delegations_mod._activity_continuation_run_id(db, row)
   get_writer().submit(StartActivityContinuation(
     chat_id=parent_id,
     run_token=run_token,
@@ -1191,7 +1199,7 @@ def test_successful_finalize_consumes_exact_activity_once(db):
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   run_token = delegations_mod._activity_continuation_run_id(
-    db.get(models.Delegation, delegation_id),
+    db, db.get(models.Delegation, delegation_id),
   )
   get_writer().submit(StartActivityContinuation(
     chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
@@ -1199,11 +1207,11 @@ def test_successful_finalize_consumes_exact_activity_once(db):
   )).result(timeout=5)
   get_writer().submit(AdmitProviderExecution(
     chat_id=parent_id, run_token=run_token,
-    activity_delegation_ids=(delegation_id,),
+    activity_results=_current_result(db, delegation_id),
   )).result(timeout=5)
   # Provider return is carried directly into the terminal write. The assistant
   # reply and result consumption become durable in the same Finalize commit.
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   terminal = Finalize(
     chat_id=parent_id,
     run_token=run_token,
@@ -1217,10 +1225,10 @@ def test_successful_finalize_consumes_exact_activity_once(db):
   assert get_writer().submit(terminal).result(timeout=5) is True
   db.expire_all()
   delegation = db.get(models.Delegation, delegation_id)
-  first_woken_at = delegation.parent_woken_at
-  first_incorporated_at = delegation.result_incorporated_at
-  assert first_woken_at is not None
-  assert first_incorporated_at is not None
+  first_woken_at = delegation.delivered_run_id
+  first_incorporated_at = delegation.incorporated_run_id
+  assert first_woken_at == "child-run-activity-ack"
+  assert first_incorporated_at == "child-run-activity-ack"
   from app.chat_activity import chat_activity_page
   assert chat_activity_page(db, parent_id)["events"][0][
     "consumption"
@@ -1235,13 +1243,70 @@ def test_successful_finalize_consumes_exact_activity_once(db):
     incorporate_activity_delivery=True,
   )).result(timeout=5) is True
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at == first_woken_at
+  assert db.get(models.Delegation, delegation_id).delivered_run_id == first_woken_at
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at == first_incorporated_at
+  ).incorporated_run_id == first_incorporated_at
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == ()
+
+
+def test_finalize_leaves_a_follow_up_sent_during_the_turn_owed(db):
+  """A turn that receives a helper result and sends it a follow-up.
+
+  Finishing that turn consumes exactly the result it admitted; the follow-up's
+  result is a newer child run and stays owed, so the helper keeps its parent
+  wake (and the Goal's next move) instead of reading as already delivered.
+  """
+  from app.chat_writer import (
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
+  )
+  from app.timeutil import now_naive_utc
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="follow-up-owed",
+    result_blocks=[{"type": "text", "content": "First result."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+  run_token = delegations_mod._activity_continuation_run_id(
+    db, db.get(models.Delegation, delegation_id),
+  )
+  get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
+    source_work_id="root-follow-up-owed", activity_id=delegation_id,
+  )).result(timeout=5)
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=parent_id, run_token=run_token,
+    activity_results=_current_result(db, delegation_id),
+  )).result(timeout=5)
+  # message_agent during the turn: a newer child run starts after this turn.
+  db.expire_all()
+  parent_started = db.get(models.ChatRun, run_token).started_at
+  db.add(make_goal_run(db,
+    id="follow-up-child-run", root_run_id="follow-up-child-run",
+    chat_id=child_id, status="running", provider="codex",
+    started_at=max(now_naive_utc(), parent_started + timedelta(seconds=1)),
+  ))
+  db.commit()
+
+  assert get_writer().submit(Finalize(
+    chat_id=parent_id, run_token=run_token,
+    snapshot={"id": run_token, "role": "assistant",
+              "blocks": [{"type": "text", "content": "Asked a follow-up."}]},
+    incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
+
+  db.expire_all()
+  delegation = db.get(models.Delegation, delegation_id)
+  assert delegation.delivered_run_id == "child-run-follow-up-owed"
+  assert delegation.incorporated_run_id == "child-run-follow-up-owed"
+  db.get(models.ChatRun, "follow-up-child-run").status = "completed"
+  db.commit()
+  assert [
+    row.id for row in delegations_mod.available_delegation_results(db, parent_id)
+  ] == [delegation_id]
 
 
 class _ActivityCheckpointProvider:
@@ -1278,7 +1343,7 @@ def _run_activity_checkpoint(
       provider="claude",
     ))
     db.commit()
-  run_token = delegations_mod._activity_continuation_run_id(row)
+  run_token = delegations_mod._activity_continuation_run_id(db, row)
   started = get_writer().submit(StartActivityContinuation(
     chat_id=parent_id,
     run_token=run_token,
@@ -1379,18 +1444,18 @@ def test_automatic_root_checkpoint_does_not_admit_or_ack_sibling_root_result(
   envelope = db.get(
     models.ChatRun,
     delegations_mod._activity_continuation_run_id(
-      db.get(models.Delegation, delegation_a),
+      db, db.get(models.Delegation, delegation_a),
     ),
   ).activity_delivery_json
   delivery_after_root_a = delegations_mod.build_delegation_result_context(
     db, parent_id,
   )
   assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
-  assert db.get(models.Delegation, delegation_a).parent_woken_at is not None
+  assert db.get(models.Delegation, delegation_a).delivered_run_id is not None
   assert {
     "root_b_was_injected": "Result owned by root B." in seen_prompts[0],
     "root_b_was_consumed": (
-      db.get(models.Delegation, delegation_b).parent_woken_at is not None
+      db.get(models.Delegation, delegation_b).delivered_run_id is not None
     ),
     "root_b_is_redeliverable": delegation_b in delivery_after_root_a.delegation_ids,
     "admitted_ids": envelope["delegation_ids"],
@@ -1442,7 +1507,7 @@ def test_ordinary_owner_turn_keeps_intentional_chat_wide_result_breadth(db):
   get_writer().submit(AdmitProviderExecution(
     chat_id=parent_id,
     run_token=run_token,
-    activity_delegation_ids=ordinary.delegation_ids,
+    activity_results=ordinary.results,
   )).result(timeout=5)
   assert get_writer().submit(Finalize(
     chat_id=parent_id,
@@ -1456,8 +1521,8 @@ def test_ordinary_owner_turn_keeps_intentional_chat_wide_result_breadth(db):
   )).result(timeout=5) is True
 
   db.expire_all()
-  assert db.get(models.Delegation, delegation_a).parent_woken_at is not None
-  assert db.get(models.Delegation, delegation_b).parent_woken_at is not None
+  assert db.get(models.Delegation, delegation_a).delivered_run_id is not None
+  assert db.get(models.Delegation, delegation_b).delivered_run_id is not None
 
 
 @pytest.mark.parametrize("provider_id", ["claude", "codex"])
@@ -1482,7 +1547,7 @@ def test_failed_finalize_keeps_injected_activity_result_redeliverable(
 
   def reject_terminal_commit(*args, **kwargs):
     # Exercise the transaction boundary after BOTH the assistant snapshot and
-    # parent_woken_at have been staged. The actor rollback must erase both.
+    # the delivery marks have been staged. The actor rollback must erase both.
     real_stage(*args, **kwargs)
     raise RuntimeError("injected terminal persistence failure")
 
@@ -1517,7 +1582,7 @@ def test_failed_finalize_keeps_injected_activity_result_redeliverable(
   )
   assert {
     "activity_was_consumed": (
-      db.get(models.Delegation, delegation_id).parent_woken_at is not None
+      db.get(models.Delegation, delegation_id).delivered_run_id is not None
     ),
     "activity_is_redeliverable": (
       delegation_id in delivery_after_failure.delegation_ids
@@ -1528,7 +1593,7 @@ def test_failed_finalize_keeps_injected_activity_result_redeliverable(
   }
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
   from app.chat_activity import chat_activity_page
   assert chat_activity_page(db, parent_id)["events"][0][
     "consumption"
@@ -1579,14 +1644,14 @@ def test_stop_and_supersession_gates_keep_activity_result_redeliverable(
 
   db.expire_all()
   assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
   envelope = db.get(
     models.ChatRun,
     delegations_mod._activity_continuation_run_id(
-      db.get(models.Delegation, delegation_id),
+      db, db.get(models.Delegation, delegation_id),
     ),
   ).activity_delivery_json
   assert envelope.get("delivery_contract") == (
@@ -1621,7 +1686,7 @@ def test_stop_after_provider_return_before_finalize_keeps_activity_redeliverable
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   run_token = delegations_mod._activity_continuation_run_id(
-    db.get(models.Delegation, delegation_id),
+    db, db.get(models.Delegation, delegation_id),
   )
   real_finalize = chat_mod._ChatEventSink.finalize
 
@@ -1648,7 +1713,7 @@ def test_stop_after_provider_return_before_finalize_keeps_activity_redeliverable
 
   db.expire_all()
   assert "Keep after late Stop." in seen_prompts[0]
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert any(
     "Partial response persisted after Stop." in str(message)
     for message in (db.get(models.Chat, parent_id).messages or [])
@@ -1669,7 +1734,7 @@ def test_unadmitted_activity_restart_reschedules_same_physical_turn(
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   row = db.get(models.Delegation, delegation_id)
-  run_token = delegations_mod._activity_continuation_run_id(row)
+  run_token = delegations_mod._activity_continuation_run_id(db, row)
   get_writer().submit(StartActivityContinuation(
     chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
     source_work_id=row.parent_root_run_id, activity_id=delegation_id,
@@ -1714,7 +1779,7 @@ def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   run_token = delegations_mod._activity_continuation_run_id(
-    db.get(models.Delegation, delegation_id),
+    db, db.get(models.Delegation, delegation_id),
   )
   get_writer().submit(StartActivityContinuation(
     chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
@@ -1722,7 +1787,7 @@ def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
   )).result(timeout=5)
   get_writer().submit(AdmitProviderExecution(
     chat_id=parent_id, run_token=run_token,
-    activity_delegation_ids=(delegation_id,),
+    activity_results=_current_result(db, delegation_id),
   )).result(timeout=5)
   # Simulate reconciliation after the process died after provider return but
   # before Finalize could durably incorporate its assistant response.
@@ -1733,7 +1798,7 @@ def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
     parent_id, "root-activity-admission-crash",
   )) is False
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == (delegation_id,)
@@ -1766,10 +1831,10 @@ def test_pre_atomic_completed_delivery_repair_remains_supported(db):
     db, parent_id,
   ) == {delegation_id}
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is not None
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
 
 
 @pytest.mark.parametrize("contract", [
@@ -1802,10 +1867,10 @@ def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db, con
     db, parent_id,
   ) == set()
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
 
 
 @pytest.mark.parametrize("terminal_status", ["stopped", "interrupted"])
@@ -1823,7 +1888,7 @@ def test_stopped_or_superseded_activity_never_consumes_accepted_result(
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   run_token = delegations_mod._activity_continuation_run_id(
-    db.get(models.Delegation, delegation_id),
+    db, db.get(models.Delegation, delegation_id),
   )
   get_writer().submit(StartActivityContinuation(
     chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
@@ -1831,7 +1896,7 @@ def test_stopped_or_superseded_activity_never_consumes_accepted_result(
   )).result(timeout=5)
   get_writer().submit(AdmitProviderExecution(
     chat_id=parent_id, run_token=run_token,
-    activity_delegation_ids=(delegation_id,),
+    activity_results=_current_result(db, delegation_id),
   )).result(timeout=5)
   get_writer().submit(FinishRun(
     chat_id=parent_id, run_token=run_token, terminal_status=terminal_status,
@@ -1854,10 +1919,10 @@ def test_stopped_or_superseded_activity_never_consumes_accepted_result(
     parent_id, "root-activity-run-stop",
   )) is False
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert db.get(
     models.Delegation, delegation_id,
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
   assert any(
     "Persisted partial output." in str(message)
     for message in (db.get(models.Chat, parent_id).messages or [])
@@ -1874,8 +1939,12 @@ def test_legacy_completion_carrier_is_recognized_without_rewriting_history(db):
     result_blocks=[{"type": "text", "content": "Historical carrier."}],
   )
   row = db.get(models.Delegation, delegation_id)
-  content = delegations_mod._compose_wake_notice(db, [row])
-  run_token, cid = delegations_mod._parent_wake_delivery_identity([row])
+  content = delegations_mod._compose_wake_notice(
+    db, [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  run_token, cid = delegations_mod._parent_wake_delivery_identity(
+    [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
   carrier = {
     "role": "user", "content": content, "cid": cid, "hidden": True,
     "kind": "delegation_result", "source_work_id": row.parent_root_run_id,
@@ -1888,8 +1957,56 @@ def test_legacy_completion_carrier_is_recognized_without_rewriting_history(db):
   assert delegations_mod.claim_scheduled_parent_wake(parent_id, carrier) is True
   db.expire_all()
   assert db.get(models.Chat, parent_id).messages == before
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is not None
   assert run_token.startswith("delegation-wake-")
+
+
+def test_a_delivered_result_does_not_swallow_the_follow_up_result(db):
+  """A helper reopened with message_agent owes a new result.
+
+  The hidden carrier that delivered its first result names that result's
+  child run; once a newer child run starts, the carrier no longer covers the
+  helper's current result, so the follow-up still wakes the parent.
+  """
+  from app.timeutil import now_naive_utc
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="reopened-helper",
+    result_blocks=[{"type": "text", "content": "First result."}],
+  )
+  row = db.get(models.Delegation, delegation_id)
+  content = delegations_mod._compose_wake_notice(
+    db, [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  _run_token, cid = delegations_mod._parent_wake_delivery_identity(
+    [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  delivered_at = now_naive_utc() + timedelta(seconds=1)
+  carrier = {
+    "role": "user", "content": content, "cid": cid, "hidden": True,
+    "kind": "delegation_result", "source_work_id": row.parent_root_run_id,
+    "ts": int(delivered_at.replace(tzinfo=UTC).timestamp() * 1000),
+  }
+  parent = db.get(models.Chat, parent_id)
+  parent.messages = [carrier]
+  db.commit()
+  assert delegation_id in delegations_mod._recorded_parent_wake_ids(db, parent_id)
+
+  db.add(make_goal_run(db,
+    id="child-run-reopened-follow-up", root_run_id="child-run-reopened-follow-up",
+    chat_id=child_id, status="completed", provider="claude",
+    started_at=delivered_at + timedelta(seconds=5),
+  ))
+  db.commit()
+
+  assert delegation_id not in delegations_mod._recorded_parent_wake_ids(
+    db, parent_id,
+  )
+  assert delegations_mod._repair_recorded_parent_wakes(
+    db, [db.get(models.Delegation, delegation_id)],
+  ) == set()
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
 
 
 def test_legacy_committed_carrier_keeps_its_exact_restart_recovery(
@@ -1901,8 +2018,12 @@ def test_legacy_committed_carrier_keeps_its_exact_restart_recovery(
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   row = db.get(models.Delegation, delegation_id)
-  content = delegations_mod._compose_wake_notice(db, [row])
-  run_token, cid = delegations_mod._parent_wake_delivery_identity([row])
+  content = delegations_mod._compose_wake_notice(
+    db, [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  run_token, cid = delegations_mod._parent_wake_delivery_identity(
+    [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
   carrier = {
     "role": "user", "content": content, "cid": cid, "hidden": True,
     "kind": "delegation_result", "source_work_id": row.parent_root_run_id,
@@ -1945,8 +2066,12 @@ def test_legacy_pending_carrier_is_read_only_compatibility_history(db):
     result_blocks=[{"type": "text", "content": "Already queued."}],
   )
   row = db.get(models.Delegation, delegation_id)
-  content = delegations_mod._compose_wake_notice(db, [row])
-  _run_token, cid = delegations_mod._parent_wake_delivery_identity([row])
+  content = delegations_mod._compose_wake_notice(
+    db, [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  _run_token, cid = delegations_mod._parent_wake_delivery_identity(
+    [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
   carrier = {
     "role": "user", "content": content, "cid": cid, "hidden": True,
     "kind": "delegation_result", "source_work_id": row.parent_root_run_id,
@@ -1990,7 +2115,8 @@ def test_cancelling_an_owner_settles_descendants_before_the_parent(db):
   assert leaf.cancelled_at <= owner.cancelled_at
 
 
-def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypatch):
+def test_a_cancelled_helper_keeps_its_launch_row(db, monkeypatch):
+  from app.activity_position import record_activity_position
   from app.chat_activity import chat_activity_page
 
   parent_id, _child, delegation_id = _seed_delegation(
@@ -2001,6 +2127,8 @@ def test_cancelling_an_idle_helper_records_the_parent_frontier_once(db, monkeypa
     "app.chat_event_sink.active_sink_activity_position",
     lambda chat_id: frontier if chat_id == parent_id else None,
   )
+  record_activity_position(db, parent_id, f"delegation:{delegation_id}:running")
+  db.commit()
   published = []
   monkeypatch.setattr(
     delegations_mod, "publish_chat_activity_changed", published.append,
@@ -2066,7 +2194,7 @@ def test_reconcile_schedules_completed_activity_once_without_consuming(db, monke
   assert second.woken_parents == 1
   assert len(starts) == 2
   assert starts[0]["run_token"] == starts[1]["run_token"]
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
 
 
 def test_recovery_selection_runs_off_the_event_loop(db, monkeypatch):
@@ -2159,7 +2287,7 @@ def test_recovery_scan_is_bounded_fair_and_status_only(db, monkeypatch):
   db.expire_all()
   assert {
     row.id for row in db.query(models.Delegation).filter(
-      models.Delegation.parent_woken_at.is_(None),
+      models.Delegation.delivered_run_id.is_(None),
       models.Delegation.id.in_(expected),
     )
   } == expected
@@ -2237,7 +2365,7 @@ def test_migration_adds_wake_columns_idempotently(db):
 def test_helper_result_admitted_to_a_live_parent_run_no_longer_owns_the_goal(db):
   """The turn incorporating a helper's result owns the Goal's next move.
 
-  Finalize latches parent_woken_at only when that turn ends, so without this
+  Finalize marks the result delivered only when that turn ends, so without this
   the incorporating turn itself could never complete the Goal.
   """
   parent_id, _child_id, delegation_id = _seed_delegation(
@@ -2261,3 +2389,278 @@ def test_helper_result_admitted_to_a_live_parent_run_no_longer_owns_the_goal(db)
   db.get(models.ChatRun, "parent-wake-run").status = "stopped"
   db.commit()
   assert background_helper_goal_ids(db, parent_id) == {"root-being-delivered"}
+
+
+def test_a_reopened_helper_result_wakes_the_idle_parent_again(
+  client, owner_token, db, monkeypatch,
+):
+  """A result is (helper, child run), not the helper alone.
+
+  The first result wakes the idle parent through an activity continuation and
+  is incorporated. message_agent then reopens the helper; when that follow-up
+  settles, the parent must wake again for the NEW result instead of treating
+  the earlier delivery as covering it.
+  """
+  from app.chat_writer import (
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
+    StartContinuationAttached, StartContinuationBlocked,
+  )
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="reopened-wake",
+    result_blocks=[{"type": "text", "content": "First result."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+
+  def deliver_current_result():
+    row = db.get(models.Delegation, delegation_id)
+    run_token = delegations_mod._activity_continuation_run_id(db, row)
+    started = get_writer().submit(StartActivityContinuation(
+      chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
+      source_work_id="root-reopened-wake", activity_id=delegation_id,
+    )).result(timeout=5)
+    assert not isinstance(started, (
+      StartContinuationAttached, StartContinuationBlocked,
+    )), started
+    delivery = delegations_mod.build_delegation_result_context(
+      db, parent_id, source_work_id="root-reopened-wake",
+    )
+    assert delivery.delegation_ids == (delegation_id,)
+    get_writer().submit(AdmitProviderExecution(
+      chat_id=parent_id, run_token=run_token,
+      activity_results=delivery.results,
+    )).result(timeout=5)
+    assert get_writer().submit(Finalize(
+      chat_id=parent_id, run_token=run_token,
+      snapshot={"id": run_token, "role": "assistant",
+                "blocks": [{"type": "text", "content": "Folded it in."}]},
+      incorporate_activity_delivery=True,
+    )).result(timeout=5) is True
+    get_writer().submit(FinishRun(
+      chat_id=parent_id, run_token=run_token, terminal_status="completed",
+    )).result(timeout=5)
+    db.expire_all()
+    return run_token
+
+  first_wake = deliver_current_result()
+  assert delegations_mod.available_delegation_results(db, parent_id) == []
+
+  async def reopen_child(**kwargs):
+    db.add(make_goal_run(db,
+      id="child-run-reopened-wake-2", root_run_id="child-run-reopened-wake-2",
+      chat_id=kwargs["chat_id"], status="running", provider="claude",
+      started_at=now_naive_utc() + timedelta(seconds=5),
+    ))
+    db.commit()
+    return True
+
+  monkeypatch.setattr(chat_start_mod, "start_programmatic_chat_turn", reopen_child)
+  response = client.post(
+    f"/api/delegations/{delegation_id}/messages",
+    json={"message": "Now check the tests too."},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 202, response.text
+  db.expire_all()
+  # Still working: nothing is owed yet, and the old delivery stays delivered.
+  assert delegations_mod.available_delegation_results(db, parent_id) == []
+  db.get(models.ChatRun, "child-run-reopened-wake-2").status = "completed"
+  db.commit()
+
+  owed = delegations_mod.available_delegation_results(db, parent_id)
+  assert [row.id for row in owed] == [delegation_id]
+  second_wake = deliver_current_result()
+  assert second_wake != first_wake
+  assert delegations_mod.available_delegation_results(db, parent_id) == []
+
+
+def test_an_older_delivery_record_never_hides_a_newer_result(db):
+  """Delivery marks only move forward through a helper's child runs."""
+  _parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="monotonic-mark",
+    result_blocks=[{"type": "text", "content": "First result."}],
+  )
+  db.add(make_goal_run(db,
+    id="child-run-monotonic-mark-2", root_run_id="child-run-monotonic-mark-2",
+    chat_id=child_id, status="completed", provider="claude",
+    started_at=now_naive_utc() + timedelta(seconds=5),
+  ))
+  db.commit()
+
+  newer = {delegation_id: "child-run-monotonic-mark-2"}
+  older = {delegation_id: "child-run-monotonic-mark"}
+  assert delegations_mod.mark_results_delivered(db, newer) == {delegation_id}
+  assert delegations_mod.mark_results_delivered(db, older) == set()
+  assert delegations_mod.mark_results_delivered(
+    db, {delegation_id: "run-from-another-chat"},
+  ) == set()
+  db.commit()
+  db.expire_all()
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).delivered_run_id == "child-run-monotonic-mark-2"
+
+
+def test_a_carrier_without_result_identity_holds_the_result_it_was_written_for(
+  db,
+):
+  """Carriers written before results had ids resolve exactly, never loosely.
+
+  Child runs are serial and only settled results are delivered, so a legacy
+  carrier held the helper's latest child run that started before it was
+  written; a follow-up run started later is still owed.
+  """
+  import json as json_mod
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="legacy-carrier",
+    result_blocks=[{"type": "text", "content": "First result."}],
+  )
+  written_at = now_naive_utc() + timedelta(seconds=1)
+  body = json_mod.dumps([{"id": delegation_id, "status": "completed"}])
+  carrier = {
+    "role": "user", "hidden": True, "kind": "delegation_result",
+    "content": (
+      "A delegated subagent task you launched has finished.\n"
+      f"{delegations_mod._WAKE_RESULTS_OPEN}{body}"
+      f"{delegations_mod._WAKE_RESULTS_CLOSE}"
+    ),
+    "ts": int(written_at.replace(tzinfo=UTC).timestamp() * 1000),
+  }
+  assert delegations_mod.carrier_results(db, carrier) == {
+    delegation_id: "child-run-legacy-carrier",
+  }
+  parent = db.get(models.Chat, parent_id)
+  parent.messages = [carrier]
+  db.commit()
+  assert delegations_mod._recorded_parent_wake_ids(db, parent_id) == {
+    delegation_id,
+  }
+
+  db.add(make_goal_run(db,
+    id="child-run-legacy-carrier-2", root_run_id="child-run-legacy-carrier-2",
+    chat_id=child_id, status="completed", provider="claude",
+    started_at=written_at + timedelta(seconds=5),
+  ))
+  db.commit()
+  assert delegations_mod._recorded_parent_wake_ids(db, parent_id) == set()
+  assert [
+    row.id for row in delegations_mod.available_delegation_results(db, parent_id)
+  ] == [delegation_id]
+
+
+def test_only_a_settled_result_can_be_marked_and_marks_follow_run_order(db):
+  """Marks refuse a running follow-up, break start-time ties by id like the
+  latest-run order, and are never stuck behind a record of a missing run."""
+  _parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="mark-rules",
+    result_blocks=[{"type": "text", "content": "First result."}],
+  )
+  first = db.get(models.ChatRun, "child-run-mark-rules")
+  tied_at = first.started_at
+  db.add(make_goal_run(db,
+    id="child-run-mark-rules-z", root_run_id="child-run-mark-rules-z",
+    chat_id=child_id, status="running", provider="claude",
+    started_at=tied_at,
+  ))
+  db.commit()
+
+  running = {delegation_id: "child-run-mark-rules-z"}
+  assert delegations_mod.mark_results_delivered(db, running) == set()
+  db.get(models.ChatRun, "child-run-mark-rules-z").status = "completed"
+  db.commit()
+  # Same start time: the higher id is the later run, so it wins and stays.
+  assert delegations_mod.mark_results_delivered(db, running) == {delegation_id}
+  assert delegations_mod.mark_results_delivered(
+    db, {delegation_id: "child-run-mark-rules"},
+  ) == set()
+
+  row = db.get(models.Delegation, delegation_id)
+  row.delivered_run_id = "run-that-no-longer-exists"
+  db.commit()
+  assert delegations_mod.mark_results_delivered(db, running) == {delegation_id}
+
+
+def test_admission_accepts_the_result_in_context_after_a_reopen(db):
+  """A helper reopened between building context and admission is not an error.
+
+  The turn admits and incorporates the result it actually saw; the newer
+  run is owed once it settles.
+  """
+  from app.chat_writer import (
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
+  )
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="reopen-before-admit",
+    result_blocks=[{"type": "text", "content": "First result."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+  row = db.get(models.Delegation, delegation_id)
+  run_token = delegations_mod._activity_continuation_run_id(db, row)
+  get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id, run_token=run_token, root_run_id=root_run_id,
+    source_work_id="root-reopen-before-admit", activity_id=delegation_id,
+  )).result(timeout=5)
+  delivery = delegations_mod.build_delegation_result_context(
+    db, parent_id, source_work_id="root-reopen-before-admit",
+  )
+  db.add(make_goal_run(db,
+    id="child-run-reopen-before-admit-2",
+    root_run_id="child-run-reopen-before-admit-2",
+    chat_id=child_id, status="running", provider="claude",
+    started_at=now_naive_utc() + timedelta(seconds=5),
+  ))
+  db.commit()
+
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=parent_id, run_token=run_token,
+    activity_results=delivery.results,
+  )).result(timeout=5)
+  assert get_writer().submit(Finalize(
+    chat_id=parent_id, run_token=run_token,
+    snapshot={"id": run_token, "role": "assistant",
+              "blocks": [{"type": "text", "content": "Folded it in."}]},
+    incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
+  db.expire_all()
+  delegation = db.get(models.Delegation, delegation_id)
+  assert delegation.delivered_run_id == "child-run-reopen-before-admit"
+  assert delegation.incorporated_run_id == "child-run-reopen-before-admit"
+  db.get(models.ChatRun, "child-run-reopen-before-admit-2").status = "completed"
+  db.commit()
+  assert [
+    row.id for row in delegations_mod.available_delegation_results(db, parent_id)
+  ] == [delegation_id]
+
+
+def test_a_wake_run_started_under_an_earlier_id_still_attaches(db):
+  """A restart orphan keeps its recorded helper, whatever id basis made it."""
+  from app.chat_writer import StartActivityContinuation, StartContinuationAttached
+
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db, suffix="old-basis-orphan",
+    result_blocks=[{"type": "text", "content": "First result."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+  legacy_token = "helper-activity-" + hashlib.sha256(
+    f"{parent_id}\0{delegation_id}".encode("utf-8"),
+  ).hexdigest()[:48]
+  db.add(make_goal_run(db,
+    id=legacy_token, root_run_id=root_run_id, chat_id=parent_id,
+    status="running", provider="claude", started_at=now_naive_utc(),
+    activity_delivery_json={
+      "delegation_ids": [delegation_id],
+      "source_work_id": "root-old-basis-orphan",
+    },
+  ))
+  db.commit()
+
+  attached = get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id, run_token=legacy_token, root_run_id=root_run_id,
+    source_work_id="root-old-basis-orphan", activity_id=delegation_id,
+  )).result(timeout=5)
+  assert isinstance(attached, StartContinuationAttached)
