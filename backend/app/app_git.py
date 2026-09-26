@@ -2909,40 +2909,6 @@ def has_conflict_markers(source_dir: str | Path) -> bool:
   return markers.returncode == 0
 
 
-def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
-  """Keep binary conflicts gated until the resolver explicitly stages them.
-
-  Text conflicts can be proven resolved by removal of Git's marker boundaries,
-  after which ``commit_local`` safely stages them. Binary conflicts have no
-  markers, so an unmerged binary path is never auto-accepted.
-  """
-  repo = Path(source_dir)
-  if not merge_in_progress(repo):
-    return False
-  listing = _run(repo, "ls-files", "-u", "-z").stdout
-  paths = {
-    row.split("\t", 1)[1]
-    for row in listing.split("\0")
-    if "\t" in row
-  }
-  for rel in paths:
-    worktree = repo / rel
-    try:
-      if b"\0" in worktree.read_bytes():
-        return True
-    except OSError:
-      pass
-    for stage in (1, 2, 3):
-      blob = subprocess.run(
-        ["git", "-C", str(repo), "show", f":{stage}:{rel}"],
-        capture_output=True, timeout=_GIT_TIMEOUT, check=False,
-        env=_git_env(repo),
-      )
-      if blob.returncode == 0 and b"\0" in blob.stdout:
-        return True
-  return False
-
-
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
   """Commits the current working-tree source onto `main`.
 
@@ -3036,22 +3002,6 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
     return None
   _run(repo, "commit", "-q", "-m", msg)
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
-
-
-def preserve_local_tip_for_recovery(source_dir: str | Path) -> str:
-  """Pin the current app source before a deliberate upstream-only replacement.
-
-  The Store self-update must stay installable even if its own source conflicts;
-  this ref keeps the displaced local tree (including captured working edits)
-  reachable for a later owner-guided reconciliation.
-  """
-  repo = Path(source_dir)
-  tip = head_sha(repo, LOCAL_BRANCH)
-  if not tip:
-    raise RuntimeError("local app source is unavailable for recovery")
-  ref = f"refs/mobius/app-pre-update/{tip}"
-  _run(repo, "update-ref", ref, tip)
-  return ref
 
 
 def commit_replay(
@@ -3467,7 +3417,7 @@ def start_conflict_merge(
       # read-tree resolves every clean path directly and leaves only residual
       # conflicts as staged 1/2/3 entries. The follow-up checkout writes the
       # familiar markers without collapsing the unmerged index, so binary
-      # conflicts remain gated by has_unresolved_binary_conflicts.
+      # conflicts stay unresolved until someone explicitly stages a side.
       _run(
         repo, "read-tree", "-m", "-u",
         merge_base, local_branch, upstream_branch,

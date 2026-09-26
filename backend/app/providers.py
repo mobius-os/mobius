@@ -52,6 +52,8 @@ KNOWN_MODELS = {
   "claude": [
     "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-sonnet-5",
     # Anthropic switched to dateless pinned IDs starting with 4.6. Keep only
     # provider-owned IDs here; migration 0056 rewrites obsolete platform IDs.
@@ -99,6 +101,7 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "claude-fable-5-1": 1_000_000,
   "claude-fable-5": 1_000_000,
+  "claude-opus-5-5": 1_000_000,
   "claude-opus-5": 1_000_000,
   "claude-opus-4-8": 1_000_000,
   "claude-opus-4-7": 1_000_000,
@@ -125,28 +128,26 @@ DEFAULT_MODELS = {
   "codex": "gpt-5.6-sol",
 }
 
-# Curated first-run model visibility. The registry remains broader so an
-# existing chat can keep rendering an older saved model and the owner can
-# reveal any hidden row from Settings. An explicit owner preference (including
-# an explicit empty hidden list) always wins over this starter set.
-DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
-  "claude": (
-    "claude-fable-5-1",
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-  ),
-  "codex": (
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-  ),
-}
-DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
-  provider_id: frozenset(models)
-  for provider_id, models in DEFAULT_VISIBLE_MODEL_ORDER.items()
+# Curated first-run model visibility: the older models a new owner starts with
+# hidden. Every other model is visible — including one a provider ships later,
+# whether it arrives only through live discovery or is added to KNOWN_MODELS —
+# so extending the offline fallback never hides a new model. The registry
+# remains broader so an existing chat can keep rendering an older saved model
+# and the owner can reveal any hidden row from Settings. An explicit owner
+# preference (including an explicit empty hidden list) always wins.
+DEFAULT_HIDDEN_MODELS: dict[str, frozenset[str]] = {
+  "claude": frozenset({
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+  }),
+  "codex": frozenset({
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+  }),
 }
 
 # Unattended work gets deliberately conservative provider-specific defaults,
@@ -168,6 +169,15 @@ DEFAULT_EFFORT = "medium"
 _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
 _AGENT_SETTINGS_LOCK = threading.RLock()
 
+
+
+# Claude Code features Möbius owns itself. Auto-memory keeps a parallel,
+# unmanaged note store under the Claude login directory and injects its index
+# into every Claude request; Möbius memory is the Memory app, so the CLI's own
+# is disabled for every Claude process Möbius launches.
+CLAUDE_CLI_POLICY_ENV: dict[str, str] = {
+  "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
 
 class _SettingsOverride(Protocol):
   """Structural boundary for the Pydantic override accepted by this module."""
@@ -306,7 +316,7 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
     model_id
     for provider_id, models in KNOWN_MODELS.items()
     for model_id in models
-    if model_id not in DEFAULT_VISIBLE_MODELS.get(provider_id, frozenset())
+    if model_id in DEFAULT_HIDDEN_MODELS.get(provider_id, frozenset())
   ]
 
 
@@ -816,6 +826,7 @@ class ClaudeProvider(BaseProvider):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
     if creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(creds.parent)
+    env.update(CLAUDE_CLI_POLICY_ENV)
     # Per-chat agent-browser session.  Every agent-browser invocation
     # spawned by the SDK runner picks up AGENT_BROWSER_SESSION via env,
     # so each chat gets its own isolated Chrome instance and they
@@ -890,6 +901,7 @@ class CodexProvider(BaseProvider):
     )
     if claude_creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(claude_creds.parent)
+      env.update(CLAUDE_CLI_POLICY_ENV)
     # Match Claude's per-chat agent-browser isolation. Without this, Codex
     # turns that invoke `agent-browser` all attach to the CLI's global
     # "default" session; a browser launched by one Codex chat can then leak
@@ -1014,7 +1026,7 @@ class MobiusProvider(BaseProvider):
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"] if self.declaration else "inkling")}',
+      f'model={quote(self.declaration["default_model"] if self.declaration else "evolve")}',
       'model_provider="mobius_trial"',
       f"model_catalog_json={quote(str(catalog_path or self._catalog_path()))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
@@ -2049,3 +2061,21 @@ def invalidate_model_cache() -> None:
   """Clears the per-provider cache. Used by tests and by the
   manage-models modal's explicit refresh path."""
   _model_registry_cache.clear()
+
+
+async def forget_provider_models(provider_id: str) -> None:
+  """Drop one provider's cached catalog after its sign-in changes.
+
+  A catalog read before sign-in is the offline fallback, and one read before
+  sign-out lists models that can no longer run; either would otherwise be
+  served for the rest of the cache TTL. Taking the provider's registry lock
+  waits out an in-flight fetch, so a result read under the old credentials
+  cannot land after the pop. Callers must not hold `_claude_refresh_lock`: a
+  Claude fetch may need it while holding the registry lock.
+  """
+  lock = _model_registry_locks.get(provider_id)
+  if lock is None:
+    _model_registry_cache.pop(provider_id, None)
+    return
+  async with lock:
+    _model_registry_cache.pop(provider_id, None)

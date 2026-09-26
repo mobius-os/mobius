@@ -32,7 +32,6 @@ import time
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -95,7 +94,9 @@ from app.github_checks import (
   _github_graphql_json,
   _fetch_base_failing_names,
 )
+from app.github_contribution_contract import COAUTHOR_TRAILER as _COAUTHOR_TRAILER
 from app.github_contribution_contract import GITHUB_LOGIN as _GITHUB_LOGIN
+from app.github_contribution_contract import coauthor_trailer_required
 from app.github_contribution_git import (
   _git,
   _gh,
@@ -536,47 +537,50 @@ _POST_PUSH_ATTEMPT_PHASES = frozenset({
 })
 
 
-def _assert_personal_publication_source(
+def _publication_source_mode(
   record: dict,
-  owner: _PersonalAttemptOwner,
-  owner_reviewed_uninstalled: bool = False,
-  allow_granted_followup: bool = False,
+  preflight: Callable[[dict], str],
 ) -> str:
-  owner.assert_current()
-  # A receipt proves the server's request, not GitHub's state. The eventual
-  # recovery path may skip this only after an authoritative exact branch/PR
-  # read; no receipt phase by itself is source provenance.
-  preflight = (
-    _assert_pending_equivalence_before_publication
-    if owner.replay_phase() in _POST_PUSH_ATTEMPT_PHASES
-    else _assert_pending_equivalence_preflight
-  )
-  # An armed receipt proves only that the owner approved these private inputs.
-  # App-writable last_submit_* fields and an unrelated pre-existing public
-  # branch cannot turn that fresh approval into source provenance. Only a
-  # signed post-mutation phase may enter authoritative public recovery.
+  """Resolve the reviewed source proof for one publication.
+
+  Publication reviews the exact committed candidate — its head, diff, target,
+  and body are already frozen — not the live source that happens to serve it.
+  So when the durable source no longer proves it still contains the reviewed
+  change (a renumbered migration, a merged main, re-derived docs, removed dead
+  code, or another chat's uncommitted edit on a reviewed file), Send publishes
+  the reviewed worktree without a local witness and the ordinary conservative
+  reconciler runs afterwards. Missing provenance and a non-canonical reviewed
+  diff still fail here. ``after_merge`` is a single reviewed handoff object;
+  treat even a malformed value as handoff-bearing and keep its source proof
+  strict, because that handoff will later mutate the installed app.
+  """
   try:
     return preflight(record)
   except ContributionSubmitError as exc:
     plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-    # ``after_merge`` is a single reviewed handoff object.  Treat even a
-    # malformed value as handoff-bearing here: validation owns its shape, and
-    # publication must never turn bad handoff metadata into permission to
-    # bypass the source proof that protects the eventual local install.
-    has_handoff = plan.get("after_merge") is not None
     if (
-      (owner_reviewed_uninstalled or allow_granted_followup)
-      and not has_handoff
+      plan.get("after_merge") is None
       and exc.code == "source_provenance_mismatch"
     ):
-      # A live owner can approve an exact reviewed worktree from chat without
-      # first installing it. An existing-PR Autopilot grant also authorizes
-      # follow-up commits on that already-public, exactly-bound branch; requiring
-      # the whole contribution to remain in the unrelated live source checkout
-      # would reject legitimate follow-ups after the source moves on. Keep
-      # malformed/missing provenance and app-publication handoffs strict.
-      return "owner_reviewed_uninstalled"
+      return "uninstalled_publication_candidate"
     raise
+
+
+def _assert_personal_publication_source(
+  record: dict,
+  owner: _PersonalAttemptOwner,
+) -> str:
+  owner.assert_current()
+  # A signed post-mutation receipt enters authoritative public recovery: an
+  # exact GitHub reconciliation, or — once that reviewed head is gone — the
+  # strict live-source proof. A receipt is not provenance and an app-writable
+  # last_submit_* journal cannot manufacture one, so a retry never resurrects a
+  # lost public head from a source that no longer proves the change. Only the
+  # first publication of an ordinary reviewed PR treats a diverged source as a
+  # sendable candidate.
+  if owner.replay_phase() in _POST_PUSH_ATTEMPT_PHASES:
+    return _assert_pending_equivalence_before_publication(record)
+  return _publication_source_mode(record, _assert_pending_equivalence_preflight)
 
 
 def _personal_resume_allowed(
@@ -764,9 +768,6 @@ _GITHUB_REPO = re.compile(
 )
 _BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
-_COAUTHOR_TRAILER = (
-  "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
-)
 _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
@@ -1175,15 +1176,17 @@ def _inspect_prepared_review(
     body = app_git._run(
       repo, "log", "-1", "--format=%B", branch, read_only=True,
     ).stdout
-    if _COAUTHOR_TRAILER not in body:
+    if coauthor_trailer_required(record) and _COAUTHOR_TRAILER not in body:
       raise ContributionSubmitError(
         "This staged commit is missing its required co-author trailer.",
         code="missing_coauthor",
       )
     # Review is a local, read-only projection. Authoritative public recovery
     # belongs only to an owner-approved Send/Update path; never hold source
-    # locks across GitHub reads just to render a status card.
-    _assert_pending_equivalence_preflight(record)
+    # locks across GitHub reads just to render a status card. An ordinary PR
+    # whose source has diverged is still a sendable publication candidate, so
+    # mirror the Send downgrade here rather than reporting it as not ready.
+    _publication_source_mode(record, _assert_pending_equivalence_preflight)
 
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
@@ -3052,11 +3055,6 @@ async def submit_contribution(
 
   try:
     plan = publication_record.get("plan") or {}
-    owner_reviewed_uninstalled = bool(
-      principal.app_id is None
-      and body is not None
-      and body.submitter == "chat-review-card"
-    )
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
     equivalence_repos = _equivalence_source_repo(publication_record)
@@ -3074,7 +3072,6 @@ async def submit_contribution(
         _assert_personal_publication_source,
         publication_record,
         attempt_owner,
-        owner_reviewed_uninstalled,
       )
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr,
@@ -3089,7 +3086,6 @@ async def submit_contribution(
         source_preflight=lambda candidate: _assert_personal_publication_source(
           candidate,
           attempt_owner,
-          owner_reviewed_uninstalled,
         ),
       )
       try:
@@ -3525,12 +3521,6 @@ async def update_existing_contribution(
     )
 
     plan = publication_record.get("plan") or {}
-    owner_reviewed_uninstalled = bool(
-      principal.app_id is None
-      and body is not None
-      and body.submitter == "chat-review-card"
-      and not isinstance(plan.get("successor"), dict)
-    )
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
     equivalence_repos = _equivalence_source_repo(publication_record)
@@ -3545,7 +3535,6 @@ async def update_existing_contribution(
         _assert_personal_publication_source,
         publication_record,
         attempt_owner,
-        owner_reviewed_uninstalled,
       )
       if isinstance(plan.get("successor"), dict):
         successor_request = {
@@ -3637,7 +3626,6 @@ async def update_existing_contribution(
           source_preflight=lambda candidate: _assert_personal_publication_source(
             candidate,
             attempt_owner,
-            owner_reviewed_uninstalled,
           ),
         )
       if returned_number != number:
@@ -6247,12 +6235,11 @@ async def autopilot_update(
         # a compare-and-swap on that head. The installed-source witness stays
         # mandatory only for after_merge handoffs; otherwise it is recorded
         # opportunistically below.
-        await asyncio.to_thread(partial(
+        await asyncio.to_thread(
           _assert_personal_publication_source,
           record,
           attempt_owner,
-          allow_granted_followup=True,
-        ))
+        )
         pr_url, number, record_patch = await asyncio.to_thread(
           _submit_prepared_pr, record, diff_path,
           direct_base_branch=str(live_target.get("base_branch") or ""),

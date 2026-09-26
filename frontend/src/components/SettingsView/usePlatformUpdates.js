@@ -297,11 +297,24 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     finally { pending.current = false; setPhase('idle') }
   }
 
+  // Until an update is swapped in the live source is untouched, so dropping it
+  // is always safe; it is the exit from a resolver that cannot finish.
+  async function cancel() {
+    if (pending.current || busy) return
+    pending.current = true
+    setPhase('cancelling'); setError('')
+    try {
+      await responseBody(await api.platform.cancelUnfinishedUpdate())
+      await refreshPlatform()
+    } catch (cause) { setError(cause.message || 'Could not cancel this update.') }
+    finally { pending.current = false; setPhase('idle') }
+  }
+
   const clearError = useCallback(() => { setError(''); setErrorCode('') }, [])
 
   return {
     platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
-    progress, reconnecting: !!reconnect, observingKind: reconnect?.kind, slow, check, execute, restart, resolve,
+    progress, reconnecting: !!reconnect, observingKind: reconnect?.kind, slow, check, execute, restart, resolve, cancel,
     clearError,
   }
 }

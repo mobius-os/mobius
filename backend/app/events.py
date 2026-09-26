@@ -65,6 +65,7 @@ EventType = Literal[
   "text",
   "text_final",
   "thinking",
+  "thinking_final",
   "text_boundary",
   "context_compacted",
   "context_usage",
@@ -251,6 +252,7 @@ def _persisted_block(block: dict) -> dict:
   persisted.pop("_thinking_start_ts", None)
   persisted.pop("_thinking_closed", None)
   persisted.pop("_thinking_segment_id", None)
+  persisted.pop("_thinking_segments", None)
   return persisted
 
 
@@ -990,6 +992,20 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
   return False
 
 
+def thinking_block_for_segment(
+  assistant_blocks: list, segment_id: str | None,
+) -> dict | None:
+  """The thinking block that holds the provider segment ``segment_id``."""
+  if segment_id is None:
+    return None
+  for block in reversed(assistant_blocks):
+    if block.get("type") != "thinking":
+      continue
+    if any(seg[0] == segment_id for seg in block.get("_thinking_segments") or ()):
+      return block
+  return None
+
+
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.
 
@@ -1068,14 +1084,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         start_ts = ts - int(last.get("duration_ms") or 0)
         last["_thinking_start_ts"] = start_ts
       previous_segment_id = last.get("_thinking_segment_id")
+      segments = last.setdefault(
+        "_thinking_segments", [[previous_segment_id, last["content"]]],
+      )
       if (
         segment_id is not None
         and previous_segment_id is not None
         and segment_id != previous_segment_id
       ):
         last["content"] += "\n\n" + content
+        segments.append([segment_id, content])
       else:
         last["content"] += content
+        segments[-1][1] += content
+        if segment_id is not None:
+          segments[-1][0] = segment_id
       if segment_id is not None:
         last["_thinking_segment_id"] = segment_id
       if thinking_id is not None:
@@ -1092,9 +1115,35 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         block["_thinking_start_ts"] = ts
       if segment_id is not None:
         block["_thinking_segment_id"] = segment_id
+      # Per-segment text, so a completed provider block can replace exactly
+      # the segment it finishes (see thinking_final). The block's content is
+      # always these texts joined by the paragraph separator.
+      block["_thinking_segments"] = [[segment_id, content]]
       if thinking_id is not None:
         block["thinking_id"] = thinking_id
       assistant_blocks.append(block)
+    return True
+
+  if event_type == "thinking_final":
+    # The provider's completed thinking block is the record; its streamed
+    # deltas were a live preview that can miss a chunk (observed: a paragraph
+    # persisted starting mid-sentence). Replace the segment it completes by
+    # identity, never positionally, and never append a duplicate.
+    content = event.get("content", "")
+    segment_id = event.get("segment_id") or None
+    if not content or segment_id is None:
+      return False
+    block = thinking_block_for_segment(assistant_blocks, segment_id)
+    if block is None:
+      # No streamed segment carries this identity (every delta was lost):
+      # the completed block is all there is, so it becomes new thinking.
+      return process_event({**event, "type": "thinking"}, assistant_blocks)
+    segments = block["_thinking_segments"]
+    segment = next(seg for seg in segments if seg[0] == segment_id)
+    if segment[1] == content:
+      return False
+    segment[1] = content
+    block["content"] = "\n\n".join(text for _, text in segments)
     return True
 
   if event_type == "text_final":

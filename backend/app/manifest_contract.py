@@ -407,7 +407,7 @@ def validate_manifest_contract(manifest) -> None:
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 
-  for field in ("offline_capable", "embeds_agent", "system_app"):
+  for field in ("offline_capable", "embeds_agent"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
 
@@ -817,11 +817,6 @@ def validate_manifest_contract(manifest) -> None:
 
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:
-    if manifest.get("system_app") is not True:
-      _fail(
-        "Manifest `system_prompt` requires `system_app: true` so global "
-        "agent-prompt authority is explicit and owner-reviewable."
-      )
     if (
       not isinstance(system_prompt, str)
       or not system_prompt.endswith(".md")

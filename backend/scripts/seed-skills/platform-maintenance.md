@@ -40,13 +40,13 @@ Review the exact changed paths and use the smallest matching action:
 | `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
-| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. |
+| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, or `backend/runtime/` | Image-owned. Container replacement installs the official image for the release, which carries no local edit to these files: Finish reports one as a blocker. Batch and test the change, then prepare it as an upstream contribution; it takes effect with the release that contains it. |
 | `backend/runtime/identity_broker.py` | The one served privileged runtime file: one server restart activates a valid edit; an invalid one falls back to the baked platform for that boot. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | `backend/scripts/seed-skills/` | One server restart applies the served templates to installed skills; untouched copies advance and edited ones stay for review. No image rebuild once the container runs an image that hands this job to the server. To use an edit immediately, write identical bytes to `/data/shared/skills/<name>.md`. |
 | Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
-| `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations make a live install reproducible after container replacement; they do not activate it and do not require an immediate rebuild. |
+| `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations do not activate a live install and do not require an immediate rebuild. They survive container replacement only through the release that contains them; see Dependencies below. |
 
 ### Dependencies — live first, durable second
 
@@ -64,8 +64,10 @@ Review the exact changed paths and use the smallest matching action:
 3. If shipped behavior depends on the package, record the same resolution in
    the owning manifest and lockfile, plus the Dockerfile only when image wiring
    is needed. These declarations are durability metadata, not an activation
-   action: they let a future image/container replacement restore the live
-   install.
+   action. Container replacement installs the official image, so a declaration
+   becomes durable only through the release that contains it: prepare it as an
+   upstream contribution. Committed only locally, it never reaches an image and
+   blocks Finish.
 4. Treat a container rebuild as a last resort, not an ordinary closeout step.
    Require it now only when the change genuinely cannot activate live, or when
    the partner explicitly asks to validate the image.

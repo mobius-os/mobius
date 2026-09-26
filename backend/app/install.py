@@ -768,33 +768,6 @@ def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   return f"{_canonical_base(url_or_base)}#manifest-id={manifest_id}"
 
 
-def _should_force_core_store_update(
-  source: str, manifest_id: str, canonical_manifest_url: str,
-) -> bool:
-  """Core App Store self-updates must not wedge behind their own local edits.
-
-  Normal apps preserve local edits and surface conflicts for an agent to
-  resolve. The App Store is the installer for resolving those conflicts, so
-  letting its own update conflict creates a dead-end: the user presses Update,
-  the backend records upstream, but the running store remains old forever. For
-  the canonical mobius-os App Store only, the published upstream source wins.
-  """
-  parsed = urlparse(canonical_manifest_url)
-  path_parts = [
-    unquote(part)
-    for part in parsed.path.split("/")
-    if part
-  ]
-  return (
-    source == "store"
-    and manifest_id == "store"
-    and parsed.hostname == "raw.githubusercontent.com"
-    and path_parts[:2] == ["mobius-os", "app-store"]
-  )
-
-
-
-
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -1244,12 +1217,29 @@ def pending_update_worktree(source_dir: str | Path) -> Path:
 _CONFLICT_MARKER = r"^(<{7,} |>{7,} )"
 
 
-def has_committed_conflict_markers(repo: str | Path, ref: str) -> bool:
-  """Whether ``ref`` commits a labelled conflict boundary; errors count."""
-  found = app_git._run(
-    Path(repo), "grep", "-qE", _CONFLICT_MARKER, ref, check=False,
+def committed_conflict_marker_paths(
+  repo: str | Path, ref: str, upstream_commit: str,
+) -> list[str] | None:
+  """Paths the resolution changed from upstream that commit a conflict
+  boundary. Unchanged upstream content is never a conflict, even if it
+  legitimately contains such a line. None when Git cannot tell."""
+  repo = Path(repo)
+  changed = app_git._run(
+    repo, "diff", "--name-only", "-z", upstream_commit, ref, check=False,
   )
-  return found.returncode != 1
+  if changed.returncode != 0:
+    return None
+  paths = [path for path in changed.stdout.split("\0") if path]
+  if not paths:
+    return []
+  found = app_git._run(
+    repo, "grep", "-z", "-lE", _CONFLICT_MARKER, ref, "--",
+    *(f":(literal){path}" for path in paths),
+    check=False,
+  )
+  if found.returncode > 1:
+    return None
+  return [p.removeprefix(f"{ref}:") for p in found.stdout.split("\0") if p]
 
 
 def committed_pending_resolution(
@@ -1267,7 +1257,7 @@ def committed_pending_resolution(
     or app_git.merge_in_progress(worktree)
     or app_git.worktree_dirty(worktree)
     or app_git.ref_is_ancestor(worktree, upstream_commit, "HEAD") is not True
-    or has_committed_conflict_markers(worktree, "HEAD")
+    or committed_conflict_marker_paths(worktree, "HEAD", upstream_commit) != []
   ):
     return None
   return app_git._run(worktree, "rev-parse", "HEAD").stdout.strip()
@@ -2599,7 +2589,6 @@ class InstallTarget:
   adopting_trusted_origin: bool
   trusted_catalog_origin: bool
   canonical_manifest_url: str
-  force_core_store_update: bool
   origin_migration: tuple[str, str] | None
   package_id: str | None
   source_identity: str | None
@@ -2949,9 +2938,6 @@ def _select_install_target(
   canonical_manifest_url = _canonical_identity_key(
     source_for_key, manifest_id,
   )
-  force_core_store_update = _should_force_core_store_update(
-    source, manifest_id, canonical_manifest_url,
-  )
   existing = _find_install_identity_row(
     db,
     source_url=requested_source,
@@ -3082,7 +3068,6 @@ def _select_install_target(
       and _trusted_catalog_origin_matches(existing, source_for_key)
     ),
     canonical_manifest_url=canonical_manifest_url,
-    force_core_store_update=force_core_store_update,
     origin_migration=origin_migration,
     package_id=package_id,
     source_identity=candidate.source_identity,
@@ -3356,7 +3341,6 @@ async def _prepare_app_row(
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
     system_prompt_file=manifest.get("system_prompt") or None,
-    system_app=bool(manifest.get("system_app", False)),
     capability_contract=capability_contract,
     project_templates_json=manifest.get("project_templates") or None,
   )
@@ -3479,7 +3463,6 @@ def _apply_manifest_metadata(
     app.embeds_agent = bool(manifest["embeds_agent"])
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.capability_contract = capability_contract
   # Projects workspace: declared project templates travel with the package
   # identity, so apply them here alongside the other manifest metadata for
@@ -3825,7 +3808,6 @@ async def install_from_manifest(
   revive_after_commit = bool(existing and existing.deleted_at is not None)
   mode = target.mode
   canonical_manifest_url = target.canonical_manifest_url
-  force_core_store_update = target.force_core_store_update
 
   warnings: list[str] = []
   conflict_paths: list[str] = []
@@ -4254,8 +4236,14 @@ async def install_from_manifest(
           # release (the resolver's finish, or the Store's Update button) then
           # combines edits that landed on `main` since with that answer through
           # the same three-way merge; only an overlap goes back to the resolver.
+          # Key on the upstream ref just recorded: app.upstream_commit is only
+          # refreshed after this for sources imported without a Git origin.
           resolved_commit = await asyncio.to_thread(
-            committed_pending_resolution, git_source_dir, app.upstream_commit,
+            committed_pending_resolution,
+            git_source_dir,
+            await asyncio.to_thread(
+              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+            ),
           )
           if resolved_commit is not None:
             merge = await asyncio.to_thread(
@@ -4301,66 +4289,51 @@ async def install_from_manifest(
             )
           reconciliation = merge.reconciliation
           if merge.status == "conflict":
-            if force_core_store_update:
-              # The Store must remain able to update itself even when its own
-              # source conflicts. Pin its full local tip before choosing the
-              # reviewed upstream tree so that choice is recoverable.
-              recovery_ref = await asyncio.to_thread(
-                app_git.preserve_local_tip_for_recovery, git_source_dir,
-              )
-              log.info("Store source saved before self-update: %s", recovery_ref)
-              warnings.append(
-                "App Store updated; previous local edits were saved "
-                "for recovery"
-              )
-              # This is an intentional upstream choice, not an unresolved
-              # merge. The displaced local tip is the recovery receipt.
-              reconciliation = app_git.ReconciliationReceipt()
-              divergence = "fast_forward"
+            # Every app, including the App Store itself, keeps local edits on
+            # a real conflict; the Store stays served and resolves through the
+            # same owner-gated resolver instead of overwriting local work.
+            # JSON manifests can reconcile serialization drift and disjoint
+            # edits structurally. Other files retain the APP_VERSION-only
+            # rule. Any remaining overlap leaves the whole update untouched
+            # for the owner to resolve.
+            benign = await asyncio.to_thread(
+              app_git.resolve_benign_conflict,
+              git_source_dir, merge.conflict_paths,
+              merge_base=git_merge_base_override,
+            )
+            resolved_source = None
+            if benign is not None:
+              resolved_source = {
+                rel: data for rel, data in benign.tree.items()
+                if rel not in _MERGED_NON_SOURCE
+              }
+            if resolved_source is not None and entry_key in resolved_source:
+              source_tree = resolved_source
+              divergence = "clean_merge"
               merge_applied = True
-            else:
-              # JSON manifests can reconcile serialization drift and disjoint
-              # edits structurally. Other files retain the APP_VERSION-only
-              # rule. Any remaining overlap leaves the whole update untouched
-              # for the owner to resolve.
-              benign = await asyncio.to_thread(
-                app_git.resolve_benign_conflict,
-                git_source_dir, merge.conflict_paths,
-                merge_base=git_merge_base_override,
+              warnings.append(
+                "auto-resolved a benign update conflict "
+                "(no semantic overlap between local edits and upstream)"
               )
-              resolved_source = None
-              if benign is not None:
-                resolved_source = {
-                  rel: data for rel, data in benign.tree.items()
-                  if rel not in _MERGED_NON_SOURCE
-                }
-              if resolved_source is not None and entry_key in resolved_source:
-                source_tree = resolved_source
-                divergence = "clean_merge"
-                merge_applied = True
-                warnings.append(
-                  "auto-resolved a benign update conflict "
-                  "(no semantic overlap between local edits and upstream)"
-                )
-                reconciliation = app_git.ReconciliationReceipt(
-                  proven_present=reconciliation.proven_present,
-                  local_only_paths=reconciliation.local_only_paths,
-                  new_upstream_paths=reconciliation.new_upstream_paths,
-                  compatible_paths=reconciliation.compatible_paths,
-                  provenance_refs_used=reconciliation.provenance_refs_used,
-                )
-                # Exec bits come from the same merged tree the resolution was
-                # built on, mirroring the clean-merge branch above.
-                git_exec_paths = await asyncio.to_thread(
-                  app_git.read_tree_exec_paths,
-                  git_source_dir, benign.tree_oid,
-                )
-              else:
-                # Never rebase local. The app stays served with its current
-                # bundle + source; the new upstream is recorded for a later
-                # agent-resolution pass. Switch to conflict mode below.
-                mode = "conflict"
-                conflict_paths = merge.conflict_paths
+              reconciliation = app_git.ReconciliationReceipt(
+                proven_present=reconciliation.proven_present,
+                local_only_paths=reconciliation.local_only_paths,
+                new_upstream_paths=reconciliation.new_upstream_paths,
+                compatible_paths=reconciliation.compatible_paths,
+                provenance_refs_used=reconciliation.provenance_refs_used,
+              )
+              # Exec bits come from the same merged tree the resolution was
+              # built on, mirroring the clean-merge branch above.
+              git_exec_paths = await asyncio.to_thread(
+                app_git.read_tree_exec_paths,
+                git_source_dir, benign.tree_oid,
+              )
+            else:
+              # Never rebase local. The app stays served with its current
+              # bundle + source; the new upstream is recorded for a later
+              # agent-resolution pass. Switch to conflict mode below.
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths
           else:
             # Clean merge: the WHOLE merged tree is what we write + compile.
             # Read it in full (one path for one and many files) and drop the
@@ -4467,10 +4440,7 @@ async def install_from_manifest(
           merge_base_override=git_merge_base_override,
         )
 
-      if (
-        mode != "conflict" and merge_applied and merge_existing_source
-        and not force_core_store_update
-      ):
+      if mode != "conflict" and merge_applied and merge_existing_source:
         # The merged tree is the complete answer, so every tracked path it
         # lacks goes: a file a resolver deleted as well as one upstream removed.
         dropped_source_paths |= await asyncio.to_thread(

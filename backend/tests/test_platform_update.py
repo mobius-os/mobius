@@ -682,10 +682,52 @@ def test_a_prepared_update_can_be_cancelled_until_it_is_swapped_in(clone_env):
   assert pu.continue_platform_overlay_update(platform) == "prepared"
   assert pu.unfinished_update(platform)["cancellable"] is True
 
-  pu.cancel_prepared_update(platform)
+  pu.cancel_unfinished_update(platform)
   assert pu.unfinished_update(platform) is None
   assert _served_sha(platform) == served
   assert pu.swap_in_prepared_update(cutover=True, repo=platform) is False
+
+
+def test_a_cancel_racing_the_shutdown_swap_keeps_the_live_source(
+  clone_env, monkeypatch,
+):
+  """The swap re-reads the update under the lock, so a Cancel that lands
+  between the drain's first look and the lock is honored."""
+  origin, platform = clone_env
+  served, _target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  real_lock = pu._reconcile_flock
+  cancelled = []
+
+  @contextmanager
+  def cancel_before_locking(*args, **kwargs):
+    if not cancelled:
+      cancelled.append(True)
+      pu.cancel_unfinished_update(platform)
+    with real_lock(*args, **kwargs):
+      yield
+
+  monkeypatch.setattr(pu, "_reconcile_flock", cancel_before_locking)
+
+  assert pu.swap_in_prepared_update(cutover=True, repo=platform) is False
+  assert cancelled and pu.unfinished_update(platform) is None
+  assert _served_sha(platform) == served
+
+
+def test_a_parked_resolution_can_be_cancelled_before_its_swap(clone_env):
+  """The owner's exit from a resolver that cannot finish: nothing is live yet."""
+  origin, platform = clone_env
+  served, _target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  assert pu.unfinished_update(platform)["stage"] == "resolve"
+  assert pu.unfinished_update(platform)["cancellable"] is True
+
+  pu.cancel_unfinished_update(platform)
+
+  assert pu.unfinished_update(platform) is None
+  assert not pu.CONFLICT_FLAG.exists()
+  assert not worktree.exists()
+  assert _served_sha(platform) == served
+  assert pu.platform_status(platform)["available"] is True
 
 
 def _park_resolved_line_a_conflict(platform: Path, origin: Path) -> tuple[str, str, Path]:
@@ -778,7 +820,7 @@ def test_resolver_refuses_unstaged_final_bytes_without_losing_them(clone_env):
   ]
 
 
-def test_late_commits_stay_out_of_the_update_and_return_after_boot(clone_env):
+def test_late_commits_stay_out_of_the_update_return_after_boot_and_stay_reachable(clone_env):
   origin, platform = clone_env
   served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
   _local_commit(platform, edits={"backend/app/late.py": "LATE = 1\n"}, msg="late 1")
@@ -803,6 +845,10 @@ def test_late_commits_stay_out_of_the_update_and_return_after_boot(clone_env):
   assert pu.read_prepared_update() is None
   assert not pu.late_edits_pending()
   assert served != late
+  # The replaced local chain, late commits and their messages included, stays
+  # reachable for undo after the update squashes it into one commit.
+  assert _git(platform, "rev-parse", pu._PRE_UPDATE_REF).stdout.strip() == late
+  assert "late 2" in _git(platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF).stdout
 
 
 def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
@@ -826,6 +872,11 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   flag = pu._read_conflict_flag()
   assert flag["overlay"]["replay"] is True
   assert pu.unfinished_update(platform)["stage"] == "resolve"
+  # The update already booted: cancelling would strand the late edit.
+  assert pu.unfinished_update(platform)["cancellable"] is False
+  with pytest.raises(pu.PlatformUpdateError, match="prepared_update_swapped"):
+    pu.cancel_unfinished_update(platform)
+  assert pu._read_conflict_flag() == flag
   replay = Path(flag["overlay"]["worktree"])
   marked = (replay / "backend/app/main.py").read_text()
   assert "LINE_A = 'LATE'" in marked and "LINE_A = 'RESOLVED'" in marked
@@ -840,6 +891,58 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   ).read_text()
   assert not pu.late_edits_pending()
   assert pu._is_ancestor(platform, target, _served_sha(platform))
+
+
+def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
+  """A late commit's conflict parks first; the uncommitted edits made on top
+  of it must still come back afterwards, never be dropped with the park."""
+  origin, platform = clone_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE'"),
+  }, msg="late conflicting commit")
+  (platform / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE DIRTY'"),
+  )
+  (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY'\n")
+
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert _finish_prepared(platform) == "conflict"
+  replay = Path(pu._read_conflict_flag()["overlay"]["worktree"])
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+
+  # The committed answer is in; the uncommitted edit to the same line now
+  # overlaps it, so it parks for the resolver instead of vanishing.
+  assert pu.continue_platform_overlay_update(platform) == "conflict"
+  assert pu.late_edits_pending()
+  flag = pu._read_conflict_flag()
+  assert flag["overlay"]["stage"] == "working" and flag["overlay"]["replay"] is True
+  replay = Path(flag["overlay"]["worktree"])
+  marked = (replay / "backend/app/main.py").read_text()
+  assert "LINE_A = 'LATE DIRTY'" in marked and "LINE_A = 'RESOLVED AND LATE'" in marked
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED, LATE AND DIRTY'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  assert not pu.late_edits_pending()
+  assert "LINE_A = 'RESOLVED, LATE AND DIRTY'" in (
+    platform / "backend/app/main.py"
+  ).read_text()
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+  # In-progress edits come back uncommitted, as after a clean replay.
+  assert sorted(_git(platform, "status", "--porcelain").stdout.splitlines()) == [
+    " M backend/app/foo.py", " M backend/app/main.py",
+  ]
+  assert pu._is_ancestor(platform, target, _served_sha(platform))
+  # The replay is not an update: the chain the swap replaced stays recorded.
+  assert "late conflicting commit" in _git(
+    platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF,
+  ).stdout
 
 
 def test_late_uncommitted_edits_stay_uncommitted_after_the_swap(clone_env):
@@ -3826,7 +3929,7 @@ def test_update_preview_excludes_local_edits(clone_env):
   assert preview["conflict_paths"] == []
 
 
-def test_update_preview_does_not_replay_local_overlay(
+def test_update_preview_predicts_the_apply_conflict_without_touching_the_checkout(
   clone_env, monkeypatch,
 ):
   origin, platform = clone_env
@@ -3841,8 +3944,9 @@ def test_update_preview_does_not_replay_local_overlay(
 
   preview = pu.platform_update_preview(platform)
 
-  # Review is read-only: it neither replays history nor parks a resolver.
-  assert preview["conflict_paths"] == []
+  # Review names the conflict Apply would park, so the update can go straight
+  # to an agent, yet stays read-only: no replay, no parked resolver.
+  assert preview["conflict_paths"] == ["backend/app/main.py"]
   assert _served_sha(platform) == served
   assert _git(platform, "status", "--porcelain").stdout == ""
   assert _git(platform, "worktree", "list", "--porcelain").stdout == worktrees_before
@@ -4553,7 +4657,7 @@ def test_a_parked_update_is_the_only_one_until_it_finishes(clone_env):
 
   assert pu.park_update_for_agent(**plan, repo=platform) == {
     "target_sha": pinned, "stage": "resolve", "action": "replace",
-    "cancellable": False,
+    "cancellable": True,
   }
   assert pu.platform_status(platform)["unfinished_update"]["target_sha"] == pinned
 

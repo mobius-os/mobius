@@ -414,9 +414,21 @@ def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
       else block.get("status") or "done"
     ),
   }
-  for key in ("tool_use_id", "output_exit_code", "subagent"):
+  for key in ("tool_use_id", "output_exit_code"):
     if key in block:
       tool[key] = block[key]
+  if isinstance(block.get("subagent"), dict):
+    # The same read-boundary rule for helper rows: a helper persisted as
+    # running in a settled turn lost its terminal fact to an interruption (a
+    # restart or crash ends the runner before it can close the row).
+    tool["subagent"] = {
+      task_id: (
+        {**helper, "status": "stopped"}
+        if isinstance(helper, dict) and helper.get("status") == "running"
+        else helper
+      )
+      for task_id, helper in block["subagent"].items()
+    }
   # Read's path is the only input that affects the collapsed presentation:
   # image reads are intentionally a distinctive beat. Keep it bounded; full
   # tool input remains in the on-demand activity detail.
