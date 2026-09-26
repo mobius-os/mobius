@@ -228,3 +228,78 @@ def test_a_second_provider_enters_only_by_applied_contract(
   assert brain["app_slug"] == "brain"
   assert brain["activity_id"] == "retrieve"
   assert brain["label"] == "Consulting Brain"
+
+
+# ── Activities triggered by an installed app's agent tool ────────────────
+
+TOOL_COMMAND = ActivityCommand(
+  app_slug="brain", app_name="Brain", activity_id="lookup",
+  argument_count=0, running_label="Searching",
+)
+TOOL_BINDING = AgentActivityBinding.of([], [("brain_search", TOOL_COMMAND)])
+
+
+def _tool_lifecycle(tool_name, content, binding=TOOL_BINDING):
+  sink = ChatEventSink.__new__(ChatEventSink)
+  sink.assistant_blocks = []
+  sink._agent_activity_binding = binding
+  for event in (
+    {"type": "tool_start", "tool": tool_name, "input": "", "tool_use_id": "t1"},
+    {"type": "tool_output", "tool_use_id": "t1", "content": content,
+     "output_complete": True, "output_exit_code": 0},
+  ):
+    sink._stamp_app_activity(event)
+    process_event(event, sink.assistant_blocks)
+  return sink.assistant_blocks[0].get("app_activity")
+
+
+def test_app_tool_call_settles_to_the_same_card_on_both_providers():
+  # Claude reports an MCP result as text; Codex as the MCP result's JSON.
+  claude = _tool_lifecycle("mcp__mobius_control__brain_search", _receipt())
+  codex = _tool_lifecycle(
+    "mobius_control:brain_search",
+    json.dumps({"content": [{"type": "text", "text": _receipt()}]}),
+  )
+  assert claude == codex
+  assert claude["status"] == "succeeded"
+  assert claude["app_slug"] == "brain"
+  assert claude["resources"][0]["intent"] == "note:quiet-interfaces"
+
+
+def test_only_bound_tools_on_the_control_server_become_app_cards():
+  assert _tool_lifecycle("mcp__mobius_control__brain_other", _receipt()) is None
+  assert _tool_lifecycle("mcp__elsewhere__brain_search", _receipt()) is None
+  assert _tool_lifecycle("brain_search", _receipt()) is None
+
+
+def test_app_tool_without_a_receipt_is_a_failed_card():
+  assert _tool_lifecycle(
+    "mcp__mobius_control__brain_search", "tool error text",
+  )["status"] == "failed"
+
+
+def test_tool_triggered_activities_bind_from_the_applied_manifest(
+  db, tmp_path, monkeypatch,
+):
+  root = tmp_path / "night-brain"
+  root.mkdir()
+  (root / "mobius.json").write_text(json.dumps({
+    "id": "night-brain", "name": "Night Brain", "version": "1.0.0",
+    "description": "test", "entry": "index.jsx", "source_files": ["service.py"],
+    "service": {"entry": "service.py"},
+    "tools": [{"name": "search", "description": "Search.",
+               "input_schema": {"type": "object"}}],
+    "agent_activities": {"lookup": {"tool": "search", "running_label": " Searching "}},
+  }))
+  app = _app(db, root, "night-brain", "Night Brain")
+  monkeypatch.setattr(
+    "app.agent_activity_provider.runtime_root", lambda row: root,
+  )
+
+  binding = resolve_agent_activity_binding(db)
+
+  assert binding.by_app_tool == {"night_brain_search": ActivityCommand(
+    app_slug="night-brain", app_name="Night Brain", activity_id="lookup",
+    argument_count=0, running_label="Searching",
+  )}
+  assert app.id

@@ -726,3 +726,81 @@ def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
 
   assert result.returncode == 2
   assert "usage: mobius_control_mcp.py call" in result.stderr
+
+
+def _control_with_app_tools(monkeypatch, listed):
+  control = _control_module()
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-token")
+  calls = []
+
+  def fake_api(method, path, payload=None, *, timeout=10):
+    calls.append((method, path, payload, timeout))
+    if method == "GET" and path == control.APP_TOOLS_PATH:
+      return {"tools": listed}
+    return {"result": "Logged.", "is_error": False}
+
+  monkeypatch.setattr(control, "_agent_api_call", fake_api)
+  return control, calls
+
+
+def test_control_server_lists_installed_app_tools_beside_its_own(monkeypatch):
+  app_tool = {
+    "name": "reflection_log_friction", "description": "Log friction.",
+    "inputSchema": {"type": "object"},
+  }
+  shadow = {**app_tool, "name": "request_restart"}
+  control, _calls = _control_with_app_tools(monkeypatch, [app_tool, shadow])
+
+  names = [tool["name"] for tool in control._tools_list_result()["tools"]]
+
+  assert names[-1] == "reflection_log_friction"
+  # An app can never replace a platform primitive.
+  assert names.count("request_restart") == 1
+
+
+def test_control_server_forwards_app_tool_calls_with_the_providers_meta(monkeypatch):
+  control, calls = _control_with_app_tools(monkeypatch, [{
+    "name": "reflection_log_friction", "description": "Log friction.",
+    "inputSchema": {"type": "object"},
+  }])
+
+  result = control._call_tool({
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "retried a flaky command"},
+    "_meta": {"claudecode/toolUseId": "toolu_9"},
+  })
+
+  assert result == {
+    "content": [{"type": "text", "text": "Logged."}], "isError": False,
+  }
+  method, path, payload, timeout = calls[-1]
+  assert (method, path) == ("POST", control.APP_TOOLS_PATH + "call")
+  assert payload == {
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "retried a flaky command"},
+    "meta": {"claudecode/toolUseId": "toolu_9"},
+  }
+  assert timeout == control.APP_TOOL_CALL_TIMEOUT_SECONDS
+
+
+def test_unlisted_names_are_never_forwarded_to_apps(monkeypatch):
+  control, calls = _control_with_app_tools(monkeypatch, [])
+  result = control._call_tool({"name": "reflection_log_friction", "arguments": {}})
+  assert result["isError"] is True
+  assert "unavailable" in result["content"][0]["text"]
+  assert all(method == "GET" for method, *_ in calls)
+
+
+def test_app_tool_timeouts_are_ordered_service_then_control_then_provider():
+  """The control script's HTTP wait sits between the service's own timeout and
+  the provider-facing tool timeout, so the app's own timeout error is what the
+  agent sees rather than a control or provider cutoff."""
+  from app import app_tools
+
+  control = _control_module()
+
+  assert (
+    app_tools.TOOL_TIMEOUT_SECONDS
+    < control.APP_TOOL_CALL_TIMEOUT_SECONDS
+    < platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS
+  )
