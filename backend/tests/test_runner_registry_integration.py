@@ -74,8 +74,6 @@ def test_claude_runner_registers_then_unregisters_handle():
         chat_id="chat-claude",
         skill_text="skill",
         bc=_FakeBroadcast(),
-        pending_questions={},
-        db=None,
       )
     )
     for _ in range(20):

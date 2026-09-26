@@ -1275,9 +1275,8 @@ class ChatEventSink:
       elif getattr(self, "_lost_reply_marker", False):
         # Defense-in-depth: a normally-owned run reached a CLEAN provider
         # terminal but produced zero renderable content (a Claude synthetic-
-        # resume no-op, or a codex message whose text was lost). The runner-side
-        # fixes stop those at the source; this guarantees the turn is never a
-        # SILENT user->user gap — persist a neutral marker the client can retry.
+        # resume no-op, or a codex message whose text was lost). Persist a
+        # neutral marker so the turn is never a silent user->user gap.
         #
         # Built via _pause_note so the marker carries `resumable` — the flag
         # MsgContent gates the one-tap Resume button on. No `kind`, so no
