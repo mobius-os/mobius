@@ -2947,6 +2947,61 @@ def test_claude_text_events_have_no_id_without_message_id():
   assert emitted and all("text_item_id" not in e for e in emitted)
 
 
+@pytest.mark.asyncio
+async def test_mid_turn_person_message_is_framed_as_owed_a_visible_reply():
+  """A person's mid-turn message must not be absorbed as silent context.
+
+  "Continue the same task" framing let agents fold an owner's question into
+  their work and answer it only in hidden thinking. Visible rows are framed
+  as a message needing a visible reply; hidden agent carriers (helper
+  results, peer notes) stay context. The distinction resets with the buffer.
+  """
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-framing")
+  handle.mark_generating()
+
+  await handle.steer(
+    "helper finished", [{"role": "user", "cid": "c1", "hidden": True,
+                         "kind": "delegation_result"}], ["c1"],
+  )
+  assert handle.steer_from_person is False
+  await handle.steer("why not X?", [{"role": "user", "cid": "c2"}], ["c2"])
+  assert handle.steer_from_person is True
+
+  texts = handle.take_steer_for_requery(interrupt_landed=True)
+  assert texts == ["helper finished", "why not X?"]
+  assert handle.steer_from_person is False
+
+  person = claude_sdk_runner._steer_redirect_message(texts, from_person=True)
+  assert person.startswith("The partner sent this message while you were")
+  assert "visible response" in person
+  assert "why not X?" in person and "helper finished" in person
+
+  context = claude_sdk_runner._steer_redirect_message(
+    ["peer note"], from_person=False,
+  )
+  assert context.startswith("New context arrived while you were working.")
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_person_steer_framing():
+  class _Client:
+    async def interrupt(self):
+      pass
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer-stop")
+  handle.mark_generating()
+  await handle.steer("stop that", [{"role": "user", "cid": "c3"}], ["c3"])
+  assert handle.steer_from_person is True
+  handle.mark_finished()
+  await handle.interrupt()
+  assert handle.pending_steer == []
+  assert handle.steer_from_person is False
+
+
 def _clean_zero_block_result(session_id: str = "sess-1"):
   """A clean, zero-block resume terminal — the synthetic-no-op shape."""
   return ResultMessage(
