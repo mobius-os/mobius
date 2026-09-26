@@ -46,6 +46,13 @@ is not praise padding: naming a sound decision, honest uncertainty, efficient
 move, or well-finished outcome makes the review fair and gives the agent a
 concrete strength to preserve.
 
+Verify the premise of every strength against the owning source *before* you
+assert it — a summary can invert what actually happened. Praising a decision
+the agent did not make (for example, crediting a guard it removed) wastes the
+fork, forces the agent to spend the debrief correcting you, and signals your
+evidence is shaky. If you cannot quickly confirm the strength, state it as a
+question ("did you keep X?") rather than as fact.
+
 Then name one or two specific opportunities to improve, also tied to evidence.
 Use neutral language such as "I noticed…", "What led you to…?", and "What would
 have made this easier to catch?" Avoid prosecutorial framing, leading questions,
