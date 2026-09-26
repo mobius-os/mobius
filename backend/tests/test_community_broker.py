@@ -116,6 +116,7 @@ async def test_unlinked_public_app_reads_fall_back_without_authorization():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", [
   "/v1/community/apps/app_12345678",
+  "/v1/community/apps/app_12345678/reviews",
   "/v1/community/apps/app_12345678/revisions/rev_12345678",
   "/v1/community/editorial/spotlight",
 ])

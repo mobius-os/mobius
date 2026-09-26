@@ -32,6 +32,7 @@ _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 _PUBLIC_READS = (
   re.compile(r"/v1/community/apps"),
   re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"),
+  re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/reviews"),
   re.compile(
     r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
     r"[A-Za-z0-9_:-]{8,200}"

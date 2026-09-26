@@ -930,6 +930,7 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   assert capabilities[2]["path"] == review_path
   assert capabilities[3]["scope"] == "community:read"
   assert capabilities[3]["path"] == reviews_path
+  assert broker_module.BROKER_ROUTE_EPOCH >= 5
   assert capabilities[4]["scope"] == "community:editorial"
   assert capabilities[4]["path"] == editorial_asset_path
   assert capabilities[5]["scope"] == "community:editorial"
