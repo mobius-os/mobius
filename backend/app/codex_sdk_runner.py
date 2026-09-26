@@ -1547,12 +1547,16 @@ async def _run_codex_sdk_turn(
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated
+  from app.app_tools import live_app_tools
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
     control_enabled=True,
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
+    app_tool_names=tuple(
+      tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
+    ),
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
