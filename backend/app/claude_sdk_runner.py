@@ -52,7 +52,7 @@ import signal
 import shutil
 import re
 from collections import deque
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -252,6 +252,12 @@ def _system_prompt_with_register(skill_text: str) -> str:
     return skill_text
   return skill_text.rstrip() + "\n\n" + register + "\n"
 
+
+# Detects a Claude CLI that never starts. A start is normally about a second;
+# a loaded host (for example every chat resuming after a restart) can stretch
+# it well past half a minute without anything being wrong, so this bound is
+# for a hang, not for slowness.
+_CLAUDE_START_TIMEOUT_SECONDS = 120.0
 
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
@@ -1131,6 +1137,7 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
+  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1500,7 +1507,9 @@ async def run_claude_sdk_turn(
     try:
       try:
         try:
-          await asyncio.wait_for(client.connect(), timeout=30.0)
+          await asyncio.wait_for(
+            client.connect(), timeout=_CLAUDE_START_TIMEOUT_SECONDS,
+          )
           control_ready_error = await _await_control_mcp_ready(
             client,
             enabled=(
@@ -1546,6 +1555,16 @@ async def run_claude_sdk_turn(
         label="Claude CLI",
       )
       active_client.set_process_group_id(process_group_id)
+      # Admission marks this turn's inputs (peer notes, helper results)
+      # delivered, so it waits until the provider has started: a turn that
+      # never reached Claude consumes nothing and its inputs stay owed.
+      if admit is not None and not await admit():
+        return {
+          "session_id": current_session_id,
+          "cost_usd": None,
+          "error": None,
+          "superseded": True,
+        }
       await client.query(turn_message)
 
       # Provider-native finite work can finish after its spawning turn, or even

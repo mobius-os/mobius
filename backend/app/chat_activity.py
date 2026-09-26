@@ -159,10 +159,11 @@ def _helper_row_events(
 
 
 def _helper_consumption(row: models.Delegation, run) -> str:
-  """How far a settled helper's result has reached its parent agent."""
-  if row.result_incorporated_at is not None:
+  """How far the helper's current result (its latest run) reached its parent."""
+  current = run.id if run is not None else None
+  if current is not None and row.incorporated_run_id == current:
     return "incorporated"
-  if row.parent_woken_at is not None:
+  if current is not None and row.delivered_run_id == current:
     return "notified"
   if (
     row.notify_parent_on_complete

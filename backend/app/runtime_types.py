@@ -15,6 +15,9 @@ class RunnerResult(TypedDict):
   usage_metrics: NotRequired[dict | None]
   terminal_status: NotRequired[str | None]
   final_message_phase: NotRequired[str | None]
+  # The turn lost execution ownership before admission (for example Stop won
+  # while the provider was starting); nothing was delivered to the provider.
+  superseded: NotRequired[bool]
 
 
 class ChatEvent(TypedDict):

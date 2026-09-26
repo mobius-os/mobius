@@ -165,7 +165,7 @@ def test_codex_host_tool_server_adopts_its_turn_identity_file(monkeypatch, tmp_p
 # ----------------------------------------------------------------- follow-ups
 
 
-def test_follow_up_restarts_a_settled_helper_and_rearms_its_wake(
+def test_follow_up_restarts_a_settled_helper_and_owes_its_next_result(
   client, owner_token, db, monkeypatch,
 ):
   parent_id, child_id, delegation_id = _seed_delegation(
@@ -173,7 +173,7 @@ def test_follow_up_restarts_a_settled_helper_and_rearms_its_wake(
     result_blocks=[{"type": "text", "content": "First answer."}],
   )
   row = db.get(models.Delegation, delegation_id)
-  row.parent_woken_at = now_naive_utc()
+  row.delivered_run_id = "child-run-follow-up"
   db.commit()
   started = []
 
@@ -191,7 +191,11 @@ def test_follow_up_restarts_a_settled_helper_and_rearms_its_wake(
   assert started[0]["chat_id"] == child_id
   assert started[0]["content"] == "Now check the tests too."
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  # The follow-up's result is a new child run, so it is owed without erasing
+  # the record that the first result was delivered.
+  row = db.get(models.Delegation, delegation_id)
+  assert row.notify_parent_on_complete is True
+  assert row.delivered_run_id == "child-run-follow-up"
 
 
 def test_a_working_or_stopped_helper_cannot_be_messaged(client, owner_token, db):
@@ -246,8 +250,45 @@ def test_a_result_is_steered_into_the_running_parent_turn_once(db, monkeypatch):
   assert chat_id == parent_id and "Done while you worked." in content
   assert user_msgs[0]["kind"] == "delegation_result" and consume is None
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is not None
   # Delivered: the next turn's context does not repeat it.
+  assert delegations_mod.available_delegation_results(db, parent_id) == []
+
+
+def test_a_reopened_helper_result_is_steered_again_not_deduplicated(
+  db, monkeypatch,
+):
+  """Steer identity is the result, not the helper.
+
+  The first result's carrier stays in the parent transcript. After a
+  follow-up (message_agent) settles as a new child run, that carrier must
+  neither mark the new result delivered nor share its steer identity.
+  """
+  parent_id, child_id, delegation_id = _running_parent(db, "steer-again")
+  steered = _live_parent(monkeypatch, accepted=True)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+  (_chat, _content, first_msgs, _consume), = steered
+  # The live turn persists the carrier it accepted.
+  parent = db.get(models.Chat, parent_id)
+  parent.messages = [*first_msgs]
+  db.add(make_goal_run(db,
+    id="child-run-steer-again-2", root_run_id="child-run-steer-again-2",
+    chat_id=child_id, status="completed", provider="claude",
+    started_at=now_naive_utc(),
+  ))
+  db.commit()
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert len(steered) == 2
+  second_msgs = steered[1][2]
+  assert second_msgs[0]["cid"] != first_msgs[0]["cid"]
+  assert '"run_id":"child-run-steer-again-2"' in second_msgs[0]["content"]
+  db.expire_all()
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).delivered_run_id == "child-run-steer-again-2"
   assert delegations_mod.available_delegation_results(db, parent_id) == []
 
 
@@ -258,7 +299,7 @@ def test_a_refused_steer_leaves_the_result_for_after_the_turn(db, monkeypatch):
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
 
   db.expire_all()
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
   assert db.get(models.Chat, parent_id).pending_messages == []
   assert [row.id for row in delegations_mod.available_delegation_results(db, parent_id)] == [
     delegation_id,

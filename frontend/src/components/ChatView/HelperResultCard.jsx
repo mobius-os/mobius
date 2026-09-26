@@ -10,13 +10,21 @@ import { isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { modelDisplayName } from './chatUsageFormat.js'
+import { modelQueries } from '../../hooks/queries.js'
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
 
-// "Claude · claude-opus-4-8": which provider and model a helper runs on.
-export function helperEngine(event) {
-  return [PROVIDER_NAMES[event.provider] || event.provider, event.model]
-    .filter(Boolean).join(' · ')
+// Which model a helper runs on, by the name the model picker shows without its
+// provider prefix ("Opus 4.8", "GPT-6-Sol"). A model the registry does not name
+// keeps its provider and raw id ("Claude · claude-opus-9").
+export function helperEngine(event, registry) {
+  const provider = PROVIDER_NAMES[event.provider] || event.provider
+  const label = modelDisplayName(event.model, registry, event.provider)
+  if (!label || label === event.model.trim()) {
+    return [provider, event.model].filter(Boolean).join(' · ')
+  }
+  return provider && label.startsWith(`${provider} `) ? label.slice(provider.length + 1) : label
 }
 
 // The helper's newest step in owner language ("Running npm test"), or null.
@@ -65,7 +73,8 @@ export function HelperRow({ event, chatId, onInternalNav }) {
   const elapsed = working
     ? live
     : Number.isFinite(event.duration_ms) ? elapsedLabel(event.duration_ms) : null
-  const sub = [helperEngine(event), outcome].filter(Boolean).join(' · ')
+  const registry = modelQueries.registry.useQuery().data
+  const sub = [helperEngine(event, registry), outcome].filter(Boolean).join(' · ')
   const canOpen = !!(chatId && event.delegation_id)
   const running = working && !paused
   const body = <>

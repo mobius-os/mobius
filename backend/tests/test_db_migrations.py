@@ -1728,6 +1728,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0067_chat_drawer_covering_index",
     "0068_rename_inkling_to_evolve",
     "0069_chat_pending_queue_index",
+    "0071_delegation_result_identity",
   ]
   assert second == first
 
@@ -3932,12 +3933,15 @@ def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
       task_key="history", child_chat_id="incorporation-child",
       provider="claude", scope="read", cwd="/tmp",
       prompt_sha256="0" * 64, notify_parent_on_complete=False,
-      parent_woken_at=datetime(2026, 9, 9),
     ))
     session.commit()
   with eng.begin() as conn:
+    # The pre-0048 shape: a historical delivery timestamp, no incorporation.
     conn.execute(text(
-      "ALTER TABLE delegations DROP COLUMN result_incorporated_at"
+      "ALTER TABLE delegations ADD COLUMN parent_woken_at DATETIME NULL"
+    ))
+    conn.execute(text(
+      "UPDATE delegations SET parent_woken_at = '2026-09-09 00:00:00'"
     ))
     conn.execute(text(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -3967,6 +3971,97 @@ def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0048_delegation_result_incorporation'"
     )).scalar_one() == 1
+
+
+def test_result_identity_migration_marks_the_delivered_result_by_child_run(
+  tmp_path,
+):
+  """0071 turns delivery timestamps into the child run they delivered.
+
+  A set timestamp covered the helper's latest child run (message_agent
+  cleared it on every follow-up); an unset one leaves the result owed. Source
+  work delivered before any child run is marked settled-before-start.
+  """
+  eng = create_engine(f"sqlite:///{tmp_path / 'result-identity.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      slug="result-identity", source_dir="/tmp/result-identity",
+      name="Result identity", description="", jsx_source="",
+    )
+    session.add(app)
+    session.flush()
+    session.add(models.Chat(id="identity-parent", messages=[]))
+    for name in ("delivered", "incorporated", "owed", "prestart"):
+      session.add(models.Chat(
+        id=f"identity-{name}", messages=[], created_by_app_id=app.id,
+      ))
+      session.flush()
+      session.add(models.Delegation(
+        id=f"delegation-{name}", app_id=app.id,
+        parent_chat_id="identity-parent", parent_root_run_id="root",
+        task_key=name, child_chat_id=f"identity-{name}",
+        provider="claude", scope="read", cwd="/tmp",
+        prompt_sha256="0" * 64, notify_parent_on_complete=True,
+      ))
+      for index in range(0 if name == "prestart" else 2):
+        session.add(models.ChatRun(
+          id=f"{name}-run-{index}", chat_id=f"identity-{name}",
+          status="completed", provider="claude",
+          started_at=datetime(2026, 9, 9, 10, index),
+        ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE delegations DROP COLUMN delivered_run_id"
+    ))
+    conn.execute(text(
+      "ALTER TABLE delegations DROP COLUMN incorporated_run_id"
+    ))
+    conn.execute(text(
+      "ALTER TABLE delegations ADD COLUMN parent_woken_at DATETIME NULL"
+    ))
+    conn.execute(text(
+      "ALTER TABLE delegations ADD COLUMN result_incorporated_at DATETIME NULL"
+    ))
+    conn.execute(text(
+      "UPDATE delegations SET parent_woken_at = '2026-09-09 11:00:00' "
+      "WHERE id IN ("
+      "'delegation-delivered', 'delegation-incorporated', 'delegation-prestart'"
+      ")"
+    ))
+    conn.execute(text(
+      "UPDATE delegations SET result_incorporated_at = '2026-09-09 11:00:00' "
+      "WHERE id = 'delegation-incorporated'"
+    ))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before(
+      "0071_delegation_result_identity",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 9, 9)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    marks = {
+      row[0]: (row[1], row[2]) for row in conn.execute(text(
+        "SELECT id, delivered_run_id, incorporated_run_id FROM delegations"
+      ))
+    }
+  assert marks == {
+    "delegation-delivered": ("delivered-run-1", None),
+    "delegation-incorporated": ("incorporated-run-1", "incorporated-run-1"),
+    "delegation-owed": (None, None),
+    "delegation-prestart": ("settled-before-start", None),
+  }
+
+
 def test_compatibility_cutover_normalizes_notification_links(tmp_path, monkeypatch):
   from sqlalchemy import create_engine
   from sqlalchemy.orm import Session

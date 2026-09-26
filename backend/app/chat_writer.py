@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models, schemas
@@ -388,7 +388,8 @@ class AdmitProviderExecution(_Command):
   chat_id: str = ""
   run_token: str = ""
   has_peer_context_delivery: bool = False
-  activity_delegation_ids: tuple[str, ...] = ()
+  # (Delegation id, child run id) pairs: the exact results in the context.
+  activity_results: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -2567,16 +2568,23 @@ class ChatWriterActor:
       or run.provider_execution_admitted is not False
     ):
       raise _PersistFailed("AdmitProviderExecution: run is not eligible")
-    activity_ids = tuple(dict.fromkeys(cmd.activity_delegation_ids))
+    activity_results = dict(cmd.activity_results)
+    activity_ids = tuple(activity_results)
     if (
       len(activity_ids) > 100
-      or any(not isinstance(item, str) or not item for item in activity_ids)
+      or len(activity_ids) != len(cmd.activity_results)
+      or any(
+        not isinstance(item, str) or not item
+        or not isinstance(run_id, str) or not run_id
+        for item, run_id in activity_results.items()
+      )
     ):
       raise _PersistFailed(
         "AdmitProviderExecution: invalid activity delivery identity"
       )
     from app.delegations import (
       ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      WAKE_ELIGIBLE_RUN_STATUSES,
       activity_continuation_delivery_source_work_id,
     )
     source_work_id = activity_continuation_delivery_source_work_id(
@@ -2591,15 +2599,29 @@ class ChatWriterActor:
         models.Delegation.id.in_(activity_ids),
         models.Delegation.parent_chat_id == cmd.chat_id,
         models.Delegation.notify_parent_on_complete.is_(True),
-        models.Delegation.parent_woken_at.is_(None),
         models.Delegation.cancelled_at.is_(None),
       ]
       if source_work_id is not None:
         ownership_filters.append(
           models.Delegation.parent_root_run_id == source_work_id,
         )
-      activity_rows = db.query(models.Delegation.id).filter(
+      # The context holds these exact results. Each must be a settled run of
+      # its helper that has not already been delivered. A helper reopened
+      # since the context was built is fine: this turn admits the result it
+      # saw, and the newer one stays owed.
+      activity_rows = db.query(models.Delegation.id).join(
+        models.ChatRun, models.ChatRun.chat_id == models.Delegation.child_chat_id,
+      ).filter(
         *ownership_filters,
+        or_(*(
+          and_(models.Delegation.id == item, models.ChatRun.id == run_id)
+          for item, run_id in activity_results.items()
+        )),
+        models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
+        or_(
+          models.Delegation.delivered_run_id.is_(None),
+          models.Delegation.delivered_run_id != models.ChatRun.id,
+        ),
       ).all()
       if {str(row[0]) for row in activity_rows} != set(activity_ids):
         raise _PersistFailed(
@@ -2615,6 +2637,7 @@ class ChatWriterActor:
     delivery_envelope = (
       {
         "delegation_ids": list(activity_ids),
+        "result_run_ids": activity_results,
         "delivery_contract": ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
       }
       if activity_ids else None
@@ -2737,23 +2760,15 @@ class ChatWriterActor:
     ).all()
     if {str(row[0]) for row in matching} != set(ids):
       raise _PersistFailed("Finalize: activity ownership changed")
-    incorporated_at = datetime.now(UTC).replace(tzinfo=None)
-    # This is the sole durable proof that the provider did more than receive a
-    # result. Keep it distinct from parent_woken_at: that older latch also
-    # closes inline claims and owner notifications before any agent response.
-    db.query(models.Delegation).filter(
-      *ownership_filters,
-      models.Delegation.result_incorporated_at.is_(None),
-    ).update(
-      {models.Delegation.result_incorporated_at: incorporated_at},
-      synchronize_session=False,
-    )
-    db.query(models.Delegation).filter(
-      *ownership_filters,
-      models.Delegation.parent_woken_at.is_(None),
-    ).update(
-      {models.Delegation.parent_woken_at: incorporated_at},
-      synchronize_session=False,
+    from app.delegations import envelope_results, mark_results_delivered
+    # Mark exactly the results this turn admitted. A follow-up the turn sent
+    # (message_agent) runs as a newer child run, so it stays owed.
+    results = envelope_results(db, envelope, run.started_at)
+    # incorporated_run_id is the sole durable proof that the provider did more
+    # than receive a result; delivery alone also closes inline claims and
+    # owner notifications before any agent response.
+    mark_results_delivered(
+      db, results, incorporated=True, filters=tuple(ownership_filters),
     )
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
@@ -3822,6 +3837,7 @@ class ChatWriterActor:
       WAKE_ELIGIBLE_STATUSES,
       _activity_continuation_run_id,
       _parent_wake_continuation_root,
+      current_result_undelivered,
       derived_status,
     )
     from app.models import ChatRun
@@ -3836,7 +3852,7 @@ class ChatWriterActor:
       models.Delegation.parent_chat_id == cmd.chat_id,
       models.Delegation.parent_root_run_id == cmd.source_work_id,
       models.Delegation.notify_parent_on_complete.is_(True),
-      models.Delegation.parent_woken_at.is_(None),
+      current_result_undelivered(),
       models.Delegation.cancelled_at.is_(None),
     ).first()
     if (
@@ -3846,7 +3862,16 @@ class ChatWriterActor:
     ):
       db.rollback()
       return StartContinuationBlocked("activity_unavailable")
-    if cmd.run_token != _activity_continuation_run_id(trigger):
+    existing_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    # A new run must carry this result's identity. An existing run (a retry
+    # or a restart orphan, possibly from an earlier id basis) is recognized by
+    # the helper it recorded when it started.
+    if existing_run is None and (
+      cmd.run_token != _activity_continuation_run_id(db, trigger)
+    ):
       raise _PersistFailed(
         "StartActivityContinuation: run identity does not match activity"
       )
@@ -3865,20 +3890,24 @@ class ChatWriterActor:
       db.rollback()
       return StartContinuationBlocked("activation_pending")
 
-    existing_run = db.query(ChatRun).filter(
-      ChatRun.id == cmd.run_token,
-      ChatRun.chat_id == cmd.chat_id,
-    ).first()
     if existing_run is not None:
       existing_envelope = existing_run.activity_delivery_json
       existing_source_work_id = (
         existing_envelope.get("source_work_id")
         if isinstance(existing_envelope, dict) else None
       )
+      existing_ids = (
+        existing_envelope.get("delegation_ids")
+        if isinstance(existing_envelope, dict) else None
+      )
       if (
         (existing_run.root_run_id or existing_run.id) != cmd.root_run_id
         or existing_run.initiated_by_app_id is not None
         or existing_source_work_id not in (None, cmd.source_work_id)
+        or (
+          cmd.run_token != _activity_continuation_run_id(db, trigger)
+          and existing_ids != [trigger.id]
+        )
       ):
         raise _PersistFailed(
           "StartActivityContinuation: run identity belongs to other work"

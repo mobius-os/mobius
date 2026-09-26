@@ -232,7 +232,7 @@ def test_disconnected_blocking_attachment_claim_does_not_imply_incorporation(
   assert event["consumption"] == "unknown"
   assert db.get(
     models.Delegation, "helper-claimed-inline",
-  ).result_incorporated_at is None
+  ).incorporated_run_id is None
 
 
 def test_source_only_activity_uses_the_derived_status_terminal_contract(

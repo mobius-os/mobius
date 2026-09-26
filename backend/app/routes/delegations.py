@@ -444,9 +444,10 @@ async def message_delegation(
 
   Only the helper's own parent chat may message it. The follow-up is the
   helper's next user turn; its result reaches the parent exactly like the
-  first one (live into a running parent turn, or by waking it), so the
-  one-shot wake latch is re-armed here. A helper that is still working is
-  refused rather than interrupted: the parent waits for its result or stops it.
+  first one (live into a running parent turn, or by waking it). That result
+  is a new child run, so it is owed without resetting any delivery record.
+  A helper that is still working is refused rather than interrupted: the
+  parent waits for its result or stops it.
   """
   row = _row_for_principal(db, delegation_id, principal)
   if principal.chat_id and principal.chat_id != row.parent_chat_id:
@@ -469,8 +470,6 @@ async def message_delegation(
     if row.cancelled_at is not None:
       raise HTTPException(status_code=409, detail="This helper was stopped.")
     row.notify_parent_on_complete = True
-    row.parent_woken_at = None
-    row.result_incorporated_at = None
     db.commit()
     started = await start_programmatic_chat_turn(
       chat_id=row.child_chat_id,

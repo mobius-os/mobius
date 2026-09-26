@@ -3061,3 +3061,50 @@ async def test_rejected_selected_model_does_not_fall_back_silently(monkeypatch):
   assert clients[0].queries == ["hello"]
   assert clients[0].options.model == "claude-opus-4-8"
   assert result["error"] == "Selected model may not exist or you may not have access"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_admits_only_after_claude_started_and_before_the_prompt(
+  monkeypatch,
+):
+  """Admission marks the turn's inputs delivered, so it follows a real start.
+
+  A start that fails never admits (its inputs stay owed); a started turn
+  admits exactly once before the prompt; a refused admission sends nothing.
+  """
+  events: list[str] = []
+
+  class _StartFails(_FakeClient):
+    async def connect(self):
+      raise asyncio.TimeoutError()
+
+  class _Records(_FakeClient):
+    async def connect(self):
+      events.append("connect")
+
+    async def query(self, message):
+      events.append("query")
+      await super().query(message)
+
+  async def admit() -> bool:
+    events.append("admit")
+    return True
+
+  _install_fake_client(monkeypatch, _StartFails)
+  failed = await _run_turn("chat-start-fails", admit=admit)
+  assert failed["error"] == "connect timeout"
+  assert events == []
+
+  _install_fake_client(monkeypatch, _Records)
+  await _run_turn("chat-start-ok", admit=admit)
+  assert events == ["connect", "admit", "query"]
+
+  events.clear()
+
+  async def refuse() -> bool:
+    events.append("admit")
+    return False
+
+  refused = await _run_turn("chat-admission-refused", admit=refuse)
+  assert refused["superseded"] is True
+  assert events == ["connect", "admit"]

@@ -26,7 +26,6 @@ advertise it.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import concurrent.futures as _cf
 import functools
 import logging
@@ -278,11 +277,9 @@ def _codex_process_group_id(
 class _CodexCallExecutor:
   """Per-client worker pool for the SDK's blocking sync protocol surface."""
 
-  def __init__(
-    self, chat_id: str, workers: int = _CODEX_CALL_EXECUTOR_WORKERS,
-  ) -> None:
+  def __init__(self, chat_id: str) -> None:
     self._executor = _cf.ThreadPoolExecutor(
-      max_workers=workers,
+      max_workers=_CODEX_CALL_EXECUTOR_WORKERS,
       thread_name_prefix=f"mobius-codex-{chat_id[:8]}",
     )
 
@@ -303,7 +300,6 @@ class _CodexCallExecutor:
 def _install_codex_call_executor(
   codex_context: Any,
   chat_id: str,
-  workers: int = _CODEX_CALL_EXECUTOR_WORKERS,
 ) -> _CodexCallExecutor | None:
   """Route one AsyncCodex client's sync bridge off the default executor.
 
@@ -315,7 +311,7 @@ def _install_codex_call_executor(
   client = getattr(codex_context, "_client", None)
   if client is None or not callable(getattr(client, "_call_sync", None)):
     return None
-  owner = _CodexCallExecutor(chat_id, workers)
+  owner = _CodexCallExecutor(chat_id)
   try:
     client._call_sync = owner.call
   except (AttributeError, TypeError):
@@ -370,27 +366,6 @@ async def _enter_codex_context_owned(
       raise deferred_cancel from exc
     raise
   return entered, deferred_cancel
-
-
-@contextlib.asynccontextmanager
-async def _codex_client_scope(codex_context, helper_host_key, sdk, config):
-  """Yield ``(client, entry_cancel, helper_host)`` for one turn.
-
-  Without a host key the turn owns a private app-server exactly as before.
-  With one it leases the shared helper host for this parent and setup; the
-  host outlives the turn and is never closed or signalled here.
-  """
-  if helper_host_key is None:
-    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
-    async with _EnteredCodexContext(codex_context, codex) as codex:
-      yield codex, entry_cancel, None
-    return
-  from app import helper_hosts
-  async with helper_hosts.MANAGER.lease(
-    helper_host_key,
-    lambda: helper_hosts.CodexHelperHost(helper_host_key, sdk=sdk, config=config),
-  ) as host:
-    yield host.client, None, host
 
 
 class _EnteredCodexContext:
@@ -722,11 +697,6 @@ class ActiveCodexTurn:
       if self._process_group_id is None and not self._run_marker:
         return False
       self._force_stop_started = True
-      if self._shared_host:
-        # Möbius ends this turn deliberately; a clean stop, not a failure.
-        self._interrupt_requested = True
-        with contextlib.suppress(Exception):
-          await asyncio.wait_for(self.turn.interrupt(), timeout=2.0)
       await asyncio.to_thread(
         _terminate_codex_processes, self._process_group_id, self._run_marker,
       )
@@ -1419,7 +1389,7 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  helper_host_key=None,
+  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1590,23 +1560,6 @@ async def _run_codex_sdk_turn(
       "Codex app-server process-group isolation unavailable; "
       "descendant cleanup is best-effort only"
     )
-  # Shared helper host: the process environment belongs to every helper in
-  # it, so this turn's identity moves into its own thread settings and a
-  # private env file (see helper_hosts).
-  turn_env_file = None
-  if helper_host_key is not None:
-    from app import helper_hosts
-    host_env, turn_env = helper_hosts.split_env(env)
-    host_env[helper_hosts.HOST_MARKER_ENV] = helper_hosts.host_marker(helper_host_key.digest)
-    config_kwargs["env"] = host_env
-    turn_env_file = helper_hosts.TurnEnvFile(
-      Path(turn_env.get("TMPDIR") or runtime_data_dir),
-      turn_env.get(RUN_MARKER_ENV, ""),
-      turn_env,
-    )
-    connector_thread_config = helper_hosts.codex_turn_thread_config(
-      connector_thread_config, turn_env=turn_env, env_file=turn_env_file,
-    )
   config = sdk["CodexConfig"](**config_kwargs)
 
   thread = None
@@ -1628,17 +1581,11 @@ async def _run_codex_sdk_turn(
   task_host_open = False
   task_host_tool_use_id: str | None = None
   public_task_ids: set[str] = set()
-  helper_host = None
-  codex_context = (
-    sdk["AsyncCodex"](config=config) if helper_host_key is None else None
-  )
-  codex_call_executor = (
-    _install_codex_call_executor(codex_context, chat_id)
-    if codex_context is not None else None
-  )
+  codex_context = sdk["AsyncCodex"](config=config)
+  codex_call_executor = _install_codex_call_executor(codex_context, chat_id)
   process_group_capture_stop: asyncio.Event | None = None
   process_group_capture_task: asyncio.Task[int | None] | None = None
-  if launch_args is not None and codex_context is not None:
+  if launch_args is not None:
     process_group_capture_stop = asyncio.Event()
     process_group_capture_task = asyncio.create_task(
       _capture_codex_process_group_during_start(
@@ -1700,21 +1647,19 @@ async def _run_codex_sdk_turn(
     }
 
   try:
-    async with _codex_client_scope(
-      codex_context, helper_host_key, sdk, config,
-    ) as (codex, entry_cancel, helper_host):
+    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
+    async with _EnteredCodexContext(codex_context, codex) as codex:
       goal_client = control_client(codex) if session_id and retire_native_goal else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",
         chat_id=chat_id,
       )
-      if helper_host is None:
-        process_group_id = _codex_process_group_id(codex)
-        lower_process_group_priority(
-          process_group_id,
-          logger=log,
-          label="Codex app-server",
-        )
+      process_group_id = _codex_process_group_id(codex)
+      lower_process_group_priority(
+        process_group_id,
+        logger=log,
+        label="Codex app-server",
+      )
       if process_group_capture_stop is not None:
         process_group_capture_stop.set()
       # Do NOT await the capture task here. Cancellation immediately after
@@ -1750,7 +1695,7 @@ async def _run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      if delegated and helper_host is None:
+      if delegated:
         _install_delegated_approval_handler(codex, chat_id=chat_id)
       elif not restricted:
         _install_request_user_input_handler(
@@ -1875,6 +1820,10 @@ async def _run_codex_sdk_turn(
           )
         if resumed_context:
           user_message = f"{resumed_context}\n\n{user_message}"
+      # Admission marks this turn's inputs delivered, so it waits until the
+      # Codex thread is ready: a turn that never started consumes nothing.
+      if admit is not None and not await admit():
+        return {**aborted_result(), "superseded": True}
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,
@@ -2431,7 +2380,7 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  helper_host_key=None,
+  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2467,7 +2416,7 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
-      helper_host_key=helper_host_key,
+      admit=admit,
     )
   finally:
     ownership.release()

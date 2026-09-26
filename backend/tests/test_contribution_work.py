@@ -124,7 +124,7 @@ def test_active_source_accepts_exact_work_and_retry_attaches(
   assert row.model == "gpt-5.6-sol"
   assert row.effort == "high"
   assert row.notify_parent_on_complete is False
-  assert row.parent_woken_at is None
+  assert row.delivered_run_id is None
   assert row.source_work_active_chat_id == source.id
   assert set(row.source_work_envelope) == {
     "v", "intent", "source_chat_id", "edit_revision", "paths",
@@ -947,6 +947,46 @@ def test_owner_can_stop_prestart_contribution_work_and_release_its_lease(
   assert row.source_work_active_chat_id is None
 
 
+def test_source_work_settled_before_start_notifies_the_owner_once(
+  client, owner_token, db, monkeypatch,
+):
+  """A pre-start failure has no child run, yet still claims one notification."""
+  auth = _auth(owner_token)
+  app_id, _subagents_id, source = _apps_and_source(client, auth, db)
+  db.add(models.ChatRun(
+    id="source-prestart", root_run_id="source-prestart",
+    chat_id=source.id, status="running", provider="codex",
+  ))
+  db.commit()
+
+  async def fake_snapshot(_db, _app_id, _chat_id):
+    return _snapshot()
+
+  monkeypatch.setattr(github_routes, "_contribution_work_snapshot", fake_snapshot)
+  accepted = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
+    headers=auth,
+    json={
+      "intent": "prepare",
+      "expected_revision": "edit-1:/data/platform/backend/app/demo.py",
+      "record_ids": [],
+    },
+  )
+  assert accepted.status_code == 202, accepted.text
+  row = db.query(models.Delegation).one()
+  assert db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == row.child_chat_id,
+  ).count() == 0
+
+  delegations.publish_source_work_changed(row, "needs_review")
+  delegations.publish_source_work_changed(row, "needs_review")
+
+  db.expire_all()
+  row = db.query(models.Delegation).one()
+  assert row.delivered_run_id == delegations.SETTLED_BEFORE_START
+  assert len(db.query(models.Notification).all()) == 1
+
+
 @pytest.mark.parametrize("terminal", ["completed", "failed"])
 def test_hidden_source_work_terminal_persists_one_owner_notification(
   client, owner_token, db, monkeypatch, terminal,
@@ -993,8 +1033,8 @@ def test_hidden_source_work_terminal_persists_one_owner_notification(
   db.expire_all()
   row = db.query(models.Delegation).one()
   notifications = db.query(models.Notification).all()
-  assert row.parent_woken_at is not None
-  assert row.result_incorporated_at is None
+  assert row.delivered_run_id is not None
+  assert row.incorporated_run_id is None
   assert row.source_work_active_chat_id is None
   assert len(notifications) == 1
   assert notifications[0].source_type == "agent"

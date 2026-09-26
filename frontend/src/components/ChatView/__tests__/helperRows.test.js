@@ -2,7 +2,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
+import { renderWithModels } from './modelRegistryRender.js'
 import { createServer } from 'vite'
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: SubagentChips } = await vite.ssrLoadModule('/src/components/ChatView/SubagentChips.jsx')
@@ -11,7 +11,7 @@ const priorWindow = globalThis.window
 globalThis.window = { location: new URL('https://mobius.test/shell') }
 after(() => { globalThis.window = priorWindow; return vite.close() })
 
-const chips = (subagent, props = {}) => renderToStaticMarkup(
+const chips = (subagent, props = {}) => renderWithModels(
   React.createElement(SubagentChips, { subagent, chatId: 'chat', ...props }),
 )
 
@@ -53,7 +53,7 @@ const working = {
 
 test('a working helper row shows its name, engine, current step, and clock', () => {
   const started = new Date(Date.now() - 75_000).toISOString()
-  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+  const html = renderWithModels(React.createElement(HelperResultCard, {
     chatId: 'chat',
     event: {
       ...working, delegation_id: 'd1', provider: 'codex', model: 'gpt-6-luna',
@@ -61,7 +61,7 @@ test('a working helper row shows its name, engine, current step, and clock', () 
     },
   }))
   assert.match(html, /audit-login/)
-  assert.match(html, /Codex · gpt-6-luna · Running npm test/)
+  assert.match(html, /GPT-6-Luna · Running npm test/)
   assert.match(html, /chat__subagent-elapsed">1m 1[45]s</)
   assert.match(html, /<button[^>]*aria-haspopup="dialog"/)
   assert.match(html, /chat__subagent--running/)
@@ -75,7 +75,7 @@ test('the clock reads the server start time as UTC, whatever the viewer\'s time 
   process.env.TZ = 'Asia/Kolkata'
   try {
     const started = new Date(Date.now() - 75_000).toISOString().replace('Z', '')
-    const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+    const html = renderWithModels(React.createElement(HelperResultCard, {
       chatId: 'chat',
       event: { ...working, delegation_id: 'd1', provider: 'claude', model: 'claude-opus-4-8', started_at: started },
     }))
@@ -87,25 +87,25 @@ test('the clock reads the server start time as UTC, whatever the viewer\'s time 
 })
 
 test('a working helper without a known step says it is working', () => {
-  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+  const html = renderWithModels(React.createElement(HelperResultCard, {
     chatId: 'chat', event: { ...working, delegation_id: 'd1', provider: 'claude', model: 'claude-opus-4-8' },
   }))
-  assert.match(html, /Claude · claude-opus-4-8 · Working/)
+  assert.match(html, /Opus 4.8 · Working/)
 })
 
 test('a finished helper keeps its row with its engine and how long it took', () => {
-  const html = renderToStaticMarkup(React.createElement(HelperResultCard, {
+  const html = renderWithModels(React.createElement(HelperResultCard, {
     chatId: 'chat',
     event: { ...working, id: 'delegation:d1:completed', status: 'completed', delegation_id: 'd1',
              provider: 'claude', model: 'claude-opus-4-8', duration_ms: 12_000, body: 'Done.' },
   }))
   assert.match(html, /audit-login/)
-  assert.match(html, /Claude · claude-opus-4-8 · Finished/)
+  assert.match(html, /Opus 4.8 · Finished/)
   assert.match(html, /12s/)
 })
 
 test('a group with working helpers says so instead of claiming they need attention', () => {
-  const html = renderToStaticMarkup(React.createElement(HelperResultGroupCard, {
+  const html = renderWithModels(React.createElement(HelperResultGroupCard, {
     chatId: 'chat',
     events: [working, { ...working, id: 'delegation:d2:completed', status: 'completed' }],
   }))
@@ -115,7 +115,7 @@ test('a group with working helpers says so instead of claiming they need attenti
 
 test('a working Subagents-app helper inside a collapsed activity group counts as running', async () => {
   const { default: ActivityStretch } = await vite.ssrLoadModule('/src/components/ChatView/ActivityStretch.jsx')
-  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+  const html = renderWithModels(React.createElement(ActivityStretch, {
     chatId: 'chat',
     surfaceKey: 'm1',
     entries: [
@@ -131,7 +131,7 @@ test('an open group draws each helper once, as its launch step, in order', async
   const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
   _resetDisclosureStateForTests()
   persistDisclosureOpen('chat', 'm2:activity:t0', true)
-  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+  const html = renderWithModels(React.createElement(ActivityStretch, {
     chatId: 'chat',
     surfaceKey: 'm2',
     entries: [
@@ -155,7 +155,7 @@ test('a finished helper stays its launch step: one settled row, counted as done'
   const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
   _resetDisclosureStateForTests()
   persistDisclosureOpen('chat', 'm3:activity:t0', true)
-  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+  const html = renderWithModels(React.createElement(ActivityStretch, {
     chatId: 'chat',
     surfaceKey: 'm3',
     entries: [
@@ -177,7 +177,7 @@ test('a failed launch stays a failed step; only the retry that started the helpe
   _resetDisclosureStateForTests()
   persistDisclosureOpen('chat', 'm4:activity:t0', true)
   const spawn = (id, extra) => ({ type: 'tool', tool: 'mcp__mobius_control__spawn_agent', input: 'audit-login', status: 'done', tool_use_id: id, ...extra })
-  const html = renderToStaticMarkup(React.createElement(ActivityStretch, {
+  const html = renderWithModels(React.createElement(ActivityStretch, {
     chatId: 'chat',
     surfaceKey: 'm4',
     entries: [

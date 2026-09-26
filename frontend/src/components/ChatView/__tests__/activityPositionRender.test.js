@@ -2,7 +2,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
+import { renderWithModels } from './modelRegistryRender.js'
 import { createServer } from 'vite'
 globalThis.window = { location: { origin: 'http://localhost', href: 'http://localhost/shell/' }, innerWidth: 420 }
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
@@ -16,7 +16,7 @@ const note = { id: 'incoming', sender_chat_id: 'peer', sender_name: 'Colleague',
 const context = { tools: new Map([['peer-incoming', [note]]]), positions: new Map([['answer', [note]]]) }
 const message = { id: 'answer', role: 'assistant', blocks: [{ type: 'text', content: 'Earlier\n\nLater response' }] }
 function render(Component, props, value = context) {
-  return renderToStaticMarkup(React.createElement(PeerTimelineContext.Provider, { value }, React.createElement(Component, props)))
+  return renderWithModels(React.createElement(PeerTimelineContext.Provider, { value }, React.createElement(Component, props)))
 }
 test('live and reopened response place the incoming row before later prose', () => {
   const saved = render(Message, { msg: message, chatId: 'chat', messageKey: 'answer' })
