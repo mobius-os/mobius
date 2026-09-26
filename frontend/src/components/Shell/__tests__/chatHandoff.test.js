@@ -40,8 +40,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*const displayReady = \([\s\S]*activationSettled[\s\S]*coldActivation[\s\S]*activationPhase === 'error'/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation; only the composer may reveal early',
+    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation (chatEntryFrame); only the composer may reveal early',
   )
   assert.match(
     chatView,
@@ -170,7 +170,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationState, setActivationState\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationPhase\('pending'\)[\s\S]*const settleRuntime[\s\S]*setActivationPhase\('ready'\)[\s\S]*const displayReady = \(\s*activationSettled/,
+    /const \[activationState, setActivationState\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationPhase\('pending'\)[\s\S]*const settleRuntime[\s\S]*setActivationPhase\('ready'\)[\s\S]*chatEntryFrame\(\{[\s\S]*activationSettled,/,
     'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(
@@ -479,8 +479,8 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
     'the disabled Send affordance explains the cold activation')
   assert.match(chatView,
-    /activationRetryDelay\(\s*err,[\s\S]*retryState\.timer = setTimeout\([\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
-    'transient activation failures get bounded quiet retries at the activation owner')
+    /const retryActivation = useCallback\(\(\) => \{[\s\S]{0,500}clearTimeout\(activationRecoveryRef\.current\.timer\)[\s\S]{0,200}setLoadNonce\(nonce => nonce \+ 1\)[\s\S]*activationRetryDelay\(\s*err,[\s\S]*setActivationRetrying\(!cacheIsSafeFallback && retry != null\)[\s\S]*activationRecoveryRef\.current\.timer = setTimeout\(retryActivation, retry\)/,
+    'transient activation failures get bounded quiet retries at the activation owner, and retrying now replaces a scheduled retry')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
     2,
@@ -514,12 +514,9 @@ test('only a loaded transcript lets runtime evidence attach a stream or reread h
     /reconcileExternalActivity\(\)\s*\}, \[\s*activationSettled,\s*effectiveRunSignal\.seq,/,
     'a run start activation did not observe still attaches once it settles')
   assert.match(chatView,
-    /const run = \(\{ recovery = false \} = \{\}\) => \{[\s\S]*?if \(\s*recovery\s*&& !hiddenRef\.current\s*&& activationPhaseRef\.current === 'error'\s*&& activationRecoveryRef\.current\.timer == null\s*\) \{\s*retryActivation\(\)/,
-    'the server coming back restarts an activation whose quiet retries ran out')
+    /const run = \(\{ recovery = false \} = \{\}\) => \{[\s\S]*?if \(\s*recovery\s*&& !hiddenRef\.current\s*&& activationPhaseRef\.current === 'error'\s*\) \{\s*retryActivation\(\)/,
+    'the server coming back restarts a failed activation at once, whether a quiet retry is pending or they ran out')
   assert.match(chatView,
     /applyMessagesToView\(\[\], 0\)[\s\S]{0,300}disconnect\(\{ clearStreaming: true \}\)/,
     'a load that shows nothing also detaches any live stream')
-  assert.match(chatView,
-    /const showLoadError = loadError && messages\.length === 0 && !loading\n/,
-    'the load error is not hidden behind a cached running marker')
 })

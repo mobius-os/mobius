@@ -32,6 +32,35 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
   return error?.name === 'TimeoutError' ? Math.max(delay, readTimeoutMs) : delay
 }
 
+/** The chat body's entry frame and whether Shell may present it (Shell holds
+ * the launch cover or the previous chat until then).
+ * - The empty state means "nothing happened yet", so it never covers a failed
+ *   load: after an error nobody knows whether the chat is empty.
+ * - The load error wins over a cached running marker, and it is stable as soon
+ *   as it renders. While quiet retries run it stays up, saying so, rather than
+ *   holding Shell or flashing per attempt.
+ * - Otherwise a transcript or empty frame waits for runtime truth; a cold
+ *   activation or a failed one over a safe cached transcript is stable early. */
+export function chatEntryFrame({
+  messageCount,
+  loading,
+  loadError,
+  activationRetrying,
+  turnActive,
+  activationPhase,
+  activationSettled,
+  transcriptPaintable,
+}) {
+  const empty = messageCount === 0
+  const showLoadError = empty && (activationRetrying || (loadError && !loading))
+  const showEmpty = empty && !loadError && !activationRetrying && !turnActive && !loading
+  const displayReady = showLoadError
+    || activationPhase === 'cold'
+    || (activationSettled && !loading && (transcriptPaintable || showEmpty))
+    || (activationPhase === 'error' && !loading && transcriptPaintable)
+  return { showEmpty, showLoadError, displayReady }
+}
+
 /**
  * Project a completed resume as one product event instead of leaving the old
  * actionable pause beside its continuation marker. The durable transcript is

@@ -33,7 +33,7 @@ import {
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
-import { activationRetryDelay } from './chatRuntimeState.js'
+import { activationRetryDelay, chatEntryFrame } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -560,6 +560,11 @@ export default function ChatView({
   // render the empty-state UI ("What's on your mind?") as if the chat had no
   // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
+  // A chat with nothing to show whose load failed transiently keeps loading
+  // while quiet retries run, but it still paints a stable frame saying so:
+  // Shell holds the launch cover or the previous chat until this chat is
+  // display-ready.
+  const [activationRetrying, setActivationRetrying] = useState(false)
   // Bumped by a manual empty-load retry or quiet cached recovery to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
@@ -569,7 +574,10 @@ export default function ChatView({
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
-    // this chat's authoritative activation effect.
+    // this chat's authoritative activation effect. Retrying now replaces a
+    // scheduled quiet retry.
+    clearTimeout(activationRecoveryRef.current.timer)
+    activationRecoveryRef.current.timer = null
     setActivationPhase('pending')
     setLoadError(false)
     setLoading(true)
@@ -2555,6 +2563,7 @@ export default function ChatView({
       // Retire that gate so the newer local owner can become paintable.
       setInitialEntryPhase('ready')
       setLoading(false)
+      setActivationRetrying(false)
       setActivationPhase('ready')
     }
 
@@ -2595,6 +2604,7 @@ export default function ChatView({
       // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
+      setActivationRetrying(false)
       setActivationPhase('ready')
       pendingQueue.hydrate(runtime.pending_messages || [])
       retireUnownedRuntimeStream({
@@ -2911,18 +2921,13 @@ export default function ChatView({
         // An empty chat keeps loading while a quiet retry is scheduled.
         setLoadError(!cacheIsSafeFallback && retry == null)
         setLoading(!cacheIsSafeFallback && retry != null)
+        setActivationRetrying(!cacheIsSafeFallback && retry != null)
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
         if (retry != null) {
-          const retryState = activationRecoveryRef.current
-          retryState.attempts += 1
-          retryState.timer = setTimeout(() => {
-            retryState.timer = null
-            setActivationPhase('pending')
-            setLoading(true)
-            setLoadNonce(nonce => nonce + 1)
-          }, retry)
+          activationRecoveryRef.current.attempts += 1
+          activationRecoveryRef.current.timer = setTimeout(retryActivation, retry)
         }
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
@@ -2968,6 +2973,7 @@ export default function ChatView({
     onRuntimeSettledIdle,
     reconcileFailedSendOutbox,
     retireUnownedRuntimeStream,
+    retryActivation,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
     setChatInfo,
@@ -5122,12 +5128,12 @@ export default function ChatView({
       // restart edge and must reattach every mounted pane.
       if (!recovery && hiddenRef.current) return
       // Runtime reads wait for a loaded transcript, so this edge is what
-      // restarts a visible activation whose quiet retries have run out.
+      // restarts a visible failed activation: at once rather than after a
+      // pending quiet retry's wait, and also once those retries have run out.
       if (
         recovery
         && !hiddenRef.current
         && activationPhaseRef.current === 'error'
-        && activationRecoveryRef.current.timer == null
       ) {
         retryActivation()
         return
@@ -5234,11 +5240,6 @@ export default function ChatView({
     reconcileFailedSendOutbox,
   ])
 
-  // Empty-state is the "I have nothing to show because nothing happened
-  // yet" view. If the initial chat fetch errored, we have no idea
-  // whether the chat is empty — surfacing that branch separately keeps
-  // us from lying with "What's on your mind?" over a network failure.
-  const showEmpty = !loadError && messages.length === 0 && !turnActive && !loading
   const newChatStatusMessage = !provisionalNewChat
     ? null
     : newChatSession.submitted
@@ -5269,8 +5270,26 @@ export default function ChatView({
           .map(it => questionKey(it))
       )
     : null
-  // An unloaded transcript's error wins over a cached running marker.
-  const showLoadError = loadError && messages.length === 0 && !loading
+  // A safe cached window can prepare while its freshness check runs. History
+  // and progressive preparation remain hidden; `cached` is granted only after
+  // the saved-coordinate coverage check above. The display-ready gate
+  // publishes a running frame only after the activation verdict settles, while
+  // catch-up continues to reconcile into the same active assistant row.
+  const transcriptPaintable = (
+    initialEntryPhase === 'cached'
+    || initialEntryPhase === 'stream-catchup'
+    || initialEntryPhase === 'ready'
+  ) && revealed
+  const { showEmpty, showLoadError, displayReady } = chatEntryFrame({
+    messageCount: messages.length,
+    loading,
+    loadError,
+    activationRetrying,
+    turnActive,
+    activationPhase,
+    activationSettled,
+    transcriptPaintable,
+  })
   // Stay quiet while an automatic retry is scheduled; the timer is set in the
   // same batch as the error phase, so this render already sees it.
   const showActivationRetry = (
@@ -5303,26 +5322,6 @@ export default function ChatView({
     observer.observe(spacerRef.current)
     return () => observer.disconnect()
   }, [chatId, hasTranscript, loading, offset]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // A safe cached window can prepare while its freshness check runs. History
-  // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above. The display-ready gate below
-  // publishes a running frame only after the activation verdict settles, while
-  // catch-up continues to reconcile into the same active assistant row.
-  const transcriptPaintable = (
-    initialEntryPhase === 'cached'
-    || initialEntryPhase === 'stream-catchup'
-    || initialEntryPhase === 'ready'
-  ) && revealed
-  const displayReady = (
-    activationSettled
-    && !loading
-    && (transcriptPaintable || showEmpty || showLoadError)
-  ) || coldActivation || (
-    activationPhase === 'error'
-    && !loading
-    && (transcriptPaintable || showLoadError)
-  )
 
   // The requested server window contains the matching row through the tail.
   // Resolve the result's alias only after validation made the visible transcript
@@ -5973,7 +5972,11 @@ export default function ChatView({
         <div className="chat__empty-wrap">
           <div className="chat__empty">
             <p className="chat__empty-title">Couldn't load this chat.</p>
-            <p className="chat__empty-sub">Check your connection and try again.</p>
+            <p className="chat__empty-sub">
+              {activationRetrying
+                ? 'Trying again…'
+                : 'Check your connection and try again.'}
+            </p>
             <button
               type="button"
               className="chat__empty-action"
