@@ -713,6 +713,11 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
+    // The drawer rows for just these chats: same projection as `list`.
+    rows: (ids, options = {}) => apiFetch(
+      `/chats?${ids.map(id => `ids=${encodeURIComponent(id)}`).join('&')}`,
+      options,
+    ),
     search: (query, options = {}) => apiFetch(
       `/chats/search?q=${encodeURIComponent(query)}`,
       { timeoutMs: 10000, ...options },

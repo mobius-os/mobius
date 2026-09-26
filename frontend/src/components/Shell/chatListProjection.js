@@ -20,6 +20,35 @@ export function withChatListRowPatch(rows, chatId, patch = {}) {
   return changed ? next : rows
 }
 
+/**
+ * Merge a scoped read of some chats' rows into the complete drawer list.
+ *
+ * `requestedIds` are the chats that read covered: a returned row replaces or
+ * adds that chat, and a requested chat the server did not return is deleted or
+ * no longer visible, so its row leaves. Unrequested rows are untouched. The
+ * drawer orders rows itself, so position in the array carries no meaning.
+ */
+export function withRefreshedChatRows(rows, requestedIds, freshRows) {
+  const current = Array.isArray(rows) ? rows : []
+  const requested = new Set([...requestedIds].map(String))
+  const fresh = new Map(
+    (Array.isArray(freshRows) ? freshRows : [])
+      .filter(row => requested.has(String(row?.id)))
+      .map(row => [String(row.id), row]),
+  )
+  const next = []
+  for (const row of current) {
+    const id = String(row?.id)
+    if (!requested.has(id)) next.push(row)
+    else if (fresh.has(id)) {
+      next.push(fresh.get(id))
+      fresh.delete(id)
+    }
+  }
+  next.push(...fresh.values())
+  return next
+}
+
 export function withChatOwnerActivity(rows, chatId, at = new Date().toISOString()) {
   const current = rows?.find?.(row => String(row?.id) === String(chatId))
   const activityAt = typeof at === 'string' && at > (current?.activity_at || '')
