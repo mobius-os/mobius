@@ -402,14 +402,37 @@ def stage_settle_goal_claims(
   return settled
 
 
-def open_goal_claim_keys(db: Session, *, chat_id: str, goal_id: str) -> set[str]:
-  """Exact actions this Goal still owns, for validating a completion's names."""
-  return {key for (key,) in db.query(models.AgentWorkClaim.work_key).filter(
+def open_claim_keys(
+  db: Session, *, chat_id: str, goal_id: str | None = None,
+) -> set[str]:
+  """Exact actions this chat (or one of its Goals) still owns."""
+  query = db.query(models.AgentWorkClaim.work_key).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,
-    models.AgentWorkClaim.owner_goal_id == goal_id,
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
-  ).all()}
+  )
+  if goal_id is not None:
+    query = query.filter(models.AgentWorkClaim.owner_goal_id == goal_id)
+  return {key for (key,) in query.all()}
+
+
+_HELD_KEYS_SHOWN = 10
+
+
+def held_claims_hint(keys: set[str]) -> str:
+  """Name the exact keys an owner holds, for a refusal of a mistyped key.
+
+  Agents settle claims long after taking them and tend to retype a long key
+  from memory (a short commit hash, a dropped suffix). Work keys are exact
+  identities, so the refusal never guesses a match; it shows the real keys so
+  the next call can use one verbatim.
+  """
+  if not keys:
+    return "No open work claims are held here."
+  shown = sorted(keys)[:_HELD_KEYS_SHOWN]
+  more = len(keys) - len(shown)
+  suffix = f" (and {more} more)" if more else ""
+  return "Open claims held here: " + ", ".join(shown) + suffix + "."
 
 
 def stage_settle_claims_with_owner(
@@ -499,7 +522,10 @@ def finish_work(
     models.AgentWorkClaim.work_key == key,
   ).first()
   if row is None:
-    raise ValueError("No work claim exists for this key.")
+    raise ValueError(
+      "No work claim exists for this key. "
+      + held_claims_hint(open_claim_keys(db, chat_id=chat_id))
+    )
   if row.owner_chat_id != chat_id:
     raise ValueError("Only the current claim owner can finish or release it.")
   if (

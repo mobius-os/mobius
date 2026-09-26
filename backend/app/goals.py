@@ -97,13 +97,13 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
       raise GoalPlanError("Goal still owns a pending handoff")
     if not result.strip():
       raise GoalPlanError("Completion requires a verification result")
-    from app.agent_work_claims import open_goal_claim_keys
-    unknown = set(finished_claims) - open_goal_claim_keys(
-      db, chat_id=goal.chat_id, goal_id=goal.id,
-    )
+    from app.agent_work_claims import held_claims_hint, open_claim_keys
+    held = open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)
+    unknown = set(finished_claims) - held
     if unknown:
       raise GoalPlanError(
         "Not an open work claim of this Goal: " + ", ".join(sorted(unknown))
+        + ". " + held_claims_hint(held)
       )
     values.update(status="completed", result=result.strip(),
                   completed_at=datetime.now(UTC))
