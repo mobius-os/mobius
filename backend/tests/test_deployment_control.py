@@ -576,7 +576,7 @@ async def test_managed_start_rejects_mismatched_release_echo(
 
 
 @pytest.mark.asyncio
-async def test_managed_final_validation_runs_after_drain_and_before_start(
+async def test_managed_final_validation_runs_before_the_handoff_swaps_source(
   tmp_path, monkeypatch,
 ):
   from app import restart_ledger, restart_util
@@ -626,7 +626,9 @@ async def test_managed_final_validation_runs_after_drain_and_before_start(
   )
 
   assert result["state"] == "queued"
-  assert events == ["prepare", "drain", "final_check", "start"]
+  # The drain swaps the prepared update into the live checkout, so a review of
+  # the live checkout after it would always read as stale.
+  assert events == ["final_check", "prepare", "drain", "start"]
 
 
 @pytest.mark.asyncio
@@ -721,9 +723,7 @@ async def test_abandoned_railway_handoff_reads_idle_so_the_update_can_retry(
 
   async def drain(_operation_id):
     seen_during_handoff.append((await dc.read_rebuild_status())["state"])
-
-  def stale_check():
-    raise dc.platform_update.PlatformUpdateError("update_plan_stale")
+    raise RuntimeError("the Host did not authorize this cutover")
 
   restarts = []
 
@@ -739,13 +739,11 @@ async def test_abandoned_railway_handoff_reads_idle_so_the_update_can_retry(
   monkeypatch.setattr(restart_util, "restart_this_worker", restart)
 
   with pytest.raises(dc.DeploymentControlError):
-    await dc._request_managed_rebuild(
-      "a" * 40, _TEST_DIGEST, final_check=stale_check,
-    )
+    await dc._request_managed_rebuild("a" * 40, _TEST_DIGEST)
   await asyncio.sleep(0)
 
   assert seen_during_handoff == ["preparing"]
-  assert restarts == [True]
+  assert restarts == []  # the drain never completed, so nothing to recover
   status = await dc.read_rebuild_status()
   assert status["state"] == "idle"
   assert "stopped before replacing" in status["message"]

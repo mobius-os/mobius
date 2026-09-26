@@ -794,6 +794,12 @@ async def _request_managed_rebuild(
       "Install the current Möbius image once to enable managed container rebuilds.",
       status_code=409,
     )
+  # Re-check the review at the last point the live checkout is still the one
+  # reviewed: the drain swaps the prepared update in, so a check after it
+  # would always see the update itself as a change. Edits made from here on
+  # are carried across the swap as late edits.
+  if final_check is not None:
+    await asyncio.to_thread(final_check)
   prepared = await asyncio.to_thread(
     _managed_request,
     "POST",
@@ -837,11 +843,6 @@ async def _request_managed_rebuild(
           "controller_unavailable", "The container could not finish the Railway handoff."
         )
       await asyncio.sleep(0.25)
-    # Commits do not take the reconcile lock, so validation performed before
-    # chat drain can become stale. Re-check the exact plan and image-owned
-    # blockers at the last locally-owned boundary before Railway starts.
-    if final_check is not None:
-      await asyncio.to_thread(final_check)
     provider_start_attempted = True
     started = await asyncio.to_thread(
       _managed_request,
