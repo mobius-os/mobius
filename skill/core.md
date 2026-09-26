@@ -393,10 +393,10 @@ mapi -X PUT /api/storage/shared/theme.css \
 - `mapi` reflects the AGENT's owner token. A background app job only has
   `$APP_TOKEN`, so app-job scripts keep plain
   `curl -H "Authorization: Bearer $APP_TOKEN" ...`.
-- A successful write often returns **204 No Content**: `mapi` then prints
-  nothing. That silence is success, not failure — verify with a follow-up
-  `GET`, or show the status with
-  `mapi -o /dev/null -w '%{http_code}' -X PUT /api/... -d '...'`.
+- An HTTP error exits non-zero and still prints the response body, so a failed
+  request no longer reads as success. An empty success (often **204 No Content**
+  after a write) prints `mapi: HTTP 204, empty response (success)` on stderr
+  rather than nothing at all.
 - Use the exact documented path **including its trailing slash** (for example
   `/api/apps/`). Möbius routes do not redirect slash-less variants: the
   slash-less form is a plain 404, not a redirect curl could follow.
