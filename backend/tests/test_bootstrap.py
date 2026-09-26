@@ -708,3 +708,18 @@ async def test_bootstrap_honors_legacy_trusted_origin_tombstone(
 
   urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
   assert BOOTSTRAP_MEMORY_MANIFEST_URL not in urls
+
+
+@pytest.mark.asyncio
+async def test_undecidable_default_pins_never_stop_bootstrap(db, monkeypatch):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  with patch(
+    "app.bootstrap._default_store_pin_pending",
+    side_effect=RuntimeError("marker unavailable"),
+  ), patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  apps = db.query(models.App).all()
+  assert len(apps) == len(_bootstrap_urls())
+  assert not any(app.pinned_at for app in apps)

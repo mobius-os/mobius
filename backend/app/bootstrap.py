@@ -105,19 +105,12 @@ _DEFAULT_PINS_MARKER_ID = "default_pins"
 
 
 def _default_store_pin_pending(db: Session) -> bool:
-  """Decide once per deployment whether the default Store pin still applies.
+  """Return whether this deployment still owes its default Store pin.
 
-  The decision is persisted in ``DefaultPinInitialization`` so it survives the
-  boot that makes it. Absence of a Store row is deliberately NOT consulted: a
-  hard-purged tombstone, an identity resolved only inside the installer, or an
-  old deployment that never installed the Store all leave no Store row, yet none
-  is a fresh install. Instead an EXISTING deployment — proven by an owner row or
-  ANY apps row (tombstones included) present before bootstrap installs anything
-  — is recorded initialized with no pin; only a genuinely new deployment stays
-  pending until its Store pin commits.
-
-  Returns True when the default Store pin is still owed, False otherwise. The
-  read-only branch releases its transaction so the install loop opens its own.
+  Decided once and persisted: an owner or any app row (tombstones included)
+  before bootstrap means an existing deployment, which is never pinned. A
+  missing Store row alone proves nothing (purged tombstones, identities the
+  installer resolves late, deployments that never installed the Store).
   """
   marker = db.query(models.DefaultPinInitialization).filter(
     models.DefaultPinInitialization.id == _DEFAULT_PINS_MARKER_ID,
@@ -139,11 +132,9 @@ def _default_store_pin_pending(db: Session) -> bool:
 
 
 def _mark_default_store_pinned(db: Session, app_id: int) -> bool:
-  """Pin the Store and record the deployment marker in ONE transaction.
+  """Pin the Store and settle the marker in one transaction.
 
-  Returns True once both commit. On failure it rolls back, logs, and returns
-  False so the pending marker is retried on the next boot — a pin failure never
-  escapes bootstrap's per-app isolation, and no partial state persists.
+  A failure rolls back and leaves the marker pending for the next boot.
   """
   try:
     now = now_naive_utc()
@@ -160,8 +151,6 @@ def _mark_default_store_pinned(db: Session, app_id: int) -> bool:
     db.commit()
     return True
   except Exception:
-    # Isolated like every other bootstrap step: a failed pin leaves the marker
-    # pending so the next boot retries, and never crashes lifespan.
     db.rollback()
     log.exception(
       "bootstrap: default Store pin failed; leaving it pending for next boot",
@@ -193,9 +182,13 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
   # agree on persisted identities, moved refs, and proven legacy origins.
   from app.install import _canonical_identity_key, _find_install_identity_row
 
-  # Decide the default pins once for this deployment, before installing (and
-  # thereby creating) any apps row that would otherwise mask the freshness test.
-  default_pin_pending = _default_store_pin_pending(db)
+  # Decide before installing anything, since installs create app rows.
+  try:
+    default_pin_pending = _default_store_pin_pending(db)
+  except Exception:
+    db.rollback()
+    log.exception("bootstrap: could not decide default pins; pinning nothing")
+    default_pin_pending = False
 
   for bootstrap_app in _CORE_BOOTSTRAP_APPS:
     # Use the installer's identity resolver here too: bootstrap and an explicit
