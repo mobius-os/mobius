@@ -3710,6 +3710,23 @@ def test_source_resolution_retries_survive_restart_but_not_later_source_edits(
     github_contributions._assert_pending_equivalence_preflight(fixture["record"])
   assert github_contributions._record_pending_equivalence(fixture["record"]) is None
 
+def test_a_non_canonical_review_diff_is_named_before_source_provenance(
+  client, owner_token,
+):
+  """A hand-made diff (other flags) fails as the diff it is, not as a source
+  that "no longer proves" the change; the provenance proof depends on it."""
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, _diff_text = _prepared_real_review(app_id, "non-canonical-diff")
+  assert github_contributions._assert_pending_equivalence_preflight(record)
+  record["plan"]["diff_sha256"] = hashlib.sha256(b"diff without --full-index").hexdigest()
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._assert_pending_equivalence_preflight(record)
+  assert caught.value.code == "diff_mismatch"
+
+
 def test_agent_reviewed_continuity_bridges_overlap_into_pending_provenance(
   client, owner_token,
 ):

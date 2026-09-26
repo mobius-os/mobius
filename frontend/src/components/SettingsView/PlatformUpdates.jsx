@@ -107,8 +107,11 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
             disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
         ) : (
           <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
-            {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : 'Updating…') : primary.label}
+            {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : phase === 'cancelling' ? 'Cancelling…' : 'Updating…') : primary.label}
           </button>
+        )}
+        {platform?.unfinished_update?.cancellable && !busy && (
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={update.cancel}>Cancel update</button>
         )}
       </div>
       {repairReason && !review && !update.reconnecting && (
