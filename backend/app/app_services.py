@@ -24,7 +24,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from app import auth
+from app import auth, models
 from app.applied_app_runtime import AppliedRuntimeUnavailable, hold_runtime, runtime_root
 from app.config import get_settings
 from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
@@ -70,6 +70,26 @@ def service_contract(app, *, access: str) -> dict:
   if not isinstance(entry, str) or not entry.endswith(".py"):
     raise HTTPException(503, "Accepted app service declaration is invalid.")
   return service
+
+
+def request_actor(db, principal, caller=None) -> dict:
+  """Who is calling an app's service, as the request's `actor` states it.
+
+  `access` is "read" for a read-only helper (or one whose delegation is gone),
+  so the app can refuse to change anything on its behalf. The owner, the app
+  itself, a top-level agent run, and a write helper get "write".
+  """
+  access = "write"
+  if principal.delegation_id is not None:
+    delegation = db.get(models.Delegation, principal.delegation_id)
+    access = delegation.scope if delegation is not None else "read"
+  return {
+    "scope": principal.scope,
+    "app_id": principal.app_id,
+    "app_slug": caller.slug if caller is not None else None,
+    "delegated": principal.delegation_id is not None,
+    "access": access,
+  }
 
 
 def service_entry(app, service: dict) -> Path:

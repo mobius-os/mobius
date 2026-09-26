@@ -102,7 +102,8 @@ def codex_turn_mcp_config(
 
   ``app_tool_names`` are the install-reviewed tools live apps serve through the
   same control server (app/app_tools.py); they are approved by exact name like
-  the platform's own primitives.
+  the platform's own primitives. Each call tells the app whether a read-only
+  helper made it (``actor.access``), and the app refuses writes for one.
   """
   servers: dict[str, Any] = {}
   if connector_plan is not None and connector_plan.codex_config:

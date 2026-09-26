@@ -75,15 +75,6 @@ def _service_app(db: Session, service_id: str) -> models.App | None:
   )
 
 
-def _actor(principal: Principal, caller: models.App | None) -> dict:
-  return {
-    "scope": principal.scope,
-    "app_id": principal.app_id,
-    "app_slug": caller.slug if caller is not None else None,
-    "delegated": principal.delegation_id is not None,
-  }
-
-
 async def _envelope(request: Request, path: str, *, public: bool, actor: dict) -> dict:
   if ".." in path.split("/") or len(path) > 512:
     raise HTTPException(404, "App service path not found.")
@@ -134,7 +125,9 @@ async def authenticated_app_service(
   app_services.service_contract(app, access="self")
   envelope = await _envelope(
     request, path, public=False,
-    actor=_actor(principal, app if principal.app_id is not None else None),
+    actor=app_services.request_actor(
+      db, principal, app if principal.app_id is not None else None,
+    ),
   )
   db.expunge(app)
   db.expunge(principal.owner)
@@ -168,7 +161,8 @@ async def shared_app_service(
   required = "self" if principal.app_id in {None, target.id} else "apps"
   app_services.service_contract(target, access=required)
   envelope = await _envelope(
-    request, path, public=False, actor=_actor(principal, caller),
+    request, path, public=False,
+    actor=app_services.request_actor(db, principal, caller),
   )
   db.expunge(target)
   db.expunge(principal.owner)

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app import app_tools
+from app import app_services, app_tools
 from app.database import get_db
 from app.deps import Principal, get_agent_run_principal, reject_cross_site
 
@@ -49,5 +49,6 @@ async def call_app_tool(
     exposed_name=body.name,
     arguments=body.arguments,
     moment=moment,
+    actor=app_services.request_actor(db, principal),
   )
   return {"result": result, "is_error": is_error}

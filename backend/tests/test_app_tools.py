@@ -222,6 +222,49 @@ def test_call_runs_the_apps_service_with_arguments_and_moment(
       "provider": "claude", "call_id": "toolu_9",
     },
   }
+  assert envelope["actor"] == {
+    "scope": "owner", "app_id": None, "app_slug": None,
+    "delegated": False, "access": "write",
+  }
+
+
+@pytest.mark.parametrize("scope", ["read", "write"])
+def test_call_tells_the_app_a_helper_called_and_whether_it_may_write(
+  client, auth, db, monkeypatch, scope,
+):
+  app = _app(db)
+  for chat_id in ("parent", "child"):
+    db.add(models.Chat(id=chat_id, title=chat_id, messages=[]))
+  db.add(models.Delegation(
+    id="helper", app_id=app.id, parent_chat_id="parent",
+    parent_root_run_id="parent-run", task_key="helper", child_chat_id="child",
+    provider="claude", scope=scope, cwd="/data", prompt_sha256="0" * 64,
+  ))
+  db.commit()
+  _run(db, chat_id="child", run_id="child-run")
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    "child", owner.username, owner.token_epoch, run_id="child-run",
+    delegation_id="helper", delegation_chat="child",
+  )
+  actors = []
+
+  async def fake_invoke(_target, _owner, envelope, *, timeout_seconds, lane):
+    actors.append(envelope["actor"])
+    return 200, "Logged.", {}, None
+
+  monkeypatch.setattr(app_tools.app_services, "invoke_service", fake_invoke)
+  response = client.post(
+    "/api/agent/app-tools/call",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"name": "reflection_log_friction", "arguments": {"friction": "x"}},
+  )
+
+  assert response.status_code == 200, response.text
+  assert actors == [{
+    "scope": "owner", "app_id": None, "app_slug": None,
+    "delegated": True, "access": scope,
+  }]
 
 
 def test_app_rejection_is_a_tool_error_not_a_transport_failure(

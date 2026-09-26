@@ -9,8 +9,10 @@ service at ``POST /tools/<name>``. There is no second way to run app code.
 
 Every call carries the exact moment it happened: the chat, the physical run,
 the provider, and the provider's own id for the model's tool call. A later
-reviewer can fork the provider session right after that call
+reviewer can fork the provider session at that call
 (``scripts/fork_chat.py --after-call``) and ask the agent about that moment.
+Its ``actor`` is the calling run's, so an app can tell a helper, and refuse
+writes for a read-only one.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ log = logging.getLogger(__name__)
 TOOL_TIMEOUT_SECONDS = 600
 # The key under which each provider sends its own id for the model's tool call
 # in the MCP request's `_meta`. Claude: the `tool_use` id. Codex: the id of the
-# model's tool-call response item. fork_session.py cuts a fork at these ids.
+# model's tool-call response item. fork_session.py forks at these ids.
 PROVIDER_CALL_ID_KEYS = {
   "claude": "claudecode/toolUseId",
   "codex": "itemId",
@@ -124,8 +126,14 @@ async def call_app_tool(
   exposed_name: str,
   arguments: dict[str, Any],
   moment: dict[str, Any],
+  actor: dict[str, Any],
 ) -> tuple[Any, bool]:
-  """Call one live app tool through its service; return (result, is_error)."""
+  """Call one live app tool through its service; return (result, is_error).
+
+  ``actor`` is the calling run as every service request states it
+  (app_services.request_actor): a helper is ``delegated``, and a read-only
+  helper has ``access: "read"`` so the app can refuse to change anything.
+  """
   tool = next(
     (item for item in live_app_tools(db) if item.exposed_name == exposed_name),
     None,
@@ -144,8 +152,7 @@ async def call_app_tool(
       "headers": {},
       "body": {"arguments": arguments, "call": moment},
       "public": False,
-      # The platform authenticated the agent run; the run itself is in `call`.
-      "actor": {"scope": "platform"},
+      "actor": actor,
     },
     timeout_seconds=TOOL_TIMEOUT_SECONDS,
     lane="tools",

@@ -269,8 +269,10 @@ manifest, layered by how always-on they are:
   `description`, and `input_schema` (a JSON Schema `object`). Requires a
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
-  app's own authority (`backend/app/app_tools.py`). Keep tools few and safe to
-  call from any chat or helper.
+  app's own authority (`backend/app/app_tools.py`). Helpers get the tools too:
+  the request's `actor` has `delegated: true` for a helper and
+  `access: "read"` for a read-only one, so refuse any change for a read-only
+  caller. Keep tools few.
 
 Anything that depends on your app being installed belongs in its fragment (the
 always-on default) and/or its skill (the how-to). A not-installed app then
