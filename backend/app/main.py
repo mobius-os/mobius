@@ -71,6 +71,7 @@ from app import activity, models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
+  app_tools_router,
   auth_router,
   app_chat_router,
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
@@ -819,6 +820,11 @@ app.add_middleware(
   allow_headers=[
     "Authorization",
     "Content-Type",
+    # Community mutations (rating, review, install receipt, publishing) use
+    # this header for replay safety. App Store runs in an opaque-origin frame,
+    # so browsers preflight it; without an explicit allowance the request is
+    # blocked client-side and the UI can only report "Failed to fetch".
+    "Idempotency-Key",
     "X-Mobius-Embed-Instance",
     "X-Mobius-Stream-Snapshot",
     "X-Mobius-Version",
@@ -914,6 +920,7 @@ app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
+app.include_router(app_tools_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)

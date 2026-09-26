@@ -163,14 +163,8 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
     ),
     (
       "PUT",
-      "/api/community/apps/app:1234/rating",
-      {"value": 5, "revision_id": "revision:1234"},
-      idempotency,
-    ),
-    (
-      "POST",
-      "/api/community/apps/app:1234/revisions/revision:1234/comments",
-      {"body": "Reviewed comment"},
+      "/api/community/apps/app:1234/review",
+      {"stars": 5, "review_text": "Reviewed comment"},
       idempotency,
     ),
     (
@@ -310,8 +304,8 @@ def test_intended_app_principals_keep_their_existing_control_paths(
   assert missing_managed_app.status_code == 404, missing_managed_app.text
 
   rated = client.put(
-    "/api/community/apps/app:1234/rating",
-    json={"value": 5, "revision_id": "revision:1234"},
+    "/api/community/apps/app:1234/review",
+    json={"stars": 5, "review_text": None},
     headers={**context["app"], "Idempotency-Key": "owner-control-0002"},
   )
   assert rated.status_code == 200, rated.text
@@ -323,7 +317,7 @@ def test_intended_app_principals_keep_their_existing_control_paths(
   )
   assert published.status_code == 200, published.text
   assert [call[:2] for call in community_calls] == [
-    ("PUT", "/v1/community/apps/app:1234/rating"),
+    ("PUT", "/v1/community/apps/app:1234/review"),
     ("POST", "existing-publication"),
   ]
 

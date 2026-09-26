@@ -1,6 +1,7 @@
 """Local sign-out preserves unrelated data and cannot lose a race to sign-in."""
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -157,3 +158,60 @@ def test_scoped_tokens_cannot_disconnect_owner_providers(client, owner_token, pr
   response = client.post('/api/auth/provider/codex/disconnect', headers={'Authorization': f'Bearer {token}'})
   assert response.status_code in (401, 403)
   assert (provider_home / 'cli-auth/codex/auth.json').exists()
+
+
+@pytest.fixture
+def signin_events(monkeypatch):
+  """Seed a stale catalog for each CLI provider and record system events."""
+  from types import SimpleNamespace
+  events = []
+  monkeypatch.setattr(routes, 'get_system_broadcast', lambda: SimpleNamespace(publish=events.append))
+  monkeypatch.setattr(providers, '_model_registry_locks', {pid: asyncio.Lock() for pid in providers.PROVIDERS})
+  providers.invalidate_model_cache()
+  for pid in ('claude', 'codex'):
+    providers._model_registry_cache[pid] = (time.monotonic(), providers._fallback_models(pid))
+  yield events
+  providers.invalidate_model_cache()
+
+
+def _refreshed(events, provider):
+  return provider not in providers._model_registry_cache and events == [{'type': 'model_providers_changed'}]
+
+
+def test_claude_signin_refreshes_pickers_instead_of_serving_the_fallback(provider_home, signin_events, monkeypatch):
+  class TokenResponse:
+    status_code = 200
+    def json(self):
+      return {'access_token': 'synthetic', 'refresh_token': 'synthetic', 'expires_in': 3600}
+  class Client:
+    def __init__(self, **_kwargs): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_exc): return False
+    async def post(self, *_args, **_kwargs): return TokenResponse()
+  written = []
+  monkeypatch.setattr(routes.httpx, 'AsyncClient', Client)
+  monkeypatch.setattr(routes, '_write_credentials', written.append)
+  monkeypatch.setattr(routes, '_active_pkce', {'verifier': 'v', 'state': 's', 'ts': time.time()})
+  result = asyncio.run(routes._exchange_claude_code(routes.schemas.ProviderCodeRequest(code='code')))
+  assert result == {'ok': True} and written
+  assert _refreshed(signin_events, 'claude')
+  assert 'codex' in providers._model_registry_cache
+
+
+@pytest.mark.parametrize('returncode, status', [(0, 'complete'), (1, 'failed')])
+def test_codex_signin_refreshes_pickers_only_when_it_succeeds(provider_home, signin_events, returncode, status):
+  class Login:
+    async def wait(self): pass
+  login = Login()
+  login.returncode = returncode
+  routes._codex_login_procs['active'] = login
+  asyncio.run(routes._watch_codex_login(login))
+  assert routes._codex_login_status['result'] == status
+  assert _refreshed(signin_events, 'codex') == (returncode == 0)
+  assert ('codex' in providers._model_registry_cache) == (returncode != 0)
+
+
+@pytest.mark.parametrize('provider', ['claude', 'codex'])
+def test_disconnect_refreshes_pickers(client, auth, provider_home, signin_events, provider):
+  assert client.post(f'/api/auth/provider/{provider}/disconnect', headers=auth).status_code == 200
+  assert _refreshed(signin_events, provider)

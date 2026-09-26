@@ -164,3 +164,103 @@ def test_huge_transcript_reads_only_its_newest_records(db, monkeypatch):
   assert result["truncated"] is True
   assert result["blocks"][-1] == {"type": "text", "content": "No blockers."}
   assert "Review the diff" not in json.dumps(result["blocks"])
+
+
+def _codex_child_working(thread: str, *, answered: bool) -> Path:
+  records = [
+    {"type": "event_msg", "payload": {"type": "task_started"}},
+    {"type": "response_item", "payload": {
+      "type": "custom_tool_call", "call_id": "c1", "name": "exec",
+      "input": 'text(await tools.exec_command({cmd:"sleep 25"}))'}},
+  ]
+  if answered:
+    records.append({"type": "event_msg", "payload": {
+      "type": "task_complete", "last_agent_message": "Login audit clean."}})
+  return _jsonl(
+    _home("codex") / "sessions" / "2026" / "09" / "25"
+    / f"rollout-2026-09-25T03-11-43-{thread}.jsonl",
+    records,
+  )
+
+
+def test_codex_helper_activity_is_the_childs_current_tool_and_latest_answer():
+  _codex_child_working("child-busy", answered=False)
+  assert helper_transcripts.codex_helper_activity("child-busy") == ("Bash", None)
+
+  _codex_child_working("child-done", answered=True)
+  assert helper_transcripts.codex_helper_activity("child-done") == (
+    "Bash", "Login audit clean.",
+  )
+  assert helper_transcripts.codex_helper_activity("no-such-child") == (None, None)
+
+
+def test_codex_rows_gain_names_live_activity_and_rollout_summary():
+  from app.codex_events import CodexHelperRows, read_codex_helper_tools
+
+  _codex_child_working("child-row", answered=False)
+  rows = CodexHelperRows("host")
+
+  # A reactivation marker carries no agent path, so the row starts generic…
+  opened = rows.public_events({
+    "event_type": "agent_started", "provider_agent_id": "child-row",
+    "provider_activation_id": "status:child-row:1",
+  })
+  assert opened[-1]["description"] == "Background helper"
+  # …and is renamed as soon as any marker for the same child names it.
+  named = rows.public_events({
+    "event_type": "agent_started", "provider_agent_id": "child-row",
+    "provider_activation_id": "status:child-row:1",
+    "agent_type": "/root/audit_login",
+  })
+  assert {event["description"] for event in named} == {"Audit login"}
+
+  running = rows.running_children()
+  assert running == [("status:child-row:1", "child-row")]
+  tools = read_codex_helper_tools(running)
+  assert rows.progress_events(tools) == [{
+    "type": "task_progress", "task_id": "status:child-row:1",
+    "last_tool_name": "Bash", "tool_use_id": "host",
+  }]
+  assert rows.progress_events(tools) == []  # unchanged tool: no new tick
+
+  _codex_child_working("child-row", answered=True)
+  done = rows.public_events({
+    "event_type": "agent_terminal", "state": "done",
+    "provider_agent_id": "child-row",
+    "provider_activation_id": "status:child-row:1",
+  })
+  assert done[-1]["summary"] == "Login audit clean."
+  assert rows.stranded_events() == []
+
+
+def test_interrupted_turn_closes_its_still_open_codex_rows():
+  from app.codex_events import CodexHelperRows
+
+  rows = CodexHelperRows("host")
+  rows.public_events({
+    "event_type": "agent_started", "provider_agent_id": "gone",
+    "provider_activation_id": "call_1", "agent_type": "/root/fix",
+  })
+
+  assert rows.stranded_events() == [{
+    "type": "task_done", "task_id": "call_1", "status": "stopped",
+    "summary": None, "tool_use_id": "host",
+  }]
+
+
+def test_settled_turn_never_shows_a_helper_still_running():
+  from app.chat_transcript import _compact_activity_item
+
+  compact = _compact_activity_item(
+    {
+      "type": "tool", "tool": "Task", "status": "done",
+      "subagent": {
+        "lost": {"description": "Lost to a restart", "status": "running"},
+        "ok": {"description": "Finished", "status": "done"},
+      },
+    },
+    binding=None,
+  )
+
+  assert compact["subagent"]["lost"]["status"] == "stopped"
+  assert compact["subagent"]["ok"]["status"] == "done"

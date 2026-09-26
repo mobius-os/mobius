@@ -42,6 +42,16 @@ const ACTIVITY_LABELS = new Map([
   ['MemoryRecall', 'Searching Memory'],
   ['AppActivity', 'Using an app'],
   ['PeerMessage', 'Exchanging messages'],
+  // Möbius control tools (see controlToolName): helpers first, then the rest.
+  ['HelperSpawn', 'Starting helpers'],
+  ['HelperMessage', 'Messaging helpers'],
+  ['HelperStop', 'Stopping helpers'],
+  ['HelperList', 'Checking helpers'],
+  ['GoalControl', 'Planning'],
+  ['WaitControl', 'Setting a wait'],
+  ['AskControl', 'Asking you'],
+  ['WorkClaim', 'Coordinating'],
+  ['PeerControl', 'Exchanging messages'],
 ])
 
 // Past-tense twins for SETTLED lines — "Ran commands", not a "Running
@@ -71,6 +81,15 @@ const PAST_LABELS = new Map([
   ['MemoryRecall', 'Recalled from Memory'],
   ['AppActivity', 'Used an app'],
   ['PeerMessage', 'Exchanged messages'],
+  ['HelperSpawn', 'Started helpers'],
+  ['HelperMessage', 'Messaged helpers'],
+  ['HelperStop', 'Stopped helpers'],
+  ['HelperList', 'Checked helpers'],
+  ['GoalControl', 'Planned'],
+  ['WaitControl', 'Set a wait'],
+  ['AskControl', 'Asked you'],
+  ['WorkClaim', 'Coordinated'],
+  ['PeerControl', 'Exchanged messages'],
 ])
 
 // Singular twins for a ONE-occurrence activity: a lone Bash reads "Ran a
@@ -80,12 +99,18 @@ const PAST_LABELS = new Map([
 // that label. Uncountable activities (code, the web, planning) have no entry
 // and are invariant.
 const PRESENT_SINGULAR = new Map([
+  ['Starting helpers', 'Starting a helper'],
+  ['Messaging helpers', 'Messaging a helper'],
+  ['Stopping helpers', 'Stopping a helper'],
   ['Running commands', 'Running a command'],
   ['Reading files', 'Reading a file'],
   ['Viewing images', 'Viewing an image'],
   ['Using skills', 'Using a skill'],
 ])
 const PAST_SINGULAR = new Map([
+  ['Started helpers', 'Started a helper'],
+  ['Messaged helpers', 'Messaged a helper'],
+  ['Stopped helpers', 'Stopped a helper'],
   ['Ran commands', 'Ran a command'],
   ['Read files', 'Read a file'],
   ['Viewed images', 'Viewed an image'],
@@ -116,7 +141,46 @@ const ACTIVITY_ICONS = new Map([
   ['MemoryRecall', 'search'],
   ['AppActivity', 'sparkle'],
   ['PeerMessage', 'agents'],
+  ['HelperSpawn', 'agents'],
+  ['HelperMessage', 'agents'],
+  ['HelperStop', 'agents'],
+  ['HelperList', 'agents'],
+  ['GoalControl', 'plan'],
+  ['WaitControl', 'dot'],
+  ['AskControl', 'dot'],
+  ['WorkClaim', 'agents'],
+  ['PeerControl', 'agents'],
 ])
+
+// Möbius control tools arrive as `mcp__mobius_control__<tool>` (Claude) or
+// `mobius_control:<tool>` (Codex). One owner-language activity per tool keeps
+// raw MCP identifiers out of collapsed lines. request_restart has its own card.
+const CONTROL_PREFIXES = ['mcp__mobius_control__', 'mobius_control:']
+const CONTROL_TOOLS = new Map([
+  ['spawn_agent', 'HelperSpawn'],
+  ['message_agent', 'HelperMessage'],
+  ['stop_agent', 'HelperStop'],
+  ['list_agents', 'HelperList'],
+  ['promote_goal', 'GoalControl'],
+  ['declare_wait', 'WaitControl'],
+  ['cancel_wait', 'WaitControl'],
+  ['request_question', 'AskControl'],
+  ['request_approval', 'AskControl'],
+  ['claim_agent_work', 'WorkClaim'],
+  ['finish_agent_work', 'WorkClaim'],
+  ['list_agent_peers', 'PeerControl'],
+  ['send_agent_message', 'PeerControl'],
+])
+// Controls whose row reads as the activity alone (their input is not a name).
+const CATEGORY_ONLY = new Set([
+  'HelperList', 'GoalControl', 'WaitControl', 'AskControl', 'WorkClaim', 'PeerControl',
+])
+
+export function controlToolName(name) {
+  if (typeof name !== 'string') return null
+  const prefix = CONTROL_PREFIXES.find(p => name.startsWith(p))
+  return prefix ? CONTROL_TOOLS.get(name.slice(prefix.length)) || null : null
+}
 
 // An unknown tool falls back to its raw name (then the generic 'Tool' for a
 // missing name), so a new tool degrades to today's rendering, never a crash.
@@ -186,6 +250,9 @@ const INSTANCE_VERBS = new Map([
   ['WebFetch', ['Opening', 'Opened']],
   ['WebSearch', ['Searching the web for', 'Searched the web for']],
   ['ViewImage', ['Viewing', 'Viewed']],
+  ['HelperSpawn', ['Starting helper', 'Started helper']],
+  ['HelperMessage', ['Messaging helper', 'Messaged helper']],
+  ['HelperStop', ['Stopping helper', 'Stopped helper']],
 ])
 
 export function toolCallLabel(tool) {
@@ -197,6 +264,11 @@ export function toolCallLabel(tool) {
   if (name === 'AppActivity') return appActivityLabel(tool)
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
   if (name === 'PeerMessage') return peerMessageLabel(tool)
+  if (CATEGORY_ONLY.has(name)) {
+    return tool?.status === 'running'
+      ? toolActivitySingular(toolActivityLabel(name))
+      : toolActivityPastSingular(toolActivityPastLabel(name) || name)
+  }
   if (name === 'Skill') {
     const skills = Array.isArray(tool?.skills)
       ? tool.skills.filter(skill => typeof skill === 'string' && skill.trim())
@@ -255,6 +327,8 @@ export function effectiveToolName(tool) {
       && peerMessageCardModel(tool.peer_message)) return 'PeerMessage'
   if (Array.isArray(tool?.skills) && tool.skills.length > 0) return 'Skill'
   if (IMAGE_TOOL_NAMES.has(name)) return 'ViewImage'
+  const control = controlToolName(name)
+  if (control) return control
   if (name === 'Read') {
     // On the wire tool.input is the STRING summary the backend builds
     // (summarize_tool_input -> the bare file_path for a Read), never the raw

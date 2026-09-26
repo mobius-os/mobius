@@ -241,7 +241,7 @@ class RuntimeSupervisors:
       self.log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
 
   async def _start_chat_supervisors(self) -> None:
-    from app.agent_scratch import release_if_idle, sweep_idle_scratch
+    from app.agent_scratch import sweep_idle_scratch
     from app.broadcast import get_system_broadcast
     from app.chat import (
       ContinuationSweepResult,
@@ -446,54 +446,21 @@ class RuntimeSupervisors:
         await asyncio.sleep(sweep_seconds)
 
     async def agent_scratch_loop():
-      # Exact physical-completion hints own the normal path. The deadline is
-      # independent of event traffic so the broad sweep still repairs missed
-      # hints after five minutes at startup and hourly thereafter.
-      system_broadcast = get_system_broadcast()
-      events = system_broadcast.subscribe()
-      loop = asyncio.get_running_loop()
-      next_sweep_at = loop.time() + 300
-      try:
-        while True:
-          event = None
-          wait_seconds = max(0.0, next_sweep_at - loop.time())
-          if wait_seconds:
-            try:
-              async with asyncio.timeout(wait_seconds):
-                event = await events.get()
-            except asyncio.TimeoutError:
-              pass
-
-          if event and event.get("type") == "chat_scratch_releasable":
-            chat_id = event.get("chatId")
-            if isinstance(chat_id, str) and chat_id:
-              try:
-                await release_if_idle(chat_id)
-              except asyncio.CancelledError:
-                raise
-              except Exception as exc:
-                self.log.error(
-                  "agent scratch release failed chat_id=%s: %s",
-                  chat_id, exc, exc_info=True,
-                )
-
-          if loop.time() >= next_sweep_at:
-            try:
-              result = await sweep_idle_scratch()
-              if result["bytes"]:
-                self.log.info(
-                  "agent scratch retention reclaimed %d bytes",
-                  result["bytes"],
-                )
-            except asyncio.CancelledError:
-              raise
-            except Exception as exc:
-              self.log.error(
-                "agent scratch retention failed: %s", exc, exc_info=True,
-              )
-            next_sweep_at = loop.time() + 60 * 60
-      finally:
-        system_broadcast.unsubscribe(events)
+      # Scratch persists across a chat's turns; this hourly sweep is its only
+      # retention, first run five minutes after startup.
+      await asyncio.sleep(300)
+      while True:
+        try:
+          result = await sweep_idle_scratch()
+          if result["bytes"]:
+            self.log.info(
+              "agent scratch retention reclaimed %d bytes", result["bytes"],
+            )
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("agent scratch retention failed: %s", exc, exc_info=True)
+        await asyncio.sleep(60 * 60)
 
     async def capacity_monitor_loop():
       # Outcome #7: see a full /data COMING, not just when admission refuses

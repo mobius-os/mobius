@@ -175,6 +175,13 @@ test('local container blockers explain lost behavior and stop before mutation', 
   assert.match(repair, /label = 'Ask Möbius'/)
 })
 
+test('predicted overlaps hand the update to an agent instead of Apply', () => {
+  assert.match(modal, /const overlaps = !finish && preview\?\.conflict_paths\?\.length > 0/)
+  assert.match(modal, /const needsAgent = containerBlockers \|\| overlaps/)
+  assert.match(modal, /needsAgent && hasPlan \? <button[^>]*onClick=\{handleFixWithAgent\}/)
+  assert.match(modal, /An agent merges the overlapping files on a separate copy/)
+})
+
 test('primary update guidance avoids deployment jargon', () => {
   assert.match(modal, /Möbius will briefly go offline while the updated system starts/)
   assert.match(modal, /earlier source was restored/)

@@ -654,6 +654,17 @@ _active_pkce: dict | None = None
 _provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock()}
 
 
+async def _provider_signin_changed(provider_id: str) -> None:
+  """Show every open picker the catalog the provider's current sign-in serves.
+
+  Every sign-in and sign-out ends here, so no picker keeps the offline fallback
+  cached before connecting (or live models cached before disconnecting).
+  """
+  from app.providers import forget_provider_models
+  await forget_provider_models(provider_id)
+  get_system_broadcast().publish({"type": "model_providers_changed"})
+
+
 def _cli_env() -> tuple[dict, str]:
   """Returns (env dict, cli_home path) for CLI subprocess calls."""
   settings = get_settings()
@@ -797,7 +808,6 @@ async def _exchange_claude_code(body: schemas.ProviderCodeRequest):
     from app.providers import _claude_refresh_lock
     async with _claude_refresh_lock:
       _write_credentials(r.json())
-    return {"ok": True}
   except httpx.TimeoutException:
     raise HTTPException(
       status_code=504, detail="Token exchange timed out.",
@@ -807,6 +817,10 @@ async def _exchange_claude_code(body: schemas.ProviderCodeRequest):
   except Exception as exc:
     log.error("Token exchange error: %s", exc)
     raise HTTPException(status_code=500, detail=str(exc))
+  # Outside the refresh lock: a registry fetch may hold its own lock while
+  # waiting for that one.
+  await _provider_signin_changed("claude")
+  return {"ok": True}
 
 
 @router.get("/providers/status")
@@ -1480,6 +1494,10 @@ def consume_mobius_web_login_session(
 async def _watch_codex_login(proc):
   """Background task that awaits proc.wait() and stores the result."""
   await proc.wait()
+  if proc.returncode == 0:
+    # The CLI has written its sign-in; refresh pickers before the status poll
+    # reports completion so the UI never refetches the pre-sign-in fallback.
+    await _provider_signin_changed("codex")
   # Only update if this proc is still the active one -- a newer
   # login may have replaced it.
   if _codex_login_procs.get("active") is proc:
@@ -1609,4 +1627,5 @@ async def provider_disconnect(
     except (OSError, ValueError):
       log.exception("Could not remove %s provider sign-in", provider_id)
       raise HTTPException(500, "Could not disconnect. Your connection has not been confirmed removed.")
+    await _provider_signin_changed(provider_id)
   return {"ok": True}

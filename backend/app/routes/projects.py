@@ -1347,7 +1347,6 @@ def list_project_import_sources(
     defer(models.App.icon_override_png),
   ).filter(
     models.App.deleted_at.is_(None), models.App.manifest_url.is_(None),
-    models.App.system_app.is_(False),
   ).order_by(models.App.updated_at.desc(), models.App.id.desc()).all()
   for app in app_rows:
     if ("app", str(app.id)) in imported:
@@ -1432,7 +1431,7 @@ def _import_project_source(body: ProjectImport, db: Session):
         defer(models.App.icon_override_png),
       ).filter(
         models.App.id == app_id, models.App.deleted_at.is_(None),
-        models.App.manifest_url.is_(None), models.App.system_app.is_(False),
+        models.App.manifest_url.is_(None),
       ).first()
       if source_app is None:
         raise HTTPException(404, "Locally built app not found.")

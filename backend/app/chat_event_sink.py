@@ -43,6 +43,7 @@ from app.events import (
   commit_question_scrub,
   excerpt_tool_output,
   process_event,
+  thinking_block_for_segment,
   tool_output_exit_code,
   undo_question_scrub,
 )
@@ -52,7 +53,9 @@ from app.agent_activity import (
   EMPTY_AGENT_ACTIVITY_BINDING,
   MAX_RESULT_SCAN_CHARS,
   AgentActivityBinding,
+  activity_from_app_tool,
   activity_from_command,
+  app_tool_result_text,
   activity_from_result,
   activity_from_task_output,
   activity_without_receipt,
@@ -430,7 +433,7 @@ class ChatEventSink:
 
   def _prepare_thinking_event(self, event: ChatEvent) -> None:
     """Give a reasoning run stable identity before reducer + broadcast."""
-    if event.get("type") != "thinking":
+    if event.get("type") not in ("thinking", "thinking_final"):
       return
     last = self.assistant_blocks[-1] if self.assistant_blocks else None
     if (
@@ -588,6 +591,13 @@ class ChatEventSink:
   ) -> None:
     """Attach one generic app-owned activity across the tool lifecycle."""
     if event.get("type") in ("tool_start", "tool_input"):
+      if event.get("type") == "tool_start":
+        activity = activity_from_app_tool(
+          event.get("tool"), self._agent_activity_binding,
+        )
+        if activity is not None:
+          event["app_activity"] = activity
+          return
       if event.get("type") == "tool_start" and event.get("tool") != "Bash":
         return
       # Both a tool_start AND a tool_input can arrive for one tool call on the
@@ -606,7 +616,7 @@ class ChatEventSink:
       return
     pending = self._app_activity_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
-      content = (
+      content = app_tool_result_text(
         event.get("content")
         if result_content is None
         else result_content
@@ -1060,6 +1070,11 @@ class ChatEventSink:
     # live transcript surface.
     if event_type in ("tool_start", "tool_input"):
       self._stash_full_edit_diff(event)
+    if event_type in ("tool_start", "tool_input"):
+      # A helper's parent shows what the helper is doing right now. Claude
+      # names the tool on tool_start and sends its text on tool_input.
+      from app.delegations import note_helper_activity
+      note_helper_activity(self.chat_id, event.get("tool"), event.get("input"))
 
     # Contract rule 6: reduce a large tool_output to a bounded excerpt and stash
     # its full text BEFORE process_event (which copies content onto the block)
@@ -1118,7 +1133,7 @@ class ChatEventSink:
       self._stamp_deferred_app_activity_done(event)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_peer_message(event)
-    if event_type == "thinking":
+    if event_type in ("thinking", "thinking_final"):
       self._prepare_thinking_event(event)
 
     # The helper that creates a saved owner card is transport, not a second
@@ -1138,6 +1153,18 @@ class ChatEventSink:
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
+    if event_type == "thinking_final":
+      if not accumulated:
+        # The stream already matched the completed block: nothing to send.
+        return True
+      # Live clients hold the thought as streamed; give them the repaired
+      # whole, addressed by the thought it belongs to.
+      repaired = thinking_block_for_segment(
+        self.assistant_blocks, event.get("segment_id"),
+      )
+      if repaired is not None:
+        event["thinking_id"] = repaired.get("thinking_id")
+        event["thinking_content"] = repaired.get("content", "")
     # Thinking streams live like answer text: the raw delta goes out on every
     # event so a connected client appends it token-by-token (see
     # streamReducers.appendThinkingChunk). We deliberately do NOT blank the delta
@@ -1262,9 +1289,8 @@ class ChatEventSink:
       elif getattr(self, "_lost_reply_marker", False):
         # Defense-in-depth: a normally-owned run reached a CLEAN provider
         # terminal but produced zero renderable content (a Claude synthetic-
-        # resume no-op, or a codex message whose text was lost). The runner-side
-        # fixes stop those at the source; this guarantees the turn is never a
-        # SILENT user->user gap — persist a neutral marker the client can retry.
+        # resume no-op, or a codex message whose text was lost). Persist a
+        # neutral marker so the turn is never a silent user->user gap.
         #
         # Built via _pause_note so the marker carries `resumable` — the flag
         # MsgContent gates the one-tap Resume button on. No `kind`, so no

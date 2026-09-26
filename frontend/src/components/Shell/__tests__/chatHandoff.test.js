@@ -40,8 +40,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*const displayReady = \([\s\S]*activationSettled[\s\S]*coldActivation[\s\S]*activationPhase === 'error'/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation; only the composer may reveal early',
+    /const transcriptPaintable = \([\s\S]*\) && revealed\s*const \{ showEmpty, showLoadError, displayReady \} = chatEntryFrame\(\{[\s\S]*activationPhase,\s*activationSettled,\s*transcriptPaintable,/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation (chatEntryFrame); only the composer may reveal early',
   )
   assert.match(
     chatView,
@@ -155,7 +155,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /if \(activationCacheReusable && cacheCoversSavedAnchor && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a warm version mismatch must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
-    /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
+    /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback && retry == null\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
   assert.match(`${scrollRestore}\n${scrollMode}`,
     /mode\?\.kind !== 'INITIAL'[\s\S]*phase === 'cache-validating' && !resolved[\s\S]*action: 'wait'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*onCachedCoordinateReady\?\.\(\)/,
@@ -170,7 +170,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationState, setActivationState\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationPhase\('pending'\)[\s\S]*const settleRuntime[\s\S]*setActivationPhase\('ready'\)[\s\S]*const displayReady = \(\s*activationSettled/,
+    /const \[activationState, setActivationState\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationPhase\('pending'\)[\s\S]*const settleRuntime[\s\S]*setActivationPhase\('ready'\)[\s\S]*chatEntryFrame\(\{[\s\S]*activationSettled,/,
     'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(
@@ -479,15 +479,15 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
     'the disabled Send affordance explains the cold activation')
   assert.match(chatView,
-    /cachedActivationRetryDelay\(\s*err,[\s\S]*retryState\.timer = setTimeout\([\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
-    'cached activation failures get bounded quiet retries at the activation owner')
+    /const retryActivation = useCallback\(\(\) => \{[\s\S]{0,500}clearTimeout\(activationRecoveryRef\.current\.timer\)[\s\S]{0,200}setLoadNonce\(nonce => nonce \+ 1\)[\s\S]*activationRetryDelay\(\s*err,[\s\S]*setActivationRetrying\(!cacheIsSafeFallback && retry != null\)[\s\S]*activationRecoveryRef\.current\.timer = setTimeout\(retryActivation, retry\)/,
+    'transient activation failures get bounded quiet retries at the activation owner, and retrying now replaces a scheduled retry')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
     2,
     'uncached and terminal cached activation failures retain manual recovery',
   )
   assert.match(chatView,
-    /const showActivationRetry = \([\s\S]*activationPhase === 'error'[\s\S]*!loadError[\s\S]*cachedActivationRecoveryRef\.current\.timer == null[\s\S]*chat__activation-retry[\s\S]*Chat activation still needs a retry before sending\.[\s\S]*onClick=\{retryActivation\}/,
+    /const showActivationRetry = \([\s\S]*activationPhase === 'error'[\s\S]*!loadError[\s\S]*activationRecoveryRef\.current\.timer == null[\s\S]*chat__activation-retry[\s\S]*Chat activation still needs a retry before sending\.[\s\S]*onClick=\{retryActivation\}/,
     'quiet retries stay quiet while scheduled, then terminal failures explain the disabled composer and recover in place')
   assert.match(chatView,
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
@@ -495,4 +495,28 @@ test('cold activation keeps one composer visible but refuses sends until runtime
   assert.match(chatView,
     /cacheIsSafeFallback = activationCacheReusable[\s\S]*err\?\.message !== 'CHAT_NOT_FOUND'/,
     'an explicit missing resource dominates stale cache history and remains non-sendable')
+})
+
+test('only a loaded transcript lets runtime evidence attach a stream or reread history', () => {
+  // After a restart the light runtime read can succeed while the history read
+  // times out; attaching from runtime alone showed the resumed reply as the
+  // whole chat.
+  assert.match(chatView,
+    /if \(sendingRef\.current && !force\) return[\s\S]{0,300}if \(!activationSettledRef\.current\) return\n/,
+    'history refreshes wait for activation without reporting the ambiguous failure callers attach on')
+  assert.match(chatView,
+    /await jsonOrThrow\(res, 'Runtime refresh failed'\)[\s\S]{0,300}if \(!activationSettledRef\.current\) return null/,
+    'runtime refreshes never attach before activation')
+  assert.match(chatView,
+    /const signalPending = \(\) => \([\s\S]{0,80}&& activationSettledRef\.current[\s\S]{0,120}\)\s*if \(externalReconcileInFlightRef\.current\) return[\s\S]*while \(signalPending\(\)\) \{\s*const previous = processedExternalSignalRef\.current[\s\S]*if \(signalPending\(\)\) queueMicrotask\(reconcileExternalActivity\)/,
+    'run signals stay unprocessed, without spinning, until activation settles')
+  assert.match(chatView,
+    /reconcileExternalActivity\(\)\s*\}, \[\s*activationSettled,\s*effectiveRunSignal\.seq,/,
+    'a run start activation did not observe still attaches once it settles')
+  assert.match(chatView,
+    /const run = \(\{ recovery = false \} = \{\}\) => \{[\s\S]*?if \(\s*recovery\s*&& !hiddenRef\.current\s*&& activationPhaseRef\.current === 'error'\s*\) \{\s*retryActivation\(\)/,
+    'the server coming back restarts a failed activation at once, whether a quiet retry is pending or they ran out')
+  assert.match(chatView,
+    /applyMessagesToView\(\[\], 0\)[\s\S]{0,300}disconnect\(\{ clearStreaming: true \}\)/,
+    'a load that shows nothing also detaches any live stream')
 })

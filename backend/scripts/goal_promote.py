@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -75,6 +76,19 @@ def promote_goal(objective: str) -> dict:
   return payload
 
 
+# Promotion is a tool call while the plan is this sibling script. Name the exact
+# command where the next step is announced: told only to "publish its Goal
+# plan", agents have invented a plan tool that does not exist.
+PLAN_NEXT_ACTION = (
+  "If this outcome has multiple verifiable stages or branches, publish its "
+  "Goal plan now with `python3 "
+  f"{Path(__file__).resolve().with_name('goal_plan.py')} set --task "
+  "'id|Title|dependencies' ...`; the same script updates, extends, and "
+  "completes it (there is no plan tool). The Goal record does not execute a "
+  "prose checklist."
+)
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(
     description="Promote the current request into a platform-owned Goal.",
@@ -88,11 +102,7 @@ def main() -> int:
     print("Goal promotion verified: this turn already owns the Goal.")
   else:
     print("Goal promotion verified: this turn now owns the Goal.")
-  print(
-    "Next: if this outcome has multiple verifiable stages or branches, "
-    "publish its Goal plan now. The Goal record does not execute a prose "
-    "checklist."
-  )
+  print(f"Next: {PLAN_NEXT_ACTION}")
   return 0
 
 

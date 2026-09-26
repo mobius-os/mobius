@@ -21,7 +21,10 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
 import { mergePositionedActivityEntries } from './activityPosition.js'
 import { restartCardActivityEntries } from './streamReducers.js'
-import HelperResultCard from './HelperResultCard.jsx'
+import HelperResultCard, { HelperRow } from './HelperResultCard.jsx'
+import { isWorkingHelper } from './workingHelper.js'
+import { helperLaunches } from './helperLaunches.js'
+
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -301,25 +304,33 @@ function GroupedActivityStretch({
 
   // A delegating turn's Task/Agent tool blocks carry a `.subagent` map of live
   // (streamReducers.applyTaskEvent) or persisted (backend 247) helper metadata.
-  // Render those helpers as rows in this stretch and surface a running/done
-  // count on the header — the header's activity word already reads "Working in
-  // the background", so the count is the only addition. The Task ToolBlock is
-  // NOT hidden: its output/expand stays reachable in the expanded timeline.
-  // Shell tasks are commands, not helpers (toolTasks.js): they neither add a
-  // row nor count toward "N running".
+  // Each helper appears once, in order with the other steps (the timeline
+  // below draws it where it was launched), plus a running/done count on the
+  // header. Shell tasks are commands, not helpers (toolTasks.js): they neither
+  // add a row nor count toward "N running".
   const subagentTools = entries
     .map(e => e?.item)
     .filter(it => it?.type === 'tool' && agentHelperEntries(it).length > 0)
   const subagentHelpers = subagentTools
     .flatMap(it => agentHelperEntries(it).map(([, helper]) => helper))
+  // A Subagents-app helper's one row (live, then settled) is counted in the
+  // header like the Task/Agent ones and drawn where it was launched.
+  const helperRows = entries
+    .map(e => e?.item)
+    .filter(it => it?.type === 'helper_result')
+  const workingRows = helperRows.filter(isWorkingHelper).length
   const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
+    + workingRows
   const failedHelpers = subagentHelpers.filter(
     h => h.status === 'failed' || h.status === 'killed' || h.status === 'stopped'
+  ).length + helperRows.filter(
+    it => !isWorkingHelper(it) && it.status !== 'completed'
   ).length
-  const doneHelpers = subagentHelpers.length - runningHelpers - failedHelpers
+  const doneHelpers = subagentHelpers.length + helperRows.length
+    - runningHelpers - failedHelpers
   // Count successes and failures separately: a failed/killed helper is not
   // "done", and the header must not label a red-dotted row as done.
-  const subagentCount = subagentHelpers.length > 0
+  const subagentCount = subagentHelpers.length + helperRows.length > 0
     ? [
         runningHelpers > 0 ? `${runningHelpers} running` : null,
         doneHelpers > 0 ? `${doneHelpers} done` : null,
@@ -384,6 +395,9 @@ function GroupedActivityStretch({
           suppressLatestRestart,
         )
       : entries
+  // Pair launches with helpers across exactly the steps drawn below — the
+  // collapsed summary may sample only some of them.
+  const launches = helperLaunches(timelineEntries || [])
 
   function revealBeforeReady() {
     if (!userOpenRef.current || visibleOpenRef.current) return
@@ -433,18 +447,6 @@ function GroupedActivityStretch({
         className="chat__activity-timeline"
         hidden={!open}
       >
-        {/* Helper rows are status within this whole-turn disclosure. The
-            parent transcript does not map its activity entries to individual
-            helpers; an agent row instead opens that helper's OWN conversation,
-            which the provider recorded separately (HelperConversation). */}
-        {subagentTools.map((tool, i) => (
-          <SubagentChips
-            key={tool.tool_use_id ?? `subagent-${i}`}
-            subagent={tool.subagent}
-            chatId={chatId}
-            onInternalNav={onInternalNav}
-          />
-        ))}
         {open && detailError && (
           <div className="chat__lazy-status">
             <span className="chat__reasoning-load" role="status" aria-live="polite">
@@ -473,6 +475,32 @@ function GroupedActivityStretch({
                 thought={item}
                 chatId={chatId}
                 disclosureKey={`${surfaceKey}:thought:${key}`}
+              />
+            )
+          }
+          // A helper's one row stands where it was launched: its own spawn
+          // call draws it, so its anchored event draws nothing more.
+          if (item.type === 'helper_result' && launches.drawnAtLaunch.has(item)) return null
+          const launched = launches.rowAt.get(item)
+          if (launched) {
+            return (
+              <HelperRow
+                key={assistantBlockKey(item, idx)}
+                event={launched}
+                chatId={chatId}
+                onInternalNav={onInternalNav}
+              />
+            )
+          }
+          // A provider's own helper call is its helper rows (each opens that
+          // helper's conversation, which the provider recorded separately).
+          if (item.type === 'tool' && agentHelperEntries(item).length > 0) {
+            return (
+              <SubagentChips
+                key={assistantBlockKey(item, idx)}
+                subagent={item.subagent}
+                chatId={chatId}
+                onInternalNav={onInternalNav}
               />
             )
           }

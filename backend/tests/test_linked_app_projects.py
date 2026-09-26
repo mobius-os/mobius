@@ -17,7 +17,7 @@ def linked(client, auth, db):
   source.mkdir(parents=True)
   (source / 'index.jsx').write_text('export default function App() { return null }')
   (source / 'mobius.json').write_text(json.dumps({'name': 'Clock', 'entry': 'index.jsx'}))
-  app = models.App(name='Clock', slug='linked-clock', source_dir=str(source), jsx_source='last-working', system_app=False)
+  app = models.App(name='Clock', slug='linked-clock', source_dir=str(source), jsx_source='last-working')
   db.add(app)
   db.commit()
   response = client.post('/api/projects/import', headers=auth, json={'kind': 'app', 'source_id': str(app.id)})

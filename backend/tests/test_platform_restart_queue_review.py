@@ -314,7 +314,7 @@ def test_deferred_restart_monitor_does_not_suspend_other_work(db, wait_status):
   assert chat.pending_question_id is None
   command = chat_writer.StartActivityContinuation(
     chat_id=cid, root_run_id=root,
-    run_token=_activity_continuation_run_id(db.get(models.Delegation, delegation_id)),
+    run_token=_activity_continuation_run_id(db, db.get(models.Delegation, delegation_id)),
     source_work_id=root, activity_id=delegation_id,
   )
   # Bypass the async precheck to exercise the actor-owned admission boundary.

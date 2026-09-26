@@ -16,6 +16,7 @@ import {
   closeToolLifecycle,
   upsertTerminalErrorItem,
   appendThinkingChunk,
+  replaceThinkingContent,
   anchorReplayedThinking,
   attachToolSources,
   attachGeneratedFile,
@@ -1180,6 +1181,15 @@ export default function useStreamConnection(chatId, {
                 ),
               )
             }
+          } else if (event.type === 'thinking_final') {
+            // The completed thinking block repaired a thought whose streamed
+            // preview lost a chunk; show the repaired whole.
+            flushBuffer()
+            applyStreamItems(
+              prev => replaceThinkingContent(
+                prev, event.thinking_id, event.thinking_content,
+              ),
+            )
           } else if (event.type === 'context_compacted') {
             // A first-class chronology boundary: flush prose so the marker
             // lands exactly where the provider compacted, then append the same

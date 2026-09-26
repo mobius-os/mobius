@@ -1363,8 +1363,8 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   db.add_all([
     models.Delegation(
       id="delegation-b", parent_chat_id=chat_id,
-      parent_root_run_id="goal-root", task_key="b", child_chat_id="child-b",
-      **common,
+      parent_root_run_id="goal-root", task_key="review-b", goal_task_id="b",
+      child_chat_id="child-b", **common,
     ),
     models.Delegation(
       id="delegation-x", parent_chat_id="child-b",
@@ -1383,16 +1383,18 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   db.commit()
 
   plan = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()["plan"]
+  # The helper is filed under task b by its recorded plan_task, not its name;
+  # while it works, b does not count as complete.
   assert plan["delegations"] == [{
-    "id": "delegation-b", "task_key": "b", "provider": "codex",
-    "status": "running", "children": [{
-      "id": "delegation-x", "task_key": "x", "provider": "codex",
-      "status": "running", "children": [],
+    "id": "delegation-b", "task_key": "review-b", "plan_task": "b",
+    "provider": "codex", "status": "running", "children": [{
+      "id": "delegation-x", "task_key": "x", "plan_task": None,
+      "provider": "codex", "status": "running", "children": [],
     }],
   }]
   assert plan["summary"]["completed"] == 0
   assert plan["summary"]["can_complete"] is False
-  assert plan["summary"]["completion_blockers"] == ["b", "x"]
+  assert plan["summary"]["completion_blockers"] == ["review-b", "x"]
 
 
 def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
@@ -1434,13 +1436,13 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
     ),
     models.Delegation(
       id="old-attempt", parent_chat_id=chat_id,
-      parent_root_run_id="goal-root", task_key="audit",
+      parent_root_run_id="goal-root", task_key="audit", goal_task_id="audit",
       child_chat_id=old_child.id, created_at=now - timedelta(minutes=1),
       **common,
     ),
     models.Delegation(
       id="new-attempt", parent_chat_id=chat_id,
-      parent_root_run_id="resumed-goal-run", task_key="audit",
+      parent_root_run_id="resumed-goal-run", task_key="audit", goal_task_id="audit",
       child_chat_id=new_child.id, created_at=now,
       **common,
     ),
@@ -1726,3 +1728,77 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
     headers=auth,
   )
   assert rejected.status_code == 409
+
+
+def _plan_with(client, auth, chat_id, tasks):
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+
+
+def test_new_helper_files_under_the_single_running_task_not_by_name(
+  client, owner_token, db,
+):
+  """A helper joins the plan's current focus whatever it is named."""
+  from app.goal_plans import helper_plan_task
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  _plan_with(client, auth, chat_id, [
+    {"id": "r1", "title": "Round one", "status": "completed"},
+    {"id": "r2", "title": "Round two", "status": "running", "depends_on": ["r1"]},
+    {"id": "report", "title": "Report", "depends_on": ["r2"]},
+  ])
+  db.expire_all()
+  assert helper_plan_task(db, chat_id, None) == "r2"
+  assert helper_plan_task(db, chat_id, "report") == "report"
+
+
+def test_helper_plan_task_refusal_lists_the_real_task_ids(client, owner_token, db):
+  from app.goal_plans import GoalPlanError, helper_plan_task
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  _plan_with(client, auth, chat_id, [{"id": "r2", "title": "Round two"}])
+  db.expire_all()
+  with pytest.raises(GoalPlanError, match="plan tasks: r2"):
+    helper_plan_task(db, chat_id, "round-2")
+
+
+def test_helper_stays_unfiled_when_several_leaves_are_running(
+  client, owner_token, db,
+):
+  """With parallel focus the platform does not guess; plan_task decides."""
+  from app.goal_plans import helper_plan_task
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  _plan_with(client, auth, chat_id, [
+    {"id": "a", "title": "A", "status": "running"},
+    {"id": "b", "title": "B", "status": "running"},
+    {"id": "p", "title": "Parent", "status": "running"},
+    {"id": "p1", "title": "Child", "status": "running", "parent_id": "p"},
+  ])
+  db.expire_all()
+  assert helper_plan_task(db, chat_id, None) is None
+
+
+def test_running_parent_defers_to_its_running_child_leaf(client, owner_token, db):
+  from app.goal_plans import helper_plan_task
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  _plan_with(client, auth, chat_id, [
+    {"id": "p", "title": "Parent", "status": "running"},
+    {"id": "p1", "title": "Child", "status": "running", "parent_id": "p"},
+  ])
+  db.expire_all()
+  assert helper_plan_task(db, chat_id, None) == "p1"
+
+
+def test_helper_without_a_goal_is_unfiled_and_cannot_name_a_task(db):
+  from app.goal_plans import GoalPlanError, helper_plan_task
+
+  db.add(models.Chat(id="plain-chat", title="Plain", messages=[]))
+  db.commit()
+  assert helper_plan_task(db, "plain-chat", None) is None
+  with pytest.raises(GoalPlanError, match="no active Goal plan"):
+    helper_plan_task(db, "plain-chat", "r2")

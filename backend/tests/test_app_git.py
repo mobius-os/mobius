@@ -4529,3 +4529,28 @@ def test_read_ref_tree_skips_gitlinks(tmp_path):
   )
 
   assert app_git.read_ref_tree(repo, "HEAD") == {"index.jsx": b"entry\n"}
+
+
+def test_conflict_markers_count_only_in_paths_the_resolution_changed(tmp_path):
+  """Upstream content that legitimately contains a boundary-looking line is
+  not a conflict; a marker the resolution itself commits is."""
+  from app import install
+
+  repo = tmp_path / "markers"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  commit = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q"]
+  (repo / "guide.md").write_text("<<<<<<< this is how git marks conflicts\n")
+  (repo / "index.jsx").write_text("export default 1\n")
+  subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+  subprocess.run([*commit, "-m", "upstream"], check=True)
+  upstream = app_git._run(repo, "rev-parse", "HEAD").stdout.strip()
+
+  (repo / "index.jsx").write_text("export default 2\n")
+  subprocess.run([*commit, "-am", "clean resolution"], check=True)
+  assert install.committed_conflict_marker_paths(repo, "HEAD", upstream) == []
+
+  (repo / "index.jsx").write_text("<<<<<<< HEAD\nexport default 3\n")
+  subprocess.run([*commit, "-am", "marked resolution"], check=True)
+  assert install.committed_conflict_marker_paths(repo, "HEAD", upstream) == [
+    "index.jsx",
+  ]

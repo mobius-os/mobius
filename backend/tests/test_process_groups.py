@@ -132,3 +132,101 @@ def test_background_group_is_preferred_oom_victim(monkeypatch, tmp_path):
   ) is True
   assert written == ["/proc/4321/oom_score_adj", "/proc/4322/oom_score_adj"]
   assert process_groups.AGENT_OOM_SCORE_ADJ == 1000
+
+
+def _command_in_own_session(run_token):
+  """A tool command as providers start it: its own session, the run's env."""
+  import os
+  import subprocess
+  env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: run_token})
+  return subprocess.Popen(
+    ["sleep", "60"], env=env, start_new_session=True,
+  )
+
+
+def _gone(proc, timeout=2.0):
+  import subprocess
+  try:
+    proc.wait(timeout=timeout)
+    return True
+  except subprocess.TimeoutExpired:
+    return False
+
+
+def test_run_commands_outside_the_agent_group_are_ended():
+  """An abruptly killed agent leaves commands in their own sessions; the
+  inherited run marker still finds and ends them."""
+  mine = _command_in_own_session("run-under-test")
+  try:
+    assert process_groups.terminate_agent_processes(
+      None,
+      run_marker="run-under-test",
+      logger=logging.getLogger(__name__),
+      label="test",
+      grace_seconds=0.2,
+    ) is True
+    assert _gone(mine)
+  finally:
+    mine.kill()
+
+
+def test_another_runs_commands_are_never_touched():
+  other = _command_in_own_session("another-run")
+  try:
+    assert process_groups.terminate_run_processes(
+      "run-under-test", logger=logging.getLogger(__name__), label="test",
+    ) == 0
+    assert other.poll() is None
+  finally:
+    other.kill()
+    other.wait()
+
+
+def test_no_run_marker_ends_nothing_beyond_the_group(monkeypatch):
+  monkeypatch.setattr(
+    process_groups, "run_owned_processes",
+    lambda _token: (_ for _ in ()).throw(AssertionError("must not scan")),
+  )
+  assert process_groups.terminate_run_processes(
+    None, logger=logging.getLogger(__name__), label="test",
+  ) == 0
+
+
+def test_a_reused_pid_is_not_signalled(monkeypatch):
+  """Identity is re-checked at delivery: a PID reused by another process
+  after the scan must not be signalled."""
+  sent = []
+  monkeypatch.setattr(process_groups, "run_owned_processes", lambda _t: [(4242, 7)])
+  monkeypatch.setattr(process_groups, "_start_ticks", lambda _pid: 8)
+  monkeypatch.setattr(process_groups.os, "kill", lambda *a: sent.append(a))
+  monkeypatch.setattr(process_groups.os, "pidfd_open", lambda _pid: (_ for _ in ()).throw(ProcessLookupError()), raising=False)
+  assert process_groups.terminate_run_processes(
+    "run-under-test", logger=logging.getLogger(__name__), label="test",
+  ) == 0
+  assert sent == []
+
+
+def test_the_chats_browser_is_left_to_its_own_graceful_owner(tmp_path):
+  """Turn teardown closes the browser so its profile flushes; the run sweep
+  must not kill it first."""
+  import os
+  import subprocess
+  chrome = tmp_path / "chrome"
+  chrome.symlink_to("/bin/sleep")
+  env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: "run-under-test"})
+  browser = subprocess.Popen([str(chrome), "60"], env=env, start_new_session=True)
+  try:
+    assert process_groups.terminate_run_processes(
+      "run-under-test", logger=logging.getLogger(__name__), label="test",
+    ) == 0
+    assert browser.poll() is None
+  finally:
+    browser.kill()
+    browser.wait()
+
+
+def test_run_marker_is_a_stable_one_way_digest():
+  marker = process_groups.run_marker("secret-run-token")
+  assert marker == process_groups.run_marker("secret-run-token")
+  assert "secret-run-token" not in marker and len(marker) == 32
+  assert process_groups.run_marker(None) == ""

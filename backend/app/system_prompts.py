@@ -114,7 +114,6 @@ def compose_system_prompt(base: str, db: Session) -> str:
     db.query(models.App)
     .filter(
       models.App.deleted_at.is_(None),
-      models.App.system_app.is_(True),
       models.App.system_prompt_file.isnot(None),
     )
     .order_by(models.App.id.asc())
@@ -128,7 +127,7 @@ def compose_system_prompt(base: str, db: Session) -> str:
       continue
     source_label = str(Path(app.source_dir).resolve())
     fragments.append(
-      f"<!-- installed system app: {app.slug}; "
+      f"<!-- installed app: {app.slug}; "
       f"source_dir: {source_label} -->\n{fragment}"
     )
   if not fragments:
@@ -204,7 +203,7 @@ def exact_prompt_for_chat(
   """Capture an exact policy prompt without installed-app composition.
 
   Delegated child chats intentionally receive neither the owner constitution nor
-  installed system-app fragments. They still need the same immutable,
+  installed-app fragments. They still need the same immutable,
   content-addressed snapshot semantics as ordinary chats, so this is the narrow
   shared primitive beneath that policy rather than a parallel prompt store.
   """

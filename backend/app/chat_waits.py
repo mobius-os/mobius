@@ -910,8 +910,16 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
   instead of losing a resume. ``force_kind`` rechecks one typed product wait
   immediately after its owning event instead of waiting for the polling
   interval. Returns the number of resumes delivered.
+
+  While edits made on the previous platform source are still being merged back
+  after an update, checks still run but resumes wait, like every other
+  automatic resume: a woken agent must not act on a checkout missing its own
+  recent edits. Undelivered results go out on the first sweep after that.
   """
   from app.database import SessionLocal
+  from app.platform_update import late_edits_pending
+
+  hold_resumes = late_edits_pending()
 
   now = now_naive_utc()
   due_ids: list[str] = []
@@ -957,6 +965,8 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
         return None
 
   async def deliver(row_id: str) -> int:
+    if hold_resumes:
+      return 0
     try:
       return int(await _deliver_resume(row_id))
     except Exception:
@@ -1083,6 +1093,27 @@ def armed_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWait]:
   )
 
 
+def _goal_waits(db: Session, chat_id: str, goal_id: str):
+  """Waits declared by any attempt of one Goal in this chat."""
+  from sqlalchemy import func
+
+  return db.query(models.ChatWait).join(
+    models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
+  ).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatWait.chat_id == chat_id,
+    func.coalesce(
+      models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
+    ) == goal_id,
+  )
+
+
+_FIRED_UNDELIVERED = (
+  models.ChatWait.status.in_(("met", "expired", "failed"))
+  & models.ChatWait.resume_delivered_at.is_(None)
+)
+
+
 def wait_owns_goal(db: Session, chat_id: str, goal_id: str) -> bool:
   """Whether one Goal is owned through observation or result admission.
 
@@ -1091,21 +1122,79 @@ def wait_owns_goal(db: Session, chat_id: str, goal_id: str) -> bool:
   must not manufacture another executor. Keep this projection small rather
   than hydrating commands, transcripts or activation manifests per Goal.
   """
-  from sqlalchemy import func
+  return _goal_waits(db, chat_id, goal_id).filter(
+    (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
+  ).with_entities(models.ChatWait.id).first() is not None
 
-  return db.query(models.ChatWait.id).join(
-      models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
-    ).filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatWait.chat_id == chat_id,
-      func.coalesce(
-        models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
-      ) == goal_id,
-      (models.ChatWait.status == "armed") | (
-        models.ChatWait.status.in_(("met", "expired", "failed"))
-        & models.ChatWait.resume_delivered_at.is_(None)
-      ),
-    ).first() is not None
+
+def armed_goal_waits(
+  db: Session, chat_id: str, goal_id: str,
+) -> list[models.ChatWait]:
+  """Waits still watching for this Goal; only their owner may cancel them."""
+  return _goal_waits(db, chat_id, goal_id).filter(
+    models.ChatWait.status == "armed",
+  ).order_by(models.ChatWait.created_at).all()
+
+
+def stage_consume_fired_goal_waits(
+  db: Session, chat_id: str, goal_id: str,
+) -> int:
+  """Let a verified Goal completion take delivery of its fired Waits.
+
+  A Wait that already fired still holds its Goal until its resume is
+  delivered, so no second executor starts at turn end. The resume can only
+  be delivered after the running turn ends, though, and that turn may have
+  observed and verified the same outcome itself. Its completion is that
+  delivery: record it in the caller's transaction so the Goal can close now
+  and no resume wakes a finished Goal. Armed Waits are not touched.
+  """
+  rows = _goal_waits(db, chat_id, goal_id).filter(_FIRED_UNDELIVERED).all()
+  delivered_at = now_naive_utc()
+  for row in rows:
+    row.resume_delivered_at = delivered_at
+  return len(rows)
+
+
+async def withdraw_delivered_resume_notices(chat_id: str) -> int:
+  """Drop queued resume notices for Waits whose delivery is already recorded.
+
+  A Wait that fires while its chat is busy queues its resume notice at once
+  and keeps its latch open until that notice starts a turn. A verified Goal
+  completion can take delivery first (stage_consume_fired_goal_waits); the
+  queued notice is then stale and would start a turn for a finished Goal.
+  """
+  from sqlalchemy.orm import load_only
+
+  from app.chat_writer import CancelPending, await_ack, get_writer
+  from app.database import SessionLocal
+
+  prefix = "wait-result-"
+  with SessionLocal() as db:
+    chat = db.query(models.Chat).options(
+      load_only(models.Chat.pending_messages),
+    ).filter(models.Chat.id == chat_id).first()
+    queued: dict[str, str] = {}
+    for message in (chat.pending_messages or []) if chat is not None else []:
+      cid = message.get("cid") if isinstance(message, dict) else None
+      if (
+        message.get("kind") == WAIT_RESULT_MESSAGE_KIND
+        and isinstance(cid, str) and cid.startswith(prefix)
+      ):
+        queued[cid.removeprefix(prefix)] = cid
+    if not queued:
+      return 0
+    delivered = {
+      wait_id for (wait_id,) in db.query(models.ChatWait.id).filter(
+        models.ChatWait.chat_id == chat_id,
+        models.ChatWait.id.in_(queued),
+        models.ChatWait.resume_delivered_at.is_not(None),
+      ).all()
+    }
+  for wait_id in delivered:
+    await await_ack(get_writer().submit(CancelPending(
+      chat_id=chat_id, run_token="", cid=queued[wait_id],
+    )))
+  return len(delivered)
 
 
 def armed_wait_chat_ids(db: Session) -> set[str]:

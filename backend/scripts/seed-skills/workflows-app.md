@@ -8,7 +8,7 @@ This skill is only about whether to surface that work — it does NOT teach you 
 
 ## When this applies
 
-Any turn where you fanned work out to background helpers or an orchestrated run — the Task/Agent tools, an orchestrated Workflow fleet, or a Codex collab (spawn/send/resume). A plain turn with ordinary tool calls does not count.
+Any turn where you fanned work out to background helpers or an orchestrated run — the Möbius helper tools (`spawn_agent`) or an orchestrated Workflow fleet. A plain turn with ordinary tool calls does not count.
 
 ---
 
