@@ -113,6 +113,161 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
     assert call.kwargs["source"] == "bootstrap"
 
 
+def _installing_rows(db):
+  """An install stand-in that persists each app like the real installer."""
+  from app.install import InstallResult, _canonical_identity_key
+
+  async def install(db_, *, manifest_url, **_kwargs):
+    manifest_id = manifest_url.split("/")[-3].removeprefix("app-")
+    identity = _canonical_identity_key(manifest_url, manifest_id)
+    app = db.query(models.App).filter_by(manifest_url=identity).first()
+    if app is None:
+      app = models.App(
+        source_dir=f"/tmp/mobius-tests/{manifest_id}",
+        name=manifest_id, description="", jsx_source="",
+        slug=manifest_id, manifest_url=identity,
+      )
+      db.add(app)
+    app.deleted_at = None  # a reinstall revives the owner's tombstone
+    db.commit()
+    return InstallResult(
+      app=app, mode="install", warnings=[], manifest={}, conflict_paths=[],
+      divergence="none", reconciliation=app_git.ReconciliationReceipt(),
+    )
+
+  return install
+
+
+@pytest.mark.asyncio
+async def test_fresh_deployment_starts_with_only_the_store_pinned(
+  db, monkeypatch,
+):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  pinned = {
+    app.slug for app in db.query(models.App).all() if app.pinned_at
+  }
+  assert pinned == {"store"}
+
+
+@pytest.mark.asyncio
+async def test_store_reinstalled_after_uninstall_keeps_owner_unpinned(
+  db, monkeypatch,
+):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  db.add_all(_installed_default_rows(
+    datetime.now(timezone.utc), deleted=("store",),
+  ))
+  db.commit()
+
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert not any(app.pinned_at for app in db.query(models.App).all())
+
+
+@pytest.mark.asyncio
+async def test_existing_deployment_with_purged_store_not_pinned(db, monkeypatch):
+  """Finding #1: a Store row's absence is not a fresh-deployment signal.
+
+  An existing deployment whose Store tombstone was hard-purged still has other
+  apps rows. Bootstrap reinstalls the (now-absent) Store but must not re-pin it
+  against the owner's earlier choice.
+  """
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  # Every default row EXCEPT the Store — i.e. the Store was hard-purged, the
+  # rest of the deployment remains.
+  db.add_all([
+    row for row in _installed_default_rows(datetime.now(timezone.utc))
+    if row.slug != "store"
+  ])
+  db.commit()
+
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  # The Store was (re)installed but left unpinned; nothing is pinned.
+  store = db.query(models.App).filter_by(slug="store").one()
+  assert store.deleted_at is None
+  assert not any(app.pinned_at for app in db.query(models.App).all())
+
+
+@pytest.mark.asyncio
+async def test_installer_resolved_existing_store_not_repinned(db, monkeypatch):
+  """Finding #1: bootstrap's identity pre-check can miss a Store the installer
+  only resolves through package metadata. On an existing deployment (an apps
+  row already present) the Store must not be re-pinned even though bootstrap's
+  own `existing` lookup returned nothing and it called install.
+  """
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import InstallResult
+
+  # A live Store row bootstrap's own pre-check cannot match (no canonical
+  # manifest_url and no trusted git origin), standing in for identity the
+  # installer resolves later via package_id.
+  db.add(models.App(
+    source_dir="/tmp/mobius-tests/store",
+    name="Store", slug="store",
+    manifest_url=None, package_id="store-package",
+  ))
+  db.commit()
+  store_id = db.query(models.App).filter_by(slug="store").one().id
+
+  async def install(_db, *, manifest_url, **_kwargs):
+    if manifest_url == BOOTSTRAP_STORE_MANIFEST_URL:
+      # The installer's deeper resolution updates the pre-existing row.
+      row = db.query(models.App).filter_by(id=store_id).one()
+      return InstallResult(
+        app=row, mode="update", warnings=[], manifest={},
+        conflict_paths=[], divergence="none",
+        reconciliation=app_git.ReconciliationReceipt(),
+      )
+    return _install_result()
+
+  with patch("app.bootstrap.install_from_manifest", install):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert db.query(models.App).filter_by(id=store_id).one().pinned_at is None
+
+
+@pytest.mark.asyncio
+async def test_failed_store_pin_retries_and_pins_next_boot(db, monkeypatch):
+  """Finding #2: the pin and its deployment marker commit in one transaction.
+
+  A failed pin leaves the marker pending (not the Store unpinned forever) and
+  does not abort bootstrap; the next boot retries and pins the already-installed
+  Store exactly once.
+  """
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  def boom():
+    raise RuntimeError("pin transaction failed")
+
+  # Boot 1: a genuinely fresh deployment, but the pin transaction fails. The
+  # first now_naive_utc() call in bootstrap is inside the pin (a fresh
+  # deployment records no marker timestamp during classification).
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)), \
+       patch("app.bootstrap.now_naive_utc", boom):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert db.query(models.App).count() == len(_bootstrap_urls())
+  assert not any(app.pinned_at for app in db.query(models.App).all())
+  marker = db.query(models.DefaultPinInitialization).one()
+  assert marker.initialized_at is None  # still pending, retryable
+
+  # Boot 2: the Store is already installed, but the pending marker drives the
+  # retry that finally pins it.
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  pinned = {app.slug for app in db.query(models.App).all() if app.pinned_at}
+  assert pinned == {"store"}
+  assert db.query(models.DefaultPinInitialization).one().initialized_at is not None
+
+
 @pytest.mark.asyncio
 async def test_local_deployment_bootstraps_identity_without_linking(
   db, monkeypatch,
@@ -553,3 +708,18 @@ async def test_bootstrap_honors_legacy_trusted_origin_tombstone(
 
   urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
   assert BOOTSTRAP_MEMORY_MANIFEST_URL not in urls
+
+
+@pytest.mark.asyncio
+async def test_undecidable_default_pins_never_stop_bootstrap(db, monkeypatch):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  with patch(
+    "app.bootstrap._default_store_pin_pending",
+    side_effect=RuntimeError("marker unavailable"),
+  ), patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  apps = db.query(models.App).all()
+  assert len(apps) == len(_bootstrap_urls())
+  assert not any(app.pinned_at for app in apps)

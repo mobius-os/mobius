@@ -1223,6 +1223,22 @@ class AppServiceAlias(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class DefaultPinInitialization(Base):
+  """Singleton marker: whether this deployment's default pins are settled.
+
+  No row means undecided; ``initialized_at`` NULL means a new deployment still
+  owes its Store pin; set means decided. A row rather than a file so the pin
+  and the marker commit together. ``create_all`` creates the table.
+  """
+
+  __tablename__ = "default_pin_initialization"
+
+  # Fixed sentinel primary key — this table holds at most one row.
+  id = Column(String(32), primary_key=True)
+  initialized_at = Column(DateTime, nullable=True, default=None)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Project(Base):
   """A first-class owner workspace containing files, chats, and artifacts.
 
