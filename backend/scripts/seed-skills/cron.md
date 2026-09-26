@@ -11,7 +11,7 @@ The container has `cron` installed. Cron tasks run as `mobius` and get the app i
 
 ## App schedules are declarations, never boot scripts
 
-`/var/spool/cron/crontabs/` lives in the image layer, not on `/data`, so a rebuild starts with an empty crontab. Installed apps should declare `schedule.default` and `schedule.job` in `mobius.json`. The installer persists an `init-cron.sh` declaration, but boot never executes app-owned shell from that file. FastAPI lifespan parses the effective cadence and job, validates the live app/source tree, and rewrites the entry through `app-job-runner.py` before cron starts.
+`/var/spool/cron/crontabs/` lives in the image layer, not on `/data`, so a rebuild starts with an empty crontab. Installed apps should declare `schedule.default` and `schedule.job` in `mobius.json`. The installer persists an `init-cron.sh` declaration, but boot never executes app-owned shell from that file: the platform reinstalls declared schedules at boot, validating each app and running its job through the supervised job runner.
 
 Managed jobs receive a short-lived app-scoped `APP_TOKEN`, not the owner service token. The token limits API calls, but the job script is reviewed owner-installed code and runs with the Möbius process's filesystem access. Declare only the API and shared-data permissions the job actually uses; do not describe them as a process sandbox.
 
@@ -35,7 +35,7 @@ follows that declaration and does not guess Bash from a filename or executable
 bit. Add the job filename to the manifest install inputs as required by the app
 contract.
 
-The scaffold is for explicit owner-managed platform/legacy jobs that are not installed from a manifest:
+The scaffold is for owner-managed jobs that are not installed from a manifest:
 
 **Use the scaffold, never `crontab -u mobius` directly:**
 
@@ -69,7 +69,7 @@ curl -fsS \
 
 - **Credentials:** installable jobs use `$APP_TOKEN`. Never read `/data/service-token.txt` from an app job. App jobs have no agent environment, so they use plain `curl -H "Authorization: Bearer $APP_TOKEN" ...` — `mapi` is for agent-context calls only.
 - **Logs:** supervised jobs receive `$APP_JOB_STATE_DIR`; keep app-owned logs there.
-- **Sub-agents start with no context** — the `--system-prompt-file` is all they get. Spell out the task fully there.
+- **A job that launches an agent** (for example a CLI run with `--system-prompt-file`) gives it no chat context: that prompt file is all it gets, so spell out the task fully there.
 - **Storage from a cron script** uses the raw API (`window.mobius.storage` only exists inside a running app). Enumerate, don't probe — see the storage section of `building-apps.md`.
 - App-scoped routes enforce the reviewed capability contract even if a job asks for more.
 

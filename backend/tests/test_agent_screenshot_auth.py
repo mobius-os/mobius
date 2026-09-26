@@ -1174,7 +1174,13 @@ printf '%s' "$status"
   assert time.monotonic() - started < 6
   assert (tmp_path / "timeout").read_text().strip() == "resistant client"
   pid = int((tmp_path / "pid").read_text())
-  assert not Path(f"/proc/{pid}/cmdline").exists() or not Path(f"/proc/{pid}/cmdline").read_bytes()
+  # The killed client can vanish between any two /proc reads, so read once:
+  # a missing entry or a zombie's empty cmdline both mean it is gone.
+  try:
+    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+  except (FileNotFoundError, ProcessLookupError):
+    cmdline = b""
+  assert not cmdline
 
 
 def test_current_page_timeout_cleans_up_without_retrying_lost_document(tmp_path: Path):

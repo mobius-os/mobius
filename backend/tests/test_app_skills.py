@@ -591,10 +591,10 @@ def _job_manifest(app_id: str):
   }
 
 
-def test_cloned_job_without_exec_bit_is_rejected(
+def test_cloned_job_without_exec_bit_installs(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """A cloned package must commit executable mode for its scheduled job."""
+  """A job committed without execute mode still installs: its shebang decides."""
   base = "https://raw.githubusercontent.com/acme/app-cronjob/main/"
   _, bare = _make_repo(tmp_path, {"index.jsx": JSX, "job.sh": JOB_SH})
   m = _job_manifest("cronjob")
@@ -603,14 +603,13 @@ def test_cloned_job_without_exec_bit_is_rejected(
     base + "index.jsx": (200, JSX.encode()),
     base + "job.sh": (200, JOB_SH.encode()),
   }, bare)
-  assert r.status_code == 400, r.text
-  assert r.json()["detail"] == "Schedule job is not executable."
+  assert r.status_code == 201, r.text
 
 
-def test_cloned_job_with_exec_bit_is_executable(
+def test_cloned_job_keeps_its_committed_exec_bit(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """The committed +x bit survives the clone — no warning, job runnable."""
+  """The committed +x bit survives the clone unchanged."""
   base = "https://raw.githubusercontent.com/acme/app-cronjob-x/main/"
   _, bare = _make_repo(
     tmp_path, {"index.jsx": JSX, "job.sh": JOB_SH}, exec_names={"job.sh"},
@@ -624,9 +623,6 @@ def test_cloned_job_with_exec_bit_is_executable(
   assert r.status_code == 201, r.text
   job = Path(get_settings().data_dir) / "apps" / "cronjob-x" / "job.sh"
   assert os.access(job, os.X_OK)
-  assert not any(
-    "not executable" in w for w in r.json()["warnings"]
-  ), r.json()["warnings"]
 
 
 # --- exact-head re-review: cross-writer collision + permission revocation ---

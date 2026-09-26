@@ -325,16 +325,16 @@ async def park_platform_update_for_agent(
 
 
 @router.delete(
-  "/prepared-update",
+  "/unfinished-update",
   dependencies=[Depends(reject_cross_site)],
   status_code=204,
 )
-async def cancel_prepared_platform_update(
+async def cancel_unfinished_platform_update(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> None:
-  """Forget a prepared update before it is swapped in; the live checkout never changed."""
+  """Drop an update that has not been swapped in; the live checkout never changed."""
   try:
-    await asyncio.to_thread(platform_update.cancel_prepared_update)
+    await asyncio.to_thread(platform_update.cancel_unfinished_update)
   except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
 

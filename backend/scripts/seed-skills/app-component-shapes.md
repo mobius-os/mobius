@@ -10,14 +10,8 @@ per-app prefix, keep the kebab role suffix and structure recognizable, and
 diverge wherever the app needs to. This is a starting catalog, not a closed
 component API.
 
-Why copies and not a shared library yet: a shared component freezes an API
-before the shapes have proven stable, and then any app that needs something it
-didn't anticipate hits a wall. Copies let each app diverge its own CSS freely —
-full CSS power, no permission, no blast radius. When ~3 apps carry the same
-fenced block (same role + structure, just a different prefix), it has earned
-extraction into a real `@mobius/ui` you import — a `grep` of the fence names
-finds the kin. Until then, owning your fork is correct. This is the platform's
-"code empowers the agent; it does not police it," in CSS form.
+Copy and diverge freely: each app owns its copy, and there is no shared
+library to keep in sync.
 
 ## How to use this catalog
 
@@ -25,11 +19,7 @@ The quickstart owns stylesheet, theme-token, accessibility, touch-target,
 reduced-motion, and native-dialog rules; do not duplicate them from here.
 Copy only the blocks the app actually needs and replace the `ma-` placeholder
 with a short app prefix.
-
-Fence comments such as `/* mobius-ui:Card */` are harvest markers, not a sync
-contract. They make similar app-owned copies discoverable if a pattern later
-earns extraction into a real shared library. Until then, the app owns and may
-diverge its copy.
+Fence comments such as `/* mobius-ui:Card */` are labels, not a sync contract.
 
 ---
 
@@ -37,8 +27,8 @@ diverge its copy.
 
 Two shapes. **Default to the lightweight Root**; reach for **AppShell** only when
 a fixed header/footer must stay put while a body scrolls under it. Each app OWNS
-its copy — fork and comment it; the `mobius-ui:*` fences only mark blocks a future
-shared library could be harvested from. No sync owed.
+its copy — fork and comment it; the `mobius-ui:*` fences are labels. No sync
+owed.
 
 **Default — `mobius-ui:Root` (lightweight flow).** Content flows, the iframe
 scrolls; nothing here can crush or collapse a child.
@@ -51,7 +41,7 @@ scrolls; nothing here can crush or collapse a child.
 ```
 
 ```css
-/* mobius-ui:Root — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Root — app-owned (no sync owed). */
 .ma-root {
   box-sizing: border-box;
   position: relative;        /* anchor for absolute scrims / sheets / toasts */
@@ -83,7 +73,7 @@ block (§10) — a native `<details>` flows fine in a Root, no AppShell needed. 
 ```
 
 ```css
-/* mobius-ui:AppShell — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:AppShell — app-owned (no sync owed). */
 .ma-root {
   position: relative;        /* anchor for scrims / sheets / toasts (absolute, not fixed) */
   display: flex; flex-direction: column;
@@ -125,7 +115,7 @@ the scroller strands its scrollbar in mid-screen.
 ```
 
 ```css
-/* mobius-ui:Page — app-owned; a future-library candidate (no sync owed).
+/* mobius-ui:Page — app-owned (no sync owed).
    Reading column: full-bleed on phones, centered + capped on wide viewports.
    Cap the CONTENT wrapper, never the scroll container (a capped scroller floats
    its scrollbar mid-screen). */
@@ -182,7 +172,7 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
 ```
 
 ```css
-/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed).
+/* mobius-ui:Header — app-owned (no sync owed).
    PINNING DIFFERS BY ROOT: in AppShell keep "flex: 0 0 auto" (the flex column holds it,
    .ma-scroll scrolls under it); in a flow Root use "position: sticky; top: 0" instead,
    or drop both for a header that scrolls away. */
@@ -243,7 +233,7 @@ as the floor). Only the header that actually sits at the top edge needs this.
 ```
 
 ```css
-/* mobius-ui:Sheet — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Sheet — app-owned (no sync owed). */
 .ma-scrim {
   position: absolute; inset: 0; z-index: 100;   /* absolute → stays inside the app, never over shell chrome */
   display: flex; align-items: flex-end; justify-content: center;  /* bottom sheet; center is a variant */
@@ -284,7 +274,7 @@ scrim itself, being full-bleed, does not.
 ```
 
 ```css
-/* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Empty — app-owned (no sync owed). */
 .ma-empty {  /* AppShell (flex column): flex:1 0 auto fills below the header + centers. Flow Root
                 (block — flex is inert): centers within its min-height box, so it sits in the upper
                 viewport; bump min-height toward 100dvh for a full-screen header-less empty. */
@@ -322,7 +312,7 @@ the title/text scale.
 ```
 
 ```css
-/* mobius-ui:Card — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Card — app-owned (no sync owed). */
 .ma-card {
   display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px;
   padding: 15px 16px; text-align: left;
@@ -360,7 +350,7 @@ Static container cards drop the `button` pseudo-states + chevron. State
 ```
 
 ```css
-/* mobius-ui:Button — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Button — app-owned (no sync owed). */
 .ma-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 44px; padding: 10px 16px; border-radius: 10px;
@@ -398,7 +388,7 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ```
 
 ```css
-/* mobius-ui:Input — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Input — app-owned (no sync owed). */
 .ma-input, .ma-textarea {
   display: block; width: 100%; box-sizing: border-box; min-height: 44px; padding: 11px 12px;
   background: var(--surface); color: var(--text); border: 1px solid var(--border);
@@ -429,7 +419,7 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ```
 
 ```css
-/* mobius-ui:Segmented — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Segmented — app-owned (no sync owed). */
 .ma-seg {
   display: inline-flex; gap: 2px; height: 44px;
   background: var(--surface2, var(--surface)); border: 0; border-radius: 10px;
@@ -488,7 +478,7 @@ keys on the focusable rail as the keyboard equivalent.
 ```
 
 ```css
-/* mobius-ui:ImageRail — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:ImageRail — app-owned (no sync owed). */
 .ma-image-gallery { container-type: inline-size; min-width: 0; }
 .ma-image-rail {
   display: grid; grid-auto-flow: column; grid-auto-columns: 78cqi; gap: 4px;
@@ -521,7 +511,7 @@ and the iframe fills it. See the [building-apps.md] "Agent-powered mini-apps"
 section for the one-call helper (`persist` + `onTurnDone`).
 
 ```css
-/* mobius-ui:ChatEmbed — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:ChatEmbed — app-owned (no sync owed). */
 .ma-chat-embed {
   flex: 1 1 auto; min-height: 0;   /* the flexbox-overflow fix — lets the iframe scroll internally */
   overflow: hidden; background: var(--bg);
@@ -537,7 +527,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 ## 10. Smaller recurring blocks
 
 ```css
-/* mobius-ui:Focus — app-owned; a future-library candidate (no sync owed). Required once per app. */
+/* mobius-ui:Focus — app-owned (no sync owed). Required once per app. */
 /* A visible keyboard-focus ring on every interactive control (WCAG 2.4.7).
    :focus-visible only shows for keyboard nav, so mouse/touch taps stay clean.
    Per-control shapes (.ma-btn, .ma-card) already carry their own ring; this is
@@ -553,7 +543,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
    :focus-visible style already exists to replace it. */
 /* /mobius-ui:Focus */
 
-/* mobius-ui:ReducedMotion — app-owned; a future-library candidate (no sync owed). Required once per app. */
+/* mobius-ui:ReducedMotion — app-owned (no sync owed). Required once per app. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -564,7 +554,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 }
 /* /mobius-ui:ReducedMotion */
 
-/* mobius-ui:Spinner — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Spinner — app-owned (no sync owed). */
 @keyframes ma-spin { to { transform: rotate(360deg); } }
 .ma-spinner {
   width: 26px; height: 26px; border-radius: 50%;
@@ -574,7 +564,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 @media (prefers-reduced-motion: reduce) { .ma-spinner { animation: none; } }   /* mandatory */
 /* /mobius-ui:Spinner */
 
-/* mobius-ui:Toast — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Toast — app-owned (no sync owed). */
 .ma-toast {
   position: absolute; left: 16px; right: 16px; bottom: 16px; z-index: 200;   /* absolute → inside the app */
   display: flex; align-items: center; gap: 12px; padding: 12px 16px;
@@ -585,7 +575,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-toast.is-error { border-color: var(--danger); }
 /* /mobius-ui:Toast */
 
-/* mobius-ui:Disclosure — app-owned; a future-library candidate (no sync owed).
+/* mobius-ui:Disclosure — app-owned (no sync owed).
    A <details>/<summary> accordion item: <summary> IS the control (it carries the
    44px tap-target + focus-ring, not a child button). This is the flex-crush-safe
    accordion the AppShell crush note points to — a native <details> needs no
@@ -598,7 +588,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-disc-body { padding: 0 16px 14px; font-size: 14px; line-height: 1.6; color: var(--muted); }
 /* /mobius-ui:Disclosure */
 
-/* mobius-ui:SectionHead — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:SectionHead — app-owned (no sync owed). */
 .ma-section-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
 .ma-section-icon {
   width: 30px; height: 30px; flex: 0 0 auto; border-radius: 9px;
@@ -608,7 +598,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-section-label { margin: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -0.01em; }
 /* /mobius-ui:SectionHead */
 
-/* mobius-ui:Scrollskin — app-owned; a future-library candidate (no sync owed). Add the ma-scroll class to a scroller. */
+/* mobius-ui:Scrollskin — app-owned (no sync owed). Add the ma-scroll class to a scroller. */
 .ma-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .ma-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
 .ma-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
@@ -632,7 +622,7 @@ error/conflict the owner must act on (`.is-error`), plainly worded
 ```
 
 ```css
-/* mobius-ui:SyncPill — app-owned; a future-library candidate (no sync owed). SILENT WHEN HEALTHY:
+/* mobius-ui:SyncPill — app-owned (no sync owed). SILENT WHEN HEALTHY:
    not mounted while online (never "Saving" / pending counts); plain "Offline"
    when offline; .is-error only for a failure the owner can act on. */
 .ma-sync-pill {
@@ -699,7 +689,7 @@ split.destroy()
 ```
 
 ```css
-/* mobius-ui:ChatSplit — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:ChatSplit — app-owned (no sync owed). */
 .ma-root--split {
   position: relative;
   overflow: hidden;

@@ -279,12 +279,11 @@ def migrate_accepted_service_contracts(db) -> tuple[int, list[str]]:
 
 
 def migrate_legacy_job_declarations(db) -> tuple[int, list[str]]:
-  """Make every accepted pre-contract job explicit and executable.
+  """Make every accepted pre-contract job declare its interpreter.
 
   Before 2026-09-12, a missing shebang meant Bash. Copy the immutable accepted
-  runtime, make that historical choice explicit in its bytes, add execute
-  permission where the old runner did not require it, and advance the app's
-  content-addressed pointer. A crash is safe to retry because the source is an
+  runtime, make that historical choice explicit in its bytes, and advance the
+  app's content-addressed pointer. A crash is safe to retry because the source is an
   accepted runtime, never the editable app tree. Every boot scans all rows,
   including tombstones, so restoring an older accepted pointer reopens this
   idempotent cutover instead of trusting a receipt from unrelated app IDs.
@@ -322,15 +321,13 @@ def migrate_legacy_job_declarations(db) -> tuple[int, list[str]]:
         if "missing a shebang" not in str(exc):
           raise AppliedRuntimeUnavailable(str(exc)) from exc
         add_shebang = True
-      if not add_shebang and job.stat().st_mode & 0o111:
+      if not add_shebang:
         continue
 
       staged = Path(tempfile.mkdtemp(prefix=".job-shebang-", dir=cache))
       shutil.copytree(source, staged, dirs_exist_ok=True, symlinks=True)
       target = staged / job_name
-      if add_shebang:
-        target.write_bytes(b"#!/usr/bin/env bash\n" + content)
-      target.chmod(target.stat().st_mode | 0o111)
+      target.write_bytes(b"#!/usr/bin/env bash\n" + content)
       previous_updated = app.updated_at
       publish_runtime(app, _prepared(staged))
       staged = None

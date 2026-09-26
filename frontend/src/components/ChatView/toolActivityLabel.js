@@ -1,6 +1,6 @@
 import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
-import { appActivityLabel } from './appActivityCard.js'
+import { appActivityLabel, appActivityCardModel } from './appActivityCard.js'
 import { runningBackgroundTask } from './toolTasks.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
@@ -130,6 +130,28 @@ export function toolActivityLabel(name) {
 // casing and is substituted by the caller.
 export function toolActivityPastLabel(name) {
   return PAST_LABELS.get(name) || null
+}
+
+// The summary labels for one tool block, for the collapsed activity header.
+// Most tools speak in their category; an app activity names its app ("Using
+// Memory"), since "Using an app" hides the one fact worth reading at a glance.
+function appNameOf(tool) {
+  const model = appActivityCardModel(tool?.app_activity)
+  return model && model.appName !== 'App' ? model.appName : null
+}
+
+export function toolSummaryLabel(tool) {
+  const name = effectiveToolName(tool)
+  const app = name === 'AppActivity' ? appNameOf(tool) : null
+  return app ? `Using ${app}` : toolActivityLabel(name)
+}
+
+// Past twin of toolSummaryLabel, or null for a tool outside the map (see
+// toolActivityPastLabel for why null matters to the joiner).
+export function toolSummaryPastLabel(tool) {
+  const name = effectiveToolName(tool)
+  const app = name === 'AppActivity' ? appNameOf(tool) : null
+  return app ? `Used ${app}` : toolActivityPastLabel(name)
 }
 
 export function toolActivityIcon(name) {

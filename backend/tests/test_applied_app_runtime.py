@@ -129,7 +129,6 @@ def test_legacy_job_migration_makes_execution_contract_explicit(db):
   assert (accepted / "job.sh").read_bytes() == (
     b"#!/usr/bin/env bash\ndeployed script"
   )
-  assert accepted.joinpath("job.sh").stat().st_mode & 0o111
   assert runtime.migrate_legacy_job_declarations(db) == (0, [])
 
   # A selective database restore can point back at the accepted legacy tree
@@ -230,14 +229,12 @@ def test_invalid_accepted_service_contract_stays_inactive_and_retries(db):
   assert row.capability_contract["service"]["entry"] == "missing.py"
 
 
-def test_legacy_job_migration_includes_tombstones_without_rewriting_bytes(db):
+def test_legacy_job_migration_includes_tombstones(db):
   row, source = _legacy_app(db)
-  content = "#!/usr/bin/env bash\necho accepted\n"
   (source / "mobius.json").write_text(
     '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
   )
-  (source / "job.sh").write_text(content, encoding="utf-8")
-  (source / "job.sh").chmod(0o644)
+  (source / "job.sh").write_text("echo accepted\n", encoding="utf-8")
   row.deleted_at = datetime(2026, 9, 12, 12)
   db.commit()
   assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
@@ -245,8 +242,23 @@ def test_legacy_job_migration_includes_tombstones_without_rewriting_bytes(db):
   assert runtime.migrate_legacy_job_declarations(db) == (1, [])
 
   accepted = runtime.runtime_root(row) / "job.sh"
-  assert accepted.read_text(encoding="utf-8") == content
-  assert accepted.stat().st_mode & 0o111
+  assert accepted.read_text(encoding="utf-8") == (
+    "#!/usr/bin/env bash\necho accepted\n"
+  )
+
+
+def test_legacy_job_migration_leaves_a_declared_job_alone_whatever_its_mode(db):
+  row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text("#!/usr/bin/env bash\necho ok\n")
+  (source / "job.sh").chmod(0o644)
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+  before = row.runtime_revision
+
+  assert runtime.migrate_legacy_job_declarations(db) == (0, [])
+  assert row.runtime_revision == before
 
 
 def test_legacy_job_migration_retries_an_unrepairable_runtime(db):

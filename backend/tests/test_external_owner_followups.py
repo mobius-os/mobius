@@ -114,11 +114,6 @@ def _requests(context):
     ),
     (
       "POST",
-      "/api/apps/resolve-update/policy",
-      {"source_dir": source_dir, "policy": "preserve_local"},
-    ),
-    (
-      "POST",
       "/api/apps/resolve-update",
       {"source_dir": source_dir},
     ),
@@ -143,11 +138,10 @@ def _requests(context):
 
 @pytest.mark.parametrize(
   "request_index",
-  range(8),
+  range(7),
   ids=(
     "store-install",
     "conflict-resolver-chat",
-    "resolution-policy",
     "resolved-update-promotion",
     "app-recovery",
     "contribution-work-start",
@@ -212,8 +206,8 @@ def test_existing_owner_top_level_and_app_authority_still_reaches_routes(
   app_allowed_paths = [
     _requests(context)[0],
     _requests(context)[1],
-    _requests(context)[4],
-    _requests(context)[7],
+    _requests(context)[3],
+    _requests(context)[6],
   ]
   for method, path, body in app_allowed_paths:
     response = client.request(method, path, headers=context["app"], json=body)

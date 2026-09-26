@@ -68,10 +68,10 @@ export default function UpdateReviewModal({
     onClose: requestClose, closeOnEscape: !inFlight, modal: false, lockScroll: false,
     inertBoundaryRef })
 
-  // Blockers are resolved on a frozen copy of the merged update, never on the
-  // live checkout: park the update, then open its resolver chat.
+  // Blockers and overlaps are resolved on a frozen copy of the merged update,
+  // never on the live checkout: park the update, then open its resolver chat.
   const [fixError, setFixError] = useState('')
-  async function handleFixBlockers() {
+  async function handleFixWithAgent() {
     setFixError('')
     const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
       current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
@@ -81,18 +81,6 @@ export default function UpdateReviewModal({
       return
     }
     onResolve()
-  }
-
-  // A prepared update has not touched the live checkout, so it can be dropped.
-  async function handleCancelPrepared() {
-    setFixError('')
-    const response = await api.platform.cancelPreparedUpdate()
-    if (!response.ok) {
-      const body = await response.json().catch(() => null)
-      setFixError(body?.detail?.message || 'Couldn’t cancel this update. Try again.')
-      return
-    }
-    onClose()
   }
 
   async function handleApply() {
@@ -116,6 +104,10 @@ export default function UpdateReviewModal({
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
   const containerBlockers = preview?.blocking_paths?.length > 0
+  // Predicted with the same merge Apply runs: an agent merges these instead
+  // of Apply stopping on them.
+  const overlaps = !finish && preview?.conflict_paths?.length > 0
+  const needsAgent = containerBlockers || overlaps
   // The review proved there is nothing to apply. A leftover rolled_back flag
   // must not turn this into a "needs repair" offer — that is the contradictory
   // "already complete + agent repair" state. Show a single Done instead.
@@ -164,11 +156,15 @@ export default function UpdateReviewModal({
                     <h3>{repairReason ? 'This update needs help' : finish ? 'Make the installed update active' : 'Update Möbius'}</h3>
                     <p>{containerBlockers
                       ? 'This update would remove changes made to how Möbius runs.'
+                      : overlaps
+                      ? 'Some of your local changes overlap this update.'
                       : repairReason || (finish ? 'Finish setting up the installed update.'
                       : 'Install this reviewed update while keeping your changes. If anything overlaps, Möbius pauses and asks you to resolve it.')}</p>
                     <h3>What to expect</h3>
                     <p>{containerBlockers
                       ? 'Möbius will keep running as it is. An agent can compare these changes and prepare an official or custom update that keeps the behavior you need.'
+                      : overlaps
+                      ? 'Möbius will keep running as it is. An agent merges the overlapping files on a separate copy, checks the result, and finishes the update.'
                       : repairReason
                       ? 'Open a chat with the update details included. Möbius will check what’s needed and help finish the update, asking before any restart.'
                       : rebuildUpdate
@@ -193,6 +189,10 @@ export default function UpdateReviewModal({
                           diffTruncated={!!preview.blocking_diff_truncated} />
                       </section>}
                     </>}
+                    {overlaps && <>
+                      <h3>Local changes that overlap</h3>
+                      <ul>{preview.conflict_paths.map(path => <li key={path}><code>{path}</code></li>)}</ul>
+                    </>}
                     {(activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
                     {(activation?.reasons || []).length > 0 && <ul>{activation.reasons.map(reason => <li key={reason.code}>{reason.summary}</li>)}</ul>}
                     {commits.length > 0 && <section>
@@ -212,12 +212,10 @@ export default function UpdateReviewModal({
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
-          {finish && platform?.unfinished_update?.cancellable && !busy && <button type="button"
-            className="settings__btn settings__btn--sm settings__btn--outline" onClick={handleCancelPrepared}>Cancel update</button>}
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
-          : containerBlockers && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
-            onClick={handleFixBlockers} disabled={busy || loading}>{resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
+          : needsAgent && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
+            onClick={handleFixWithAgent} disabled={busy || loading}>{resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
           : repairReason ? <>
             <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" label="Fix with an agent" />
           </>
