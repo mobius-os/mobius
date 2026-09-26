@@ -496,7 +496,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 |------|------|
 | `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps inside the shared opaque frame used by both workspace and standalone hosts. Offline outbox + read-through cache live here |
 | `frontend/public/app-frame.html` | The opaque mini-app frame: error UI, parent module broker, runtime bootstrap, and postMessage isolation |
-| `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
+| `frontend/src/sw.js` | Service worker: precache + mini-app code and standalone cache strategies |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `connectivityStore.js`, `navHistory.js`, `errorLog.js`, etc. |
 
@@ -1718,7 +1718,7 @@ protected lane. No recursive crawler is implied: a future offline-capable packag
 needs an explicit manifest/static-assets warm contract. The controlled-page
 regression pins the cached entry as packaged content rather than shell HTML.
 
-Install-time precache includes the Vite shell plus the D3/Pixi classic scripts Memory loads by URL. Package imports are already inside each compiled app artifact and must not be duplicated in the shell precache. Runtime `/vendor/` remains `CacheFirst` for explicit public assets. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
+Install-time precache includes the Vite shell plus the D3/Pixi classic scripts Memory loads by URL. Package imports are already inside each compiled app artifact and must not be duplicated in the shell precache. Runtime `/vendor/` remains `CacheFirst` for explicit public assets. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens, while in-shell code warm-up and storage behavior are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
 Shell rebuilds never own document navigation. `shell_rebuilt`, agent-authored
 `shell_apply_now`, and resume-time worker discovery collapse into one

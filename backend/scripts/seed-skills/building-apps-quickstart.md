@@ -12,7 +12,8 @@ the initial read only when the request already needs one of its advanced paths:
 - wrapping or packaging an existing site/game;
 - an installable or upstream-tracked app;
 - external fetching/proxying or a separate service;
-- secrets, cross-app access, concurrent writers, or raw file storage;
+- secrets, cross-app access, concurrent writers, raw file storage, or
+  product-level offline support;
 - microphone/device capabilities;
 - an embedded agent, immersive mode, or internal navigation/back handling.
 
@@ -124,8 +125,8 @@ bright decision wheel, a tactile stack of cards—then support it with restraine
 chrome. Visual richness should come from hierarchy, composition, motion, and
 state feedback, not extra screens.
 
-The manifest should truthfully describe the local app. A typical private,
-offline-safe app uses:
+The manifest should truthfully describe the local app. A typical private app
+uses:
 
 ```json
 {
@@ -135,26 +136,20 @@ offline-safe app uses:
   "description": "One useful sentence.",
   "entry": "index.jsx",
   "icon": "icon.png",
-  "offline_capable": true,
+  "offline_capable": false,
   "permissions": {},
   "source_files": []
 }
 ```
 
-List every imported sibling source file in `source_files`. Set
-`offline_capable` to `true` only when every required read and write works
-without the network. The manifest's `icon` is the package-artwork source of
-truth: apply validates and materializes that exact accepted file, so do not
-upload a second copy after applying. The apply helper also applies the offline
-flag and versioned `capabilities` object; do not patch the app row separately.
+List every imported sibling source file in `source_files`. Keep
+`offline_capable` false for a new app and preserve an existing app's value on
+update; see `building-apps.md` if offline use is a real product promise.
 
-Offline support is a product choice, not a default requirement. Choose it when
-it materially benefits the app's use case or preserves an existing product
-promise. Möbius supplies generic cached storage, durable queues, connectivity,
-and conflict delivery; the app chooses what data to warm and owns completeness
-decisions, reconciliation, and UI. If offline logic depends on complete
-collection membership, use `storage.listWithStatus()` and treat
-`complete:false` as unavailable, not empty.
+The manifest's `icon` is the package-artwork source of truth: apply validates
+and materializes that exact accepted file, so do not upload a second copy after
+applying. The apply helper also applies the offline flag and versioned
+`capabilities` object; do not patch the app row separately.
 
 ### 3. Apply once early, then after each coherent revision
 
@@ -231,8 +226,12 @@ const unsubscribe = store.subscribe('state.json', setValue)
 ```
 
 Do not probe guessed keys. If records are split across keys, keep an explicit
-index or use `store.list()`. Do not use `localStorage`, IndexedDB, native
-`alert`/`confirm`/`prompt`, or owner credentials.
+index or use `store.list()` for best-known display. If behavior depends on
+complete membership—such as deciding that a collection is empty, seeding
+defaults, or deleting records—switch to `building-apps.md` and use
+`store.listWithStatus()`; `complete: false` means unavailable or partial, not
+empty. Do not use `localStorage`, IndexedDB, native `alert`/`confirm`/`prompt`,
+or owner credentials.
 
 ### 5. Verify the rendered app without exploring the whole shell
 
