@@ -1202,6 +1202,39 @@ class AppServiceAlias(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class DefaultPinInitialization(Base):
+  """Deployment-scoped 'default pins decided' marker — one singleton row.
+
+  Bootstrap pins the Store on a genuinely new deployment. Row absence is NOT a
+  reliable fresh-deployment signal: a hard-purged Store tombstone, an identity
+  the installer resolves only after fetching package metadata, or an old
+  deployment that never installed the Store all leave no matching Store row, yet
+  none of them is a fresh install whose owner never made a choice. So the
+  decision is made ONCE and persisted here rather than re-inferred every boot.
+
+  Three durable states, distinguishable across boots:
+    * no row               — undecided (before the first bootstrap classified).
+    * ``initialized_at`` NULL  — a new deployment whose default Store pin is
+      still pending; retried every boot until the pin transaction commits.
+    * ``initialized_at`` set   — decided: an existing deployment recorded at
+      upgrade with no pin, OR the Store pin committed in the same transaction.
+
+  It is a database row (not a filesystem marker) precisely so the pin and this
+  marker commit atomically — a crash between them can never leave the Store
+  unpinned forever with the deployment recorded as initialized.
+
+  ``create_all`` builds this table on the next boot — a new table needs no ALTER
+  migration (see ``schema_migrations.run_migrations``).
+  """
+
+  __tablename__ = "default_pin_initialization"
+
+  # Fixed sentinel primary key — this table holds at most one row.
+  id = Column(String(32), primary_key=True)
+  initialized_at = Column(DateTime, nullable=True, default=None)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Project(Base):
   """A first-class owner workspace containing files, chats, and artifacts.
 
