@@ -4897,6 +4897,46 @@ def _build_provider_skills_block(
   return _build_available_skills_block(data_dir)
 
 
+def _helper_host_key(db, run_policy, *, provider_id: str, connector_plan):
+  """The shared helper host a delegated turn runs in, or None for its own process.
+
+  One host per parent chat and setup (provider, access scope, working
+  directory, connected services), so helpers of different chats or setups
+  never share a process, environment, or permissions. See helper_hosts.
+  """
+  if run_policy is None:
+    return None
+  from app import helper_hosts
+  if not helper_hosts.hosts_enabled():
+    return None
+  row = db.query(models.Delegation.parent_chat_id).filter(
+    models.Delegation.id == run_policy.delegation_id,
+  ).first()
+  if row is None:
+    return None
+  # Identity only: capabilities are freshly minted every turn, so hashing
+  # their values would give each turn a host of its own.
+  connectors = None
+  if connector_plan is not None:
+    connectors = {
+      "codex_config": connector_plan.codex_config,
+      "claude_servers": sorted(
+        (name, server.get("url")) for name, server in connector_plan.claude_servers.items()
+      ),
+      "codex_env": sorted(connector_plan.codex_env),
+    }
+  # Claude fixes a helper's model on the host's helper definitions, so its
+  # hosts are also per model; a Codex thread chooses its model per turn.
+  model = run_policy.model if provider_runtime_kind(get_provider(provider_id)) == "claude_sdk" else None
+  return helper_hosts.HostKey(
+    parent_chat_id=row[0],
+    provider_id=provider_id,
+    scope=run_policy.scope,
+    cwd=run_policy.cwd,
+    setup=helper_hosts.setup_digest(connectors, model),
+  )
+
+
 async def _run_chat_impl(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -5609,6 +5649,9 @@ async def _run_chat_impl_with_db(
       _publish_chat_run_finished(chat_id)
     db.close()
     return disposition
+  helper_host_key = _helper_host_key(
+    db, run_policy, provider_id=provider_id, connector_plan=connector_turn_plan,
+  )
   data_dir = Path(settings.data_dir)
   cwd = (
     run_policy.cwd
@@ -5677,6 +5720,7 @@ async def _run_chat_impl_with_db(
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
+        helper_host_key=helper_host_key,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5789,7 +5833,9 @@ async def _run_chat_impl_with_db(
     # scope — _resumable lives in claude_sdk_runner and is imported.
     from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
     claude_session_id = session_id
-    if session_id and not _resumable(
+    # A helper on a shared host resumes through its host (or is reseeded
+    # there); only a private Claude session needs a resumable transcript.
+    if helper_host_key is None and session_id and not _resumable(
       session_id, cwd, sdk_env.get("CLAUDE_CONFIG_DIR")
     ):
       if run_policy is not None and not run_policy.allow_session_reseed:
@@ -5853,20 +5899,38 @@ async def _run_chat_impl_with_db(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
           provider_id=provider_id, cost_usd=0, close_browser=False,
         )
-      runner_result = await run_claude_sdk_turn(
-        user_message=user_message,
-        session_id=claude_session_id,
-        base_env=sdk_env,
-        cwd=cwd,
-        chat_id=chat_id,
-        skill_text=system_prompt,
-        bc=sink,
-        agent_settings=runner_agent_settings,
-        skills_enabled=_skills_enabled(settings.data_dir),
-        run_policy=run_policy,
-        connector_plan=connector_turn_plan,
-        coordination_enabled=coordination_tools_enabled,
-      )
+      if helper_host_key is not None:
+        from app.claude_helper_host import run_claude_host_turn
+        runner_result = await run_claude_host_turn(
+          user_message=user_message,
+          session_id=claude_session_id,
+          base_env=sdk_env,
+          chat_id=chat_id,
+          skill_text=system_prompt,
+          bc=sink,
+          agent_settings=runner_agent_settings,
+          skills_enabled=_skills_enabled(settings.data_dir),
+          run_policy=run_policy,
+          connector_plan=connector_turn_plan,
+          resumed_context=resumed_context_fallback,
+          helper_host_key=helper_host_key,
+          data_dir=settings.data_dir,
+        )
+      else:
+        runner_result = await run_claude_sdk_turn(
+          user_message=user_message,
+          session_id=claude_session_id,
+          base_env=sdk_env,
+          cwd=cwd,
+          chat_id=chat_id,
+          skill_text=system_prompt,
+          bc=sink,
+          agent_settings=runner_agent_settings,
+          skills_enabled=_skills_enabled(settings.data_dir),
+          run_policy=run_policy,
+          connector_plan=connector_turn_plan,
+          coordination_enabled=coordination_tools_enabled,
+        )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
