@@ -108,11 +108,17 @@ def test_promote_goal_tool_returns_verified_platform_identity(monkeypatch):
     "objective": "Ship and verify",
     "goal_id": "goal-1",
     "run_id": "run-1",
-    "next_action": (
-      "If this outcome has multiple verifiable stages or branches, publish "
-      "its Goal plan now. The Goal record does not execute a prose checklist."
-    ),
+    "next_action": control._GOALS.PLAN_NEXT_ACTION,
   }
+
+
+def test_promote_goal_result_names_the_plan_script_not_a_plan_tool():
+  """Told only to "publish its Goal plan", agents invented an MCP plan tool."""
+  control = _control_module()
+  next_action = control._GOALS.PLAN_NEXT_ACTION
+  plan_script = Path(__file__).resolve().parents[1] / "scripts" / "goal_plan.py"
+  assert f"python3 {plan_script} set --task" in next_action
+  assert "there is no plan tool" in next_action
 
 
 def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):

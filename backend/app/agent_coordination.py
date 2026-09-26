@@ -31,8 +31,10 @@ MAX_PEERS = 200
 MAX_SCOPE_MESSAGES = 1000
 MAX_DIRECT_MESSAGES_PER_RECIPIENT = 1000
 MAX_CONTEXT_PEERS = 24
+# Notes are delivered whole: the send cap (4000 characters) already bounds
+# each one, and a clipped note forces the recipient to dig the rest out of the
+# activity log. The message count bounds the delivery.
 MAX_CONTEXT_MESSAGES = 12
-MAX_CONTEXT_BODY_CHARS = 1200
 PEER_MESSAGE_CURSOR_FIELD = "peer_message_through"
 
 
@@ -1667,11 +1669,6 @@ def _interrupt_peer_carrier(
   if not messages:
     return None
   model_messages = [model_message(message) for message in messages]
-  for message in model_messages:
-    body = message.get("body")
-    if isinstance(body, str) and len(body) > MAX_CONTEXT_BODY_CHARS:
-      message["body"] = body[:MAX_CONTEXT_BODY_CHARS].rstrip() + "…"
-      message["truncated"] = True
   payload: dict[str, Any] = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
@@ -2102,11 +2099,6 @@ def build_coordination_context_delivery(
     goal = peer.get("goal")
     if isinstance(goal, str) and len(goal) > 240:
       peer["goal"] = goal[:240].rstrip() + "…"
-  for message in snapshot["messages"]:
-    body = message.get("body")
-    if isinstance(body, str) and len(body) > MAX_CONTEXT_BODY_CHARS:
-      message["body"] = body[:MAX_CONTEXT_BODY_CHARS].rstrip() + "…"
-      message["truncated"] = True
   if (
     not snapshot["collaborators"]
     and not snapshot["messages"]

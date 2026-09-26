@@ -3502,11 +3502,9 @@ _MODEL_CAPACITY_ERROR_MARKERS = (
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
 
-  Substring match on the display error (mirrors `_should_retry_without_model`
-  in claude_sdk_runner). Deliberately broad — the cost of a false positive is
-  only that the queue is parked for the user to resend (never lost), while a
-  false negative reinstates the limit storm. A genuinely transient one-off
-  error does NOT match, so the queue still flows through a blip.
+  Substring match on the display error. A false positive only parks the queue
+  for manual resend; a false negative reinstates the limit storm. A transient
+  one-off error does not match, so the queue flows through a blip.
 
   The marker list is grounded in the ACTUAL Anthropic limit strings seen in
   prod chat.log: "You've hit your weekly limit · resets ...", "... session
@@ -5825,8 +5823,6 @@ async def _run_chat_impl_with_db(
         chat_id=chat_id,
         skill_text=system_prompt,
         bc=sink,
-        pending_questions=questions._pending,
-        db=db,
         agent_settings=runner_agent_settings,
         skills_enabled=_skills_enabled(settings.data_dir),
         run_policy=run_policy,
