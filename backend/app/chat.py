@@ -5324,6 +5324,9 @@ async def _run_chat_impl_with_db(
   if agent_token is not None:
     base_env["AGENT_TOKEN"] = agent_token
   base_env.update(app_context_env)
+  from app.process_groups import RUN_MARKER_ENV, run_marker
+  # Names every process this run starts (non-secret; see RUN_MARKER_ENV).
+  base_env[RUN_MARKER_ENV] = run_marker(run_token)
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
