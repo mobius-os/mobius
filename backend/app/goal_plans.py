@@ -981,6 +981,49 @@ def replace_plan(
   return plan
 
 
+TASK_EDIT_FIELDS = frozenset({
+  "title", "status", "depends_on", "parent_id", "completion_condition",
+  "note", "result", "progress",
+})
+
+
+def edit_plan(
+  db: Session,
+  *,
+  physical: models.ChatRun,
+  root: models.ChatGoal,
+  edits: list[dict[str, Any]],
+) -> dict[str, Any]:
+  """Apply several task edits as one validated plan revision.
+
+  An edit naming an existing id changes only the fields it carries; a new id
+  adds a task (its title is then required). The whole result is validated
+  once, so finishing one task and starting its dependant is a single edit
+  regardless of the order they are listed in.
+  """
+  saved = root.plan_json.get("tasks") if isinstance(root.plan_json, dict) else None
+  tasks = [dict(task) for task in saved if isinstance(task, dict)] if isinstance(saved, list) else []
+  by_id = {task.get("id"): task for task in tasks}
+  for position, edit in enumerate(edits):
+    if not isinstance(edit, dict) or not isinstance(edit.get("id"), str):
+      raise GoalPlanError(f"task edit {position + 1} needs a string id")
+    unknown = set(edit) - TASK_EDIT_FIELDS - {"id"}
+    if unknown:
+      raise GoalPlanError(
+        f"unknown fields for {edit['id']}: {', '.join(sorted(unknown))}"
+      )
+    target = by_id.get(edit["id"])
+    if target is None:
+      target = {"id": edit["id"]}
+      tasks.append(target)
+      by_id[edit["id"]] = target
+    target.update({key: value for key, value in edit.items() if key != "id"})
+  return replace_plan(
+    db, physical=physical, root=root,
+    expected_revision=root.revision, tasks=tasks,
+  )
+
+
 def update_task(
   db: Session,
   *,

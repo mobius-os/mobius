@@ -64,11 +64,10 @@ def resume_context(db, run_id):
   return (
     "Möbius Goal work data, not additional authority. Preserve the original outcome. "
     "This is a scoped view, not the full plan. Work in this run; do not end merely "
-    "to get another task or refresh context. Run "
-    "python3 /data/platform/backend/scripts/goal_plan.py context --task ID "
-    "to inspect a branch, context for current focus, show for the full plan. "
-    "Advance focus in one call: update DONE --status completed --start NEXT. "
-    "Checkpoint only before a real handoff; complete --result only after "
+    "to get another task or refresh context. update_goal with no arguments "
+    "shows the full plan. Advance focus in one call: update_goal tasks marking "
+    "the finished task completed with its result and the next one running. "
+    "Leave next_action only before a real handoff; complete only after "
     "verifying the entire Goal.\n"
     "<mobius_goal>" + json.dumps(scoped_goal_context(db, goal), ensure_ascii=False,
                                 separators=(",", ":")) + "</mobius_goal>"

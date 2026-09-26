@@ -76,16 +76,13 @@ def promote_goal(objective: str) -> dict:
   return payload
 
 
-# Promotion is a tool call while the plan is this sibling script. Name the exact
-# command where the next step is announced: told only to "publish its Goal
-# plan", agents have invented a plan tool that does not exist.
+# Name the exact next call: told only to "publish its Goal plan", agents once
+# invented plan tools. update_goal is the real one.
 PLAN_NEXT_ACTION = (
   "If this outcome has multiple verifiable stages or branches, publish its "
-  "Goal plan now with `python3 "
-  f"{Path(__file__).resolve().with_name('goal_plan.py')} set --task "
-  "'id|Title|dependencies' ...`; the same script updates, extends, and "
-  "completes it (there is no plan tool). The Goal record does not execute a "
-  "prose checklist."
+  "plan now with update_goal tasks (or pass tasks to promote_goal next time); "
+  "the same tool advances and completes it. The Goal record does not execute "
+  "a prose checklist."
 )
 
 

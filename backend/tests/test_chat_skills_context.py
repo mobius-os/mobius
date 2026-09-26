@@ -232,20 +232,16 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "ready independent sibling leaves concurrently" in planning_normalized
   assert "Parallelism itself is not the saving" in planning_normalized
   assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
-  assert "goal_plan.py check-complete" in planning_normalized
-  assert "complete --result 'Verified evidence'" in planning_normalized
-  assert "no separate preflight is required" in planning_normalized
-  assert "optional read-only task diagnostic" in planning_normalized
-  completion_example = planning.split("After verifying the original outcome:", 1)[1].split("```", 2)[1]
-  assert "complete --result" in completion_example
-  assert "check-complete" not in completion_example
+  assert "call `update_goal` with `complete" in planning_normalized
+  assert "refused while tasks or helpers are unfinished" in planning_normalized
+  assert "goal_plan.py" not in planning
   assert "not a keyword trigger" in planning_normalized
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
   assert "Terminal settlement continues the exact Goal" in planning_normalized
   assert "turns are not a budget" in planning_normalized
-  assert "context --task ID" in planning_normalized
+  assert "With no arguments it returns the full plan" in planning_normalized
   assert "Do not end a run merely to refresh context" in planning_normalized
 
 

@@ -1211,9 +1211,10 @@ Every Goal attempt receives a deterministic hierarchical view even with no
 provider history: original objective, checkpoint, current task, ancestor
 requirements, direct children, sibling summaries and relevant prerequisites.
 The deepest running work selects focus; concurrent branches select their common
-ancestor. Other descendants remain stored, not injected. `goal_plan.py context
---task ID` navigates with the same read-only projection during a run; `show`
-retains full-plan access. No model summarizer, delta cache, extra focus record,
+ancestor. Other descendants remain stored, not injected. `update_goal` with
+no arguments returns the full plan without attaching the run; every write
+through it attaches the run first and applies all task edits as one revision.
+No model summarizer, delta cache, extra focus record,
 or duplicate copy of the incoming message is involved. Agents continue working
 in their current run rather than ending turns to refresh context. Task additions and updates operate on the existing record. Completion
 is an explicit revision-checked operation with verification evidence and no

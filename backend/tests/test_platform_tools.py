@@ -115,13 +115,75 @@ def test_promote_goal_tool_returns_verified_platform_identity(monkeypatch):
   }
 
 
-def test_promote_goal_result_names_the_plan_script_not_a_plan_tool():
-  """Told only to "publish its Goal plan", agents invented an MCP plan tool."""
+def test_promote_goal_result_names_the_real_plan_tool():
+  """Told only to "publish its Goal plan", agents once invented plan tools."""
   control = _control_module()
   next_action = control._GOALS.PLAN_NEXT_ACTION
-  plan_script = Path(__file__).resolve().parents[1] / "scripts" / "goal_plan.py"
-  assert f"python3 {plan_script} set --task" in next_action
-  assert "there is no plan tool" in next_action
+  assert "update_goal" in next_action
+  assert control.UPDATE_GOAL_TOOL in control.OWNER_TOOLS
+  assert control.UPDATE_GOAL_TOOL not in control.DELEGATED_TOOLS
+
+
+def test_promote_goal_with_tasks_publishes_the_plan_in_the_same_call(monkeypatch):
+  control = _control_module()
+  monkeypatch.setattr(control._GOALS, "promote_goal", lambda objective: {
+    "state": "promoted", "objective": objective,
+    "root_run_id": "goal-1", "run_id": "run-1",
+  })
+  sent = []
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path, body: (
+    sent.append((method, path, body)) or {
+      "goal": {"id": "goal-1", "status": "open", "revision": 1},
+      "plan": {"tasks": [], "summary": {"completed": 0, "total": 2, "ready": ["a"]}},
+    }
+  ))
+
+  text = control._call_promote_goal({
+    "objective": "Ship", "tasks": [{"id": "a", "title": "A"}],
+  })
+
+  assert sent == [("POST", "/api/chats/chat-1/goal/update", {
+    "tasks": [{"id": "a", "title": "A"}],
+  })]
+  assert text.startswith("Goal promoted. Goal open, revision 1: 0/2 tasks complete.")
+  assert "Ready: a." in text
+
+
+def test_update_goal_reports_compactly_and_rejects_unknown_arguments(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(control, "_agent_api_call", lambda method, path, body: {
+    "goal": {"id": "g", "status": "open", "revision": 4, "objective": "Ship"},
+    "plan": {
+      "tasks": [{"id": "a", "title": "A", "status": "completed", "result": "ok"}],
+      "summary": {"completed": 1, "total": 1, "running": [], "ready": []},
+    },
+  })
+
+  write = control._call_update_goal({"tasks": [{"id": "a", "status": "completed"}]})
+  read = control._call_update_goal({})
+
+  assert write == "Goal open, revision 4: 1/1 tasks complete."
+  assert read.splitlines()[0] == "Objective: Ship"
+  assert "- a [completed]: A — ok" in read
+  with pytest.raises(ValueError, match="does not take: owner"):
+    control._call_update_goal({"owner": "x"})
+
+
+def test_platform_control_tools_are_marked_always_loaded(monkeypatch):
+  """Claude Code defers MCP tools behind a search round trip by default, so the
+  control tools every owner turn is told to use carry the always-load meta."""
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  control = _control_module()
+
+  tools = control._tools_list_result()["tools"]
+
+  assert tools and all(
+    tool["_meta"] == {"anthropic/alwaysLoad": True} for tool in tools
+  )
+  # The meta is added to the listing, not baked into the shared definition.
+  assert "_meta" not in control._TOOL_DEFINITIONS[control.PROMOTE_GOAL_TOOL]
 
 
 def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
@@ -252,7 +314,7 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   assert "your turn continues" in approval
   assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
   finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
-  assert "Usually unnecessary" in finish and "--finished WORK_KEY" in finish
+  assert "Usually unnecessary" in finish and "finished_claims" in finish
   spawn = tools[control.SPAWN_AGENT_TOOL]["description"]
   assert "never poll" in spawn and "does not see this" in spawn
   for name in (
