@@ -109,7 +109,6 @@ def test_validator_rejects_manifest_type_holes_and_missing_package_files(tmp_pat
   {"schedule": {"initialize_on_install": True}},
   {"schedule": {"job": "job.sh", "user_configurable": "yes"}},
   {"system_prompt": "prompt.md"},
-  {"tools": [{"name": "log", "description": "x", "input_schema": {"type": "object"}}]},
   {"entry": "src/index.jsx"},
   {"entry": "main.jsx"},
 ])

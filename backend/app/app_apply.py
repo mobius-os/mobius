@@ -583,7 +583,6 @@ def _apply_local_manifest_runtime(
     public_access=runtime_fields["public_access"],
     contract_permissions=manifest.get("permissions") or {},
     service=service,
-    tools=list(manifest.get("tools") or []),
   )
 
 

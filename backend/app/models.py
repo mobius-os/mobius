@@ -526,9 +526,6 @@ class Delegation(Base):
   # child chat or weakening the idempotency key.
   parent_root_run_id = Column(String(64), nullable=False, index=True)
   task_key = Column(String(128), nullable=False)
-  # The parent Goal plan task this helper works on, recorded at spawn. The
-  # helper's name is free; this is what places it under its task.
-  goal_task_id = Column(String(128), nullable=True, default=None)
   child_chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True
   )

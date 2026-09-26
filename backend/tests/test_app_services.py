@@ -464,8 +464,7 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
   )
   owner = db.query(models.Owner).one()
   headers = auth
-  expected = {'scope':'owner', 'app_id':None, 'app_slug':None, 'delegated':False,
-              'access':'write'}
+  expected = {'scope':'owner', 'app_id':None, 'app_slug':None, 'delegated':False}
   if caller_kind == 'app':
     token = auth_tokens.create_app_token(
       target.id, owner.username, owner.token_epoch, app_nonce=target.token_nonce,
@@ -481,8 +480,7 @@ def test_authenticated_routes_preserve_the_same_complete_actor(
                        delegation_id='fixture-delegation')
 
     server.dependency_overrides[get_principal] = delegated_principal
-    # No delegation row stands behind this bearer, so it may only read.
-    expected.update(delegated=True, access='read')
+    expected['delegated'] = True
   path = (f'/api/apps/{target.id}/service/actor' if route == 'numeric'
           else '/api/services/stable-actor/actor')
   try:

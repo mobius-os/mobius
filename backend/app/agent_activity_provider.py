@@ -14,7 +14,6 @@ from app.agent_activity import (
   ActivityCommand,
   AgentActivityBinding,
 )
-from app.app_tools import exposed_tool_name
 from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
 from app.manifest_contract import validate_manifest_contract
 
@@ -29,7 +28,6 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
   """
   try:
     pairs: list[tuple[str, ActivityCommand]] = []
-    tool_pairs: list[tuple[str, ActivityCommand]] = []
     rows = db.query(models.App).filter(
       models.App.deleted_at.is_(None),
     ).order_by(models.App.id.asc()).all()
@@ -50,19 +48,9 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
       for activity_id, raw in declarations.items():
         if not isinstance(raw, dict):
           continue
-        running_label = raw.get("running_label")
-        tool = raw.get("tool")
-        if isinstance(tool, str) and isinstance(running_label, str):
-          tool_pairs.append((exposed_tool_name(app.slug, tool), ActivityCommand(
-            app_slug=str(app.slug),
-            app_name=str(app.name or app.slug),
-            activity_id=str(activity_id),
-            argument_count=0,
-            running_label=running_label.strip(),
-          )))
-          continue
         entry = raw.get("entry")
         argument_count = raw.get("arguments")
+        running_label = raw.get("running_label")
         if (
           not isinstance(entry, str)
           or not isinstance(argument_count, int)
@@ -83,7 +71,7 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         except OSError:
           pass
         pairs.extend((str(path), command) for path in forms)
-    return AgentActivityBinding.of(pairs, tool_pairs)
+    return AgentActivityBinding.of(pairs)
   except Exception:
     log.exception("app activity binding unavailable; activity cards disabled")
     return EMPTY_AGENT_ACTIVITY_BINDING

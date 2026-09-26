@@ -1393,7 +1393,6 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1527,16 +1526,12 @@ async def _run_codex_sdk_turn(
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated
-  from app.app_tools import live_app_tools
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
     control_enabled=True,
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
-    app_tool_names=tuple(
-      tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
-    ),
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
@@ -1829,10 +1824,6 @@ async def _run_codex_sdk_turn(
           )
         if resumed_context:
           user_message = f"{resumed_context}\n\n{user_message}"
-      # Admission marks this turn's inputs delivered, so it waits until the
-      # Codex thread is ready: a turn that never started consumes nothing.
-      if admit is not None and not await admit():
-        return {**aborted_result(), "superseded": True}
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,
@@ -2394,7 +2385,6 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
-  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2430,7 +2420,6 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
-      admit=admit,
     )
   finally:
     ownership.release()

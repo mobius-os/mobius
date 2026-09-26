@@ -5648,15 +5648,17 @@ async def _run_chat_impl_with_db(
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
 
-      async def admit() -> bool:
-        return await _admit_provider_execution(
-          chat_id,
-          run_token or "",
-          run_gen,
-          has_peer_context_delivery=coordination_message_through is not None,
-          activity_results=activity_results,
+      if not await _admit_provider_execution(
+        chat_id,
+        run_token or "",
+        run_gen,
+        has_peer_context_delivery=coordination_message_through is not None,
+        activity_results=activity_results,
+      ):
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
         )
-
       runner_result = await run_codex_sdk_turn(
         user_message=user_message,
         session_id=session_id,
@@ -5675,13 +5677,7 @@ async def _run_chat_impl_with_db(
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        admit=admit,
       )
-      if runner_result.get("superseded"):
-        return await _complete_turn(
-          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-          provider_id=provider_id, cost_usd=0, close_browser=False,
-        )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
@@ -5846,15 +5842,17 @@ async def _run_chat_impl_with_db(
     try:
       from app.providers import skills_enabled as _skills_enabled
 
-      async def admit() -> bool:
-        return await _admit_provider_execution(
-          chat_id,
-          run_token or "",
-          run_gen,
-          has_peer_context_delivery=coordination_message_through is not None,
-          activity_results=activity_results,
+      if not await _admit_provider_execution(
+        chat_id,
+        run_token or "",
+        run_gen,
+        has_peer_context_delivery=coordination_message_through is not None,
+        activity_results=activity_results,
+      ):
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
         )
-
       runner_result = await run_claude_sdk_turn(
         user_message=user_message,
         session_id=claude_session_id,
@@ -5868,13 +5866,7 @@ async def _run_chat_impl_with_db(
         run_policy=run_policy,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
-        admit=admit,
       )
-      if runner_result.get("superseded"):
-        return await _complete_turn(
-          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-          provider_id=provider_id, cost_usd=0, close_browser=False,
-        )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:

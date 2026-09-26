@@ -1,7 +1,6 @@
 """Dependency-free manifest contract shared by install and preflight."""
 
 from collections.abc import Mapping
-import json
 from urllib.parse import unquote, urlparse
 import re
 import shlex
@@ -38,9 +37,6 @@ PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
-AGENT_TOOLS_MAX = 16
-AGENT_TOOL_DESCRIPTION_MAX = 2000
-AGENT_TOOL_SCHEMA_MAX_BYTES = 8 * 1024
 MAX_JOB_SHEBANG_BYTES = 256
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -57,7 +53,6 @@ _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
 _SKILL_FOLDER_OK = re.compile(r"^([a-z0-9][a-z0-9._-]*)/$")
 FOLDER_SKILL_ENTRY = "SKILL.md"
 _PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
-_AGENT_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class ManifestContractError(ValueError):
@@ -273,70 +268,6 @@ def static_asset_entries(value) -> dict[str, str]:
       entries[dest] = src
     return entries
   _fail("Manifest `static_assets` must be an object or array.")
-
-
-def _validate_running_label(running_label, field: str) -> None:
-  if (
-    not isinstance(running_label, str)
-    or not running_label.strip()
-    or len(running_label) > 160
-  ):
-    _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
-
-
-def validate_agent_tools(tools, *, has_service: bool) -> None:
-  """Validate the tools an app contributes to every agent run.
-
-  A tool is only a declaration: the platform calls it through the app's own
-  reviewed `service`, so there is no second execution path to review.
-  """
-  if not has_service:
-    _fail(
-      "Manifest `tools` requires a `service`: the platform calls each tool "
-      "through the app's service."
-    )
-  if not isinstance(tools, list) or len(tools) > AGENT_TOOLS_MAX:
-    _fail(f"Manifest `tools` must be an array with at most {AGENT_TOOLS_MAX} entries.")
-  names: set[str] = set()
-  for index, tool in enumerate(tools):
-    field = f"tools[{index}]"
-    if not isinstance(tool, Mapping) or set(tool) != {
-      "name", "description", "input_schema",
-    }:
-      _fail(
-        f"Manifest `{field}` must contain exactly `name`, `description`, "
-        "and `input_schema`."
-      )
-    name = tool["name"]
-    if not isinstance(name, str) or _AGENT_TOOL_NAME.fullmatch(name) is None:
-      _fail(f"Manifest `{field}.name` must match `^[a-z][a-z0-9_]{{0,39}}$`.")
-    if name in names:
-      _fail(f"Manifest `tools` repeats the name {name!r}.")
-    names.add(name)
-    description = tool["description"]
-    if (
-      not isinstance(description, str)
-      or not description.strip()
-      or len(description) > AGENT_TOOL_DESCRIPTION_MAX
-    ):
-      _fail(
-        f"Manifest `{field}.description` must be 1-"
-        f"{AGENT_TOOL_DESCRIPTION_MAX} characters."
-      )
-    schema = tool["input_schema"]
-    if not isinstance(schema, Mapping) or schema.get("type") != "object":
-      _fail(f"Manifest `{field}.input_schema` must be a JSON Schema object type.")
-    try:
-      encoded = json.dumps(schema, allow_nan=False).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-      raise ManifestContractError(
-        f"Manifest `{field}.input_schema` must be plain JSON."
-      ) from exc
-    if len(encoded) > AGENT_TOOL_SCHEMA_MAX_BYTES:
-      _fail(
-        f"Manifest `{field}.input_schema` exceeds "
-        f"{AGENT_TOOL_SCHEMA_MAX_BYTES} bytes."
-      )
 
 
 def validate_manifest_contract(manifest) -> None:
@@ -757,32 +688,16 @@ def validate_manifest_contract(manifest) -> None:
       f"(max {AGENT_ACTIVITIES_COUNT_MAX})."
     )
   declared_sources = set(source_files or []) if isinstance(source_files, list) else set()
-  declared_tools = {
-    tool.get("name") for tool in (manifest.get("tools") or [])
-    if isinstance(tool, Mapping)
-  } if isinstance(manifest.get("tools"), list) else set()
   activity_entries: set[str] = set()
-  activity_tools: set[str] = set()
   for activity_id, activity in agent_activities.items():
     validate_slug_field(activity_id, f"agent_activities.{activity_id}")
     field = f"agent_activities.{activity_id}"
-    # An activity card is triggered either by one of the app's agent tools or
-    # by a simple shell invocation of one of its source files.
-    if isinstance(activity, Mapping) and set(activity) == {"tool", "running_label"}:
-      tool = activity.get("tool")
-      if tool not in declared_tools:
-        _fail(f"Manifest `{field}.tool` must name one of the app's `tools`.")
-      if tool in activity_tools:
-        _fail("Manifest agent_activities must use distinct tools.")
-      activity_tools.add(tool)
-      _validate_running_label(activity.get("running_label"), field)
-      continue
     if not isinstance(activity, Mapping) or set(activity) != {
       "entry", "arguments", "running_label",
     }:
       _fail(
-        f"Manifest `{field}` must contain either `tool` and `running_label`, "
-        "or `entry`, `arguments`, and `running_label`."
+        f"Manifest `{field}` must contain only entry, arguments, and "
+        "running_label."
       )
     entry = activity.get("entry")
     validate_repo_relative_path(entry, f"{field}.entry")
@@ -800,7 +715,13 @@ def validate_manifest_contract(manifest) -> None:
       or not 0 <= arguments <= 16
     ):
       _fail(f"Manifest `{field}.arguments` must be an integer from 0 to 16.")
-    _validate_running_label(activity.get("running_label"), field)
+    running_label = activity.get("running_label")
+    if (
+      not isinstance(running_label, str)
+      or not running_label.strip()
+      or len(running_label) > 160
+    ):
+      _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
 
   service = manifest.get("service")
   if service is not None:
@@ -893,10 +814,6 @@ def validate_manifest_contract(manifest) -> None:
           f"Manifest `skills[{index}]` {entry!r} must list "
           f"`{entry}{FOLDER_SKILL_ENTRY}` in `source_files`."
         )
-
-  tools = manifest.get("tools")
-  if tools is not None:
-    validate_agent_tools(tools, has_service=service is not None)
 
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:

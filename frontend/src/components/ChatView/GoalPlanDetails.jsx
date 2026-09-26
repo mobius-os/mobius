@@ -74,22 +74,41 @@ export default function GoalPlanDetails({ plan }) {
   if (!tasks.length) return null
   const tasksById = new Map(tasks.map(task => [task.id, task]))
   const delegations = Array.isArray(plan?.delegations) ? plan.delegations : []
-  // Each helper records the plan task it works on (plan_task) when it starts;
-  // it nests under that task in start order. Helpers with no task stay after
-  // the plan rather than being matched by name.
-  const helpersByTask = new Map()
-  const unfiledHelpers = []
-  for (const node of delegations) {
-    if (tasksById.has(node.plan_task)) {
-      helpersByTask.set(node.plan_task, [...(helpersByTask.get(node.plan_task) || []), node])
-    } else {
-      unfiledHelpers.push(node)
-    }
-  }
+  const delegatedByTask = new Map(delegations.map(node => [node.task_key, node]))
   const childrenByParent = new Map()
   for (const task of tasks) {
     const parent = tasksById.has(task.parent_id) ? task.parent_id : null
     childrenByParent.set(parent, [...(childrenByParent.get(parent) || []), task])
+  }
+  const renderBranch = (
+    task,
+    depth = 0,
+    execution = delegatedByTask.get(task.id),
+  ) => {
+    const planChildren = childrenByParent.get(task.id) || []
+    const executionChildren = execution?.children || []
+    const children = planChildren.map(child => renderBranch(
+        child,
+        depth + 1,
+        executionChildren.find(node => node.task_key === child.id),
+      ))
+    children.push(...executionChildren
+        .filter(node => !planChildren.some(child => child.id === node.task_key))
+        .map(node => renderDelegation(node, depth + 1)))
+    return <GoalPlanRow
+      key={task.id}
+      title={task.title}
+      status={goalTaskDisplayStatus(task, execution)}
+      depth={depth}
+      emphasized={task.ready_to_verify ? 'verify' : task.ready ? 'ready' : ''}
+      meta={task.ready_to_verify
+        ? 'Ready to verify'
+        : execution
+          ? delegationMeta(execution)
+          : taskMeta(task, tasksById)}
+    >
+      {children}
+    </GoalPlanRow>
   }
   const renderDelegation = (node, depth = 0) => (
     <GoalPlanRow
@@ -102,28 +121,13 @@ export default function GoalPlanDetails({ plan }) {
       {(node.children || []).map(child => renderDelegation(child, depth + 1))}
     </GoalPlanRow>
   )
-  const renderBranch = (task, depth = 0) => {
-    const helpers = helpersByTask.get(task.id) || []
-    const children = [
-      ...(childrenByParent.get(task.id) || []).map(child => renderBranch(child, depth + 1)),
-      ...helpers.map(node => renderDelegation(node, depth + 1)),
-    ]
-    return <GoalPlanRow
-      key={task.id}
-      title={task.title}
-      status={goalTaskDisplayStatus(task, helpers)}
-      depth={depth}
-      emphasized={task.ready_to_verify ? 'verify' : task.ready ? 'ready' : ''}
-      meta={task.ready_to_verify ? 'Ready to verify' : taskMeta(task, tasksById)}
-    >
-      {children}
-    </GoalPlanRow>
-  }
   return (
     <div className="chat__goal-plan" role="region" aria-label="Goal details" tabIndex={0}>
       <div className="chat__goal-plan-tasks" role="list" aria-label="Full goal todo list">
         {(childrenByParent.get(null) || []).map(task => renderBranch(task))}
-        {unfiledHelpers.map(node => renderDelegation(node))}
+        {delegations
+          .filter(node => !tasksById.has(node.task_key))
+          .map(node => renderDelegation(node))}
       </div>
     </div>
   )

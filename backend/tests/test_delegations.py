@@ -413,38 +413,6 @@ def test_goal_identity_is_the_delegation_idempotency_parent(db, chat):
   assert parent_root_run_id(db, chat.id, require_active=True) == "stable-goal"
 
 
-def test_submit_records_the_plan_task_and_refuses_an_unknown_one(
-  client, owner_token, db, monkeypatch,
-):
-  """A submitted plan_task reaches the row; a bad one is refused, not dropped."""
-  auth = {"Authorization": f"Bearer {owner_token}"}
-  app_id = create_local_app(client, auth, name="Subagents")['id']
-  parent_chat_id = _parent_with_run(client, owner_token, db)
-
-  async def fake_start(**kwargs):
-    return True
-
-  monkeypatch.setattr(
-    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
-  )
-  body = {
-    "app_id": app_id, "parent_chat_id": parent_chat_id,
-    "task_key": "review-round-two", "prompt": "Review round two.",
-    "provider": "codex", "scope": "read",
-  }
-  refused = client.post(
-    "/api/delegations", json={**body, "plan_task": "r2"}, headers=auth,
-  )
-  assert refused.status_code == 422, refused.text
-  assert "no active Goal plan" in refused.json()["detail"]
-
-  created = client.post("/api/delegations", json=body, headers=auth)
-  assert created.status_code == 201, created.text
-  db.expire_all()
-  row = db.get(models.Delegation, created.json()["id"])
-  assert row.goal_task_id is None
-
-
 def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   client, owner_token, db, monkeypatch,
 ):
@@ -1355,11 +1323,7 @@ def _run_activity_checkpoint(
 
   seen_prompts = []
 
-  async def provider_turn(*, user_message, bc, admit=None, **_kwargs):
-    # Like the real runners: admit once the provider is up, before the prompt.
-    if admit is not None and not await admit():
-      return {"session_id": None, "cost_usd": None, "error": None,
-              "superseded": True}
+  async def provider_turn(*, user_message, bc, **_kwargs):
     seen_prompts.append(user_message)
     bc.publish({"type": "text", "content": response})
     if before_provider_return is not None:

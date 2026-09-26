@@ -124,9 +124,6 @@ class DelegationIntent:
   source_work_intent: str | None = None
   source_work_context_app_id: int | None = None
   source_work_envelope: dict | None = None
-  # Placement under the parent Goal's plan, not task identity: reattaching by
-  # name never re-files the helper.
-  goal_task_id: str | None = None
 
 
 def same_delegation_intent(
@@ -199,7 +196,6 @@ def create_or_attach_delegation(
     parent_chat_id=intent.parent_chat_id,
     parent_root_run_id=intent.parent_root_run_id,
     task_key=intent.task_key,
-    goal_task_id=intent.goal_task_id,
     child_chat_id=child_id,
     provider=intent.provider,
     model=intent.model,

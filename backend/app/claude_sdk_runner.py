@@ -52,7 +52,7 @@ import signal
 import shutil
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -174,9 +174,6 @@ async def _await_control_mcp_ready(
 # deliberate exception that module's contract now allows. The Codex runner
 # declares none, so it is unaffected. This is the Claude runner's register:
 # appended AFTER the constitution, never substituted for it.
-# Waiting guidance names shell patterns, not Claude tool names: the bundled CLI
-# retires tools between releases (TaskOutput went in 2.1.x), and a register that
-# names a missing tool sends every agent into a blocked `sleep` instead.
 _CONCISE_REGISTER = r"""# Concise register
 
 Keep replies proportionate: lead with the result and skip preamble. Match length to what the partner needs: brief for simple answers, complete for findings, decisions, and anything they must act on. Brevity never drops substance: a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
@@ -184,19 +181,14 @@ Keep replies proportionate: lead with the result and skip preamble. Match length
 # Execution lifetimes in Möbius
 
 Bash background tasks are local to this running turn. Their native receipt's
-"You will be notified" promise does not survive ending this turn or a restart,
-and a running background command never keeps the turn open. Run work that
-finishes within the Bash timeout in the foreground. To join longer work in
-this turn, start it so it records its own exit
-(`cmd > "$TMPDIR/job.log" 2>&1; echo $? > "$TMPDIR/job.exit"`), then wait in
-the foreground with `until [ -e "$TMPDIR/job.exit" ]; do sleep 5; done` and
-read the log; an output file alone is not completion, and a bare leading
-`sleep N` is refused. For an external condition that must outlive this turn,
-declare a durable Möbius Wait and confirm its saved receipt. Never end with
-"I'm waiting" on a Bash task, an output file, or ListAgents. Native
-Agent/Workflow work is also turn-local; join and synthesize it. Durable
-delegated work belongs to the installed Subagents capability, whose own
-receipt owns the later wake.
+"You will be notified" promise does not survive ending this turn or a restart.
+For work finishing now, join the exact task with TaskOutput(block=true) and
+read its result before finishing; an empty output file is not completion.
+For an external condition that must outlive this turn, declare a durable
+Möbius Wait and confirm its saved receipt. Never end with "I'm waiting" on a
+Bash task, an output file, or ListAgents. Workflow work is also turn-local;
+join and synthesize it. Helpers started with the Möbius `spawn_agent` tool are
+durable: their results reach this chat by themselves, so never wait on them.
 """
 # Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
 # Provider-native schedulers cannot render its card, survive the same restart
@@ -260,12 +252,6 @@ def _system_prompt_with_register(skill_text: str) -> str:
     return skill_text
   return skill_text.rstrip() + "\n\n" + register + "\n"
 
-
-# Detects a Claude CLI that never starts. A start is normally about a second;
-# a loaded host (for example every chat resuming after a restart) can stretch
-# it well past half a minute without anything being wrong, so this bound is
-# for a hang, not for slowness.
-_CLAUDE_START_TIMEOUT_SECONDS = 120.0
 
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
@@ -1145,7 +1131,6 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
-  admit: Callable[[], Awaitable[bool]] | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1515,9 +1500,7 @@ async def run_claude_sdk_turn(
     try:
       try:
         try:
-          await asyncio.wait_for(
-            client.connect(), timeout=_CLAUDE_START_TIMEOUT_SECONDS,
-          )
+          await asyncio.wait_for(client.connect(), timeout=30.0)
           control_ready_error = await _await_control_mcp_ready(
             client,
             enabled=(
@@ -1563,16 +1546,6 @@ async def run_claude_sdk_turn(
         label="Claude CLI",
       )
       active_client.set_process_group_id(process_group_id)
-      # Admission marks this turn's inputs (peer notes, helper results)
-      # delivered, so it waits until the provider has started: a turn that
-      # never reached Claude consumes nothing and its inputs stay owed.
-      if admit is not None and not await admit():
-        return {
-          "session_id": current_session_id,
-          "cost_usd": None,
-          "error": None,
-          "superseded": True,
-        }
       await client.query(turn_message)
 
       # Provider-native finite work can finish after its spawning turn, or even

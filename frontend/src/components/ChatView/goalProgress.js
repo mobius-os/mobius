@@ -205,16 +205,16 @@ function progressLabel(task) {
   return task?.title || ''
 }
 
-/**
- * A task with a helper still working shows as running, whatever it was marked;
- * otherwise the task's own status stands. A failed helper shows on its own row
- * beneath the task, since another helper may already have redone its work.
- */
-export function goalTaskDisplayStatus(task, helpers = []) {
-  const active = ['starting', 'running', 'resuming', 'paused']
-  return helpers.some(helper => active.includes(helper?.status))
-    ? 'running'
-    : task?.status
+/** Present the live execution owner rather than a stale optimistic task state. */
+export function goalTaskDisplayStatus(task, execution) {
+  if (!execution || execution.status === 'completed') return task?.status
+  if (['starting', 'running', 'resuming', 'paused'].includes(execution.status)) {
+    return 'running'
+  }
+  if (['failed', 'needs_review', 'interrupted'].includes(execution.status)) {
+    return 'failed'
+  }
+  return execution.status
 }
 
 function deepestPlanTasks(tasks, candidates) {

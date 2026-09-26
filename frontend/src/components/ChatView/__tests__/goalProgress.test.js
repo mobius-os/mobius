@@ -400,20 +400,12 @@ test('malformed delegation cycles cannot recurse forever', () => {
   )
 })
 
-test('a working helper outranks a stale completed task presentation', () => {
+test('live delegated execution outranks a stale completed task presentation', () => {
   const task = { id: 'audit', status: 'completed' }
-  assert.equal(goalTaskDisplayStatus(task, [{ status: 'running' }]), 'running')
-  assert.equal(goalTaskDisplayStatus(task, [{ status: 'paused' }]), 'running')
-  assert.equal(goalTaskDisplayStatus(task, [{ status: 'completed' }]), 'completed')
-  assert.equal(goalTaskDisplayStatus(task), 'completed')
-})
-
-test('a failed helper does not repaint a task another helper redid', () => {
-  const task = { id: 'review', status: 'completed' }
-  assert.equal(
-    goalTaskDisplayStatus(task, [{ status: 'needs_review' }, { status: 'completed' }]),
-    'completed',
-  )
+  assert.equal(goalTaskDisplayStatus(task, { status: 'running' }), 'running')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'paused' }), 'running')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'needs_review' }), 'failed')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'completed' }), 'completed')
 })
 
 test('ChatView retains settled goals independently of transport liveness', () => {
@@ -530,13 +522,13 @@ test('ChatView retains settled goals independently of transport liveness', () =>
   )
   assert.match(
     goalPlanDetails,
-    /helpersByTask\.set\(node\.plan_task/,
-    'helpers nest under the plan task they recorded at start, not a name match',
+    /execution = delegatedByTask\.get\(task\.id\)/,
+    'a nested plan task without a child-local match should retain root execution fallback',
   )
   assert.match(
     goalPlanDetails,
-    /status=\{goalTaskDisplayStatus\(task, helpers\)\}/,
-    'a task\'s working helpers should own the row presentation state',
+    /status=\{goalTaskDisplayStatus\(task, execution\)\}/,
+    'live delegated execution should own the row presentation state',
   )
 })
 

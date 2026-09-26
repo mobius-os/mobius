@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
 import json
 import logging
 import os
@@ -24,7 +23,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from app import auth, models
+from app import auth
 from app.applied_app_runtime import AppliedRuntimeUnavailable, hold_runtime, runtime_root
 from app.config import get_settings
 from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
@@ -45,7 +44,6 @@ _FORBIDDEN_HEADERS = frozenset({
 _global_slots = {
   "private": asyncio.Semaphore(8),
   "public": asyncio.Semaphore(8),
-  "tools": asyncio.Semaphore(8),
 }
 _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
   weakref.WeakValueDictionary()
@@ -72,26 +70,6 @@ def service_contract(app, *, access: str) -> dict:
   return service
 
 
-def request_actor(db, principal, caller=None) -> dict:
-  """Who is calling an app's service, as the request's `actor` states it.
-
-  `access` is "read" for a read-only helper (or one whose delegation is gone),
-  so the app can refuse to change anything on its behalf. The owner, the app
-  itself, a top-level agent run, and a write helper get "write".
-  """
-  access = "write"
-  if principal.delegation_id is not None:
-    delegation = db.get(models.Delegation, principal.delegation_id)
-    access = delegation.scope if delegation is not None else "read"
-  return {
-    "scope": principal.scope,
-    "app_id": principal.app_id,
-    "app_slug": caller.slug if caller is not None else None,
-    "delegated": principal.delegation_id is not None,
-    "access": access,
-  }
-
-
 def service_entry(app, service: dict) -> Path:
   try:
     root = runtime_root(app)
@@ -107,12 +85,7 @@ def service_entry(app, service: dict) -> Path:
 
 
 def service_environment(app, owner) -> dict[str, str]:
-  # The same allowlist as scheduled app jobs: a reviewed service may run a
-  # provider CLI (Memory's recall navigator does) exactly as its job can.
-  allowed = {
-    "PATH", "LANG", "LC_ALL", "TZ", "HOME",
-    "DATA_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
-  }
+  allowed = {"PATH", "LANG", "LC_ALL", "TZ", "HOME"}
   env = {key: value for key, value in os.environ.items() if key in allowed}
   settings = get_settings()
   env.update({
@@ -193,9 +166,7 @@ def _response_headers(value) -> dict[str, str]:
 
 
 async def invoke_service(
-  app, owner, request_envelope: dict, *,
-  timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
-  lane: str | None = None,
+  app, owner, request_envelope: dict,
 ) -> tuple[int, object, dict[str, str], str | None]:
   service = service_contract(
     app, access="public" if request_envelope.get("public") else "self",
@@ -218,17 +189,8 @@ async def invoke_service(
   # lane for both directions deadlocks that callback behind the write waiting
   # for it. Public services still own their own file/SQLite locking where the
   # two lanes can touch the same state.
-  #
-  # Agent tool calls use a third lane that is not serialized per app: one
-  # agent's long tool call (a Memory search can take minutes) must not stall
-  # the app's own screen or another chat's call. A tool owns its concurrency,
-  # as a public service already must.
-  if lane is None:
-    lane = "public" if request_envelope.get("public") else "private"
-  slot = (
-    contextlib.nullcontext() if lane == "tools"
-    else _app_slots.setdefault((app.id, lane), asyncio.Semaphore(1))
-  )
+  lane = "public" if request_envelope.get("public") else "private"
+  slot = _app_slots.setdefault((app.id, lane), asyncio.Semaphore(1))
   # Backlog for one app must not reserve all platform execution capacity while
   # waiting for that app's serialized request. Count only executable requests.
   # Queued requests already own an accepted revision. Pin before admission so
@@ -281,7 +243,7 @@ async def invoke_service(
       try:
         _written, stdout, stderr, returncode = await asyncio.wait_for(
           asyncio.gather(write_task, stdout_task, stderr_task, process.wait()),
-          timeout=timeout_seconds,
+          timeout=SERVICE_TIMEOUT_SECONDS,
         )
       except (TimeoutError, ValueError) as exc:
         await _stop_process(process, write_task, stdout_task, stderr_task)

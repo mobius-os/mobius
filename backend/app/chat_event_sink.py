@@ -53,9 +53,7 @@ from app.agent_activity import (
   EMPTY_AGENT_ACTIVITY_BINDING,
   MAX_RESULT_SCAN_CHARS,
   AgentActivityBinding,
-  activity_from_app_tool,
   activity_from_command,
-  app_tool_result_text,
   activity_from_result,
   activity_from_task_output,
   activity_without_receipt,
@@ -591,13 +589,6 @@ class ChatEventSink:
   ) -> None:
     """Attach one generic app-owned activity across the tool lifecycle."""
     if event.get("type") in ("tool_start", "tool_input"):
-      if event.get("type") == "tool_start":
-        activity = activity_from_app_tool(
-          event.get("tool"), self._agent_activity_binding,
-        )
-        if activity is not None:
-          event["app_activity"] = activity
-          return
       if event.get("type") == "tool_start" and event.get("tool") != "Bash":
         return
       # Both a tool_start AND a tool_input can arrive for one tool call on the
@@ -616,7 +607,7 @@ class ChatEventSink:
       return
     pending = self._app_activity_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
-      content = app_tool_result_text(
+      content = (
         event.get("content")
         if result_content is None
         else result_content
