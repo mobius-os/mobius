@@ -16,6 +16,7 @@ def _run_mapi(
   tmp_path: Path,
   *arguments: str,
   stdin_text: str | None = None,
+  response: str = "",
 ) -> subprocess.CompletedProcess:
   bin_dir = tmp_path / "bin"
   bin_dir.mkdir()
@@ -30,7 +31,8 @@ def _run_mapi(
     "    cat > \"$MAPI_STDIN_CAPTURE\"\n"
     "    break\n"
     "  fi\n"
-    "done\n",
+    "done\n"
+    f"{response}\n",
     encoding="utf-8",
   )
   fake_curl.chmod(0o755)
@@ -70,6 +72,8 @@ def test_mapi_resolves_api_paths_and_adds_json_for_data(tmp_path: Path):
     b"-sS",
     b"-H", b"Authorization: Bearer owner-token",
     b"-H", b"Content-Type: application/json",
+    b"--fail-with-body",
+    b"-w", b"%{stderr}mapi-status:%{exitcode} %{http_code} %{size_download}\\n",
     b"-X", b"PATCH",
     b"https://mobius.example/api/connect/hosts/h_1",
     b"-d", b'{"name":"Desk"}',
@@ -200,6 +204,58 @@ def test_mapi_rejects_unknown_short_flag_before_curl_can_reparse_a_url(
   assert result.returncode == 2
   assert result.curl_arguments is None
   assert "unsupported curl option '-AH'" in result.stderr
+
+
+def _fake_response(status: int, body: str, exit_code: int) -> str:
+  """Shell for the fake curl: body on stdout, mapi's status marker on stderr."""
+  return (
+    f"printf '%s' {body!r}\n"
+    f"printf 'mapi-status:{exit_code} {status} {len(body)}\\n' >&2\n"
+    f"exit {exit_code}"
+  )
+
+
+def test_mapi_notes_an_empty_success_instead_of_printing_nothing(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path, "-X", "DELETE", "/api/storage/shared/x",
+    response=_fake_response(204, "", 0),
+  )
+
+  assert result.returncode == 0
+  assert result.stdout == ""
+  assert result.stderr == "mapi: HTTP 204, empty response (success)\n"
+
+
+def test_mapi_keeps_a_non_empty_success_quiet_on_stderr(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path, "/api/apps/", response=_fake_response(200, "[]", 0),
+  )
+
+  assert (result.returncode, result.stdout, result.stderr) == (0, "[]", "")
+
+
+def test_mapi_fails_on_an_http_error_but_still_shows_its_body(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path, "/api/missing/",
+    response=_fake_response(404, '{"detail":"Not found."}', 22),
+  )
+
+  assert "--fail-with-body" in [a.decode() for a in result.curl_arguments]
+  assert result.returncode == 22
+  assert result.stdout == '{"detail":"Not found."}'
+  assert "empty response" not in result.stderr
+
+
+def test_mapi_leaves_an_explicit_fail_choice_and_write_out_to_the_caller(
+  tmp_path: Path,
+):
+  result = _run_mapi(
+    tmp_path, "-f", "-o", "/dev/null", "-w", "%{http_code}", "/api/ready",
+  )
+
+  arguments = [a.decode() for a in result.curl_arguments]
+  assert "--fail-with-body" not in arguments
+  assert arguments.count("-w") == 1
 
 
 def test_mapi_preserves_an_ordinary_custom_header(tmp_path: Path):
@@ -425,6 +481,8 @@ def test_mapi_normalizes_joined_long_options_for_older_curl_versions(
     b"--globoff",
     b"-sS",
     b"-H", b"Authorization: Bearer owner-token",
+    b"--fail-with-body",
+    b"-w", b"%{stderr}mapi-status:%{exitcode} %{http_code} %{size_download}\\n",
     b"https://mobius.example/api/chats",
     b"--data", b'{"title":"Notes"}',
     b"--header", b"Content-Type: application/merge-patch+json",
