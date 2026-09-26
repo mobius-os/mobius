@@ -904,6 +904,22 @@ async def install_app(
   )
 
 
+def _upstream_version(repo: Path, upstream_commit: str | None) -> str | None:
+  """Version recorded by app_git.record_upstream's commit subject.
+
+  None (not a 500) when the recorded commit is missing.
+  """
+  if not upstream_commit:
+    return None
+  proc = app_git._run(
+    repo, "log", "-1", "--format=%s", upstream_commit, check=False,
+  )
+  if proc.returncode != 0:
+    return None
+  match = re.match(r"install v(.+) from .+", proc.stdout.strip())
+  return match.group(1) if match else None
+
+
 def _write_preview_tree(root: Path, files: dict[str, bytes]) -> None:
   """Materialize a trusted git/source tree below ``root`` for no-index diff.
 
@@ -1745,7 +1761,9 @@ async def create_conflict_resolver_chat(
     conflict_paths = await asyncio.to_thread(
       _park_pending_update, repo, receipt,
     )
-    upstream_version = str(receipt["manifest"].get("version") or "") or None
+    upstream_version = await asyncio.to_thread(
+      _upstream_version, repo, app.upstream_commit,
+    )
 
     from app import background_agents, install
     title = f"Resolve {app.name} update conflict"
