@@ -17,7 +17,9 @@ The update is merged in a **private checkout** inside the app's git directory:
 It started at the committed `main` and holds Git's ordinary in-progress merge
 of `upstream`, with conflict markers in the listed files. Work only there. The
 live app stays served and editable meanwhile; other chats' edits to it are
-merged in when you finish. Never edit `/data/apps/<slug>` for this task.
+merged in when you finish. Never edit `/data/apps/<slug>` for this task. Use
+`git -C "$W"` and full paths rather than `cd` into the checkout: finishing
+removes it.
 
 ```bash
 W=/data/apps/<slug>/.git/mobius-pending-update/worktree

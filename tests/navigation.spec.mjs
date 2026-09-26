@@ -1045,6 +1045,88 @@ test.describe('Touch navigation', () => {
     await expect(resumed).toHaveValue('Navigation can recover this')
   })
 
+  for (const mode of ['single', 'panes']) {
+    test(`a list refresh before New chat's row exists keeps its composer and draft (${mode})`, async ({ page }) => {
+      // New Chat routes to its client id before the server row exists. A list
+      // refresh in that window once ran the deletion probe, read the pending
+      // row's 404 as deletion, closed the composer mid-typing, and let the
+      // empty-slot repair create a second, empty chat.
+      if (mode === 'panes') {
+        const ws = paneModel.setViewMode(
+          paneModel.seedFromFlatTabs([{ kind: 'chat', id: NAV_CHATS[0].id }]),
+          'panes',
+        )
+        await page.addInitScript(([key, blob]) => {
+          localStorage.setItem(key, blob)
+        }, [paneModel.STORAGE_KEY, paneModel.serializeWorkspace(ws)])
+      }
+      await setup(page, { width: 1512, height: 911 }, { detailForChat: emptyChatDetail })
+      let releaseCreation
+      const creationGate = new Promise(resolve => { releaseCreation = resolve })
+      let requestedId = null
+      let created = false
+      const creates = []
+      const readsBeforeCreate = []
+      await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+        if (route.request().method() !== 'POST') return route.fallback()
+        const body = route.request().postDataJSON()
+        creates.push(body.id ?? null)
+        if (!body.id) {
+          return route.fulfill({ status: 200, json: createdChat('00000000-0000-4000-8000-00000000abcd') })
+        }
+        requestedId = body.id
+        await creationGate
+        created = true
+        return route.fulfill({ status: 200, json: createdChat(requestedId) })
+      })
+      // Like the server: the id does not exist until its create commits.
+      await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
+        const id = new URL(route.request().url()).pathname.split('/').pop()
+        if (route.request().method() !== 'GET' || id !== requestedId || created) {
+          return route.fallback()
+        }
+        readsBeforeCreate.push(id)
+        return route.fulfill({ status: 404, json: { detail: 'Chat not found' } })
+      })
+
+      await openDrawer(page)
+      await page.getByRole('navigation', { name: 'Primary navigation' })
+        .getByRole('button', { name: 'New chat', exact: true }).click()
+      await expect.poll(() => requestedId).not.toBeNull()
+      const composer = newChatSurface(page, requestedId)
+        .getByRole('textbox', { name: 'Message Möbius…' })
+      await composer.fill('Typed before the row exists')
+      await page.evaluate(id => {
+        window.__newChatSurfaceLost = false
+        const selector = `[data-chat-surface="painted"][data-chat-id="${id}"]`
+        new MutationObserver(() => {
+          if (!document.querySelector(selector)) window.__newChatSurfaceLost = true
+        }).observe(document.body, { childList: true, subtree: true, attributes: true })
+      }, requestedId)
+
+      // A focus return refetches the chat list while the create is still held.
+      const listRefresh = page.waitForResponse(response => (
+        response.request().method() === 'GET'
+        && /\/api\/chats(?:\?.*)?$/.test(response.url())
+      ))
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+      await listRefresh
+      await page.evaluate(() => new Promise(resolve => (
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 250)))
+      )))
+      expect(await page.evaluate(() => window.__newChatSurfaceLost)).toBe(false)
+
+      releaseCreation()
+      await expect.poll(() => page.evaluate(() => (
+        JSON.parse(sessionStorage.getItem('new-chat-intent'))?.status
+      ))).toBe('materialized')
+      await expect(composer).toHaveValue('Typed before the row exists')
+      expect(await page.evaluate(() => window.__newChatSurfaceLost)).toBe(false)
+      expect(creates).toEqual([requestedId])
+      expect(readsBeforeCreate).toEqual([])
+    })
+  }
+
   test('New chat does not reuse a blank hidden behind Settings', async ({ page }) => {
     const blank = {
       ...NAV_CHATS[0],

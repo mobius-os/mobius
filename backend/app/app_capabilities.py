@@ -751,7 +751,7 @@ def contract_and_digest(manifest: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 
 def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:
-  """Project historical receipts onto today's closed-default semantics.
+  """Project a contract onto what it grants, for access comparison.
 
   Older accepted contracts omit capabilities that did not exist at the time.
   Omission has always meant no grant; it must compare equal to the explicit
@@ -761,6 +761,17 @@ def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:
   """
   normalized = deepcopy(contract)
   normalized.pop("schema", None)
+
+  provider = normalized.get("model_provider")
+  if isinstance(provider, dict):
+    # Access is where requests go and how they authenticate. The provider's
+    # label, model catalog, and default model describe what it offers; the
+    # frozen contract still carries them for the model picker.
+    normalized["model_provider"] = {
+      key: provider[key]
+      for key in ("base_url", "transport", "secret_name")
+      if key in provider
+    }
 
   public = normalized.get("public")
   if isinstance(public, dict) and "storage" in public:

@@ -729,6 +729,27 @@ export function appendThinkingChunk(
   }]
 }
 
+/** Apply a provider's completed thinking block. The backend treats the
+ * completed block as the record and sends `thinking_final` only when it
+ * changed the thought (a streamed chunk was lost), carrying the repaired whole
+ * thought and its `thinking_id`. Replace that thought in place; if it never
+ * streamed here, it is new content. Deferred (lazily fetched) thoughts are
+ * refreshed from the server by revision, so they are left alone. */
+export function replaceThinkingContent(prev, thinkingId, content) {
+  if (!thinkingId || !content) return prev
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const item = prev[i]
+    if (item?.type !== 'thinking' || item.thinking_id !== thinkingId) continue
+    if (item.thinking_deferred || item.content === content) return prev
+    const updated = [...prev]
+    updated[i] = { ...item, content }
+    return updated
+  }
+  return appendThinkingChunk(prev, content, Date.now(), null, null, {
+    thinking_id: thinkingId,
+  })
+}
+
 /** Render-time repair for already-persisted reasoning from clients that lost
  * provider segment identity. Adjacent bold summary headings were stored as
  * `****`; restore only that unambiguous Markdown seam. New events carry

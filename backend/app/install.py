@@ -1244,12 +1244,29 @@ def pending_update_worktree(source_dir: str | Path) -> Path:
 _CONFLICT_MARKER = r"^(<{7,} |>{7,} )"
 
 
-def has_committed_conflict_markers(repo: str | Path, ref: str) -> bool:
-  """Whether ``ref`` commits a labelled conflict boundary; errors count."""
-  found = app_git._run(
-    Path(repo), "grep", "-qE", _CONFLICT_MARKER, ref, check=False,
+def committed_conflict_marker_paths(
+  repo: str | Path, ref: str, upstream_commit: str,
+) -> list[str] | None:
+  """Paths the resolution changed from upstream that commit a conflict
+  boundary. Unchanged upstream content is never a conflict, even if it
+  legitimately contains such a line. None when Git cannot tell."""
+  repo = Path(repo)
+  changed = app_git._run(
+    repo, "diff", "--name-only", "-z", upstream_commit, ref, check=False,
   )
-  return found.returncode != 1
+  if changed.returncode != 0:
+    return None
+  paths = [path for path in changed.stdout.split("\0") if path]
+  if not paths:
+    return []
+  found = app_git._run(
+    repo, "grep", "-z", "-lE", _CONFLICT_MARKER, ref, "--",
+    *(f":(literal){path}" for path in paths),
+    check=False,
+  )
+  if found.returncode > 1:
+    return None
+  return [p.removeprefix(f"{ref}:") for p in found.stdout.split("\0") if p]
 
 
 def committed_pending_resolution(
@@ -1267,7 +1284,7 @@ def committed_pending_resolution(
     or app_git.merge_in_progress(worktree)
     or app_git.worktree_dirty(worktree)
     or app_git.ref_is_ancestor(worktree, upstream_commit, "HEAD") is not True
-    or has_committed_conflict_markers(worktree, "HEAD")
+    or committed_conflict_marker_paths(worktree, "HEAD", upstream_commit) != []
   ):
     return None
   return app_git._run(worktree, "rev-parse", "HEAD").stdout.strip()
@@ -4254,8 +4271,14 @@ async def install_from_manifest(
           # release (the resolver's finish, or the Store's Update button) then
           # combines edits that landed on `main` since with that answer through
           # the same three-way merge; only an overlap goes back to the resolver.
+          # Key on the upstream ref just recorded: app.upstream_commit is only
+          # refreshed after this for sources imported without a Git origin.
           resolved_commit = await asyncio.to_thread(
-            committed_pending_resolution, git_source_dir, app.upstream_commit,
+            committed_pending_resolution,
+            git_source_dir,
+            await asyncio.to_thread(
+              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+            ),
           )
           if resolved_commit is not None:
             merge = await asyncio.to_thread(

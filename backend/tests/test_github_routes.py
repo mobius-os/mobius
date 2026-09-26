@@ -3074,6 +3074,32 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     )
 
 
+def test_coauthor_trailer_is_required_unless_the_reviewed_plan_opts_out(
+  monkeypatch,
+):
+  """Disclosure is the default; only an explicit reviewed `false` opts out."""
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: _cp("reviewed fix\n"),
+  )
+  check = github_contributions._git_ops._assert_coauthor_trailer
+  for record in (None, {"plan": {}}, {"plan": {"coauthor_trailer": "false"}}):
+    with pytest.raises(ContributionSubmitError) as exc:
+      check(Path("/unused"), "fix/demo", record)
+    assert exc.value.code == "missing_coauthor"
+
+  check(Path("/unused"), "fix/demo", {"plan": {"coauthor_trailer": False}})
+
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: _cp(
+      "reviewed fix\n\nCo-authored-by: Möbius Agent "
+      "<mobius-agent@users.noreply.github.com>\n"
+    ),
+  )
+  check(Path("/unused"), "fix/demo", {"plan": {}})
+
+
 def test_submit_requires_source_provenance_without_a_prior_status_read(
   client, owner_token, monkeypatch,
 ):
@@ -3709,6 +3735,23 @@ def test_source_resolution_retries_survive_restart_but_not_later_source_edits(
   with pytest.raises(ContributionSubmitError):
     github_contributions._assert_pending_equivalence_preflight(fixture["record"])
   assert github_contributions._record_pending_equivalence(fixture["record"]) is None
+
+def test_a_non_canonical_review_diff_is_named_before_source_provenance(
+  client, owner_token,
+):
+  """A hand-made diff (other flags) fails as the diff it is, not as a source
+  that "no longer proves" the change; the provenance proof depends on it."""
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, _diff_text = _prepared_real_review(app_id, "non-canonical-diff")
+  assert github_contributions._assert_pending_equivalence_preflight(record)
+  record["plan"]["diff_sha256"] = hashlib.sha256(b"diff without --full-index").hexdigest()
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._assert_pending_equivalence_preflight(record)
+  assert caught.value.code == "diff_mismatch"
+
 
 def test_agent_reviewed_continuity_bridges_overlap_into_pending_provenance(
   client, owner_token,

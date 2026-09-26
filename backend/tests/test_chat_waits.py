@@ -602,6 +602,35 @@ def test_met_command_wait_resumes_idle_chat(client, owner_token, db, monkeypatch
   assert len(starts) == 1
 
 
+def test_met_wait_resumes_only_after_late_update_edits_are_back(
+  client, owner_token, db, monkeypatch,
+):
+  """A wait woken while an update's late edits are still being merged back
+  records its result but resumes the chat only once those edits land."""
+  from app import platform_update
+
+  chat_id = _owner_chat(client, owner_token)
+  row = _command_wait(
+    db, chat_id=chat_id, description="restart loaded", kind="command",
+    command="true", created_by_run_id=_seed_declaring_run(db, chat_id),
+  )
+  row.next_check_at = now_naive_utc() - timedelta(seconds=1)
+  db.commit()
+  starts = _capture_starts(monkeypatch, running=False)
+  pending = [True]
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: pending[0])
+
+  assert asyncio.run(sweep_due_waits()) == 0
+  assert starts == []
+  db.expire_all()
+  held = db.get(models.ChatWait, row.id)
+  assert held.status == "met" and held.resume_delivered_at is None
+
+  pending[0] = False
+  assert asyncio.run(sweep_due_waits()) == 1
+  assert len(starts) == 1 and starts[0]["chat_id"] == chat_id
+
+
 def test_unmet_command_wait_reschedules(client, owner_token, db, monkeypatch):
   chat_id = _owner_chat(client, owner_token)
   row = _command_wait(

@@ -3272,6 +3272,9 @@ def create_app_chat(
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
+    # An app that names its chat chose that name deliberately, like an owner
+    # rename: neither the first message nor a generated name replaces it.
+    title_locked=bool(body.title),
     messages=[],
     provider=provider,
     agent_settings_json=agent_settings,
