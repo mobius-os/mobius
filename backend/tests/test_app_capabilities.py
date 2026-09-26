@@ -666,3 +666,26 @@ def test_matching_digest_is_persisted_with_explicit_system_identity(
     wait_for_ready=True,
   )
   assert "initialization waiting for startup readiness" in response.json()["warnings"]
+
+
+def test_model_catalog_changes_are_not_access_changes():
+  """Renaming or adding models is what a provider offers, not what it reaches;
+  only its endpoint or credential is an access change."""
+  from app.app_capabilities import diff_contracts
+
+  def contract(**provider):
+    return {"schema": 1, "model_provider": {
+      "name": "Evolve", "base_url": "https://models.example/v1",
+      "secret_name": "EVOLVE_KEY",
+      "models": [{"id": "inkling"}], "default_model": "inkling", **provider,
+    }}
+
+  renamed = diff_contracts(contract(), contract(
+    name="Evolve AI", models=[{"id": "evolve"}, {"id": "evolve-mini"}],
+    default_model="evolve",
+  ))
+  assert renamed == {
+    "unknown_previous": False, "added": [], "removed": [], "changed": [],
+  }
+  moved = diff_contracts(contract(), contract(base_url="https://other.example/v1"))
+  assert moved["changed"] == ["model_provider.base_url"]

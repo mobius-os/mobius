@@ -3027,6 +3027,32 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
     # Late edits were parked against the booted update; live edits made since
     # that boot merge with the answer from there, and are unwound again below.
     live = str(parked.get("live") or source)
+    late_working = str(parked.get("pre") or "")
+    if (
+      parked.get("replay") and resolved_working is None
+      and late_working and late_working != source
+    ):
+      # The committed late edits are resolved; the uncommitted ones saved at
+      # the swap still follow, exactly as boot merges them after a clean
+      # committed part. Chats stay held, so nothing else edits live meanwhile.
+      late = app_git.merge_refs(repo, late_working, committed, merge_base=source)
+      if late.status == "conflict":
+        outcome = _park_net_conflict(
+          repo, _Carried(served=source, pre=late_working, working=late_working),
+          target, source=late_working, right=committed, base=source,
+          stage="working", reconciliation=app_git.ReconciliationReceipt(),
+        )
+        _write_conflict_flag(
+          target, outcome.conflict_paths, flag.get("chat_id"),
+          overlay={**(outcome.overlay or {}), "replay": True, "live": live},
+        )
+        return outcome.status
+      if not late.merged_tree_oid:
+        raise PlatformUpdateError("The late working-tree merge returned no tree.")
+      resolved_working = (
+        _working_overlay_commit(repo, committed, late.merged_tree_oid),
+        late_working,
+      )
     _reattach_detached_head(repo, local)
     carried = _carry_working_edits(repo, local)
     if parked.get("replay") and resolved_working is not None:
@@ -3050,7 +3076,8 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       result = _finalize_update(
         repo, local, pre=carried.pre, tip=outcome.tip, target=target,
         progress=None, reconciliation=outcome.reconciliation,
-        overlay=outcome.overlay,
+        # A late-edit merge replaces no local chain; the swap recorded it.
+        overlay=None if parked.get("replay") else outcome.overlay,
       )
       if result.status == "updated":
         if parked.get("replay"):

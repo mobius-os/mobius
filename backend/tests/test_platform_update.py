@@ -893,6 +893,58 @@ def test_a_late_commit_that_conflicts_is_parked_after_boot_and_holds_resumes(
   assert pu._is_ancestor(platform, target, _served_sha(platform))
 
 
+def test_uncommitted_late_edits_survive_a_conflicting_late_commit(clone_env):
+  """A late commit's conflict parks first; the uncommitted edits made on top
+  of it must still come back afterwards, never be dropped with the park."""
+  origin, platform = clone_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE'"),
+  }, msg="late conflicting commit")
+  (platform / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE DIRTY'"),
+  )
+  (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY'\n")
+
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert _finish_prepared(platform) == "conflict"
+  replay = Path(pu._read_conflict_flag()["overlay"]["worktree"])
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+
+  # The committed answer is in; the uncommitted edit to the same line now
+  # overlaps it, so it parks for the resolver instead of vanishing.
+  assert pu.continue_platform_overlay_update(platform) == "conflict"
+  assert pu.late_edits_pending()
+  flag = pu._read_conflict_flag()
+  assert flag["overlay"]["stage"] == "working" and flag["overlay"]["replay"] is True
+  replay = Path(flag["overlay"]["worktree"])
+  marked = (replay / "backend/app/main.py").read_text()
+  assert "LINE_A = 'LATE DIRTY'" in marked and "LINE_A = 'RESOLVED AND LATE'" in marked
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED, LATE AND DIRTY'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+
+  assert pu.continue_platform_overlay_update(platform) == "updated"
+  assert not pu.late_edits_pending()
+  assert "LINE_A = 'RESOLVED, LATE AND DIRTY'" in (
+    platform / "backend/app/main.py"
+  ).read_text()
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
+  # In-progress edits come back uncommitted, as after a clean replay.
+  assert sorted(_git(platform, "status", "--porcelain").stdout.splitlines()) == [
+    " M backend/app/foo.py", " M backend/app/main.py",
+  ]
+  assert pu._is_ancestor(platform, target, _served_sha(platform))
+  # The replay is not an update: the chain the swap replaced stays recorded.
+  assert "late conflicting commit" in _git(
+    platform, "log", "-1", "--format=%s", pu._PRE_UPDATE_REF,
+  ).stdout
+
+
 def test_late_uncommitted_edits_stay_uncommitted_after_the_swap(clone_env):
   origin, platform = clone_env
   _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)

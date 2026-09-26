@@ -12,10 +12,14 @@ export function isContinuationMessage(message) {
     || message?.kind === 'auto_continuation'
 }
 
-/** Cached history may stay readable during a transient runtime-read failure.
- * Retry only transport/server failures, and only a small fixed number of
- * times; permanent client errors and missing chats need a different remedy. */
-export function cachedActivationRetryDelay(error, attempt) {
+const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
+
+/** Delay before quietly retrying a failed chat activation, or null to stop.
+ * Only transport/server failures are retried; permanent client errors and
+ * missing chats need a different remedy. The schedule spans a server restart,
+ * and a timed-out read is still running server-side, so the next one waits at
+ * least as long as the read timeout: one load in flight at a time. */
+export function activationRetryDelay(error, attempt, readTimeoutMs) {
   const message = String(error?.message || '')
   const transientNetworkError = error?.name === 'TypeError'
     && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
@@ -23,10 +27,38 @@ export function cachedActivationRetryDelay(error, attempt) {
     || error?.name === 'TimeoutError'
     || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
     || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
-  if (!transient || !Number.isInteger(attempt) || attempt < 0 || attempt >= 3) {
-    return null
-  }
-  return [750, 2000, 5000][attempt]
+  const delay = transient ? ACTIVATION_RETRY_DELAYS_MS[attempt] : undefined
+  if (delay === undefined) return null
+  return error?.name === 'TimeoutError' ? Math.max(delay, readTimeoutMs) : delay
+}
+
+/** The chat body's entry frame and whether Shell may present it (Shell holds
+ * the launch cover or the previous chat until then).
+ * - The empty state means "nothing happened yet", so it never covers a failed
+ *   load: after an error nobody knows whether the chat is empty.
+ * - The load error wins over a cached running marker, and it is stable as soon
+ *   as it renders. While quiet retries run it stays up, saying so, rather than
+ *   holding Shell or flashing per attempt.
+ * - Otherwise a transcript or empty frame waits for runtime truth; a cold
+ *   activation or a failed one over a safe cached transcript is stable early. */
+export function chatEntryFrame({
+  messageCount,
+  loading,
+  loadError,
+  activationRetrying,
+  turnActive,
+  activationPhase,
+  activationSettled,
+  transcriptPaintable,
+}) {
+  const empty = messageCount === 0
+  const showLoadError = empty && (activationRetrying || (loadError && !loading))
+  const showEmpty = empty && !loadError && !activationRetrying && !turnActive && !loading
+  const displayReady = showLoadError
+    || activationPhase === 'cold'
+    || (activationSettled && !loading && (transcriptPaintable || showEmpty))
+    || (activationPhase === 'error' && !loading && transcriptPaintable)
+  return { showEmpty, showLoadError, displayReady }
 }
 
 /**

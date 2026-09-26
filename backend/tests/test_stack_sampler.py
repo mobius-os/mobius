@@ -6,21 +6,25 @@ from types import SimpleNamespace
 from app import stack_sampler
 
 
-def _spin_in_named_hot_loop(stop: threading.Event) -> None:
-  while not stop.is_set():
+def _spin_in_named_hot_loop(stop: list[bool]) -> None:
+  # Poll a plain flag, not Event.is_set(): a Python-level call inside the loop
+  # would sometimes be the innermost frame the sampler records last.
+  while not stop[0]:
     sum(range(200))
 
 
 def test_busy_thread_ranks_first_and_parked_thread_counts_as_waiting():
-  stop = threading.Event()
-  busy = threading.Thread(target=_spin_in_named_hot_loop, args=(stop,), name="busy-worker")
-  parked = threading.Thread(target=stop.wait, name="parked-worker")
+  spinning = [False]
+  parked_until = threading.Event()
+  busy = threading.Thread(target=_spin_in_named_hot_loop, args=(spinning,), name="busy-worker")
+  parked = threading.Thread(target=parked_until.wait, name="parked-worker")
   busy.start()
   parked.start()
   try:
     report = stack_sampler.sample_thread_stacks(0.5, interval=0.005)
   finally:
-    stop.set()
+    spinning[0] = True
+    parked_until.set()
     busy.join()
     parked.join()
 
