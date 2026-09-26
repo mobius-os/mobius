@@ -1,6 +1,6 @@
 import {
-  toolSummaryLabel,
-  toolSummaryPastLabel,
+  toolActivityLabel,
+  toolActivityPastLabel,
   toolActivitySingular,
   toolActivityPastSingular,
   effectiveToolName,
@@ -58,7 +58,7 @@ export function toolGroupState(tools) {
 
 // A compact header summary: the run's distinct ACTIVITIES, first 3 shown, the
 // rest folded into "+N". Activities are the owner-facing labels from
-// toolSummaryLabel, deduped on the LABEL so Read+Glob+Read collapses to one
+// toolActivityLabel, deduped on the LABEL so Read+Glob+Read collapses to one
 // "Reading files" — the header reads "Reading files · Editing code", never
 // "Read, Read, Edit". Raw tool names stay on the expanded children (ToolBlock)
 // for inspection.
@@ -80,9 +80,9 @@ export function toolGroupSummary(tools) {
   const seen = []
   const counts = new Map()
   const bump = label => counts.set(label, (counts.get(label) || 0) + 1)
-  if (running) seen.push(toolSummaryLabel(running))
+  if (running) seen.push(toolActivityLabel(effectiveToolName(running)))
   for (const t of tools) {
-    const label = toolSummaryLabel(t)
+    const label = toolActivityLabel(effectiveToolName(t))
     bump(label)
     if (!seen.includes(label)) seen.push(label)
   }
@@ -103,8 +103,9 @@ export function toolGroupPastSummary(tools) {
   const seen = []
   const counts = new Map()
   for (const t of tools) {
-    const past = toolSummaryPastLabel(t)
-    const label = past || effectiveToolName(t) || 'Tool'
+    const name = effectiveToolName(t)
+    const past = toolActivityPastLabel(name)
+    const label = past || name || 'Tool'
     counts.set(label, (counts.get(label) || 0) + 1)
     if (!seen.some(s => s.label === label)) seen.push({ label, known: !!past })
   }
