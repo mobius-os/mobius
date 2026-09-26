@@ -26,6 +26,7 @@ advertise it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import concurrent.futures as _cf
 import functools
 import logging
@@ -136,15 +137,6 @@ _CODEX_PROMPT_CONTROL_OVERRIDES = [
 ]
 
 
-def _env_flag_on(name: str, *, default: bool) -> bool:
-  """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
-  anything else enables; unset falls back to ``default``."""
-  raw = os.environ.get(name)
-  if raw is None:
-    return default
-  return raw.strip().lower() not in ("off", "0", "false", "no", "")
-
-
 def _codex_config_overrides() -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
@@ -154,22 +146,12 @@ def _codex_config_overrides() -> list[str]:
 
   Owner questions are deliberately absent here: the Möbius control MCP's
   durable ``request_question`` is the sole owner-facing question capability.
-  Multi-agent (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
-  ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
-  activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
-  ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
-  uvicorn — a runtime rollback that needs no image rebuild, since the overrides
-  are read fresh per turn.
 
-  When enabled, the tool namespace is PINNED to ``agents``. Codex #31864: the
-  pinned SDK source still DEFAULTS multi_agent_v2's spawn_agent tool to the
-  ``collaboration`` namespace, which gpt-5.6 reserves, so the Responses API can
-  reject the tool schema on EVERY turn (not only spawn turns). A live probe on
-  0.144.5 spawned a sub-agent cleanly under the observed default, but the model
-  rollout is server-side and mutable — so we do not depend on that observation:
-  pinning ``agents`` (the reporter-confirmed bypass in #31864) keeps enablement
-  robust to a rollout change, not just to the binary we probed. Re-run the
-  delegate probe after any @openai/codex bump.
+  Helpers are Möbius's too: agents delegate with ``spawn_agent`` on the
+  Möbius control server, whose helpers run on any provider, outlive the turn,
+  and share a helper host (see ``helper_hosts``). Codex's own helper tools are
+  therefore switched off in both generations — note ``multi_agent`` (v1) is on
+  by default, so disabling only ``multi_agent_v2`` would leave it offered.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
   # Disabling only default_mode_request_user_input leaves the native tool
@@ -177,12 +159,10 @@ def _codex_config_overrides() -> list[str]:
   overrides.append("tools.experimental_request_user_input.enabled=false")
   # One provider turn per Möbius admission; never enable a competing loop.
   overrides.append("features.goals=false")
-  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
-    overrides += [
-      "features.multi_agent_v2.enabled=true",
-      "features.multi_agent_v2.tool_namespace=agents",
-      "suppress_unstable_features_warning=true",
-    ]
+  overrides += [
+    "features.multi_agent=false",
+    "features.multi_agent_v2.enabled=false",
+  ]
   return overrides
 
 
@@ -302,9 +282,11 @@ def _codex_process_group_id(
 class _CodexCallExecutor:
   """Per-client worker pool for the SDK's blocking sync protocol surface."""
 
-  def __init__(self, chat_id: str) -> None:
+  def __init__(
+    self, chat_id: str, workers: int = _CODEX_CALL_EXECUTOR_WORKERS,
+  ) -> None:
     self._executor = _cf.ThreadPoolExecutor(
-      max_workers=_CODEX_CALL_EXECUTOR_WORKERS,
+      max_workers=workers,
       thread_name_prefix=f"mobius-codex-{chat_id[:8]}",
     )
 
@@ -325,6 +307,7 @@ class _CodexCallExecutor:
 def _install_codex_call_executor(
   codex_context: Any,
   chat_id: str,
+  workers: int = _CODEX_CALL_EXECUTOR_WORKERS,
 ) -> _CodexCallExecutor | None:
   """Route one AsyncCodex client's sync bridge off the default executor.
 
@@ -336,7 +319,7 @@ def _install_codex_call_executor(
   client = getattr(codex_context, "_client", None)
   if client is None or not callable(getattr(client, "_call_sync", None)):
     return None
-  owner = _CodexCallExecutor(chat_id)
+  owner = _CodexCallExecutor(chat_id, workers)
   try:
     client._call_sync = owner.call
   except (AttributeError, TypeError):
@@ -391,6 +374,27 @@ async def _enter_codex_context_owned(
       raise deferred_cancel from exc
     raise
   return entered, deferred_cancel
+
+
+@contextlib.asynccontextmanager
+async def _codex_client_scope(codex_context, helper_host_key, sdk, config):
+  """Yield ``(client, entry_cancel, helper_host)`` for one turn.
+
+  Without a host key the turn owns a private app-server exactly as before.
+  With one it leases the shared helper host for this parent and setup; the
+  host outlives the turn and is never closed or signalled here.
+  """
+  if helper_host_key is None:
+    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
+    async with _EnteredCodexContext(codex_context, codex) as codex:
+      yield codex, entry_cancel, None
+    return
+  from app import helper_hosts
+  async with helper_hosts.MANAGER.lease(
+    helper_host_key,
+    lambda: helper_hosts.CodexHelperHost(helper_host_key, sdk=sdk, config=config),
+  ) as host:
+    yield host.client, None, host
 
 
 class _EnteredCodexContext:
@@ -586,6 +590,7 @@ class ActiveCodexTurn:
     process_group_id: int | None = None,
     sink: Any | None = None,
     run_marker: str | None = None,
+    shared_host: bool = False,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
@@ -595,6 +600,9 @@ class ActiveCodexTurn:
     self._process_group_id = process_group_id
     # Names this turn's commands, which live outside the app-server's group.
     self._run_marker = run_marker
+    # On a shared helper host the process group is the host's: a hard stop
+    # interrupts this turn and ends only its own marked commands.
+    self._shared_host = shared_host
     # A retained PGID must never be signalled twice: after the first kill the
     # kernel may eventually reuse that number for an unrelated process group.
     self._force_stop_started = False
@@ -722,6 +730,11 @@ class ActiveCodexTurn:
       if self._process_group_id is None and not self._run_marker:
         return False
       self._force_stop_started = True
+      if self._shared_host:
+        # Möbius ends this turn deliberately; a clean stop, not a failure.
+        self._interrupt_requested = True
+        with contextlib.suppress(Exception):
+          await asyncio.wait_for(self.turn.interrupt(), timeout=2.0)
       await asyncio.to_thread(
         _terminate_codex_processes, self._process_group_id, self._run_marker,
       )
@@ -1414,6 +1427,7 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  helper_host_key=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1547,12 +1561,16 @@ async def _run_codex_sdk_turn(
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated
+  from app.app_tools import live_app_tools
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
     control_enabled=True,
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
+    app_tool_names=tuple(
+      tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
+    ),
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
@@ -1584,6 +1602,23 @@ async def _run_codex_sdk_turn(
       "Codex app-server process-group isolation unavailable; "
       "descendant cleanup is best-effort only"
     )
+  # Shared helper host: the process environment belongs to every helper in
+  # it, so this turn's identity moves into its own thread settings and a
+  # private env file (see helper_hosts).
+  turn_env_file = None
+  if helper_host_key is not None:
+    from app import helper_hosts
+    host_env, turn_env = helper_hosts.split_env(env)
+    host_env[helper_hosts.HOST_MARKER_ENV] = helper_hosts.host_marker(helper_host_key.digest)
+    config_kwargs["env"] = host_env
+    turn_env_file = helper_hosts.TurnEnvFile(
+      Path(turn_env.get("TMPDIR") or runtime_data_dir),
+      turn_env.get(RUN_MARKER_ENV, ""),
+      turn_env,
+    )
+    connector_thread_config = helper_hosts.codex_turn_thread_config(
+      connector_thread_config, turn_env=turn_env, env_file=turn_env_file,
+    )
   config = sdk["CodexConfig"](**config_kwargs)
 
   thread = None
@@ -1606,11 +1641,17 @@ async def _run_codex_sdk_turn(
   task_host_tool_use_id: str | None = None
   helper_rows: CodexHelperRows | None = None
   helper_progress_task: asyncio.Task | None = None
-  codex_context = sdk["AsyncCodex"](config=config)
-  codex_call_executor = _install_codex_call_executor(codex_context, chat_id)
+  helper_host = None
+  codex_context = (
+    sdk["AsyncCodex"](config=config) if helper_host_key is None else None
+  )
+  codex_call_executor = (
+    _install_codex_call_executor(codex_context, chat_id)
+    if codex_context is not None else None
+  )
   process_group_capture_stop: asyncio.Event | None = None
   process_group_capture_task: asyncio.Task[int | None] | None = None
-  if launch_args is not None:
+  if launch_args is not None and codex_context is not None:
     process_group_capture_stop = asyncio.Event()
     process_group_capture_task = asyncio.create_task(
       _capture_codex_process_group_during_start(
@@ -1672,19 +1713,21 @@ async def _run_codex_sdk_turn(
     }
 
   try:
-    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
-    async with _EnteredCodexContext(codex_context, codex) as codex:
+    async with _codex_client_scope(
+      codex_context, helper_host_key, sdk, config,
+    ) as (codex, entry_cancel, helper_host):
       goal_client = control_client(codex) if session_id and retire_native_goal else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",
         chat_id=chat_id,
       )
-      process_group_id = _codex_process_group_id(codex)
-      lower_process_group_priority(
-        process_group_id,
-        logger=log,
-        label="Codex app-server",
-      )
+      if helper_host is None:
+        process_group_id = _codex_process_group_id(codex)
+        lower_process_group_priority(
+          process_group_id,
+          logger=log,
+          label="Codex app-server",
+        )
       if process_group_capture_stop is not None:
         process_group_capture_stop.set()
       # Do NOT await the capture task here. Cancellation immediately after
@@ -1720,7 +1763,7 @@ async def _run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      if delegated:
+      if delegated and helper_host is None:
         _install_delegated_approval_handler(codex, chat_id=chat_id)
       elif not restricted:
         _install_request_user_input_handler(
@@ -1875,6 +1918,7 @@ async def _run_codex_sdk_turn(
         process_group_id=process_group_id,
         sink=bc,
         run_marker=base_env.get(RUN_MARKER_ENV),
+        shared_host=helper_host is not None,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -2364,6 +2408,15 @@ async def _run_codex_sdk_turn(
     # worker keeps the short grace period off the FastAPI event loop; shield
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
+    if helper_host is not None:
+      # Unload this helper's thread (its tool servers exit with it) before
+      # ending its leftover commands; the host itself stays up.
+      await asyncio.shield(helper_host.unload_thread(current_session_id))
+      if not helper_host.alive:
+        from app import helper_hosts
+        await asyncio.shield(helper_hosts.MANAGER.discard(helper_host))
+    if turn_env_file is not None:
+      turn_env_file.remove()
     run_marker = base_env.get(RUN_MARKER_ENV)
     if (
       (process_group_id is not None or run_marker)
@@ -2406,6 +2459,7 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  helper_host_key=None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2441,6 +2495,7 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
+      helper_host_key=helper_host_key,
     )
   finally:
     ownership.release()

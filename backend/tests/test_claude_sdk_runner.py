@@ -1760,7 +1760,8 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   assert options.system_prompt.startswith("system")
   assert "# Concise register" in options.system_prompt
   assert "# Execution lifetimes in Möbius" in options.system_prompt
-  assert "TaskOutput(block=true)" in options.system_prompt
+  assert "TaskOutput" not in options.system_prompt
+  assert 'until [ -e "$TMPDIR/job.exit" ]' in options.system_prompt
   assert "confirm its saved receipt" in options.system_prompt
   assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
@@ -2625,10 +2626,13 @@ async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   assert "create_goal" in disallowed
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
   finite_tools = {
-    "Bash", "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows",
-    "Agent",
+    "Bash", "TaskStop", "Workflow", "Workflows",
   }
   assert not disallowed.intersection(finite_tools)
+  # Like its parent, a helper delegates with Möbius spawn_agent; Claude's own
+  # helper tool is off for every agent, so the child still inherits exactly
+  # the parent's tools.
+  assert set(claude_sdk_runner._CLAUDE_BUILTIN_HELPER_TOOLS) <= disallowed
 
   can_use_tool = captured["options"].can_use_tool
   for tool_name in finite_tools:
@@ -2706,55 +2710,6 @@ def test_precompact_log_trigger_extracts_and_is_defensive():
   assert _precompact_log_trigger({"trigger": 123}) is None
   assert _precompact_log_trigger(None) is None
   assert _precompact_log_trigger("not-a-dict") is None
-
-
-def test_dispatch_suppresses_task_output_wait_events():
-  """TaskOutput is the agent waiting on work it started — not owner activity.
-
-  Möbius's ultracode reminder makes the agent re-issue a ten-minute wait until
-  the work lands, so surfacing these rendered a long turn as a repeating
-  "retrieval_status: timeout" wall that reads as the product failing.
-  """
-  bus = _Bus()
-  wait = AssistantMessage(
-    content=[ToolUseBlock(id="poll-1", name="TaskOutput", input={
-      "task_id": "wf-1", "block": True, "timeout": 600000,
-    })],
-    model="claude",
-  )
-  dispatch_sdk_message(wait, bus, None)
-  assert bus.events == [], bus.events
-
-  result = UserMessage(content=[ToolResultBlock(
-    tool_use_id="poll-1",
-    content="<retrieval_status>timeout</retrieval_status>",
-  )])
-  dispatch_sdk_message(result, bus, None)
-  # Symmetric: no orphan tool_output/tool_end for a block never opened.
-  assert bus.events == [], bus.events
-
-
-def test_dispatch_still_surfaces_ordinary_tools_alongside_a_suppressed_wait():
-  bus = _Bus()
-  msg = AssistantMessage(
-    content=[
-      ToolUseBlock(id="poll-2", name="TaskOutput", input={"task_id": "wf-2"}),
-      ToolUseBlock(id="read-1", name="Read", input={"file_path": "/tmp/x.md"}),
-    ],
-    model="claude",
-  )
-  dispatch_sdk_message(msg, bus, None)
-  starts = [e for e in bus.events if e["type"] == "tool_start"]
-  assert [e["tool"] for e in starts] == ["Read"]
-  assert all(e.get("tool_use_id") != "poll-2" for e in bus.events)
-
-  # The real tool's result still flows; only the wait's is dropped.
-  dispatch_sdk_message(
-    UserMessage(content=[ToolResultBlock(tool_use_id="read-1", content="ok")]),
-    bus,
-    None,
-  )
-  assert [e["type"] for e in bus.events if e["type"] == "tool_end"] == ["tool_end"]
 
 
 def _stream_message_start(message_id: str) -> StreamEvent:

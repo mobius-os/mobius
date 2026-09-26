@@ -30,6 +30,9 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
   assert set(codex_server["env_vars"]) == {
     "API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN",
     "MOBIUS_COORDINATION_ENABLED",
+    # Non-secret helper context: the agent's provider (spawn_agent default),
+    # its delegation, and the Subagents app helper.
+    "MOBIUS_AGENT_PROVIDER", "MOBIUS_DELEGATION_ID", "MOBIUS_SUBAGENT_HELPER",
   }
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {
@@ -211,8 +214,9 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   }
   instructions = initialized["result"]["instructions"]
   assert "agents in other Möbius chats" in instructions
-  assert "Provider-native subagent tools" in instructions
-  assert "temporary subagent tree" in instructions
+  # Möbius-owned helpers replace the providers' built-in helper tools.
+  assert "spawn_agent" in instructions
+  assert "arrive in this chat automatically" in instructions
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 2, "method": "tools/list",
@@ -291,8 +295,7 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
     "params": {"protocolVersion": "2025-06-18"},
   })
   instructions = initialized["result"]["instructions"]
-  assert "Provider-native subagent tools" in instructions
-  assert "temporary subagent tree" in instructions
+  assert "spawn_agent" in instructions
   assert "peer tools" not in instructions
   assert "agents in other Möbius chats" not in instructions
 
@@ -312,10 +315,12 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
   finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
   assert "Usually unnecessary" in finish and "finished_claims" in finish
+  spawn = tools[control.SPAWN_AGENT_TOOL]["description"]
+  assert "never poll" in spawn and "does not see this" in spawn
   for name in (
     control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
-    control.LIST_AGENT_PEERS_TOOL,
+    control.LIST_AGENT_PEERS_TOOL, *control.HELPER_TOOLS,
   ):
     assert len(tools[name]["description"]) <= 1000, name
 
@@ -325,8 +330,9 @@ def test_constitution_routes_each_agent_network_to_its_owner():
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
   ).read_text(encoding="utf-8")
 
-  assert "provider-native subagent tools" in core
-  assert "`agents.*`, Task, or Agent" in core
+  # Helpers are Möbius-owned; built-in provider helper tools are off.
+  assert "`spawn_agent`" in core
+  assert "built-in helper tools" in core and "switched off" in core
   assert "other Möbius chats" in core
   assert core.index("`list_agent_peers`") < core.index("`send_agent_message`")
   assert "ordinary chat-message API" in core
@@ -782,3 +788,81 @@ def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
 
   assert result.returncode == 2
   assert "usage: mobius_control_mcp.py call" in result.stderr
+
+
+def _control_with_app_tools(monkeypatch, listed):
+  control = _control_module()
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-token")
+  calls = []
+
+  def fake_api(method, path, payload=None, *, timeout=10):
+    calls.append((method, path, payload, timeout))
+    if method == "GET" and path == control.APP_TOOLS_PATH:
+      return {"tools": listed}
+    return {"result": "Logged.", "is_error": False}
+
+  monkeypatch.setattr(control, "_agent_api_call", fake_api)
+  return control, calls
+
+
+def test_control_server_lists_installed_app_tools_beside_its_own(monkeypatch):
+  app_tool = {
+    "name": "reflection_log_friction", "description": "Log friction.",
+    "inputSchema": {"type": "object"},
+  }
+  shadow = {**app_tool, "name": "request_restart"}
+  control, _calls = _control_with_app_tools(monkeypatch, [app_tool, shadow])
+
+  names = [tool["name"] for tool in control._tools_list_result()["tools"]]
+
+  assert names[-1] == "reflection_log_friction"
+  # An app can never replace a platform primitive.
+  assert names.count("request_restart") == 1
+
+
+def test_control_server_forwards_app_tool_calls_with_the_providers_meta(monkeypatch):
+  control, calls = _control_with_app_tools(monkeypatch, [{
+    "name": "reflection_log_friction", "description": "Log friction.",
+    "inputSchema": {"type": "object"},
+  }])
+
+  result = control._call_tool({
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "retried a flaky command"},
+    "_meta": {"claudecode/toolUseId": "toolu_9"},
+  })
+
+  assert result == {
+    "content": [{"type": "text", "text": "Logged."}], "isError": False,
+  }
+  method, path, payload, timeout = calls[-1]
+  assert (method, path) == ("POST", control.APP_TOOLS_PATH + "call")
+  assert payload == {
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "retried a flaky command"},
+    "meta": {"claudecode/toolUseId": "toolu_9"},
+  }
+  assert timeout == control.APP_TOOL_CALL_TIMEOUT_SECONDS
+
+
+def test_unlisted_names_are_never_forwarded_to_apps(monkeypatch):
+  control, calls = _control_with_app_tools(monkeypatch, [])
+  result = control._call_tool({"name": "reflection_log_friction", "arguments": {}})
+  assert result["isError"] is True
+  assert "unavailable" in result["content"][0]["text"]
+  assert all(method == "GET" for method, *_ in calls)
+
+
+def test_app_tool_timeouts_are_ordered_service_then_control_then_provider():
+  """The control script's HTTP wait sits between the service's own timeout and
+  the provider-facing tool timeout, so the app's own timeout error is what the
+  agent sees rather than a control or provider cutoff."""
+  from app import app_tools
+
+  control = _control_module()
+
+  assert (
+    app_tools.TOOL_TIMEOUT_SECONDS
+    < control.APP_TOOL_CALL_TIMEOUT_SECONDS
+    < platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS
+  )

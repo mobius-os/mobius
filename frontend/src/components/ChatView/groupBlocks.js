@@ -1,3 +1,4 @@
+import { isWorkingHelper } from './workingHelper.js'
 import {
   toolSummaryLabel,
   toolSummaryPastLabel,
@@ -181,6 +182,9 @@ export function activitySummaryTools(entries) {
   return entries.flatMap(entry => {
     const item = entry?.item
     if (item?.type === 'tool') return [item]
+    if (isWorkingHelper(item)) {
+      return [{ type: 'tool', tool: 'Agent', status: 'running' }]
+    }
     if (item?.type === 'helper_result') {
       return [{ type: 'tool', tool: 'PeerMessage', status: 'done' }]
     }

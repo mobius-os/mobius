@@ -53,7 +53,9 @@ from app.agent_activity import (
   EMPTY_AGENT_ACTIVITY_BINDING,
   MAX_RESULT_SCAN_CHARS,
   AgentActivityBinding,
+  activity_from_app_tool,
   activity_from_command,
+  app_tool_result_text,
   activity_from_result,
   activity_from_task_output,
   activity_without_receipt,
@@ -589,6 +591,13 @@ class ChatEventSink:
   ) -> None:
     """Attach one generic app-owned activity across the tool lifecycle."""
     if event.get("type") in ("tool_start", "tool_input"):
+      if event.get("type") == "tool_start":
+        activity = activity_from_app_tool(
+          event.get("tool"), self._agent_activity_binding,
+        )
+        if activity is not None:
+          event["app_activity"] = activity
+          return
       if event.get("type") == "tool_start" and event.get("tool") != "Bash":
         return
       # Both a tool_start AND a tool_input can arrive for one tool call on the
@@ -607,7 +616,7 @@ class ChatEventSink:
       return
     pending = self._app_activity_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
-      content = (
+      content = app_tool_result_text(
         event.get("content")
         if result_content is None
         else result_content
@@ -1061,6 +1070,11 @@ class ChatEventSink:
     # live transcript surface.
     if event_type in ("tool_start", "tool_input"):
       self._stash_full_edit_diff(event)
+    if event_type in ("tool_start", "tool_input"):
+      # A helper's parent shows what the helper is doing right now. Claude
+      # names the tool on tool_start and sends its text on tool_input.
+      from app.delegations import note_helper_activity
+      note_helper_activity(self.chat_id, event.get("tool"), event.get("input"))
 
     # Contract rule 6: reduce a large tool_output to a bounded excerpt and stash
     # its full text BEFORE process_event (which copies content onto the block)

@@ -4013,6 +4013,8 @@
 .chat__wait-history { --lifecycle-tone: var(--accent); }
 .chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
 .chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
+/* A wake cause opens the answer it started, so its gap sits below it. */
+.chat__wait-history--lead { margin-top: 0; margin-bottom: 10px; }
 
 /* What started an answer sits above its first line. */
 .chat__answer-cause {
@@ -4488,6 +4490,16 @@
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.chat__peer-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent); /* CONTRACT: link-coloured action beside the chat link */
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
 
 /* A rejected outbox row keeps its original content and a visible next action. */
 .queued__rejection {

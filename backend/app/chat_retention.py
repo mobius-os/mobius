@@ -119,7 +119,8 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
 
   db.query(models.ChatActivityPosition).filter(or_(
     models.ChatActivityPosition.event_id.in_(
-      [f"delegation:{value}:completed" for value in delegation_ids]
+      [f"delegation:{value}:{event}" for value in delegation_ids
+       for event in ("running", "completed")]
     ),
     models.ChatActivityPosition.event_id.in_(select(
       literal("peer:") + models.AgentCoordinationMessage.id,

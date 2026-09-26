@@ -293,6 +293,35 @@ def active_goal_rows(
   return _goal_rows_for_physical(db, physical) if physical is not None else None
 
 
+def helper_plan_task(
+  db: Session, chat_id: str, requested: str | None,
+) -> str | None:
+  """Choose the plan task a new helper of ``chat_id`` works on.
+
+  An explicit task must exist in the chat's active Goal plan. Otherwise the
+  helper joins the plan's current focus: the one running leaf task. With no
+  Goal, no plan, or several running leaves the helper stays unfiled rather
+  than guessing among them.
+  """
+  rows = active_goal_rows(db, chat_id)
+  tasks = list(((rows[1].plan_json or {}) if rows else {}).get("tasks") or [])
+  if requested is not None:
+    ids = [str(task.get("id")) for task in tasks]
+    if requested not in ids:
+      known = ", ".join(ids) if ids else "none (no active Goal plan)"
+      raise GoalPlanError(
+        f"plan_task {requested!r} is not a task of this chat's Goal plan; "
+        f"plan tasks: {known}"
+      )
+    return requested
+  running = {
+    str(task.get("id")): task for task in tasks if task.get("status") == "running"
+  }
+  parents = {str(task.get("parent_id")) for task in running.values()}
+  leaves = [task_id for task_id in running if task_id not in parents]
+  return leaves[0] if len(leaves) == 1 else None
+
+
 def presented_goal_rows(
   db: Session, chat_id: str,
 ) -> tuple[models.ChatRun, models.ChatGoal] | None:
@@ -376,6 +405,7 @@ def _delegation_tree(
     return {
       "id": row.id,
       "task_key": row.task_key,
+      "plan_task": row.goal_task_id,
       "provider": row.provider,
       "status": status,
       "children": [project(child, seen | {row.id}) for child in children],
@@ -446,17 +476,21 @@ def serialize_plan(
   from app.delegations import TERMINAL_DELEGATION_STATUSES
 
   active_execution_keys: list[str] = []
+  # Plan tasks with a helper still working: such a task is not counted complete
+  # even if it was marked so, because its execution has not settled.
+  tasks_with_active_helpers: set[str] = set()
 
   def collect_active_execution(nodes: list[dict[str, Any]]) -> None:
     for node in nodes:
       if node.get("status") not in TERMINAL_DELEGATION_STATUSES:
         active_execution_keys.append(str(node.get("task_key") or node["id"]))
+        if node.get("plan_task"):
+          tasks_with_active_helpers.add(str(node["plan_task"]))
       collect_active_execution(node.get("children") or [])
 
   collect_active_execution(delegations)
-  active_execution = set(active_execution_keys)
   completed = sum(
-    task.get("status") == "completed" and task["id"] not in active_execution
+    task.get("status") == "completed" and task["id"] not in tasks_with_active_helpers
     for task in tasks
   )
   running = [task["id"] for task in tasks if task.get("status") == "running"]

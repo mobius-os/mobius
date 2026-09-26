@@ -3574,34 +3574,15 @@ def test_persist_session_id_skips_synthetic_turn_without_db(monkeypatch, caplog)
   assert "Codex session id persistence failed" not in caplog.text
 
 
-def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):
-  """Multi-agent is on by default AND pins the 'agents' tool namespace so the
-  reserved 'collaboration' default (Codex #31864) can never brick a turn."""
-  from app import codex_sdk_runner as runner
-  monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
-  ov = runner._codex_config_overrides()
-  assert "features.multi_agent_v2.enabled=true" in ov
-  assert "features.multi_agent_v2.tool_namespace=agents" in ov
-  assert "tools.experimental_request_user_input.enabled=false" in ov
-
-
-def test_codex_config_overrides_kill_switch(monkeypatch):
-  """The multi-agent rollback never reintroduces process-bound questions."""
-  from app import codex_sdk_runner as runner
-  monkeypatch.setenv("MOEBIUS_CODEX_MULTI_AGENT", "off")
-  ov = runner._codex_config_overrides()
-  assert ov == [
-    'instructions=""',
-    'developer_instructions=""',
-    "project_doc_max_bytes=0",
-    "tools.experimental_request_user_input.enabled=false",
-    "features.goals=false",
-  ]
-  assert not any("multi_agent_v2" in o for o in ov)
+def test_codex_builtin_helper_tools_are_off_in_both_generations():
+  """Möbius helpers replace Codex's own; v1 is on by default, so both go."""
+  ov = codex_sdk_runner._codex_config_overrides()
+  assert "features.multi_agent=false" in ov
+  assert "features.multi_agent_v2.enabled=false" in ov
+  assert not any("multi_agent_v2.enabled=true" in o for o in ov)
 
 
 def test_codex_config_overrides_disable_competing_native_goal_runtime(monkeypatch):
-  monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
   assert "features.goals=false" in codex_sdk_runner._codex_config_overrides()
 
 

@@ -54,6 +54,12 @@ def read_helper_conversation(
   ``None`` when the chat never recorded ``task_id`` or the provider's record
   of the conversation is gone.
   """
+  delegation = db.query(models.Delegation).filter(
+    models.Delegation.id == task_id,
+    models.Delegation.parent_chat_id == chat_id,
+  ).first()
+  if delegation is not None:
+    return _delegation_conversation(db, delegation)
   helper = _recorded_helper(db, chat_id, task_id)
   if helper is None:
     return None
@@ -80,6 +86,48 @@ def read_helper_conversation(
     "provider": helper.provider,
     "blocks": blocks[-MAX_BLOCKS:],
     "truncated": skipped or dropped,
+  }
+
+
+def _delegation_conversation(db: Session, delegation: models.Delegation) -> dict | None:
+  """A Möbius helper's own chat, in the same block shape as a transcript.
+
+  Its tasks read as ``{"role": "user", "content"}``, its replies as
+  ``{"role": "assistant", "content"}``, and tool blocks as stored; hidden
+  product messages (result carriers, wakes) are not its conversation. A
+  running turn's live steps are included.
+  """
+  from app.chat_transcript import materialized_messages
+
+  child = db.query(models.Chat).filter(
+    models.Chat.id == delegation.child_chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if child is None:
+    return None
+  blocks: list[dict] = []
+  for message in materialized_messages(child):
+    if not isinstance(message, dict) or message.get("hidden"):
+      continue
+    if message.get("role") == "user":
+      content = message.get("content")
+      if isinstance(content, str) and content.strip():
+        blocks.append({"role": "user", "content": content})
+      continue
+    if message.get("role") != "assistant":
+      continue
+    for block in message.get("blocks") or []:
+      if not isinstance(block, dict):
+        continue
+      if block.get("type") == "tool":
+        blocks.append(block)
+      elif block.get("type") == "text" and str(block.get("content") or "").strip():
+        blocks.append({"role": "assistant", "content": block["content"]})
+  return {
+    "provider": delegation.provider,
+    "child_chat_id": delegation.child_chat_id,
+    "blocks": blocks[-MAX_BLOCKS:],
+    "truncated": len(blocks) > MAX_BLOCKS,
   }
 
 

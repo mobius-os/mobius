@@ -21,6 +21,12 @@ def _served_tree(tmp_path, monkeypatch, source: str | None):
   if source is not None:
     (runtime / "identity_broker.py").write_text(source, encoding="utf-8")
   monkeypatch.setattr(launcher, "PLATFORM_DIR", platform)
+  # A test that does not explicitly configure an image epoch must not inherit
+  # the container's real /app/runtime marker.  Keep its image side empty so the
+  # launcher's documented absent-proof behavior is what the fixture exercises.
+  image = tmp_path / "default-image-runtime"
+  image.mkdir()
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(image))
   return runtime / "identity_broker.py"
 
 
