@@ -148,6 +148,13 @@ truth: apply validates and materializes that exact accepted file, so do not
 upload a second copy after applying. The apply helper also applies the offline
 flag and versioned `capabilities` object; do not patch the app row separately.
 
+Edit `mobius.json` surgically: change only the span you mean to change. Do not
+round-trip it through a full `json.dumps(...)` rewrite — Python's default
+`ensure_ascii=True` turns every non-ASCII character into `\uXXXX` and can
+reorder keys or reflow whitespace. The meaning is unchanged, but the bytes
+differ, and a later Store update then has to reconcile manufactured drift
+against the reviewed upstream. The same applies to any tracked JSON.
+
 Offline support is a product choice, not a default requirement. Choose it when
 it materially benefits the app's use case or preserves an existing product
 promise. Möbius supplies generic cached storage, durable queues, connectivity,

@@ -75,6 +75,42 @@ def resume_context(db, run_id):
   )
 
 
+async def settle_after_goal_completion(chat_id: str) -> None:
+  """Finish what a committed Goal completion leaves for other owners.
+
+  Resume notices queued for Waits the completion took delivery of are
+  withdrawn, so they cannot start a turn for the finished Goal, and claim
+  followers wake with the settled outcome.
+  """
+  from app.agent_coordination import settle_claims_with_owner
+  from app.chat_waits import withdraw_delivered_resume_notices
+
+  await withdraw_delivered_resume_notices(chat_id)
+  await settle_claims_with_owner(chat_id)
+
+
+def _pending_handoff_refusal(db, goal, owner: str) -> str:
+  """Name what still owns the Goal's next move and how to settle it."""
+  if owner == "owner_question":
+    return (
+      "Goal still owns a pending handoff: a question card it asked is waiting "
+      "for the owner's answer. Complete after the answer arrives."
+    )
+  from app.chat_waits import armed_goal_waits
+  waits = armed_goal_waits(db, goal.chat_id, goal.id)
+  if waits:
+    named = "; ".join(f"{row.id} ({row.description})" for row in waits[:5])
+    return (
+      "Goal still owns a pending handoff: armed Wait "
+      f"{named}. Cancel it with cancel_wait if the Goal no longer needs it, "
+      "or let it resume this chat."
+    )
+  return (
+    "Goal still owns a pending handoff: a helper is still working and its "
+    "result will resume this chat. Complete after it arrives, or stop it."
+  )
+
+
 def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, result=None, finished_claims=()):
   from app.goal_plans import GoalPlanConflict, GoalPlanError, serialize_plan
@@ -84,6 +120,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   if goal.status != "open":
     raise GoalPlanConflict("Goal is not open")
   values = {"revision": expected_revision + 1}
+  consumed_waits = 0
   if result is not None:
     plan = serialize_plan(db, run, goal)
     if goal.plan_json is not None and plan is None:
@@ -92,9 +129,6 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
       )
     if plan is not None and not plan["summary"]["can_complete"]:
       raise GoalPlanError("Goal has unfinished tasks or active delegations")
-    from app.goal_plans import goal_handoff_owner_kind
-    if goal_handoff_owner_kind(db, goal.chat_id, goal.id) is not None:
-      raise GoalPlanError("Goal still owns a pending handoff")
     if not result.strip():
       raise GoalPlanError("Completion requires a verification result")
     from app.agent_work_claims import held_claims_hint, open_claim_keys
@@ -105,6 +139,15 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         "Not an open work claim of this Goal: " + ", ".join(sorted(unknown))
         + ". " + held_claims_hint(held)
       )
+    from app.chat_waits import stage_consume_fired_goal_waits
+    from app.goal_plans import goal_handoff_owner_kind
+    consumed_waits = stage_consume_fired_goal_waits(db, goal.chat_id, goal.id)
+    db.flush()
+    owner = goal_handoff_owner_kind(db, goal.chat_id, goal.id)
+    if owner is not None:
+      refusal = _pending_handoff_refusal(db, goal, owner)
+      db.rollback()
+      raise GoalPlanError(refusal)
     values.update(status="completed", result=result.strip(),
                   completed_at=datetime.now(UTC))
   else:
@@ -127,4 +170,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     )
   db.commit()
   db.refresh(goal)
+  if consumed_waits:
+    from app.chat_waits import _broadcast_changed
+    _broadcast_changed(goal.chat_id)
   return {"goal_id": goal.id, "status": goal.status, "revision": goal.revision}

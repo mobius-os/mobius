@@ -6,6 +6,7 @@ import { apiFetch } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
+import './HelperConversation.css'
 
 // A running helper keeps writing its conversation; re-read it on this cadence
 // while the dialog is open. A settled helper is read once.
@@ -25,8 +26,8 @@ async function readConversation(chatId, taskId, signal) {
   return { phase: 'ready', blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider }
 }
 
-// The dialog shell reuses the chat summary viewer's overlay (ChatView.css
-// .chat-summary); `host` is the chat pane it covers.
+// The dialog draws its own overlay (HelperConversation.css); `host` is the
+// chat pane it covers.
 export default function HelperConversation({
   chatId, taskId, name, status, host, onClose, onInternalNav,
 }) {
@@ -72,66 +73,68 @@ export default function HelperConversation({
     .filter(Boolean).join(' · ')
 
   return createPortal(
-    <div className="chat-summary__overlay" role="presentation" onClick={onClose}>
+    <div className="helper-convo__overlay" role="presentation" onClick={onClose}>
       <div
         ref={dialogRef}
-        className="chat-summary helper-convo"
+        className="helper-convo"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}
       >
-        <div className="chat-summary__head">
+        <div className="helper-convo__head">
           <div className="helper-convo__heading">
-            <h2 id={titleId} className="chat-summary__title helper-convo__title">{name}</h2>
-            <p className="chat-summary__subtitle">{subtitle}</p>
+            <h2 id={titleId} className="helper-convo__title">{name}</h2>
+            <p className="helper-convo__subtitle">{subtitle}</p>
           </div>
           <button
             ref={closeRef}
             type="button"
-            className="chat-summary__close"
+            className="helper-convo__close"
             onClick={onClose}
             aria-label="Close helper conversation"
           >×</button>
         </div>
         <div
           ref={bodyRef}
-          className="chat-summary__body helper-convo__body"
+          className="helper-convo__body"
           onScroll={event => {
             const el = event.currentTarget
             followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
           }}
         >
-          {state.phase === 'loading' && <p className="chat-summary__state">Loading conversation…</p>}
+          {state.phase === 'loading' && <p className="helper-convo__state">Loading conversation…</p>}
           {state.phase === 'unavailable' && (
-            <p className="chat-summary__state">
+            <p className="helper-convo__state">
               This helper&apos;s conversation isn&apos;t available. Its record may have been cleaned up.
             </p>
           )}
           {state.phase === 'error' && (
-            <p className="chat-summary__state chat-summary__state--error" role="alert">{state.message}</p>
+            <p className="helper-convo__state helper-convo__state--error" role="alert">{state.message}</p>
           )}
-          {state.phase === 'ready' && <>
-            {state.truncated && <p className="helper-convo__note">Showing the most recent part of a long conversation.</p>}
-            {state.blocks.length === 0 && <p className="helper-convo__note">The helper hasn&apos;t done anything yet.</p>}
-            {state.blocks.map((block, i) => {
-              const key = `${taskId}:${i}`
-              if (block.type === 'tool') {
+          {state.phase === 'ready' && (
+            <div className="helper-convo__blocks">
+              {state.truncated && <p className="helper-convo__note">Showing the most recent part of a long conversation.</p>}
+              {state.blocks.length === 0 && <p className="helper-convo__note">The helper hasn&apos;t done anything yet.</p>}
+              {state.blocks.map((block, i) => {
+                const key = `${taskId}:${i}`
+                if (block.type === 'tool') {
+                  return (
+                    <div key={key} className="chat__tools">
+                      <ToolBlock t={block} chatId={chatId} compact disclosureKey={`helper:${key}`} onInternalNav={onInternalNav} />
+                    </div>
+                  )
+                }
                 return (
-                  <div key={key} className="chat__tools">
-                    <ToolBlock t={block} chatId={chatId} compact disclosureKey={`helper:${key}`} onInternalNav={onInternalNav} />
+                  <div key={key} className={block.role === 'user' ? 'helper-convo__task' : 'helper-convo__text'}>
+                    {block.role === 'user' && <span className="helper-convo__task-label">Task</span>}
+                    <StandardMarkdown text={block.content} onInternalNav={onInternalNav} />
                   </div>
                 )
-              }
-              return (
-                <div key={key} className={block.role === 'user' ? 'helper-convo__task' : 'helper-convo__text'}>
-                  {block.role === 'user' && <span className="helper-convo__task-label">Task</span>}
-                  <StandardMarkdown text={block.content} onInternalNav={onInternalNav} />
-                </div>
-              )
-            })}
-            {running && <p className="helper-convo__note" aria-live="polite">Still working — updates as it goes.</p>}
-          </>}
+              })}
+              {running && <p className="helper-convo__note" aria-live="polite">Still working — updates as it goes.</p>}
+            </div>
+          )}
         </div>
       </div>
     </div>,

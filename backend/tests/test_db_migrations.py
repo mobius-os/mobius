@@ -1727,6 +1727,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0066_retire_chat_continuity_journal",
     "0067_chat_drawer_covering_index",
     "0068_rename_inkling_to_evolve",
+    "0069_chat_pending_queue_index",
   ]
   assert second == first
 

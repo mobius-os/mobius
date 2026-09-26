@@ -91,7 +91,8 @@ from app.platform_tools import (
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
-  terminate_process_group,
+  RUN_MARKER_ENV,
+  terminate_agent_processes,
 )
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
@@ -171,11 +172,11 @@ async def _await_control_mcp_ready(
 # constitution handed to every provider. A runner MAY append its own small,
 # provider-authored behavioral register on top of that shared base — the narrow,
 # deliberate exception that module's contract now allows. The Codex runner
-# declares none, so it is unaffected. This is the Claude runner's concise
-# register: appended AFTER the constitution, never substituted for it.
+# declares none, so it is unaffected. This is the Claude runner's register:
+# appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
+Keep replies proportionate: lead with the result and skip preamble. Match length to what the partner needs: brief for simple answers, complete for findings, decisions, and anything they must act on. Brevity never drops substance: a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the chat's saved summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
 # Execution lifetimes in Möbius
 
@@ -292,7 +293,7 @@ def _claude_process_was_force_stopped(error: ProcessError) -> bool:
   claude-agent-sdk 0.2.152 preserves ``ProcessError`` (and its structured
   ``ResultError`` subclass) through ``receive_response()``. Classifying the
   public exit code removes the old dependency on transport ``_exit_error``;
-  only the TERM/KILL signals sent by ``terminate_process_group`` are hidden.
+  only the TERM/KILL signals sent by ``terminate_agent_processes`` are hidden.
   """
   return (
     error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
@@ -328,9 +329,10 @@ def _process_error_with_stderr_tail(
   )
 
 
-def _terminate_claude_process_group(pgid: int | None) -> bool:
-  return terminate_process_group(
+def _terminate_claude_processes(pgid: int | None, run_marker: str | None) -> bool:
+  return terminate_agent_processes(
     pgid,
+    run_marker=run_marker,
     logger=log,
     label="Claude descendant",
   )
@@ -437,11 +439,15 @@ class ActiveClaudeClient:
   closed the broadcast for live SSE subscribers.
   """
 
-  def __init__(self, client: ClaudeSDKClient, chat_id: str):
+  def __init__(
+    self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
+  ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._process_group_id: int | None = None
+    # Names this turn's commands after the CLI (and its group) are gone.
+    self._run_marker = run_marker
     # Never signal a retained PGID twice; the kernel can eventually reuse it
     # after the first hard stop.
     self._force_stop_started = False
@@ -459,6 +465,11 @@ class ActiveClaudeClient:
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
     self.pending_steer: list[str] = []
+    # Whether any buffered steer is a person's visible message rather than an
+    # agent-originated carrier (helper result, peer note), which the transcript
+    # marks `hidden`. It decides how the requery frames the text: a person is
+    # owed a visible reply, while machine context is folded into the work.
+    self.steer_from_person = False
     # Transcript-side payload for the buffered steers: the steered user rows +
     # any queued rows they consume. The RUNNER drives the transcript split
     # (seal the pre-interrupt A1, append these user rows, reset the sink for
@@ -543,6 +554,8 @@ class ActiveClaudeClient:
     if user_msgs and not appended_any:
       return True
     self.pending_steer.append(text)
+    if any(not m.get("hidden") for m in user_msgs or ()):
+      self.steer_from_person = True
     if consume_pending_cids:
       buffered_consume = set(self._steer_consume_cids)
       for cid in consume_pending_cids:
@@ -595,6 +608,7 @@ class ActiveClaudeClient:
     if interrupt_landed and self._interrupt_owner == "steer":
       self._interrupt_owner = None
     texts, self.pending_steer = self.pending_steer, []
+    self.steer_from_person = False
     return texts
 
   def claim_owner_card_end(self) -> bool:
@@ -674,6 +688,7 @@ class ActiveClaudeClient:
     """
     self._interrupt_owner = "stop"
     self.pending_steer = []
+    self.steer_from_person = False
     self._steer_user_msgs = []
     self._steer_consume_cids = []
     await self._client.interrupt()
@@ -730,11 +745,11 @@ class ActiveClaudeClient:
   async def force_stop(self, timeout: float = 5.0) -> bool:
     """One-shot hard stop for this turn's verified private process group."""
     if not self._force_stop_started:
-      if self._process_group_id is None:
+      if self._process_group_id is None and not self._run_marker:
         return False
       self._force_stop_started = True
       await asyncio.to_thread(
-        _terminate_claude_process_group, self._process_group_id,
+        _terminate_claude_processes, self._process_group_id, self._run_marker,
       )
     try:
       await asyncio.wait_for(
@@ -755,8 +770,23 @@ class ActiveClaudeClient:
       self._finished.set_result(None)
 
 
-def _steer_redirect_message(text: str) -> str:
-  """Frame owner or product context on the still-connected client."""
+def _steer_redirect_message(texts: list[str], *, from_person: bool) -> str:
+  """Frame mid-turn input for the requery on the still-connected client.
+
+  A person's message is a conversational turn, not context to absorb: framing
+  it as "continue the same task" let agents fold a question into their work
+  and never answer it where the partner can see. Agent-originated carriers
+  (helper results, peer notes) remain context for the ongoing work.
+  """
+  text = "\n\n".join(texts)
+  if from_person:
+    return (
+      "The partner sent this message while you were working. Reply to it in "
+      "your visible response before continuing: answer any question and "
+      "acknowledge any correction or change of direction. Then continue the "
+      "task as the message directs:\n\n"
+      f"{text}"
+    )
   return (
     "New context arrived while you were working. Incorporate it according "
     "to its stated authority and continue the same task:\n\n"
@@ -1449,7 +1479,9 @@ async def run_claude_sdk_turn(
       connector_config_stack.close()
       raise
 
-    active_client = ActiveClaudeClient(client, chat_id=chat_id)
+    active_client = ActiveClaudeClient(
+      client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV),
+    )
     registry.register(active_client)
     # The root result reached while native helpers still owe a follow-up. Its
     # cost and usage are already spent, so any exit before the follow-up keeps
@@ -1590,6 +1622,7 @@ async def run_claude_sdk_turn(
                 terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut or a saved owner card may end a later segment.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=isinstance(sdk_msg, ResultMessage) and (
               sdk_msg.stop_reason == "interrupt"
@@ -1602,7 +1635,9 @@ async def run_claude_sdk_turn(
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             break
           # Do not replay a clean result with no visible reply: no content is
@@ -1627,6 +1662,7 @@ async def run_claude_sdk_turn(
           # block — so this is the catch-all that preserves the original
           # pending_steer→requery contract).
           # No terminal arrived, so a steer interrupt may still be in flight.
+          steer_from_person = active_client.steer_from_person
           steer_texts = active_client.take_steer_for_requery(
             interrupt_landed=False,
           )
@@ -1635,7 +1671,9 @@ async def run_claude_sdk_turn(
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
             await client.query(
-              _steer_redirect_message("\n\n".join(steer_texts))
+              _steer_redirect_message(
+                steer_texts, from_person=steer_from_person,
+              )
             )
             continue
           break
@@ -1730,16 +1768,19 @@ async def run_claude_sdk_turn(
       finally:
         connector_config_stack.close()
         # The SDK closes only its direct CLI PID. Reap the verified private
-        # group as a bounded backstop for tool children, and do not let a
-        # repeated task cancellation skip the SIGKILL worker once it starts.
+        # group and every command this run started in its own session as a
+        # bounded backstop, and do not let a repeated task cancellation skip
+        # the SIGKILL worker once it starts.
         deferred_cancel: asyncio.CancelledError | None = None
         if (
-          active_client._process_group_id is not None
+          (active_client._process_group_id is not None
+           or active_client._run_marker)
           and not active_client._force_stop_started
         ):
           reap_task = asyncio.create_task(asyncio.to_thread(
-            _terminate_claude_process_group,
+            _terminate_claude_processes,
             active_client._process_group_id,
+            active_client._run_marker,
           ))
           while not reap_task.done():
             try:
