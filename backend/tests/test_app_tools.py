@@ -309,3 +309,11 @@ def test_every_layer_waits_longer_than_the_one_inside_it():
   assert platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS > app_tools.TOOL_TIMEOUT_SECONDS
   assert codex["tool_timeout_sec"] == platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS
   assert control["timeout"] == platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS * 1000
+
+
+def test_every_app_response_shows_the_reviewed_tools(client, auth, db):
+  app = _app(db)
+  shown = client.get(f"/api/apps/{app.id}", headers=auth).json()
+  assert shown["agent_tools"] == [LOG_TOOL]
+  listed = {row["id"]: row for row in client.get("/api/apps/", headers=auth).json()}
+  assert listed[app.id]["agent_tools"] == [LOG_TOOL]

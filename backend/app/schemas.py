@@ -229,12 +229,18 @@ class AppOut(BaseModel):
   # Root-level manifest file composed into the agent prompt while this app is
   # live. Informational so install UIs can surface the privileged declaration.
   system_prompt_file: str | None = None
-  # Reviewed agent tools this app contributes to every agent run.
-  agent_tools: list[dict] = []
   chat_log_access: ChatLogAccess = "none"
   capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
+
+  @computed_field
+  @property
+  def agent_tools(self) -> list[dict]:
+    """Reviewed agent tools this app contributes to every agent run."""
+    from app.app_capabilities import agent_tools_from_contract
+
+    return agent_tools_from_contract(self.capability_contract)
 
   @computed_field
   @property

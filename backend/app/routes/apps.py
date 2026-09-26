@@ -46,8 +46,7 @@ from app.storage_io import (
   rmtree_strict as _rmtree_strict,
 )
 from app.app_capabilities import (
-  agent_tools_from_contract, contract_and_digest, contract_from_manifest,
-  diff_contracts,
+  contract_and_digest, contract_from_manifest, diff_contracts,
 )
 from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
@@ -888,7 +887,6 @@ async def install_app(
     display=app.display,
     offline_contract=app.offline_contract,
     system_prompt_file=app.system_prompt_file,
-    agent_tools=agent_tools_from_contract(app.capability_contract),
     chat_log_access=app.chat_log_access,
     capability_contract=app.capability_contract,
     created_at=app.created_at,
