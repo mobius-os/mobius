@@ -56,7 +56,8 @@ from app.codex_events import (
   _subagent_lifecycle_event,
   _thread_started_lifecycle_event,
   _record_private_lifecycle,
-  _public_task_event,
+  CodexHelperRows,
+  read_codex_helper_tools,
   _collab_reactivation_events,
   _collab_completion_events,
   _thread_status_lifecycle_event,
@@ -107,6 +108,9 @@ log = logging.getLogger("moebius.chat")
 _CODEX_CALL_EXECUTOR_WORKERS = 3
 _PROCESS_GROUP_CAPTURE_SPIN_SECONDS = 0.1
 _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
+# How often a running Codex helper row re-reads its child rollout for the
+# owner-facing "currently doing" line. The read is a small tail of one file.
+HELPER_PROGRESS_INTERVAL_S = 3.0
 
 
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
@@ -1600,7 +1604,8 @@ async def _run_codex_sdk_turn(
   process_group_id: int | None = None
   task_host_open = False
   task_host_tool_use_id: str | None = None
-  public_task_ids: set[str] = set()
+  helper_rows: CodexHelperRows | None = None
+  helper_progress_task: asyncio.Task | None = None
   codex_context = sdk["AsyncCodex"](config=config)
   codex_call_executor = _install_codex_call_executor(codex_context, chat_id)
   process_group_capture_stop: asyncio.Event | None = None
@@ -1894,8 +1899,22 @@ async def _run_codex_sdk_turn(
         f"codex-agents:{getattr(turn, 'id', None) or id(turn)}"
       )
 
+      helper_rows = CodexHelperRows(task_host_tool_use_id)
+
+      async def publish_helper_progress() -> None:
+        # The parent stream never carries a child's tool calls; its rollout
+        # does. Each pass reads only the rows still running.
+        while True:
+          await asyncio.sleep(HELPER_PROGRESS_INTERVAL_S)
+          running = helper_rows.running_children()
+          if not running:
+            continue
+          tools = await asyncio.to_thread(read_codex_helper_tools, running)
+          for event in helper_rows.progress_events(tools):
+            bc.publish(event)
+
       def ensure_task_host() -> None:
-        nonlocal task_host_open
+        nonlocal task_host_open, helper_progress_task
         if task_host_open:
           return
         bc.publish({
@@ -1905,24 +1924,18 @@ async def _run_codex_sdk_turn(
           "tool_use_id": task_host_tool_use_id,
         })
         task_host_open = True
+        helper_progress_task = asyncio.create_task(publish_helper_progress())
 
       def record_task_lifecycle(
         lifecycle: dict[str, Any] | None,
       ) -> None:
         _record_private_lifecycle(bc, lifecycle)
-        event = _public_task_event(
-          lifecycle,
-          tool_use_id=task_host_tool_use_id,
-        )
-        if event is None:
+        events = helper_rows.public_events(lifecycle)
+        if not events:
           return
         ensure_task_host()
-        task_id = str(event["task_id"])
-        if event["type"] == "task_start":
-          public_task_ids.add(task_id)
-        else:
-          public_task_ids.discard(task_id)
-        bc.publish(event)
+        for event in events:
+          bc.publish(event)
 
       # Structured rate-limit state, mirroring the Claude runner. Captured from
       # AccountRateLimitsUpdatedNotification during the turn so a Codex quota
@@ -2283,17 +2296,14 @@ async def _run_codex_sdk_turn(
       )
     except Exception:
       log.debug("generated-file turn capture failed", exc_info=True)
+    if helper_progress_task is not None:
+      helper_progress_task.cancel()
     if task_host_open and task_host_tool_use_id is not None:
       # A provider error/interrupt may skip terminal child notifications.
       # Close every still-live chip honestly before closing its Task host.
-      for task_id in sorted(public_task_ids):
-        bc.publish({
-          "type": "task_done",
-          "task_id": task_id,
-          "status": "stopped",
-          "summary": None,
-          "tool_use_id": task_host_tool_use_id,
-        })
+      if helper_rows is not None:
+        for event in helper_rows.stranded_events():
+          bc.publish(event)
       bc.publish({
         "type": "tool_end",
         "tool_use_id": task_host_tool_use_id,

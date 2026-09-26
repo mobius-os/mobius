@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from app.codex_appserver import _extract_bash_command
+from app.helper_transcripts import codex_helper_activity, codex_helper_row_name
 from app.json_safety import json_safe
 from app.tool_edit_preview import codex_edit_preview
 from app.tool_sources import normalize_tool_sources
@@ -342,6 +343,7 @@ def _public_task_event(
   lifecycle: dict[str, Any] | None,
   *,
   tool_use_id: str,
+  description: str | None = None,
 ) -> dict[str, Any] | None:
   """Translate one provider-neutral lifecycle fact into the shared chip wire.
 
@@ -365,7 +367,8 @@ def _public_task_event(
       "type": "task_start",
       "task_id": str(task_id),
       "description": (
-        agent_type[:_COLLAB_DESCRIPTION_MAX] or "Background helper"
+        (description or agent_type)[:_COLLAB_DESCRIPTION_MAX]
+        or "Background helper"
       ),
       "task_type": agent_type or None,
       "tool_use_id": tool_use_id,
@@ -382,6 +385,107 @@ def _public_task_event(
       "tool_use_id": tool_use_id,
     }
   return None
+
+
+class CodexHelperRows:
+  """Owner-facing helper rows for the children one Codex turn spawns.
+
+  The parent turn's notification stream carries only lifecycle markers for a
+  child: a readable name on some markers but not all, and never the child's
+  tool activity or final answer. Each child's own rollout records both, so this
+  owns the per-turn bookkeeping that turns lifecycle facts plus that rollout
+  into the same ``task_start`` / ``task_progress`` / ``task_done`` rows Claude
+  helpers produce.
+  """
+
+  def __init__(self, tool_use_id: str) -> None:
+    self.tool_use_id = tool_use_id
+    self._names: dict[str, str] = {}
+    self._child_by_task: dict[str, str] = {}
+    self._open: set[str] = set()
+    self._last_tool: dict[str, str] = {}
+
+  def public_events(self, lifecycle: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Row events for one lifecycle fact (empty when it changes no row)."""
+    if not lifecycle:
+      return []
+    child = str(lifecycle.get("provider_agent_id") or "")
+    events: list[dict[str, Any]] = []
+    name = codex_helper_row_name(lifecycle.get("agent_type"))
+    if child and name and self._names.get(child) != name:
+      self._names[child] = name
+      # A row opened by a nameless marker (a thread-status reactivation) takes
+      # its name as soon as any marker for the same child carries one.
+      events.extend(
+        {
+          "type": "task_start", "task_id": task_id, "description": name,
+          "tool_use_id": self.tool_use_id,
+        }
+        for task_id in sorted(self._open)
+        if self._child_by_task.get(task_id) == child
+      )
+    event = _public_task_event(
+      lifecycle, tool_use_id=self.tool_use_id,
+      description=self._names.get(child),
+    )
+    if event is None:
+      return events
+    task_id = event["task_id"]
+    if event["type"] == "task_start":
+      self._open.add(task_id)
+      if child:
+        self._child_by_task[task_id] = child
+    else:
+      self._open.discard(task_id)
+      self._last_tool.pop(task_id, None)
+      if event.get("summary") is None and child:
+        _tool, answer = codex_helper_activity(child)
+        if answer:
+          event["summary"] = answer[:_COLLAB_SUMMARY_MAX]
+    events.append(event)
+    return events
+
+  def running_children(self) -> list[tuple[str, str]]:
+    """``(task_id, child_thread_id)`` for each row still running."""
+    return [
+      (task_id, self._child_by_task[task_id])
+      for task_id in sorted(self._open)
+      if task_id in self._child_by_task
+    ]
+
+  def progress_events(
+    self, tool_by_task: dict[str, str | None],
+  ) -> list[dict[str, Any]]:
+    """``task_progress`` for each still-open row whose current tool changed."""
+    events = []
+    for task_id, tool in tool_by_task.items():
+      if task_id not in self._open or not tool or self._last_tool.get(task_id) == tool:
+        continue
+      self._last_tool[task_id] = tool
+      events.append({
+        "type": "task_progress", "task_id": task_id,
+        "last_tool_name": tool, "tool_use_id": self.tool_use_id,
+      })
+    return events
+
+  def stranded_events(self) -> list[dict[str, Any]]:
+    """Close rows a provider error or interrupt left without a terminal fact."""
+    events = [
+      {
+        "type": "task_done", "task_id": task_id, "status": "stopped",
+        "summary": None, "tool_use_id": self.tool_use_id,
+      }
+      for task_id in sorted(self._open)
+    ]
+    self._open.clear()
+    return events
+
+
+def read_codex_helper_tools(
+  running: list[tuple[str, str]],
+) -> dict[str, str | None]:
+  """Blocking rollout reads for ``CodexHelperRows.progress_events``."""
+  return {task_id: codex_helper_activity(child)[0] for task_id, child in running}
 
 
 def _collab_reactivation_events(

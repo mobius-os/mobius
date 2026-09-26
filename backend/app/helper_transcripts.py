@@ -156,13 +156,16 @@ def _codex_rollout_path(thread_id: str) -> Path | None:
   return None
 
 
-def _tail_records(path: Path) -> tuple[list[dict], bool]:
+def _tail_records(
+  path: Path, tail_bytes: int | None = None,
+) -> tuple[list[dict], bool]:
   """Parse the newest JSONL records; ``True`` when older bytes were skipped."""
+  tail_bytes = TAIL_BYTES if tail_bytes is None else tail_bytes
   size = path.stat().st_size
-  skipped = size > TAIL_BYTES
+  skipped = size > tail_bytes
   with path.open("rb") as handle:
     if skipped:
-      handle.seek(size - TAIL_BYTES)
+      handle.seek(size - tail_bytes)
       handle.readline()  # discard the partial first line
     raw = handle.read()
   records = []
@@ -271,6 +274,14 @@ def _codex_agent_name(path: Any) -> str:
   return words[:1].upper() + words[1:]
 
 
+def _codex_tool_label(payload: dict) -> str:
+  """The chat's tool vocabulary for one Codex rollout tool call."""
+  if payload.get("namespace") == "agents":
+    return "Agent"
+  name = str(payload.get("name") or "")
+  return _CODEX_TOOL_NAMES.get(name, name or "tool")
+
+
 def _codex_tool_summary(payload: dict) -> str:
   name = payload.get("name")
   raw = payload.get("input") if payload.get("type") == "custom_tool_call" else payload.get("arguments")
@@ -358,11 +369,52 @@ def _codex_blocks(records: list[dict], *, from_start: bool) -> _Blocks:
     elif kind == "message" and payload.get("role") == "assistant":
       blocks.text(_joined_text(payload.get("content"), "output_text", "text"))
     elif kind in ("custom_tool_call", "function_call"):
-      name = payload.get("name")
-      label = "Agent" if payload.get("namespace") == "agents" else (
-        _CODEX_TOOL_NAMES.get(str(name or ""), str(name or "tool"))
+      blocks.tool(
+        payload.get("call_id") or payload.get("id"),
+        _codex_tool_label(payload), _codex_tool_summary(payload),
       )
-      blocks.tool(payload.get("call_id") or payload.get("id"), label, _codex_tool_summary(payload))
     elif kind in ("custom_tool_call_output", "function_call_output"):
       blocks.result(payload.get("call_id"), _codex_output(payload))
   return blocks
+
+
+# The newest records name a child's current tool and latest answer; a small
+# tail keeps a running row's periodic re-read cheap even for a long rollout.
+_ACTIVITY_TAIL_BYTES = 256 * 1024
+
+
+def codex_helper_activity(thread_id: str) -> tuple[str | None, str | None]:
+  """``(current tool, latest completed answer)`` of one Codex child thread.
+
+  The parent turn's notification stream carries only lifecycle markers for a
+  spawned child, never its tool calls or its answer; the child's own rollout
+  records both. An answer belongs to the latest task only, so a newer
+  ``task_started`` clears it.
+  """
+  path = _codex_rollout_path(thread_id)
+  if path is None:
+    return None, None
+  try:
+    records, _ = _tail_records(path, _ACTIVITY_TAIL_BYTES)
+  except OSError:
+    return None, None
+  tool = answer = None
+  for record in records:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+      continue
+    kind = payload.get("type")
+    if kind in ("custom_tool_call", "function_call"):
+      tool = _codex_tool_label(payload)
+    elif record.get("type") == "event_msg" and kind == "task_started":
+      answer = None
+    elif record.get("type") == "event_msg" and kind == "task_complete":
+      message = payload.get("last_agent_message")
+      answer = message.strip() if isinstance(message, str) and message.strip() else None
+  return tool, answer
+
+
+def codex_helper_row_name(agent_path: Any) -> str | None:
+  """A spawned child's owner-facing row name, e.g. ``Fix login``."""
+  leaf = str(agent_path or "").rstrip("/").rsplit("/", 1)[-1]
+  return None if leaf in ("", "root") else _codex_agent_name(leaf)
