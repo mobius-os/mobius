@@ -3338,6 +3338,7 @@ def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   async def fake_start_turn(db, chat_id, title, content, provider):
     assert app_git.merge_in_progress(checkout)
     assert str(checkout) in content
+    assert "update to v2.0.0" in content
     return True
 
   monkeypatch.setattr(
@@ -3581,6 +3582,32 @@ def test_a_finish_that_stopped_after_its_receipt_is_repeat_safe(
     f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
     json={"resolution_policy": "accept_reviewed_upstream_exact"},
   ).status_code == 422
+
+
+def test_a_newer_release_never_installs_an_older_resolution(
+  client, auth, bypass_url_validation,
+):
+  """A resolution committed for release X must not stand in for release Y:
+  for a source imported without a Git origin the recorded upstream advances
+  before the merge, and the lookup must follow it, not the stale row."""
+  from app import install
+
+  base = "https://newer-release.test/repo/"
+  _app_id, app_dir, _replay = _conflicted_app(client, auth, base, "newer-release")
+  checkout = install.pending_update_worktree(app_dir)
+  _resolve_in(checkout, {
+    "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+  })
+  local = (app_dir / "index.jsx").read_text()
+
+  newer = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE").replace(
+    "ORIGINAL FOOTER", "NEWER FOOTER",
+  )
+  manifest = {**MANIFEST_NEWS, "id": "newer-release", "version": "3.0.0"}
+  result = _update_v2(client, auth, base, manifest, newer)
+  assert result.status_code == 201, result.text
+  assert result.json()["mode"] == "conflict"
+  assert (app_dir / "index.jsx").read_text() == local
 
 
 def test_accepting_local_package_waits_for_the_pending_update(

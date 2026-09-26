@@ -904,22 +904,6 @@ async def install_app(
   )
 
 
-def _upstream_version(repo: Path, upstream_commit: str | None) -> str | None:
-  """Version recorded by app_git.record_upstream's commit subject.
-
-  None (not a 500) when the recorded commit is missing.
-  """
-  if not upstream_commit:
-    return None
-  proc = app_git._run(
-    repo, "log", "-1", "--format=%s", upstream_commit, check=False,
-  )
-  if proc.returncode != 0:
-    return None
-  match = re.match(r"install v(.+) from .+", proc.stdout.strip())
-  return match.group(1) if match else None
-
-
 def _write_preview_tree(root: Path, files: dict[str, bytes]) -> None:
   """Materialize a trusted git/source tree below ``root`` for no-index diff.
 
@@ -1095,16 +1079,14 @@ def _park_pending_update(repo: Path, receipt: dict) -> list[str]:
     if app_git.ref_is_ancestor(worktree, upstream, "HEAD") is True:
       # Merged but not yet a clean answer: uncommitted edits or committed
       # markers are the remaining work.
-      marked = app_git._run(
-        worktree, "grep", "-z", "-lE", install._CONFLICT_MARKER, "HEAD",
-        check=False,
-      ).stdout.split("\0")
+      marked = install.committed_conflict_marker_paths(
+        worktree, "HEAD", upstream,
+      ) or []
       changed = app_git._run(
         worktree, "status", "--porcelain=v1", "-z", "--no-renames",
       ).stdout.split("\0")
       return sorted(
-        {path.removeprefix("HEAD:") for path in marked if path}
-        | {entry[3:] for entry in changed if len(entry) > 3}
+        set(marked) | {entry[3:] for entry in changed if len(entry) > 3}
       )
     # The resolver backed out of its merge. Start over from current `main`.
     app_git.remove_overlay_worktree(repo, worktree)
@@ -1763,9 +1745,7 @@ async def create_conflict_resolver_chat(
     conflict_paths = await asyncio.to_thread(
       _park_pending_update, repo, receipt,
     )
-    upstream_version = await asyncio.to_thread(
-      _upstream_version, repo, app.upstream_commit,
-    )
+    upstream_version = str(receipt["manifest"].get("version") or "") or None
 
     from app import background_agents, install
     title = f"Resolve {app.name} update conflict"
