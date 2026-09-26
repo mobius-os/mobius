@@ -867,9 +867,15 @@ def _assert_fresh(
     _reviewed_branch_diff(repo, expected_base, expected_head)
   ).hexdigest()
   if branch_hash != expected_diff:
-    raise ContributionSubmitError(
-      "The reviewed diff does not match the branch that would be pushed. "
-      "Ask your agent to prepare this PR again.",
-      code="diff_mismatch",
-    )
+    raise reviewed_diff_mismatch()
   return expected_base, expected_head, expected_diff
+
+
+def reviewed_diff_mismatch() -> ContributionSubmitError:
+  """The stored review is not the branch's canonical diff, so nothing it proves
+  (freshness, source provenance) can hold until it is prepared again."""
+  return ContributionSubmitError(
+    "The reviewed diff does not match the branch that would be pushed. "
+    "Ask your agent to prepare this PR again.",
+    code="diff_mismatch",
+  )

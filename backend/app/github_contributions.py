@@ -727,6 +727,11 @@ def _assert_pending_equivalence_preflight(record: dict) -> str:
       "This review is missing its durable source provenance.",
       code="missing_source_provenance",
     )
+  reviewed = app_git._canonical_diff(
+    spec.review_repo, spec.base_sha, spec.head_sha, read_only=True,
+  )
+  if reviewed is not None and hashlib.sha256(reviewed).hexdigest() != spec.diff_sha256:
+    raise _git_ops.reviewed_diff_mismatch()
   for source_sha in spec.source_candidates:
     proof_mode = app_git.preview_pending_equivalent_change(
       spec.source_repo,

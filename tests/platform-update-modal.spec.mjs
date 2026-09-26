@@ -403,6 +403,58 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
   await expect(page.getByRole('button', { name: 'Resolve in chat' })).toBeFocused()
 })
 
+test('a predicted overlap goes straight to an agent without applying', async ({ page }) => {
+  const state = { current: 'available', preview: { ...preview, conflict_paths: ['frontend/src/example.js'] } }
+  await mockPlatform(page, state)
+  let parked = null
+  await page.route('**/api/platform/park-for-agent', route => {
+    parked = route.request().postDataJSON()
+    state.current = 'conflict'
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      target_sha: preview.target_sha, stage: 'resolve', action: 'restart', cancellable: true,
+    }) })
+  })
+  let opened = false
+  await page.route('**/api/platform/conflict-resolver-chat', route => {
+    opened = true
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ chat_id: 'resolver-chat', created: true, started: true }) })
+  })
+
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  await expect(dialog.getByText('Some of your local changes overlap this update.')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Fix with an agent' }).click()
+
+  await expect.poll(() => opened).toBe(true)
+  expect(parked).toMatchObject({ plan_id: preview.plan_id, current_sha: preview.current_sha,
+    target_sha: preview.target_sha })
+  expect(state.unexpectedMutations).toEqual([])
+})
+
+test('an update waiting for its resolver can be cancelled from Settings', async ({ page }) => {
+  const waiting = { target_sha: preview.target_sha, stage: 'resolve', action: 'restart', cancellable: true }
+  const state = { current: 'conflict', overrides: { unfinished_update: waiting } }
+  await mockPlatform(page, state)
+  let cancelled = false
+  await page.route('**/api/platform/unfinished-update', route => {
+    cancelled = route.request().method() === 'DELETE'
+    state.current = 'available'
+    state.overrides = {}
+    return route.fulfill({ status: 204 })
+  })
+
+  const updates = await openSettings(page)
+  await updates.getByRole('button', { name: 'Cancel update' }).click()
+
+  await expect.poll(() => cancelled).toBe(true)
+  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
+  await expect(updates.getByRole('button', { name: 'Cancel update' })).toHaveCount(0)
+  expect(state.unexpectedMutations).toEqual([])
+})
+
 test('a rolled-back apply stays open with an explicit repair action', async ({ page }) => {
   const state = { current: 'available' }
   await mockPlatform(page, state)
