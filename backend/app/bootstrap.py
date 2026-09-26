@@ -20,7 +20,9 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app import models
 from app.install import install_from_manifest
+from app.timeutil import now_naive_utc
 
 log = logging.getLogger("mobius.bootstrap")
 
@@ -53,10 +55,16 @@ class _BootstrapApp:
   reinstall_after_uninstall: bool
   predecessor_manifest_id: str | None = None
   predecessor_manifest_url: str | None = None
+  # Pinned in the drawer only when this deployment has never had the app, so
+  # an owner's later unpin (or uninstall and reinstall) is never overridden.
+  pin_on_first_install: bool = False
 
 
 _CORE_BOOTSTRAP_APPS = (
-  _BootstrapApp("store", BOOTSTRAP_STORE_MANIFEST_URL, True),
+  # The Store is how a new owner finds everything else, so it starts pinned.
+  _BootstrapApp(
+    "store", BOOTSTRAP_STORE_MANIFEST_URL, True, pin_on_first_install=True,
+  ),
   # Skills is NOT the recovery surface — an owner uninstall is respected, and
   # the Store remains the way back.
   _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, False),
@@ -192,3 +200,8 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       "bootstrap: %s install %s (app id=%s, warnings=%s)",
       bootstrap_app.manifest_id, mode, app.id, warnings,
     )
+    if bootstrap_app.pin_on_first_install and existing_id is None:
+      db.query(models.App).filter(
+        models.App.id == app.id, models.App.pinned_at.is_(None),
+      ).update({models.App.pinned_at: now_naive_utc()})
+      db.commit()

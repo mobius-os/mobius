@@ -113,6 +113,62 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
     assert call.kwargs["source"] == "bootstrap"
 
 
+def _installing_rows(db):
+  """An install stand-in that persists each app like the real installer."""
+  from app.install import InstallResult, _canonical_identity_key
+
+  async def install(db_, *, manifest_url, **_kwargs):
+    manifest_id = manifest_url.split("/")[-3].removeprefix("app-")
+    identity = _canonical_identity_key(manifest_url, manifest_id)
+    app = db.query(models.App).filter_by(manifest_url=identity).first()
+    if app is None:
+      app = models.App(
+        source_dir=f"/tmp/mobius-tests/{manifest_id}",
+        name=manifest_id, description="", jsx_source="",
+        slug=manifest_id, manifest_url=identity,
+      )
+      db.add(app)
+    app.deleted_at = None  # a reinstall revives the owner's tombstone
+    db.commit()
+    return InstallResult(
+      app=app, mode="install", warnings=[], manifest={}, conflict_paths=[],
+      divergence="none", reconciliation=app_git.ReconciliationReceipt(),
+    )
+
+  return install
+
+
+@pytest.mark.asyncio
+async def test_fresh_deployment_starts_with_only_the_store_pinned(
+  db, monkeypatch,
+):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  pinned = {
+    app.slug for app in db.query(models.App).all() if app.pinned_at
+  }
+  assert pinned == {"store"}
+
+
+@pytest.mark.asyncio
+async def test_store_reinstalled_after_uninstall_keeps_owner_unpinned(
+  db, monkeypatch,
+):
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  db.add_all(_installed_default_rows(
+    datetime.now(timezone.utc), deleted=("store",),
+  ))
+  db.commit()
+
+  with patch("app.bootstrap.install_from_manifest", _installing_rows(db)):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert not any(app.pinned_at for app in db.query(models.App).all())
+
+
 @pytest.mark.asyncio
 async def test_local_deployment_bootstraps_identity_without_linking(
   db, monkeypatch,
