@@ -46,6 +46,9 @@ DELEGATED_CONTROL_TOOL_NAMES = (
   *PEER_TOOL_NAMES, *WORK_OWNERSHIP_TOOL_NAMES, CHECKPOINT_CHAT_TOOL_NAME,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
+# Above app_tools.TOOL_TIMEOUT_SECONDS and the control server's own HTTP wait,
+# so the innermost limit is the one that reports.
+CONTROL_TOOL_TIMEOUT_SECONDS = 630
 CONTROL_ENV_VARS = (
   "API_BASE_URL",
   "AGENT_TOKEN",
@@ -81,6 +84,8 @@ def claude_control_servers(*, enabled: bool) -> dict[str, dict[str, Any]]:
       "type": "stdio",
       "command": sys.executable,
       "args": [_control_script()],
+      # Milliseconds; the same wall-clock limit Codex gets as tool_timeout_sec.
+      "timeout": CONTROL_TOOL_TIMEOUT_SECONDS * 1000,
     },
   }
 
@@ -129,5 +134,8 @@ def codex_turn_mcp_config(
       # out of thread configuration and process arguments.
       "env_vars": list(CONTROL_ENV_VARS),
       "startup_timeout_sec": 30,
+      # Codex otherwise abandons any MCP call after 60 seconds; installed-app
+      # tools may legitimately run for minutes (app_tools.TOOL_TIMEOUT_SECONDS).
+      "tool_timeout_sec": CONTROL_TOOL_TIMEOUT_SECONDS,
     }
   return {"mcp_servers": servers} if servers else None

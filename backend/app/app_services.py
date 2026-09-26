@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ _FORBIDDEN_HEADERS = frozenset({
 _global_slots = {
   "private": asyncio.Semaphore(8),
   "public": asyncio.Semaphore(8),
+  "tools": asyncio.Semaphore(8),
 }
 _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
   weakref.WeakValueDictionary()
@@ -85,7 +87,12 @@ def service_entry(app, service: dict) -> Path:
 
 
 def service_environment(app, owner) -> dict[str, str]:
-  allowed = {"PATH", "LANG", "LC_ALL", "TZ", "HOME"}
+  # The same allowlist as scheduled app jobs: a reviewed service may run a
+  # provider CLI (Memory's recall navigator does) exactly as its job can.
+  allowed = {
+    "PATH", "LANG", "LC_ALL", "TZ", "HOME",
+    "DATA_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+  }
   env = {key: value for key, value in os.environ.items() if key in allowed}
   settings = get_settings()
   env.update({
@@ -168,6 +175,7 @@ def _response_headers(value) -> dict[str, str]:
 async def invoke_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
+  lane: str | None = None,
 ) -> tuple[int, object, dict[str, str], str | None]:
   service = service_contract(
     app, access="public" if request_envelope.get("public") else "self",
@@ -190,8 +198,17 @@ async def invoke_service(
   # lane for both directions deadlocks that callback behind the write waiting
   # for it. Public services still own their own file/SQLite locking where the
   # two lanes can touch the same state.
-  lane = "public" if request_envelope.get("public") else "private"
-  slot = _app_slots.setdefault((app.id, lane), asyncio.Semaphore(1))
+  #
+  # Agent tool calls use a third lane that is not serialized per app: one
+  # agent's long tool call (a Memory search can take minutes) must not stall
+  # the app's own screen or another chat's call. A tool owns its concurrency,
+  # as a public service already must.
+  if lane is None:
+    lane = "public" if request_envelope.get("public") else "private"
+  slot = (
+    contextlib.nullcontext() if lane == "tools"
+    else _app_slots.setdefault((app.id, lane), asyncio.Semaphore(1))
+  )
   # Backlog for one app must not reserve all platform execution capacity while
   # waiting for that app's serialized request. Count only executable requests.
   # Queued requests already own an accepted revision. Pin before admission so

@@ -308,7 +308,7 @@ def _available_tool_names() -> tuple[str, ...]:
 # runs each call through the app's reviewed service (backend app/app_tools.py).
 APP_TOOLS_PATH = "/api/agent/app-tools/"
 # Slightly above the backend's limit so its own timeout error is what arrives.
-APP_TOOL_CALL_TIMEOUT_SECONDS = 65
+APP_TOOL_CALL_TIMEOUT_SECONDS = 615
 
 
 def _app_tool_listings() -> list[dict[str, Any]]:

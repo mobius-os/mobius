@@ -28,9 +28,11 @@ from app.app_capabilities import agent_tools_from_contract
 
 log = logging.getLogger(__name__)
 
-# Codex's default MCP tool timeout is 60 seconds; a longer platform limit would
-# only let an app keep working after the model has been told the call failed.
-TOOL_TIMEOUT_SECONDS = 55
+# Long enough for a tool that runs its own model work (a Memory search). The
+# control server and Codex's per-server `tool_timeout_sec` wait slightly
+# longer (platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS), so the app's own
+# timeout error is what reaches the agent.
+TOOL_TIMEOUT_SECONDS = 600
 # The key under which each provider sends its own id for the model's tool call
 # in the MCP request's `_meta`. Claude: the `tool_use` id. Codex: the id of the
 # model's tool-call response item. fork_session.py cuts a fork at these ids.
@@ -57,7 +59,8 @@ class AppTool:
     }
 
 
-def _exposed_name(slug: str, name: str) -> str:
+def exposed_tool_name(slug: str, name: str) -> str:
+  """The agent-facing name of one app's tool: `<app slug>_<tool name>`."""
   return f"{slug.replace('-', '_')}_{name}"
 
 
@@ -79,7 +82,7 @@ def live_app_tools(db: Session) -> list[AppTool]:
     if not isinstance(contract, dict) or not isinstance(contract.get("service"), dict):
       continue
     for declaration in agent_tools_from_contract(contract):
-      exposed = _exposed_name(app.slug, declaration["name"])
+      exposed = exposed_tool_name(app.slug, declaration["name"])
       if exposed in seen:
         # Two apps whose slugs differ only by `-`/`_`. The older install keeps
         # the name; the newer one's tool is unavailable until renamed.
@@ -145,6 +148,7 @@ async def call_app_tool(
       "actor": {"scope": "platform"},
     },
     timeout_seconds=TOOL_TIMEOUT_SECONDS,
+    lane="tools",
   )
   if media_type is not None:
     return "App tool returned binary data.", True

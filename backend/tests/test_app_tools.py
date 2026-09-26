@@ -191,7 +191,7 @@ def test_call_runs_the_apps_service_with_arguments_and_moment(
   _run(db, provider="claude")
   calls = []
 
-  async def fake_invoke(target, owner, envelope, *, timeout_seconds):
+  async def fake_invoke(target, owner, envelope, *, timeout_seconds, lane):
     calls.append((target.id, envelope, timeout_seconds))
     return 200, "Logged.", {}, None
 
@@ -263,3 +263,49 @@ def test_codex_pre_approves_app_tools_by_exact_name():
   )
   approvals = config["mcp_servers"]["mobius_control"]["tools"]
   assert approvals["reflection_log_friction"] == {"approval_mode": "approve"}
+
+
+# ── Activity cards and limits ────────────────────────────────────────────
+
+
+def test_an_activity_may_be_triggered_by_a_declared_tool():
+  validate_manifest_contract(_manifest(agent_activities={
+    "lookup": {"tool": "log_friction", "running_label": "Logging"},
+  }))
+  with pytest.raises(ManifestContractError, match="must name one of the app's"):
+    validate_manifest_contract(_manifest(agent_activities={
+      "lookup": {"tool": "missing", "running_label": "Logging"},
+    }))
+  with pytest.raises(ManifestContractError, match="distinct tools"):
+    validate_manifest_contract(_manifest(agent_activities={
+      "a": {"tool": "log_friction", "running_label": "Logging"},
+      "b": {"tool": "log_friction", "running_label": "Logging"},
+    }))
+
+
+def test_tool_calls_run_in_their_own_unserialized_lane(client, auth, db, monkeypatch):
+  _app(db)
+  _run(db)
+  lanes = []
+
+  async def fake_invoke(target, owner, envelope, *, timeout_seconds, lane):
+    lanes.append(lane)
+    return 200, "ok", {}, None
+
+  monkeypatch.setattr(app_tools.app_services, "invoke_service", fake_invoke)
+  client.post(
+    "/api/agent/app-tools/call", headers=_agent_auth(db),
+    json={"name": "reflection_log_friction", "arguments": {}},
+  )
+  assert lanes == ["tools"]
+
+
+def test_every_layer_waits_longer_than_the_one_inside_it():
+  from app import platform_tools
+
+  control = platform_tools.claude_control_servers(enabled=True)["mobius_control"]
+  codex = codex_turn_mcp_config(None, control_enabled=True)["mcp_servers"]["mobius_control"]
+  assert app_tools.TOOL_TIMEOUT_SECONDS >= 300
+  assert platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS > app_tools.TOOL_TIMEOUT_SECONDS
+  assert codex["tool_timeout_sec"] == platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS
+  assert control["timeout"] == platform_tools.CONTROL_TOOL_TIMEOUT_SECONDS * 1000

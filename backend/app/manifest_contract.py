@@ -275,6 +275,15 @@ def static_asset_entries(value) -> dict[str, str]:
   _fail("Manifest `static_assets` must be an object or array.")
 
 
+def _validate_running_label(running_label, field: str) -> None:
+  if (
+    not isinstance(running_label, str)
+    or not running_label.strip()
+    or len(running_label) > 160
+  ):
+    _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
+
+
 def validate_agent_tools(tools, *, has_service: bool) -> None:
   """Validate the tools an app contributes to every agent run.
 
@@ -748,16 +757,32 @@ def validate_manifest_contract(manifest) -> None:
       f"(max {AGENT_ACTIVITIES_COUNT_MAX})."
     )
   declared_sources = set(source_files or []) if isinstance(source_files, list) else set()
+  declared_tools = {
+    tool.get("name") for tool in (manifest.get("tools") or [])
+    if isinstance(tool, Mapping)
+  } if isinstance(manifest.get("tools"), list) else set()
   activity_entries: set[str] = set()
+  activity_tools: set[str] = set()
   for activity_id, activity in agent_activities.items():
     validate_slug_field(activity_id, f"agent_activities.{activity_id}")
     field = f"agent_activities.{activity_id}"
+    # An activity card is triggered either by one of the app's agent tools or
+    # by a simple shell invocation of one of its source files.
+    if isinstance(activity, Mapping) and set(activity) == {"tool", "running_label"}:
+      tool = activity.get("tool")
+      if tool not in declared_tools:
+        _fail(f"Manifest `{field}.tool` must name one of the app's `tools`.")
+      if tool in activity_tools:
+        _fail("Manifest agent_activities must use distinct tools.")
+      activity_tools.add(tool)
+      _validate_running_label(activity.get("running_label"), field)
+      continue
     if not isinstance(activity, Mapping) or set(activity) != {
       "entry", "arguments", "running_label",
     }:
       _fail(
-        f"Manifest `{field}` must contain only entry, arguments, and "
-        "running_label."
+        f"Manifest `{field}` must contain either `tool` and `running_label`, "
+        "or `entry`, `arguments`, and `running_label`."
       )
     entry = activity.get("entry")
     validate_repo_relative_path(entry, f"{field}.entry")
@@ -775,13 +800,7 @@ def validate_manifest_contract(manifest) -> None:
       or not 0 <= arguments <= 16
     ):
       _fail(f"Manifest `{field}.arguments` must be an integer from 0 to 16.")
-    running_label = activity.get("running_label")
-    if (
-      not isinstance(running_label, str)
-      or not running_label.strip()
-      or len(running_label) > 160
-    ):
-      _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
+    _validate_running_label(activity.get("running_label"), field)
 
   service = manifest.get("service")
   if service is not None:
