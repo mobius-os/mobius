@@ -887,7 +887,6 @@ async def install_app(
     display=app.display,
     offline_contract=app.offline_contract,
     system_prompt_file=app.system_prompt_file,
-    system_app=app.system_app,
     chat_log_access=app.chat_log_access,
     capability_contract=app.capability_contract,
     created_at=app.created_at,
