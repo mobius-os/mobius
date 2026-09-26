@@ -502,14 +502,20 @@ test('only a loaded transcript lets runtime evidence attach a stream or reread h
   // times out; attaching from runtime alone showed the resumed reply as the
   // whole chat.
   assert.match(chatView,
-    /if \(sendingRef\.current && !force\) return[\s\S]{0,200}if \(!activationSettledRef\.current\) return null/,
-    'history refreshes wait for activation')
+    /if \(sendingRef\.current && !force\) return[\s\S]{0,300}if \(!activationSettledRef\.current\) return\n/,
+    'history refreshes wait for activation without reporting the ambiguous failure callers attach on')
   assert.match(chatView,
     /await jsonOrThrow\(res, 'Runtime refresh failed'\)[\s\S]{0,300}if \(!activationSettledRef\.current\) return null/,
     'runtime refreshes never attach before activation')
   assert.match(chatView,
-    /const delta = chatRunSignalDelta\(previous, target\)\s*if \(!activationSettledRef\.current\) continue/,
-    'run signals never attach before activation')
+    /const signalPending = \(\) => \([\s\S]{0,80}&& activationSettledRef\.current[\s\S]{0,120}\)\s*if \(externalReconcileInFlightRef\.current\) return[\s\S]*while \(signalPending\(\)\) \{\s*const previous = processedExternalSignalRef\.current[\s\S]*if \(signalPending\(\)\) queueMicrotask\(reconcileExternalActivity\)/,
+    'run signals stay unprocessed, without spinning, until activation settles')
+  assert.match(chatView,
+    /reconcileExternalActivity\(\)\s*\}, \[\s*activationSettled,\s*effectiveRunSignal\.seq,/,
+    'a run start activation did not observe still attaches once it settles')
+  assert.match(chatView,
+    /const run = \(\{ recovery = false \} = \{\}\) => \{[\s\S]*?if \(\s*recovery\s*&& !hiddenRef\.current\s*&& activationPhaseRef\.current === 'error'\s*&& activationRecoveryRef\.current\.timer == null\s*\) \{\s*retryActivation\(\)/,
+    'the server coming back restarts an activation whose quiet retries ran out')
   assert.match(chatView,
     /applyMessagesToView\(\[\], 0\)[\s\S]{0,300}disconnect\(\{ clearStreaming: true \}\)/,
     'a load that shows nothing also detaches any live stream')

@@ -533,6 +533,8 @@ export default function ChatView({
   const activationSettled = provisionalNewChat || activationPhase === 'ready'
   const activationSettledRef = useRef(activationSettled)
   activationSettledRef.current = activationSettled
+  const activationPhaseRef = useRef(activationPhase)
+  activationPhaseRef.current = activationPhase
   const setActivationPhase = useCallback((phase) => {
     setActivationState({ chatId: activationIdentity, phase })
   }, [activationIdentity])
@@ -1375,8 +1377,9 @@ export default function ChatView({
   } = {}) => {
     if (sendingRef.current && !force) return
     // Until activation has loaded the transcript, it alone reads history and
-    // attaches the live stream (see settleRuntime).
-    if (!activationSettledRef.current) return null
+    // attaches the live stream (see settleRuntime). Like a superseded read,
+    // this is not the ambiguous `null` that callers may attach on.
+    if (!activationSettledRef.current) return
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -2139,20 +2142,22 @@ export default function ChatView({
   const reconcileExternalActivity = useCallback(async () => {
     // A retained surface from the other workspace world is layout state, not a
     // second chat runtime. Its visible twin owns fetch/stream reconciliation.
-    if (hiddenRef.current) return
+    // Until activation has loaded the transcript, it alone reads history and
+    // attaches the stream, so signals stay unprocessed and are drained once it
+    // settles: a start its snapshot missed must still attach.
+    const signalPending = () => (
+      !hiddenRef.current
+      && activationSettledRef.current
+      && processedExternalSignalRef.current.seq < externalSignalRef.current.seq
+    )
     if (externalReconcileInFlightRef.current) return
     externalReconcileInFlightRef.current = true
     try {
-      while (
-        !hiddenRef.current &&
-        processedExternalSignalRef.current.seq
-        < externalSignalRef.current.seq
-      ) {
+      while (signalPending()) {
         const previous = processedExternalSignalRef.current
         const target = externalSignalRef.current
         processedExternalSignalRef.current = target
         const delta = chatRunSignalDelta(previous, target)
-        if (!activationSettledRef.current) continue
         const locallyActive = (
           sendingRef.current
           || isStreamingRef.current
@@ -2210,13 +2215,7 @@ export default function ChatView({
       }
     } finally {
       externalReconcileInFlightRef.current = false
-      if (
-        !hiddenRef.current &&
-        processedExternalSignalRef.current.seq
-        < externalSignalRef.current.seq
-      ) {
-        queueMicrotask(reconcileExternalActivity)
-      }
+      if (signalPending()) queueMicrotask(reconcileExternalActivity)
     }
   }, [
     chatId,
@@ -2229,7 +2228,13 @@ export default function ChatView({
   useEffect(() => {
     if (hidden || provisionalNewChat) return
     reconcileExternalActivity()
-  }, [effectiveRunSignal.seq, hidden, provisionalNewChat, reconcileExternalActivity])
+  }, [
+    activationSettled,
+    effectiveRunSignal.seq,
+    hidden,
+    provisionalNewChat,
+    reconcileExternalActivity,
+  ])
 
   const ensureRuntimeStreamConnected = useCallback((runtime) => {
     if (!shouldRepairRuntimeStream({
@@ -5116,6 +5121,17 @@ export default function ChatView({
       // A shared recovery generation is different: it is the explicit server
       // restart edge and must reattach every mounted pane.
       if (!recovery && hiddenRef.current) return
+      // Runtime reads wait for a loaded transcript, so this edge is what
+      // restarts a visible activation whose quiet retries have run out.
+      if (
+        recovery
+        && !hiddenRef.current
+        && activationPhaseRef.current === 'error'
+        && activationRecoveryRef.current.timer == null
+      ) {
+        retryActivation()
+        return
+      }
       void reconcileFailedSendOutbox({ authoritative: false })
       reconcileRuntimeState().then(runtime => {
         if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
@@ -5147,6 +5163,7 @@ export default function ChatView({
     hidden,
     reconcileFailedSendOutbox,
     reconcileRuntimeState,
+    retryActivation,
   ])
 
   // Only authoritative answered blocks retire the local card projection. A
