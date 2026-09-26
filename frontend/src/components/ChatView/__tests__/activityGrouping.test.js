@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { groupActivityRuns } from '../activityGrouping.js'
+import { foldAppActivityOperations, groupActivityRuns } from '../activityGrouping.js'
 
 const entry = (type, extra = {}) => ({ item: { type, ...extra } })
 
@@ -82,7 +82,7 @@ test('pages of one app operation render as one row listing every page', () => {
   const last = page('done', 'Finished reading 3 notes from Memory', ['B', 'C'])
   const otherApp = page('done', 'Other', ['Z'], { app_slug: 'notes' })
 
-  const nodes = groupActivityRuns([first, prose, last, otherApp])
+  const nodes = groupActivityRuns(foldAppActivityOperations([first, prose, last, otherApp]))
   const row = nodes[0].group[0]
   // The operation keeps its first slot and shows the finished wording with
   // every note read, once each; another app's identical key stays separate.
@@ -92,4 +92,12 @@ test('pages of one app operation render as one row listing every page', () => {
   assert.equal(nodes[0].group.length, 1)
   assert.equal(nodes[1].single, prose)
   assert.equal(nodes[2].group[0], otherApp)
+
+  // Grouping alone keeps every stored page, so cold-transcript preparation
+  // (which shares it) never drops or copies a block.
+  assert.deepEqual(groupActivityRuns([first, prose, last]), [
+    { group: [first] },
+    { single: prose },
+    { group: [last] },
+  ])
 })

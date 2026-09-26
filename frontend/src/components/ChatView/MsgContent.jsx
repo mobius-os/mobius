@@ -13,6 +13,7 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
+import { foldAppActivityOperations } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -572,9 +573,10 @@ function MsgContentInner({
     }
 
     // Fold contiguous runs of thinking AND tool blocks into one activity
-    // stretch. Live items arrive here after conversion to the same block shape,
-    // so the transcript doesn't reshuffle on promote.
-    const nodes = groupActivityRuns(finalEntries)
+    // stretch, after the pages of one app operation become one row. Live items
+    // arrive here after conversion to the same block shape, so the transcript
+    // doesn't reshuffle on promote.
+    const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
 
     return (
       <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
