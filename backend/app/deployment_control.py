@@ -79,6 +79,11 @@ _KNOWN_STATES = {
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
 _managed_recovery_tasks: set[asyncio.Task[None]] = set()
+# The Railway handoff this process can still start or cancel. Its nonce lives
+# only in that request, and the account service never expires a prepared
+# handoff, so ``awaiting_handoff`` for any other operation is abandoned: nothing
+# can ever advance it, and reporting it as running would block every retry.
+_managed_handoff: str | None = None
 _UPGRADE_MESSAGE = (
   "The Host replacement helper predates the current protected-runtime or "
   "safe external chat-handoff contract. Re-run "
@@ -153,6 +158,12 @@ async def _reconcile_ambiguous_managed_start(
       return
 
 
+def _release_managed_handoff(operation_id: str) -> None:
+  global _managed_handoff
+  if _managed_handoff == operation_id:
+    _managed_handoff = None
+
+
 def _schedule_ambiguous_start_reconciliation(
   operation_id: str,
   handoff_nonce: str,
@@ -165,6 +176,8 @@ def _schedule_ambiguous_start_reconciliation(
   )
   _managed_recovery_tasks.add(task)
   task.add_done_callback(_managed_recovery_tasks.discard)
+  # Only this task still holds the nonce, so it owns the handoff until it ends.
+  task.add_done_callback(lambda _task: _release_managed_handoff(operation_id))
 
 
 def _control_dir() -> Path:
@@ -500,6 +513,15 @@ async def read_rebuild_status() -> RebuildStatus:
         ),
       )
     raw = await asyncio.to_thread(_managed_request, "GET", "status")
+    if (
+      raw.get("state") == "awaiting_handoff"
+      and raw.get("operation_id") != _managed_handoff
+    ):
+      # Retrying prepares a fresh handoff over this one.
+      raw = {
+        **raw, "state": "idle",
+        "message": "The last update attempt stopped before replacing the container.",
+      }
     return _normalize_managed_status(raw)
   if not _configured():
     return _empty_status(
@@ -763,6 +785,7 @@ async def _request_managed_rebuild(
   *,
   final_check: Callable[[], None] | None = None,
 ) -> RebuildStatus:
+  global _managed_handoff
   from app import restart_ledger, restart_util
 
   if not managed_cutover_ready():
@@ -789,21 +812,22 @@ async def _request_managed_rebuild(
     raise DeploymentControlError(
       "controller_invalid_response", "The managed replacement handoff is incomplete."
     )
-  restart_ledger.request_managed_cutover(
-    boot_id=boot_id, cutover_id=operation_id,
-  )
-  deadline = time.monotonic() + 15
-  while not restart_ledger.authorized_cutover_challenge(operation_id):
-    if time.monotonic() >= deadline:
-      raise DeploymentControlError(
-        "controller_upgrade_required",
-        "The current container cannot authorize a Railway replacement.",
-      )
-    await asyncio.sleep(0.25)
-
+  _managed_handoff = operation_id
   drained = False
   provider_start_attempted = False
+  reconciling = False
   try:
+    restart_ledger.request_managed_cutover(
+      boot_id=boot_id, cutover_id=operation_id,
+    )
+    deadline = time.monotonic() + 15
+    while not restart_ledger.authorized_cutover_challenge(operation_id):
+      if time.monotonic() >= deadline:
+        raise DeploymentControlError(
+          "controller_upgrade_required",
+          "The current container cannot authorize a Railway replacement.",
+        )
+      await asyncio.sleep(0.25)
     await restart_util.prepare_managed_container_cutover(operation_id)
     drained = True
     deadline = time.monotonic() + 15
@@ -839,6 +863,7 @@ async def _request_managed_rebuild(
       # accepted Railway cutover.
       _schedule_managed_recovery(restart_util.restart_this_worker)
     elif drained and provider_start_attempted and code != "controller_rejected":
+      reconciling = True
       _schedule_ambiguous_start_reconciliation(
         operation_id,
         handoff_nonce,
@@ -850,3 +875,6 @@ async def _request_managed_rebuild(
       "controller_unavailable",
       "The final container replacement check could not complete.",
     ) from exc
+  finally:
+    if not reconciling:
+      _release_managed_handoff(operation_id)
