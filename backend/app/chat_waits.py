@@ -48,17 +48,68 @@ from app.timeutil import now_naive_utc
 _LOG = logging.getLogger("moebius.chat_waits")
 
 
+# A generic Wait's resume is delivered by one turn; when that turn ends before
+# admission (its provider never started) it is delivered again as a new
+# attempt, each with its own run and message identity. Attempt 1 keeps the
+# historical ids, so existing rows and queued notices stay valid.
+MAX_RESUME_ATTEMPTS = 3
+_RESUME_RUN_PREFIX = "wait-resume-"
+_RESUME_CID_PREFIX = "wait-result-"
+
+
+def resume_attempt_identity(wait_id: str, attempt: int) -> tuple[str, str]:
+  """(run token, message cid) of one delivery attempt of a Wait's resume."""
+  suffix = wait_id if attempt <= 1 else f"{wait_id}.{attempt}"
+  return f"{_RESUME_RUN_PREFIX}{suffix}", f"{_RESUME_CID_PREFIX}{suffix}"
+
+
+def _wait_id_of(identity: str, prefix: str) -> str:
+  """The Wait id inside an attempt's run token or cid."""
+  return identity.removeprefix(prefix).split(".", 1)[0]
+
+
+def claim_admitted_wait_result(chat_id: str, run_token: str) -> bool:
+  """Latch the Wait result an admitted turn carries.
+
+  Admission is when the provider has started and the prompt is about to be
+  sent. A resume turn that ends before it leaves the Wait owed, and the
+  supervisor delivers it again as a new attempt.
+  """
+  if not run_token.startswith(_RESUME_RUN_PREFIX):
+    return False
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    claimed = db.query(models.ChatWait).filter(
+      models.ChatWait.id == _wait_id_of(run_token, _RESUME_RUN_PREFIX),
+      models.ChatWait.chat_id == chat_id,
+      models.ChatWait.kind != "platform_activation",
+      models.ChatWait.status.in_(("met", "expired", "failed")),
+      models.ChatWait.resume_delivered_at.is_(None),
+    ).update(
+      {models.ChatWait.resume_delivered_at: now_naive_utc()},
+      synchronize_session=False,
+    )
+    db.commit()
+  if claimed:
+    _broadcast_changed(chat_id)
+  return claimed == 1
+
+
 def claim_scheduled_wait_result(chat_id: str, message: object) -> bool:
-  """Latch one exact Wait result only after provider-task admission."""
+  """Latch a restart-activation result once its turn is scheduled.
+
+  The activation barrier owns its own delivery lifecycle. Generic Wait
+  results latch later, at admission (claim_admitted_wait_result).
+  """
   if not isinstance(message, dict):
     return False
   cid = message.get("cid")
   kind = message.get("kind")
-  prefixes = {
-    WAIT_RESULT_MESSAGE_KIND: "wait-result-",
-    PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND: "activation-result-",
-  }
-  prefix = prefixes.get(kind)
+  prefix = (
+    "activation-result-"
+    if kind == PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND else None
+  )
   if not isinstance(cid, str) or prefix is None or not cid.startswith(prefix):
     return False
   row_id = cid.removeprefix(prefix)
@@ -72,11 +123,9 @@ def claim_scheduled_wait_result(chat_id: str, message: object) -> bool:
       models.ChatWait.status.in_(("met", "expired", "failed")),
       models.ChatWait.resume_delivered_at.is_(None),
     )
-    if kind == PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND:
-      query = query.filter(models.ChatWait.kind == "platform_activation")
-    else:
-      query = query.filter(models.ChatWait.kind != "platform_activation")
-    claimed = query.update(
+    claimed = query.filter(
+      models.ChatWait.kind == "platform_activation",
+    ).update(
       {models.ChatWait.resume_delivered_at: now_naive_utc()},
       synchronize_session=False,
     )
@@ -613,7 +662,10 @@ def safe_startup_writer_orphan(
     or not physical.id.startswith(prefix)
   ):
     return False
-  wait_id = physical.id[len(prefix):]
+  wait_id = (
+    physical.id[len(prefix):] if activation
+    else _wait_id_of(physical.id, _RESUME_RUN_PREFIX)
+  )
   row = db.query(models.ChatWait).filter(
     models.ChatWait.id == wait_id,
     models.ChatWait.chat_id == chat.id,
@@ -649,7 +701,10 @@ def safe_startup_writer_orphan(
     expected_kind = PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND
   else:
     expected_content = _compose_resume_notice(row, outcome)
-    expected_cid = f"wait-result-{row.id}"
+    # The cid of this exact attempt, which shares the run token's suffix.
+    expected_cid = _RESUME_CID_PREFIX + physical.id.removeprefix(
+      _RESUME_RUN_PREFIX,
+    )
     expected_kind = WAIT_RESULT_MESSAGE_KIND
   messages = list(chat.messages or [])
   continuation = messages[-1] if messages else None
@@ -664,6 +719,48 @@ def safe_startup_writer_orphan(
     and bool(continuation.get("hidden"))
     and live.get("id") == physical.id
     and not (live.get("blocks") or [])
+  )
+
+
+def _owner_message_follows_resume(
+  db: Session, row: models.ChatWait, content: str,
+) -> bool:
+  """Whether the owner spoke after this Wait's latest delivered result.
+
+  An owner send that wins over a resume turn carries the result in its own
+  model history, so that turn, not a new attempt, owns the delivery.
+  """
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == row.chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat is None:
+    return False
+  cids = {
+    resume_attempt_identity(row.id, attempt)[1]
+    for attempt in range(1, MAX_RESUME_ATTEMPTS + 1)
+  }
+  messages = list(chat.messages or [])
+  matches = [
+    index
+    for index, message in enumerate(messages)
+    if (
+      isinstance(message, dict)
+      and message.get("role") == "user"
+      and message.get("cid") in cids
+      and message.get("content") == content
+      and message.get("kind") == WAIT_RESULT_MESSAGE_KIND
+      and message.get("source_work_id") == row.created_by_run_id
+      and bool(message.get("hidden"))
+    )
+  ]
+  return bool(matches) and any(
+    isinstance(message, dict)
+    and message.get("role") == "user"
+    and not bool(message.get("hidden"))
+    and message.get("kind") is None
+    and message.get("_initiated_by_app_id") is None
+    for message in messages[matches[-1] + 1:]
   )
 
 
@@ -684,37 +781,7 @@ def _wait_resume_owned_by_later_owner_turn(
   """
   if physical.status not in ("interrupted", "stopped"):
     return False
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == row.chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if chat is None:
-    return False
-  resume_cid = f"wait-result-{row.id}"
-  matches = [
-    index
-    for index, message in enumerate(list(chat.messages or []))
-    if (
-      isinstance(message, dict)
-      and message.get("role") == "user"
-      and message.get("cid") == resume_cid
-      and message.get("content") == content
-      and message.get("kind") == WAIT_RESULT_MESSAGE_KIND
-      and message.get("source_work_id") == row.created_by_run_id
-      and bool(message.get("hidden"))
-    )
-  ]
-  if len(matches) != 1:
-    return False
-  messages = list(chat.messages or [])
-  if not any(
-    isinstance(message, dict)
-    and message.get("role") == "user"
-    and not bool(message.get("hidden"))
-    and message.get("kind") is None
-    and message.get("_initiated_by_app_id") is None
-    for message in messages[matches[0] + 1:]
-  ):
+  if not _owner_message_follows_resume(db, row, content):
     return False
 
   successor = (
@@ -741,6 +808,42 @@ def _wait_resume_owned_by_later_owner_turn(
   # Failed, stopped, interrupted, and limit-parked attempts can all end before
   # the provider owns the prompt, so they must leave the Wait retryable.
   return True
+
+
+def _next_resume_attempt(
+  db: Session, row: models.ChatWait, content: str,
+) -> tuple[str, str] | bool:
+  """Choose how to deliver a generic Wait's resume now.
+
+  Returns the attempt's (run token, cid) to start or attach to; True when the
+  result is already consumed and only its latch is missing; False while an
+  owner turn that followed it may still adopt it.
+  """
+  identities = {
+    resume_attempt_identity(row.id, attempt)[0]: attempt
+    for attempt in range(1, MAX_RESUME_ATTEMPTS + 1)
+  }
+  runs = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == row.chat_id,
+    models.ChatRun.id.in_(identities),
+  ).all()
+  if not runs:
+    return resume_attempt_identity(row.id, 1)
+  latest = max(runs, key=lambda run: identities[run.id])
+  attempt = identities[latest.id]
+  if latest.status == "running":
+    return resume_attempt_identity(row.id, attempt)
+  if latest.provider_execution_admitted:
+    return True
+  if _wait_resume_owned_by_later_owner_turn(db, row, latest, content):
+    return True
+  if _owner_message_follows_resume(db, row, content):
+    return False
+  if latest.status == "stopped" or attempt >= MAX_RESUME_ATTEMPTS:
+    # The owner stopped it, or every attempt failed to start; each failure
+    # left its error in the chat.
+    return True
+  return resume_attempt_identity(row.id, attempt + 1)
 
 
 async def _deliver_resume(row_id: str) -> bool:
@@ -791,10 +894,19 @@ async def _deliver_resume(row_id: str) -> bool:
       ).first()
       if source_work_id is not None else None
     )
-    resume_run_id = (
-      f"activation-resume-{row_id}" if activation
-      else f"wait-resume-{row_id}"
-    )
+    if activation:
+      resume_run_id = f"activation-resume-{row_id}"
+      resume_cid = f"activation-result-{row_id}"
+    else:
+      attempt = _next_resume_attempt(db, row, content)
+      if attempt is False:
+        return False
+      if attempt is True:
+        row.resume_delivered_at = now_naive_utc()
+        db.commit()
+        _broadcast_changed(row.chat_id)
+        return True
+      resume_run_id, resume_cid = attempt
     existing_resume = db.query(models.ChatRun).filter(
       models.ChatRun.id == resume_run_id,
       models.ChatRun.chat_id == chat_id,
@@ -812,10 +924,6 @@ async def _deliver_resume(row_id: str) -> bool:
       )
     )
 
-  resume_cid = (
-    f"activation-result-{row_id}" if activation
-    else f"wait-result-{row_id}"
-  )
   message_kind = (
     PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND if activation
     else WAIT_RESULT_MESSAGE_KIND
@@ -848,12 +956,24 @@ async def _deliver_resume(row_id: str) -> bool:
         models.ChatRun.chat_id == chat_id,
       ).first()
       if existing_resume is not None:
-        if _wait_resume_owned_by_later_owner_turn(
+        if not _wait_resume_owned_by_later_owner_turn(
           db, row, existing_resume, content,
         ):
-          delivered = True
-        else:
           return False
+        if not activation:
+          # An owner turn carried the result; no resume turn will admit it.
+          claimed = db.query(models.ChatWait).filter(
+            models.ChatWait.id == row_id,
+            models.ChatWait.resume_delivered_at.is_(None),
+          ).update(
+            {models.ChatWait.resume_delivered_at: now_naive_utc()},
+            synchronize_session=False,
+          )
+          db.commit()
+          if claimed:
+            _broadcast_changed(chat_id)
+          return True
+        delivered = True
 
   if not delivered and activation:
     # Activation has a writer-authenticated pending/question bypass. Falling
@@ -883,8 +1003,8 @@ async def _deliver_resume(row_id: str) -> bool:
           initiated_by_app_id=None,
         )))
         # Queue persistence is not provider delivery. Keep the latch open;
-        # the deterministic promoted run claims it after scheduling, while
-        # this stable cid makes supervisor retries idempotent.
+        # the promoted run claims it at admission, while this stable cid
+        # makes supervisor retries idempotent.
         return False
       except Exception:
         _LOG.warning(
@@ -894,11 +1014,13 @@ async def _deliver_resume(row_id: str) -> bool:
 
   if not delivered:
     return False
-  claim_scheduled_wait_result(chat_id, {
-    "kind": message_kind,
-    "cid": resume_cid,
-    "source_work_id": source_work_id,
-  })
+  if activation:
+    claim_scheduled_wait_result(chat_id, {
+      "kind": message_kind,
+      "cid": resume_cid,
+      "source_work_id": source_work_id,
+    })
+  # A generic Wait's resume turn latches it at admission.
   return True
 
 
@@ -1173,28 +1295,29 @@ async def withdraw_delivered_resume_notices(chat_id: str) -> int:
     chat = db.query(models.Chat).options(
       load_only(models.Chat.pending_messages),
     ).filter(models.Chat.id == chat_id).first()
-    queued: dict[str, str] = {}
+    queued: list[tuple[str, str]] = []
     for message in (chat.pending_messages or []) if chat is not None else []:
       cid = message.get("cid") if isinstance(message, dict) else None
       if (
         message.get("kind") == WAIT_RESULT_MESSAGE_KIND
         and isinstance(cid, str) and cid.startswith(prefix)
       ):
-        queued[cid.removeprefix(prefix)] = cid
+        queued.append((_wait_id_of(cid, prefix), cid))
     if not queued:
       return 0
     delivered = {
       wait_id for (wait_id,) in db.query(models.ChatWait.id).filter(
         models.ChatWait.chat_id == chat_id,
-        models.ChatWait.id.in_(queued),
+        models.ChatWait.id.in_({wait_id for wait_id, _cid in queued}),
         models.ChatWait.resume_delivered_at.is_not(None),
       ).all()
     }
-  for wait_id in delivered:
+  stale = [cid for wait_id, cid in queued if wait_id in delivered]
+  for cid in stale:
     await await_ack(get_writer().submit(CancelPending(
-      chat_id=chat_id, run_token="", cid=queued[wait_id],
+      chat_id=chat_id, run_token="", cid=cid,
     )))
-  return len(delivered)
+  return len(stale)
 
 
 def armed_wait_chat_ids(db: Session) -> set[str]:

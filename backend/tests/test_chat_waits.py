@@ -595,7 +595,12 @@ def test_met_command_wait_resumes_idle_chat(client, owner_token, db, monkeypatch
   db.expire_all()
   refreshed = db.get(models.ChatWait, row.id)
   assert refreshed.status == "met"
-  assert refreshed.resume_delivered_at is not None
+  # Scheduling is not delivery: the resume turn latches it at admission.
+  assert refreshed.resume_delivered_at is None
+  assert starts[0]["run_token"] == f"wait-resume-{row.id}"
+  assert chat_waits_mod.claim_admitted_wait_result(chat_id, starts[0]["run_token"])
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
 
   # The latch holds: a second sweep never redelivers.
   assert asyncio.run(sweep_due_waits()) == 0
@@ -1025,6 +1030,10 @@ def test_wait_resume_survives_commit_before_schedule_restart(
     if message.get("cid") == f"wait-result-{row.id}"
   ] == [f"wait-result-{row.id}"]
   assert db.query(models.ChatRun).filter_by(id=resume_run_id).count() == 1
+  # Scheduling is not delivery; the resume turn latches it at admission.
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+  chat_waits_mod.claim_admitted_wait_result(chat_id, f"wait-resume-{row.id}")
+  db.expire_all()
   assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
   assert [attempt["run_token"] for attempt in attempts] == [
     resume_run_id, resume_run_id,
@@ -1306,6 +1315,10 @@ def test_queued_wait_promotion_recovers_schedule_failure_on_boot_and_wedge(
   assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
   db.expire_all()
   assert scheduled == [resume_run_id]
+  # Scheduling is not delivery; the resume turn latches it at admission.
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+  chat_waits_mod.claim_admitted_wait_result(chat_id, f"wait-resume-{row.id}")
+  db.expire_all()
   assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
   assert db.query(models.ChatRun).filter_by(id=resume_run_id).count() == 1
 
@@ -1391,6 +1404,10 @@ def test_legacy_wait_without_source_recovers_promoted_schedule_crash_once(
   assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
   db.expire_all()
   assert scheduled == [resume_run_id]
+  # Scheduling is not delivery; the resume turn latches it at admission.
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+  chat_waits_mod.claim_admitted_wait_result(chat_id, f"wait-resume-{row.id}")
+  db.expire_all()
   assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
   assert db.query(models.ChatRun).filter_by(id=resume_run_id).count() == 1
   assert sum(
@@ -1509,6 +1526,10 @@ def test_wait_result_data_cannot_terminate_its_carrier_and_latches_once(
   ) is True
   db.expire_all()
   assert scheduled == [f"wait-resume-{row.id}"]
+  # Scheduling is not delivery; the resume turn latches it at admission.
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+  chat_waits_mod.claim_admitted_wait_result(chat_id, f"wait-resume-{row.id}")
+  db.expire_all()
   assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
   assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is False
   assert sum(
@@ -1801,3 +1822,124 @@ def test_expired_autopilot_lease_is_reclaimed_by_sweep(db):
 
   # Idempotent: nothing left to reclaim.
   assert sweep_expired_leases(db) == 0
+
+
+def _met_wait_and_scheduler(client, owner_token, db, monkeypatch, description):
+  """A met Wait whose resume turns are scheduled but never run a provider."""
+  chat_id = _owner_chat(client, owner_token)
+  row = _command_wait(
+    db, chat_id=chat_id, description=description, kind="command",
+    command="true", created_by_run_id=_seed_declaring_run(db, chat_id),
+  )
+  row.status = "met"
+  row.met_at = now_naive_utc()
+  db.commit()
+  scheduled: list[str] = []
+
+  def schedule(**kwargs):
+    scheduled.append(kwargs["run_token"])
+    return True
+
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", schedule)
+  return chat_id, row, scheduled
+
+
+def _end_run(chat_id, run_token, status):
+  from app.chat_writer import FinishRun, get_writer
+
+  get_writer().submit(FinishRun(
+    chat_id=chat_id, run_token=run_token, terminal_status=status,
+  )).result(timeout=5)
+
+
+def test_a_resume_turn_that_never_started_is_delivered_again(
+  client, owner_token, db, monkeypatch,
+):
+  """The start failed before admission, so the agent never saw the result:
+  the Wait stays owed, a new attempt carries it, and that turn's admission
+  finally counts it delivered."""
+  chat_id, row, scheduled = _met_wait_and_scheduler(
+    client, owner_token, db, monkeypatch, "start failure retried",
+  )
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
+  chat_mod.discard_starting(chat_id)
+  remove_broadcast(chat_id)
+  _end_run(chat_id, scheduled[0], "failed")
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
+  chat_mod.discard_starting(chat_id)
+  remove_broadcast(chat_id)
+  assert scheduled == [f"wait-resume-{row.id}", f"wait-resume-{row.id}.2"]
+  db.expire_all()
+  carriers = [
+    m.get("cid") for m in db.get(models.Chat, chat_id).messages
+    if m.get("kind") == WAIT_RESULT_MESSAGE_KIND
+  ]
+  assert carriers == [f"wait-result-{row.id}", f"wait-result-{row.id}.2"]
+
+  assert chat_waits_mod.claim_admitted_wait_result(chat_id, scheduled[1])
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is False
+
+
+def test_a_stopped_resume_turn_is_consumed_not_restarted(
+  client, owner_token, db, monkeypatch,
+):
+  """The owner stopped it: a Stop never makes the chat restart itself."""
+  chat_id, row, scheduled = _met_wait_and_scheduler(
+    client, owner_token, db, monkeypatch, "stopped before start",
+  )
+  asyncio.run(chat_waits_mod._deliver_resume(row.id))
+  chat_mod.discard_starting(chat_id)
+  remove_broadcast(chat_id)
+  _end_run(chat_id, scheduled[0], "stopped")
+
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
+  db.expire_all()
+  assert scheduled == [f"wait-resume-{row.id}"]
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
+
+
+def test_resume_attempts_are_bounded(client, owner_token, db, monkeypatch):
+  """A provider that never starts cannot turn one Wait into endless turns."""
+  chat_id, row, scheduled = _met_wait_and_scheduler(
+    client, owner_token, db, monkeypatch, "never starts",
+  )
+  for _ in range(chat_waits_mod.MAX_RESUME_ATTEMPTS):
+    assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
+    chat_mod.discard_starting(chat_id)
+    remove_broadcast(chat_id)
+    _end_run(chat_id, scheduled[-1], "failed")
+
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is True
+  db.expire_all()
+  assert len(scheduled) == chat_waits_mod.MAX_RESUME_ATTEMPTS
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
+
+
+def test_an_owner_message_after_the_result_defers_to_that_owner_turn(
+  client, owner_token, db, monkeypatch,
+):
+  """The owner spoke after the Wait's result, so their turn carries it; a new
+  attempt would deliver it twice."""
+  chat_id, row, scheduled = _met_wait_and_scheduler(
+    client, owner_token, db, monkeypatch, "owner spoke next",
+  )
+  asyncio.run(chat_waits_mod._deliver_resume(row.id))
+  chat_mod.discard_starting(chat_id)
+  remove_broadcast(chat_id)
+  _end_run(chat_id, scheduled[0], "interrupted")
+  chat = db.get(models.Chat, chat_id)
+  chat.messages = [
+    *chat.messages,
+    {"role": "user", "content": "What happened?", "cid": "owner-next", "ts": 9},
+  ]
+  db.commit()
+
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is False
+  db.expire_all()
+  assert scheduled == [f"wait-resume-{row.id}"]
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
