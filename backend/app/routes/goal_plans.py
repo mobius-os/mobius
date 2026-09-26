@@ -456,6 +456,146 @@ async def attach_unfinished_goal(
   return result
 
 
+class GoalUpdateRequest(BaseModel):
+  """One agent-facing Goal operation: edit tasks, then checkpoint or complete."""
+
+  model_config = ConfigDict(extra="forbid")
+  goal_id: str | None = Field(default=None, min_length=1, max_length=64)
+  tasks: list[dict[str, Any]] | None = Field(default=None, min_length=1)
+  next_action: str | None = Field(default=None, min_length=1, max_length=2000)
+  complete: str | None = Field(default=None, min_length=1, max_length=4000)
+  finished_claims: list[str] = Field(default_factory=list, max_length=50)
+
+  @model_validator(mode="after")
+  def one_record_operation(self) -> "GoalUpdateRequest":
+    if self.complete is not None and self.next_action is not None:
+      raise ValueError("Complete or leave a next action, not both.")
+    if self.finished_claims and self.complete is None:
+      raise ValueError("Only a completion can name finished claims.")
+    return self
+
+  @property
+  def changes_anything(self) -> bool:
+    return any(
+      value is not None
+      for value in (self.goal_id, self.tasks, self.next_action, self.complete)
+    )
+
+
+def _goal_summary(goal) -> dict[str, Any]:
+  return {
+    "id": goal.id, "status": goal.status, "revision": goal.revision,
+    "objective": goal.objective, "next_action": goal.next_action,
+  }
+
+
+async def _attach_run_to_goal(db: Session, chat_id: str, principal: Principal,
+                              goal_id: str | None):
+  """Return this attempt's Goal rows, attaching the attempt when needed.
+
+  An ordinary turn that resumes unfinished work is not yet bound to the Goal
+  the chat presents; binding it here means a plan write never needs a
+  separate resume step. Caller holds the chat transition lock.
+  """
+  rows = active_goal_rows(db, chat_id)
+  if (
+    rows is not None and rows[0].id == principal.run_id
+    and rows[0].status == "running"
+    and (goal_id is None or rows[1].id == goal_id)
+  ):
+    return rows
+  from app import models
+  from app.chat_writer import (
+    GoalPromotionRejected, PromoteRunToGoal, await_ack, get_writer,
+  )
+  if goal_id is not None:
+    target = db.get(models.ChatGoal, goal_id)
+    if target is None or target.chat_id != chat_id:
+      raise HTTPException(status_code=404, detail="Goal not found in this chat.")
+  else:
+    presented = presented_goal_rows(db, chat_id)
+    target = presented[1] if presented else None
+  if target is None or target.status != "open":
+    raise HTTPException(status_code=409, detail={
+      "code": "no_active_goal",
+      "message": "This chat has no open Goal to update. Promote one first.",
+    })
+  result = await await_ack(get_writer().submit(PromoteRunToGoal(
+    chat_id=chat_id, run_token=principal.run_id or "",
+    objective=target.objective, resume_goal_id=target.id,
+  )))
+  if isinstance(result, GoalPromotionRejected):
+    raise HTTPException(
+      status_code=409, detail="Goal cannot attach: " + result.reason,
+    )
+  if result["state"] == "promoted":
+    broadcast = get_broadcast(chat_id)
+    if broadcast is not None and broadcast.running:
+      broadcast.publish({"type": "goal_activated", **result})
+  db.rollback()
+  return _active_rows_or_409(db, chat_id, principal)
+
+
+@router.post("/{chat_id}/goal/update", dependencies=[Depends(reject_cross_site)])
+async def update_goal(
+  chat_id: str, body: GoalUpdateRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Edit the plan and optionally checkpoint or complete, as one operation.
+
+  With no fields it reads the presented Goal without attaching to it.
+  """
+  _require_owner(principal)
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  get_active_chat_for_principal(db, chat_id, principal)
+  if not body.changes_anything:
+    rows = presented_goal_rows(db, chat_id)
+    if rows is None:
+      return {"goal": None, "plan": None}
+    return {"goal": _goal_summary(rows[1]), "plan": serialize_plan(db, *rows)}
+  from app import chat_queue
+  from app.goal_plans import edit_plan
+  from app.goals import update_goal_record
+  record = None
+  async with chat_queue.get_transition_lock(chat_id):
+    db.rollback()
+    run, goal = await _attach_run_to_goal(db, chat_id, principal, body.goal_id)
+    tasks_saved = False
+    try:
+      if body.tasks is not None:
+        edit_plan(db, physical=run, root=goal, edits=body.tasks)
+        db.refresh(goal)
+        tasks_saved = True
+      if body.next_action is not None or body.complete is not None:
+        record = update_goal_record(
+          db, run, goal, goal.revision,
+          checkpoint="Plan saved." if body.next_action is not None else None,
+          next_action=body.next_action, result=body.complete,
+          finished_claims=body.finished_claims,
+        )
+        db.refresh(goal)
+    except (GoalPlanError, GoalPlanConflict) as exc:
+      if tasks_saved:
+        # The task edits committed before the record operation was refused;
+        # say so, or a retry would re-apply them as if nothing had changed.
+        _publish(chat_id, serialize_plan(db, run, goal))
+      prefix = "Task edits were saved, but " if tasks_saved else ""
+      if isinstance(exc, GoalPlanError):
+        refusal = _plan_refusal(exc)
+        refusal.detail["message"] = prefix + refusal.detail["message"]
+        raise refusal from exc
+      raise HTTPException(status_code=409, detail=prefix + str(exc)) from exc
+    plan = serialize_plan(db, run, goal)
+  if plan is not None:
+    _publish(chat_id, plan)
+  if record is not None and record.get("status") == "completed":
+    from app.agent_coordination import settle_claims_with_owner
+    await settle_claims_with_owner(chat_id)
+  return {"goal": _goal_summary(goal), "plan": plan}
+
+
 @router.get("/{chat_id}/goal-context")
 def get_goal_context(
   chat_id: str, task: str | None = None, goal_id: str | None = None,

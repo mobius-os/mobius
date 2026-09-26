@@ -14,6 +14,7 @@ from typing import Any
 
 CONTROL_SERVER_NAME = "mobius_control"
 GOAL_TOOL_NAME = "promote_goal"
+UPDATE_GOAL_TOOL_NAME = "update_goal"
 WAIT_TOOL_NAME = "declare_wait"
 CANCEL_WAIT_TOOL_NAME = "cancel_wait"
 APPROVAL_TOOL_NAME = "request_approval"
@@ -34,6 +35,7 @@ WORK_OWNERSHIP_TOOL_NAMES = (
 )
 OWNER_CONTROL_TOOL_NAMES = (
   GOAL_TOOL_NAME,
+  UPDATE_GOAL_TOOL_NAME,
   WAIT_TOOL_NAME,
   CANCEL_WAIT_TOOL_NAME,
   APPROVAL_TOOL_NAME,
