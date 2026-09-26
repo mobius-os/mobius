@@ -1535,16 +1535,81 @@ _PYTHON_DEPENDENCY_INPUTS = (
 )
 
 
+_PYTHON_LOCK_INPUT = "backend/requirements.lock"
+
+
+def _git_blob(repo: Path, rev: str, path: str) -> bytes | None:
+  """Exact bytes of one immutable ``rev:path`` object, or None."""
+  try:
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "show", f"{rev}:{path}"],
+      capture_output=True,
+      check=False,
+      timeout=_GIT_TIMEOUT,
+      env=_scrubbed_git_env(repo),
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+  return blob.stdout if blob.returncode == 0 else None
+
+
+def _locked_requirements(lock: bytes) -> frozenset[str] | None:
+  """A pip lock's requirement entries with artifact hashes and comments removed.
+
+  Each logical (backslash-continued) line keeps every token except
+  ``--hash=...``, so any change to a name, version, marker, extra, or pip
+  option still differs. Undecodable input fails closed.
+  """
+  try:
+    text = lock.decode("utf-8")
+  except UnicodeDecodeError:
+    return None
+  entries: set[str] = set()
+  for logical in re.sub(r"\\\r?\n", " ", text).splitlines():
+    line = re.sub(r"(^|\s)#.*$", "", logical)
+    tokens = [token for token in line.split() if not token.startswith("--hash=")]
+    if tokens:
+      entries.add(" ".join(tokens))
+  return frozenset(entries)
+
+
+def _image_lock_pins_target_packages(
+  repo: Path, target_lock: bytes, expected: str,
+) -> bool:
+  """Whether the image's own lock pins exactly the target lock's packages.
+
+  The image records only its lock's hash. Recover those bytes from the
+  image's build commit and prove them against that hash before comparing, so a
+  mutable or missing object can never stand in for the installed environment.
+  A lock that changes only artifact hashes (for example a corrected checksum
+  for another platform's wheel) installs the same distributions, so the running
+  image can already import and check the target's source.
+  """
+  build_sha = str(_build_info().get("sha") or "").strip()
+  if not re.fullmatch(r"[0-9a-f]{40}", build_sha):
+    return False
+  image_lock = _git_blob(repo, build_sha, _PYTHON_LOCK_INPUT)
+  if image_lock is None or hashlib.sha256(image_lock).hexdigest() != expected:
+    return False
+  image_entries = _locked_requirements(image_lock)
+  return image_entries is not None and image_entries == _locked_requirements(
+    target_lock,
+  )
+
+
 def target_python_inputs_baked_into_image(
   repo: Path,
   target_sha: str | None,
 ) -> bool:
-  """Whether this process's image contains the target's Python inputs.
+  """Whether this process's image already installs the target's Python inputs.
 
   The served checkout can intentionally lag the image during an image-first
   deployment. Compare immutable target objects with the hashes recorded by
   that image instead of comparing either side with mutable working-tree bytes.
-  Missing provenance, target objects, or inputs fail closed.
+  ``requirements.txt`` must match exactly; the lock may instead pin the same
+  packages with different artifact hashes (see
+  ``_image_lock_pins_target_packages``). Missing provenance, target objects,
+  or inputs fail closed.
   """
   if not target_sha or _rev(repo, target_sha) != target_sha:
     return False
@@ -1555,17 +1620,14 @@ def target_python_inputs_baked_into_image(
     expected = baked.get(path)
     if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
       return False
-    try:
-      blob = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{target_sha}:{path}"],
-        capture_output=True,
-        check=False,
-        timeout=_GIT_TIMEOUT,
-        env=_scrubbed_git_env(repo),
-      )
-    except (OSError, subprocess.SubprocessError):
+    blob = _git_blob(repo, target_sha, path)
+    if blob is None:
       return False
-    if blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() != expected:
+    if hashlib.sha256(blob).hexdigest() == expected:
+      continue
+    if path != _PYTHON_LOCK_INPUT or not _image_lock_pins_target_packages(
+      repo, blob, expected,
+    ):
       return False
   return True
 
