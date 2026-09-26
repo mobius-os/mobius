@@ -228,7 +228,6 @@ def test_autopilot_followup_does_not_bypass_handoff_source_proof(monkeypatch):
     github_routes._assert_personal_publication_source(
       {"plan": {"after_merge": {"app": "verified"}}},
       owner,
-      allow_granted_followup=True,
     )
 
 
