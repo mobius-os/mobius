@@ -576,7 +576,7 @@ async def test_managed_start_rejects_mismatched_release_echo(
 
 
 @pytest.mark.asyncio
-async def test_managed_final_validation_runs_after_drain_and_before_start(
+async def test_managed_final_validation_runs_before_the_handoff_swaps_source(
   tmp_path, monkeypatch,
 ):
   from app import restart_ledger, restart_util
@@ -626,7 +626,9 @@ async def test_managed_final_validation_runs_after_drain_and_before_start(
   )
 
   assert result["state"] == "queued"
-  assert events == ["prepare", "drain", "final_check", "start"]
+  # The drain swaps the prepared update into the live checkout, so a review of
+  # the live checkout after it would always read as stale.
+  assert events == ["final_check", "prepare", "drain", "start"]
 
 
 @pytest.mark.asyncio
@@ -692,6 +694,60 @@ async def test_railway_status_uses_account_service(tmp_path, monkeypatch):
   assert status["deployment"] == "railway"
   assert status["state"] == "replacing"
   assert status["expected_sha"] == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_abandoned_railway_handoff_reads_idle_so_the_update_can_retry(
+  tmp_path, monkeypatch,
+):
+  """A handoff whose start never came can never advance: it is not running."""
+  from app import restart_ledger, restart_util
+
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
+  settings = type("S", (), {"data_dir": str(tmp_path)})()
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_managed_handoff", None)
+  waiting = {
+    "operation_id": "replace_12345678", "state": "awaiting_handoff",
+    "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
+  }
+
+  def managed_request(method, suffix, payload=None):
+    if suffix == "prepare":
+      return {**waiting, "handoff_nonce": "nonce-secret"}
+    assert suffix == "status", "an abandoned handoff must never start"
+    return waiting
+
+  seen_during_handoff = []
+
+  async def drain(_operation_id):
+    seen_during_handoff.append((await dc.read_rebuild_status())["state"])
+    raise RuntimeError("the Host did not authorize this cutover")
+
+  restarts = []
+
+  async def restart():
+    restarts.append(True)
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
+  monkeypatch.setattr(restart_util, "prepare_managed_container_cutover", drain)
+  monkeypatch.setattr(restart_util, "restart_this_worker", restart)
+
+  with pytest.raises(dc.DeploymentControlError):
+    await dc._request_managed_rebuild("a" * 40, _TEST_DIGEST)
+  await asyncio.sleep(0)
+
+  assert seen_during_handoff == ["preparing"]
+  assert restarts == []  # the drain never completed, so nothing to recover
+  status = await dc.read_rebuild_status()
+  assert status["state"] == "idle"
+  assert "stopped before replacing" in status["message"]
+  dc._ensure_can_rebuild(status)  # a retry is not refused as already running
 
 
 @pytest.mark.asyncio
@@ -776,6 +832,7 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_managed_handoff", None)
 
   def managed_request(method, suffix, payload=None):
     if suffix == "prepare":
@@ -816,6 +873,8 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   assert exc.value.code == error_code
   assert len(restarts) == restart_count
   assert len(reconciliations) == reconcile_count
+  # Only the reconciliation, which still holds the nonce, keeps the handoff.
+  assert dc._managed_handoff == ("replace_12345678" if reconcile_count else None)
   if reconcile_count:
     assert reconciliations == [("replace_12345678", "nonce-secret")]
 
@@ -843,16 +902,19 @@ async def test_ambiguous_start_recovers_only_after_atomic_cancel_wins(
     return None
 
   monkeypatch.setattr(dc.asyncio, "sleep", no_sleep)
+  monkeypatch.setattr(dc, "_managed_handoff", "replace_12345678")
   restarts = []
 
   async def restart():
     restarts.append(True)
 
-  await dc._reconcile_ambiguous_managed_start(
+  dc._schedule_ambiguous_start_reconciliation(
     "replace_12345678", "nonce-secret", restart,
   )
+  await asyncio.gather(*dc._managed_recovery_tasks)
 
   assert restarts == [True]
+  assert dc._managed_handoff is None  # settled: nothing can start it now
   assert requests == [(
     "POST",
     "cancel",
