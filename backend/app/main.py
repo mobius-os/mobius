@@ -819,6 +819,11 @@ app.add_middleware(
   allow_headers=[
     "Authorization",
     "Content-Type",
+    # Community mutations (rating, review, install receipt, publishing) use
+    # this header for replay safety. App Store runs in an opaque-origin frame,
+    # so browsers preflight it; without an explicit allowance the request is
+    # blocked client-side and the UI can only report "Failed to fetch".
+    "Idempotency-Key",
     "X-Mobius-Embed-Instance",
     "X-Mobius-Stream-Snapshot",
     "X-Mobius-Version",

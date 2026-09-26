@@ -54,6 +54,28 @@ def test_connector_mutation_preflight_allows_the_generation_header(client):
   assert "x-mobius-connector-generation" in allowed
 
 
+def test_community_mutation_preflight_allows_idempotency_key(client):
+  """Store account reviews must reach the authenticated route.
+
+  Every community mutation carries Idempotency-Key. Sandboxed app frames have
+  an opaque origin, so Chromium/WebKit preflight that non-simple header before
+  sending the PUT. Omitting it here turns a valid rating into the browser's
+  generic "Failed to fetch" without the route ever seeing the request.
+  """
+  r = client.options(
+    "/api/community/apps/app_public_1234/review",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "PUT",
+      "Access-Control-Request-Headers":
+        "authorization,content-type,idempotency-key",
+    },
+  )
+  assert r.status_code == 200
+  allowed = r.headers.get("access-control-allow-headers", "").lower()
+  assert "idempotency-key" in allowed
+
+
 def test_sandboxed_frame_gets_a_wildcard_on_the_real_response_too(client, auth):
   # A preflight alone is not enough: WebKit checks the actual response as well.
   r = client.get("/api/apps/", headers={"Origin": "null", **auth})
