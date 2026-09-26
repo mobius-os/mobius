@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
-  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
+  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, text,
+  true,
 )
 
 from sqlalchemy.orm import column_property, relationship, validates
@@ -176,6 +177,17 @@ class Chat(Base):
   """A chat conversation with the agent."""
 
   __tablename__ = "chats"
+  # The idle-queue sweep pins this partial index with INDEXED BY (see
+  # chat._nonempty_pending_queues), so every SQLite database must have it:
+  # migration 0069 adds it to existing ones and create_all to fresh ones.
+  __table_args__ = (
+    Index(
+      "ix_chats_pending_queue", "id",
+      sqlite_where=text(
+        "deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
+      ),
+    ).ddl_if(dialect="sqlite"),
+  )
 
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
