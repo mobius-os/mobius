@@ -51,3 +51,4 @@ def test_codex_runner_declares_no_register():
   from app import codex_sdk_runner
 
   assert not hasattr(codex_sdk_runner, "_CONCISE_REGISTER")
+

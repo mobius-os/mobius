@@ -1,5 +1,4 @@
 import asyncio
-import signal
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import (
+  codex_events,
   codex_sdk_runner,
   connectors as connector_core,
   models,
@@ -969,8 +969,8 @@ def test_active_codex_force_stop_signals_group_only_once(monkeypatch):
   calls: list[int] = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: calls.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: calls.append(pgid) or True,
   )
 
   async def _scenario() -> None:
@@ -1902,7 +1902,7 @@ def test_codex_lifecycle_maps_to_shared_task_chip_contract():
     "state": "done",
     "summary": "Found the cause",
   }
-  assert codex_sdk_runner._public_task_event(
+  assert codex_events._public_task_event(
     started, tool_use_id="host-1",
   ) == {
     "type": "task_start",
@@ -1911,7 +1911,7 @@ def test_codex_lifecycle_maps_to_shared_task_chip_contract():
     "task_type": "researcher",
     "tool_use_id": "host-1",
   }
-  assert codex_sdk_runner._public_task_event(
+  assert codex_events._public_task_event(
     done, tool_use_id="host-1",
   ) == {
     "type": "task_done",
@@ -3856,22 +3856,16 @@ def test_process_group_capture_poll_backs_off_after_startup_window():
   assert codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS > 0
 
 
-def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
+def test_codex_cleanup_ends_the_group_and_the_runs_own_commands(monkeypatch):
   calls = []
-  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
   monkeypatch.setattr(
-    codex_sdk_runner.os,
-    "killpg",
-    lambda pgid, sig: calls.append((pgid, sig)),
+    codex_sdk_runner,
+    "terminate_agent_processes",
+    lambda pgid, **kw: calls.append((pgid, kw["run_marker"])) or True,
   )
 
-  assert codex_sdk_runner._terminate_codex_process_group(
-    4321, grace_seconds=0,
-  ) is True
-  assert calls == [
-    (4321, signal.SIGTERM),
-    (4321, signal.SIGKILL),
-  ]
+  assert codex_sdk_runner._terminate_codex_processes(4321, "run-1") is True
+  assert calls == [(4321, "run-1")]
 
 
 def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
@@ -3917,8 +3911,8 @@ def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
   monkeypatch.setattr(
     codex_sdk_runner,
@@ -3974,8 +3968,8 @@ def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
@@ -4034,8 +4028,8 @@ def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4103,8 +4097,8 @@ def test_run_codex_sdk_turn_cancel_during_threaded_start_waits_then_reaps(
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4173,8 +4167,8 @@ def test_run_codex_sdk_turn_start_failure_preserves_deferred_cancellation(
   reaped = []
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
-    lambda pgid: reaped.append(pgid) or True,
+    "_terminate_codex_processes",
+    lambda pgid, _run_marker: reaped.append(pgid) or True,
   )
 
   async def scenario():
@@ -4261,7 +4255,7 @@ def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
   monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
   monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
 
-  def reap(pgid):
+  def reap(pgid, _run_marker):
     assert pgid == 4321
     assert close_finished.is_set()
     order.append("reap")
@@ -4269,7 +4263,7 @@ def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
 
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_terminate_codex_process_group",
+    "_terminate_codex_processes",
     reap,
   )
 
@@ -4674,3 +4668,84 @@ def test_run_codex_sdk_turn_reseeds_lost_session_and_records_event(monkeypatch):
     and f.get("reseeded") is True
     for ev, f in events
   )
+
+
+def test_running_codex_helper_row_shows_what_its_child_is_doing(monkeypatch):
+  """The parent stream never carries a child's tool calls; its rollout does."""
+  import json as _json
+  from pathlib import Path
+
+  from app.config import get_settings
+
+  rollout = (
+    Path(get_settings().data_dir) / "cli-auth" / "codex" / "sessions"
+    / "2026" / "09" / "25" / "rollout-2026-09-25T03-11-43-child-thread.jsonl"
+  )
+  rollout.parent.mkdir(parents=True, exist_ok=True)
+  rollout.write_text("".join(_json.dumps(record) + "\n" for record in [
+    {"type": "event_msg", "payload": {"type": "task_started"}},
+    {"type": "response_item", "payload": {
+      "type": "custom_tool_call", "call_id": "c1", "name": "exec",
+      "input": 'tools.exec_command({cmd:"sleep 25"})'}},
+  ]))
+  monkeypatch.setattr(codex_sdk_runner, "HELPER_PROGRESS_INTERVAL_S", 0.01)
+
+  class SubActivity:
+    def __init__(self, item_id, kind):
+      self.id = item_id
+      self.kind = kind
+      self.agent_path = "/root/slow_repo_tour"
+      self.agent_thread_id = "child-thread"
+
+  class ItemStarted:
+    def __init__(self, item):
+      self.item = item
+      self.started_at_ms = None
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+
+  class SlowTurn(_FakeTurnHandle):
+    async def stream(self):
+      yield SimpleNamespace(method="item/started", payload=ItemStarted(
+        SubActivity("call-1", "started")))
+      await asyncio.sleep(0.2)  # the child works while the parent waits
+      yield SimpleNamespace(method="item/started", payload=ItemStarted(
+        SubActivity("done-1", "completed")))
+      yield SimpleNamespace(
+        method="turn/completed",
+        payload=_FakeTurnCompletedNotification(completed_turn),
+      )
+
+  thread = _FakeThread("root", SlowTurn())
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update({
+    "ItemStartedNotification": ItemStarted,
+    "SubAgentActivityThreadItem": SubActivity,
+  })
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+  bus = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="delegate", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-progress", bc=bus, pending_questions={}, db=None,
+  ))
+
+  assert result["error"] is None
+  start = next(e for e in bus.events if e.get("type") == "task_start")
+  assert start["description"] == "Slow repo tour"
+  progress = [e for e in bus.events if e.get("type") == "task_progress"]
+  assert progress and progress[0]["last_tool_name"] == "Bash"
+  assert progress[0]["task_id"] == start["task_id"]

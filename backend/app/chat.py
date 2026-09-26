@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, or_
+from sqlalchemy import Text, cast, func, literal_column, or_, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -224,7 +224,7 @@ def _read_skill_text() -> str:
   """Return only the cached platform constitution.
 
   App-owned fragments are composed and snapshotted separately when a chat
-  starts its first turn. Installing, updating, or uninstalling a system app
+  starts its first turn. Installing, updating, or uninstalling an app
   therefore affects chats started afterwards, never an existing conversation.
   The tracked platform constitution has a process-lifetime cache, so an edit
   or platform update takes effect after server restart. If the live checkout
@@ -1345,6 +1345,39 @@ def _pending_head_is_stale(
   return timestamp <= now_ms - age_ms
 
 
+def _nonempty_pending_queues(db: Session) -> list:
+  """Project live chats whose pending queue is non-empty.
+
+  SQLite stores the transcript inline before ``pending_messages``, so reading
+  that column for every chat walks every transcript; on a cold page cache that
+  blocked the event loop for 20-40 s. The partial index
+  ``ix_chats_pending_queue`` (migration 0069) lists only non-empty queues.
+  Without ANALYZE statistics SQLite prefers ``ix_chats_drawer``'s
+  ``deleted_at`` equality and reads every row anyway, so the plan is pinned
+  with INDEXED BY. Other databases store large values out of line.
+  """
+  columns = (
+    models.Chat.id, models.Chat.pending_messages, models.Chat.pending_question_id,
+  )
+  if db.get_bind().dialect.name == "sqlite":
+    return db.execute(
+      text(
+        "SELECT chats.id, chats.pending_messages, chats.pending_question_id "
+        "FROM chats INDEXED BY ix_chats_pending_queue "
+        "WHERE chats.deleted_at IS NULL "
+        "AND CAST(chats.pending_messages AS TEXT) != '[]'"
+      ).columns(*columns),
+    ).all()
+  return (
+    db.query(*columns)
+    .filter(
+      models.Chat.deleted_at.is_(None),
+      cast(models.Chat.pending_messages, Text) != literal_column("'[]'"),
+    )
+    .all()
+  )
+
+
 async def sweep_idle_pending_chats(db: Session) -> list[str]:
   """Claim and start old pending queues whose chat has no run owner."""
   log = _get_logger()
@@ -1358,15 +1391,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # ~204 MiB allocation spike and left ~169 MiB in CPython/glibc arenas after
     # the rows were released. The queue is the candidate index; load one full
     # Chat only after its projected pending head proves old enough to recover.
-    candidates = (
-      db.query(
-        models.Chat.id,
-        models.Chat.pending_messages,
-        models.Chat.pending_question_id,
-      )
-      .filter(models.Chat.deleted_at.is_(None))
-      .all()
-    )
+    candidates = _nonempty_pending_queues(db)
   except Exception:
     log.exception("sweep_idle_pending_chats: query failed")
     return started
@@ -5038,7 +5063,7 @@ async def _run_chat_impl_with_db(
 
   # On the first message of a session, gather bounded recent-chat digests and
   # the skills inventory as one-time startup context. Knowledge-graph data is
-  # never pulled here; an installed system app may teach the agent to make a
+  # never pulled here; an installed app may teach the agent to make a
   # separate prompt-scoped recall call.
   #
   # Startup context belongs to the first-turn system prompt, not the user
@@ -5299,6 +5324,9 @@ async def _run_chat_impl_with_db(
   if agent_token is not None:
     base_env["AGENT_TOKEN"] = agent_token
   base_env.update(app_context_env)
+  from app.process_groups import RUN_MARKER_ENV, run_marker
+  # Names every process this run starts (non-secret; see RUN_MARKER_ENV).
+  base_env[RUN_MARKER_ENV] = run_marker(run_token)
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
@@ -5393,7 +5421,7 @@ async def _run_chat_impl_with_db(
         )
         db.rollback()
 
-  # A per-chat custom prompt replaces the base constitution, but system-app
+  # A per-chat custom prompt replaces the base constitution, but installed-app
   # contributions are still part of the ONE prompt snapshot selected when the
   # chat starts. Provider SDKs receive those same immutable bytes on every
   # request; live app state is never recomposed for an established chat.

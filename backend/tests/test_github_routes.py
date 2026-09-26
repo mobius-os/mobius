@@ -3126,10 +3126,11 @@ def test_submit_requires_source_provenance_without_a_prior_status_read(
   assert response.json()["detail"]["code"] == "missing_source_provenance"
 
 
-def test_submit_rechecks_current_source_after_ready_status(
+def test_ordinary_send_survives_a_source_divergence_after_ready(
   client, owner_token, monkeypatch,
 ):
-  """A source change between Ready and Send returns to review, without push."""
+  """A source change between Ready and Send does not stale an ordinary PR: the
+  advisory review stays sendable and the reviewed candidate still publishes."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "send-source-moved")
@@ -3140,30 +3141,25 @@ def test_submit_rechecks_current_source_after_ready_status(
   assert ready.status_code == 200, ready.text
   assert ready.json()["ready"] == 1
 
-  # These fields are app-writable. Even a plausible forged lost-response
-  # journal cannot authorize publication without matching public GitHub state.
-  record.update({
-    "last_submit_stage": "pushed",
-    "last_submit_push_sha": record["plan"]["head_sha"],
-    "last_submit_upstream_branch": "main",
-    "head_repository": "octocat/app-demo",
-  })
-  _write_contribution(app_id, record["id"], record, diff_text)
-  monkeypatch.setattr(
-    github_contributions, "_find_existing_pr", lambda *_args, **_kwargs: None,
-  )
-  monkeypatch.setattr(
-    github_contributions, "_existing_branch_pr", lambda *_args, **_kwargs: None,
-  )
-  monkeypatch.setattr(
-    "app.github_contribution_git._upstream_branch_sha",
-    lambda *_args, **_kwargs: "c" * 40,
-  )
   _remove_reviewed_change_from_source(record)
+  # The advisory status still reports the PR as sendable after the source
+  # diverges, because publication reviews the reviewed worktree.
+  still_ready = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert still_ready.status_code == 200, still_ready.text
+  assert still_ready.json()["ready"] == 1
+
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    submitted.append(candidate["id"])
+    return "https://github.com/mobius-os/app-demo/pull/42", 42, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("moved source must never publish"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
@@ -3172,11 +3168,42 @@ def test_submit_rechecks_current_source_after_ready_status(
     json={"publication_stage": "draft"},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
-  assert not github_routes.contribution_runtime.personal_attempt_path(
-    app_id, record["id"],
-  ).exists()
+  assert response.status_code == 200, response.text
+  assert submitted == [record["id"]]
+
+
+def test_owner_contribute_button_publishes_a_diverged_ordinary_review(
+  client, owner_token, monkeypatch,
+):
+  """An owner Contribute-button Send publishes an ordinary reviewed PR after
+  the live source diverges, with no chat-review authority needed."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, "owner-button-diverged",
+  )
+  _remove_reviewed_change_from_source(record)
+  _write_contribution(app_id, record["id"], record, diff_text)
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    submitted.append(candidate["id"])
+    return "https://github.com/mobius-os/app-demo/pull/42", 42, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  monkeypatch.setattr(
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"submitter": "contribute-button", "publication_stage": "draft"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert submitted == [record["id"]]
 
 
 def test_owner_chat_review_can_publish_an_uninstalled_ordinary_review(
@@ -3248,28 +3275,34 @@ def test_owner_chat_review_cannot_bypass_source_proof_for_app_handoff(
   )
 
   with pytest.raises(ContributionSubmitError) as exc:
-    github_routes._assert_personal_publication_source(
-      record, owner, owner_reviewed_uninstalled=True,
-    )
+    github_routes._assert_personal_publication_source(record, owner)
 
   assert exc.value.code == "source_provenance_mismatch"
 
 
-def test_app_token_cannot_claim_owner_chat_approval_for_uninstalled_review(
+def test_app_token_publishes_an_uninstalled_ordinary_review(
   client, owner_token, monkeypatch,
 ):
-  """The app-writable request cannot manufacture the owner's chat authority."""
+  """Publication reviews the exact reviewed candidate, so an app-token Send
+  publishes an uninstalled ordinary review just as an owner chat would: no
+  caller authority gates it and the reviewed worktree is what publishes."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(
-    app_id, "app-forged-chat-approval",
+    app_id, "app-uninstalled-ordinary",
   )
   _remove_reviewed_change_from_source(record)
   _write_contribution(app_id, record["id"], record, diff_text)
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    submitted.append((candidate["id"], kwargs["publication_stage"]))
+    return "https://github.com/mobius-os/app-demo/pull/42", 42, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("app authority must stay strict"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
@@ -3281,39 +3314,30 @@ def test_app_token_cannot_claim_owner_chat_approval_for_uninstalled_review(
     },
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == [(record["id"], "ready")]
 
 
-def test_submit_rejects_dirty_installed_source_before_push(
+def test_dirty_installed_source_no_longer_blocks_an_ordinary_send(
   client, owner_token, monkeypatch,
 ):
-  """Uncommitted served bytes cannot be ignored in favor of source HEAD."""
+  """Uncommitted served bytes on a reviewed path no longer block an ordinary
+  publication; the reviewed worktree, not the live checkout, is published."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "send-source-dirty")
-  record.update({
-    "last_submit_stage": "pushed",
-    "last_submit_push_sha": record["plan"]["head_sha"],
-    "last_submit_upstream_branch": "main",
-    "head_repository": "octocat/app-demo",
-  })
   _write_contribution(app_id, record["id"], record, diff_text)
-  monkeypatch.setattr(
-    github_contributions, "_find_existing_pr", lambda *_args, **_kwargs: None,
-  )
-  monkeypatch.setattr(
-    github_contributions, "_existing_branch_pr", lambda *_args, **_kwargs: None,
-  )
-  monkeypatch.setattr(
-    "app.github_contribution_git._upstream_branch_sha",
-    lambda *_args, **_kwargs: "c" * 40,
-  )
   _remove_reviewed_change_from_source(record, commit=False)
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    submitted.append(candidate["id"])
+    return "https://github.com/mobius-os/app-demo/pull/42", 42, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("dirty source must never publish"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
@@ -3322,8 +3346,35 @@ def test_submit_rejects_dirty_installed_source_before_push(
     json={"publication_stage": "draft"},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == [record["id"]]
+
+
+def test_dirty_installed_source_still_blocks_an_app_handoff(
+  client, owner_token,
+):
+  """A reviewed after_merge app connection keeps its strict source proof even
+  when the only divergence is an uncommitted reviewed file, because the handoff
+  will later mutate the installed app."""
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff_text = _prepared_real_review(app_id, "handoff-dirty-source")
+  record["plan"]["after_merge"] = {
+    "action": "connect_app",
+    "app_id": 42,
+    "manifest_url": (
+      "https://raw.githubusercontent.com/mobius-os/app-demo/main/mobius.json"
+    ),
+  }
+  _remove_reviewed_change_from_source(record, commit=False)
+  owner = SimpleNamespace(
+    assert_current=lambda: None,
+    replay_phase=lambda: "armed",
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_routes._assert_personal_publication_source(record, owner)
+
+  assert caught.value.code == "source_provenance_mismatch"
 
 
 def test_source_continuity_route_requires_the_exact_active_source_chat(
@@ -4942,12 +4993,25 @@ def test_public_reconciliation_requires_exact_github_branch_or_pr(
 def test_rejected_push_journal_cannot_bypass_source_recheck_on_retry(
   client, owner_token, monkeypatch,
 ):
-  """A pre-push SHA patch is not a post-push recovery authorization."""
+  """A pre-push SHA patch is not a post-push recovery authorization.
+
+  A reviewed after_merge app connection keeps the strict source proof, so a
+  reverted installed source still blocks the retry rather than republishing a
+  change the installed app no longer contains.
+  """
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, _diff_text = _prepared_real_review(
     app_id, "rejected-push-retry",
   )
+  record["plan"]["after_merge"] = {
+    "action": "connect_app",
+    "app_id": 42,
+    "manifest_url": (
+      "https://raw.githubusercontent.com/mobius-os/app-demo/main/mobius.json"
+    ),
+  }
+  _write_contribution(app_id, record["id"], record, _diff_text)
   calls = []
 
   def reject(record_arg, _diff_path, **_kwargs):
@@ -4982,15 +5046,15 @@ def test_rejected_push_journal_cannot_bypass_source_recheck_on_retry(
   assert calls == [record["id"]]
 
 
-@pytest.mark.parametrize("successor", [False, True], ids=["app-ordinary", "owner-chat-successor"])
-def test_existing_pr_update_rechecks_current_source_before_push(
-  client, owner_token, monkeypatch, successor,
+def test_existing_pr_update_publishes_an_uninstalled_ordinary_review(
+  client, owner_token, monkeypatch,
 ):
-  """Update PR cannot bypass provenance after its source has reverted."""
+  """An app-token Update PR publishes an ordinary reviewed update after its
+  installed source reverts, exactly like the owner-chat path."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(
-    app_id, f"update-source-moved-{successor}",
+    app_id, "update-uninstalled-ordinary",
   )
   record.update({
     "number": 58,
@@ -5005,13 +5069,6 @@ def test_existing_pr_update_rechecks_current_source_before_push(
     "old_title": record["plan"]["title"],
     "old_body": record["plan"]["body_draft"],
   }
-  if successor:
-    record["plan"]["successor"] = {
-      "old_head_sha": record["plan"]["base_sha"],
-      "old_base_branch": "stack/source-review/01-parent",
-      "old_base_sha": record["plan"]["base_sha"],
-      "base_branch": "main",
-    }
   _write_contribution(app_id, record["id"], record, diff_text)
   _remove_reviewed_change_from_source(record)
   monkeypatch.setattr(
@@ -5025,27 +5082,57 @@ def test_existing_pr_update_rechecks_current_source_before_push(
       "body": record["plan"]["pr_metadata"]["old_body"],
     },
   )
-  monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("reverted source must never update"),
-  )
+  submitted = []
 
+  def submit(candidate, _diff_path, **kwargs):
+    kwargs["source_preflight"](candidate)
+    submitted.append(candidate["id"])
+    return record["url"], 58, {
+      "last_submit_push_sha": record["plan"]["head_sha"],
+    }
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_advance_merged_parent_successor",
-    lambda *_args, **_kwargs: pytest.fail("reverted source must never rewrite a successor"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
-  token = owner_token if successor else app_token
 
   response = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
-    headers={"Authorization": f"Bearer {token}"},
-    json={"submitter": "chat-review-card"},
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == [record["id"]]
+
+
+def test_existing_pr_update_downgrades_a_diverged_successor(
+  client, owner_token,
+):
+  """A merged-parent successor is a publication too: a reverted installed
+  source no longer blocks the source proof for its branch rewrite, whose own
+  reviewed-tree and live-head proofs still guard the mutation."""
+  app_id, _app_token_value = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff_text = _prepared_real_review(
+    app_id, "update-diverged-successor",
+  )
+  record["plan"]["action"] = "pr_update"
+  record["plan"]["successor"] = {
+    "old_head_sha": record["plan"]["base_sha"],
+    "old_base_branch": "stack/source-review/01-parent",
+    "old_base_sha": record["plan"]["base_sha"],
+    "base_branch": "main",
+  }
+  _remove_reviewed_change_from_source(record)
+  owner = SimpleNamespace(
+    assert_current=lambda: None,
+    replay_phase=lambda: "armed",
+  )
+
+  assert github_routes._assert_personal_publication_source(
+    record, owner,
+  ) == "uninstalled_publication_candidate"
 
 
 def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
@@ -5329,7 +5416,7 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
   assert attempts == [None, record["plan"]["head_sha"]]
 
 
-def test_review_status_rejects_an_ambiguous_conflict_projection(
+def test_review_status_shows_a_diverged_projection_as_sendable(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -5377,7 +5464,7 @@ def test_review_status_rejects_an_ambiguous_conflict_projection(
   ], cwd=review, text=True)
 
   # Matching path sets do not prove that a locally resolved conflict contains
-  # the reviewed change. The installed source must fail closed.
+  # the reviewed change, so the raw source proof still fails closed below.
   (source / "index.jsx").write_text("local precursor\n")
   (source / "stable.js").write_text("base\n")
   subprocess.run(["git", "add", "index.jsx", "stable.js"], cwd=source,
@@ -5417,13 +5504,15 @@ def test_review_status_rejects_an_ambiguous_conflict_projection(
   with pytest.raises(ContributionSubmitError) as caught:
     github_contributions._assert_pending_equivalence_preflight(record)
   assert caught.value.code == "source_provenance_mismatch"
+  # An ordinary PR is a publication candidate, so the advisory review status
+  # downgrades that diverged source to sendable instead of demanding a refresh.
   response = client.get(
     f"/api/github/contributions/{app_id}/review-status",
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.status_code == 200, response.text
-  assert response.json()["needs_refresh"] == 1
-  assert response.json()["records"][0]["code"] == "source_provenance_mismatch"
+  assert response.json()["ready"] == 1
+  assert response.json()["records"][0]["code"] == "ready"
 
 
 def test_review_status_releases_db_before_git_inspection(
@@ -8573,10 +8662,11 @@ def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
   )
 
 
-def test_submit_contribution_stack_rechecks_current_source_before_push(
+def test_submit_contribution_stack_publishes_uninstalled_layers(
   client, owner_token, monkeypatch,
 ):
-  """The batch path proves every installed source before its first push."""
+  """A reverted installed source no longer blocks stack publication; each
+  reviewed layer publishes its exact candidate."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "stack-source-moved")
@@ -8597,10 +8687,17 @@ def test_submit_contribution_stack_rechecks_current_source_before_push(
     "app.github_contribution_git._assert_merges_with_upstream",
     lambda *_args: {},
   )
+  submitted = []
+
+  def submit(candidate, _diff_path, **_kwargs):
+    submitted.append(candidate["id"])
+    number = len(submitted)
+    return f"https://github.com/mobius-os/app-demo/pull/{number}", number, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("reverted source must never push"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
@@ -8609,14 +8706,15 @@ def test_submit_contribution_stack_rechecks_current_source_before_push(
     json={"record_ids": record_ids, "publication_stage": "draft"},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == record_ids
 
 
-def test_submit_contribution_stack_rechecks_each_child_before_first_push(
+def test_submit_contribution_stack_publishes_a_child_absent_from_source(
   client, owner_token, monkeypatch,
 ):
-  """A valid parent cannot hide a child absent from the installed source."""
+  """A reviewed child layer absent from the installed source still publishes;
+  the reviewed candidate, not the live checkout, is what each layer pushes."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "stack-child-moved")
@@ -8636,10 +8734,17 @@ def test_submit_contribution_stack_rechecks_each_child_before_first_push(
     "app.github_contribution_git._assert_merges_with_upstream",
     lambda *_args: {},
   )
+  submitted = []
+
+  def submit(candidate, _diff_path, **_kwargs):
+    submitted.append(candidate["id"])
+    number = len(submitted)
+    return f"https://github.com/mobius-os/app-demo/pull/{number}", number, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("invalid child must block every push"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
@@ -8648,8 +8753,8 @@ def test_submit_contribution_stack_rechecks_each_child_before_first_push(
     json={"record_ids": record_ids, "publication_stage": "draft"},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == record_ids
 
 
 def test_submit_contribution_stack_accepts_public_draft_parent():

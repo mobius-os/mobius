@@ -30,7 +30,6 @@ import concurrent.futures as _cf
 import functools
 import logging
 import os
-import signal
 import shutil
 import tempfile
 import time
@@ -57,7 +56,8 @@ from app.codex_events import (
   _subagent_lifecycle_event,
   _thread_started_lifecycle_event,
   _record_private_lifecycle,
-  _public_task_event,
+  CodexHelperRows,
+  read_codex_helper_tools,
   _collab_reactivation_events,
   _collab_completion_events,
   _thread_status_lifecycle_event,
@@ -75,7 +75,11 @@ from app.codex_events import (
   _file_change_patch_summary,
   _file_change_edit_preview,
 )
-from app.process_groups import lower_process_group_priority
+from app.process_groups import (
+  RUN_MARKER_ENV,
+  lower_process_group_priority,
+  terminate_agent_processes,
+)
 from app.providers import get_skill_path
 from app.question_bridge import (
   QuestionOverlapError,
@@ -104,6 +108,9 @@ log = logging.getLogger("moebius.chat")
 _CODEX_CALL_EXECUTOR_WORKERS = 3
 _PROCESS_GROUP_CAPTURE_SPIN_SECONDS = 0.1
 _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
+# How often a running Codex helper row re-reads its child rollout for the
+# owner-facing "currently doing" line. The read is a small tail of one file.
+HELPER_PROGRESS_INTERVAL_S = 3.0
 
 
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
@@ -474,47 +481,19 @@ async def _capture_codex_process_group_during_start(
   return _codex_process_group_id(codex, log_unisolated=False)
 
 
-def _terminate_codex_process_group(
-  pgid: int | None,
-  *,
-  grace_seconds: float = 0.25,
-) -> bool:
-  """Terminate every process left in one completed Codex turn's group.
+def _terminate_codex_processes(pgid: int | None, run_marker: str | None) -> bool:
+  """End one Codex turn's app-server group and every command it started.
 
-  Called only after the SDK context has closed its app-server PID.  SIGTERM
-  gives ordinary shell/browser helpers a brief exit window; SIGKILL is the
-  bounded backstop for the exact failure mode this guards (a CPU-heavy child
-  that ignores or never receives its parent's termination).  Returns whether
-  a live group was found.  All failures are best-effort because terminal chat
-  persistence must not fail merely because the OS already reaped the group.
+  Codex runs each shell command in its own session, outside the app-server's
+  group, so the run token those commands inherited is what finds them after an
+  abrupt app-server death. See ``process_groups.terminate_agent_processes``.
   """
-  if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
-    return False
-  try:
-    os.killpg(pgid, signal.SIGTERM)
-  except ProcessLookupError:
-    return False
-  except OSError as exc:
-    log.warning("Codex descendant SIGTERM failed pgid=%s: %s", pgid, exc)
-    return False
-
-  deadline = time.monotonic() + max(0.0, grace_seconds)
-  while time.monotonic() < deadline:
-    try:
-      os.killpg(pgid, 0)
-    except ProcessLookupError:
-      return True
-    except OSError:
-      break
-    time.sleep(min(0.025, max(0.0, deadline - time.monotonic())))
-
-  try:
-    os.killpg(pgid, signal.SIGKILL)
-  except ProcessLookupError:
-    pass
-  except OSError as exc:
-    log.warning("Codex descendant SIGKILL failed pgid=%s: %s", pgid, exc)
-  return True
+  return terminate_agent_processes(
+    pgid,
+    run_marker=run_marker,
+    logger=log,
+    label="Codex descendant",
+  )
 
 
 class _BridgeError(Exception):
@@ -606,6 +585,7 @@ class ActiveCodexTurn:
     chat_id: str,
     process_group_id: int | None = None,
     sink: Any | None = None,
+    run_marker: str | None = None,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
@@ -613,6 +593,8 @@ class ActiveCodexTurn:
     self.turn = turn
     self._sink = sink
     self._process_group_id = process_group_id
+    # Names this turn's commands, which live outside the app-server's group.
+    self._run_marker = run_marker
     # A retained PGID must never be signalled twice: after the first kill the
     # kernel may eventually reuse that number for an unrelated process group.
     self._force_stop_started = False
@@ -737,11 +719,11 @@ class ActiveCodexTurn:
     """One-shot hard stop for this turn's verified private process group."""
     self._reject_pending_steer()
     if not self._force_stop_started:
-      if self._process_group_id is None:
+      if self._process_group_id is None and not self._run_marker:
         return False
       self._force_stop_started = True
       await asyncio.to_thread(
-        _terminate_codex_process_group, self._process_group_id,
+        _terminate_codex_processes, self._process_group_id, self._run_marker,
       )
     try:
       await asyncio.wait_for(
@@ -1622,7 +1604,8 @@ async def _run_codex_sdk_turn(
   process_group_id: int | None = None
   task_host_open = False
   task_host_tool_use_id: str | None = None
-  public_task_ids: set[str] = set()
+  helper_rows: CodexHelperRows | None = None
+  helper_progress_task: asyncio.Task | None = None
   codex_context = sdk["AsyncCodex"](config=config)
   codex_call_executor = _install_codex_call_executor(codex_context, chat_id)
   process_group_capture_stop: asyncio.Event | None = None
@@ -1891,6 +1874,7 @@ async def _run_codex_sdk_turn(
         chat_id=chat_id,
         process_group_id=process_group_id,
         sink=bc,
+        run_marker=base_env.get(RUN_MARKER_ENV),
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -1915,8 +1899,22 @@ async def _run_codex_sdk_turn(
         f"codex-agents:{getattr(turn, 'id', None) or id(turn)}"
       )
 
+      helper_rows = CodexHelperRows(task_host_tool_use_id)
+
+      async def publish_helper_progress() -> None:
+        # The parent stream never carries a child's tool calls; its rollout
+        # does. Each pass reads only the rows still running.
+        while True:
+          await asyncio.sleep(HELPER_PROGRESS_INTERVAL_S)
+          running = helper_rows.running_children()
+          if not running:
+            continue
+          tools = await asyncio.to_thread(read_codex_helper_tools, running)
+          for event in helper_rows.progress_events(tools):
+            bc.publish(event)
+
       def ensure_task_host() -> None:
-        nonlocal task_host_open
+        nonlocal task_host_open, helper_progress_task
         if task_host_open:
           return
         bc.publish({
@@ -1926,24 +1924,18 @@ async def _run_codex_sdk_turn(
           "tool_use_id": task_host_tool_use_id,
         })
         task_host_open = True
+        helper_progress_task = asyncio.create_task(publish_helper_progress())
 
       def record_task_lifecycle(
         lifecycle: dict[str, Any] | None,
       ) -> None:
         _record_private_lifecycle(bc, lifecycle)
-        event = _public_task_event(
-          lifecycle,
-          tool_use_id=task_host_tool_use_id,
-        )
-        if event is None:
+        events = helper_rows.public_events(lifecycle)
+        if not events:
           return
         ensure_task_host()
-        task_id = str(event["task_id"])
-        if event["type"] == "task_start":
-          public_task_ids.add(task_id)
-        else:
-          public_task_ids.discard(task_id)
-        bc.publish(event)
+        for event in events:
+          bc.publish(event)
 
       # Structured rate-limit state, mirroring the Claude runner. Captured from
       # AccountRateLimitsUpdatedNotification during the turn so a Codex quota
@@ -2304,17 +2296,14 @@ async def _run_codex_sdk_turn(
       )
     except Exception:
       log.debug("generated-file turn capture failed", exc_info=True)
+    if helper_progress_task is not None:
+      helper_progress_task.cancel()
     if task_host_open and task_host_tool_use_id is not None:
       # A provider error/interrupt may skip terminal child notifications.
       # Close every still-live chip honestly before closing its Task host.
-      for task_id in sorted(public_task_ids):
-        bc.publish({
-          "type": "task_done",
-          "task_id": task_id,
-          "status": "stopped",
-          "summary": None,
-          "tool_use_id": task_host_tool_use_id,
-        })
+      if helper_rows is not None:
+        for event in helper_rows.stranded_events():
+          bc.publish(event)
       bc.publish({
         "type": "tool_end",
         "tool_use_id": task_host_tool_use_id,
@@ -2369,14 +2358,19 @@ async def _run_codex_sdk_turn(
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
     # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
-    # isolated group after that context exit so a tool child cannot be
-    # re-parented to container init and consume CPU/RAM after the turn.  A
+    # isolated group and every command this run started in its own session
+    # after that context exit, so a tool child cannot be re-parented to
+    # container init and consume CPU/RAM after the turn.  A
     # worker keeps the short grace period off the FastAPI event loop; shield
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
-    if process_group_id is not None and not group_already_terminated:
+    run_marker = base_env.get(RUN_MARKER_ENV)
+    if (
+      (process_group_id is not None or run_marker)
+      and not group_already_terminated
+    ):
       reap_task = asyncio.create_task(asyncio.to_thread(
-        _terminate_codex_process_group, process_group_id,
+        _terminate_codex_processes, process_group_id, run_marker,
       ))
       while not reap_task.done():
         try:

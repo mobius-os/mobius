@@ -3004,22 +3004,6 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
 
 
-def preserve_local_tip_for_recovery(source_dir: str | Path) -> str:
-  """Pin the current app source before a deliberate upstream-only replacement.
-
-  The Store self-update must stay installable even if its own source conflicts;
-  this ref keeps the displaced local tree (including captured working edits)
-  reachable for a later owner-guided reconciliation.
-  """
-  repo = Path(source_dir)
-  tip = head_sha(repo, LOCAL_BRANCH)
-  if not tip:
-    raise RuntimeError("local app source is unavailable for recovery")
-  ref = f"refs/mobius/app-pre-update/{tip}"
-  _run(repo, "update-ref", ref, tip)
-  return ref
-
-
 def commit_replay(
   source_dir: str | Path, upstream_tip: str, msg: str,
 ) -> str | None:

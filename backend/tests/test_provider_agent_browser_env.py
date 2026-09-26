@@ -174,3 +174,21 @@ def test_viewport_env_bounds_untrusted_pixel_density_without_losing_geometry():
     "VIEWPORT_HEIGHT": "844",
     "VIEWPORT_PIXEL_RATIO": "1",
   }
+
+
+def test_claude_processes_run_without_claude_code_auto_memory(tmp_path):
+  """Möbius memory is the Memory app. Claude Code's own auto-memory would keep
+  a parallel store and inject its index into every Claude request, so every
+  Claude process Möbius launches (its own turns and Codex-delegated `claude`)
+  disables it."""
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text("{}")
+  claude_env = ClaudeProvider().build_env(
+    base_env={}, data_dir=str(tmp_path), chat_id="c1",
+  )
+  codex_env = CodexProvider().build_env(
+    base_env={}, data_dir=str(tmp_path), chat_id="c1",
+  )
+  assert claude_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+  assert codex_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"

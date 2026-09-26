@@ -363,11 +363,10 @@ async def patch_goal_record(
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, serialize_plan(db, run, goal))
   if result.get("status") == "completed":
-    # Completion settled the Goal's open work claims with its verified result
-    # in the same commit; wake the followers, so the owner needs no trailing
-    # finish_agent_work call.
-    from app.agent_coordination import settle_claims_with_owner
-    await settle_claims_with_owner(chat_id)
+    # Completion settled the Goal's claims and fired Waits in the same commit;
+    # wake claim followers and withdraw now-stale resume notices.
+    from app.goals import settle_after_goal_completion
+    await settle_after_goal_completion(chat_id)
   return result
 
 

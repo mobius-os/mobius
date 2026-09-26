@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
-  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
+  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, text,
+  true,
 )
 
 from sqlalchemy.orm import column_property, relationship, validates
@@ -176,6 +177,17 @@ class Chat(Base):
   """A chat conversation with the agent."""
 
   __tablename__ = "chats"
+  # The idle-queue sweep pins this partial index with INDEXED BY (see
+  # chat._nonempty_pending_queues), so every SQLite database must have it:
+  # migration 0069 adds it to existing ones and create_all to fresh ones.
+  __table_args__ = (
+    Index(
+      "ix_chats_pending_queue", "id",
+      sqlite_where=text(
+        "deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
+      ),
+    ).ddl_if(dialect="sqlite"),
+  )
 
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
@@ -246,7 +258,7 @@ class Chat(Base):
   # its first turn. The provider receives the referenced bytes on every API
   # call (provider SDKs are stateless at that boundary), but Möbius never
   # recomposes installed-app fragments for an already-started chat. Installing,
-  # updating, or uninstalling a system app therefore affects only chats that
+  # updating, or uninstalling an app therefore affects only chats that
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
@@ -1167,9 +1179,10 @@ class App(Base):
   # Only live installed rows are composed at chat start. Soft-uninstall changes
   # future chats while existing snapshots and app data remain recoverable.
   system_prompt_file = Column(String(255), nullable=True, default=None)
-  # Explicit manifest identity for apps that participate in the agent/system
-  # lifecycle.  This flag grants nothing by itself; the individual manifest
-  # declarations remain the capabilities and the install review is consent.
+  # Retired: apps no longer have a "system" class. Any installed app may
+  # declare a prompt fragment, skills, or agent tools, and install review is
+  # the consent. Nothing reads this column; it stays so an older baked
+  # platform started as a fallback can still load this table.
   system_app = Column(Boolean, nullable=False, default=False)
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.
