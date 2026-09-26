@@ -11,6 +11,7 @@ import {
   clearNewChatIntent,
   mergeChatListWithCreatedGuards,
   mintNewChatIntentId,
+  newChatIsAllocating,
   newChatPresentationIsCurrent,
   readNewChatIntent,
   reconcileCreatedChatGuard,
@@ -680,4 +681,26 @@ test('stale-present rows cannot downgrade an occupied or newer guard', () => {
   }], guards, { now: 4000 })
   assert.equal(secondStalePresent[0].title, 'Server title')
   assert.equal(secondStalePresent[0].has_messages, true)
+})
+
+test('a chat New Chat is still creating is never a deletion-probe target', () => {
+  const allocating = { chatId: 'abc', materialized: false }
+  assert.equal(newChatIsAllocating(allocating, 'abc'), true)
+  // Once the row exists it is an ordinary chat again: a real deletion elsewhere
+  // must still close it.
+  assert.equal(newChatIsAllocating({ ...allocating, materialized: true }, 'abc'), false)
+  assert.equal(newChatIsAllocating(allocating, 'other'), false)
+  assert.equal(newChatIsAllocating(null, 'abc'), false)
+  assert.equal(newChatIsAllocating(allocating, null), false)
+})
+
+test('the restore deletion probe defers to New Chat before probing and before closing', () => {
+  const start = shellSource.indexOf('if (knownExistingOffListChatIdsRef.current.has(prev))')
+  const effect = shellSource.slice(start, shellSource.indexOf("reason: 'deleted',", start))
+  const guardBeforeProbe = effect.indexOf('newChatIsAllocating(newChatPresentationRef.current, prev)')
+  const probe = effect.indexOf('probeDeletion(')
+  const guardAfterProbe = effect.indexOf('newChatIsAllocating(newChatPresentationRef.current, probedChatId)')
+  const close = effect.indexOf("type: 'CLOSE_TAB'")
+  assert.ok(guardBeforeProbe >= 0 && guardBeforeProbe < probe)
+  assert.ok(probe < guardAfterProbe && guardAfterProbe < close)
 })
