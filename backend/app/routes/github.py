@@ -95,7 +95,9 @@ from app.github_checks import (
   _github_graphql_json,
   _fetch_base_failing_names,
 )
+from app.github_contribution_contract import COAUTHOR_TRAILER as _COAUTHOR_TRAILER
 from app.github_contribution_contract import GITHUB_LOGIN as _GITHUB_LOGIN
+from app.github_contribution_contract import coauthor_trailer_required
 from app.github_contribution_git import (
   _git,
   _gh,
@@ -764,9 +766,6 @@ _GITHUB_REPO = re.compile(
 )
 _BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
-_COAUTHOR_TRAILER = (
-  "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
-)
 _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
@@ -1175,7 +1174,7 @@ def _inspect_prepared_review(
     body = app_git._run(
       repo, "log", "-1", "--format=%B", branch, read_only=True,
     ).stdout
-    if _COAUTHOR_TRAILER not in body:
+    if coauthor_trailer_required(record) and _COAUTHOR_TRAILER not in body:
       raise ContributionSubmitError(
         "This staged commit is missing its required co-author trailer.",
         code="missing_coauthor",

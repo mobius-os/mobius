@@ -3074,6 +3074,32 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     )
 
 
+def test_coauthor_trailer_is_required_unless_the_reviewed_plan_opts_out(
+  monkeypatch,
+):
+  """Disclosure is the default; only an explicit reviewed `false` opts out."""
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: _cp("reviewed fix\n"),
+  )
+  check = github_contributions._git_ops._assert_coauthor_trailer
+  for record in (None, {"plan": {}}, {"plan": {"coauthor_trailer": "false"}}):
+    with pytest.raises(ContributionSubmitError) as exc:
+      check(Path("/unused"), "fix/demo", record)
+    assert exc.value.code == "missing_coauthor"
+
+  check(Path("/unused"), "fix/demo", {"plan": {"coauthor_trailer": False}})
+
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: _cp(
+      "reviewed fix\n\nCo-authored-by: Möbius Agent "
+      "<mobius-agent@users.noreply.github.com>\n"
+    ),
+  )
+  check(Path("/unused"), "fix/demo", {"plan": {}})
+
+
 def test_submit_requires_source_provenance_without_a_prior_status_read(
   client, owner_token, monkeypatch,
 ):

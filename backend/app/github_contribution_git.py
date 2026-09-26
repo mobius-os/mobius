@@ -22,6 +22,7 @@ from app.github_contribution_contract import (
   GIT_SHA as _GIT_SHA,
   PUSH_TIMEOUT_SECONDS as _PUSH_TIMEOUT,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
+  coauthor_trailer_required,
 )
 from app.terminal_output import readable_output
 
@@ -153,7 +154,11 @@ def _assert_clean_worktree(repo: Path) -> None:
     )
 
 
-def _assert_coauthor_trailer(repo: Path, branch: str) -> None:
+def _assert_coauthor_trailer(
+  repo: Path, branch: str, record: dict | None = None,
+) -> None:
+  if not coauthor_trailer_required(record):
+    return
   body = _git(repo, "log", "-1", "--format=%B", branch).stdout
   if _COAUTHOR_TRAILER not in body:
     raise ContributionSubmitError(
