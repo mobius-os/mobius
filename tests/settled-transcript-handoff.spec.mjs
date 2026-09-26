@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -36,11 +37,13 @@ async function installStreamMock(page, firstItems) {
         return realFetch(input, init)
       }
       const current = streamIndex++
-      const items = current === 0
-        ? initialItems
-        : [{ type: 'thinking', content: 'Checking the follow-up.' }]
-      const delay = current === 0 ? 0 : 300
-      const doneAfter = current === 0 ? 420 : 1800
+      // The follow-up has already settled server-side when its stream attaches,
+      // so the terminal 204 drives the authoritative refresh this case observes
+      // while the second send is pinned.
+      if (current >= 1) return Promise.resolve(new Response(null, { status: 204 }))
+      const items = initialItems
+      const delay = 0
+      const doneAfter = 420
       const encoder = new TextEncoder()
       return Promise.resolve(new Response(new ReadableStream({
         start(controller) {
@@ -117,10 +120,9 @@ async function mountScenario(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running,
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running }),
+        run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
       }),
     })
   ))
@@ -135,10 +137,10 @@ async function mountScenario(page) {
         messages,
         total: messages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running }),
+        run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })
@@ -159,6 +161,8 @@ async function mountScenario(page) {
         messages = [...messages, settledAssistant]
         running = false
       }, 320)
+    } else {
+      setTimeout(() => { running = false }, 320)
     }
     await new Promise(resolve => setTimeout(resolve, 100))
     await route.fulfill({
@@ -224,11 +228,17 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
         users: users.length,
         top: sr && rr ? rr.top - sr.top : null,
       })
-      if (window.__handoffSampling) requestAnimationFrame(sample)
+      if (window.__handoffSampling) schedule()
     }
-    requestAnimationFrame(sample)
+    // Sample after each frame has painted. A read inside rAF forces layout
+    // before the frame's ResizeObserver repair and sees geometry that never paints.
+    const schedule = () => requestAnimationFrame(() => setTimeout(sample, 0))
+    schedule()
   })
 
+  // The terminal refresh, not the send, performs the handoff: a fresh send
+  // canonicalises its row from the 202. The follow-up's 204 triggers that
+  // refresh while the new send is pinned.
   await page.keyboard.press('Enter')
   await page.waitForFunction(ts => {
     const rows = document.querySelectorAll(
@@ -253,8 +263,8 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await expect(scenario.surface.getByText('Verification result', { exact: false }))
     .toBeVisible({ timeout: 10000 })
   // Finish the first stream while its detailed live row is still mounted. The
-  // server already holds the compact settled projection, but the next send's
-  // authoritative read is what hands the rendered row over to that source.
+  // server already holds the compact settled projection; the authoritative
+  // terminal refresh after the next send hands the rendered row over to it.
   await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
     timeout: 10000,
   })

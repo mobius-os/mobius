@@ -14,8 +14,11 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { settledBox } from './_geometry.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const APP_ID = 990001
@@ -92,6 +95,7 @@ async function sendMessage(page, text) {
   const paintedChat = page.locator('[data-chat-surface="painted"]')
   const input = paintedChat.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(paintedChat)
   await page.keyboard.press('Enter')
   await expect(paintedChat.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>
@@ -114,8 +118,7 @@ async function persistMockedMessageOnReload(page, chat, text) {
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
+        ...runtimeSnapshot(),
       }),
     })
   })
@@ -237,12 +240,16 @@ async function seedSingleModeChat(page, chatId) {
 }
 
 async function mouseDrag(page, sourceLocator, toX, toY) {
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 })
+  // Prove the press actually armed a drag. Without this a press that missed
+  // its tab reads as a silent no-op and the failure surfaces much later as an
+  // absent pane, with nothing pointing back at the gesture.
+  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
   await page.mouse.move(toX, toY, { steps: 14 })
   await page.mouse.up()
 }

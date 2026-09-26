@@ -3,7 +3,7 @@
  *
  * Rebuild and agent-finished signals may advertise one coalesced update, but
  * they never own document navigation. Chat/app navigation remains ordinary;
- * only the owner's explicit Update now action performs one hard navigation.
+ * only the owner's explicit Reload shell action performs one hard navigation.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/shell-update-idle.spec.mjs
  */
@@ -86,6 +86,12 @@ test.describe('shell update — owner-controlled navigation', () => {
     ], armed))
     const target = await createTaggedChat(page, 'update-target')
     const current = await createTaggedChat(page, 'update-current')
+    // Recents lists only chats with messages; seed one so the target renders.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    await page.request.put(`${BASE}/api/chats/${target.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Target chat fixture' }] },
+    })
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,
@@ -94,11 +100,11 @@ test.describe('shell update — owner-controlled navigation', () => {
 
     releaseEvents()
     await expect(page.getByRole('button', { name: /Notifications, \d+ unread/ })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Update now' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Reload shell' })).toHaveCount(0)
     await page.getByRole('button', { name: /Notifications/ }).click()
-    await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Reload shell' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Later' })).toBeVisible()
-    await expect(page.getByText('A Möbius update is ready.')).toHaveCount(1)
+    await expect(page.getByText('New shell ready.')).toHaveCount(1)
     expect(await loadCount(page)).toBe(0)
 
     await page.getByRole('button', { name: 'Close notifications' }).click()
@@ -109,12 +115,12 @@ test.describe('shell update — owner-controlled navigation', () => {
     )).toBeVisible({ timeout: 8000 })
     expect(await loadCount(page)).toBe(0)
     await page.getByRole('button', { name: 'Notifications' }).click()
-    await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Reload shell' })).toBeVisible()
     await page.getByRole('button', { name: 'Later' }).click()
     await expect(page.getByRole('heading', { name: 'Notifications' })).toHaveCount(0)
     expect(await loadCount(page)).toBe(0)
     await page.getByRole('button', { name: 'Notifications' }).click()
-    await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Reload shell' })).toBeVisible()
   })
 
   test('one explicit update preserves the current chat and navigates once', async ({ page }) => {
@@ -135,7 +141,7 @@ test.describe('shell update — owner-controlled navigation', () => {
 
     releaseEvent()
     await page.getByRole('button', { name: /Notifications, \d+ unread/ }).click()
-    const update = page.getByRole('button', { name: 'Update now' })
+    const update = page.getByRole('button', { name: 'Reload shell' })
     await expect(update).toBeVisible()
     await update.click()
 

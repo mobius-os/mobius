@@ -9,7 +9,8 @@
  * Debug: scripts/playwright-local.sh --allow-local-e2e tests/spacer.spec.mjs --headed --debug
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -38,43 +39,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 
   // Auth is handled by the global setup (storageState).
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
-}
-
-/** Navigate to a new empty chat. */
-async function newChat(page) {
-  // Create a worker-tagged chat via the API so cleanupWorkerChats
-  // can find and delete it after the spec finishes. Navigate to that exact
-  // chat on the next shell mount. Clicking the drawer's New-chat action here
-  // races its cached chat list: it can reuse an older empty chat or create an
-  // untagged second row, which makes retries stateful and defeats cleanup.
-  const chat = await createTaggedChat(page)
-  if (!chat?.id) throw new Error('failed to create tagged test chat')
-  // The versioned workspace is authoritative over the legacy active-chat
-  // compatibility mirror. Use the supported explicit deep link so this helper
-  // really navigates to the chat even after a previous test engaged a workspace.
-  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
-}
-
-/** Type a message and press Enter.  Returns after React has rendered. */
-async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  // Wait for the scroll container to appear (empty state -> chat state).
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  // Two rAFs for React to flush layout effects.
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  await waitForChatShell(page)
 }
 
 /** Wait for the terminal assistant row, not merely an already-absent Stop. */
@@ -299,7 +264,7 @@ test.use({ serviceWorkers: 'block' })
 test.describe('Spacer mechanics', () => {
   test('1. First message — spacer reserves space, user msg at top', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Hello, first message')
 
     const m = await measure(page)
@@ -311,7 +276,7 @@ test.describe('Spacer mechanics', () => {
 
   test('2. Second message at the physical tail retargets the spacer and pins', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First message')
     const first = await measure(page)
     await stopAgent(page)
@@ -336,7 +301,7 @@ test.describe('Spacer mechanics', () => {
 
   test('3. Repeated messages at the physical tail pin deterministically', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First')
     const first = await measure(page)
     await stopAgent(page)
@@ -360,7 +325,7 @@ test.describe('Spacer mechanics', () => {
 test.describe('Streaming content', () => {
   test('4. Spacer shrinks as content grows', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test streaming')
 
     const before = await measure(page)
@@ -378,7 +343,7 @@ test.describe('Streaming content', () => {
 
   test('5. Spacer reaches 0 when content exceeds viewport', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test overflow')
 
     await injectContent(page, 'Long content. ', 100)
@@ -389,7 +354,7 @@ test.describe('Streaming content', () => {
 
   test('6. Tool blocks — spacer adjusts', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test tools')
 
     const before = await measure(page)
@@ -401,7 +366,7 @@ test.describe('Streaming content', () => {
 
   test('7. Lazy resize — spacer adjusts after delayed render', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test lazy')
 
     await injectContent(page, 'Code block placeholder. ')
@@ -417,7 +382,7 @@ test.describe('Streaming content', () => {
 test.describe('Short responses', () => {
   test('8. Short response — spacer stays positive after stop', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'What is 2+2?')
 
     await injectContent(page, 'The answer is 4. ')
@@ -430,7 +395,7 @@ test.describe('Short responses', () => {
 
   test('9. Short response — spacer preserved after reload', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Short test')
     await injectContent(page, 'Brief answer. ')
     await stopAgent(page)
@@ -514,7 +479,7 @@ test.describe('Short responses', () => {
 
   test('10. New send after short response — old spacer replaced', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First question')
     await injectContent(page, 'Short answer. ')
     await stopAgent(page)
@@ -542,7 +507,7 @@ test.describe('Short responses', () => {
 test.describe('Chat switching (the bug)', () => {
   test('11. Cold return preserves the visible owner\'s exact reading position', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
 
@@ -630,7 +595,7 @@ test.describe('Chat switching (the bug)', () => {
 test.describe('Empty state transition', () => {
   test('12. visible viewport reservation initializes on empty->chat transition', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     // Verify empty state — no scroll container.
     const hasScroll = await page.evaluate(
@@ -659,7 +624,7 @@ test.describe('SSE streaming (real React path)', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'SSE test')
 
     // Wait for the stream to be processed and promote to happen.
@@ -681,7 +646,7 @@ test.describe('SSE streaming (real React path)', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'SSE tool test')
 
     await waitForSettledAssistant(page)
@@ -722,7 +687,7 @@ test.describe('SSE streaming (real React path)', () => {
     events.push({ type: 'done' })
 
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Near-foot disclosure test')
     await waitForSettledAssistant(page)
 
@@ -806,7 +771,7 @@ test.describe('SSE streaming (real React path)', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'SSE long test')
 
     await waitForSettledAssistant(page)
@@ -824,7 +789,7 @@ test.describe('SSE streaming (real React path)', () => {
 test.describe('Autoscroll behavior', () => {
   test('18. Auto-follows when near bottom during streaming', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Autoscroll test')
 
     // Inject enough content to overflow the viewport.
@@ -873,7 +838,7 @@ test.describe('Autoscroll behavior', () => {
 
   test('19. Does NOT auto-follow when user scrolled up', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'No auto-follow test')
 
     // Fill viewport.
@@ -912,7 +877,7 @@ test.describe('Autoscroll behavior', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'SSE autoscroll test')
 
     await waitForSettledAssistant(page)
@@ -939,7 +904,7 @@ test.describe('Autoscroll behavior', () => {
       ...chunks,
       { type: 'done' },
     ])
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Pin test')
 
     await waitForSettledAssistant(page)
@@ -952,7 +917,7 @@ test.describe('Autoscroll behavior', () => {
 test.describe('Viewport sizes', () => {
   test('13. Desktop viewport', async ({ page }) => {
     await setup(page, { width: 1280, height: 800 })
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Desktop test')
 
     const m = await measure(page)
@@ -966,7 +931,7 @@ test.describe('Viewport sizes', () => {
 
   test('14. Mobile viewport', async ({ page }) => {
     await setup(page, { width: 412, height: 915 })
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Mobile test')
 
     const m = await measure(page)
@@ -988,7 +953,7 @@ test.describe('Scroll edge cases', () => {
     }
     const events = [{ type: 'catch_up_done' }, ...chunks, { type: 'done' }]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Scroll preservation test')
 
     // Wait for stream to complete.
@@ -1021,7 +986,7 @@ test.describe('Scroll edge cases', () => {
 
   test('22. Auto-follow survives content bursts during streaming', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Burst test')
 
     // Start at the bottom (auto-follow engaged).
@@ -1042,7 +1007,7 @@ test.describe('Scroll edge cases', () => {
 
   test('23. User scroll-up disengages auto-follow mid-stream', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Disengage test')
 
     // Fill viewport.
@@ -1087,7 +1052,7 @@ test.describe('Scroll edge cases', () => {
 
   test('25. Reserved-tail swipe follows tool output without jumping backward', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Autoscroll tight test')
 
     const before = await measure(page)
@@ -1134,7 +1099,7 @@ test.describe('Scroll edge cases', () => {
 
   test('28. Keyboard-sized viewport consumes blank reservation before lifting output', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Responsive keyboard spacer test')
 
     // The fresh pin is already at the physical tail. This upward swipe is the
@@ -1193,7 +1158,7 @@ test.describe('Scroll edge cases', () => {
 
   test('24. Auto-follow re-engages when user scrolls back to bottom', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Re-engage test')
 
     // Helper: simulate a user-driven scroll. pointerdown opens the
@@ -1265,7 +1230,7 @@ test.describe('Scroll edge cases', () => {
 
   test('24b. A downward wheel at the clamp re-engages follow without a scroll event', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Clamped wheel re-engage test')
     await injectContent(page, 'Existing streamed content. ', 140)
 
@@ -1330,7 +1295,7 @@ test.describe('Scroll edge cases', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events)
-    await newChat(page)
+    await createChat(page)
 
     await sendMessage(page, 'First message')
     await waitForSettledAssistant(page)
@@ -1378,7 +1343,7 @@ test.describe('Scroll edge cases', () => {
     // resize cycles reapply whichever semantic mode already owns the chat;
     // geometry must never replace a pin or exact anchor with another alignment.
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First')
 
     const pinned = await measure(page)
@@ -1434,7 +1399,7 @@ test.describe('Scroll edge cases', () => {
       { type: 'done' },
     ]
     await setupWithSSE(page, events, { width: 412, height: 615 })
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First message')
     await waitForSettledAssistant(page)
 

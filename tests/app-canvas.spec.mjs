@@ -24,7 +24,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-canvas.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, mockDeliveryReady, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -91,6 +91,20 @@ async function setupShellBasics(page) {
       body: JSON.stringify({ ok: true }),
     })
   )
+  // With no chats, Shell auto-creates a starter chat; the catch-all's 204
+  // would fail that create before the app view settles.
+  await page.route(/\/api\/chats$/, route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'bootstrap-chat', title: 'New chat', ...emptyChatPage(),
+      }),
+    })
+  })
+  // Without it the chat bootstrap renders the offline New Chat fallback instead of the canvas.
+  await mockDeliveryReady(page)
   await page.route(/\/api\/theme$/, route =>
     route.fulfill({
       status: 200,
@@ -158,12 +172,31 @@ async function setupAppRoutes(page, appId, frameHTML) {
   })
   await setupShellBasics(page)
 
-  await page.route(/\/api\/chats(\/[^?]*)?(\?.*)?$/, route => {
+  await page.route(/\/api\/chats(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: '[]',
+    })
+  })
+  await page.route(/\/api\/chats\/[^/?]+\/activity(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: [], next_before: null }),
+    })
+  })
+  await page.route(/\/api\/chats\/[^/?]+(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const pathname = new URL(route.request().url()).pathname
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: pathname.split('/').pop(), title: 'New chat', ...emptyChatPage(),
+      }),
     })
   })
   await page.route(/\/api\/apps\/$/, route => {
@@ -322,7 +355,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // then reliably hidden after we trigger mount — deterministic.
     await setupAppRoutes(page, appId, mockFrameHTML(appId, { sendMounted: false, mountOnSignal: true }))
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     // No mount yet → the spinner is visible and STAYS visible (no race).
     // 10s covers CI's cold-container first-app mount; it won't hide on us.
@@ -351,7 +384,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
   test('drawer playback controls stay bound to the owning live frame', async ({ page }) => {
     const appId = 97
     await setupAppRoutes(page, appId, mockFrameHTML(appId))
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
     const frame = await waitForContentFrame(page, 'iframe.canvas--live')
     await frame.evaluate(() => {
@@ -440,7 +473,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       })
     })
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     await expect(page.getByText('Couldn’t open mock-app')).toBeVisible({ timeout: 10000 })
     const retry = page.getByRole('button', { name: 'Try again' })
@@ -665,7 +698,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     const appId = 99
     await setupAppRoutes(page, appId, mockFrameHTML(appId, { sendMounted: false }))
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     // 10s (was 5s) — this waits for the genuinely slow cold-CI first-app
     // mount to render the spinner, which is a real state, not a race; 5s
@@ -687,7 +720,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       targetAppId,
     )
 
-    await page.goto(`${BASE}/app/${sourceAppId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${sourceAppId}`, { waitUntil: 'domcontentloaded' })
     const sourceSelector = `iframe[data-app-id="${sourceAppId}"]`
     await expect(page.locator(sourceSelector)).toBeVisible({ timeout: 8000 })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
@@ -829,7 +862,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       route.fulfill({ status: 204, body: '' })
     )
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
     // The live frame has mounted (spinner gated on frame-mounted).
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
     // Confirm the LIVE frame settled at '1000' before arming, so the arm can't

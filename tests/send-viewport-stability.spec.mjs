@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Hold the acknowledgement beyond the keyboard-close transition so the test
@@ -56,6 +58,7 @@ async function send(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(surface)
   await page.keyboard.press('Enter')
 }
 
@@ -105,10 +108,9 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running,
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running }),
+        run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
       }),
     })
   ))
@@ -122,10 +124,10 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         messages: serverMessages,
         total: serverMessages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running }),
+        run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })
@@ -299,10 +301,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running,
           active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
+          ...runtimeSnapshot({ running }),
         }),
       })
       if (raceArmed) runtimeRaceReturned.resolve()
@@ -319,14 +319,16 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         messages: history,
         total: history.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running }),
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })
 
+  // The race under test is only engaged on the fresh-send path, never the queued one.
+  await mockDeliveryReady(page)
+  const readinessProbed = page.waitForResponse(/\/api\/ready$/)
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
@@ -334,6 +336,12 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(surface.locator('.chat__msg--user')).toHaveCount(0)
   await expect(input).toBeVisible()
+  await readinessProbed
+  await page.evaluate(() => new Promise(resolve => {
+    let frames = 8
+    const next = () => (--frames ? requestAnimationFrame(next) : resolve())
+    requestAnimationFrame(next)
+  }))
 
   const prompt = [
     'Fresh message whose acknowledgement remains deliberately pending.',

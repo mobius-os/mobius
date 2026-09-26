@@ -6,7 +6,7 @@
  * and POST must mirror that state or a terminal refresh correctly turns their
  * transient question card into read-only history.
  */
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
@@ -35,10 +35,8 @@ export async function mockPendingQuestionState(page, questionId) {
 
     const path = new URL(request.url()).pathname
     const runtime = {
-      running: false,
+      ...runtimeSnapshot({ pending_question_id: pendingQuestionId }),
       active_goal_objective: null,
-      pending_messages: [],
-      pending_question_id: pendingQuestionId,
       updated_at: null,
     }
     return route.fulfill({

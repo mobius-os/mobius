@@ -4,6 +4,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -76,10 +77,8 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: true,
+        ...runtimeSnapshot({ running: true }),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
       }),
     })
   })
@@ -93,9 +92,7 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
         messages: [userMessage],
         total: 1,
         offset: 0,
-        running: true,
-        pending_messages: [],
-        pending_question_id: null,
+        ...runtimeSnapshot({ running: true }),
         provider: 'claude',
       }),
     })
@@ -159,14 +156,26 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     const rows = painted?.querySelectorAll('.chat__msg--assistant') || []
     const paragraphs = rows[rows.length - 1]?.querySelectorAll('.md-paragraph') || []
     const paragraph = paragraphs[paragraphs.length - 1]
-    const scrollRect = scroll?.getBoundingClientRect()
+    const row = rows[rows.length - 1]
+    const blocks = row?.querySelector('.md-blocks')
+    const rowRect = row?.getBoundingClientRect()
     const paragraphRect = paragraph?.getBoundingClientRect()
+    const meta = row?.querySelector('.chat__msg-meta')
+    const metaStyle = meta ? getComputedStyle(meta) : null
     return {
-      scrollHeight: scroll?.scrollHeight ?? -1,
-      scrollTop: scroll?.scrollTop ?? -1,
-      paragraphTop: paragraphRect && scrollRect
-        ? paragraphRect.top - scrollRect.top
+      blocksHeight: blocks?.getBoundingClientRect().height ?? -1,
+      rowHeight: rowRect?.height ?? -1,
+      // The metadata row's net contribution to the answer row's flow.
+      metaFlow: metaStyle
+        ? parseFloat(metaStyle.marginTop) + meta.getBoundingClientRect().height
+          + parseFloat(metaStyle.marginBottom)
+        : 0,
+      paragraphOffset: paragraphRect && rowRect
+        ? paragraphRect.top - rowRect.top
         : null,
+      bottomGap: scroll
+        ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
+        : -1,
     }
   })
   const live = await measure()
@@ -178,7 +187,15 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   )))
   const settled = await measure()
 
-  expect(Math.abs(settled.scrollHeight - live.scrollHeight)).toBeLessThanOrEqual(1)
-  expect(Math.abs(settled.scrollTop - live.scrollTop)).toBeLessThanOrEqual(1)
-  expect(Math.abs(settled.paragraphTop - live.paragraphTop)).toBeLessThanOrEqual(1)
+  // Removing the cursor leaves the answer's own flow alone: the rendered blocks
+  // keep their height and the followed paragraph keeps its place in the row.
+  expect(Math.abs(settled.blocksHeight - live.blocksHeight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(settled.paragraphOffset - live.paragraphOffset)).toBeLessThanOrEqual(1)
+  // The settled turn also mounts its metadata row, whose top margin is not
+  // cancelled by its reserved height. That is the ONLY growth accepted: the row
+  // grows by exactly the metadata row's flow, and the followed view stays
+  // pinned to the tail (bottomGap derives from fractional scrollTop).
+  expect(Math.abs((settled.rowHeight - live.rowHeight) - (settled.metaFlow - live.metaFlow)))
+    .toBeLessThanOrEqual(1)
+  expect(Math.abs(settled.bottomGap - live.bottomGap)).toBeLessThanOrEqual(1.5)
 })

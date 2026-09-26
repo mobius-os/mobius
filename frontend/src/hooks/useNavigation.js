@@ -627,6 +627,20 @@ export default function useNavigation({
     // mistakes for the whole open drawer. A close already in flight is the
     // exception: commitDrawerOpen owns remembering that reopen intent.
     if (drawerOpenRef.current) return
+    // Record a traversal-deferred open BEFORE the canvas preparation below.
+    // Both traversal handlers (onNavigate and onPopState) call
+    // cancelDrawerPreparation() as their first act, so on a canvas view the
+    // rAF pair below is destroyed by the very traversal this open is supposed
+    // to wait for -- and because commitDrawerOpen never runs, the in-flight
+    // check living there never records the intent either. The open is then
+    // LOST rather than deferred. Keeping it in drawerOpenAfterLocalPopRef
+    // survives the cancellation; resumeLocalAppPops replays it once the pump
+    // goes idle. commitDrawerOpen keeps its own copy of this check for the
+    // non-canvas path, which reaches it synchronously.
+    if (appLocalPopInFlightRef.current) {
+      drawerOpenAfterLocalPopRef.current = true
+      return
+    }
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
@@ -1099,6 +1113,58 @@ export default function useNavigation({
     settingsOpenRef.current = false
   }, [])
 
+  function targetPaneFor(paneId) {
+    const ws = workspaceStateRef.current.ws
+    return (typeof paneId === 'string' && ws.panes[paneId]) ? paneId : ws.focusedPaneId
+  }
+
+  // The history half of one navigation. Ensure exactly one history entry sits
+  // above the current one to serve as its back-target: retag a consumed drawer
+  // sentinel, else push a fresh nav entry. Exactly one pushState/retag per
+  // navigation (§5.3.12). Callers reject a same-route no-op first and apply the
+  // destination afterwards.
+  function recordNavigation(previousRoute, nextRoute) {
+    navigationEpochRef.current += 1
+    if (drawerPushedRef.current) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      const recoveredClose = closeTraversal?.recovered
+        && closeTraversal.entryId === navEntryId(history.state)
+      drawerPushedRef.current = false
+      currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
+      if (recoveredClose) {
+        closeTraversal.selectedRoute = nextRoute
+        closeTraversal.selectionChanged = true
+      } else {
+        drawerCloseTraversalRef.current = null
+      }
+    } else {
+      try {
+        pushShellEntry('nav', nextRoute)
+      } catch { /* history unavailable — leave the entry as-is */ }
+    }
+    navStackRef.current.push(previousRoute)
+    // This navigation resolved the drawer's history state, so clear ALL of the
+    // drawer's flags together. Leaving the pending-close flag set would make a later
+    // open try to re-adopt a sentinel this navigation has already retagged.
+    drawerClosePendingRef.current = false
+    drawerOpenRef.current = false
+    setDrawerVisible(false)
+  }
+
+  // A chat destination applied outside navTo still owes Back the same target.
+  // The draft-first New Chat mounts its presentation before the chat exists
+  // server-side, so it applies its own destination. Call this first, while
+  // snapshotRoute() is still the route being left. Returns false when there is
+  // nothing to record.
+  function recordChatNavigation(chatId, { paneId } = {}) {
+    if (chatId == null || String(chatId).trim() === '') return false
+    const previousRoute = snapshotRoute()
+    const nextRoute = navRoute('chat', String(chatId), null, targetPaneFor(paneId))
+    if (sameRoute(previousRoute, nextRoute)) return false
+    cancelDrawerPreparation()
+    recordNavigation(previousRoute, nextRoute)
+    return true
+  }
   function navTo(view, opts = {}) {
     // A route change supersedes a drawer open that has not reached its painted
     // commit yet. Otherwise its queued callback can install a drawer sentinel
@@ -1109,10 +1175,7 @@ export default function useNavigation({
     // earlier revision cleared sentinels here via history.go(-stale) + a
     // suppress-popstate counter; that desynchronized iframe depth and swallowed
     // a real user Back in the synthetic-pop window (regression history at §5.3.1).
-    const ws = workspaceStateRef.current.ws
-    const targetPaneId = (typeof opts.paneId === 'string' && ws.panes[opts.paneId])
-      ? opts.paneId
-      : ws.focusedPaneId
+    const targetPaneId = targetPaneFor(opts.paneId)
     const previousRoute = snapshotRoute()
 
     let nextRoute
@@ -1172,34 +1235,7 @@ export default function useNavigation({
       return
     }
 
-    navigationEpochRef.current += 1
-    // Ensure exactly one history entry sits above the current one to serve as
-    // this navigation's back-target: retag a consumed drawer sentinel, else push
-    // a fresh nav entry. Exactly one pushState/retag per navTo (§5.3.12).
-    if (drawerPushedRef.current) {
-      const closeTraversal = drawerCloseTraversalRef.current
-      const recoveredClose = closeTraversal?.recovered
-        && closeTraversal.entryId === navEntryId(history.state)
-      drawerPushedRef.current = false
-      currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
-      if (recoveredClose) {
-        closeTraversal.selectedRoute = nextRoute
-        closeTraversal.selectionChanged = true
-      } else {
-        drawerCloseTraversalRef.current = null
-      }
-    } else {
-      try {
-        pushShellEntry('nav', nextRoute)
-      } catch { /* history unavailable — leave the entry as-is */ }
-    }
-    navStackRef.current.push(previousRoute)
-    // This navigation resolved the drawer's history state, so clear ALL of the
-    // drawer's flags together. Leaving the pending-close flag set would make a later
-    // open try to re-adopt a sentinel this navigation has already retagged.
-    drawerClosePendingRef.current = false
-    drawerOpenRef.current = false
-    setDrawerVisible(false)
+    recordNavigation(previousRoute, nextRoute)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -2230,6 +2266,7 @@ export default function useNavigation({
     openDrawer,
     closeDrawer,
     navTo,
+    recordChatNavigation,
     navigateBackward,
     navigateForward,
     tabRevealRevision,

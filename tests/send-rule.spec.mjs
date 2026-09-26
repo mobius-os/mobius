@@ -14,6 +14,10 @@
  */
 import { test, expect } from '@playwright/test'
 import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -27,11 +31,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   // availability cannot disable the send-scroll contract.
   await installMockProviderUsage(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
-    { timeout: 10000 })
+  await waitForChatShell(page)
 }
 
 /** Swap in an SSE response body for the next stream the app opens. */
@@ -70,7 +70,7 @@ async function installChunkedStreams(page, streams) {
       }
       // Ignore foreground/reconnect streams for chats that this test did not
       // just send. This keeps the sequence deterministic even when the shell
-      // initially mounts a different live chat before `newChat()` runs.
+      // initially mounts a different live chat before `createChat()` runs.
       const pendingIdx = sentChatIds.indexOf(streamMatch[1])
       if (pendingIdx < 0) return realFetch(input, init)
       sentChatIds.splice(pendingIdx, 1)
@@ -93,30 +93,6 @@ async function installChunkedStreams(page, streams) {
       }))
     }
   }, streams)
-}
-
-async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(() => !!document.querySelector('.drawer--open'), { timeout: 3000 })
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  await page.waitForFunction(() => !document.querySelector('.drawer--open'), { timeout: 3000 })
-  await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
-    { timeout: 10000 },
-  )
-}
-
-async function sendMessage(page, text) {
-  const input = page.locator('[data-chat-surface="painted"]')
-    .getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
 async function waitStreamDone(page) {
@@ -197,7 +173,7 @@ test.use({ serviceWorkers: 'block' })
 
 test('First message in a chat pins to the viewport top', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Hi.' }, { type: 'done' }])
   await sendMessage(page, 'My first message')
   await page.evaluate(() => new Promise(r =>
@@ -217,7 +193,7 @@ test('First message in a chat pins to the viewport top', async ({ page }) => {
 
 test('Send while at the bottom hands off after a long response fills the reservation', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
 
   // Long first response so the chat overflows and a scroll position
   // genuinely exists (the short-chat shortcut must not be what makes
@@ -273,7 +249,7 @@ test('Immediate tail-to-send follows output after the reader returns to the phys
     ],
   ])
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -335,7 +311,7 @@ test('Immediate tail-to-send follows output after the reader returns to the phys
 
 test('Send while scrolled up preserves the exact reading position', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
 
   // Long first response that overflows so there's a real reading position.
   await routeStream(page, [
@@ -378,7 +354,7 @@ test('Send while scrolled up preserves the exact reading position', async ({ pag
 
 test('Scrolling upward inside reserved reply room keeps the next send in place', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
 
   // Build real history so a later pinned row can move from the top into the
   // middle while the latest-turn reservation still remains below it.
@@ -445,7 +421,7 @@ test('Scrolling upward inside reserved reply room keeps the next send in place',
 
 test('Short chat at the physical tail pins the next send', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'send-rule')
 
   // The first send pins and its short reply leaves a permanent reservation.
   // The exact spacer keeps that pin at the one physical clamp.

@@ -30,6 +30,10 @@
  * Mirrors tests/second-send-pin.spec.mjs's route-mock SSE flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -40,12 +44,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    undefined,
-    { timeout: 10000 })
+  await waitForChatShell(page)
 }
 
 /** Swap in an SSE response body for the next stream the app opens. */
@@ -92,42 +91,6 @@ async function installChunkedStreams(page, streams) {
       }))
     }
   }, streams)
-}
-
-async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    undefined,
-    { timeout: 3000 },
-  )
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    undefined,
-    { timeout: 3000 },
-  )
-}
-
-async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  const previousCount = await page.locator('[data-chat-surface="painted"] .chat__msg--user').count()
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  // `.chat__scroll` already exists after the first exchange. Waiting only for
-  // that container lets a busy CI worker measure the previous user message
-  // before React commits the new pinned row. Synchronize on the state this
-  // helper is responsible for creating, then allow the pin's layout pass.
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(previousCount + 1, {
-    timeout: 3000,
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').last()).toContainText(text)
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
 /** Engage FOLLOW_BOTTOM via a real gesture so a subsequent send pins
@@ -235,7 +198,7 @@ test.use({ serviceWorkers: 'block' })
 
 test('Deep second send pins flush to top after the post-send layout settle (no halfway clamp)', async ({ page }) => {
   await setup(page)
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
 
   // First response is long → the second user message lands DEEP in the
   // list (large offsetTop ⇒ pin target needs a spacer).
@@ -294,7 +257,7 @@ test('Keyboard close cannot retire a pin before a short stream settles', async (
     ],
   ])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -339,7 +302,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
     [2600, { type: 'done' }],
   ]])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
   await sendMessage(page, 'Keep this prompt still, then follow')
 
   // The first small frame must consume blank reservation without moving the
@@ -381,7 +344,7 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
     [1700, { type: 'done' }],
   ]])
   await setup(page, { width: 426, height: 860 })
-  await newChat(page)
+  await createChat(page, 'pin-clamp-settle')
   await sendMessage(page, 'Let me scroll while this runs')
   await expect(page.locator('[data-chat-surface="painted"]').getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
 

@@ -8,7 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const NAV_CHATS = [
@@ -27,27 +27,9 @@ const NAV_CHATS = [
   running: false,
 }))
 
-function navChatDetail(id, assistantContent = 'Fixture response') {
-  return {
-    messages: [
-      { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
-      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
-    ],
-    total: 2,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-  }
-}
-
 function emptyChatDetail() {
   return {
-    messages: [],
-    total: 0,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-    pending_question_id: null,
+    ...emptyChatPage(),
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -57,6 +39,20 @@ function emptyChatDetail() {
     auto_resume_on_limit: false,
     auto_resume_on_restart: true,
     updated_at: '2026-01-01T00:02:00Z',
+  }
+}
+
+// A chat opened with history must carry the full chat-detail contract too, or
+// the shell never reaches display-ready and the launch cover keeps the page.
+function navChatDetail(id, assistantContent = 'Fixture response') {
+  return {
+    ...emptyChatDetail(),
+    messages: [
+      { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
+      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
+    ],
+    total: 2,
+    has_assistant_turns: true,
   }
 }
 
@@ -209,10 +205,8 @@ async function setup(
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: false,
+        ...runtimeSnapshot(),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
         updated_at: null,
       }),
     })
@@ -369,21 +363,32 @@ async function closeDrawerToggle(page) {
   if (wasOpen) await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 }
 
-/** Trigger browser back via history.back().
+/** Traverse shell history with history.back()/forward().
  *  Uses evaluate to fire within the SPA rather than Playwright's page.goBack
- *  which triggers a real page navigation. */
-async function goBack(page) {
-  await page.evaluate(() => history.back())
-  // Wait from the test runner, not the page's old execution context: the assertion
-  // below should report an accidental document navigation as the product failure,
-  // rather than this helper racing the context swap with a second evaluate().
-  await page.waitForTimeout(500)
+ *  which triggers a real page navigation.
+ *
+ *  history.back()/forward() are SPA-internal (pushState) transitions here, so
+ *  there's no real document navigation to await — 'framenavigated' never
+ *  fires for them. The actual completion signal is the resulting 'popstate'
+ *  event; wait for that (registered before firing back/forward, since it can
+ *  dispatch synchronously-ish) instead of guessing a flat delay is enough for
+ *  the app's history listener + React to settle, then allow one settle frame
+ *  for the render it triggers to commit. */
+async function traverseHistory(page, direction) {
+  await page.evaluate((dir) => {
+    window.__navPopstateSeen = false
+    window.addEventListener('popstate', () => { window.__navPopstateSeen = true }, { once: true })
+    if (dir === 'back') history.back()
+    else history.forward()
+  }, direction)
+  await page.waitForFunction(() => window.__navPopstateSeen === true, { timeout: 5000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))
+  ))
 }
 
-async function goForward(page) {
-  await page.evaluate(() => history.forward())
-  await page.waitForTimeout(500)
-}
+const goBack = page => traverseHistory(page, 'back')
+const goForward = page => traverseHistory(page, 'forward')
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -397,7 +402,12 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
-  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+  // The cold composer is revealed and editable before the chat's authoritative
+  // read settles, but ChatView deliberately does not start a turn until that
+  // activation is ready (#1281 retired #820's "send supersedes the cold read").
+  // The draft typed early must survive, and once the read lands it sends
+  // normally and the first user message is placed at the top.
+  test('a first send typed during a cold activation waits for it and then lands', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
     let runtimeRunning = false
@@ -427,10 +437,8 @@ test.describe('Navigation basics', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          running: runtimeRunning,
+          ...runtimeSnapshot({ running: runtimeRunning }),
           active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
           updated_at: null,
         }),
       })
@@ -466,14 +474,21 @@ test.describe('Navigation basics', () => {
       const composer = painted
         .getByRole('textbox', { name: 'Message Möbius…' })
       await expect(composer).toBeVisible()
-      await composer.fill('Visible after superseding the cold read')
+      await composer.fill('Visible after the cold read settles')
+      await expect(painted.locator('.chat__send')).toBeDisabled()
       await composer.press('Enter')
+      // Enter must not start a turn before activation has settled.
+      await page.waitForTimeout(500)
+      expect(sendRequests).toBe(0)
+      await expect(composer).toHaveValue('Visible after the cold read settles')
 
-      await expect.poll(() => sendRequests).toBe(1)
       releaseChatDetail()
+      await expect(painted.locator('.chat__send')).toBeEnabled()
+      await composer.press('Enter')
+      await expect.poll(() => sendRequests).toBe(1)
 
       const userRow = painted.locator('.chat__msg--user')
-      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toContainText('Visible after the cold read settles')
       await expect(userRow).toBeVisible()
 
       const position = await userRow.evaluate((row) => {
@@ -498,9 +513,8 @@ test.describe('Navigation basics', () => {
   test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
     const chats = NAV_CHATS.map((chat, index) => ({
       ...chat,
-      running: index < 2,
+      ...runtimeSnapshot({ running: index < 2 }),
       owner_input_kind: index === 0 ? 'secure_input' : null,
-      pending_question_id: null,
     }))
     await setup(page, { width: 1512, height: 861 }, { chats })
 
@@ -887,6 +901,7 @@ test.describe('Touch navigation', () => {
       })
     })
 
+    const startChatId = await newChatSurface(page).getAttribute('data-chat-id')
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
@@ -919,7 +934,55 @@ test.describe('Touch navigation', () => {
     )
     await expect(painted).toBeFocused()
     await expect(painted).toHaveValue(durableInput)
+
+    // New Chat recorded its Back target under the minted id before the 409
+    // rotated it. History must follow the replacement: Back returns to the chat
+    // the tap left, and Forward restores the replacement, never the unavailable id.
+    await goBack(page)
+    await expect(newChatSurface(page, startChatId)).toBeVisible()
+    await goForward(page)
+    await expect(newChatSurface(page, replacementId)).toBeVisible()
+    await expect(newChatSurface(page, intentId)).toHaveCount(0)
   })
+
+  // Only the mobile drawer carries a history sentinel. The persistent desktop
+  // sidebar and the New Chat shortcut have none, but they are the same user
+  // navigation and owe Back the same target.
+  for (const [source, startNewChat] of [
+    ['the desktop sidebar', async (page) => {
+      await openDrawer(page)
+      await page.getByRole('navigation', { name: 'Primary navigation' })
+        .getByRole('button', { name: 'New chat', exact: true }).click()
+    }],
+    ['the New Chat shortcut', async (page) => {
+      await page.keyboard.press('ControlOrMeta+n')
+    }],
+  ]) {
+    test(`New Chat from ${source} leaves Back a target`, async ({ page }) => {
+      await setup(page, { width: 1280, height: 900 }, { detailForChat: emptyChatDetail })
+      let requestedId = null
+      await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+        if (route.request().method() !== 'POST') return route.fallback()
+        requestedId = route.request().postDataJSON().id
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(createdChat(requestedId)),
+        })
+      })
+
+      const startChatId = await newChatSurface(page).getAttribute('data-chat-id')
+      expect(startChatId).toBeTruthy()
+      await startNewChat(page)
+      await expect.poll(() => requestedId).not.toBeNull()
+      await expect(newChatSurface(page, requestedId)).toBeVisible()
+
+      await goBack(page)
+      await expect(newChatSurface(page, startChatId)).toBeVisible()
+      await goForward(page)
+      await expect(newChatSurface(page, requestedId)).toBeVisible()
+    })
+  }
 
   test('a fast allocation waits for its IDB-only draft before handoff', async ({ page }) => {
     const intentId = '10000000-0000-4000-8000-000000000098'
@@ -1286,6 +1349,10 @@ test.describe('Desktop sidebar navigation', () => {
       pinned_at: index === 1 ? '2026-09-12T12:00:30' : null,
     }))
     let listRequests = 0
+    // Identify the focus refresh by arming the hold, not by request count:
+    // boot may issue one or two (cancelled) list reads.
+    let holdArmed = false
+    let staleListHeld = false
     let staleListFinished = false
     let releaseStaleList
     let releasePinWrite
@@ -1297,13 +1364,23 @@ test.describe('Desktop sidebar navigation', () => {
       chatListResponder: async route => {
         listRequests += 1
         const snapshot = serverChats.map(chat => ({ ...chat }))
-        if (listRequests === 2) await staleListGate
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(snapshot),
-        })
-        if (listRequests === 2) staleListFinished = true
+        const hold = holdArmed && !staleListHeld
+        if (hold) {
+          staleListHeld = true
+          await staleListGate
+        }
+        try {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(snapshot),
+          })
+        } catch {
+          // The page may cancel a list read it has superseded; that stale
+          // snapshot then never lands, which is the safe outcome here.
+        } finally {
+          if (hold) staleListFinished = true
+        }
       },
       chatPatchResponder: async route => {
         const id = new URL(route.request().url()).pathname.split('/').pop()
@@ -1330,8 +1407,12 @@ test.describe('Desktop sidebar navigation', () => {
 
     // A real return to the tab revalidates chats even inside staleTime. Hold
     // that request at the older unpinned snapshot while the owner pins.
+    holdArmed = true
     await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
-    await expect.poll(() => listRequests).toBe(2)
+    // Any drawer read that starts after arming and before the pin commits is
+    // a stale read for this case. On a slow runner the focus refresh can
+    // coalesce into the next readiness-driven read rather than fire at once.
+    await expect.poll(() => staleListHeld, { timeout: 15000 }).toBe(true)
 
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
@@ -1349,10 +1430,13 @@ test.describe('Desktop sidebar navigation', () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     )))
     await expect(pinnedAlpha).toBeVisible()
+    const listRequestsBeforeWrite = listRequests
 
     releasePinWrite()
     await expect(pinnedAlpha).toBeVisible()
-    await expect.poll(() => listRequests).toBe(2)
+    // Committing the pin applies the server rank directly; it must not need
+    // another list read to become canonical.
+    await expect.poll(() => listRequests).toBe(listRequestsBeforeWrite)
     await expect.poll(() => pinnedSection.locator('[data-pinned-key]').evaluateAll(
       rows => rows.map(row => row.dataset.pinnedKey),
     )).toEqual([

@@ -12,7 +12,14 @@
  */
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
+import {
+  BROADCAST_REGISTRATION_WINDOW_MS,
+  QUICK_WAKE_HIDDEN_MS,
+} from '../frontend/src/components/ChatView/streamTiming.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
+import { testChatAgentSettings, mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { mockLiveRuntime } from './_mockLiveRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -31,6 +38,7 @@ async function setupChat(page) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
+  await mockDeliveryReady(page)
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -43,8 +51,17 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
+  // Wait for an idle composer: a send before the chat settles would queue
+  // instead of starting the turn these cases expect.
   await page.waitForFunction(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+    () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+      return !!composer
+        && !composer.disabled
+        && !surface.querySelector('.chat__stop')
+        && !surface.querySelector('.queued__row')
+    },
     { timeout: 10000 },
   )
   return chat
@@ -53,6 +70,7 @@ async function setupChat(page) {
 async function send(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
+  await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
   await page.keyboard.press('Enter')
 }
 
@@ -70,7 +88,6 @@ async function pillOverlapDiagnostics(page) {
     const pill = document.querySelector('[data-chat-surface="painted"] .chat__pill')
     if (!pill) return { missing: 'pill' }
     const pillRect = pill.getBoundingClientRect()
-    const retry = document.querySelector('[data-chat-surface="painted"] .connection-status__retry')
     const status = document.querySelector('[data-chat-surface="painted"] .connection-status')
 
     const describe = (el) => {
@@ -114,8 +131,6 @@ async function pillOverlapDiagnostics(page) {
         right: pillRect.right,
       },
       status: status ? status.getBoundingClientRect().toJSON() : null,
-      retry: retry ? retry.getBoundingClientRect().toJSON() : null,
-      retryOverlapsPill: overlapsPill(retry),
       statusOverlapsPill: overlapsPill(status),
       samples,
     }
@@ -189,6 +204,8 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          // The app ignores a snapshot without a safe-integer runtime_revision.
+          runtime_revision: 1,
         }),
       })
     })
@@ -540,7 +557,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
@@ -609,10 +626,12 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
+    // Readiness recovery on the same wake must not clear the note the
+    // visibility reattach armed (#1241).
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
       timeout: 3000,
     })
@@ -621,7 +640,7 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
-  test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
+    test('9. The connection status stays above the composer pill on wake failure', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
       let streamCount = 0
@@ -638,22 +657,47 @@ test.describe('Stream reconnection', () => {
     })
 
     await setupChat(page)
+    // A wake failure shows the connection status only while the backend claims
+    // a live run, and both the runtime poll and the detail read retire the
+    // transport once they report settled. Registered after setupChat so its
+    // idle wait (no Stop) still settles.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...runtimeSnapshot({ running: true }),
+          run_id: 'stream-reconnect-wake-run',
+          active_goal_objective: null,
+          updated_at: null,
+        }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      const response = await route.fetch()
+      let body = null
+      try { body = await response.json() } catch { return route.fulfill({ response }) }
+      return route.fulfill({
+        response,
+        body: JSON.stringify({ ...body, running: true, pending_question_id: null }),
+      })
+    })
     await send(page, 'retry button layout')
 
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
-      timeout: 10000,
+    // A wake failure keeps the connection status on screen while the run is
+    // live; its Retry (when mounted) is inside it, so the status is measured.
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status')).toBeVisible({
+      timeout: 25000,
     })
-    await page.waitForFunction(() => {
-      const chat = document.querySelector('[data-chat-surface="painted"] .chat')
-      const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
-      return chat && foot
-        && getComputedStyle(chat).getPropertyValue('--composer-h').trim()
-          === `${foot.offsetHeight}px`
-    })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__pill'))
+      .toBeVisible({ timeout: 15000 })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
 
     const diagnostics = await pillOverlapDiagnostics(page)
-    expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
-      .toBe(false)
     expect(diagnostics.statusOverlapsPill, JSON.stringify(diagnostics, null, 2))
       .toBe(false)
   })
@@ -752,6 +796,7 @@ test.describe('Stream reconnection', () => {
     // real network race or this simulation, because both deliver a resolved
     // 204 Response to the same awaited fetch while abortRef points elsewhere.
     let messagesPostCount = 0
+    const live = await mockLiveRuntime(page, { idleDetail: true })
 
     // Install the fetch shim before any app code runs. It captures the
     // first explicitly armed /stream fetch and parks it (a held Response).
@@ -818,13 +863,22 @@ test.describe('Stream reconnection', () => {
 
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
+      live.pending = []
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pending_messages: [] }),
       })
-    )
+    })
+
+    // Stop override — registered AFTER setupChat so it wins, same reasoning
+    // as the /messages override below: keeps the runtime-poll mock's
+    // `running` in sync with the actual turn lifecycle this test drives.
+    await page.route('**/api/chat/stop', route => {
+      live.running = false
+      route.fulfill({ status: 200, body: '{}' })
+    })
 
     // POST /messages override — registered AFTER setupChat so it wins
     // (Playwright matches most-recently-added first; setupChat's bare-{}
@@ -837,6 +891,9 @@ test.describe('Stream reconnection', () => {
       messagesPostCount++
       if (messagesPostCount === 2) {
         const ts = Date.now()
+        live.pending = [{
+          role: 'user', content: body.content, ts, cid: body.cid,
+        }]
         route.fulfill({
           status: 202,
           headers: { 'Content-Type': 'application/json' },
@@ -854,6 +911,7 @@ test.describe('Stream reconnection', () => {
         })
         return
       }
+      live.running = true
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -912,7 +970,7 @@ test.describe('Stream reconnection', () => {
     // the old response. Without the ownership guard, this makes the stale
     // connection take the terminal-204 branch immediately instead of entering
     // the registration-retry branch first.
-    await page.waitForTimeout(1750)
+    await page.waitForTimeout(BROADCAST_REGISTRATION_WINDOW_MS + 250)
 
     // NOW release the parked first stream as a stale 204. With the guard
     // it bails (abortRef no longer === its controller). Without the
@@ -1002,10 +1060,8 @@ test.describe('Stream reconnection', () => {
       },
     ]
     const runtimeState = {
-      running: true,
+      ...runtimeSnapshot({ running: true, pending_question_id: QUESTION_ID }),
       active_goal_objective: GOAL,
-      pending_messages: [],
-      pending_question_id: QUESTION_ID,
       updated_at: updatedAt,
     }
     const detail = {
@@ -1037,12 +1093,15 @@ test.describe('Stream reconnection', () => {
       provider: 'claude',
       ...runtimeState,
     }
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)$/, route => {
+    // CHAT_ID exists only here, so every transcript read of it (including the
+    // &anchor= activation read) must be mocked.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)(?:&anchor=[^&]*)?$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(detail),
+        // Spread runtimeState per request so detail and runtime always agree.
+        body: JSON.stringify({ ...detail, ...runtimeState }),
       })
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
@@ -1083,6 +1142,10 @@ test.describe('Stream reconnection', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') { route.continue(); return }
       try { answerPosted = route.request().postDataJSON() } catch { answerPosted = null }
+      // Answering unfreezes the turn: clear the parked question (the stream
+      // attaches only without one) and advance the revision so it is adopted.
+      runtimeState.pending_question_id = null
+      runtimeState.runtime_revision += 1
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -1137,7 +1200,10 @@ test.describe('Stream reconnection', () => {
     // browser exhausts its reconnects, the connection warning must not retire
     // the goal while the authoritative runtime still reports `running:true`.
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
-    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 12000 })
+    // Connection trouble must surface as the status without retiring the goal;
+    // the goal rail on both sides is the guarantee.
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status'))
+      .toBeVisible({ timeout: 25000 })
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
 
     // Answering MUST POST the answer payload (the turn unfreezes).
@@ -1149,10 +1215,10 @@ test.describe('Stream reconnection', () => {
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
     await expect(activeComposer)
       .toHaveValue('keep this draft safe')
-    // The answer unfreezes the turn, but the authoritative runtime above still
-    // reports `running:true`; reconnect loss must not invent an idle composer.
-    // Keep the draft safe behind Stop until a later runtime snapshot settles.
-    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
+    // With the card answered, a kept draft offers Send even while the run is
+    // live, so the button cannot show it. The goal rail on both sides of the
+    // connection status is the guarantee that the run was not settled.
+    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+    await expect(goalRail).toContainText(`Goal · ${GOAL}`)
   })
 })

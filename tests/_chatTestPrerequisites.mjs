@@ -77,3 +77,37 @@ export async function persistTestChatModel(page, { base, chatId, token }) {
     failOnStatusCode: false,
   })
 }
+
+/**
+ * Report the shell delivery-ready. Until connectivityStore's /api/ready probe
+ * sees `ready: true` with a boot id, a send is queued locally instead of
+ * starting a turn, and the composer is usable before that probe settles.
+ * Specs that expect a started turn install this before navigating.
+ */
+export async function mockDeliveryReady(page, { bootId = 'test-boot' } = {}) {
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: { ready: true, boot_id: bootId },
+  }))
+}
+
+/**
+ * A chat runtime snapshot carrying every field the app requires. The app
+ * rejects a snapshot without a safe-integer revision, and the backend always
+ * sends these; a new required field is added here once.
+ */
+export function runtimeSnapshot(overrides = {}) {
+  return {
+    running: false,
+    runtime_revision: 0,
+    pending_messages: [],
+    pending_question_id: null,
+    ...overrides,
+  }
+}
+
+/** An empty chat-detail page, with the runtime fields it carries. */
+export function emptyChatPage(overrides = {}) {
+  return { messages: [], total: 0, offset: 0, ...runtimeSnapshot(), ...overrides }
+}

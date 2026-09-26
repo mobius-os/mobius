@@ -13,8 +13,11 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/chat-redesign.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
+import { mockDeliveryReady } from './_chatTestPrerequisites.mjs'
+import { disconnectDelivery } from './_connectivity.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -58,6 +61,8 @@ async function setupWithStreamMock(
       route.fulfill({ status: 204, body: '' })
     )
   }
+  // The readiness case registers its own /api/ready route over this one.
+  await mockDeliveryReady(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
     () => !!(document.querySelector('.chat__empty-wrap')
@@ -68,35 +73,6 @@ async function setupWithStreamMock(
 }
 
 
-/** Navigate to a new empty chat. */
-async function newChat(page) {
-  // Create the chat via API first (so it's tagged with the worker
-  // prefix and can be reaped after the spec finishes), then click
-  // through the UI to actually land on it.
-  const chat = await createTaggedChat(page)
-  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
-}
-
-
-async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  // Wait for the optimistic user-message LI to render — the
-  // deterministic signal that the send landed. The previous
-  // strategy (waiting on `.chat__scroll` to be visible) raced the
-  // hide-then-reveal safety cap when prior tests left state in the
-  // shared storageState; downstream assertions already do their
-  // own visibility waits, so blocking on container visibility up
-  // front bought nothing.
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
-}
 
 
 // ─────────────────────────────────────────────────────────────────
@@ -132,7 +108,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     await setupWithStreamMock(page, streamBody)
     await mockPendingQuestionState(page, 'q-pick-one')
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me a question')
 
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
@@ -174,7 +150,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     await setupWithStreamMock(page, streamBody)
     await mockPendingQuestionState(page, 'q-restart-order')
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Prepare the change and ask before restarting')
 
     const assistant = page.locator(
@@ -238,12 +214,15 @@ test.describe('Bug 1: AskUserQuestion', () => {
     })
     pendingQuestion = await mockPendingQuestionState(page, 'q-retry-answer')
 
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask for a launch lane')
 
     const card = page.locator('[data-chat-surface="painted"] .qcard')
     const careful = page.getByRole('radio', { name: 'Careful' })
-    const submit = page.getByRole('button', { name: 'Submit' })
+    // The submit button's accessible name changes with its state ("Submit" ->
+    // "Queued on this device" -> "Submitted"), so target it by class instead
+    // of the transient role name.
+    const submit = card.locator('.qcard__submit')
     await expect(card).toBeVisible({ timeout: 5000 })
     await careful.click()
     await submit.click()
@@ -251,13 +230,24 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Prove the failure below comes from the intended answer request, not a
     // competing route mock or a click that never reached the transport.
     await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByText(/answer didn’t save/i)).toBeVisible()
+    // A failed answer is kept in the outbox: the card shows it queued and locks
+    // the choice instead of offering a manual retry.
+    await expect(card.getByText('Queued on this device')).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
-    await expect(careful).toBeEnabled()
-    await expect(submit).toBeEnabled()
-    await submit.click()
+    await expect(careful).toBeDisabled()
+    await expect(submit).toBeDisabled()
+    // The outbox retries on a genuine offline -> online delivery edge; this
+    // same-session 503 never went offline, so produce that edge.
+    const network = await disconnectDelivery(page)
+    await network.reconnect()
     await expect.poll(() => answerAttempts).toBe(2)
-    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+    // The card settles into its durable answered state once the retried
+    // answer commits: the choice stays recorded and read-only, and the
+    // action row (Submit/Queued/Submitted) retires entirely rather than
+    // showing a terminal "Submitted" label.
+    await expect(careful).toHaveAttribute('aria-checked', 'true')
+    await expect(careful).toBeDisabled()
+    await expect(card.locator('.qcard__submit')).toHaveCount(0)
   })
 
 
@@ -290,7 +280,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       return fulfillStartedPost(route)
     })
     pendingQuestion = await mockPendingQuestionState(page, 'q-stable-card')
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me which route')
 
     const card = page.locator('[data-chat-surface="painted"] .qcard')
@@ -370,7 +360,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
     await mockPendingQuestionState(page, 'q-steady-multiline')
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask for multiline details')
 
     const card = page.locator('[data-chat-surface="painted"] .qcard')
@@ -452,7 +442,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
     await mockPendingQuestionState(page, 'q-nested-input-owner')
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask for a detailed answer')
 
     const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
@@ -533,7 +523,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Try the partial-then-full sequence')
 
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
@@ -580,7 +570,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask two questions')
 
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(2, { timeout: 5000 })
@@ -607,7 +597,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Pick scope')
 
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
@@ -633,7 +623,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
   // streamItems is empty.
   test('an assistant message in messages persists when streamItems is empty', async ({ page }) => {
     await setupWithStreamMock(page, null)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test')
     // Inject a fake assistant message into the chat list — the
     // redesign means messages.map's suppression only fires under
@@ -665,7 +655,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
 
   test('bottom detection has no lagging sentinel authority', async ({ page }) => {
     await setupWithStreamMock(page, null)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First send')
     await expect(page.locator('[data-chat-surface="painted"] .chat__bottom-sentinel')).toHaveCount(0)
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toHaveCount(1)
@@ -674,7 +664,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
 
   test('user messages carry data-cid (for PIN_USER_MSG resolution)', async ({ page }) => {
     await setupWithStreamMock(page, null)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Send with cid')
     // The pin resolves the user row by its stable cid (data-cid). data-ts is
     // kept too, but only for the timestamp tooltip (display metadata).
@@ -687,7 +677,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
 
   test('messages carry data-key (for ANCHOR_AT resolution)', async ({ page }) => {
     await setupWithStreamMock(page, null)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Send with key')
     const keyed = await page.locator('[data-chat-surface="painted"] .chat__msg[data-key]').count()
     expect(keyed).toBeGreaterThan(0)
@@ -766,7 +756,7 @@ test.describe('Q&A atomic write', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask')
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
     await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
@@ -866,7 +856,7 @@ test.describe('Q&A atomic write', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 },
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask the anchored question')
 
     const card = page.locator('[data-chat-surface="painted"] .qcard')
@@ -961,7 +951,7 @@ test.describe('Error block: persists across chat return', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Try something')
 
     // The error notice appears during streaming with the
@@ -1031,7 +1021,7 @@ test.describe('Error block: persists across chat return', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Trigger error')
 
     // The error renders as a system notice. The URL inside it

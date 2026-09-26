@@ -10,6 +10,10 @@
  * end-to-end to catch any regression specific to that flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForChatShell, waitForComposerSendable } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/
@@ -39,41 +43,7 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
   await replaceStreamRoute(page, events)
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
-}
-
-async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  await page.evaluate(() => {
-    const newChatBtn = document.querySelector('.drawer__item--new')
-    if (newChatBtn) newChatBtn.click()
-  })
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-}
-
-async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  await waitForChatShell(page)
 }
 
 /** Engage FOLLOW_BOTTOM via a real gesture (pointerdown + scroll to the
@@ -147,7 +117,7 @@ test('Second send from auto-scroll pins to viewport top through the full SSE flo
     { type: 'done' },
   ]
   await setupWithSSE(page, events)
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   // Send 1, wait for the stream + promote to settle.
   await sendMessage(page, 'First user message')
@@ -201,7 +171,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     { type: 'text', content: 'First response paragraph. '.repeat(60) },
     { type: 'done' },
   ])
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
   await gestureToBottom(page)
@@ -324,7 +294,7 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
     { type: 'done' },
   ]
   await setupWithSSE(page, events)
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -446,7 +416,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 })
-  await newChat(page)
+  await createChat(page, 'second-send-pin')
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
@@ -456,6 +426,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
   // Send 2. The POST resolves fast (retarget fires); the SSE pauses ~1.3s.
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill('Second user message')
+  await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
   await page.keyboard.press('Enter')
 
   // DURING the pause: wait for the optimistic row to render (POST + retarget

@@ -328,7 +328,12 @@
         // apply-on-idle, and reload. Keeping lifecycle policy out of this boot
         // document prevents an older cached page and the mounted shell from
         // racing two partial update mechanisms.
-        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {})
+        // `in` only proves the property EXISTS. A sandboxed frame without
+        // allow-same-origin still throws from its getter, so the read itself
+        // needs guarding for any framed route, not just the embed path above.
+        try {
+          navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {})
+        } catch { /* sandboxed: no worker is possible or wanted here */ }
       }
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —

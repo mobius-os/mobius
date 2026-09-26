@@ -7,9 +7,11 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/frontend.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForComposerSendable } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
+import { mockDeliveryReady, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -47,35 +49,6 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   )
 }
 
-async function newChat(page) {
-  // Worker-tagged title so cleanupWorkerChats can find + delete this
-  // chat at the end of the spec. See tests/_chatTracker.mjs.
-  const chat = await createTaggedChat(page)
-  if (chat?.id) {
-    // A valid persisted workspace wins over the legacy active-chat mirror.
-    // Navigate through the supported in-scope cold deep-link contract.
-    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-      waitUntil: 'domcontentloaded',
-    })
-  } else {
-    await page.evaluate(() => {
-      document.querySelector('.drawer__item--new')?.click()
-    })
-  }
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
-  return chat
-}
-
-async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
-}
-
 async function waitForChatMode(page, chatId, kind, timeout = 3000) {
   await expect.poll(
     () => page.evaluate(id => {
@@ -110,10 +83,13 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
 // the mocks stay authoritative for the whole test.
 test.use({ serviceWorkers: 'block' })
 
+// Every send in this file expects a started turn; none exercises readiness.
+test.beforeEach(async ({ page }) => { await mockDeliveryReady(page) })
+
 test.describe('Input behavior', () => {
   test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.evaluate(el => {
@@ -198,7 +174,7 @@ test.describe('Input behavior', () => {
     })
 
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     await page.getByRole('button', { name: 'Voice input' }).click()
     await expect(page.getByRole('button', { name: 'Stop recording' })).toBeVisible()
@@ -211,7 +187,7 @@ test.describe('Input behavior', () => {
 
   test('1. Input clears after send', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test message')
 
     const value = await page.evaluate(
@@ -222,7 +198,7 @@ test.describe('Input behavior', () => {
 
   test('2. Empty input does not send', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     // Try to send empty
     await page.keyboard.press('Enter')
@@ -237,7 +213,7 @@ test.describe('Input behavior', () => {
 
   test('3. Send button appears when input has text', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     // Initially no send button (voice button instead)
     const hasSend = await page.evaluate(
@@ -254,7 +230,7 @@ test.describe('Input behavior', () => {
 test.describe('Message rendering', () => {
   test('4. User message renders with correct class', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Hello world')
 
     const userMsg = await page.evaluate(() => {
@@ -270,7 +246,7 @@ test.describe('Message rendering', () => {
 
   test('5. Multiple messages render in order', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'First')
 
     // Stop and send second
@@ -290,7 +266,7 @@ test.describe('Message rendering', () => {
 
   test('6. Thinking dots show while agent is processing', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Test thinking')
 
     const hasThinking = await page.evaluate(
@@ -327,7 +303,7 @@ test.describe('Message rendering', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Render markdown')
 
     const result = await page.evaluate(() => {
@@ -426,7 +402,7 @@ test.describe('Message rendering', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me something')
 
     // Wait for question card to appear.
@@ -510,7 +486,7 @@ test.describe('Message rendering', () => {
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me')
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
     await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'A' }).click()
@@ -552,7 +528,7 @@ test.describe('Message rendering', () => {
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
     await sendMessage(page, 'Ask me')
 
     // Only ONE question card should render (the real one).
@@ -638,7 +614,7 @@ test.describe('App canvas', () => {
 test.describe('Scroll position', () => {
   test('10. PageUp position saved on navigate, restored on return', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -679,8 +655,7 @@ test.describe('Scroll position', () => {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -753,7 +728,7 @@ test.describe('Scroll position', () => {
 
   test('10b. Leaving auto-scroll restores the exact old tail, not content grown while away', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -787,8 +762,7 @@ test.describe('Scroll position', () => {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -877,7 +851,7 @@ test.describe('Scroll position', () => {
 
   test('10c. A paginated return anchor survives the latest-page refresh', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -910,8 +884,7 @@ test.describe('Scroll position', () => {
           messages: allMessages.slice(start, before),
           total: allMessages.length,
           offset: start,
-          running: false,
-          pending_messages: [],
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -990,7 +963,7 @@ test.describe('Scroll position', () => {
 
   test('10d. Running chat presents before catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    await newChat(page)
+    await createChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -1042,8 +1015,7 @@ test.describe('Scroll position', () => {
           messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
           total: 4,
           offset: 0,
-          running: returning,
-          pending_messages: [],
+          ...runtimeSnapshot({ running: returning }),
         }),
       })
     })
@@ -1222,10 +1194,11 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
@@ -1250,10 +1223,11 @@ test.describe('Enter key — desktop (no touch)', () => {
 
   test('10b. Enter sends on desktop', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Desktop send test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     // Should NOT be on empty state — message was sent.
@@ -1262,7 +1236,7 @@ test.describe('Enter key — desktop (no touch)', () => {
 
   test('10c. Shift+Enter inserts newline on desktop', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
@@ -1324,11 +1298,12 @@ test.describe('Scroll after stream end', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     // Send message → stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Long response test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
@@ -1407,6 +1382,7 @@ test.describe('Connection recovery', () => {
           ],
           total: 2,
           offset: 0,
+          ...runtimeSnapshot(),
         }),
       })
     })
@@ -1426,11 +1402,12 @@ test.describe('Connection recovery', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     // Send message → first stream completes.
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Recovery test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
@@ -1482,10 +1459,11 @@ test.describe('Connection recovery', () => {
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
-    await newChat(page)
+    await createChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Reconnect test')
+    await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(

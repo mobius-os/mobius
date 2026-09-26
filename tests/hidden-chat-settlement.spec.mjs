@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 attachCleanup()
@@ -48,13 +49,18 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({ json: {
       id: a.id, title: 'Hidden settlement', provider: 'codex',
-      messages, total: messages.length, offset: 0, running,
-      pending_messages: [], pending_question_id: null,
+      messages, total: messages.length, offset: 0,
+      ...runtimeSnapshot({ running }),
+      run_id: 'settlement-run-1',
     } })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null } })
+    // The real runtime keeps run_id after running flips false; it identifies
+    // the run that settled, which is how a hidden chat notices completion.
+    return route.fulfill({
+      json: { ...runtimeSnapshot({ running }), run_id: 'settlement-run-1' },
+    })
   })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

@@ -1,7 +1,7 @@
 // Durable offline delivery belongs to the client outbox. Every chat request is
 // intercepted: this spec needs no persisted chat, provider turn, or cleanup job.
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
-import { installMockAgentProvider, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { installMockAgentProvider, testChatAgentSettings, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 import { FAILURE_GRACE_MS, PROBE_TIMEOUT_MS } from '../frontend/src/lib/connectivityStore.js'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
@@ -29,8 +29,7 @@ function readChatOutbox(page) {
 
 test('offline Send survives reload and drains into the chat once after reconnect', async ({ page, context }) => {
   const chat = { id: CHAT, title: 'Offline outbox fixture', provider: 'claude',
-    ...testChatAgentSettings(), running: false, pending_messages: [],
-    pending_question_id: null, recovery_run_id: null,
+    ...testChatAgentSettings(), ...runtimeSnapshot(), recovery_run_id: null,
     active_assistant_message_id: null, updated_at: '2026-09-12T00:00:00Z' }
   const chatPath = `/api/chats/${chat.id}`
   const messagePath = `${chatPath}/messages`

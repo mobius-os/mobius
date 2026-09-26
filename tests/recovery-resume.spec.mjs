@@ -1,6 +1,6 @@
 /* Rendered recovery contracts: Resume is acknowledged control, never a queued owner message. */
 import { test as base, expect, chromium } from '@playwright/test'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
 
 // An authenticated screenshot-helper browser may run these fully intercepted
 // fixtures against a live build. No fixture request may mutate the real chat.
@@ -62,8 +62,9 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, partial]
   const detail = () => ({
     id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
-    total: messages.length, offset: 0, running: resumed, pending_messages: [queued],
-    pending_question_id: null, active_goal_objective: null,
+    total: messages.length, offset: 0,
+    ...runtimeSnapshot({ running: resumed, pending_messages: [queued] }),
+    active_goal_objective: null,
     recovery_run_id: resumed ? null : 'interrupted-a',
     active_assistant_message_id: resumed ? 'assistant-resumed-a' : null,
     updated_at: '2026-09-08T17:00:00Z',

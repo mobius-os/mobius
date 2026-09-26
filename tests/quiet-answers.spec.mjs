@@ -1,6 +1,7 @@
 /* Saved close answers never manufacture a model turn or disturb owner intent. */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
+import { disconnectDelivery } from './_connectivity.mjs'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
 const CHAT = process.env.MOBIUS_RECOVERY_CHAT_ID || 'ffffffff-1111-4222-8333-444444444444'
@@ -49,10 +50,14 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
     const answered = restartStatus !== 'awaiting_owner' || (block.answers && !awaitingReplay)
     return { id: CHAT, title: 'Quiet answer fixture', provider: 'codex',
       messages: awaitingReplay ? unansweredMessages : messages,
-      total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
+      total: messages.length, offset: 0,
+      ...runtimeSnapshot({
+        pending_messages: pendingMessages,
+        pending_question_id: answered ? null : block.question_id,
+      }),
       agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
-      pending_question_id: answered ? null : block.question_id, active_goal_objective: null,
-      recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' }
+      active_goal_objective: null, recovery_run_id: null, active_assistant_message_id: null,
+      updated_at: '2026-09-09T02:00:00Z' }
   }
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url())
@@ -147,7 +152,9 @@ for (const acknowledgement of ['detail', 'replay']) {
     if (acknowledgement === 'replay') {
       await expect.poll(() => f.attempts.length).toBe(2)
     }
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
+    // Settling runs a chain (online edge, readiness, reconcile, read or replay)
+    // with no fixed latency; assert the outcome with room, not its timing.
+    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible({ timeout: 15000 })
     expect(f.attempts.length).toBeGreaterThanOrEqual(1)
     for (const attempt of f.attempts) expect(attempt).toEqual(f.attempts[0])
     expect(f.answerWrites()).toBe(1)
@@ -161,7 +168,11 @@ for (const restartVersion of [1, 2]) {
     const f = await mount(page, { restart: { version: restartVersion } })
     await f.card.getByRole('radio', { name: /Restart now/ }).click()
     const beforeStreams = f.streams()
-    await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+    // The submit label is version-dependent: QuestionCard's writtenRestartAction
+    // is `restartAction && platformAction?.version === 2`, so only a v2 written
+    // restart relabels the action 'Continue'. A v1 restart keeps 'Submit'.
+    const submitLabel = restartVersion === 2 ? 'Continue' : 'Submit'
+    await f.card.getByRole('button', { name: submitLabel, exact: true }).click()
     await expect(f.card.getByRole('status')).toContainText('Restart requested')
     expect(f.attempts).toHaveLength(1)
     expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })
@@ -206,36 +217,17 @@ test('independent activation settles a Restart card without fabricating an owner
   await expect(f.attachment).toBeVisible()
 })
 
-async function disconnectDelivery(page) {
-  let postAttempts = 0
-  const blockNetwork = async route => {
-    const request = route.request()
-    if (request.method() === 'POST' && new URL(request.url()).pathname === `${path}/messages`) {
-      postAttempts++
-      return route.abort('internetdisconnected')
-    }
-    if (['/api/ready', '/api/health'].includes(new URL(request.url()).pathname)) return route.abort('internetdisconnected')
-    return route.fallback()
-  }
-  await page.route('**/api/**', blockNetwork)
-  await page.evaluate(() => {
-    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false })
-    window.dispatchEvent(new Event('offline'))
+async function disconnectAnswerDelivery(page) {
+  const network = await disconnectDelivery(page, {
+    alsoAbort: request => request.method() === 'POST'
+      && new URL(request.url()).pathname === `${path}/messages`,
   })
-  const status = page.locator('.shell__connection-status')
-  await expect(status).toContainText('Offline', { timeout: 15000 })
-  await expect(status).toBeVisible()
-  const box = await status.boundingBox()
+  await expect(network.status).toBeVisible()
+  const box = await network.status.boundingBox()
   expect(box.x).toBeGreaterThanOrEqual(0)
   expect(box.y).toBeGreaterThanOrEqual(0)
   expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width)
-  return { attempts: () => postAttempts, reconnect: async () => {
-    await page.unroute('**/api/**', blockNetwork)
-    await page.evaluate(() => {
-      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true })
-      window.dispatchEvent(new Event('online'))
-    })
-  } }
+  return { attempts: network.aborted, reconnect: network.reconnect }
 }
 
 test('known-offline fresh send stays in its local queue without POST or transcript movement', async ({ page }) => {
@@ -248,7 +240,7 @@ test('known-offline fresh send stays in its local queue without POST or transcri
   await f.composer.focus()
   await f.composer.fill(marker)
   await expect(f.composer).toHaveValue(marker)
-  const network = await disconnectDelivery(page)
+  const network = await disconnectAnswerDelivery(page)
   await page.evaluate(marker => {
     window.__offlineTrace = []
     const sample = () => {
@@ -293,7 +285,7 @@ test('known-offline fresh send stays in its local queue without POST or transcri
 for (const mode of ['quiet', 'reply', 'restart']) {
   test(`${mode} answer queues on its card offline, then confirms without touching the draft`, async ({ page }) => {
     const f = await mount(page, { restart: mode === 'restart' ? {} : null })
-    const network = await disconnectDelivery(page)
+    const network = await disconnectAnswerDelivery(page)
     await f.card.getByRole('radio', { name: mode === 'restart' ? /Restart now/ : mode === 'quiet' ? /No thanks/ : /Yes please/ }).click()
     await f.card.getByRole('button', { name: mode === 'restart' ? 'Continue' : 'Submit', exact: true }).click()
     await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
@@ -323,7 +315,7 @@ for (const mode of ['quiet', 'reply', 'restart']) {
 
 test('a follow-up can queue behind a locally saved answer without clearing its barrier', async ({ page }) => {
   const f = await mount(page)
-  const network = await disconnectDelivery(page)
+  const network = await disconnectAnswerDelivery(page)
   await f.card.getByRole('radio', { name: /Yes please/ }).click()
   await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
   await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
@@ -353,7 +345,7 @@ for (const action of ['edit', 'cancel']) {
     const marker = 'LOCAL-CONTROL-MESSAGE'
     await f.composer.focus()
     await f.composer.fill(marker)
-    const network = await disconnectDelivery(page)
+    const network = await disconnectAnswerDelivery(page)
     await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
     const row = f.surface.locator('.queued__row')
     await expect(row).toHaveCount(1)
@@ -395,7 +387,7 @@ test('cancellation cannot overtake a claimed background delivery', async ({ page
     await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
     await f.composer.focus()
     await f.composer.fill('DELIVERY-IN-FLIGHT')
-    const network = await disconnectDelivery(page)
+    const network = await disconnectAnswerDelivery(page)
     await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
     const row = f.surface.locator('.queued__row')
     await expect(row).toHaveCount(1)

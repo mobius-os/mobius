@@ -22,7 +22,9 @@ import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
-import { PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
+import { DRAG_HOLD_HAPTIC_MS, PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
+import { settledBox } from './_geometry.mjs'
+import { waitForComposerSendable } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
@@ -90,16 +92,16 @@ async function ensureNavigationOpen(page) {
  *  real pointer path (not the deterministic Shift+Enter). The completed hold
  *  suppresses the trailing click, so it never also toggles the drawer. */
 async function holdLogo(page, brand) {
-  await brand.scrollIntoViewIfNeeded()
   const startedInBuilder = await brand.evaluate(element => (
     element.classList.contains('shell__brand--builder')
   ))
-  const box = await brand.boundingBox()
+  // The brand shares the header with the connectivity status, which resizes as
+  // it resolves; press the settled centre so the hold actually starts.
+  const box = await settledBox(brand)
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   await page.mouse.down()
-  // Under a loaded CI runner the 450ms hold can complete between pointerdown
-  // returning and the first assertion. Accept either owned boundary: the live
-  // hold class or the mode flip it commits, then require the completed flip.
+  // A loaded runner can complete the 450ms hold before the first read, so accept
+  // either the live hold class or the flip it commits, then require the flip.
   await expect.poll(() => brand.evaluate((element, wasBuilder) => (
     element.classList.contains('is-holding')
       || element.classList.contains('shell__brand--builder') !== wasBuilder
@@ -214,6 +216,41 @@ async function waitTiled(page) {
   await expect(page.locator('.workspace__divider').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
+  await waitStripSettled(page)
+}
+
+/** Hold until every tab in every strip has stopped moving.
+ *
+ *  Panes tile before their tabs have titles: each tab is laid out near-empty
+ *  and widens as its chat title resolves, pushing the tabs after it sideways.
+ *  Cases measure DROP TARGETS straight after this gate and only later hand the
+ *  SOURCE to a drag helper, so a gate that returns mid-reflow hands out stale
+ *  target coordinates that no later settle can repair. Settle the whole strip
+ *  once, here, and every measurement taken afterwards is taken on real
+ *  geometry. */
+async function waitStripSettled(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    const read = () => [...document.querySelectorAll('[data-pane-strip] .shell__tab-open')]
+      .map((tab) => {
+        const rect = tab.getBoundingClientRect()
+        return `${rect.x},${rect.y},${rect.width},${rect.height}`
+      })
+      .join('|')
+    let previous = null
+    let stable = 0
+    let seen = 0
+    const step = () => {
+      const now = read()
+      stable = previous !== null && now === previous ? stable + 1 : 0
+      previous = now
+      seen += 1
+      // Frames, not a sleep: this is a layout settle. The cap keeps a case
+      // that legitimately animates from hanging here.
+      if (stable >= 3 || seen >= 180) resolve()
+      else requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+  }))
 }
 
 /** Sample the first three pre-paint frames after toggling the persistent drawer.
@@ -251,6 +288,7 @@ async function sampleDesktopDrawerToggle(page) {
 async function sendInPane(page, chatId, text) {
   const pane = page.locator(`[data-tab-key="chat:${chatId}"]`)
   await pane.getByRole('textbox', { name: 'Message Möbius…' }).fill(text)
+  await waitForComposerSendable(pane)
   await page.keyboard.press('Enter')
   await expect(pane.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>
@@ -838,13 +876,14 @@ async function mouseDrag(
   toY,
   { release = true, resolveTarget = null } = {},
 ) {
-  await sourceLocator.scrollIntoViewIfNeeded()
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
+  // A press that misses its tab starts no session at all, so this is where a
+  // stale measurement surfaces -- as a chip that never mounts.
   await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
   if (resolveTarget) ({ x: toX, y: toY } = await resolveTarget())
   await page.mouse.move(toX, toY, { steps: 14 })
@@ -859,16 +898,38 @@ async function touchDrag(
   sourceLocator,
   toX,
   toY,
-  { firstDx = 0, firstDy = 12, holdMs = 0, release = true } = {},
+  { firstDx = 0, firstDy = 12, awaitDragHold = false, release = true } = {},
 ) {
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   const cdp = await page.context().newCDPSession(page)
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
   const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
+  // The drag stage is a bare timer with no DOM marker; observe its haptic
+  // (the arm cue differs) instead of sleeping past it. The stage stays open
+  // until PRESS_MENU_HOLD_MS, leaving room for the move that follows.
+  if (awaitDragHold) {
+    await page.evaluate(() => {
+      window.__dragHoldCues = []
+      const real = navigator.vibrate ? navigator.vibrate.bind(navigator) : null
+      Object.defineProperty(navigator, 'vibrate', {
+        configurable: true,
+        value: (pattern) => {
+          window.__dragHoldCues.push(pattern)
+          return real ? real(pattern) : true
+        },
+      })
+    })
+  }
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
-  if (holdMs > 0) await page.waitForTimeout(holdMs)
+  if (awaitDragHold) {
+    await page.waitForFunction(
+      cue => (window.__dragHoldCues || []).includes(cue),
+      DRAG_HOLD_HAPTIC_MS,
+      { timeout: 5000 },
+    )
+  }
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchMove', touchPoints: point(sx + firstDx, sy + firstDy),
   })
@@ -1012,7 +1073,7 @@ test.describe('Workspace drag (PR3)', () => {
       page, source,
       drawerBox.x + drawerBox.width + 30,
       content.y + content.height / 2,
-      { firstDx: 12, firstDy: 0, holdMs: 250, release: false },
+      { firstDx: 12, firstDy: 0, awaitDragHold: true, release: false },
     )
     await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
     await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
@@ -1057,9 +1118,15 @@ test.describe('Workspace drag (PR3)', () => {
 
   test('dragging a tab onto another strip inserts it there (move, no new pane)', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragStrip')
-    const strip = await page.locator('[data-pane-strip="p1"]').boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    await mouseDrag(page, src, strip.x + strip.width / 2, strip.y + strip.height / 2)
+    // Resolve the destination strip after the drag arms: arming can re-tile the
+    // workspace, so an earlier box may describe a layout that no longer exists.
+    await mouseDrag(page, src, 0, 0, {
+      resolveTarget: async () => {
+        const strip = await settledBox(page.locator('[data-pane-strip="p1"]'))
+        return { x: strip.x + strip.width / 2, y: strip.y + strip.height / 2 }
+      },
+    })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'C landed in p1 via the caret' },
@@ -1070,9 +1137,16 @@ test.describe('Workspace drag (PR3)', () => {
 
   test('dragging a tab to a pane center joins it as a tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragCenter')
-    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    await mouseDrag(page, src, p1.x + p1.width / 2, p1.y + p1.height / 2)
+    // Resolve the destination after the drag arms, as the strip-insert case does:
+    // arming builds the scene and can re-tile, so a box read beforehand can
+    // describe a layout that no longer exists when the pointer arrives.
+    await mouseDrag(page, src, 0, 0, {
+      resolveTarget: async () => {
+        const p1 = await settledBox(page.locator(`[data-tab-key="chat:${b.id}"]`))
+        return { x: p1.x + p1.width / 2, y: p1.y + p1.height / 2 }
+      },
+    })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'C joined p1 as a tab' },
@@ -1151,13 +1225,16 @@ test.describe('Workspace drag (PR3)', () => {
     const { c, b } = await bootThreeTab(page, 'touchDrag')
     await page.setViewportSize(PHONE)
     await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
-    const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    // A viewport switch re-lays out every strip; measure after it settles.
+    await waitStripSettled(page)
+    const target = await settledBox(page.locator(`[data-tab-key="chat:${b.id}"]`))
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
     await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
-      // Move after the shared 180ms drag stage but before the 400ms stationary
-      // menu stage. Waiting through the menu threshold correctly opens actions
-      // and therefore must not be used to model this short-hold drag.
-      holdMs: 250,
+      // Move once the shared drag stage (PRESS_DRAG_HOLD_MS) has actually won
+      // but before the stationary menu stage (PRESS_MENU_HOLD_MS). Waiting
+      // through the menu threshold correctly opens actions and therefore must
+      // not be used to model this short-hold drag.
+      awaitDragHold: true,
     })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
@@ -1168,15 +1245,17 @@ test.describe('Workspace drag (PR3)', () => {
   test('phone horizontal touch-drag reorders tabs in the same strip after a short hold', async ({ page }) => {
     const { a, c } = await bootThreeTab(page, 'touchReorder')
     await page.setViewportSize(PHONE)
-    const target = await page.locator(
+    // A viewport switch re-lays out every strip; measure after it settles.
+    await waitStripSettled(page)
+    const target = await settledBox(page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
-    ).boundingBox()
+    ))
     const src = page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`,
     )
     await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
-      firstDx: -12, firstDy: 0, holdMs: 250,
+      firstDx: -12, firstDy: 0, awaitDragHold: true,
     })
     await expect.poll(async () => (await readWs(page)).panes.p0.tabs
       .map(t => `${t.kind}:${t.id}`), {
@@ -1225,7 +1304,8 @@ test.describe('Workspace drag (PR3)', () => {
     const divider = page.locator('.workspace__divider').first()
     await expect(divider).toBeVisible({ timeout: 4000 })
     const before = (await readWs(page)).layout.ratio
-    const box = await divider.boundingBox()
+    // A viewport switch re-lays out every strip; measure after it settles.
+    const box = await settledBox(divider)
     await touchDrag(page, divider, box.x + box.width / 2, box.y + box.height / 2 + 90)
     await expect.poll(async () => (await readWs(page)).layout.ratio, {
       timeout: 3000, message: 'the real touch stream resized the stacked panes',
@@ -1344,6 +1424,34 @@ test.describe('Workspace view-mode toggle', () => {
     const chat = await createTaggedChat(page, 'phonePreview')
     const appId = 990111
     await mockApps(page, [{ id: appId, name: 'Phone Preview', chatId: chat.id }])
+    // The preview CTA is driven by this chat's app-artifact rows: an unseen,
+    // advanced touch mounts it. The app exists only client-side, so mock them.
+    await page.route(
+      new RegExp(`/api/apps/chat-artifacts/${chat.id}$`),
+      route => (route.request().method() === 'GET'
+        ? route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([{
+            app: {
+              id: appId,
+              name: 'Phone Preview',
+              description: '',
+              compiled_path: '',
+              chat_id: chat.id,
+              source_dir: null,
+              pinned_at: null,
+              cross_app_access: 'none',
+              share_with_apps: 'none',
+              offline_capable: false,
+              updated_at: '2026-07-12T12:00:00Z',
+            },
+            touched_at: '2026-07-12T12:00:00Z',
+            seen_at: null,
+          }]),
+        })
+        : route.fallback()),
+    )
     const standard = paneModel.setSingleScreen(
       paneModel.setViewMode(
         paneModel.seedFromFlatTabs([{ kind: 'chat', id: chat.id }]),
@@ -1618,23 +1726,34 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
 
     // Wedge sequence: re-enter, then exit -> re-enter -> exit with sub-beat gaps.
-    // At no sampled moment may the two deal classes co-exist (mutual exclusion),
-    // and it must always settle collapsed.
+    // The two deal classes must never co-exist and must settle collapsed. The
+    // sub-beat gaps (90ms, 80ms) place the presses inside the exit beat; a
+    // MutationObserver checks exclusion continuously, not by snapshot.
+    await page.evaluate(() => {
+      window.__mobiusBuilderPhaseWitness = { sawBoth: false }
+      const observer = new MutationObserver(() => {
+        if (document.querySelectorAll('.shell--builder-exiting.shell--builder-entering').length > 0) {
+          window.__mobiusBuilderPhaseWitness.sawBoth = true
+        }
+      })
+      observer.observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true })
+      window.__mobiusBuilderPhaseWitness.observer = observer
+    })
     await brand.focus(); await page.keyboard.press('Shift+Enter') // enter builder
     await waitTiled(page)
-    let sawBothClasses = false
-    const sampleBoth = async () => {
-      if (await page.locator('.shell--builder-exiting.shell--builder-entering').count() > 0) sawBothClasses = true
-    }
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit1
-    await page.waitForTimeout(90); await sampleBoth()
+    await page.waitForTimeout(90)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // re-enter within the exit beat
-    await page.waitForTimeout(20); await sampleBoth()
-    await page.waitForTimeout(60); await sampleBoth()
+    await page.waitForTimeout(80)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit2
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+    const sawBothClasses = await page.evaluate(() => {
+      const witness = window.__mobiusBuilderPhaseWitness
+      witness?.observer?.disconnect()
+      return witness?.sawBoth ?? false
+    })
     expect(sawBothClasses, 'the exit and enter deal classes are mutually exclusive').toBe(false)
   })
 

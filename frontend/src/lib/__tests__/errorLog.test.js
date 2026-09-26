@@ -191,3 +191,18 @@ test('installGlobalErrorHandlers still records a genuine shell error', () => {
   })
   assert.equal(fetchCalls.length, 1, 'a real shell error must still be reported')
 })
+
+test('a ResizeObserver loop notice is not a script fault', () => {
+  for (const message of [
+    'ResizeObserver loop completed with undelivered notifications.',
+    'ResizeObserver loop limit exceeded',
+  ]) {
+    assert.equal(errorLog.isBenignBrowserNotice({ message, error: null }), true)
+  }
+  // A real error object, or any other message, is still recorded.
+  assert.equal(errorLog.isBenignBrowserNotice({
+    message: 'ResizeObserver loop completed with undelivered notifications.',
+    error: new Error('thrown'),
+  }), false)
+  assert.equal(errorLog.isBenignBrowserNotice({ message: 'Boom', error: null }), false)
+})

@@ -19,6 +19,7 @@ import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
 import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
+import { sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
   chatQueries,
@@ -263,6 +264,7 @@ import './ChatView.css'
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
+
 const MESSAGE_META_VISIBLE_MS = 5000
 // The floating jump-to-latest control is driven by follow-state plus physical
 // tail distance. Reserved reply room remains part of that range, so an upward
@@ -1575,11 +1577,10 @@ export default function ChatView({
   const refreshRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(
-        `/chats/${chatId}/runtime`,
-        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
-      )
-      const data = await jsonOrThrow(res, 'Runtime refresh failed')
+      const data = await sharedRuntimeRead(chatId, () => (
+        apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+          .then(res => jsonOrThrow(res, 'Runtime refresh failed'))
+      ))
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
@@ -1735,8 +1736,10 @@ export default function ChatView({
     setGoalPresentationLocalState,
   ])
 
-  // Every runtime reader shares the same bounded request for this chat/view
-  // generation. An old view's completion must not release a successor read.
+  // Every runtime reader in this view shares one read-and-apply per
+  // generation; an old view's completion must not release a successor read.
+  // The network read beneath it is also shared across views of the same chat
+  // (runtimeReads.js).
   const reconcileRuntimeState = useCallback(() => {
     const generation = fetchGenRef.current
     const current = runtimeReconcileRef.current

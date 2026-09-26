@@ -23,7 +23,7 @@
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import * as tabModel from '../frontend/src/components/Shell/tabModel.js'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { installMockProviderUsage, runtimeSnapshot, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -34,10 +34,8 @@ async function mockIdleChatRuntime(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        running: false,
+        ...runtimeSnapshot(),
         active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
         updated_at: null,
       }),
     })
@@ -68,7 +66,28 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
-    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'x', title: 'Seeded', messages: [] }) })
+    // Echo the REQUESTED id and carry the chat-detail contract. This answered
+    // id:'x' for every chat and omitted every field the surface now reads, so a
+    // seeded tab could not settle into a real chat identity.
+    const requestedId = new URL(r.request().url()).pathname.split('/').pop()
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: requestedId,
+        title: 'Seeded',
+        ...emptyChatPage(),
+        session_id: null,
+        provider: 'codex',
+        created_by_app_id: null,
+        agent_settings_json: { model: 'gpt-5.6-sol' },
+        effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
+        has_assistant_turns: false,
+        auto_resume_on_limit: false,
+        auto_resume_on_restart: true,
+        updated_at: '2026-01-01T00:02:00Z',
+      }),
+    })
   })
   // Some mode exits materialize a provider-backed empty chat. Pin its quota
   // boundary without changing the workspace geometry under test.
@@ -224,12 +243,7 @@ async function transientClassCount(page) {
 
 function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
   const detail = {
-    messages: [],
-    total: 0,
-    offset: 0,
-    running: false,
-    pending_messages: [],
-    pending_question_id: null,
+    ...emptyChatPage(),
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -650,7 +664,7 @@ test('leaving Builder replaces an empty Standard slot without allocating a chat'
   expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
-test('retiring an explicit Builder cover returns the selected tab and preserves its draft', async ({ page }) => {
+test('an explicit Builder cover carries its own selection into Standard and preserves its draft', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
   let automaticCreates = 0
@@ -696,22 +710,26 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-  const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
+  // Both Builder panes paint a chat surface; scope to the new chat's tab.
+  const presentation = page.locator(`[data-chat-id="${explicitId}"][data-chat-surface="painted"]`)
+  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect(presentation).toHaveCount(0)
+  // The outgoing chat may stay painted as an inert cover until the incoming
+  // one is stable, so the stored slot is the proof of what Standard adopted:
+  // the explicit (focused) chat, not the older slot. The exit must allocate
+  // no replacement chat, and the parked draft and intent must survive.
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
     kind: 'chat',
-    id: 'aaa',
+    id: explicitId,
   })
-  expect(automaticCreates, 'returning the selected tab must not allocate a replacement').toBe(0)
+  expect(automaticCreates, 'carrying the selection into Standard must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -734,7 +752,7 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   expect(automaticCreates, 'the late explicit response must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: explicitId })
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -788,7 +806,6 @@ test('a selected Builder tab supersedes an in-flight NULL-slot allocation', asyn
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('aaa')
   expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab

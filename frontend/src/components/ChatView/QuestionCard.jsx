@@ -285,10 +285,17 @@ export default function QuestionCard({
       // immediately retryable. Keep the notice on the card too: adding an
       // assistant-looking error row after it makes the question cease to be
       // the transcript tail and disables the very retry the owner needs.
+      // Only a 409 explains the answer itself (why it cannot be accepted), so
+      // show its detail; every other failure keeps the friendly retry copy so
+      // raw backend strings never reach the card.
+      const rejectionDetail = error?.status === 409 && typeof error?.detail === 'string'
+        ? error.detail.trim()
+        : ''
       setSubmitError(
         !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
-          : (error?.detail || 'That answer didn’t save. Your choice is still here — please try again.'),
+          : rejectionDetail
+            || 'That answer didn’t save. Your choice is still here — please try again.',
       )
     } finally {
       setSubmitting(false)

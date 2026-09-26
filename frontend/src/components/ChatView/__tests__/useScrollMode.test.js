@@ -44,6 +44,7 @@ import {
   readerScrollEscapeDirection,
   settledPinMode,
   shouldPinSend,
+  resizeReappliesMode,
 } from '../scroll/policy.js'
 import { _scrollModeForDiagnostics } from '../useScrollMode.js'
 import {
@@ -2532,4 +2533,12 @@ test('durable queue anchors lose submission authority and cannot restore off-con
   const offContent = _validateSavedMode({ ...captured, offset: -500 }, [], scrollEl)
   assert.notEqual(offContent.offset, -500)
   assert.equal(offContent.submissionLayoutHold, undefined)
+})
+
+test('a resize driven by the inline answer editor never follows the live tail', () => {
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: true }), false)
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: false }), true)
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM'), true)
+  // A hidden anchor restore is not reader typing; it re-applies regardless.
+  assert.equal(resizeReappliesMode('ANCHOR_AT', { editorResized: true }), true)
 })

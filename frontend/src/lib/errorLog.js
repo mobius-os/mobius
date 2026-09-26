@@ -125,6 +125,15 @@ function isExtensionError(source, stack) {
 }
 
 /**
+ * A browser notice that reaches window 'error' without being a script fault.
+ * Chromium reports a ResizeObserver whose callback changed observed layout in
+ * the same frame this way; the notifications are simply delivered next frame.
+ */
+export function isBenignBrowserNotice(event) {
+  return !event?.error && /^ResizeObserver loop /.test(String(event?.message || ''))
+}
+
+/**
  * Installs window-level handlers for the errors React's ErrorBoundary can't
  * catch: errors thrown in event handlers / async callbacks (window 'error')
  * and unhandled promise rejections. Idempotent.
@@ -138,6 +147,7 @@ export function installGlobalErrorHandlers() {
     // carry no `error` object and aren't actionable script faults — skip them
     // so the log stays signal, not noise.
     if (!e.error && !e.message) return
+    if (isBenignBrowserNotice(e)) return
     if (isExtensionError(e.filename, e.error?.stack)) {
       console.warn('[mobius] ignored browser-extension error (not the shell):', e.message)
       return
