@@ -155,7 +155,7 @@ def build_memory_block(
   Each entry is the note's one-line ``description``, relative path, and bounded
   ``## Digest`` paragraph. The cumulative ``## Summary``,
   facts, graph router, MOCs, and atomic notes are never pulled into a new chat.
-  An installed system app may teach the agent to request graph recall through
+  An installed app may teach the agent to request graph recall through
   a separate prompt-scoped reader.
 
   Returns an empty block only when there are no usable chat notes. ``max_notes``

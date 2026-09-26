@@ -3373,7 +3373,6 @@ async def _prepare_app_row(
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
     system_prompt_file=manifest.get("system_prompt") or None,
-    system_app=bool(manifest.get("system_app", False)),
     capability_contract=capability_contract,
     project_templates_json=manifest.get("project_templates") or None,
   )
@@ -3496,7 +3495,6 @@ def _apply_manifest_metadata(
     app.embeds_agent = bool(manifest["embeds_agent"])
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
-  app.system_app = bool(manifest.get("system_app", False))
   app.capability_contract = capability_contract
   # Projects workspace: declared project templates travel with the package
   # identity, so apply them here alongside the other manifest metadata for
