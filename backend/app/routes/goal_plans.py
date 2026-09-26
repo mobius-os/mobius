@@ -590,8 +590,10 @@ async def update_goal(
   if plan is not None:
     _publish(chat_id, plan)
   if record is not None and record.get("status") == "completed":
-    from app.agent_coordination import settle_claims_with_owner
-    await settle_claims_with_owner(chat_id)
+    # Completion settled the Goal's claims and fired Waits in the same commit;
+    # wake claim followers and withdraw now-stale resume notices.
+    from app.goals import settle_after_goal_completion
+    await settle_after_goal_completion(chat_id)
   return {"goal": _goal_summary(goal), "plan": plan}
 
 

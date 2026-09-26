@@ -106,6 +106,44 @@ def test_the_final_task_edit_and_completion_can_share_one_call(
   assert db.get(models.ChatGoal, "goal-1").result == "Release verified live"
 
 
+def test_completing_through_the_route_withdraws_its_fired_waits_resume(
+  client, owner_token, db,
+):
+  """This route settles a completion exactly as patch_goal_record does: a
+  verified completion takes delivery of its fired Wait, so the queued resume
+  that would otherwise wake the finished Goal is withdrawn while the owner's
+  own follow-up stays. (Mirrors PR #1450's patch_goal_record settlement.)"""
+  from app import chat_waits
+
+  _, chat_id = _active_goal(client, owner_token, db)
+  _update(client, db, chat_id, {"tasks": [{"id": "only", "title": "Only step"}]})
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat_id, created_by_run_id="goal-root",
+    description="Checks finishing", kind="timer", delay_secs=60,
+  )
+  wait.status = "met"
+  chat = db.get(models.Chat, chat_id)
+  chat.pending_messages = [{
+    "role": "user", "content": "A wait you declared has completed.",
+    "ts": 1, "cid": f"wait-result-{wait.id}", "hidden": True,
+    "kind": "wait_result", "source_work_id": "goal-root",
+  }, {"role": "user", "content": "Owner follow-up", "ts": 2, "cid": "owner-1"}]
+  db.commit()
+
+  completed = _update(client, db, chat_id, {
+    "tasks": [{"id": "only", "status": "completed", "result": "Shipped"}],
+    "complete": "Release verified live",
+  })
+
+  assert completed.status_code == 200, completed.text
+  assert completed.json()["goal"]["status"] == "completed"
+  db.expire_all()
+  assert db.get(models.ChatWait, wait.id).resume_delivered_at is not None
+  assert [m["cid"] for m in db.get(models.Chat, chat_id).pending_messages] == [
+    "owner-1",
+  ]
+
+
 def test_next_action_leaves_a_handoff_checkpoint(client, owner_token, db):
   _, chat_id = _active_goal(client, owner_token, db)
   _seed_plan(client, db, chat_id)
