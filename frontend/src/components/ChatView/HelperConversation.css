@@ -1,0 +1,102 @@
+/* Helper conversation dialog — the same overlay voice as the chat summary
+   viewer (ChatView.css .chat-summary), sized for a longer transcript. */
+.helper-convo__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 210;
+  display: grid;
+  /* One track no wider than the overlay: a transcript's longest code line
+     must scroll inside the dialog, never widen the track it is centred in. */
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.46);
+}
+.helper-convo {
+  width: min(760px, 100%);
+  min-width: 0;
+  height: min(820px, calc(100% - 16px));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 18px 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.3);
+}
+.helper-convo__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.helper-convo__heading { min-width: 0; }
+.helper-convo__title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 17px;
+  line-height: 1.3;
+}
+.helper-convo__subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.helper-convo__close {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -7px -7px 0 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+}
+.helper-convo__close:active { background: var(--surface2); }
+.helper-convo__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 18px;
+  overscroll-behavior: contain;
+}
+.helper-convo__blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.helper-convo__state {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+}
+.helper-convo__state--error { color: var(--danger); }
+.helper-convo__note { margin: 0; color: var(--muted); font-size: 12px; }
+.helper-convo__task {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  font-size: 14px;
+}
+.helper-convo__task-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.helper-convo__task > :last-child > :first-child,
+.helper-convo__text > :first-child > :first-child { margin-top: 0; }
+.helper-convo__task > :last-child > :last-child,
+.helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
+.helper-convo__text { font-size: 14px; }
