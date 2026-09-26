@@ -208,7 +208,8 @@ def test_checkpoint_needs_only_the_next_action(cli, monkeypatch):
 @pytest.mark.parametrize(("status", "detail", "remedy"), [
   (409, {"code": "no_active_goal",
          "message": "This chat has no active Goal to plan."},
-   r"no active Goal to plan\. Promote first, or run `list` then `resume ID`"),
+   r"no active Goal to plan\. Promote first, or run `list` then `resume ID`\. "
+   r"To save this chat's name, digest, or summary, use checkpoint_chat"),
   (422, {"code": "progress_incomplete", "task_id": "t", "current": 1,
          "total": 2, "message": "t cannot complete at 1/2 progress"},
    r"at 1/2 progress\. .*update t --progress 2/2 --status completed"),

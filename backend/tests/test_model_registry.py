@@ -15,6 +15,7 @@ Two gaps this guards:
   fetch still offers today's models, not a stale snapshot.
 """
 
+import asyncio
 import json
 import stat
 import time
@@ -48,6 +49,8 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   for model_id in (
     "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -61,9 +64,9 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   assert claude[:5] == [
     "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-opus-4-7",
   ]
   # Current Codex family — each canonical id present by name.
   for model_id in (
@@ -84,6 +87,8 @@ def test_default_model_visibility_is_curated_until_owner_saves_preferences():
   for model_id in (
     "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
@@ -96,6 +101,18 @@ def test_default_model_visibility_is_curated_until_owner_saves_preferences():
   assert "claude-opus-4-7" in hidden
   assert "gpt-5.4" in hidden
   assert providers.hidden_model_ids({"hidden_ids": []}) == []
+
+
+def test_adding_a_model_to_the_offline_fallback_never_hides_it(monkeypatch):
+  """A live-only model is visible, so listing it in the fallback must not
+  flip it to hidden; only the curated older models start hidden."""
+  monkeypatch.setitem(
+    providers.KNOWN_MODELS, "claude",
+    ["claude-future-9", *providers.KNOWN_MODELS["claude"]],
+  )
+  hidden = providers.hidden_model_ids(None)
+  assert "claude-future-9" not in hidden
+  assert set(hidden) == set().union(*providers.DEFAULT_HIDDEN_MODELS.values())
 
 
 @pytest.mark.asyncio
@@ -486,3 +503,34 @@ def test_live_context_uses_provider_catalog_without_product_specific_cap():
   assert by_id["flow"]["context_window"] == 1_048_576
   # A model without a known cap keeps its catalog value.
   assert by_id["mystery-model"]["context_window"] == 50_000
+
+
+@pytest.mark.asyncio
+async def test_forgetting_a_provider_catalog_waits_out_an_inflight_fetch(
+  tmp_path, monkeypatch,
+):
+  """A fetch that read the pre-sign-in credentials must not repopulate the
+  cache after sign-in forgot it, or pickers keep the offline fallback."""
+  started, finish = asyncio.Event(), asyncio.Event()
+
+  async def slow_signed_out_fetch(data_dir):
+    started.set()
+    await finish.wait()
+    raise RuntimeError("claude credentials missing")
+
+  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  monkeypatch.setattr(providers.PROVIDERS["claude"], "fetch_models", slow_signed_out_fetch)
+  monkeypatch.setitem(providers._model_registry_locks, "claude", asyncio.Lock())
+  providers.invalidate_model_cache()
+  try:
+    listing = asyncio.create_task(providers.list_models(str(tmp_path)))
+    await started.wait()
+    forgetting = asyncio.create_task(providers.forget_provider_models("claude"))
+    await asyncio.sleep(0)
+    assert not forgetting.done()
+    finish.set()
+    listed, _ = await asyncio.gather(listing, forgetting)
+    assert listed["claude"] == providers._fallback_models("claude")
+    assert "claude" not in providers._model_registry_cache
+  finally:
+    providers.invalidate_model_cache()

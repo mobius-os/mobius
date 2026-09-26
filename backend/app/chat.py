@@ -2717,15 +2717,6 @@ def _publish_chat_run_finished(chat_id: str) -> None:
     })
 
 
-def _publish_chat_scratch_releasable(chat_id: str) -> None:
-  """Hint that physical turn cleanup finished; consumers recheck ownership."""
-  if chat_id:
-    get_system_broadcast().publish({
-      "type": "chat_scratch_releasable",
-      "chatId": chat_id,
-    })
-
-
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
   if registry.is_alive(chat_id):
@@ -3511,11 +3502,9 @@ _MODEL_CAPACITY_ERROR_MARKERS = (
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
 
-  Substring match on the display error (mirrors `_should_retry_without_model`
-  in claude_sdk_runner). Deliberately broad — the cost of a false positive is
-  only that the queue is parked for the user to resend (never lost), while a
-  false negative reinstates the limit storm. A genuinely transient one-off
-  error does NOT match, so the queue still flows through a blip.
+  Substring match on the display error. A false positive only parks the queue
+  for manual resend; a false negative reinstates the limit storm. A transient
+  one-off error does not match, so the queue flows through a blip.
 
   The marker list is grounded in the ACTUAL Anthropic limit strings seen in
   prod chat.log: "You've hit your weekly limit · resets ...", "... session
@@ -4618,23 +4607,6 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
-    if runtime_settled and chat_id:
-      # chat_run_finished is intentionally earlier for responsive shell UI.
-      # Scratch needs a stricter physical boundary: _run_chat_impl has returned
-      # after browser cleanup, and a complete empty process inventory proves no
-      # detached Chromium session still inherits this turn's TMPDIR. The
-      # scratch owner rechecks both runtime and durable run identity again.
-      try:
-        browser_scan = await asyncio.to_thread(
-          browser_profiles.browser_session_targets_for_chat, chat_id,
-        )
-        if browser_scan.idle:
-          _publish_chat_scratch_releasable(chat_id)
-      except Exception:
-        _get_logger().debug(
-          "agent scratch release hint skipped chat_id=%s",
-          chat_id, exc_info=True,
-        )
     # Parent progress must not wait on optional summary generation.
     try:
       if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
@@ -5851,8 +5823,6 @@ async def _run_chat_impl_with_db(
         chat_id=chat_id,
         skill_text=system_prompt,
         bc=sink,
-        pending_questions=questions._pending,
-        db=db,
         agent_settings=runner_agent_settings,
         skills_enabled=_skills_enabled(settings.data_dir),
         run_policy=run_policy,

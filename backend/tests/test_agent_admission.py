@@ -187,6 +187,27 @@ async def test_critical_memory_defers_new_turns_and_names_the_signal():
 
 
 @pytest.mark.asyncio
+async def test_critical_memory_alone_never_sweeps_paused_chats_scratch():
+  """Scratch cleanup frees disk, not memory, so memory pressure keeps it."""
+  swept = False
+
+  async def sweep():
+    nonlocal swept
+    swept = True
+    return {}
+
+  with pytest.raises(AgentTurnDeferred):
+    await require_agent_turn_admission(
+      "/data",
+      status_reader=lambda _path: _memory_status(
+        "critical", working_set_ratio=0.94,
+      ),
+      scratch_sweeper=sweep,
+    )
+  assert swept is False
+
+
+@pytest.mark.asyncio
 async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
   await require_agent_turn_admission(
     "/data",

@@ -920,6 +920,10 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
     "status": "failed",
   })
   bc.publish({"type": "steered_into_turn", "ts": 4, "content": "follow up"})
+  # A running helper's activity line is live-only; the snapshot's blocks never
+  # carry it, so its newest tick must replay for a viewer joining mid-run.
+  bc.publish({"type": "task_progress", "task_id": "h1", "last_tool_name": "Read"})
+  bc.publish({"type": "task_progress", "task_id": "h1", "last_tool_name": "Bash"})
   bc.running = False
   bc_mod._broadcasts[bc.chat_id] = bc
   snapshot_items = [
@@ -960,6 +964,10 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
     assert "build_phase" in replay_types
     assert "answers_applied" in replay_types
     assert "steered_into_turn" in replay_types
+    assert [
+      event["last_tool_name"] for event in payloads
+      if event.get("type") == "task_progress"
+    ] == ["Bash"]
     assert "text" not in replay_types
     assert "tool_start" not in replay_types
     assert "secure_input_request" not in replay_types

@@ -910,8 +910,16 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
   instead of losing a resume. ``force_kind`` rechecks one typed product wait
   immediately after its owning event instead of waiting for the polling
   interval. Returns the number of resumes delivered.
+
+  While edits made on the previous platform source are still being merged back
+  after an update, checks still run but resumes wait, like every other
+  automatic resume: a woken agent must not act on a checkout missing its own
+  recent edits. Undelivered results go out on the first sweep after that.
   """
   from app.database import SessionLocal
+  from app.platform_update import late_edits_pending
+
+  hold_resumes = late_edits_pending()
 
   now = now_naive_utc()
   due_ids: list[str] = []
@@ -957,6 +965,8 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
         return None
 
   async def deliver(row_id: str) -> int:
+    if hold_resumes:
+      return 0
     try:
       return int(await _deliver_resume(row_id))
     except Exception:

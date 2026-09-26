@@ -106,19 +106,16 @@ class ExistingGitHubRevisionIn(BaseModel):
     pattern=r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$",
   )
   commit_sha: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
-  manifest_path: str = Field(
-    default="mobius.json", min_length=1, max_length=256,
-    pattern=r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
-  )
+  # Every app has one source contract: a root manifest at an exact commit.
+  # That is the only shape Git-backed installs and updates can follow.
+  manifest_path: Literal["mobius.json"] = "mobius.json"
   public_identity: _PUBLIC_IDENTITY = "anonymous"
   contribution_id: str = Field(default="", max_length=200)
 
 
-class RatingIn(BaseModel):
-  value: int = Field(ge=1, le=5)
-  revision_id: str = Field(
-    min_length=8, max_length=200, pattern=r"^[A-Za-z0-9_:-]+$",
-  )
+class ReviewIn(BaseModel):
+  stars: int = Field(ge=1, le=5)
+  review_text: str | None = Field(default=None, max_length=4000)
 
 
 class InstallReceiptIn(BaseModel):
@@ -126,11 +123,6 @@ class InstallReceiptIn(BaseModel):
     min_length=1, max_length=128,
     pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
   )
-
-
-class CommentIn(BaseModel):
-  body: str = Field(min_length=1, max_length=4000)
-  public_identity: _PUBLIC_IDENTITY = "anonymous"
 
 
 class EditorialAssetIn(BaseModel):
@@ -547,6 +539,16 @@ async def get_community_app(
 ) -> JSONResponse:
   return await _request(
     "GET", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}",
+  )
+
+
+@router.get("/apps/{app_id}/reviews")
+async def list_community_reviews(
+  app_id: str,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+) -> JSONResponse:
+  return await _request(
+    "GET", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/reviews",
   )
 
 
@@ -1130,17 +1132,17 @@ async def record_community_install(
 
 
 @router.put(
-  "/apps/{app_id}/rating",
+  "/apps/{app_id}/review",
   dependencies=[Depends(reject_cross_site)],
 )
-async def set_community_rating(
+async def set_community_review(
   app_id: str,
-  body: RatingIn,
+  body: ReviewIn,
   _: models.Owner = Depends(_store_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _request(
-    "PUT", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/rating",
+    "PUT", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/review",
     body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
   )
 
@@ -1163,25 +1165,6 @@ async def withdraw_community_app(
     "POST",
     f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/withdraw",
     idempotency_key=_idempotency(idempotency_key),
-  )
-
-
-@router.post(
-  "/apps/{app_id}/revisions/{revision_id}/comments",
-  dependencies=[Depends(reject_cross_site)],
-)
-async def add_community_comment(
-  app_id: str,
-  revision_id: str,
-  body: CommentIn,
-  _: models.Owner = Depends(_store_owner_control),
-  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> JSONResponse:
-  return await _request(
-    "POST",
-    f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}"
-    f"/revisions/{_safe_public_id(revision_id, 'Revision id')}/comments",
-    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
   )
 
 

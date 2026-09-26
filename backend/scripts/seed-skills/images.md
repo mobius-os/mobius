@@ -17,25 +17,22 @@ implementation detail inside the protected credentials tree.
 
 ---
 
-## Möbius app icons
+## App icons
 
-Möbius app icons are one visual family: a compact sculptural object in
-dimensional enamel and polished warm metal, restrained gold or silver
-structure, and an occasional small violet jewel. An icon that ignores that
-language looks broken beside its neighbours in the launcher.
-
-Use this as the starting prompt whenever the partner asks for an app icon,
-unless they want a different art direction. Replace every bracketed field. If
-the app already has an icon, attach it as the identity reference and keep
-roughly 70% of its defining silhouette, subject, orientation, and palette,
-spending the remaining 30% on the shared finish.
+The partner's own art direction always wins. When they have none and want the
+icon to match the built-in apps' style (a compact sculptural object in
+dimensional enamel and polished warm metal, with restrained gold or silver
+structure and an occasional small violet jewel), start from the prompt below.
+Replace every bracketed field. If the app already has an icon, attach it as the
+identity reference and keep roughly 70% of its defining silhouette, subject,
+orientation, and palette, spending the remaining 30% on the shared finish.
 
 ```text
 Create one isolated app-icon symbol for [APP NAME], an app that [APP PURPOSE].
 The central metaphor is [ONE CLEAR, RECOGNIZABLE SYMBOL]. Make the metaphor
 immediately legible, distinctive to the app, and readable at 40px.
 
-Match the Möbius icon family: a compact premium sculptural object, dimensional
+Match the built-in app icon style: a compact premium sculptural object, dimensional
 enamel and polished warm metal, gentle rounded bevels, controlled depth,
 restrained highlights, and rich material detail that survives downscaling.
 Use [APP-SPECIFIC DOMINANT COLORS] rather than a generic brand palette. A single
@@ -87,5 +84,5 @@ silhouettes, muddy transparency, weak metaphors, and anything that only reads
 at full size.
 
 Then keep `icon.png` in the app's source tree and declare it in `mobius.json`.
-An icon applied only as a live override leaves the app's own package still
-shipping the old artwork, so every other install keeps the icon you replaced.
+An icon applied only as a live override is not part of the app itself, so a
+reinstall or a shared copy of the app still shows the old artwork.
