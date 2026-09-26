@@ -3,8 +3,8 @@
 Milestone B threads the `PendingQuestion.question_id` end-to-end (non-
 activating, backend only):
 
-  1. Both SDK runners publish `question_id` on the `question` event so the
-     id reaches the client over SSE.
+  1. The Codex native-question runner publishes `question_id` on the
+     `question` event so the id reaches the client over SSE.
   2. `process_event` stamps that id onto the persisted question block.
   3. The answer routes (`chats_stream._apply_answers_to_last_question`
      and the legacy `chats.save_question_answers`) prefer an exact match
@@ -267,90 +267,7 @@ def test_legacy_route_without_question_id_falls_back_to_latest(client, auth, db)
   assert "answers" not in blocks[0]
 
 
-# -- (c) both SDK runners publish question_id on the question event ----------
-def test_claude_runner_publishes_question_id_on_question_event(monkeypatch):
-  # The Claude runner's `can_use_tool` callback must publish the
-  # PendingQuestion.question_id on the `question` event so the id reaches
-  # the client over SSE. We capture the callback the runner hands to the
-  # SDK options, invoke it, and assert the published event.
-  import asyncio
-
-  from app import claude_sdk_runner
-
-  captured: dict = {}
-
-  class _FakeOptions:
-    def __init__(self, **kwargs):
-      captured["can_use_tool"] = kwargs.get("can_use_tool")
-
-  class _FakeClient:
-    def __init__(self, options):
-      pass
-
-    async def connect(self):
-      # Return early from the turn (after the callback was captured) by
-      # raising the same timeout the runner already handles gracefully.
-      raise asyncio.TimeoutError()
-
-    async def disconnect(self):
-      pass
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeAgentOptions", _FakeOptions)
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-
-  events: list = []
-
-  class _Bc:
-    def publish(self, event):
-      events.append(event)
-
-    async def publish_question(self, event):
-      # C2: the runner calls the sink's async save-before-broadcast for
-      # question events. This fake records the event (the save is the
-      # actor's job, exercised in the writer-contention suite); the test
-      # asserts the question_id reaches the wire.
-      events.append(event)
-
-  pending_registry: dict = {}
-
-  async def go():
-    # Run the turn; it captures can_use_tool then bails on connect timeout.
-    await claude_sdk_runner.run_claude_sdk_turn(
-      user_message="hi",
-      session_id=None,
-      base_env={},
-      cwd="/tmp",
-      chat_id="cqid",
-      skill_text="",
-      bc=_Bc(),
-      pending_questions=pending_registry,
-      db=None,
-    )
-    cut = captured["can_use_tool"]
-    assert cut is not None, "runner did not hand can_use_tool to the SDK"
-
-    # Invoke the captured callback; resolve its future so it returns.
-    task = asyncio.create_task(
-      cut("AskUserQuestion", {"questions": [{"id": "q1", "question": "Color?"}]}, None)
-    )
-    # Let the callback publish + register the pending question.
-    for _ in range(50):
-      await asyncio.sleep(0.01)
-      pending = pending_registry.get("cqid")
-      if pending is not None:
-        break
-    assert pending is not None
-    pending.future.set_result({"Color?": "red"})
-    await task
-
-    qevents = [e for e in events if e.get("type") == "question"]
-    assert len(qevents) == 1
-    assert qevents[0]["question_id"] == pending.question_id
-    assert qevents[0]["question_id"]  # non-empty
-
-  asyncio.run(go())
-
-
+# -- (c) Codex native questions retain their in-turn identity ---------------
 def test_codex_runner_publishes_question_id_on_question_event():
   # The Codex bridge's `park_question` must publish question_id too. Drive
   # the installed sync handler from a worker thread, marshaling onto the

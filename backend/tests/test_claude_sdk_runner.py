@@ -128,7 +128,6 @@ async def _run_turn(
   prompt: str = "hello",
   session_id: str | None = None,
   cwd: str = "/tmp",
-  db=None,
   **kwargs,
 ) -> dict:
   return await run_claude_sdk_turn(
@@ -139,8 +138,6 @@ async def _run_turn(
     chat_id=chat_id,
     skill_text="system",
     bc=_ChatBus() if bc is None else bc,
-    pending_questions={},
-    db=db,
     **kwargs,
   )
 
@@ -287,8 +284,6 @@ async def test_claude_connection_secret_file_closes_when_connect_fails(
     chat_id=f"claude-mcp-{expected_error}",
     skill_text="system",
     bc=_ChatBus(),
-    pending_questions={},
-    db=None,
     connector_plan=plan,
   )
 
@@ -334,8 +329,6 @@ async def test_claude_connection_secret_file_closes_when_connect_is_cancelled(
     chat_id="claude-mcp-cancelled",
     skill_text="system",
     bc=_ChatBus(),
-    pending_questions={},
-    db=None,
     connector_plan=plan,
   ))
 
@@ -1583,7 +1576,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
     ))
     db.commit()
 
-    result = asyncio.run(_run_turn("claude-early", db=db))
+    result = asyncio.run(_run_turn("claude-early"))
 
     assert result["session_id"] == "sess-early"
     db.expire_all()
@@ -1732,12 +1725,17 @@ async def test_claude_new_and_resumed_turns_exclude_native_owner_questions(
   monkeypatch, session_id,
 ):
   clients = _install_fake_client(monkeypatch)
+  bus = _Bus()
   await _run_turn(
-    "chat-owner-question", bc=_Bus(), cwd="/data", session_id=session_id,
+    "chat-owner-question", bc=bus, cwd="/data", session_id=session_id,
   )
   assert {"AskUserQuestion", "request_user_input"} <= set(
     clients[0].options.disallowed_tools
   )
+  for name in ("AskUserQuestion", "request_user_input"):
+    denied = await clients[0].options.can_use_tool(name, {}, None)
+    assert isinstance(denied, PermissionResultDeny)
+  assert not any(event.get("type") == "question" for event in bus.events)
 
 
 @pytest.mark.asyncio
@@ -2837,3 +2835,61 @@ def test_claude_text_events_have_no_id_without_message_id():
   )
   emitted = [e for e in bus.events if e["type"] in ("text", "text_final")]
   assert emitted and all("text_item_id" not in e for e in emitted)
+
+
+def _clean_zero_block_result(session_id: str = "sess-1"):
+  """A clean, zero-block resume terminal — the synthetic-no-op shape."""
+  return ResultMessage(
+    subtype="success",
+    duration_ms=20,
+    duration_api_ms=15,
+    is_error=False,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason="end_turn",
+    total_cost_usd=0.01,
+    usage={"input_tokens": 1, "output_tokens": 0},
+  )
+
+
+@pytest.mark.asyncio
+async def test_zero_block_resume_never_replays_the_original_prompt(monkeypatch):
+  """A clean empty result does not prove that the original request had no
+  side effects. The chat finalizer, not this runner, owns the resumable marker."""
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield _clean_zero_block_result(session_id="sess-1")
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  bus = _ChatBus()
+  bus.assistant_blocks = []
+
+  result = await _run_turn("noop-chat", bc=bus, prompt="do it", session_id="sess-1")
+  assert clients[0].queries == ["do it"]
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_selected_model_does_not_fall_back_silently(monkeypatch):
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="error_during_execution",
+        duration_ms=20,
+        duration_api_ms=15,
+        is_error=True,
+        num_turns=0,
+        session_id="sess-1",
+        total_cost_usd=0.0,
+        result="Selected model may not exist or you may not have access",
+      )
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn(
+    "rejected-model", agent_settings={"model": "claude-opus-4-8"},
+  )
+
+  assert len(clients) == 1
+  assert clients[0].queries == ["hello"]
+  assert clients[0].options.model == "claude-opus-4-8"
+  assert result["error"] == "Selected model may not exist or you may not have access"
