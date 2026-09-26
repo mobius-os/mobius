@@ -38,7 +38,9 @@ function mergedResources(earlier, later) {
 // backend/app/agent_activity.py) are one operation, so they render as one row:
 // it keeps the FIRST call's slot and key (no jump while later pages stream in)
 // and shows the latest call's status and wording with every page's resources.
-function foldAppActivityOperations(entries) {
+// Render-only (MsgContent): cold-transcript preparation must keep every stored
+// block, or its prefix frames lose the later pages and shift later keys.
+export function foldAppActivityOperations(entries) {
   const slotByKey = new Map()
   const folded = []
   for (const entry of entries) {
@@ -69,8 +71,7 @@ function foldAppActivityOperations(entries) {
 // Fold adjacent thinking/tool entries into the exact activity stretches shared
 // by rendering and cold-transcript preparation. Distinctive tools stand alone;
 // prose and other entries preserve their original interleave positions.
-// Pure: entry objects are carried through unchanged, except that the pages of
-// one app operation fold into their first entry (foldAppActivityOperations).
+// Pure: entry objects are carried through unchanged.
 export function groupActivityRuns(entries) {
   const nodes = []
   let run = []
@@ -80,7 +81,7 @@ export function groupActivityRuns(entries) {
     run = []
   }
 
-  for (const entry of foldAppActivityOperations(entries)) {
+  for (const entry of entries) {
     const type = entry?.item?.type
     // Some providers persist empty separator text blocks between reasoning and
     // tool events. They have no visible content, so treating them as prose

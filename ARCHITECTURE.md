@@ -1753,12 +1753,16 @@ invocation, and persists a bounded lifecycle marker on that ordinary tool
 block. A completed script prints a final
 `MOBIUS_APP_ACTIVITY_V1:{...}` JSON line with the same `activity_id`, a
 `succeeded|empty|failed` status, required `label`, and optional `detail`,
-`warning`, and resources (`label`, optional `summary` and own-app `intent`).
-The shell owns identity, bounds, persistence, safe own-app navigation, and the
-generic card; every domain concept and all additional protocol fields stay in
-the app. The declaration is not included in the capability contract and grants
-no data, network, or execution permission. Old Memory V1/V2 receipts remain a
-read-only transcript compatibility path, never a live provider interface.
+`warning`, resources (`label`, optional `summary` and own-app `intent`), and
+`operation_key`. Receipts from one app sharing an `operation_key` are the pages
+of one operation; the chat renders them as one row at render time only
+(`foldAppActivityOperations`), so stored blocks and cold-transcript preparation
+keep every page. The shell owns identity, bounds, persistence, safe own-app
+navigation, and the generic card; every domain concept and all additional
+protocol fields stay in the app. The declaration is not included in the
+capability contract and grants no data, network, or execution permission. Old
+Memory V1/V2 receipts remain a read-only transcript compatibility path, never a
+live provider interface.
 
 ## Testing — determinism principle
 

@@ -308,10 +308,15 @@ MOBIUS_APP_ACTIVITY_V1:{"activity_id":"lookup","status":"succeeded","label":"Fou
 `status` is `succeeded`, `empty`, or `failed`; `label` is required. `detail`,
 `warning`, and up to 128 `resources` are optional. A resource needs `label` and
 may add `summary` plus an app-owned `intent`; the shell opens that intent only
-inside the authenticated declaring app. Extra receipt fields remain ordinary
-command output for the agent and are ignored by the shell, so a retrieval app
-can carry its own cursors, page metadata, and protocol without teaching the
-platform any of those concepts. Keep the receipt bounded and print it last.
+inside the authenticated declaring app. An app that pages one operation across
+several calls (to fit a provider's tool-output limit) gives each page's receipt
+the same optional `operation_key` (up to 160 letters, digits, `.`, `_`, `:` or
+`-`). The chat folds that app's receipts sharing a key within one answer into
+the first call's row, showing the latest status and wording with every page's
+resources. Other receipt fields remain ordinary command output for the agent
+and are ignored by the shell, so a retrieval app can carry its own cursors,
+page metadata, and protocol without teaching the platform any of those
+concepts. Keep the receipt bounded and print it last.
 
 ---
 
