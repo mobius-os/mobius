@@ -5411,6 +5411,25 @@ def _add_chat_pending_queue_index(eng) -> None:
       "CREATE INDEX IF NOT EXISTS ix_chats_pending_queue ON chats (id) "
       "WHERE deleted_at IS NULL AND CAST(pending_messages AS TEXT) != '[]'"
     ))
+def _add_delegation_goal_task(eng) -> None:
+  """Record which Goal plan task each helper works on.
+
+  Helpers used to be matched to plan tasks only when their name equalled a
+  task id. Existing rows keep exactly that link; new helpers record it at spawn.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  if "goal_task_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE delegations ADD COLUMN goal_task_id VARCHAR(128) NULL"
+    ))
+    conn.execute(text("UPDATE delegations SET goal_task_id = task_key"))
 
 
 _SCHEMA_MIGRATIONS = (
@@ -5492,6 +5511,7 @@ _SCHEMA_MIGRATIONS = (
   ("0067_chat_drawer_covering_index", _add_chat_drawer_covering_index),
   ("0068_rename_inkling_to_evolve", _rename_inkling_to_evolve),
   ("0069_chat_pending_queue_index", _add_chat_pending_queue_index),
+  ("0070_delegation_goal_task", _add_delegation_goal_task),
 )
 
 

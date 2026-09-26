@@ -1728,6 +1728,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0067_chat_drawer_covering_index",
     "0068_rename_inkling_to_evolve",
     "0069_chat_pending_queue_index",
+    "0070_delegation_goal_task",
   ]
   assert second == first
 
@@ -4473,3 +4474,36 @@ def test_inkling_is_renamed_to_evolve_wherever_a_model_is_saved(
       {"provider": "codex", "model": "gpt-5.6-terra"},
     ]},
   }
+
+
+def test_delegation_goal_task_keeps_existing_name_links(tmp_path):
+  """0070 adds the recorded plan-task link; old helpers keep their name link.
+
+  The backfill runs only with the column it adds, so a repeat never files a
+  newer, deliberately unfiled helper under a task by name.
+  """
+  from app.schema_migrations import _add_delegation_goal_task
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'delegation-goal-task.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE delegations (id VARCHAR(64) PRIMARY KEY, "
+      "task_key VARCHAR(128) NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO delegations (id, task_key) VALUES ('old', 'audit')"
+    ))
+
+  _add_delegation_goal_task(eng)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO delegations (id, task_key, goal_task_id) "
+      "VALUES ('new', 'review-helper', NULL)"
+    ))
+  _add_delegation_goal_task(eng)
+
+  with eng.connect() as conn:
+    links = dict(conn.execute(text(
+      "SELECT id, goal_task_id FROM delegations"
+    )).all())
+  assert links == {"old": "audit", "new": None}

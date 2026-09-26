@@ -46,6 +46,9 @@ class DelegationSubmit(BaseModel):
   effort: str | None = Field(default=None, max_length=32)
   scope: str
   cwd: str | None = Field(default=None, max_length=1024)
+  # The parent Goal plan task this helper works on; omitted means the plan's
+  # single running task, if there is exactly one.
+  plan_task: str | None = Field(default=None, min_length=1, max_length=128)
   # Wake the parent chat with the result when the child settles. Defaults on for
   # the owner-agent subagent path; a pure-poll caller can pass False.
   notify_parent_on_complete: bool = True
@@ -225,11 +228,17 @@ async def submit_or_attach(
       if requested_cwd is None and existing is not None
       else requested_cwd or normalize_cwd(None)
     )
+    from app.goal_plans import GoalPlanError, helper_plan_task
+    try:
+      goal_task_id = helper_plan_task(db, parent.id, body.plan_task)
+    except GoalPlanError as exc:
+      raise HTTPException(status_code=422, detail=str(exc)) from exc
     intent = DelegationIntent(
       app_id=body.app_id,
       parent_chat_id=parent.id,
       parent_root_run_id=root_id,
       task_key=body.task_key,
+      goal_task_id=goal_task_id,
       prompt=body.prompt,
       provider=body.provider,
       model=selection["model"],
