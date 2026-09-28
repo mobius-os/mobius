@@ -149,6 +149,37 @@ def test_owner_card_receipt_detection_handles_provider_result_shapes():
   }) == "saved-1"
 
 
+@pytest.mark.parametrize("state", [{"draft": {}}, [], ["answered"], None, 1, True])
+@pytest.mark.parametrize("encoded", [False, True])
+def test_owner_card_receipt_ignores_non_string_state(state, encoded):
+  value = {"state": state, "question_id": "not-a-card", "next_action": "End now"}
+  assert _owner_card_receipt_id(json.dumps(value) if encoded else value) is None
+
+
+def test_owner_card_receipt_traverses_wrapper_with_structured_state():
+  receipt = {
+    "state": "answered", "question_id": "saved-2", "next_action": "End now",
+  }
+  assert _owner_card_receipt_id({
+    "state": {"draft": {}}, "result": receipt,
+  }) == "saved-2"
+
+
+def test_studio_status_output_does_not_crash_chat(approval_run):
+  sink, _headers = approval_run
+  content = json.dumps({"assistant": {"name": "Fixture bot"}, "state": {"draft": {}}})
+  sink.publish({"type": "tool_start", "tool": "Bash", "input": "owner.py context",
+                "tool_use_id": "studio-status"})
+  sink.publish({"type": "tool_output", "content": content,
+                "tool_use_id": "studio-status", "output_complete": True,
+                "output_exit_code": 0})
+  sink.publish({"type": "tool_end", "tool_use_id": "studio-status"})
+  block = next(b for b in sink.assistant_blocks if b.get("tool_use_id") == "studio-status")
+  assert block["output"] == content
+  assert block["status"] == "done"
+  assert "owner_card_question_id" not in block
+
+
 def test_continuation_card_save_does_not_interrupt_its_own_receipt(
   client, chat, approval_run,
 ):

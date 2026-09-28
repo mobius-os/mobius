@@ -1,0 +1,6 @@
+.app-owner-action{margin:auto;padding:0;border:0;background:transparent;color:var(--text);width:min(94vw,560px);max-height:90dvh;overflow:auto}
+.app-owner-action::backdrop{background:rgba(0,0,0,.55)}
+.app-owner-action .secure-card{margin:0;width:100%;background:var(--surface)}
+.app-owner-action__context{margin:12px 0;color:var(--muted);font-size:13px}
+.app-owner-action__context summary{cursor:pointer;padding:8px 0}
+.app-owner-action__context dl{margin:0}.app-owner-action__context dt{text-transform:capitalize}.app-owner-action__context dd{margin:2px 0 10px;overflow-wrap:anywhere;color:var(--text)}

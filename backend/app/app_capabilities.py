@@ -290,6 +290,11 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "app.owner-action": {
+    "version": 1, "kind": "session", "title": "Open trusted owner actions",
+    "description": "Request a reviewed local operation through a trusted confirmation or sealed form. Values bypass app UI and AI.",
+    "risk": "credentials", "lifecycle": "active_frame", "default_limits": {}, "hard_limits": {},
+  },
   "device.storage": {
     "version": 1,
     "kind": "invoke",
@@ -557,6 +562,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connections_manage": bool(perms.get("connections_manage", False)),
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
+      "credentialed_fetch": deepcopy(perms.get("credentialed_fetch") or {}),
+      "owner_screenshot": bool(perms.get("owner_screenshot", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
     },
     "background": (
@@ -590,6 +597,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "max_request_bytes": SERVICE_REQUEST_MAX_BYTES,
       "max_response_bytes": SERVICE_REQUEST_MAX_BYTES,
     }
+    if service.get("owner_actions"):
+      accepted_service["owner_actions"] = deepcopy(service["owner_actions"])
     aliases = list(service.get("aliases") or [])
     if aliases:
       accepted_service["aliases"] = aliases
@@ -680,6 +689,12 @@ def contract_from_app_state(
       "identity_manage": bool(
         (contract_permissions or {}).get("identity_manage", False)
       ),
+      "credentialed_fetch": deepcopy(
+        (contract_permissions or {}).get("credentialed_fetch") or {}
+      ),
+      "owner_screenshot": bool(
+        (contract_permissions or {}).get("owner_screenshot", False)
+      ),
       "railway_manage": bool(
         (contract_permissions or {}).get("railway_manage", False)
       ),
@@ -700,6 +715,8 @@ def contract_from_app_state(
         "entry": accepted_service.get("entry"),
         "access": accepted_service.get("access", "self"),
       }
+      if accepted_service.get("owner_actions"):
+        service["owner_actions"] = deepcopy(accepted_service["owner_actions"])
       if accepted_service.get("aliases"):
         service["aliases"] = list(accepted_service["aliases"])
   if isinstance(service, dict):

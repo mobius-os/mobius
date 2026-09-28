@@ -1,11 +1,14 @@
 """Routes for chat CRUD operations."""
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
+import subprocess
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -2925,7 +2928,7 @@ def _clean_app_chat_text(value: str | None, max_len: int, field: str) -> str | N
 
 
 class AppChatCreate(BaseModel):
-  title: str | None = None
+  title: str | None = Field(default=None, max_length=500)
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
   effort: schemas.AgentEffort | None = None
@@ -2936,6 +2939,11 @@ class AppChatCreate(BaseModel):
   scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
   scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
   owner_visible: bool = False
+
+  @field_validator("title")
+  @classmethod
+  def _validate_title(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(value, 500, "title")
 
   @field_validator("project_id")
   @classmethod
@@ -2991,12 +2999,19 @@ class AppChatStart(AppChatCreate):
 
 
 class AppChatPatch(BaseModel):
+  title: str | None = Field(default=None, max_length=500)
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
   effort: schemas.AgentEffort | None = None
   provider: str | None = None
   scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
   scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
+  owner_visible: bool | None = None
+
+  @field_validator("title")
+  @classmethod
+  def _validate_title(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(value, 500, "title")
 
   @field_validator("scope")
   @classmethod
@@ -3009,6 +3024,10 @@ class AppChatPatch(BaseModel):
     return _clean_app_chat_text(
       value, _CHAT_SCOPE_LABEL_MAX, "scope_label",
     )
+
+
+class AppOwnerScreenshotRequest(BaseModel):
+  warm_only: bool = False
 
 
 def _merge_app_chat_settings(
@@ -3115,6 +3134,7 @@ def _app_chat_sort_ts(chat: models.Chat) -> float:
 
 
 def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
+  settings = _coerce_agent_settings(chat.agent_settings_json)
   return {
     "id": chat.id,
     "title": chat.title,
@@ -3131,8 +3151,14 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
     "provider": chat.provider or "claude",
     "scope": _app_chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
-    "model": _coerce_agent_settings(chat.agent_settings_json).get("model"),
-    "effort": _coerce_agent_settings(chat.agent_settings_json).get("effort"),
+    "owner_visible": settings.get("owner_visible") is True,
+    "title_locked": bool(chat.title_locked),
+    # App-owned conversational clients need only the opaque identity to retire
+    # stale external controls when the owner answers in the Möbius shell. The
+    # question text and answers remain on the owner-only transcript surface.
+    "pending_question_id": chat.pending_question_id,
+    "model": settings.get("model"),
+    "effort": settings.get("effort"),
     "usage": usage,
   }
 
@@ -3245,7 +3271,6 @@ def create_app_chat(
       status_code=403,
       detail="Use POST /api/chats for owner-created chats.",
     )
-  import uuid
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
@@ -3321,6 +3346,139 @@ def create_app_chat(
     "id": chat.id,
     "title": chat.title,
     "created_by_app_id": chat.created_by_app_id,
+  }
+
+
+@app_chat_router.post(
+  "/{chat_id}/output-media-token",
+  dependencies=[Depends(reject_cross_site)],
+)
+def issue_app_chat_output_media_token(
+  chat_id: str,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Mint read-only output-media access for one chat owned by the app."""
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="App-chat output media tokens require an app token.",
+    )
+  chat = get_active_chat_for_principal(db, chat_id, principal)
+  app = db.query(models.App).filter(
+    models.App.id == principal.app_id,
+    models.App.deleted_at.is_(None),
+  ).first()
+  if app is None or not isinstance(app.token_nonce, str):
+    raise HTTPException(status_code=401, detail="App token is no longer valid.")
+  token = auth.create_app_chat_output_media_token(
+    owner_username=principal.owner.username,
+    token_epoch=principal.owner.token_epoch,
+    app_id=app.id,
+    app_nonce=app.token_nonce,
+    chat_id=chat.id,
+  )
+  return {"token": token, "expires_in": 900}
+
+
+from app.app_owner_screenshots import capture_owner_shell as _capture_owner_shell
+_owner_screenshot_locks: dict[int, asyncio.Lock] = {}
+
+
+def _owner_screenshot_allowed(app: models.App) -> bool:
+  contract = app.capability_contract
+  if not isinstance(contract, dict):
+    return False
+  data = contract.get("data")
+  return isinstance(data, dict) and data.get("owner_screenshot") is True
+
+
+@app_chat_router.post(
+  "/{chat_id}/owner-screenshot",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def capture_app_owner_screenshot(
+  chat_id: str,
+  body: AppOwnerScreenshotRequest,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Capture the owner's canonical shell for one explicitly permitted app.
+
+  The app receives only the resulting filename in one of its own chats. The
+  short-lived owner bearer and persistent browser profile never cross the app
+  boundary. Permission is reviewed from the live capability contract on every
+  call, so omitting it on a later app apply revokes capture immediately.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Owner screenshots require an app-scoped token.",
+    )
+  output_chat = get_active_chat_for_principal(db, chat_id, principal)
+  app = db.query(models.App).filter(
+    models.App.id == principal.app_id,
+    models.App.deleted_at.is_(None),
+  ).first()
+  if app is None:
+    raise HTTPException(status_code=404, detail="App not found.")
+  if not _owner_screenshot_allowed(app):
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "This app needs permissions.owner_screenshot=true in its manifest."
+      ),
+    )
+  target_chat_id = str(app.chat_id or "")
+  target_chat = db.query(models.Chat.id).filter(
+    models.Chat.id == target_chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if not target_chat_id or target_chat is None:
+    raise HTTPException(
+      status_code=409,
+      detail="The app has no active owner conversation to capture.",
+    )
+  if output_chat.created_by_app_id != app.id:
+    raise HTTPException(status_code=403, detail="Output chat is not owned by this app.")
+
+  owner_token = auth.create_access_token(
+    {"sub": principal.owner.username},
+    expires_delta=timedelta(minutes=2),
+    token_epoch=principal.owner.token_epoch,
+  )
+  expected_nonce = app.token_nonce
+  expected_epoch = principal.owner.token_epoch
+  lock = _owner_screenshot_locks.setdefault(app.id, asyncio.Lock())
+  try:
+    async with lock:
+      db.expire_all()
+      if (app.deleted_at is not None or app.token_nonce != expected_nonce
+          or principal.owner.token_epoch != expected_epoch
+          or not _owner_screenshot_allowed(app) or str(app.chat_id or '') != target_chat_id
+          or output_chat.deleted_at is not None):
+        raise HTTPException(409, "Screenshot authority changed while waiting. Try again.")
+      filename = await asyncio.to_thread(
+        _capture_owner_shell,
+        app_id=app.id,
+        target_chat_id=target_chat_id,
+        output_chat_id=output_chat.id,
+        owner_token=owner_token,
+        warm_only=body.warm_only,
+      )
+  except subprocess.TimeoutExpired as exc:
+    raise HTTPException(
+      status_code=504, detail="Möbius screenshot capture timed out.",
+    ) from exc
+  except (OSError, RuntimeError) as exc:
+    log.warning("owner screenshot failed for app %s (%s)", app.id, type(exc).__name__)
+    raise HTTPException(
+      status_code=503, detail="Möbius screenshot capture is unavailable.",
+    ) from exc
+  return {
+    "ready": True,
+    "chat_id": output_chat.id,
+    "filename": filename,
   }
 
 
@@ -3531,6 +3689,9 @@ async def patch_app_chat(
         body = body.model_copy(update={"model": selection["model"]})
         chat.provider = body.provider
         chat.session_id = None
+    if body.title is not None:
+      chat.title = body.title
+      chat.title_locked = True
     _merge_app_chat_settings(
       chat,
       system_prompt=body.system_prompt,
@@ -3538,6 +3699,7 @@ async def patch_app_chat(
       effort=body.effort,
       scope=body.scope,
       scope_label=body.scope_label,
+      owner_visible=body.owner_visible,
     )
     chat.updated_at = datetime.now(UTC)
     db.commit()

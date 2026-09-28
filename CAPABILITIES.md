@@ -508,3 +508,79 @@ large package in memory.
 - No capability inferred from an app name, current screen, or payload app id.
 - No raw shell JWT, cookies, DOM handles, `MediaStream`, or general shell-origin
   access passed into an ordinary app.
+
+### Trusted owner actions and sealed input
+
+A reviewed app may declare `app.owner-action` v1 and up to eight
+`service.owner_actions`. Each action names a top-level Python `entry` included
+in `source_files`, a title, description, and secure `fields` (name, label,
+text/password type). Empty fields mean explicit confirmation without key entry.
+All declarations are included in the reviewed capability digest.
+
+The app calls `capabilities.invoke('app.owner-action', {action, context})` from
+its visible UI. Context is small, **non-secret** JSON. The shell obtains the
+accepted declaration and opens a trusted modal; the opaque app cannot submit
+fields or confirm it through capability controls. Submitted values bypass app
+UI and AI. Only fixed success/failure/unknown outcomes return to the frame.
+The existing owner-chat secure-input guard remains unchanged.
+
+The server binds a one-use, 15-minute ticket to the owner, installation nonce,
+accepted runtime and exact context. Cancellation/restart invalidates unsubmitted
+tickets; submission consumes before execution and never automatically repeats.
+The accepted Python entry receives `{action, context, fields}` on stdin in the
+existing two-minute sealed runner, with discarded stdout/stderr and process-group
+cleanup. `APP_OWNER_ACTION=1`, `APP_ID`, `APP_STORAGE_DIR`, `DATA_DIR`, and
+`API_BASE_URL` identify the trusted local context; no key goes into environment,
+arguments, files, or a transcript. The entry owns narrowly scoped domain checks,
+encrypted credential placement and idempotent recovery. Like app jobs/services,
+this is reviewed trusted local code, **not an OS sandbox**. Never write secret
+values to diagnostic files. The owner reviews action effects again when using it.
+
+Owner actions require a direct browser-owner session; app, agent, embedded-chat,
+and delegated tokens cannot supply consent or secrets. A closed form after
+submission does not undo its effects. After an interrupted outcome the app must
+read its own durable state before offering another operation.
+
+### Credentialed provider reads
+
+`permissions.credentialed_fetch` declares at most eight named providers. Each
+specifies an encrypted app secret, exact HTTPS `origin`, allowed absolute path
+prefixes, and exactly one placement: `query_parameter` or `path_prefix`. For
+example, a Telegram provider uses origin `https://api.telegram.org`, paths
+`["/bot/"]`, and path prefix `/bot`.
+
+`GET /api/apps/{app_id}/credentialed-fetch/{provider}?url=...` accepts the URL
+without the secret. It reuses ordinary app authorization, rejects a different
+origin/path or caller-supplied credential parameter, and injects the stored
+secret server-side. Requests are DNS-pinned with original Host/TLS identity,
+no redirects, cookies or ambient proxy credentials, and a 2 MiB response cap.
+Public and credentialed requests have separate bounded connection pools.
+Provider responses are returned as data; providers are trusted with the key.
+This contract adds no binary-upload or local-transport support.
+
+### Explicit owner conversation connections
+
+The owner can grant one app installation access to one owner-created chat at
+`/api/apps/{app_id}/chat-connections`. The grant pins the app nonce, owner epoch
+and digest of a bounded app-owned pairing record. Re-pairing, revocation, token
+rotation or deleting either resource invalidates it. Re-granting creates a new
+identity, never revives an old stream.
+
+Apps must supply the exact `X-Mobius-Chat-Connection` header for text sends and
+SSE on that chat. Streams and queued sends recheck the grant. Connected apps do
+not gain general chat discovery, settings, attachments or card-answer access;
+owner-input cards in these owner-created chats stay in the owner workspace.
+Existing app-owned/participant card-answer contracts are unchanged.
+
+### Owner-channel previews
+
+An app-owned chat can issue a 15-minute `output-media-token` that reads only its
+output images, not uploads or temporary files. Each use rechecks app identity
+and chat ownership. `permissions.owner_screenshot: true` additionally allows
+`POST /api/app-chats/{chat_id}/owner-screenshot` to capture the owning shell chat
+into that app-owned output chat. The permission is intentionally sensitive:
+visible owner content can appear in the image. Owner credentials and the browser
+profile stay server-side. Screenshot requests serialize per app and recheck
+permission after waiting. `warm_only` prepares the browser without returning an
+image; it grants no additional access. App job context includes the non-secret
+`public_origin` for constructing output links.

@@ -28,11 +28,12 @@ _RASTER_MEDIA_TYPES = {
 _AGENT_TMP_ROOT = Path("/tmp")
 
 
-def _authorize_chat_media(chat_id, token_src, db):
+def _authorize_chat_media(chat_id, token_src, db, *, allow_app_output=False):
   """Validate the chat id and the owner-scoped media credential once."""
   validate_chat_id(chat_id)
   resolve_media_or_header_owner(
     token_src.token, db, chat_id=chat_id, from_query=token_src.from_query,
+    allow_app_output=allow_app_output,
   )
 
 
@@ -41,7 +42,9 @@ def _raster_media_type(file_path: Path) -> str | None:
   return guessed_type if guessed_type in _RASTER_MEDIA_TYPES else None
 
 
-def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
+def _serve_chat_image(
+  chat_id, filename, token_src, db, *, preview=False, allow_app_output=False,
+):
   """Common auth + path-validation + FileResponse for a chat media file.
 
   The token can come from two sources:
@@ -52,7 +55,9 @@ def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
 
   App tokens are rejected on both paths.
   """
-  _authorize_chat_media(chat_id, token_src, db)
+  _authorize_chat_media(
+    chat_id, token_src, db, allow_app_output=allow_app_output,
+  )
 
   settings = get_settings()
   base = Path(settings.data_dir) / "chats" / chat_id / "media"
@@ -83,7 +88,7 @@ def serve_chat_media(
 ):
   """Serves an agent-attached image or its bounded transcript preview."""
   return _serve_chat_image(
-    chat_id, filename, token_src, db, preview=preview,
+    chat_id, filename, token_src, db, preview=preview, allow_app_output=True,
   )
 
 

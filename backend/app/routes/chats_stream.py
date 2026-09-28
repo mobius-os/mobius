@@ -6,6 +6,7 @@ import logging
 import time
 from contextlib import nullcontext
 from pathlib import Path as FilePath
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,6 +15,7 @@ from starlette.responses import Response
 from sqlalchemy.orm import Session
 
 from app import activity, models, questions, schemas
+from app.chat_app_connections import (conversation_chat, connection_is_active, require_conversation_input)
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat_event_sink import active_sink_stream_snapshot
 from app.chat import (
@@ -645,13 +647,14 @@ async def send_message(
   chat_id: str,
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
+  connection_id: Annotated[str | None, Header(alias="X-Mobius-Chat-Connection")] = None,
 ):
   """Saves the user message, starts the agent as a background task,
   and returns 202 immediately.  The client streams via GET /stream.
 
   Owner tokens may send to any active chat. App tokens may send only to
-  a chat they created (`created_by_app_id == app_id`) — the app-
-  attributed contract (design §1). Foreign chats are 403; the runner /
+  a chat they created, or an owner-created chat with an explicit exact
+  connection header. Other foreign chats are 403; the runner /
   queue / SSE internals are reused unchanged for both actors. Delegated
   execution bearers use peer/delegation channels for ordinary messages, but
   may answer a card they can read through this same route.
@@ -662,7 +665,8 @@ async def send_message(
   is_card_answer = bool(body.answers or body.selected_options)
   if not is_card_answer:
     require_nondelegated_owner_control(principal)
-  chat = get_active_chat_for_principal(db, chat_id, principal)
+  chat = conversation_chat(db, chat_id, principal, connection_id)
+  require_conversation_input(chat, body, connection_id)
   agent_exact_retry = False
   if is_card_answer and not is_owner_input_principal(principal):
     if not body.question_id:
@@ -1223,7 +1227,8 @@ async def send_message(
       # against state committed by a concurrent provider switch that may have
       # won the transition lock first.
       db.rollback()
-      chat = get_active_chat_for_principal(db, chat_id, principal)
+      chat = conversation_chat(db, chat_id, principal, connection_id)
+      require_conversation_input(chat, body, connection_id)
       return await _send_message_locked(body, chat_id, principal, db, chat)
 
 
@@ -1803,6 +1808,7 @@ async def stream_chat(
   snapshot: bool = Header(False, alias="X-Mobius-Stream-Snapshot"),
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
+  connection_id: Annotated[str | None, Header(alias="X-Mobius-Chat-Connection")] = None,
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
 
@@ -1813,7 +1819,8 @@ async def stream_chat(
   30 s to prevent proxy timeouts.
 
   Same actor gate as send_message: owner streams any chat; an app token
-  streams only a chat it created (403 otherwise). The ownership check
+  streams only a chat it created or an explicitly connected owner chat.
+  Connected streams recheck the grant before emitting events. The ownership check
   runs against the DB row up front so an app can't read another chat's
   event stream by guessing its id, even though the events themselves
   flow from the in-memory broadcast.
@@ -1821,7 +1828,7 @@ async def stream_chat(
   # Gate before touching the broadcast. Raises 404 (missing/deleted) or
   # 403 (app token, foreign chat) — matching send_message's surface.
   require_chat_embed_operation(principal, "chat:stream")
-  require_active_chat_access(db, chat_id, principal)
+  conversation_chat(db, chat_id, principal, connection_id, load_fields=(models.Chat.id,))
   embed_session_id = (
     principal.embed_session_id if principal.scope == "chat_embed" else None
   )
@@ -1877,14 +1884,20 @@ async def stream_chat(
         return True
       last_embed_auth_check = now_mono
       return chat_embed_session_is_active(embed_session_id)
+    def connection_active():
+      return connection_id is None or connection_is_active(
+        connection_id, principal.app_id, chat_id, principal.app_instance_id)
+
     try:
-      if not embed_session_active():
+      if not connection_active() or not embed_session_active():
         return
       if snapshot_state is not None:
         yield _sse({"type": "stream_snapshot", **snapshot_state})
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:
+        if not connection_active():
+          return
         yield _sse(event)
         if event.get("type") == "done":
           has_done = True
@@ -1910,7 +1923,7 @@ async def stream_chat(
 
       # Stream live events from the queue.
       while True:
-        if not embed_session_active():
+        if not connection_active() or not embed_session_active():
           return
         if await request.is_disconnected():
           break
@@ -1920,6 +1933,8 @@ async def stream_chat(
             queue.get(), timeout=_KEEPALIVE_INTERVAL
           )
         except asyncio.TimeoutError:
+          if not connection_active():
+            return
           # Send a keepalive comment — invisible to EventSource clients
           # but keeps the TCP connection alive through proxies.
           yield ": keepalive\n\n"
@@ -1929,6 +1944,8 @@ async def stream_chat(
         if event is None:
           break
 
+        if not connection_active():
+          return
         yield _sse(event)
 
         if event.get("type") == "done":

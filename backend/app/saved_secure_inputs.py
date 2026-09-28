@@ -81,11 +81,11 @@ def _consumer_env(chat_id: str) -> dict[str, str]:
   return env
 
 
-async def _run_consumer(spec: dict, values: dict[str, str], chat_id: str) -> int:
+async def _run_consumer(spec: dict, values: dict[str, Any], chat_id: str, *, env: dict[str, str] | None = None) -> int:
   process = None
   try:
     spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-      *spec["command"], cwd=spec["cwd"], env=_consumer_env(chat_id),
+      *spec["command"], cwd=spec["cwd"], env=_consumer_env(chat_id) if env is None else env,
       stdin=asyncio.subprocess.PIPE,
       stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
       start_new_session=True,

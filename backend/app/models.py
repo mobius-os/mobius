@@ -2065,3 +2065,22 @@ class ChatActivityPosition(Base):
   chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
   event_id = Column(String(128), primary_key=True)
   position = Column(JSON, nullable=True)
+
+
+class ChatAppConnection(Base):
+  """One explicit owner chat grant, not an app ownership or participant claim.
+
+  Revoke deletes this row. Reconnecting always mints a fresh identity, so an
+  already-open stream or stale send cannot regain access after revocation.
+  """
+  __tablename__ = 'chat_app_connections'
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey('apps.id', ondelete='CASCADE'), nullable=False, index=True)
+  chat_id = Column(String(64), ForeignKey('chats.id', ondelete='CASCADE'), nullable=False, index=True)
+  owner_id = Column(Integer, ForeignKey('owner.id', ondelete='CASCADE'), nullable=False)
+  app_nonce = Column(String(64), nullable=False)
+  owner_epoch = Column(Integer, nullable=False)
+  binding_file = Column(String(85), nullable=False)
+  binding_digest = Column(String(64), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  __table_args__ = (UniqueConstraint('app_id', 'chat_id'),)

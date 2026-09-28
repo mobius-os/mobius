@@ -35,8 +35,12 @@ def owner_card_receipt_id(content: object) -> str | None:
     if not isinstance(value, dict):
       continue
     question_id = value.get("question_id")
+    state = value.get("state")
+    # Ordinary tool results (including Studio status) also carry `state`,
+    # often as an object. Require a receipt's string status before set lookup.
     if (
-      value.get("state") in {"waiting_for_owner", "answered"}
+      isinstance(state, str)
+      and state in {"waiting_for_owner", "answered"}
       and isinstance(question_id, str)
       and question_id
       and len(question_id) <= 64

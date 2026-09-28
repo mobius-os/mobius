@@ -823,6 +823,11 @@ export const api = {
       },
     ),
   },
+  ownerActions: {
+    prepare: (appId, action, context) => apiFetch(`/apps/${appId}/owner-actions/${encodeURIComponent(action)}/prepare`, { method: 'POST', body: JSON.stringify(context) }),
+    submit: (appId, ticket, fields) => apiFetch(`/apps/${appId}/owner-actions/${encodeURIComponent(ticket)}/submit`, { method: 'POST', body: JSON.stringify(fields) }),
+    cancel: (appId, ticket) => apiFetch(`/apps/${appId}/owner-actions/${encodeURIComponent(ticket)}/cancel`, { method: 'POST', body: '{}' }),
+  },
   secureInputs: {
     savedState: (chatId, requestId) => apiFetch(
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/saved-state`,
