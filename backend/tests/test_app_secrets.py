@@ -193,3 +193,87 @@ def test_entrypoint_secret_root_is_usable_when_volume_chown_fails():
   assert "if chown mobius:mobius /data/app-secrets" in entrypoint
   assert "chmod 700 /data/app-secrets" in entrypoint
   assert "chmod 733 /data/app-secrets" in entrypoint
+
+
+def _job_auth(client, auth, app):
+  response = client.post('/api/auth/app-job-token', headers=auth, json={'app_id': app.id})
+  assert response.status_code == 200
+  return {'Authorization': 'Bearer ' + response.json()['token']}
+
+
+def test_job_reads_only_named_own_secrets_and_cannot_mint(client, auth, db):
+  app = _create_app(db, 'Scoped Job')
+  other = _create_app(db, 'Other Job')
+  app.capability_contract = {'data': {'job_secret_read': ['bot-token']}}
+  db.commit()
+  for target, name in [(app, 'bot-token'), (app, 'unapproved'), (other, 'bot-token')]:
+    assert client.put(f'/api/apps/{target.id}/secrets/{name}', headers=auth,
+                      json={'value': 'fake-test-key'}).status_code == 204
+  job = _job_auth(client, auth, app)
+  path = f'/api/apps/{app.id}/secrets/bot-token'
+  read = client.get(path, headers=job)
+  assert read.status_code == 200 and read.text == 'fake-test-key'
+  assert read.headers['cache-control'] == 'no-store'
+  assert client.get(path, headers=_app_auth(db, app)).status_code == 403
+  assert client.get(f'/api/apps/{app.id}/secrets/unapproved', headers=job).status_code == 403
+  assert client.get(f'/api/apps/{other.id}/secrets/bot-token', headers=job).status_code == 403
+  for headers in (job, _app_auth(db, app)):
+    assert client.post('/api/auth/app-job-token', headers=headers,
+                       json={'app_id': app.id}).status_code == 403
+
+
+def test_job_grant_removal_revokes_and_addition_requires_new_job(client, auth, db):
+  app = _create_app(db, 'Revocable Job')
+  path = f'/api/apps/{app.id}/secrets/bot-token'
+  assert client.put(path, headers=auth, json={'value': 'fake'}).status_code == 204
+  unapproved = _job_auth(client, auth, app)
+  app.capability_contract = {'data': {'job_secret_read': ['bot-token']}}
+  db.commit()
+  assert client.get(path, headers=unapproved).status_code == 403
+  approved = _job_auth(client, auth, app)
+  assert client.get(path, headers=approved).status_code == 200
+  app.capability_contract = {'data': {}}
+  db.commit()
+  assert client.get(path, headers=approved).status_code == 403
+
+
+def test_job_secret_access_keeps_expiry_epoch_and_nonce_checks(client, auth, db):
+  from datetime import timedelta
+  app = _create_app(db, 'Lifetime Job')
+  app.capability_contract = {'data': {'job_secret_read': ['bot-token']}}
+  db.commit()
+  owner = db.query(models.Owner).first()
+  path = f'/api/apps/{app.id}/secrets/bot-token'
+  assert client.put(path, headers=auth, json={'value': 'fake'}).status_code == 204
+  for options in [
+    {'expires_delta': timedelta(seconds=-1)},
+    {'token_epoch': owner.token_epoch + 1},
+    {'app_nonce': 'revoked-instance'},
+  ]:
+    args = dict(app_id=app.id, owner_username=owner.username,
+                token_epoch=owner.token_epoch, app_nonce=app.token_nonce,
+                job_secrets=['bot-token'])
+    args.update(options)
+    token = create_app_token(**args)
+    assert client.get(path, headers={'Authorization': f'Bearer {token}'}).status_code in (401, 403)
+
+
+def test_job_grant_is_rechecked_after_waiting_for_storage_lock(client, auth, db, monkeypatch):
+  from contextlib import asynccontextmanager
+  from app import fs_locks
+  app = _create_app(db, 'Queued Job')
+  app.capability_contract = {'data': {'job_secret_read': ['bot-token']}}
+  db.commit()
+  path = f'/api/apps/{app.id}/secrets/bot-token'
+  assert client.put(path, headers=auth, json={'value': 'fake'}).status_code == 204
+  job = _job_auth(client, auth, app)
+
+  @asynccontextmanager
+  async def revoked_while_queued(app_id):
+    assert app_id == app.id
+    app.capability_contract = {'data': {}}
+    db.commit()
+    yield
+
+  monkeypatch.setattr(fs_locks, 'app_storage_lock', revoked_while_queued)
+  assert client.get(path, headers=job).status_code == 403

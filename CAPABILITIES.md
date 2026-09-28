@@ -60,6 +60,25 @@ above. Origin-bound facilities such as cookies, service workers and durable
 origin storage still require a host provider or a separate service origin; a
 raw general shell-origin bridge would recreate the authority opacity removed.
 
+### Named secret reads for supervised jobs
+
+An app may declare `permissions.job_secret_read`, up to 16 unique names from
+its own encrypted secret store. The accepted capability contract includes the
+names in owner review. Omitted or empty means no job read access; ordinary app
+frames still cannot read secret values. Only the owner-authorized supervised-job
+mint includes a signed `job_secrets` claim, bounded by the accepted names at
+mint time. Every read also checks the current accepted names, app installation
+nonce, owner epoch and token expiry. Removing a grant denies future reads;
+adding names does not expand an already-running job's token. Applying a manifest
+without the grant revokes it. The existing owner/service behavior is unchanged.
+
+This is not a process sandbox: reviewed jobs already run as trusted local code.
+They must not log, persist unencrypted, or expose these values through browser
+responses. A compromised permitted job could leak its own keys; denial cannot
+retract a key already read. Keep provider transport and secret handling in the
+app, not in new platform proxy routes. No grant implies permission to activate
+bots, send messages or make paid calls.
+
 ## Manifest contract
 
 Runtime capabilities live in the root `capabilities` object:

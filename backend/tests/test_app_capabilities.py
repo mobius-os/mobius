@@ -689,3 +689,30 @@ def test_model_catalog_changes_are_not_access_changes():
   }
   moved = diff_contracts(contract(), contract(base_url="https://other.example/v1"))
   assert moved["changed"] == ["model_provider.base_url"]
+
+
+@pytest.mark.parametrize('names', [True, 'bot-token', ['../secret'], ['a', 'a'],
+                                  ['a'] * 17, [None], ['a b'], ['a' * 65]])
+def test_job_secret_permission_rejects_invalid_names(names):
+  with pytest.raises(ManifestContractError, match='job_secret_read'):
+    validate_manifest_contract(_manifest(permissions={'job_secret_read': names}))
+
+
+def test_job_secret_permission_is_reviewed_normalized_and_omission_revokes():
+  from types import SimpleNamespace
+  from app.app_capabilities import contract_from_app_state
+  base, base_hash = contract_and_digest(_manifest(permissions={}))
+  empty, empty_hash = contract_and_digest(_manifest(permissions={'job_secret_read': []}))
+  assert base == empty and base_hash == empty_hash
+  manifest = _manifest(permissions={'job_secret_read': ['tg-2', 'tg-1']})
+  validate_manifest_contract(manifest)
+  granted, digest = contract_and_digest(manifest)
+  assert digest != base_hash
+  assert granted['data']['job_secret_read'] == ['tg-1', 'tg-2']
+  assert 'data.job_secret_read' in diff_contracts(base, granted)['added']
+  app = SimpleNamespace(capability_contract=granted)
+  accepted = contract_from_app_state(app, contract_permissions=manifest['permissions'])
+  assert accepted['data']['job_secret_read'] == ['tg-1', 'tg-2']
+  assert contract_from_app_state(app)['data']['job_secret_read'] == ['tg-1', 'tg-2']
+  revoked = contract_from_app_state(app, contract_permissions={})
+  assert 'job_secret_read' not in revoked['data']

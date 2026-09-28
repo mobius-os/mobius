@@ -148,8 +148,9 @@ async def get_secret(
   principal: Principal = Depends(get_principal),
 ):
   """Returns one decrypted secret to the owner, an owner-scoped agent, or
-  the app's own server-side service (never the app's browser frame)."""
-  if principal.app_id is not None and not principal.app_is_service:
+  the app's own service or explicitly permitted job (never its browser frame)."""
+  if (principal.app_id is not None and not principal.app_is_service
+      and name not in principal.app_job_secrets):
     raise HTTPException(
       status_code=403,
       detail="Apps may check or replace secrets but cannot read them back.",
@@ -162,6 +163,12 @@ async def get_secret(
     current = _authorize_app(db, principal, app_id)
     if current.token_nonce != expected_nonce:
       raise HTTPException(status_code=404, detail="App not found.")
+    if principal.app_id is not None and not principal.app_is_service:
+      # Read the accepted contract again under the storage lock: mutable draft
+      # source cannot grant access, and removal revokes future reads immediately.
+      allowed = (current.capability_contract or {}).get("data", {}).get("job_secret_read", [])
+      if name not in allowed:
+        raise HTTPException(status_code=403, detail="This job cannot read that secret.")
     if not path.is_file():
       raise HTTPException(status_code=404, detail="Secret not found.")
     try:

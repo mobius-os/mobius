@@ -576,6 +576,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
+  if perms.get("job_secret_read"):
+    contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -674,9 +676,13 @@ def contract_from_app_state(
       "github_connect": bool(getattr(app, "github_connect", False)),
       "connections_manage": bool(getattr(app, "connections_manage", False)),
       "connect_manage": bool(getattr(app, "connect_manage", False)),
-      # Contract-only grants are declared by a local package on every apply.
-      # Store installs build straight from their manifest and never enter this
-      # projection. Do not inherit an older accepted value: omission revokes.
+      # Manifest apply passes an explicit mapping: omission revokes. An
+      # unrelated row projection (no mapping) retains reviewed job access.
+      "job_secret_read": (
+        contract_permissions if contract_permissions is not None else
+        (getattr(app, "capability_contract", None) or {}).get("data", {})
+      ).get("job_secret_read", []),
+      # These contract-only grants must be declared on every local apply.
       "identity_manage": bool(
         (contract_permissions or {}).get("identity_manage", False)
       ),
