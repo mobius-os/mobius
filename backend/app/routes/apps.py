@@ -1455,6 +1455,7 @@ async def update_check(
       upstream_version=str(receipt["manifest"].get("version") or "") or None,
       local_version=local_version,
       installed_source_revision=str(receipt["upstream_commit"]),
+      candidate_source_digest=str(receipt["candidate_digest"]),
       checked_at=checked_at,
     )
 

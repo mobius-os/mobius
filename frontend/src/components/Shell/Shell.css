@@ -60,6 +60,149 @@
   transform: translateY(0);
 }
 
+/* App update notices stay inside their owning app pane without blocking the app
+   or sibling panes. Keep the treatment compact and native to the shell. */
+.shell__app-view--update-surface { isolation: isolate; }
+
+.app-update-notice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  width: min(420px, calc(100% - 24px));
+  transform: translateX(-50%);
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 94%, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--text) 12%, var(--surface));
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.app-update-notice__app-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-update-notice__app-icon,
+.app-icon.app-update-notice__app-icon.is-image {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--surface));
+  background: color-mix(in srgb, var(--accent) 17%, var(--surface));
+  border-radius: 10px;
+}
+
+.app-update-notice__app-icon img {
+  border-radius: 8px;
+}
+
+.app-update-notice__app-icon > span {
+  visibility: hidden;
+}
+
+.app-update-notice__copy {
+  min-width: 0;
+}
+
+.app-update-notice__copy p {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.app-update-notice__meta {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.app-update-notice__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.app-update-notice__actions button {
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.app-update-notice__primary {
+  color: var(--accent-fg, #fff);
+  background: var(--accent-hover, var(--accent));
+  border: 0;
+  white-space: nowrap;
+}
+
+.app-update-notice__dismiss {
+  display: grid;
+  width: 36px;
+  padding: 0 !important;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  font-size: 22px !important;
+}
+
+.app-update-notice__primary-label--compact { display: none; }
+
+.app-update-notice__dismiss:hover,
+.app-update-notice__dismiss:focus-visible {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, var(--surface));
+}
+
+.app-update-notice__actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 520px) {
+  .app-update-notice {
+    top: 8px;
+    width: min(420px, calc(100% - 16px));
+    gap: 8px;
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    padding: 8px;
+  }
+  .app-update-notice__app-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+  }
+  .app-update-notice__meta {
+    font-size: 10px;
+  }
+  .app-update-notice__copy p {
+    font-size: 12px;
+  }
+  .app-update-notice__actions button {
+    min-height: 44px;
+    padding: 8px 9px;
+  }
+  .app-update-notice__primary-label--wide { display: none; }
+  .app-update-notice__primary-label--compact { display: inline; }
+  .app-update-notice__dismiss {
+    width: 32px;
+    font-size: 20px !important;
+  }
+}
+
 /* Both hidden-bar modes span the full content area; suppress the bottom chrome
    for either. `shell--barhidden` is applied whenever the top toolbar is hidden
    (full immersive OR the lighter bar-collapse). */

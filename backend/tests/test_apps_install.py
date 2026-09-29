@@ -3096,6 +3096,18 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   assert update.json()["pending_update_state"] == "needs_resolution"
   assert update.json()["needs_resolution"] is True
   assert update.json()["upstream_version"] == "2.0.0"
+  assert update.json()["candidate_source_digest"] == json.loads(
+    pending.read_text()
+  )["candidate_digest"]
+  with patch("app.install.pending_update_resolved", side_effect=OSError):
+    unknown = client.get(
+      f"/api/apps/{payload['id']}/update-check", headers=auth,
+    )
+  assert unknown.status_code == 200, unknown.text
+  assert unknown.json()["update_available"] is True
+  assert unknown.json()["pending_update_state"] == "unknown"
+  assert unknown.json()["needs_resolution"] is False
+
   bypass = client.patch(
     f"/api/apps/{payload['id']}",
     headers=auth,
@@ -3130,12 +3142,21 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   pending_update = client.get(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
+  assert pending_update.status_code == 200, pending_update.text
+  assert pending_update.json()["update_available"] is True
   assert pending_update.json()["pending_update_state"] == "needs_resolution"
+  assert pending_update.json()["needs_resolution"] is True
+  assert pending_update.json()["candidate_source_digest"] == json.loads(
+    pending.read_text()
+  )["candidate_digest"]
   _resolve_in(checkout, {})
   resolved_update = client.get(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
   assert resolved_update.json()["pending_update_state"] == "replay_pending"
+  assert resolved_update.json()["candidate_source_digest"] == json.loads(
+    pending.read_text()
+  )["candidate_digest"]
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
   )

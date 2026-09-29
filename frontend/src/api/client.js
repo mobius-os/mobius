@@ -909,6 +909,9 @@ export const api = {
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),
+    updateCheck: (appId, { signal } = {}) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/update-check`, { signal },
+    ),
     markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),

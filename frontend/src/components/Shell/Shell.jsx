@@ -13,6 +13,7 @@ import {
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
+import AppUpdateNotice from './AppUpdateNotice.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import NotificationCenter from '../NotificationBell/NotificationCenter.jsx'
 import {
@@ -4724,6 +4725,8 @@ export default function Shell({ onInitialVisualReady }) {
             ...modeViewTransitionStyle('pane', paned.paneId, tabKey),
           } : null
           const app = apps.find(a => String(a.id) === String(id))
+          const appStore = findAppStoreApp(apps)
+          const updateSurfaceClass = appStore?.id == null || String(appStore.id) !== String(id)
           return (
           <div
             key={id}
@@ -4734,8 +4737,8 @@ export default function Shell({ onInitialVisualReady }) {
             data-tab-key={(multiPane || focusedPaneViewId != null) ? tabKey : undefined}
             data-mode-pane-vt={paned ? paned.paneId : undefined}
             className={paned
-              ? 'shell__view shell__app-view shell__view--paned'
-              : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}${heldForChat ? ' shell__app-view--held' : ''}`}
+              ? `shell__view shell__app-view shell__view--paned${updateSurfaceClass ? ' shell__app-view--update-surface' : ''}`
+              : `shell__view shell__app-view${updateSurfaceClass ? ' shell__app-view--update-surface' : ''}${fullBleed ? ' shell__view--active' : ''}${heldForChat ? ' shell__app-view--held' : ''}`}
             style={posStyle || undefined}
             inert={appSurfaceInert || undefined}
             aria-hidden={appSurfaceInert ? 'true' : undefined}
@@ -4794,6 +4797,21 @@ export default function Shell({ onInitialVisualReady }) {
               onShellShortcut={runShellShortcut}
             />
             </ErrorBoundary>
+            {String(appStore?.id ?? '') !== String(id) && (
+              <AppUpdateNotice
+                appId={id}
+                appName={app?.name}
+                app={app}
+                active={tabKey === focusedActiveKey}
+                appStoreAvailable={!!appStore}
+                onOpenAppStore={() => {
+                  const appStore = findAppStoreApp(appsRef.current)
+                  if (appStore?.id != null) {
+                    openAppWithIntent(appStore.id, `update:${id}`)
+                  }
+                }}
+              />
+            )}
           </div>
           )
         })}

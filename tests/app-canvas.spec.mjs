@@ -44,7 +44,12 @@ function mockFrameHTML(appId, opts = {}) {
   // visible first and hidden after, deterministically, instead of racing
   // a timer-based auto-mount that can hide the spinner before the
   // assertion observes it.
-  const { sendMounted = true, mountDelayMs = 0, mountOnSignal = false } = opts
+  const {
+    sendMounted = true,
+    mountDelayMs = 0,
+    mountOnSignal = false,
+    recordIntent = false,
+  } = opts
   return `<!doctype html>
 <html><head><meta charset="utf-8"></head><body>
 <div id="root">mock app ${appId}</div>
@@ -65,6 +70,13 @@ function mockFrameHTML(appId, opts = {}) {
       ${sendMounted ? `setTimeout(postMounted, ${mountDelayMs});` : '/* deliberately never auto-post mounted */'}
     }
     ${mountOnSignal ? `if (msg.type === 'moebius-test:mount') postMounted();` : ''}
+    ${recordIntent ? `if (msg.type === 'moebius:app-intent') {
+      document.getElementById('root').textContent = 'intent:' + msg.intent;
+      window.parent.postMessage(
+        { type: 'moebius:app-intent-applied', nonce: msg.nonce },
+        window.location.origin
+      );
+    }` : ''}
   });
 </script>
 </body></html>`
@@ -345,6 +357,117 @@ async function waitForContentFrame(page, selector, timeout = 10000) {
 }
 
 test.describe('AppCanvas: iframe-mount contract', () => {
+  test('outdated-app banner stays dismissed for one candidate and opens the Store for a new one', async ({ page }) => {
+    const appId = 304
+    const storeId = 305
+    const candidateA = 'a'.repeat(64)
+    const candidateB = 'b'.repeat(64)
+    let candidate = candidateA
+    let checks = 0
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    await page.route(/\/api\/apps\/$/, route => route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([
+        {
+          id: appId,
+          name: 'mock-app',
+          description: 'test',
+          compiled_path: `/data/compiled/app-${appId}.js`,
+          icon_url: `/api/apps/${appId}/icon?v=mock-app`,
+          chat_id: null,
+          source_dir: null,
+          created_at: '2026-07-17T00:00:00.000Z',
+          updated_at: '2026-07-17T00:00:00.000Z',
+        },
+        {
+          id: storeId,
+          name: 'App Store',
+          manifest_url: 'https://raw.githubusercontent.com/mobius-os/app-store/main/mobius.json',
+          description: 'updates',
+          compiled_path: `/data/compiled/app-${storeId}.js`,
+          chat_id: null,
+          source_dir: null,
+          created_at: '2026-07-17T00:00:00.000Z',
+          updated_at: '2026-07-17T00:00:00.000Z',
+        },
+      ]),
+    }))
+    await page.route(new RegExp(`/api/apps/${storeId}/frame`), route => route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' },
+      body: mockFrameHTML(storeId, { recordIntent: true }),
+    }))
+    await page.route(new RegExp(`/api/apps/${appId}/icon`), route => route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'image/svg+xml' },
+      body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="#9270ff"/></svg>',
+    }))
+    await page.route(new RegExp(`/api/apps/${appId}/update-check$`), route => {
+      checks += 1
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          update_available: true,
+          pending_update_state: 'none',
+          candidate_source_digest: candidate,
+        }),
+      })
+    })
+
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    const banner = page.getByRole('region', { name: 'App update available' })
+    await expect(banner).toBeVisible()
+    await expect(banner.getByText('mock-app', { exact: false })).toBeVisible()
+    await expect(banner.getByText('Ready to review in the App Store')).toBeVisible()
+    await expect(banner.locator('.app-update-notice__app-icon img.app-icon__image--displayed')).toBeVisible()
+    await expect(banner.locator('.app-update-notice__app-icon > span')).toBeHidden()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await expect(banner.locator('.app-update-notice__dismiss-icon')).toBeVisible()
+    const desktopBounds = await banner.boundingBox()
+    expect(desktopBounds.width).toBeLessThan(500)
+    expect(desktopBounds.x).toBeGreaterThan(300)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(banner.locator('.app-update-notice__dismiss-icon')).toBeVisible()
+    await expect.poll(async () => (await banner.boundingBox())?.height ?? Infinity).toBeLessThan(120)
+    const bounds = await banner.boundingBox()
+    expect(bounds.height).toBeLessThan(120)
+    const actionBounds = await Promise.all([
+      banner.getByRole('button', { name: 'Review update in App Store' }).boundingBox(),
+      banner.getByRole('button', { name: 'Dismiss update notice' }).boundingBox(),
+    ])
+    expect(Math.abs(actionBounds[0].y - actionBounds[1].y)).toBeLessThan(4)
+    expect(actionBounds[0].height).toBeGreaterThanOrEqual(44)
+    expect(actionBounds[1].height).toBeGreaterThanOrEqual(44)
+    const bannerStyles = await banner.evaluate(element => {
+      const style = getComputedStyle(element)
+      return { backdropFilter: style.backdropFilter, position: style.position }
+    })
+    expect(bannerStyles).toEqual({ backdropFilter: 'none', position: 'absolute' })
+    await banner.getByRole('button', { name: 'Dismiss update notice' }).click()
+    await expect(banner).toHaveCount(0)
+
+    // A new entry rechecks the source, but closing has silenced this exact
+    // content candidate across reloads.
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(banner).toHaveCount(0)
+    await expect.poll(() => checks).toBeGreaterThan(1)
+
+    // A different source digest is a new update even if the version label did
+    // not change, so it earns one new prompt and can open the existing Store.
+    candidate = candidateB
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(banner).toBeVisible()
+    await banner.getByRole('button', { name: 'Review update in App Store' }).click()
+    const storeFrameSelector =
+      `.shell__app-view.shell__view--active iframe[data-app-id="${storeId}"]`
+    await expect(page.locator(storeFrameSelector)).toBeVisible()
+    const storeFrame = await waitForContentFrame(page, storeFrameSelector)
+    await expect(storeFrame.locator('#root')).toHaveText(`intent:update:${appId}`)
+  })
+
   test('loading spinner hides as soon as frame posts moebius:frame-mounted', async ({ page }) => {
     const appId = 99
     // Mount only on the test's signal — NOT a timer. The old
