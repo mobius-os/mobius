@@ -162,6 +162,8 @@ import {
 import {
   chatQuestionRevealFor,
   consumeChatQuestionReveal,
+  markQuestionArrivalRevealed,
+  questionArrivalRevealed,
   subscribeChatQuestionReveal,
 } from '../../lib/chatQuestionReveal.js'
 import {
@@ -1206,6 +1208,7 @@ export default function ChatView({
     resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealPendingQuestion,
+    revealArrivedQuestion,
     revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
@@ -5653,6 +5656,29 @@ export default function ChatView({
     revealPendingQuestion(pendingQuestionEl)
     if (questionReveal?.id != null) consumeChatQuestionReveal(chatId, questionReveal.id)
   }, [chatId, focusPendingQuestion, hasPendingQuestion, pendingQuestionEl, questionReveal, revealPendingQuestion])
+  // Contract R5c (owner ask, 2026-09-28): a newly pending decision comes into
+  // view by itself, once per page session, on the surface that owns this
+  // chat's reading position — including the first visit to a chat that is
+  // waiting on the owner. The scroll controller decides whether and when it
+  // actually moves (never under a reader gesture, never when the card is
+  // already readable or carried by live follow). Once settled, the decision
+  // never moves the reader again; the question nudge remains the way back.
+  // Declared after the deep-link reveal so an explicit reveal lands first.
+  useLayoutEffect(() => {
+    if (hidden || !hasPendingQuestion || !pendingQuestionEl) return undefined
+    const questionId = answerableQuestionId
+    if (!questionId || questionArrivalRevealed(chatId, questionId)) return undefined
+    return revealArrivedQuestion(pendingQuestionEl, () => {
+      markQuestionArrivalRevealed(chatId, questionId)
+    })
+  }, [
+    answerableQuestionId,
+    chatId,
+    hasPendingQuestion,
+    hidden,
+    pendingQuestionEl,
+    revealArrivedQuestion,
+  ])
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
     // A send-owned PIN_USER_MSG is the expected latest-turn location, not a

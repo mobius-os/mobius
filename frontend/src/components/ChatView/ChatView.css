@@ -2683,8 +2683,9 @@
 
 /* Pending-question nudge — shown in the floating stack when an unanswered
    AskUserQuestion card sits outside the viewport, so the frozen turn
-   doesn't read as a hang. A tap scrolls the card into view (user-initiated
-   — the no-auto-scroll contract stays intact). Same frosted accent chip
+   doesn't read as a hang. A new decision already scrolls itself into view
+   once (contract R5c); the nudge is the way back after the reader scrolls
+   away, and a tap reveals the card again. Same frosted accent chip
    recipe uses a translucent surface floor so it reads as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. Its parent stack owns

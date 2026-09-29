@@ -5,7 +5,8 @@
  * single funnel that turns a mode into a concrete `scrollTop`.
  * Layout changes (RO, content mutation, spacer recompute, keyboard)
  * re-apply the mode but never mutate it. Only user gestures and
- * explicit semantic events (send, composer intent, mount restore) mutate it.
+ * explicit semantic events (send, composer intent, mount restore, and the
+ * once-per-decision reveal of a newly pending owner question) mutate it.
  *
  * Modes:
  *   { kind: 'INITIAL' }           — pre-restore default; no-op
@@ -115,6 +116,7 @@ import {
   modeForScrollTransition,
   nestedReaderTargetOwnsInput,
   paginationViewportCompensationAllowed,
+  questionArrivalNeedsReveal,
   readerInputDisclosureTarget,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
@@ -401,6 +403,12 @@ export default function useScrollMode({
   // prepared semantic mode together with spacer sizing + scrollTop before the
   // submitting render can paint.
   const questionSubmissionRunRef = useRef(null)
+  // Contract R5c: the one pending "a decision just arrived" request. It lives
+  // outside the layout effect so a transcript reinstall or a reader gesture
+  // postpones it without losing it; the effect-owned runner below executes it
+  // with the same spacer + write transaction as every other layout commit.
+  const questionArrivalRef = useRef(null)
+  const questionArrivalRunRef = useRef(null)
   const initialEntryPhaseRef = useRef(initialEntryPhase)
   initialEntryPhaseRef.current = initialEntryPhase
   // A normal reveal ends entry stabilization. A forced safety-cap reveal keeps
@@ -636,12 +644,23 @@ export default function useScrollMode({
     return anchor ? transitionMode(anchor, event) : modeRef.current
   }, [scrollRef, transitionMode])
 
+  // Contract R5c: an explicit reveal satisfies a pending decision arrival, and
+  // any newer semantic action (Send, answering, composer intent) retires it
+  // without moving. Either way that decision is finished; it never replays.
+  const settleQuestionArrival = useCallback(() => {
+    const request = questionArrivalRef.current
+    if (!request) return
+    questionArrivalRef.current = null
+    request.onSettled?.()
+  }, [])
+
   // A semantic action snapshots the geometry that the reader just chose, then
   // supersedes every unfinished part of the older gesture. Keep that ordering
   // inside the scroll owner: exposing the gesture timer + intent generation to
   // ChatView made each new send entrypoint responsible for reproducing the same
   // easy-to-miss sequence.
   const supersedePendingReaderGesture = useCallback(() => {
+    settleQuestionArrival()
     discardPendingReaderSettleRef.current?.()
     gestureSequenceRef.current += 1
     gestureWindowUntilRef.current = 0
@@ -650,7 +669,7 @@ export default function useScrollMode({
     cancelAnimationFrame(pendingGestureReleaseRafRef.current)
     pendingGestureReleaseRafRef.current = 0
     resumeLayoutAfterGestureRef.current?.()
-  }, [])
+  }, [settleQuestionArrival])
 
   const captureSendIntent = useCallback(({
     canPin = true,
@@ -1034,6 +1053,9 @@ export default function useScrollMode({
   const revealPendingQuestion = useCallback((cardEl) => {
     const scrollEl = scrollRef.current
     if (!scrollEl) return
+    // This explicit reveal also satisfies an automatic one still waiting on
+    // a reader gesture (contract R5c), so that decision never moves again.
+    settleQuestionArrival()
     const nextMode = topRevealAnchorMode(scrollEl, cardEl, QUESTION_REVEAL_TOP_GAP)
     if (!nextMode) {
       revealConversationTail()
@@ -1053,7 +1075,33 @@ export default function useScrollMode({
     )
     lastAppliedModeRef.current = nextMode
     persistMode()
-  }, [persistMode, revealConversationTail, scrollRef, transitionMode, writeMode])
+  }, [
+    persistMode,
+    revealConversationTail,
+    scrollRef,
+    settleQuestionArrival,
+    transitionMode,
+    writeMode,
+  ])
+
+  // Contract R5c: ChatView hands over each newly pending owner decision once
+  // per page session. The controller alone decides whether and when it moves:
+  // a hidden surface never adopts the request, a reader gesture or resting
+  // finger postpones it to the ownership handoff, and a card that is already
+  // readable or carried by live follow stays exactly where it is. `onSettled`
+  // runs once the decision is finished (revealed, already in view, satisfied
+  // by an explicit reveal, or retired by a newer semantic action). Returns a
+  // cancel for this request only; ChatView calls it when the card node, the
+  // chat, or the pending question changes.
+  const revealArrivedQuestion = useCallback((cardEl, onSettled) => {
+    if (!cardEl || !readingPositionOwnerRef.current) return () => {}
+    const request = { cardEl, onSettled }
+    questionArrivalRef.current = request
+    questionArrivalRunRef.current?.()
+    return () => {
+      if (questionArrivalRef.current === request) questionArrivalRef.current = null
+    }
+  }, [])
 
   // The jump-to-latest control: unlike the question/resume nudges (which only
   // reveal a card as a settled hold), tapping "jump to latest" is an explicit
@@ -1266,7 +1314,14 @@ export default function useScrollMode({
       syncLayout({ forceApply: true, authorityVersion })
       return true
     }
+    // Teardown settles the reader's gesture, which reaches the handoff below.
+    // A decision must not move a transcript that is being replaced or left;
+    // the next instance (or ChatView's cancel) owns the request instead.
+    let questionArrivalLive = true
     const resumeLayoutAfterGesture = () => {
+      // A decision that arrived under the reader's gesture moves at this
+      // handoff; it replays any deferred layout itself before measuring.
+      if (runQuestionArrival()) return
       if (!deferredGestureLayoutPending) return
       deferLayoutUntilReaderYields(currentAuthority())
     }
@@ -1356,6 +1411,62 @@ export default function useScrollMode({
       return true
     }
     questionSubmissionRunRef.current = commitQuestionSubmission
+
+    // Contract R5c: bring a newly pending owner decision into view once, with
+    // the question nudge's own top-of-card hold. It runs only while layout owns
+    // the viewport; under a reader gesture or resting finger the request waits
+    // for resumeLayoutAfterGesture. Layout deferred under that gesture is
+    // replayed first, so the card is measured against the settled reservation
+    // and composer clearance rather than a stale frame.
+    function runQuestionArrival() {
+      const request = questionArrivalRef.current
+      if (!request || !questionArrivalLive) return false
+      const { cardEl } = request
+      if (!cardEl?.isConnected || !scrollEl.contains(cardEl)) {
+        // A replaced card node arrives with its own request from ChatView.
+        questionArrivalRef.current = null
+        return false
+      }
+      if (readerGestureRef.current.dirty || !layoutOwnsScroll()) return false
+      questionArrivalRef.current = null
+      if (!replayDeferredLayoutNow()) sizeSpacer(currentAuthority())
+      const scrollRect = scrollEl.getBoundingClientRect()
+      const cardRect = cardEl.getBoundingClientRect()
+      const composerTop = footRef.current?.getBoundingClientRect?.().top
+      const needsReveal = questionArrivalNeedsReveal({
+        mode: modeRef.current,
+        cardTop: cardRect.top,
+        cardBottom: cardRect.bottom,
+        visibleTop: scrollRect.top,
+        visibleBottom: Math.min(
+          scrollRect.bottom,
+          Number.isFinite(composerTop) ? composerTop : Infinity,
+        ),
+      })
+      const nextMode = needsReveal
+        ? topRevealAnchorMode(scrollEl, cardEl, QUESTION_REVEAL_TOP_GAP)
+          || physicalBottomAnchorModeFromScroll(scrollEl)
+        : null
+      if (nextMode) {
+        // A new semantic location: older deferred work captured before it
+        // must not reapply the previous hold (contract R5).
+        readerIntentVersionRef.current += 1
+        const authorityVersion = readerIntentVersionRef.current
+        readerLocationExplicitRef.current = true
+        transitionMode(nextMode, 'question:arrival-reveal')
+        sizeSpacer(authorityVersion)
+        if (writeMode(
+          scrollEl,
+          modeRef.current,
+          'question:arrival-reveal',
+          authorityVersion,
+        )) rememberAppliedMode()
+        persistMode()
+      }
+      request.onSettled?.()
+      return true
+    }
+    questionArrivalRunRef.current = runQuestionArrival
 
     /** Keep the focused answer fully visible above the overlaid composer, then
      * record that exact position as the ordinary reading hold. Keyboard resize,
@@ -2293,7 +2404,15 @@ export default function useScrollMode({
       requestRevealOnQuiet()
     }
 
+    // A decision postponed across a reinstall, or requested while no
+    // controller was installed, is retried against this instance's geometry.
+    runQuestionArrival()
+
     return () => {
+      questionArrivalLive = false
+      if (questionArrivalRunRef.current === runQuestionArrival) {
+        questionArrivalRunRef.current = null
+      }
       // A dependency change or chat exit can arrive inside the quiet window.
       // Commit the reader's final DOM location while this effect still owns
       // the mounted nodes rather than carrying a stale FOLLOW_BOTTOM/PIN mode
@@ -2542,6 +2661,7 @@ export default function useScrollMode({
     resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealPendingQuestion,
+    revealArrivedQuestion,
     revealAnchor,
     reapplyActiveMode,
     settleSendIntent,

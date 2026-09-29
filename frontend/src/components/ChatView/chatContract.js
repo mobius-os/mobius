@@ -119,6 +119,16 @@ export const CHAT_CONTRACT = [
       + 'the reader anchor fixed. The helper never writes spacer; the sole '
       + 'owner recomputes the stable latest-turn deficit.',
   },
+  {
+    id: 'reveal-new-decision-once',
+    title: 'A new owner decision comes into view once',
+    summary:
+      'When a question, approval, restart, or secure-input card becomes '
+      + 'pending and is not already readable above the composer, the chat '
+      + 'reveals it from its top as a hold — once per decision per page '
+      + 'session, never under a reader gesture, and never out of live follow. '
+      + 'Scrolling away afterward is never undone.',
+  },
 ]
 
 /**

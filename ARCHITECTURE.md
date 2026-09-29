@@ -668,7 +668,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.26 (2026-09-12).** This section is the
+**Owner-authoritative contract — v1.27 (2026-09-28).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -679,7 +679,7 @@ rewrite the contract around the behavior that happened to ship.
 The Chat Issue Reporter mini-app carries an owner-readable snapshot of these rules
 and attaches their rule ids to new diagnostic chats. The Playwright lock-in specs
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
-`backend/tests/test_chats_stream_steer`) encode this:
+`question-arrival-reveal`, `backend/tests/test_chats_stream_steer`) encode this:
 
 - **R0 — Two modes; explicit auto-scroll entrances.** A chat is either in **auto-scroll**
   (`FOLLOW_BOTTOM`, following the physical scroll tail as the reply streams) or **hold**
@@ -698,7 +698,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   advancing the tail; after the room reaches zero, the same tail advances with the
   stream. A viewport/keyboard change, foreground return, mount, or chat restoration
   must never create follow intent; a resize may only complete an already-armed
-  live-send handoff when its responsive reservation reaches zero.
+  live-send handoff when its responsive reservation reaches zero. A hold never
+  moves by itself with one exception: R5c's once-per-decision reveal relocates it
+  to a newly pending owner decision, still as a hold and without follow intent.
 - **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
   latest user row and the real tail geometry, independent of whether that row has
   already entered the viewport. It reserves exactly enough room for that row to
@@ -771,7 +773,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 - **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
   same visible anchor, even if the chat had been auto-scrolling and content grew while
   it was inactive. Return never jumps to the new tail and does not restore
-  auto-scroll; the user must manually reach the bottom again. If there is no saved
+  auto-scroll; the user must manually reach the bottom again. The one exception is
+  an owner decision this page session has not yet revealed: R5c brings it into
+  view once on that first visit instead of the saved anchor. If there is no saved
   location, or its target row is no longer available, return shows the latest real
   conversation content at the viewport bottom once as a settled anchor. It must not
   manufacture a top-of-chat location or engage live following. That automatic tail
@@ -940,6 +944,30 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   idempotent operation every time. Browser clamps and controller writes may emit
   `scroll` while the box is changing, but only a gesture-owned scroll may change
   the reader's semantic mode.
+- **R5c — A new owner decision reveals itself once (v1.27; owner ask, 2026-09-28).**
+  A small offscreen nudge alone let decisions go unnoticed while the owner read
+  earlier conversation. When an owner-input card (Q&A, approval, restart, or
+  sealed input) becomes the chat's pending question, the surface that owns the
+  chat's reading position brings it into view once per page session, using the
+  question nudge's own top-of-card `ANCHOR_AT` hold. This is the one
+  system-initiated move of a hold, and it never creates follow intent. It also
+  covers the first visit to a chat that is already waiting on the owner, where it
+  takes precedence over R4's restored anchor. Nothing moves when at least 48px of
+  the card (or all of a shorter card) is already readable in the usable viewport
+  — between the scroll box top and the overlaid composer, which viewport
+  intersection alone cannot see — or when `FOLLOW_BOTTOM`, an armed
+  `PIN_USER_MSG`, or a question-submission overlay whose base is `FOLLOW_BOTTOM`
+  is already carrying the live tail into view; converting those to a hold would
+  also cost the answer's response its live follow. A reader gesture, momentum,
+  or resting finger postpones the reveal to R5's ordinary ownership handoff,
+  where it runs after any deferred layout replays. A newer semantic action (Send,
+  answering, composer intent, search navigation) or an explicit nudge,
+  notification, or Goal-rail reveal finishes it without another move. Once
+  finished, that decision never moves the reader again: scrolling away leaves
+  them there, with the question nudge as the way back. The per-chat record of
+  revealed decisions is page-session state, so a reload may reveal a
+  still-pending decision once more. Hidden retained surfaces never adopt the
+  request, and a transcript being torn down never executes it.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
@@ -1040,9 +1068,14 @@ path means routing it through the same entries rather than inventing another rul
 | Focused Q&A custom answer grows or its keyboard viewport changes | ordinary hold | current caret-visible `ANCHOR_AT` | Browser may reveal the caret once; controller rebases instead of snapping back. Pins, reserved-tail holds, follow, and submission overlay are unchanged |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
+| Owner decision becomes pending (first time this page session) and is not readable in the usable viewport | `ANCHOR_AT`, settled `PIN_USER_MSG`, or unrestored `INITIAL` | `ANCHOR_AT` at the card's top (the nudge's hold) | One-shot system reveal (R5c); waits for reader gesture/touch ownership to end; a newer semantic action or explicit reveal finishes it with no write |
+| Owner decision becomes pending while follow, an armed pin, or a follow-based question submission carries the tail, or the card is already readable | any | same mode | None; recorded as revealed so it never moves the reader later |
 
 Controller structure is part of the contract, not an implementation detail:
 
+- `ChatView` hands each newly pending owner decision to `revealArrivedQuestion`
+  once per page session (the record lives in `lib/chatQuestionReveal.js`); the
+  controller alone decides whether and when that R5c reveal moves the reader.
 - `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
   It emits send, queue, pagination, and lifecycle events through the semantic
   methods returned by `useScrollMode`.

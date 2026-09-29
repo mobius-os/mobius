@@ -645,6 +645,42 @@ export function modeAfterQuestionResponseStart({
 }
 
 
+/** The smallest slice of a decision card that counts as already in view. */
+export const QUESTION_ARRIVAL_MIN_VISIBLE_PX = 48
+
+
+/** Contract R5c: whether a newly pending owner decision needs its one-shot
+ * reveal. FOLLOW_BOTTOM, an armed send pin, and a submitted answer that will
+ * restore follow already carry the live tail (and the new card with it) into
+ * view, so they never move; converting them to a hold would also cost the
+ * reader live follow for the answer's response. Every other location reveals
+ * the card unless a readable slice of it already shows in the usable viewport
+ * — between the scroll box top and the overlaid composer, which the browser's
+ * own intersection test cannot see. An unrestored INITIAL mount has no
+ * location of its own yet, so its first position is the decision. */
+export function questionArrivalNeedsReveal({
+  mode,
+  cardTop,
+  cardBottom,
+  visibleTop,
+  visibleBottom,
+  minVisiblePx = QUESTION_ARRIVAL_MIN_VISIBLE_PX,
+}) {
+  const kind = mode?.kind
+  if (kind === 'FOLLOW_BOTTOM') return false
+  if (kind === 'PIN_USER_MSG' && mode.followWhenFilled) return false
+  if (isQuestionSubmissionMode(mode)
+      && mode.questionSubmitBaseMode?.kind === 'FOLLOW_BOTTOM') return false
+  if (!kind || kind === 'INITIAL') return true
+  if (![cardTop, cardBottom, visibleTop, visibleBottom].every(Number.isFinite)) {
+    return true
+  }
+  const shown = Math.min(cardBottom, visibleBottom) - Math.max(cardTop, visibleTop)
+  const readable = Math.min(Math.max(cardBottom - cardTop, 1), minVisiblePx)
+  return shown < readable
+}
+
+
 /** A queued send changes composer/footer layout but does not add a transcript
  * row. Freeze the visible anchor before that reflow; its separately-captured
  * submit intent still decides what happens when the row is later promoted. */
