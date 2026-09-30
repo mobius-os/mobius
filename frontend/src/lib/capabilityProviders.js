@@ -1,3 +1,4 @@
+import { createAppOwnerActionProvider, APP_OWNER_ACTION } from './appOwnerAction.js'
 import { startMicrophoneCapture } from './microphoneCapture.js'
 import { startCameraCapture } from './cameraCapture.js'
 import { readCameraPreviewRect } from './cameraPreview.js'
@@ -192,6 +193,7 @@ export function createCameraProvider({
 
 export function builtInCapabilityProviders(options = {}) {
   return {
+    [APP_OWNER_ACTION]: createAppOwnerActionProvider(options.ownerActions),
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [DEVICE_STORAGE]: createDeviceStorageProvider(options.deviceStorage),
     [CAMERA_CAPTURE]: createCameraProvider(options.camera),

@@ -1,3 +1,4 @@
+import AppOwnerAction from './AppOwnerAction.jsx'
 import {
   forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo,
   useReducer, useRef, useState,
@@ -348,6 +349,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
   const [cameraPreview, setCameraPreview] = useState(null)
+  const [ownerAction, setOwnerAction] = useState(null)
   const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
@@ -592,6 +594,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   if (!capabilityHostRef.current) {
     capabilityHostRef.current = createCapabilityHost({
       providers: builtInCapabilityProviders({
+        ownerActions: { appId, present: setOwnerAction },
         deviceAssets: { appId },
         deviceStorage: {
           appId,
@@ -1696,6 +1699,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         )
       })}
       <CameraPreviewLayer preview={cameraPreview} />
+      {ownerAction && <AppOwnerAction key={ownerAction.prompt.ticket} action={ownerAction} />}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it
           remounts (replays) exactly when a promotion lands, and a live-frame

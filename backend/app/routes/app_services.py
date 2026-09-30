@@ -206,3 +206,45 @@ async def public_app_service(
     app, owner, envelope,
   )
   return _response(status, body, headers, media_type)
+
+
+# Unlike app services, these forms/operations require direct owner authority.
+# The frame may request a form; it cannot submit credentials or forge consent.
+from app.deps import require_owner_input_principal
+
+
+def _direct_owner_input(principal: Principal = Depends(get_principal)):
+  require_owner_input_principal(principal)
+  if principal.scope != "owner":
+    raise HTTPException(403, "Open this action in the owner workspace.")
+  return principal.owner
+
+@router.post('/api/apps/{app_id}/owner-actions/{action_id}/prepare', dependencies=[Depends(reject_cross_site)])
+async def prepare_owner_action(app_id: int, action_id: str, request: Request,
+    owner: models.Owner = Depends(_direct_owner_input), db: Session = Depends(get_db)):
+  from app import app_owner_actions
+  envelope=await _envelope(request,'',public=False,actor={})
+  return app_owner_actions.prepare(live_app_or_404(db,app_id),owner,action_id,envelope['body'])
+
+
+@router.post('/api/apps/{app_id}/owner-actions/{ticket}/submit', dependencies=[Depends(reject_cross_site)])
+async def submit_owner_action(app_id: int, ticket: str, request: Request,
+    owner: models.Owner = Depends(_direct_owner_input), db: Session = Depends(get_db)):
+  from app import app_owner_actions
+  app=live_app_or_404(db,app_id)
+  # No Pydantic body schema: a validation error must never reflect input.
+  raw=await read_capped_body(request,128*1024,too_large='Secure submission is too large.')
+  try:
+    fields=json.loads(raw)
+  except Exception:raise HTTPException(400,'Invalid secure submission.') from None
+  finally:del raw
+  db.expunge(app);db.expunge(owner);db.close()
+  return await app_owner_actions.execute(app,owner,ticket,fields)
+
+
+@router.post('/api/apps/{app_id}/owner-actions/{ticket}/cancel', dependencies=[Depends(reject_cross_site)])
+async def cancel_owner_action(app_id: int, ticket: str,
+    owner: models.Owner = Depends(_direct_owner_input), db: Session = Depends(get_db)):
+  from app import app_owner_actions
+  app_owner_actions.take(live_app_or_404(db,app_id),owner,ticket)
+  return {'status':'cancelled'}

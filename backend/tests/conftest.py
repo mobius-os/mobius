@@ -32,7 +32,18 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
+os.environ.pop("RAILWAY_PUBLIC_DOMAIN", None)
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
+# A managed production container exports SSO identity variables to every
+# process. Unit tests exercise local owner setup by default, so scrub those
+# deployment-only values before Settings is imported just like the live DB
+# coordinates above. SSO-specific tests construct explicit Settings values.
+for _managed_auth_var in (
+  "MOBIUS_SSO_ISSUER",
+  "MOBIUS_SSO_INSTANCE_ID",
+  "MOBIUS_SSO_CLIENT_SECRET",
+):
+  os.environ.pop(_managed_auth_var, None)
 os.environ["MOBIUS_TEST_DATABASE_ISOLATED"] = "1"
 # Fail closed when pytest is launched from inside a running production
 # container. DATA_DIR isolates Python file writes, but subprocess-facing

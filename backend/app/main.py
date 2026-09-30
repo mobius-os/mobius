@@ -77,7 +77,7 @@ from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
   app_tools_router,
   auth_router,
-  app_chat_router,
+  app_chat_router, chat_app_connections_router,
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
   chats_router, chats_stream_router,
   secure_inputs_router,
@@ -337,6 +337,11 @@ async def lifespan(app):
       await close_public_fetch_clients()
     except Exception as exc:
       _log.error("public fetch client shutdown failed: %s", exc, exc_info=True)
+    try:
+      from app.routes.secrets import close_credentialed_fetch_clients
+      await close_credentialed_fetch_clients()
+    except Exception as exc:
+      _log.error("credentialed fetch client shutdown failed: %s", exc, exc_info=True)
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
@@ -989,6 +994,7 @@ app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)
 app.include_router(app_chat_router)
+app.include_router(chat_app_connections_router)
 app.include_router(notify_router)
 app.include_router(screen_control_router)
 app.include_router(proxy_router)
