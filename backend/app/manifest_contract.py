@@ -20,6 +20,10 @@ RECOGNIZED_CAPABILITIES = (
   "railway_manage",
 )
 SKILLS_COUNT_MAX = 5
+# Wire protocols an app-secret model provider may declare. `responses` runs on
+# the Codex engine; `anthropic_messages` runs on the Claude engine through the
+# local model relay (see MODEL-PROVIDERS.md).
+MODEL_PROVIDER_PROTOCOLS = ("responses", "anthropic_messages")
 MANIFEST_MAX_BYTES = 64 * 1024
 ENTRY_MAX_BYTES = 1024 * 1024
 SEED_MAX_BYTES = 4 * 1024 * 1024
@@ -448,8 +452,13 @@ def validate_manifest_contract(manifest) -> None:
     broker = model_provider.get("transport") == "identity_broker"
     expected = {"name", "base_url", "models", "default_model"}
     expected |= {"transport"} if broker else {"secret_name"}
-    if set(model_provider) != expected:
+    # App-secret providers may name their wire protocol; omission means the
+    # original OpenAI Responses contract.
+    optional = set() if broker else {"protocol"}
+    if not expected <= set(model_provider) <= expected | optional:
       _fail("Manifest `model_provider` has invalid fields for its transport.")
+    if model_provider.get("protocol", "responses") not in MODEL_PROVIDER_PROTOCOLS:
+      _fail("Manifest `model_provider.protocol` must be `responses` or `anthropic_messages`.")
     if not isinstance(model_provider["name"], str) or not 1 <= len(model_provider["name"].strip()) <= 80:
       _fail("Manifest `model_provider.name` must be 1–80 characters.")
     url = urlparse(model_provider["base_url"] if isinstance(model_provider["base_url"], str) else "")

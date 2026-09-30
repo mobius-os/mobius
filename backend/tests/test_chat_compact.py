@@ -1153,7 +1153,7 @@ async def test_claude_synthesis_rejects_partial_text_on_error_terminal(
 
   with pytest.raises(compaction.CompactionError, match="could not compact"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert client.disconnected is True
 
@@ -1189,7 +1189,7 @@ async def test_claude_synthesis_requires_terminal_result(monkeypatch, tmp_path):
 
   with pytest.raises(compaction.CompactionError, match="terminal result"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
 
 

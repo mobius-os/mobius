@@ -5729,12 +5729,14 @@ async def _run_chat_impl_with_db(
           delivered_through=coordination_message_through,
           wait_results=wait_results,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (
@@ -5912,6 +5914,7 @@ async def _run_chat_impl_with_db(
           run_policy=run_policy,
           connector_plan=connector_turn_plan,
           coordination_enabled=coordination_tools_enabled,
+          provider_id=provider_id,
         )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5922,12 +5925,14 @@ async def _run_chat_impl_with_db(
           delivered_through=coordination_message_through,
           wait_results=wait_results,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or claude_session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (

@@ -799,7 +799,7 @@ def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:
     # frozen contract still carries them for the model picker.
     normalized["model_provider"] = {
       key: provider[key]
-      for key in ("base_url", "transport", "secret_name")
+      for key in ("base_url", "transport", "secret_name", "protocol")
       if key in provider
     }
 

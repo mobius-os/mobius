@@ -65,6 +65,7 @@ chats_router = _load("chats")
 app_chat_router = _load("chats", "app_chat_router")
 chats_stream_router = _load("chats_stream")
 secure_inputs_router = _load("secure_inputs")
+model_relay_router = _load("model_relay")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
 connectors_public_router = _load("connectors", "public_router")
@@ -123,6 +124,7 @@ __all__ = [
   "app_chat_router",
   "chats_stream_router",
   "secure_inputs_router",
+  "model_relay_router",
   "chat_logs_router",
   "connectors_router",
   "connectors_public_router",
