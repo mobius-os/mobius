@@ -15,7 +15,7 @@ import {
 } from './groupBlocks.js'
 import { foldAppActivityOperations } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
-import { isDurableRestartOffer } from './restartCard.js'
+import { blockAnswerable } from './questionAnswerable.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -40,32 +40,6 @@ import WaitHistoryCard from './WaitHistoryCard.jsx'
 import { waitWokeItsAnswer } from './waitHistory.js'
 import HelperResultCard from './HelperResultCard.jsx'
 
-
-// Answerability is a function of the block + its position + live hint, except
-// for a durable Restart offer: once shown, that exact button stays actionable
-// until it is pressed even if the chat later moves on.
-// Computing it here (rather than passing an arrow from ChatView's render loop)
-// lets React.memo skip re-renders for non-last messages on every streaming
-// tick — the only message that changes during streaming is the streaming <li>
-// itself, not the static history above it.
-function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer }) {
-  // Ordinary questions are answerable iff this block IS the chat's durable open question
-  // (liveQuestionId = pending_question_id) and still unanswered — matched by id,
-  // not by block position, so a card trailed by parallel output or a terminal
-  // error stays answerable. liveQuestionId clears when the question is answered
-  // or the turn ends, so nothing is answerable once it's null.
-  const durableRestart = isDurableRestartOffer(block?.platform_action)
-  return !!(
-    onQuestionAnswer
-    && msg.role === 'assistant'
-    && block?.type === 'question'
-    && !block.answers
-    && (
-      durableRestart
-      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
-    )
-  )
-}
 
 function AssistantCopySurface({ msg, markdownByIndex, children }) {
   if (msg.role !== 'assistant') return children
@@ -179,6 +153,7 @@ function MsgContentInner({
   // the resumable tail note.
   pendingQuestionRef,
   resumeCardRef,
+  replySourcesBeforeQuestion = null,
   // Active answers always use this renderer for both their DB partial and
   // live SSE payload. isStreaming only enables the cursor, aria-live, and the
   // active thinking timer; it never selects a different component tree.
@@ -445,7 +420,7 @@ function MsgContentInner({
         )
         if (block.secure_input) {
           return (
-            <div key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined}>
+            <div key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined} data-open-question-tail={answerable ? '' : undefined}>
               <SecureInputCard
                 chatId={chatId}
                 interactive={answerable}
@@ -461,7 +436,7 @@ function MsgContentInner({
           )
         }
         return (
-          <div key={assistantBlockKey(block, i)}>
+          <div key={assistantBlockKey(block, i)} data-open-question-tail={answerable ? '' : undefined}>
             <QuestionCard
               chatId={chatId}
               questions={block.questions || []}
@@ -590,7 +565,14 @@ function MsgContentInner({
     // stretch, after the pages of one app operation become one row. Live items
     // arrive here after conversion to the same block shape, so the transcript
     // doesn't reshuffle on promote.
-    const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
+    // Late provider output remains in the transcript, but an unanswered card
+    // owns the next action and is presented after that output.
+    const openQuestionEntry = finalEntries.find(({ item }) => (
+      item.type === 'question' && isQuestionAnswerable(item)
+    ))
+    const nodes = groupActivityRuns(foldAppActivityOperations(openQuestionEntry
+      ? finalEntries.filter(entry => entry !== openQuestionEntry)
+      : finalEntries))
     const generatedFiles = msg.role === 'assistant' && !isStreaming
       ? (msg.blocks || []).flatMap(block =>
           block.type === 'generated_files' && Array.isArray(block.files)
@@ -656,6 +638,8 @@ function MsgContentInner({
         {beforeQuestionNode < 0 && fileAttachments}
         {!isStreaming && <GoalHistory msg={msg} />}
         {!isStreaming && <StoppedWaits msg={msg} />}
+        {openQuestionEntry && replySourcesBeforeQuestion}
+        {openQuestionEntry && renderBlock(openQuestionEntry.item, openQuestionEntry.idx)}
       </AssistantCopySurface>
     )
   }
@@ -740,6 +724,7 @@ export default memo(MsgContentInner, (prev, next) => {
     // the host node changes, and a bailed-out render changes neither.
     && prev.pendingQuestionRef === next.pendingQuestionRef
     && prev.resumeCardRef === next.resumeCardRef
+    && prev.replySourcesBeforeQuestion === next.replySourcesBeforeQuestion
     && prev.isActiveAnswer === next.isActiveAnswer
     && prev.isStreaming === next.isStreaming
     // suppressedQuestionKeys is a Set (new reference each render) or null.

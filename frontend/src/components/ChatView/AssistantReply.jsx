@@ -1,6 +1,7 @@
 /* One reply owns live/saved source rows, continuous prose, and its final References. */
 import { Fragment, memo, useMemo, useContext } from 'react'
 import MsgContent from './MsgContent.jsx'
+import { blockAnswerable } from './questionAnswerable.js'
 import MessageSources from './MessageSources.jsx'
 import { carryDurableBlockState, streamItemsToAssistantPayload } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
@@ -60,6 +61,21 @@ function AssistantReply({
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
+  const tailMessage = rows[lastVisibleRow]?.message
+  const openTailQuestion = !isStreaming && tailMessage?.blocks?.some(block => (
+    blockAnswerable(block, {
+      msg: tailMessage,
+      isLastMsg,
+      liveQuestionId: messageProps.liveQuestionId,
+      onQuestionAnswer: messageProps.onQuestionAnswer,
+    })
+  ))
+  const sources = !isStreaming && <MessageSources
+    chatId={chatId}
+    groups={sourceRows.map(row => row.message.blocks)}
+    refs={sourceRows.flatMap(row => row.message.source_ref ? [row.message.source_ref] : [])}
+    disclosureKey={`${rows[lastVisibleRow].key}:references`}
+  />
   return <li className="chat__reply">
     <ul className="chat__reply-rows" role="presentation">
       {rows.map((row, index) => {
@@ -97,6 +113,7 @@ function AssistantReply({
               recoveryCredit={tail ? messageProps.recoveryCredit : null}
               pendingQuestionRef={pendingQuestionRef}
               resumeCardRef={resumeCardRef}
+              replySourcesBeforeQuestion={tail && openTailQuestion ? sources : null}
               // The selected row already owns the live/DB question source.
               // Suppressing its key would remove its only card on acceptance.
               suppressedQuestionKeys={replyQuestionSuppression(messageProps.suppressedQuestionKeys, activeRowIndex, index)}
@@ -105,12 +122,7 @@ function AssistantReply({
         </Fragment>
       })}
     </ul>
-    {!isStreaming && <MessageSources
-      chatId={chatId}
-      groups={sourceRows.map(row => row.message.blocks)}
-      refs={sourceRows.flatMap(row => row.message.source_ref ? [row.message.source_ref] : [])}
-      disclosureKey={`${rows[lastVisibleRow].key}:references`}
-    />}
+    {!openTailQuestion && sources}
   </li>
 }
 

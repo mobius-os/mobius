@@ -51,6 +51,42 @@ test('live and reopened response place the incoming row before later prose', () 
   }
 })
 
+test('an open question follows raced output and References without losing either', () => {
+  const blocks = [
+    { type: 'text', content: 'Before the question' },
+    { type: 'question', question_id: 'open-card', questions: [{ question: 'Choose now', options: [] }] },
+    { type: 'text', content: 'Late generated text' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'Late tool result' },
+  ]
+  const msg = { id: 'question-answer', role: 'assistant', blocks,
+    source_ref: { message_index: 0, count: 1 } }
+  const group = assistantReplyGroups([msg]).get(0)
+  const props = { replyGroup: group, chatId: 'chat', liveQuestionId: 'open-card',
+    onQuestionAnswer: () => {} }
+  const saved = render(Active, { ...props, activeRowIndex: -1,
+    activeMirrorMsg: msg, useDbActivePayload: true })
+  const live = render(Active, { ...props, activeRowIndex: 0,
+    activeMirrorMsg: null, hasLivePayload: true, streamItems: blocks, isStreaming: true })
+  for (const html of [saved, live]) {
+    assert.ok(html.indexOf('Before the question') < html.indexOf('Late generated text'))
+    assert.ok(html.indexOf('Late generated text') < html.indexOf('Choose now'))
+    assert.equal((html.match(/class="qcard(?:\s|\")/g) || []).length, 1)
+    assert.equal((html.match(/data-open-question-tail=""/g) || []).length, 1)
+  }
+  assert.ok(saved.indexOf('References') < saved.indexOf('Choose now'))
+  assert.equal((saved.match(/class="chat__sources(?: |")/g) || []).length, 1)
+  const withFile = render(Active, { ...props, activeRowIndex: -1,
+    useDbActivePayload: true, activeMirrorMsg: { ...msg, blocks: [...blocks,
+      { type: 'generated_files', files: [{ name: 'summary.txt', size: 1024, mime_type: 'text/plain' }] }] } })
+  assert.ok(withFile.indexOf('summary.txt') < withFile.indexOf('Choose now'))
+  const answered = render(Active, { ...props, liveQuestionId: null,
+    activeRowIndex: -1, useDbActivePayload: true,
+    activeMirrorMsg: { ...msg, blocks: [blocks[0],
+      { ...blocks[1], answers: { 'Choose now': 'Yes' } }, ...blocks.slice(2)] } })
+  assert.ok(answered.indexOf('Choose now') < answered.indexOf('Late generated text'))
+  assert.ok(answered.indexOf('Late generated text') < answered.indexOf('References'))
+})
+
 test('a completed Goal splits activity at completion before later prose', () => {
   const msg = { id: 'goal-answer', role: 'assistant', blocks: [
     { type: 'text', content: 'Before completion' },
