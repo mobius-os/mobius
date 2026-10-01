@@ -8,7 +8,15 @@ import { LocalAnswersContext } from '../localAnswersContext.js'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
+
+test('question cards center within the assistant message lane', () => {
+  assert.match(msgContent, /className="chat__question-wrap"[^>]*>\s*<QuestionCard/)
+  assert.match(msgContent, /className="chat__question-wrap"[^>]*>\s*<SecureInputCard/)
+  assert.match(css, /\.chat__question-wrap\s*\{\s*align-self:\s*stretch;/)
+  assert.match(css, /\.qcard\s*\{[\s\S]*?margin:\s*10px auto;/)
+})
 
 test('text-only questions never offer choice instructions or empty choice groups', () => {
   for (const options of [undefined, null, []]) {

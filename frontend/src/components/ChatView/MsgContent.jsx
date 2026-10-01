@@ -420,7 +420,7 @@ function MsgContentInner({
         )
         if (block.secure_input) {
           return (
-            <div key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined} data-open-question-tail={answerable ? '' : undefined}>
+            <div className="chat__question-wrap" key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined} data-open-question-tail={answerable ? '' : undefined}>
               <SecureInputCard
                 chatId={chatId}
                 interactive={answerable}
@@ -436,7 +436,7 @@ function MsgContentInner({
           )
         }
         return (
-          <div key={assistantBlockKey(block, i)} data-open-question-tail={answerable ? '' : undefined}>
+          <div className="chat__question-wrap" key={assistantBlockKey(block, i)} data-open-question-tail={answerable ? '' : undefined}>
             <QuestionCard
               chatId={chatId}
               questions={block.questions || []}

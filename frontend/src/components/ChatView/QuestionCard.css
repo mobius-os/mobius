@@ -1,3 +1,7 @@
+/* The assistant row aligns prose to the left; let the question occupy the
+   full message width so the card's auto margins center it in the chat lane. */
+.chat__question-wrap { align-self: stretch; }
+
 .qcard {
   box-sizing: border-box;
   width: min(100%, 640px);
