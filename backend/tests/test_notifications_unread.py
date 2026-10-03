@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app import models
 from app.auth import create_app_token
 from app.broadcast import get_system_broadcast
@@ -219,16 +221,19 @@ def test_owner_can_dismiss_one_notification(client, auth):
   assert missing.status_code == 404
 
 
-def test_single_item_dismissal_preserves_recovery_receipts(client, auth, db):
-  """A direct call cannot delete an Undo receipt or erase its recovery path."""
+@pytest.mark.parametrize("action", ["recover_app", "recover_project", "recover_future"])
+@pytest.mark.parametrize("with_chat_action", [False, True])
+def test_single_item_dismissal_preserves_other_recovery_receipts(client, auth, db, action, with_chat_action):
+  """Chat dismissal does not permit erasing other recovery paths, even mixed receipts."""
   owner = db.query(models.Owner).first()
   receipt_id = "recovery-receipt-not-dismissable"
   db.add(models.Notification(
     id=receipt_id,
     owner_id=owner.id,
     source_type="shell",
-    title="Chat deleted",
-    actions=[{"action": "recover_chat", "resource_id": "chat-123"}],
+    title="Protected recovery",
+    actions=[{"action": action, "resource_id": "resource-123"}]
+    + ([{"action": "recover_chat"}] if with_chat_action else []),
   ))
   db.commit()
 

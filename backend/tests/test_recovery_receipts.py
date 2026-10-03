@@ -75,6 +75,22 @@ def _delete(client, auth, db, resource):
   return receipt
 
 
+@pytest.mark.parametrize("resource", ["chat"], indirect=True)
+def test_dismiss_chat_deletion_notice_preserves_deleted_chat(client, auth, db, resource):
+  """Explicit × removes only the selected receipt, never the recoverable chat."""
+  _, row, _ = resource
+  receipt = _delete(client, auth, db, resource)
+  receipt_id = receipt.id
+  deleted_at = row.deleted_at
+  response = client.delete(f"/api/notifications/{receipt_id}", headers=auth)
+  assert response.status_code == 200, response.text
+  assert response.json() == {"deleted": 1}
+  db.expire_all()
+  assert db.get(models.Notification, receipt_id) is None
+  assert db.get(models.Chat, row.id).deleted_at == deleted_at
+  assert all(n["id"] != receipt_id for n in client.get("/api/notifications", headers=auth).json())
+
+
 @pytest.mark.parametrize("resource", ["app"], indirect=True)
 def test_app_receipt_uses_the_app_lifecycle_expiry(
   client, auth, db, resource, monkeypatch,

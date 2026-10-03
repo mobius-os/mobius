@@ -8,7 +8,7 @@ import { notificationQueries } from '../../hooks/queries.js'
 import NotificationsView from '../../components/NotificationsView/NotificationsView.jsx'
 import {
   completeNotificationRecovery,
-  hasRecoveryReceipt,
+  hasProtectedRecoveryReceipt,
   notificationRecoveryAction,
   parseNotificationRecoveryAction,
   recoveryFailure,
@@ -37,10 +37,14 @@ test('recovery notifications require a matching tombstone-bound resource action'
   ]) assert.equal(parseNotificationRecoveryAction(receipt(fields)), null)
 })
 
-test('recovery receipts stay protected from dismissal even when their payload is malformed', () => {
-  assert.equal(hasRecoveryReceipt({ actions: [{ action: 'recover_chat' }] }), true)
-  assert.equal(hasRecoveryReceipt({ actions: [{ action: 'open_chat' }] }), false)
-  assert.equal(hasRecoveryReceipt({ actions: null }), false)
+test('only chat recovery receipts permit deliberate individual dismissal', () => {
+  assert.equal(hasProtectedRecoveryReceipt({ actions: [{ action: 'recover_chat' }] }), false)
+  for (const action of ['recover_app', 'recover_project', 'recover_future']) {
+    assert.equal(hasProtectedRecoveryReceipt({ actions: [{ action }] }), true)
+    assert.equal(hasProtectedRecoveryReceipt({ actions: [{ action: 'recover_chat' }, { action }] }), true)
+  }
+  assert.equal(hasProtectedRecoveryReceipt({ actions: [{ action: 'open_chat' }] }), false)
+  assert.equal(hasProtectedRecoveryReceipt({ actions: null }), false)
 })
 
 test('completed and expired receipts remain inspectable but are not actionable', () => {
@@ -118,9 +122,29 @@ test('rendered history disables expired Undo and offers older pages', () => {
   ))
   assert.match(html, /Recovery window expired/)
   assert.doesNotMatch(html, />Undo</)
-  assert.doesNotMatch(html, /aria-label="Dismiss Chat deleted"/)
-  assert.doesNotMatch(html, /aria-label="Dismiss Legacy recovery"/)
+  assert.match(html, /aria-label="Dismiss Chat deleted"/)
+  assert.match(html, /aria-label="Dismiss Legacy recovery"/)
   assert.match(html, /aria-label="Dismiss Ordinary notice"/)
   assert.match(html, /Load older notifications/)
+  queryClient.clear()
+})
+
+test('rendered chat receipts offer dismissal throughout recovery while other recovery stays protected', () => {
+  const queryClient = new QueryClient()
+  const rows = [
+    { id: 'active', actions: [receipt({ expires_at: '2099-01-01T00:00:00Z' })] },
+    { id: 'restored', actions: [receipt({ completed_at: deletedAt })] },
+    { id: 'app', actions: [{ action: 'recover_app' }] },
+    { id: 'project', actions: [{ action: 'recover_project' }] },
+    { id: 'mixed', actions: [receipt(), { action: 'recover_app' }] },
+  ].map(row => ({ ...row, title: row.id, source_type: 'shell', sent_at: deletedAt }))
+  queryClient.setQueryData(notificationQueries.list.key, { pages: [rows], pageParams: [null] })
+  const html = renderToStaticMarkup(React.createElement(QueryClientProvider, { client: queryClient },
+    React.createElement(NotificationsView, { onDismiss() {}, onRecoveryAction() {} }),
+  ))
+  for (const title of ['active', 'restored']) assert.ok(html.includes(`aria-label="Dismiss ${title}"`))
+  for (const title of ['app', 'project', 'mixed']) assert.ok(!html.includes(`aria-label="Dismiss ${title}"`))
+  assert.match(html, />Undo</)
+  assert.match(html, />Restored</)
   queryClient.clear()
 })

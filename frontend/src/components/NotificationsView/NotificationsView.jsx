@@ -5,7 +5,7 @@ import { notificationQueries } from '../../hooks/queries.js'
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import {
   completeNotificationRecovery,
-  hasRecoveryReceipt,
+  hasProtectedRecoveryReceipt,
   notificationRecoveryAction,
   recoveryFailure,
   recoveryUnavailableLabel,
@@ -258,7 +258,7 @@ export default function NotificationsView({
               ? { ...parsedNav, focusQuestion: true }
               : parsedNav
             const recovery = notificationRecoveryAction(n)
-            const protectsDismissal = hasRecoveryReceipt(n)
+            const protectsDismissal = hasProtectedRecoveryReceipt(n)
             const recoveryStatus = recoveryState[n.id]
             const unavailableLabel = recovery && (
               recoveryStatus === 'done' ? 'Restored' : (

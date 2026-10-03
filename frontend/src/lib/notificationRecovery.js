@@ -53,12 +53,13 @@ export function notificationRecoveryAction(notification) {
   return null
 }
 
-export function hasRecoveryReceipt(notification) {
+export function hasProtectedRecoveryReceipt(notification) {
   return Array.isArray(notification?.actions) && notification.actions.some(value => (
     value
     && typeof value === 'object'
     && typeof value.action === 'string'
     && value.action.startsWith('recover_')
+    && value.action !== 'recover_chat'
   ))
 }
 
