@@ -344,6 +344,19 @@ def test_goal_report_supplies_completion_keys_without_bloating_progress_updates(
   assert "test:verified" not in settled
 
 
+def test_a_compile_refusal_carries_its_diagnostic_not_just_that_it_failed():
+  control = _control_module()
+  body = json.dumps({"detail": {
+    "code": "compile_failed", "message": "Compilation failed.",
+    "stderr": "[PARSE_ERROR] Unexpected token\n   ╭─[ index.jsx:2:47 ]",
+  }})
+
+  reason = control._refusal_message(body)
+
+  assert reason.startswith("Compilation failed.\n[PARSE_ERROR] Unexpected token")
+  assert "index.jsx:2:47" in reason
+
+
 def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")

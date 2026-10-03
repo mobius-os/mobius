@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from app import workspace_files
 from app.project_templates import linked_app_id
+from app.terminal_output import strip_terminal_noise
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -545,7 +546,7 @@ async def build_app(
     )
     _append_log(log_path, "App preview compiled with the platform app compiler.\n")
   except CompileError as exc:
-    _append_log(log_path, exc.stderr + "\n")
+    _append_log(log_path, strip_terminal_noise(exc.stderr) + "\n")
     raise
   finally:
     entry.unlink(missing_ok=True)

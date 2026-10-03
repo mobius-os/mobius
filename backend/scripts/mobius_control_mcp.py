@@ -288,7 +288,12 @@ def _refusal_message(raw: str) -> str:
   except (json.JSONDecodeError, AttributeError):
     return raw.strip()[:1000] or "no reason given"
   if isinstance(detail, dict):
+    diagnostic = detail.get("stderr")
     detail = detail.get("message") or detail.get("code") or json.dumps(detail)
+    if isinstance(diagnostic, str) and diagnostic.strip():
+      # A compile refusal's reason and location live in its sanitized,
+      # server-capped diagnostic; the message alone only says it failed.
+      return f"{str(detail).strip()}\n{diagnostic.strip()}"
   elif isinstance(detail, list):
     detail = "; ".join(
       " ".join(str(part) for part in (issue.get("loc") or [])[1:]) + ": " + str(issue.get("msg"))

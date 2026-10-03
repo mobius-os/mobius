@@ -47,6 +47,7 @@ from app.storage_io import (
   require_parent_folders,
   rmtree_strict as _rmtree_strict,
 )
+from app.terminal_output import readable_output
 from app.app_capabilities import (
   contract_and_digest, contract_from_manifest, diff_contracts,
 )
@@ -1881,9 +1882,11 @@ async def apply_app_source(
         "code": "compile_failed",
         "message": str(exc),
       }
-      stderr = exc.stderr.strip()
+      # Strip colour before capping: escape codes inflate the text several
+      # times over, so a raw tail can lose the error line and its location.
+      stderr = readable_output(exc.stderr, limit=4000)
       if stderr:
-        detail["stderr"] = stderr[-4000:]
+        detail["stderr"] = stderr
       raise HTTPException(status_code=422, detail=detail) from exc
 
   async with fs_locks.install_uninstall_lock():
