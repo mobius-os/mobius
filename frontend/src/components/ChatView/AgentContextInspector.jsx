@@ -352,7 +352,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
       {
         key: 'recent_chats',
         title: 'Recent chat summaries',
-        description: 'Names and digests from your latest conversations.',
+        description: 'Names and chat summary excerpts from your latest conversations.',
         value: Array.isArray(data.recent_chat_entries)
           ? data.recent_chat_entries
           : [],

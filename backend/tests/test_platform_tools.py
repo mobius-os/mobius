@@ -13,6 +13,26 @@ import pytest
 from app import platform_tools
 
 
+def test_checkpoint_guidance_names_the_layers_without_changing_save_keys_or_limits():
+  control = _control_module()
+  definition = control._TOOL_DEFINITIONS["checkpoint_chat"]
+  description = definition["description"]
+  properties = definition["inputSchema"]["properties"]
+
+  assert "digest replaces the Chat summary" in description
+  assert "summary appends one entry to the Full digest" in description
+  assert "two short, connected paragraphs" in description
+  assert "important earlier outcomes" in description
+  assert "recent phase and open work" in description
+  assert "not an execution diary" in description
+  assert set(properties) == {"title", "digest", "summary"}
+  assert {key: value["maxLength"] for key, value in properties.items()} == {
+    "title": 200, "digest": 1000, "summary": 8000,
+  }
+  assert properties["digest"]["description"].startswith("Chat summary.")
+  assert properties["summary"]["description"].startswith("Full digest.")
+
+
 @pytest.mark.parametrize("top_level,coordination", [(True, True), (True, False), (False, True)])
 def test_helpers_are_builtin_without_subagents_app(monkeypatch, top_level, coordination):
   monkeypatch.delenv("MOBIUS_SUBAGENT_HELPER", raising=False)

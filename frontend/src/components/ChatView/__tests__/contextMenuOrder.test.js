@@ -60,10 +60,25 @@ test('the Brain surfaces only work that needs the owner, never a not-upstream-ye
 test('agent context inspector keeps continuity and active turn context visible', () => {
   assert.match(inspectorSource, /title: 'System prompt'/)
   assert.match(inspectorSource, /title: 'Recent chat summaries'/)
+  assert.match(inspectorSource, /Names and chat summary excerpts from your latest conversations/)
   assert.doesNotMatch(inspectorSource, /title: 'Memory/)
   assert.match(inspectorSource, /title: 'Current app context'/)
   assert.match(inspectorSource, /title: 'App report'/)
   assert.match(inspectorSource, /title: 'Compaction handoff'/)
+})
+
+
+test('chat continuity labels describe existing layers without swapping their data', () => {
+  const viewer = readFileSync(new URL('../ChatSummaryViewer.jsx', import.meta.url), 'utf8')
+
+  assert.match(viewer, /<h3>Chat name<\/h3>/)
+  assert.match(viewer, /<h3>Chat summary<\/h3>/)
+  assert.match(viewer, /<h3>Full digest<\/h3>/)
+  assert.doesNotMatch(viewer, /<h3>Digest<\/h3>|<h3>Full summary<\/h3>/)
+  assert.match(viewer, /digest: data\.chat_digest \|\| ''/)
+  assert.match(viewer, /summary: data\.chat_summary \|\| ''/)
+  assert.match(viewer, /whole conversation in brief, with connected recent progress/)
+  assert.match(composerSource, /Name, summary, full digest/)
 })
 
 

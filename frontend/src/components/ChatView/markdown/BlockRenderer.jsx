@@ -14,10 +14,13 @@ import '../markdown.css'
  */
 const md = new Marked()
 md.use(mathTokens())
+// Agent-to-agent notes (chat summaries) are plain Markdown: a `$` there is a
+// shell variable or a price, never TeX, so they lex without math tokens.
+const plainMd = new Marked()
 
 
-function tokenize(text) {
-  return md.lexer(text || '')
+function tokenize(text, { math = true } = {}) {
+  return (math ? md : plainMd).lexer(text || '')
 }
 
 
@@ -99,6 +102,7 @@ export function StandardMarkdown({
   renderFraction,
   onInternalNav,
   mediaDimensions,
+  math = true,
 }) {
   // The settled-transcript renderer, so this is the one that matters for "a
   // stopped chat still feels slow". `useMemo` only holds while the component
@@ -106,8 +110,8 @@ export function StandardMarkdown({
   // message, which the probe surfaces as a burst of calls with no stream
   // running.
   const tokens = useMemo(
-    () => groupMarkdownImages(tokenize(text)),
-    [text],
+    () => groupMarkdownImages(tokenize(text, { math })),
+    [text, math],
   )
   const fraction = Number(renderFraction)
   const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1

@@ -2,9 +2,10 @@
 
 The platform owns only per-chat summaries under
 ``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives the
-bounded Digest from the most recently touched notes, never their cumulative
-Summary/facts and never knowledge-graph files. Optional installed apps may use
-the sibling directory for richer data, but they activate and retrieve that data
+bounded chat summary (stored as ``## Digest``) from the most recently touched
+notes, never their full digest (``## Summary``)/facts or knowledge-graph files.
+Optional installed apps may use the sibling directory for richer data, but they
+activate and retrieve that data
 through their own system-prompt contribution and reader.
 
 ``build_memory_block`` is pure; ``chat.py`` owns the surrounding private-context
@@ -24,7 +25,7 @@ from app.chat_notes import extract_section
 DEFAULT_BUDGET_BYTES = 25_000
 DEFAULT_MAX_NOTES = 12
 # How many recent per-chat notes to inject at session start. Each is the
-# agent's one-paragraph Digest; the most-recently-modified ones open a fresh
+# agent's brief chat summary; the most-recently-modified ones open a fresh
 # session with recent conversational context.
 RECENT_CHAT_NOTES = 10
 # Per-note byte cap on the injected chat digest. The daytime agent is
@@ -38,10 +39,12 @@ DIGEST_MAX_BYTES = 800
 # Keeping retrieval guidance here makes the structured entry contract and its
 # single shared instruction one source of truth.
 RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
-  "Each recent-chat entry gives a Name, Location, and bounded Digest. "
+  "Each recent-chat entry gives a Name, Location, and bounded Chat summary excerpt. "
+  "The excerpt may omit detail or the recent paragraph; it is not the Full digest. "
   "When more detail would materially help, read "
-  "/data/shared/memory/<Location> for that chat's complete cumulative "
-  "summary. The platform alone publishes those files; do not edit them."
+  "/data/shared/memory/<Location> for that chat's complete Full digest "
+  "(stored under ## Summary; ## Digest holds its replaceable Chat summary). "
+  "The platform alone publishes those files; do not edit them."
 )
 
 
@@ -107,8 +110,8 @@ def load_chat_summary_metadata(
   """Read the short, owner-visible layers of a published chat note.
 
   ``description`` is the one-line gist that normally becomes the chat name;
-  ``digest`` is the bounded cross-chat continuity paragraph. The unbounded
-  ``## Summary`` remains owned by :func:`compaction.load_cumulative_summary`
+  ``digest`` is the replaceable chat summary. The append-only full digest is
+  stored under ``## Summary`` and read by :func:`compaction.load_cumulative_summary`
   because it is also continuation-critical provider handoff state.
 
   Missing and legacy notes are normal: older notes predate ``## Digest`` and
@@ -189,7 +192,7 @@ def build_memory_block(
       "<recent_chat>\n"
       f"Name: {safe_name}\n"
       f"Location: {rel}\n"
-      f"Digest: {safe_digest}\n"
+      f"Chat summary: {safe_digest}\n"
       "</recent_chat>"
     )
     if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:

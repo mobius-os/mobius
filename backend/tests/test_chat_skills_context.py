@@ -585,6 +585,16 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
   assert "sentence case" in normalized
   assert "Set it in your first turn" in normalized
   assert "A name the owner chose always wins" in normalized
+  assert "**Chat name** (`title`)" in normalized
+  assert "**Chat summary** (`digest`)" in normalized
+  assert "**Full digest** (`summary`)" in normalized
+  assert "two short, connected paragraphs" in normalized
+  assert "important earlier" in normalized and "recent phase" in normalized
+  assert "not just the last turn" in normalized
+  assert "without erasing its meaning or unresolved threads" in normalized
+  assert "not an execution diary" in normalized
+  assert "existing tool keys and note headings remain unchanged" in normalized
+  assert "under ~600 characters" not in normalized
   assert "one concise checkpoint before ending a substantive turn" in normalized
   assert "Never postpone necessary recovery saves until compaction" in normalized
   assert "Send `title` and `digest` only when they need changing" in normalized

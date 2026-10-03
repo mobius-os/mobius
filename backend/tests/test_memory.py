@@ -84,14 +84,17 @@ def test_chat_digest_entries_have_name_location_and_digest_without_repeated_copy
 
   assert "Name: first chat" in block.text
   assert "Location: chats/c1/index.md" in block.text
-  assert "Digest: first digest" in block.text
+  assert "Chat summary: first digest" in block.text
   assert "Name: second chat" in block.text
   assert "Location: chats/c2/index.md" in block.text
-  assert "Digest: second digest" in block.text
+  assert "Chat summary: second digest" in block.text
   assert "Read this file for the full note" not in block.text
   assert "recent chat —" not in block.text
   assert "When more detail would materially help" not in block.text
   assert "<Location>" in memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
+  assert "Chat summary excerpt" in memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
+  assert "it is not the Full digest" in memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
+  assert "stored under ## Summary" in memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
   assert sorted(block.entries, key=lambda entry: entry["location"]) == [
     {
       "name": "first chat",
@@ -104,6 +107,35 @@ def test_chat_digest_entries_have_name_location_and_digest_without_repeated_copy
       "digest": "second digest",
     },
   ]
+
+
+def test_two_paragraph_chat_summary_is_preserved_in_the_note_and_excerpted_only_for_context(tmp_path):
+  from app.chat_continuity import apply_checkpoint
+  from app.chat_notes import extract_cumulative_summary, extract_section
+
+  summary = (
+    "Investigated export failures and confirmed an invalid filename. Existing documents must stay."
+    "\n\nA filename correction is awaiting review; export verification remains unresolved."
+  )
+  full_digest = "Earlier root cause: invalid filename. No deletion approved."
+  note = apply_checkpoint(None, name="Export review", digest=summary, summary=full_digest)
+  path = tmp_path / "shared/memory/chats/c1/index.md"
+  path.parent.mkdir(parents=True)
+  path.write_text(note)
+  block = memory.build_memory_block(tmp_path)
+
+  assert extract_section(note, "Digest") == summary
+  assert extract_cumulative_summary(note).endswith(full_digest)
+  assert f"Chat summary: {summary}" in block.text
+  assert full_digest not in block.text
+
+  # The context safeguard never rewrites the stored overview or full digest.
+  longer = summary + " " + "é" * memory.DIGEST_MAX_BYTES
+  path.write_text(apply_checkpoint(note, name="Export review", digest=longer))
+  excerpt = memory.build_memory_block(tmp_path).entries[0]["digest"]
+  assert len(excerpt.encode("utf-8")) <= memory.DIGEST_MAX_BYTES
+  assert extract_section(path.read_text(), "Digest") == longer
+  assert extract_cumulative_summary(path.read_text()).endswith(full_digest)
 
 
 def test_chat_digest_fields_cannot_break_out_of_the_recent_chat_envelope(tmp_path):

@@ -1154,9 +1154,18 @@ _TOOL_DEFINITIONS = {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
       "Save this chat's continuity note. Every field is optional: title "
-      "renames the chat (a name the owner chose always wins), digest replaces "
-      "its short current paragraph, and summary appends one entry to its "
-      "cumulative Summary. Default to one concise changes-only save per substantive "
+      "sets the Chat name (a name the owner chose always wins), digest replaces "
+      "the Chat summary, and summary appends one entry to the Full digest. "
+      "Keep existing keys and note headings: digest/## Digest is the chat summary; "
+      "summary/## Summary is the full digest. Write the chat summary as two short, "
+      "connected paragraphs: whole-chat purpose and important earlier outcomes, "
+      "then the recent phase and open work in that context, not just the last turn. "
+      "Abstract older detail without losing unresolved threads. Full-digest entries "
+      "are a brief handoff in plain, complete sentences: decisions, verified "
+      "outcomes, corrections and open work a successor needs, not an execution "
+      "diary. Leave out commands, test counts, log locations, hashes, paths and "
+      "run or helper ids unless a later step needs that exact identifier. "
+      "Default to one concise changes-only full-digest save per substantive "
       "turn; save earlier before handoffs, owner-input cards, restarts, or "
       "risky/long work that needs a recovery checkpoint. Omit unchanged title "
       "and digest; do not repeat saved facts or raw tool output. Omitted fields "
@@ -1166,9 +1175,12 @@ _TOOL_DEFINITIONS = {
     "inputSchema": {
       "type": "object", "additionalProperties": False,
       "properties": {
-        "title": {"type": "string", "maxLength": 200},
-        "digest": {"type": "string", "maxLength": 1000},
-        "summary": {"type": "string", "maxLength": 8000},
+        "title": {"type": "string", "maxLength": 200,
+                  "description": "Chat name. Replace only when the main topic changes; owner naming wins."},
+        "digest": {"type": "string", "maxLength": 1000,
+                   "description": "Chat summary. Replace both short paragraphs coherently: whole-chat context, then connected recent phase."},
+        "summary": {"type": "string", "maxLength": 8000,
+                    "description": "Full digest. Append what changed as a brief plain-prose handoff; omit routine steps, counts, logs and identifiers a later step does not need."},
       },
     },
   },
