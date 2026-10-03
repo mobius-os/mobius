@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  chatArchiveMatchesIntent,
   ownerInputChangeFromEvent,
   reconcileChatRenameGuards,
   withChatArchive,
@@ -219,4 +220,15 @@ test('archive projection applies committed archive and pin stamps in place', () 
 
   const restored = withChatArchive(archived, 'b', { archivedAt: null, pinnedAt: null })
   assert.equal(restored[1].archived_at, null)
+})
+
+test('server truth decides whether an archive intent already committed', () => {
+  const stored = [rows[0], { ...rows[1], archived_at: '2026-09-29T08:00:00' }]
+  assert.equal(chatArchiveMatchesIntent(stored, 'b', true), true)
+  assert.equal(chatArchiveMatchesIntent(stored, 'b', false), false)
+  assert.equal(chatArchiveMatchesIntent(stored, 'a', false), true)
+  assert.equal(chatArchiveMatchesIntent(stored, 'a', true), false)
+  assert.equal(chatArchiveMatchesIntent(stored, 'gone', false), false,
+    'a chat the read no longer returns satisfies no intent')
+  assert.equal(chatArchiveMatchesIntent(null, 'b', true), false)
 })

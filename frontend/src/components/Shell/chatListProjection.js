@@ -68,6 +68,20 @@ export function withChatArchive(rows, chatId, { archivedAt, pinnedAt } = {}) {
   })
 }
 
+/**
+ * Whether a freshly read row already carries an archive intent.
+ *
+ * A lost answer is not a refusal: the request can commit and its response
+ * never arrive. Server truth, not the missing response, decides whether the
+ * owner is told the action failed. A chat the read no longer returns satisfies
+ * no archive intent.
+ */
+export function chatArchiveMatchesIntent(rows, chatId, archived) {
+  const row = (Array.isArray(rows) ? rows : [])
+    .find(item => String(item?.id) === String(chatId))
+  return row ? Boolean(row.archived_at) === Boolean(archived) : false
+}
+
 /** Keep an in-flight archive intent visible across complete and scoped reads. */
 export function withPendingChatArchives(rows, pending) {
   return rows.map(row => {

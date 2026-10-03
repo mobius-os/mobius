@@ -132,6 +132,7 @@ import {
   withoutConfirmedDeletions,
 } from './confirmedDeletion.js'
 import {
+  chatArchiveMatchesIntent,
   ownerInputChangeFromEvent,
   reconcileChatRenameGuards,
   withChatOwnerActivity,
@@ -2519,6 +2520,21 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     }
   }, [projectChatLookup, queryClient])
 
+  // A lost response leaves the outcome unknown, not failed: the archive write
+  // may have committed before the connection dropped. Read the one row back so
+  // server truth decides whether the owner is told the action failed.
+  const chatArchiveCommitted = useCallback(async (chatId, archived) => {
+    try {
+      const rows = jsonOrThrow(
+        await api.chats.rows([chatId], { cache: 'no-store' }),
+        'chat rows fetch failed:',
+      )
+      return chatArchiveMatchesIntent(rows, chatId, archived)
+    } catch {
+      return false
+    }
+  }, [])
+
   // Archive state is owner filing. Keep rapid toggles in intent order; an
   // older failure must not roll back a newer action's optimistic projection.
   // The final scoped read settles the row from server truth in every case.
@@ -2542,14 +2558,18 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ))
     archiveRequestsRef.current.set(sid, request)
     let committed = false
+    let answered = true
     try {
       const response = await request
       committed = response.ok
-    } catch {}
+    } catch {
+      answered = false
+    }
     if (archiveActionsRef.current.get(sid)?.token !== token) return false
     archiveActionsRef.current.delete(sid)
     archiveRequestsRef.current.delete(sid)
     refreshChatRows(sid)
+    if (!answered) committed = await chatArchiveCommitted(sid, archived)
     if (!committed) {
       notifyShell(`Couldn’t ${archived ? 'archive' : 'restore'} that chat.`, { variant: 'error' })
       return false
@@ -2570,7 +2590,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       },
     })
     return true
-  }, [projectChatList, refreshChatRows, notifyShell])
+  }, [projectChatList, refreshChatRows, notifyShell, chatArchiveCommitted])
   const archivedChatIds = useMemo(() => new Set(
     chats.filter(row => row?.archived_at).map(row => String(row.id)),
   ), [chats])

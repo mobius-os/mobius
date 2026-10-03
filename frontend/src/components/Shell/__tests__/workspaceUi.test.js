@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { withChatArchive, withPendingChatArchives } from '../chatListProjection.js'
+import {
+  chatArchiveMatchesIntent,
+  withChatArchive,
+  withPendingChatArchives,
+} from '../chatListProjection.js'
 
 const css = readFileSync(
   new URL('../workspace.css', import.meta.url),
@@ -1520,8 +1524,9 @@ test('complete and scoped reads both preserve pending archive intent', () => {
 
 function deferred() {
   let resolve
-  const promise = new Promise(r => { resolve = r })
-  return { promise, resolve }
+  let reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
 }
 
 function harness() {
@@ -1552,6 +1557,9 @@ function harness() {
     chatsRef, archiveActionsRef, archiveRequestsRef, withChatArchive,
     projectChatList(project) { rows = project(rows); chatsRef.current = rows },
     api: { chats: { archive: () => request(true), unarchive: () => request(false) } },
+    chatArchiveCommitted: async (chatId, archived) => (
+      chatArchiveMatchesIntent([server], chatId, archived)
+    ),
     refreshChatRows(id) {
       refreshes.push(id)
       rows = withPendingChatArchives([{ ...server }], archiveActionsRef.current)
@@ -1562,6 +1570,13 @@ function harness() {
   return {
     act: makeCallback(deps), calls, notices, refreshes, requests,
     get row() { return rows[0] },
+    commitServer(archived) {
+      server = {
+        ...server,
+        archived_at: archived ? 'server-archive' : null,
+        pinned_at: archived ? null : server.pinned_at,
+      }
+    },
     fullRead(row) {
       rows = withPendingChatArchives([row], archiveActionsRef.current)
       chatsRef.current = rows
@@ -1608,6 +1623,38 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('a lost archive response that committed is not reported as a failure', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.commitServer(true)
+  h.requests[0].reject(new Error('connection lost'))
+  assert.equal(await first, true, 'server truth settles the unknown outcome')
+  assert.deepEqual(h.refreshes, ['a'])
+  assert.equal(h.row.archived_at, 'server-archive')
+  assert.equal(h.notices.length, 1)
+  assert.equal(h.notices[0].message, 'Chat archived')
+  assert.equal(h.notices[0].options.action.label, 'Undo')
+})
+
+test('a lost archive response that never committed still reports the failure', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].reject(new Error('connection lost'))
+  assert.equal(await first, false)
+  assert.equal(h.row.archived_at, null)
+  assert.match(h.notices[0].message, /Couldn’t archive/)
+})
+
+test('the lost-response check reads the one row back and compares server truth', () => {
+  assert.match(
+    source,
+    /const chatArchiveCommitted = useCallback\(async \(chatId, archived\) => \{[\s\S]*?api\.chats\.rows\(\[chatId\], \{ cache: 'no-store' \}\)[\s\S]*?chatArchiveMatchesIntent\(rows, chatId, archived\)/,
+  )
+  assert.match(source, /if \(!answered\) committed = await chatArchiveCommitted\(sid, archived\)/)
 })
 
 test('Undo reverses a committed archive without creating another Undo', async () => {
