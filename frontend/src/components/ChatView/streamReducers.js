@@ -33,6 +33,7 @@ import {
   enrichMessageSource,
 } from './messageSources.js'
 import { toolBlockFailed } from './toolResultFormat.js'
+import { isOwnerAnswerNotification } from './toolActivityLabel.js'
 
 // Tool names whose tool events describe an AskUserQuestion-style
 // call: Claude's AskUserQuestion and Codex's request_user_input.
@@ -413,7 +414,7 @@ export function restartCardActivityEntries(entries, ownsRestartCard) {
  * @param {Array<object>} blocks  a persisted message's blocks
  * @returns {Set<number>} indices into `blocks` to skip when rendering
  */
-export function suppressedQuestionToolIndices(blocks) {
+export function suppressedQuestionToolIndices(blocks, chatId) {
   const suppressed = new Set()
   if (!Array.isArray(blocks)) return suppressed
   const questionIds = new Set(blocks
@@ -422,6 +423,7 @@ export function suppressedQuestionToolIndices(blocks) {
   const latestUnowned = { question: null, restart: null }
   blocks.forEach((b, i) => {
     if (b?.type === 'tool') {
+      if (questionIds.size > 0 && isOwnerAnswerNotification(b, chatId)) suppressed.add(i)
       if (questionIds.has(b.owner_card_question_id)) suppressed.add(i)
       const family = isQuestionTool(b.tool)
         ? 'question'

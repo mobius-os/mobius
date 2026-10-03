@@ -10,7 +10,7 @@ import {
   activitySummaryTools,
   thoughtDurationLabel,
 } from './groupBlocks.js'
-import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
+import { toolActivityIcon, effectiveToolName, isQuietBookkeepingTool } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
@@ -236,7 +236,7 @@ function GroupedActivityStretch({
   // The line's glyph matches its LEADING label word: the currently-running
   // tool's activity while one runs (toolGroupSummary leads with it), else the
   // first-seen activity (the past-tense sentence leads with that).
-  const summaryTools = activitySummaryTools(entries)
+  const summaryTools = activitySummaryTools(entries).filter(tool => !isQuietBookkeepingTool(tool))
   const leadTool = [...summaryTools].reverse().find(tool => tool.status === 'running')
     || summaryTools[0]
   const leadToolIcon = toolActivityIcon(effectiveToolName(leadTool))
@@ -289,7 +289,9 @@ function GroupedActivityStretch({
       toolCount: Number.isInteger(summaryToolCount)
         ? summaryToolCount
         : tools.length,
-      thinkingOnly: tools.length === 0,
+      // A reasoning pass that routine saves joined keeps its reasoning glyph.
+      thinkingOnly: tools.length === 0 || (tools.every(isQuietBookkeepingTool)
+        && entries.some(entry => entry?.item?.type === 'thinking')),
     }
   }, [sig, summaryToolCount]) // eslint-disable-line react-hooks/exhaustive-deps
 

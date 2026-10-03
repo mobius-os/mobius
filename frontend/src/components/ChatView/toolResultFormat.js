@@ -273,13 +273,29 @@ export function toolResultCopyText(output, { terminal = false } = {}) {
   return displayValue(value)
 }
 
-// Did this tool result report a failure? True only when the output parses to a
-// terminal envelope with a nonzero exit code. This is the ONLY failure signal a
-// tool block carries — the stream contract never sets a tool `status` beyond
-// 'running' → 'done' (see streamReducers.js), so both the per-block header
-// indicator (ToolBlock) and the stretch's exit chip (ActivityStretch, via
-// groupBlocks) derive "failed" from here rather than a status that never arrives.
+// Tool inputs are text on the wire. Older quiet-write rows accidentally stored
+// argument objects; format them without rewriting immutable chat history.
+export function toolInputText(input) {
+  if (input == null) return ''
+  return typeof input === 'string' ? input : JSON.stringify(input, null, 2)
+}
+
+// MCP completion and transport success do not imply application success.
+// Inspect bounded result envelopes, never error-shaped command stdout.
+function mcpResultFailed(output) {
+  let value = tryParse(output)
+  for (let depth = 0; depth <= 4 && value && typeof value === 'object'; depth += 1) {
+    if (value.isError === true) return true
+    const keys = Object.keys(value)
+    if (keys.length !== 1 || !COMMON_KEYS.includes(keys[0])) break
+    const inner = value[keys[0]]
+    value = typeof inner === 'string' ? tryParse(inner) : inner
+  }
+  return false
+}
+
 export function toolResultFailed(output) {
+  if (mcpResultFailed(output)) return true
   const r = formatToolResult(output)
   return r.kind === 'terminal' && r.exitCode != null && r.exitCode !== 0
 }
@@ -299,5 +315,7 @@ export function toolBlockExitCode(t) {
 
 export function toolBlockFailed(t) {
   const code = toolBlockExitCode(t)
-  return code != null && code !== 0
+  // Shell stdout is arbitrary user data, not an MCP result envelope.
+  if (t?.tool === 'Bash' || t?.tool === 'shell') return code != null && code !== 0
+  return code != null ? code !== 0 || mcpResultFailed(t?.output) : toolResultFailed(t?.output)
 }

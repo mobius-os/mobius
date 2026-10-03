@@ -220,7 +220,7 @@ function storedBoundaryIndex(entries, position) {
 
 export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
   if (!notes?.length) return entries
-  const skipped = suppressedQuestionToolIndices(sourceBlocks)
+  const skipped = suppressedQuestionToolIndices(sourceBlocks, chatId)
   const boundaries = new Map()
   const activity = note => note.type === 'helper_result'
     ? { idx: `activity-${note.activityId || note.id}`, item: note }

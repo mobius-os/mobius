@@ -4,7 +4,7 @@ import { appActivityCardModel } from './appActivityCard.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
-import { toolActivityIcon, toolCallLabel } from './toolActivityLabel.js'
+import { toolActivityIcon, toolCallLabel, isQuietBookkeepingTool, quietBookkeepingLabel } from './toolActivityLabel.js'
 
 function openInternal(event, href, onInternalNav) {
   if (!onInternalNav || !href) return
@@ -21,7 +21,7 @@ function openInternal(event, href, onInternalNav) {
 }
 
 export default function AppActivityCard({
-  t, chatId, disclosureKey, onInternalNav,
+  t, chatId, compact = false, disclosureKey, onInternalNav,
 }) {
   const model = appActivityCardModel(t?.app_activity)
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
@@ -32,7 +32,7 @@ export default function AppActivityCard({
   if (!model) return null
 
   const live = model.status === 'running' || t?.status === 'running'
-  const label = toolCallLabel(t)
+  const label = compact && isQuietBookkeepingTool(t) ? quietBookkeepingLabel({ live }) : toolCallLabel(t)
   const iconKind = toolActivityIcon('AppActivity')
 
   return (

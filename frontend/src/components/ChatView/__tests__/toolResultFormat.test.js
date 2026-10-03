@@ -1,12 +1,36 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  toolInputText,
   formatToolResult,
   toolResultCopyText,
   toolResultFailed,
   toolBlockFailed,
   toolBlockExitCode,
 } from '../toolResultFormat.js'
+
+test('historical structured quiet inputs render as readable text without rewriting them', () => {
+  const input = { digest: 'Saved context', summary: 'Continued work', title: 'Quiet details' }
+  assert.equal(toolInputText('original text'), 'original text')
+  assert.equal(toolInputText(null), '')
+  assert.equal(toolInputText(undefined), '')
+  assert.deepEqual(JSON.parse(toolInputText(input)), input)
+  assert.equal(toolInputText(input), JSON.stringify(input, null, 2))
+  assert.deepEqual(input, { digest: 'Saved context', summary: 'Continued work', title: 'Quiet details' })
+})
+
+test('MCP error flags preserve diagnostics even without a terminal exit', () => {
+  for (const output of [
+    { isError: true, content: [{ type: 'text', text: 'Denied' }] },
+    { result: JSON.stringify({ isError: true }) },
+  ]) {
+    assert.equal(toolResultFailed(JSON.stringify(output)), true)
+    assert.equal(toolBlockFailed({ output: JSON.stringify(output) }), true)
+  }
+  assert.equal(toolResultFailed(JSON.stringify({ isError: false })), false)
+  assert.equal(toolResultFailed('The text mentions isError=true'), false)
+  assert.equal(toolResultFailed(JSON.stringify({ content: [{ text: 'isError=true' }] })), false)
+})
 
 test('copy text matches readable terminal and structured presentation', () => {
   assert.equal(
@@ -264,4 +288,26 @@ test('toolBlockFailed: field-or-parse failure detection survives truncation', ()
   // Parse path: a preserved "Exit code N" head still detects the failure.
   assert.equal(toolBlockFailed({ output: 'Exit code 1\nboom' }), true)
   assert.equal(toolBlockFailed({ output: 'all good' }), false)
+})
+
+test('MCP semantic failures remain failures with a successful transport exit code', () => {
+  for (const output of [
+    JSON.stringify({ isError: true }),
+    JSON.stringify({ result: JSON.stringify({ isError: true }) }),
+  ]) assert.equal(toolBlockFailed({ output_exit_code: 0, output }), true)
+  assert.equal(toolBlockFailed({ output_exit_code: 0, output: JSON.stringify({ isError: false }) }), false)
+  // Terminal exit metadata is still authoritative over a carved excerpt.
+  assert.equal(toolBlockFailed({ output_exit_code: 0, output: 'Exit code 1\nstale excerpt' }), false)
+  assert.equal(toolBlockFailed({ output_exit_code: 0, output: JSON.stringify({ stdout: 'ok', exit_code: 1 }) }), false)
+  assert.equal(toolBlockFailed({ output_exit_code: 0, output: JSON.stringify({ stdout: '{"isError":true}' }) }), false)
+})
+
+test('successful shell stdout cannot impersonate an MCP failure envelope', () => {
+  for (const tool of ['Bash', 'shell']) {
+    for (const output of ['{"isError":true}', '{"result":{"isError":true}}']) {
+      assert.equal(toolBlockFailed({ tool, output_exit_code: 0, output }), false)
+      assert.equal(toolBlockFailed({ tool, output }), false)
+      assert.equal(toolBlockFailed({ tool, output_exit_code: 1, output }), true)
+    }
+  }
 })

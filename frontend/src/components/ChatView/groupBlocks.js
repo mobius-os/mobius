@@ -5,6 +5,8 @@ import {
   toolActivitySingular,
   toolActivityPastSingular,
   effectiveToolName,
+  isQuietBookkeepingTool,
+  quietBookkeepingLabel,
 } from './toolActivityLabel.js'
 export { groupActivityRuns } from './activityGrouping.js'
 
@@ -72,6 +74,8 @@ export function toolGroupState(tools) {
 // is running (a done/persisted group) the order is plain first-seen.
 // Pure — no React, no mutation of the input array.
 export function toolGroupSummary(tools) {
+  tools = tools.filter(tool => !isQuietBookkeepingTool(tool))
+  if (tools.length === 0) return quietBookkeepingLabel({ live: true })
   // Search from the tail so "currently running" reads as the most-recent live
   // tool. Seeding `seen` with its label pins it first; the first-seen scan then
   // fills the rest, and the dedupe folds the running label back out if it also
@@ -101,6 +105,8 @@ export function toolGroupSummary(tools) {
 // raw name and casing (it is an identifier, not prose). Dedupe is on the
 // label, same as the live summary. Pure — no React, no mutation.
 export function toolGroupPastSummary(tools) {
+  tools = tools.filter(tool => !isQuietBookkeepingTool(tool))
+  if (tools.length === 0) return quietBookkeepingLabel()
   const seen = []
   const counts = new Map()
   for (const t of tools) {
@@ -168,7 +174,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
     .map(e => {
       const it = e?.item
       if (it?.type === 'tool') {
-        return `t:${effectiveToolName(it) || ''}:${it.status || ''}`
+        return `t:${effectiveToolName(it) || ''}:${it.status || ''}:${isQuietBookkeepingTool(it) ? 'quiet' : ''}`
       }
       if (it?.type === 'helper_result') return `h:${it.status || ''}`
       return 'k'
@@ -207,7 +213,11 @@ export function activitySummaryTools(entries) {
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
 // without a memo.
 export function activityCollapsedLabel(entries, { live = false } = {}) {
-  const tools = activitySummaryTools(entries)
+  // Routine saves never name a stretch that has anything else to show: a
+  // reasoning pass that a save joined still reads as that reasoning pass.
+  const allTools = activitySummaryTools(entries)
+  const reasoned = entries.some(e => e?.item?.type === 'thinking')
+  const tools = reasoned && allTools.every(isQuietBookkeepingTool) ? [] : allTools
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
   const toolRunning = tools.some(t => t?.status === 'running')

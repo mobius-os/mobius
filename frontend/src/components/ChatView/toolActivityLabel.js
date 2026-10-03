@@ -2,6 +2,7 @@ import { imagePathFromInput } from './toolImageResult.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { appActivityLabel } from './appActivityCard.js'
 import { runningBackgroundTask } from './toolTasks.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -256,6 +257,45 @@ function controlInputValue(input, key) {
   } catch { /* A provider's plain-text summary is not JSON. */ }
   const match = input.match(new RegExp(`(?:^|, )${key}=([\\s\\S]*?)(?=, [a-z_]+=|$)`))
   return match ? match[1].trim() : undefined
+}
+
+// These writes have no decision-bearing result. Keep their full receipts in
+// the activity disclosure, but don't promote routine saving into a chat beat:
+// a row made only of them reads as plain note-keeping, never a headline.
+export function quietBookkeepingLabel({ live = false } = {}) {
+  return live ? 'Saving notes' : 'Saved notes'
+}
+
+export function isQuietBookkeepingTool(tool) {
+  const bare = bareControlName(tool?.tool)
+  const capture = tool?.app_activity?.app_slug === 'memory'
+    && tool.app_activity.activity_id === 'memory-capture'
+  if (!capture && !['checkpoint_chat', 'memory_remember', 'reflection_log_friction'].includes(bare)) return false
+  const activity = tool?.app_activity
+  return tool?.status !== 'failed' && !toolBlockFailed(tool)
+    && activity?.status !== 'failed' && !activity?.warning && !activity?.receipt_missing
+    && !(activity?.resources?.length > 0)
+}
+
+// A notification is redundant only when it points back to this card's chat.
+// Other notifications, failed sends and in-flight sends remain real activity.
+export function isOwnerAnswerNotification(tool, chatId) {
+  if (bareControlName(tool?.tool) !== 'notify_owner'
+      || tool?.status !== 'done' || toolBlockFailed(tool)) return false
+  if (typeof tool.input !== 'string') return false
+  let args
+  try {
+    args = JSON.parse(tool.input)
+  } catch {
+    // Legacy summaries are unescaped and truncated; ambiguous inputs stay visible.
+    if (/^(?:\{|\[)/.test(tool.input.trimStart()) || tool.input.length >= 200) return false
+    const pairs = [...tool.input.matchAll(/(?:^|, )([a-z_]+)=([\s\S]*?)(?=, [a-z_]+=|$)/g)]
+    if (!pairs.length || pairs[0].index !== 0 || new Set(pairs.map(p => p[1])).size !== pairs.length) return false
+    args = Object.fromEntries(pairs.map(p => [p[1], p[2]]))
+  }
+  if (!args || typeof args !== 'object' || Array.isArray(args)
+      || args.title !== 'Möbius needs your answer') return false
+  return !Object.hasOwn(args, 'target') || (chatId && args.target === `/shell/?chat=${chatId}`)
 }
 
 function summaryValue(input, key) {
@@ -538,5 +578,6 @@ export function memoryRecallLabel(tool) {
   return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`
 }
 export function isDistinctiveActivityTool(item) {
-  return item?.type === 'tool' && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+  return item?.type === 'tool' && !isQuietBookkeepingTool(item)
+    && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
 }

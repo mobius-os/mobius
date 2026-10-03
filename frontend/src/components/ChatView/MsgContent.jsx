@@ -13,7 +13,7 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
-import { foldAppActivityOperations } from './activityGrouping.js'
+import { foldAppActivityOperations, joinQuietSavesToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -243,7 +243,7 @@ function MsgContentInner({
     // the live stream absorbs the tool twin into the card. Skip the twin
     // here so a reopened chat matches the live view — render-time, so it
     // also cleans up already-persisted old chats with no backend migration.
-    const skipToolIdx = suppressedQuestionToolIndices(displayBlocks)
+    const skipToolIdx = suppressedQuestionToolIndices(displayBlocks, chatId)
 
     // Entry idx is the POST-suppression position, not the raw msg.blocks
     // ordinal. The two surfaces of the active answer disagree about the twin:
@@ -278,10 +278,14 @@ function MsgContentInner({
       activitySourceBlocks || displayBlocks,
       chatId,
     )
+    const coalescedEntries = coalesceThinkingEntries(
+      mergeAdjacentPeerActivityEntries(positionedEntries),
+    )
+    // A settled reply's trailing routine saves join its earlier activity line
+    // instead of adding a row below the answer. Live turns keep stream order
+    // so their tail ownership is unchanged while the agent is still working.
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      coalesceThinkingEntries(
-        mergeAdjacentPeerActivityEntries(positionedEntries),
-      ),
+      isStreaming ? coalescedEntries : joinQuietSavesToActivity(coalescedEntries),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means

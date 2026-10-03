@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from app.chat_message_identity import assistant_message_index
@@ -30,7 +31,56 @@ _MAX_SOURCE_ROWS_SCANNED = 512
 MAX_ACTIVITY_DETAIL_BLOCKS = 2000
 
 
-def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
+def _is_owner_answer_notification(block: dict, chat_id: str | None) -> bool:
+  """Recognize a settled Q&A push to this chat, not a distinct notification."""
+  if block.get("tool") not in {
+    "mobius_control:notify_owner", "mcp__mobius_control__notify_owner",
+  } or block.get("status") != "done":
+    return False
+  raw = block.get("input")
+  if not isinstance(raw, str):
+    return False
+  try:
+    args = json.loads(raw)
+  except ValueError:
+    # Claude's bounded key=value summaries; never guess an omitted target
+    # when the summary itself may have been truncated.
+    if raw.lstrip().startswith(("{", "[")) or len(raw) >= 200:
+      return False
+    pairs = list(re.finditer(r"(?:^|, )([a-z_]+)=([\s\S]*?)(?=, [a-z_]+=|$)", raw))
+    # Delimiters inside an unescaped value can impersonate another argument.
+    if not pairs or pairs[0].start() != 0 or len({p[1] for p in pairs}) != len(pairs):
+      return False
+    args = {p[1]: p[2] for p in pairs}
+  if not isinstance(args, dict) or args.get("title") != "Möbius needs your answer":
+    return False
+  if "target" in args and (chat_id is None or args["target"] != f"/shell/?chat={chat_id}"):
+    return False
+  exit_code = block.get("output_exit_code")
+  if exit_code is None:
+    exit_code = tool_output_exit_code(block.get("output"))
+  # MCP can complete successfully while reporting an application failure.
+  try:
+    result = json.loads(block.get("output") or "")
+  except (ValueError, TypeError):
+    result = None
+  for _depth in range(5):
+    if not isinstance(result, dict):
+      break
+    if result.get("isError") is True:
+      return False
+    if len(result) != 1 or next(iter(result)) not in {"result", "content", "text", "summary", "output", "data"}:
+      break
+    result = next(iter(result.values()))
+    if isinstance(result, str):
+      try:
+        result = json.loads(result)
+      except ValueError:
+        break
+  return exit_code in (None, 0)
+
+
+def redundant_interaction_tool_indexes(blocks: list[dict], *, chat_id: str | None = None) -> set[int]:
   """Return tool transport whose product card owns the visible interaction.
 
   New saved-card helpers carry an exact, sink-validated card identity and may
@@ -51,6 +101,8 @@ def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
     if not isinstance(block, dict):
       continue
     if block.get("type") == "tool":
+      if question_ids and _is_owner_answer_notification(block, chat_id):
+        owned.add(index)
       if block.get("owner_card_question_id") in question_ids:
         owned.add(index)
       # Historical saved-card turns predate the explicit ownership stamp. They
@@ -534,6 +586,7 @@ def compact_messages_for_detail(
   message_offset: int,
   binding: RecallBinding,
   live_message: dict | None = None,
+  chat_id: str | None = None,
 ) -> list[dict]:
   """Project settled activity runs into small, lazily expandable summaries.
 
@@ -558,7 +611,7 @@ def compact_messages_for_detail(
       continue
 
     sources = message_sources_for_detail(message)
-    redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
+    redundant_tool_indexes = redundant_interaction_tool_indexes(blocks, chat_id=chat_id)
     next_blocks: list[dict] = []
     # Stored-block index of each emitted passthrough block (None for a compact
     # run, which carries start/end). Recorded activity positions use stored

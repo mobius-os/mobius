@@ -697,6 +697,7 @@ def _chat_detail_response(
       # Read path: an uninstalled provider's past citations stay readable.
       binding=resolve_recall_binding(db, include_uninstalled=True),
       live_message=compact_exempt_live_message,
+      chat_id=chat.id,
     )
   from app.chat_media_dimensions import project_message_image_dimensions
   page = project_message_image_dimensions(
@@ -1938,7 +1939,7 @@ def get_chat_activity_detail(
   if not isinstance(blocks, list) or end > len(blocks):
     raise HTTPException(status_code=404, detail="Activity range not found.")
 
-  redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
+  redundant_tool_indexes = redundant_interaction_tool_indexes(blocks, chat_id=chat.id)
   selected = [
     (raw_index, block)
     for raw_index, block in enumerate(blocks[start:end], start=start)

@@ -1,4 +1,4 @@
-import { isDistinctiveActivityTool } from './toolActivityLabel.js'
+import { isDistinctiveActivityTool, isQuietBookkeepingTool } from './toolActivityLabel.js'
 
 // One boundary rule for transcript-level agent activity. Helper completions are
 // incoming agent activity just like peer messages are outgoing agent activity;
@@ -101,4 +101,40 @@ export function groupActivityRuns(entries) {
   }
   flush()
   return nodes
+}
+
+const isQuietSaveEntry = entry => {
+  const item = entry?.item
+  if (item?.type === 'tool') return isQuietBookkeepingTool(item)
+  // A saved reply's compact block summarizes a stored range. It is a quiet
+  // save only when every counted step is visible here and is itself quiet.
+  if (item?.type !== 'activity' || !Array.isArray(item.entries) || !item.entries.length) return false
+  const tools = item.entries.filter(inner => inner?.item?.type === 'tool')
+  return tools.length === item.entries.length
+    && (!Number.isInteger(item.tool_count) || item.tool_count === tools.length)
+    && tools.every(inner => isQuietBookkeepingTool(inner.item))
+}
+
+const joinsActivityLine = entry => entry?.item?.type === 'activity' || isActivityRunEntry(entry)
+
+// Routine saves (chat notes, Memory captures, friction logs) usually land after
+// a reply's prose. On their own they add a trailing row that says only "Saved
+// notes" and pushes the next turn down. In a settled reply, move each save to
+// just after the reply's latest earlier activity entry so the ordinary
+// grouping folds it into that line; its receipt stays inspectable there. A
+// save with no earlier activity keeps its place. Entries keep their idx, so
+// the joined line keeps its key. Pure; inputs are not mutated.
+export function joinQuietSavesToActivity(entries) {
+  const out = []
+  let anchor = -1
+  for (const entry of entries) {
+    if (isQuietSaveEntry(entry) && anchor >= 0 && anchor < out.length - 1) {
+      anchor += 1
+      out.splice(anchor, 0, entry)
+      continue
+    }
+    out.push(entry)
+    if (joinsActivityLine(entry)) anchor = out.length - 1
+  }
+  return out
 }
