@@ -2,10 +2,12 @@
 
 from pathlib import Path
 
+import pytest
 from sqlalchemy.orm import Session
 
-from app import app_cron
+from app import app_cron, app_git, models
 from app.app_cron import ScheduleChoice
+from app.config import get_settings
 
 
 def test_owner_timezone_is_recorded_validated_and_readable(client, auth):
@@ -178,3 +180,81 @@ def test_declaration_without_provenance_is_never_adopted_as_the_owners():
   _write_zone_declaration(9115, "memory", "Asia/Tokyo", "30 5 * * *")
 
   assert app_cron.owner_schedule_to_keep(9115, "30 5 * * *", "fetch.sh") is None
+
+
+def test_rollback_restores_the_prior_choice_when_registration_fails():
+  _owner_daily(9116)
+  prior = app_cron.read_schedule_choice(9116)
+
+  try:
+    with app_cron.schedule_choice_rollback(9116):
+      app_cron.record_schedule_choice(9116, ScheduleChoice(
+        source="owner", cron="0 3 * * *", job="fetch.sh",
+      ))
+      raise RuntimeError("registration failed")
+  except RuntimeError:
+    pass
+
+  assert app_cron.read_schedule_choice(9116) == prior
+
+
+def test_rollback_leaves_no_provenance_where_there_was_none():
+  with app_cron.schedule_choice_rollback(9117):
+    app_cron.record_schedule_choice(9117, ScheduleChoice(
+      source="owner", cron="0 3 * * *", job="fetch.sh",
+    ))
+  assert app_cron.read_schedule_choice(9117) is not None
+
+  try:
+    with app_cron.schedule_choice_rollback(9118):
+      app_cron.record_schedule_choice(9118, ScheduleChoice(
+        source="owner", cron="0 3 * * *", job="fetch.sh",
+      ))
+      raise RuntimeError("registration failed")
+  except RuntimeError:
+    pass
+
+  assert app_cron.read_schedule_choice(9118) is None
+
+
+@pytest.fixture
+def scheduled_app(db):
+  """One installed app whose accepted revision carries a job script."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "schedule-rollback"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  app = models.App(
+    name="Schedule rollback", description="", slug="schedule-rollback",
+    source_dir=str(source_dir), jsx_source="export default () => null",
+    token_nonce="schedule-rollback-nonce",
+  )
+  db.add(app)
+  db.flush()
+  app_git.ensure_repo(source_dir)
+  app_git.commit_local(source_dir, "Accept schedule fixture")
+  app.source_commit = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  from app.applied_app_runtime import prepare_runtime, publish_runtime
+  publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
+  db.commit()
+  return app
+
+
+def test_a_schedule_save_that_failed_is_never_applied_by_a_later_update(
+  client, auth, scheduled_app, monkeypatch,
+):
+  """The owner was told the save failed, so no update may adopt that time."""
+  def refuse(*_args, **_kwargs):
+    raise app_cron.CronInfrastructureError(500, "Could not save schedule.")
+
+  monkeypatch.setattr(app_cron, "register_cron", refuse)
+
+  response = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "15 7 * * *", "job": "fetch.sh"}, headers=auth,
+  )
+
+  assert response.status_code == 500, response.text
+  assert app_cron.read_schedule_choice(scheduled_app.id) is None
+  assert app_cron.owner_schedule_to_keep(
+    scheduled_app.id, "0 6 * * *", "fetch.sh",
+  ) is None

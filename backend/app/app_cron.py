@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -83,6 +84,26 @@ def record_schedule_choice(app_id: int, choice: ScheduleChoice) -> None:
 
 def clear_schedule_choice(app_id: int) -> None:
   (schedule_state_dir(app_id) / _SCHEDULE_CHOICE_FILE).unlink(missing_ok=True)
+
+
+@contextmanager
+def schedule_choice_rollback(app_id: int):
+  """Keep recorded provenance from outliving the registration it describes.
+
+  Provenance is written before the declaration so no declaration exists whose
+  origin a later update must guess. A registration that then fails would leave
+  a recorded choice the app never ran, which an accepted update later applies
+  as the owner's schedule, so the prior provenance is restored instead.
+  """
+  prior = read_schedule_choice(app_id)
+  try:
+    yield
+  except BaseException:
+    if prior is None:
+      clear_schedule_choice(app_id)
+    else:
+      record_schedule_choice(app_id, prior)
+    raise
 
 
 def read_schedule_choice(app_id: int) -> ScheduleChoice | None:

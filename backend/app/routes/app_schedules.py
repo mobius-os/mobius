@@ -632,23 +632,27 @@ def update_app_schedule(
   # Provenance lets accepted updates keep this choice instead of resetting it
   # to the manifest default (see app_cron.owner_schedule_to_keep). It is
   # recorded before registering, so no declaration exists without it.
-  app_cron.record_schedule_choice(app_id, app_cron.ScheduleChoice(
-    source="owner",
-    cron=body.cron,
-    job=job_name,
-    timezone=timezone,
-    manifest_default=manifest_schedule[0] if manifest_schedule else None,
-  ))
-  if timezone is not None:
-    materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
-    app_cron.register_cron(
-      slug, materialized, job_path, app_id,
-      timezone=timezone, zone_cron=body.cron,
-    )
-    return {
-      "cron": materialized, "job": job_name,
-      "timezone": timezone, "zone_cron": body.cron,
-    }
-  app_cron.register_cron(slug, body.cron, job_path, app_id)
+  # A registration that fails leaves no schedule, so its provenance must not
+  # survive either: an accepted update would otherwise apply the time the
+  # owner was told could not be saved (see app_cron.schedule_choice_rollback).
+  with app_cron.schedule_choice_rollback(app_id):
+    app_cron.record_schedule_choice(app_id, app_cron.ScheduleChoice(
+      source="owner",
+      cron=body.cron,
+      job=job_name,
+      timezone=timezone,
+      manifest_default=manifest_schedule[0] if manifest_schedule else None,
+    ))
+    if timezone is not None:
+      materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
+      app_cron.register_cron(
+        slug, materialized, job_path, app_id,
+        timezone=timezone, zone_cron=body.cron,
+      )
+      return {
+        "cron": materialized, "job": job_name,
+        "timezone": timezone, "zone_cron": body.cron,
+      }
+    app_cron.register_cron(slug, body.cron, job_path, app_id)
   return {"cron": body.cron, "job": job_name, "timezone": None,
           "zone_cron": None}
