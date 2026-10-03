@@ -48,16 +48,49 @@ returns a failure. Both arm the same wait.
 {
   "description": "the new deploy answering its health check",
   "condition_owner": "the hosting provider's deploy",
+  "check_description": "Whether the website answers its health check",
+  "on_ready": "Verify the published website and report the result",
   "command": "test \"$(curl -s -o /dev/null -w '%{http_code}' https://app.example.com/health)\" = 200",
   "interval_secs": 120,
   "deadline_secs": 1800
 }
 ```
 
-A pull request works the same way: `gh pr view 123 --repo owner/repo --json
-state -q .state | grep -qx MERGED` waits for a merge, and
-`/data/platform/scripts/pr-checks.sh owner/repo PR SHA` waits for that exact
-commit's checks to finish.
+For GitHub checks, prefer the standard operation instead of composing a shell
+command. Give exactly one of `github_checks`, `command`, or `delay_secs`:
+
+```json
+{
+  "description": "The published change's checks finish",
+  "github_checks": {"repository": "owner/repo", "pull_request": 123,
+                    "head_sha": "0123456789abcdef0123456789abcdef01234567"},
+  "on_ready": "Review every result before deciding the next step",
+  "interval_secs": 120,
+  "deadline_secs": 1800
+}
+```
+
+This uses the existing GitHub connection, checks every page of check runs and
+commit statuses for that exact published head, and shows a bounded progress
+summary in the card. **Finished does not mean passed**: unsuccessful completed
+checks still wake the chat for review. A replaced head or unreadable result is
+a failed monitor, not an ordinary pending check. No checks yet stays pending.
+The existing `scripts/pr-checks.sh owner/repo PR SHA` entry point uses the same
+checker while preserving its 0/1/error contract for previously saved commands.
+
+For every wait, write `check_description` (what is actually inspected) and
+`on_ready` (what you will do afterward) in plain language. Standard GitHub
+checks supply their own check description. For an acknowledged internal
+executor, pass `owner_chat_id`: the card resolves its current title into a
+link. Keep `condition_owner` readable; do not bury chat ids in its prose.
+These descriptions are explanations, never authorization for the follow-up.
+The card keeps exact commands under **Technical details**. Never put credentials
+in commands or descriptions; raw diagnostic output is not user-facing progress.
+
+A custom command remains the escape hatch for other observable conditions.
+For example, `gh pr view 123 --repo owner/repo --json state -q .state |
+grep -qx MERGED` observes a merge. It cannot report normal pending progress
+through stdout: the silent-unmet/error contract below remains unchanged.
 
 - The check command must be **read-only** and exit **0 exactly when the
   condition is met**. An ordinary unmet result is **exit 1 with no diagnostic
@@ -77,7 +110,7 @@ commit's checks to finish.
   monitor proves only that someone will check; it never proves that work is
   happening. For internal work, do not declare the wait until that executor has
   explicitly accepted the handoff.
-- `deadline_secs` / `--deadline` is required for command waits (max 7 days):
+- `deadline_secs` / `--deadline` is required for command and GitHub waits (max 7 days):
   use roughly 2–3× the expected duration. At the deadline, the same chat wakes
   to inspect the owner and real state before deciding whether safe takeover,
   reassignment, a longer wait, or a blocker report is correct.

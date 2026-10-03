@@ -46,6 +46,7 @@ from app.continuations import (
   WAIT_RESULT_MESSAGE_KIND,
 )
 from app.timeutil import now_naive_utc
+from app.wait_checks import GitHubChecks, read_check_observation
 
 _LOG = logging.getLogger("moebius.chat_waits")
 
@@ -164,6 +165,10 @@ def declare_wait(
   interval_secs: int | None = None,
   deadline_secs: int | None = None,
   created_by_run_id: str | None = None,
+  github_checks: dict | None = None,
+  check_description: str | None = None,
+  on_ready: str | None = None,
+  owner_chat_id: str | None = None,
 ) -> models.ChatWait:
   """Validate and persist one armed wait for `chat_id`."""
   description = (description or "").strip()
@@ -172,13 +177,39 @@ def declare_wait(
   condition_owner = (condition_owner or "").strip()
   if len(condition_owner) > 160:
     raise WaitValidationError("condition_owner must not exceed 160 characters")
-  if kind not in ("command", "timer"):
-    raise WaitValidationError("kind must be 'command' or 'timer'")
+  if kind not in ("command", "timer", "github_checks"):
+    raise WaitValidationError("kind must be 'command', 'timer', or 'github_checks'")
+  details = {}
+  for name, value in (("check_description", check_description), ("on_ready", on_ready)):
+    if value is not None:
+      if not isinstance(value, str) or not value.strip() or len(value) > 500:
+        raise WaitValidationError(f"{name} must be a nonempty string of at most 500 characters")
+      details[name] = value.strip()
+  if owner_chat_id is not None:
+    owner_chat = db.query(models.Chat).filter(
+      models.Chat.id == owner_chat_id, models.Chat.deleted_at.is_(None),
+    ).first()
+    if owner_chat is None:
+      raise WaitValidationError("owner_chat_id must name an existing active chat")
+    details["owner_chat_id"] = owner_chat_id
+  if kind == "github_checks":
+    if command or delay_secs is not None:
+      raise WaitValidationError("GitHub checks cannot also specify a command or timer")
+    try:
+      spec = GitHubChecks.model_validate(github_checks)
+    except ValueError as exc:
+      raise WaitValidationError("github_checks needs repository, pull_request, and head_sha") from exc
+    details["github_checks"] = spec.model_dump()
+    details.setdefault("check_description", f"GitHub checks for {spec.repository} #{spec.pull_request}")
+    condition_owner = condition_owner or "GitHub"
+    command = spec.command()
+  elif github_checks is not None:
+    raise WaitValidationError("github_checks is only valid for a GitHub wait")
   condition_owner = (condition_owner or "").strip() or None
   if kind == "command" and condition_owner is None:
     raise WaitValidationError("command waits need a condition owner")
-  if kind == "command" and deadline_secs is None:
-    raise WaitValidationError("command waits need an explicit deadline")
+  if kind in ("command", "github_checks") and deadline_secs is None:
+    raise WaitValidationError("command and GitHub waits need an explicit deadline")
 
   now = now_naive_utc()
   interval = int(
@@ -198,7 +229,7 @@ def declare_wait(
     )
 
   due_at = None
-  if kind == "command":
+  if kind in ("command", "github_checks"):
     command = command if isinstance(command, str) else ""
     if not command.strip():
       raise WaitValidationError("command waits need a check command")
@@ -245,6 +276,7 @@ def declare_wait(
     ),
     kind=kind,
     command=command,
+    condition_json=details or None,
     due_at=due_at,
     interval_secs=interval,
     deadline_at=deadline_at,
@@ -349,10 +381,35 @@ def wait_resume_blocker(db: Session, row: models.ChatWait) -> str | None:
   return None
 
 
+def _latest_observation(row: models.ChatWait) -> dict | None:
+  observation = None
+  if row.checks_count and row.kind == "github_checks":
+    observation = read_check_observation(0, row.last_output).model_dump()
+  elif row.checks_count and row.kind == "command":
+    state = "met" if row.last_exit_code == 0 else "failed" if row.status == "failed" else "pending"
+    observation = {"state": state, "summary": {
+      "met": "The condition was met.",
+      "pending": "The condition has not been met yet.",
+      "failed": "The check could not finish. The agent will investigate.",
+    }[state]}
+  return observation
+
+
 def serialize_wait(row: models.ChatWait, *, db: Session) -> dict:
   # Platform activation has no product deadline. Its non-null storage value is
   # retained only for compatibility with the original shared ChatWait schema.
   presented_deadline = None if row.kind == "platform_activation" else row.deadline_at
+  details = row.condition_json if isinstance(row.condition_json, dict) else {}
+  owner_chat = None
+  if owner_id := details.get("owner_chat_id"):
+    owner = db.query(models.Chat.id, models.Chat.title).filter(
+      models.Chat.id == owner_id, models.Chat.deleted_at.is_(None),
+    ).first()
+    if owner:
+      owner_chat = {"id": owner.id, "title": owner.title or "Untitled chat"}
+  check_url = None
+  if row.kind == "github_checks":
+    check_url = GitHubChecks.model_validate(details["github_checks"]).url
   return {
     "id": row.id,
     "chat_id": row.chat_id,
@@ -360,6 +417,11 @@ def serialize_wait(row: models.ChatWait, *, db: Session) -> dict:
     "condition_owner": row.condition_owner,
     "kind": row.kind,
     "command": row.command,
+    "check_description": details.get("check_description"),
+    "on_ready": details.get("on_ready"),
+    "owner_chat": owner_chat,
+    "check_url": check_url,
+    "latest_result": _latest_observation(row),
     "status": row.status,
     "delivery_pending": row.status in _OUTCOMES and row.resume_delivered_at is None,
     "resume_delivered_at": (
@@ -537,6 +599,7 @@ def terminal_wait_summaries_by_message_index(
     projected.setdefault(candidate_index, []).append({
       "id": row.id,
       "description": row.description,
+      "latest_result": _latest_observation(row) if row.kind == "github_checks" else None,
       "condition_owner": row.condition_owner,
       "status": row.status,
       "delivery_pending": row.status in _OUTCOMES and row.resume_delivered_at is None,
@@ -661,6 +724,7 @@ def _compose_resume_notice(row: models.ChatWait, outcome: str) -> str:
     "outcome": outcome,
     "kind": row.kind,
     "command": row.command,
+    "on_ready": (row.condition_json or {}).get("on_ready"),
     "checks_count": row.checks_count,
     "last_exit_code": row.last_exit_code,
     "declared_at": row.created_at.isoformat() if row.created_at else None,
@@ -1075,15 +1139,18 @@ async def _check_one(row_id: str) -> bool:
     exit_code = 0 if met else (2 if check_failed else 1)
   else:
     exit_code, output = await _run_check(command or "false", wait_id=row_id)
-    met = exit_code == 0
-    # Command waits have a deliberate three-way contract. A normal unmet
-    # predicate is silent exit 1; output is reserved for diagnostics or a met
-    # result. This catches shell quoting, missing auth/environment, missing
-    # executables, timeouts, and provider errors without guessing from brittle
-    # message substrings.
-    check_failed = not met and not (
-      exit_code == 1 and not (output or "").strip()
-    )
+    if kind == "github_checks":
+      observation = read_check_observation(exit_code, output)
+      met = observation.state == "met"
+      check_failed = observation.state == "failed"
+      output = observation.model_dump_json()
+    else:
+      met = exit_code == 0
+      # Custom commands retain their silent-unmet/error contract. Only the
+      # explicitly typed checker may report progress while still pending.
+      check_failed = not met and not (
+        exit_code == 1 and not (output or "").strip()
+      )
 
   with SessionLocal() as db:
     row = db.query(models.ChatWait).filter(

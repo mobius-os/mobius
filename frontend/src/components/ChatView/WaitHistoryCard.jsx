@@ -18,6 +18,7 @@ export default function WaitHistoryCard({ summary }) {
           <LifecycleOutcome tone={view.tone} />{view.kicker}
         </span>
         <strong className="chat__goal-history-objective">{view.condition}</strong>
+        {view.result && <span className="chat__goal-history-meta">{view.result}</span>}
         {view.metadata && (
           <span className="chat__goal-history-meta">{view.metadata}</span>
         )}

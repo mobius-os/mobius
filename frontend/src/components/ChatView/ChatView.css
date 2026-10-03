@@ -4079,7 +4079,7 @@
 
 .chat__wait-card--expanded {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border-light));
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  background: var(--surface);
 }
 
 .chat__wait-summary {
@@ -4128,8 +4128,12 @@
 }
 
 .chat__wait-details {
+  max-height: min(50dvh, 480px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: 16px;
   padding: 10px 12px 12px;
   border-top: 1px solid var(--border-light);
@@ -4168,6 +4172,58 @@
   font-size: 13px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+.chat__wait-technical {
+  min-width: 0;
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.chat__wait-technical summary {
+  cursor: pointer;
+  width: fit-content;
+  min-height: 44px;
+  padding: 10px 0;
+  color: var(--text);
+}
+
+.chat__wait-technical[open] summary {
+  margin-bottom: 8px;
+}
+
+.chat__wait-technical code {
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat__wait-details a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.chat__wait-source {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-size: 12px;
+  width: fit-content;
+}
+
+.chat__wait-technical summary:focus-visible,
+.chat__wait-details a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.chat__wait-observation {
+  margin: 0;
+  padding: 0 12px 8px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 /* Archived notice: the waiting-card shell with one Restore action. */

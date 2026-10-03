@@ -63,18 +63,26 @@ def declare_wait(
   delay_secs: int | None = None,
   interval_secs: int | None = None,
   deadline_secs: int | None = None,
+  github_checks: dict | None = None,
+  check_description: str | None = None,
+  on_ready: str | None = None,
+  owner_chat_id: str | None = None,
 ) -> dict:
-  """Arm one command or timer wait through the chat-bound platform API."""
-  if bool(command) == bool(delay_secs):
-    raise SystemExit("declare needs exactly one of command or delay_secs")
+  """Arm one bounded wait through the chat-bound platform API."""
+  if sum(value is not None for value in (command, delay_secs, github_checks)) != 1:
+    raise SystemExit("declare needs exactly one of command, delay_secs, or github_checks")
   if command and not (condition_owner or "").strip():
     raise SystemExit("command waits need --owner")
-  if command and deadline_secs is None:
+  if (command or github_checks is not None) and deadline_secs is None:
     raise SystemExit("command waits need --deadline")
   return _call("POST", "/api/chat-waits", {
     "description": description,
     "condition_owner": condition_owner,
-    "kind": "command" if command else "timer",
+    "kind": "github_checks" if github_checks is not None else "command" if command else "timer",
+    "github_checks": github_checks,
+    "check_description": check_description,
+    "on_ready": on_ready,
+    "owner_chat_id": owner_chat_id,
     "command": command,
     "delay_secs": delay_secs,
     "interval_secs": interval_secs,

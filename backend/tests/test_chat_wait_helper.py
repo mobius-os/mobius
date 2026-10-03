@@ -48,7 +48,7 @@ def test_a_wait_with_both_a_command_and_a_timer_is_refused_before_any_request(
   })])
 
   assert status == 1
-  assert "exactly one of command or delay_secs" in capsys.readouterr().out
+  assert "exactly one of command, delay_secs, or github_checks" in capsys.readouterr().out
 
 
 def test_malformed_stdin_arguments_are_a_usage_error(monkeypatch, capsys):
@@ -57,3 +57,17 @@ def test_malformed_stdin_arguments_are_a_usage_error(monkeypatch, capsys):
 
   assert control._cli_call(["call", "declare_wait", "--args-json", "-"]) == 2
   assert "invalid --args-json" in capsys.readouterr().err
+
+
+def test_standard_check_details_cross_the_tool_boundary_without_shell_scripting(monkeypatch):
+  control = _control(monkeypatch)
+  captured = []
+  monkeypatch.setattr(control._WAITS, "_call", lambda *args: captured.append(args) or {"kind": "github_checks"})
+  args = {"description": "Checks finish", "github_checks": {
+    "repository": "owner/repo", "pull_request": 7, "head_sha": "a" * 40},
+    "deadline_secs": 600, "on_ready": "Review the results", "check_description": "Published checks", "owner_chat_id": "owner-chat"}
+  assert control._cli_call(["call", "declare_wait", "--args-json", json.dumps(args)]) == 0
+  payload = captured[0][2]
+  assert payload["kind"] == "github_checks"
+  for name in ("github_checks", "on_ready", "check_description", "owner_chat_id"):
+    assert payload[name] == args[name]

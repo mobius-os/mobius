@@ -28,6 +28,7 @@ function HandoffCard({
   title,
   text,
   meta,
+  description,
   rows,
   children,
 }) {
@@ -48,6 +49,7 @@ function HandoffCard({
         </span>
         <span className="chat__wait-meta">{meta}</span>
       </button>
+      {description && <p className="chat__wait-observation">{description}</p>}
       {expanded && (
         <div className="chat__wait-details">
           <dl className="chat__wait-detail-list">
@@ -66,6 +68,13 @@ function HandoffCard({
 
 export function WaitCard({ wait, expanded, onToggle, onCancel }) {
   const presentation = waitPresentation(wait)
+  const owner = wait.owner_chat
+    ? <a href={`/shell/?chat=${encodeURIComponent(wait.owner_chat.id)}`}>{wait.owner_chat.title}</a>
+    : presentation.owner
+  const checking = wait.check_description || (wait.kind === 'timer'
+    ? 'A one-time timer' : wait.kind === 'platform_activation'
+      ? 'Whether the requested platform changes have loaded'
+      : 'A read-only check (see Technical details)')
   return (
     <HandoffCard
       expanded={expanded}
@@ -74,16 +83,28 @@ export function WaitCard({ wait, expanded, onToggle, onCancel }) {
       title={`${presentation.condition} — ${presentation.summary}`}
       text={presentation.condition}
       meta={presentation.summary}
+      description={wait.kind === 'github_checks' ? wait.latest_result?.summary : null}
       rows={[
         { label: 'Waiting for', value: presentation.condition, primary: true },
         ...(wait.delivery_pending ? [{ label: 'Original condition', value: wait.description, primary: true }] : []),
-        { label: 'Condition owner', value: presentation.owner },
-        { label: 'Checker', value: presentation.checker },
-        { label: 'Activity', value: presentation.activity },
+        { label: 'Checking', value: checking },
+        { label: 'Latest result', value: presentation.latest },
+        { label: 'Then', value: wait.on_ready || 'This chat resumes to review the result and continue.' },
+        { label: 'Handled by', value: owner },
+        { label: 'Timing', value: presentation.checker },
         { label: presentation.timeoutLabel, value: presentation.timeout },
-        { label: 'Agent usage', value: presentation.usage },
       ]}
     >
+      <details className="chat__wait-technical">
+        <summary>Technical details</summary>
+        <dl className="chat__wait-detail-list">
+          <div className="chat__wait-detail-row"><dt>Activity</dt><dd>{presentation.activity}</dd></div>
+          <div className="chat__wait-detail-row"><dt>Agent usage</dt><dd>{presentation.usage}</dd></div>
+          {wait.command && <div className="chat__wait-detail-row"><dt>Exact check</dt><dd><code>{wait.command}</code></dd></div>}
+          {wait.last_exit_code != null && <div className="chat__wait-detail-row"><dt>Last exit code</dt><dd>{wait.last_exit_code}</dd></div>}
+        </dl>
+      </details>
+      {wait.check_url && <a className="chat__wait-source" href={wait.check_url} target="_blank" rel="noopener noreferrer">View GitHub checks</a>}
       {wait.kind !== 'platform_activation' && !wait.delivery_pending && <button
         type="button"
         className="chat__wait-cancel"

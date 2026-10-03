@@ -85,6 +85,11 @@ export function waitPresentation(wait) {
   const summary = wait.kind === 'timer'
     ? (due ? `resumes ${due}` : 'resumes later')
     : (next ? `next check ${next}` : cadence)
+  const latest = wait.latest_result?.summary || (wait.kind === 'timer'
+    ? (wait.status === 'met' ? 'The timer finished.' : 'The timer has not finished yet.')
+    : wait.status === 'met' ? 'The condition was met.'
+      : wait.status === 'failed' ? 'The check could not finish.'
+        : count ? 'The condition has not been met yet.' : 'Not checked yet.')
 
   if (wait.delivery_pending) {
     const outcome = wait.status === 'failed' ? 'Check failed'
@@ -99,6 +104,7 @@ export function waitPresentation(wait) {
       summary: 'result saved',
       checker: 'Finished · no more checks',
       activity,
+      latest: `${latest}${last ? ` · checked at ${last}` : ''}`,
       timeoutLabel: 'Next step',
       timeout: wakeUp,
       usage: 'No model tokens while blocked · one turn when the result is delivered',
@@ -111,10 +117,13 @@ export function waitPresentation(wait) {
     summary,
     checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,
     activity,
+    latest: `${latest}${last ? ` · checked at ${last}` : ''}`,
     timeoutLabel: activation ? 'Wake-up' : 'If it takes too long',
     timeout: activation
       ? 'A later ready restart wakes this chat; the Restart card has no time limit'
-      : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
+      : wait.kind === 'timer' ? (due ? `This chat resumes at ${due}` : 'This chat resumes when the timer finishes')
+        : wait.deadline_at ? `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`
+          : 'No deadline recorded',
     usage: 'No model tokens while checking · one turn when it wakes',
   }
 }

@@ -91,7 +91,7 @@ test('active wait details show the full condition and its owner separately', () 
   }))
 
   assert.match(html, new RegExp(condition))
-  assert.match(html, /Condition owner<\/dt><dd>Hosted deployment/)
+  assert.match(html, /Handled by<\/dt><dd>Hosted deployment/)
   assert.match(html, /Stop waiting/)
 })
 
@@ -197,4 +197,27 @@ test('history distinguishes a saved result from the continuation it has not woke
   assert.doesNotMatch(html, /Wait completed/)
   assert.match(html, /follow-up pending/)
   assert.equal(waitWokeItsAnswer({ ...summary, delivery_pending: false }), true)
+})
+
+
+test('wait explanations show real observations and links while commands stay in opt-in details', () => {
+  const html = renderToStaticMarkup(createElement(WaitCard, {
+    wait: { id: 'github', kind: 'github_checks', description: 'Checks finish',
+      check_description: 'All checks for the reviewed change',
+      on_ready: 'Review the results before continuing',
+      owner_chat: { id: 'owner-chat', title: 'Reviewing the change' },
+      command: 'python3 exact-check.py',
+      check_url: 'https://github.com/owner/repo/pull/7/checks',
+      latest_result: { state: 'pending', summary: '3 of 4 checks have finished.' },
+      checks_count: 2, last_exit_code: 0 },
+    expanded: true, onToggle() {}, onCancel() {},
+  }))
+  assert.match(html, /Checking<\/dt><dd>All checks for the reviewed change/)
+  assert.match(html, /Latest result<\/dt><dd>3 of 4 checks have finished/)
+  assert.match(html, /Then<\/dt><dd>Review the results before continuing/)
+  assert.match(html, /href="\/shell\/\?chat=owner-chat">Reviewing the change/)
+  assert.match(html, /<details class="chat__wait-technical"><summary>Technical details<\/summary>/)
+  assert.match(html, /<code>python3 exact-check.py<\/code>/)
+  assert.match(html, /View GitHub checks/)
+  assert.ok(!html.includes('<details open'))
 })
