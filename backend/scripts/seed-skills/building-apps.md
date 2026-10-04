@@ -259,7 +259,9 @@ manifest, layered by how always-on they are:
 - **A system-prompt fragment (always-on, while installed).**
   `"system_prompt": "<name>.md"` (also a root-level `source_files` entry) —
   the file is appended to the base system prompt for EVERY chat, but ONLY while
-  the app is installed; uninstall removes it. Use it for a short,
+  the app is installed; uninstall removes it. Chats read it from the app's
+  last applied version, so an edit reaches chats started after the next
+  apply, never while it is still being written. Use it for a short,
   always-relevant default the agent should carry without being asked, and keep
   it tight — it costs tokens on every session. Memory ships `memory-core.md`;
   Pages ships `pages-core.md`. Max 256 KB.
