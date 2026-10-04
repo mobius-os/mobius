@@ -3968,12 +3968,13 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
 
   overrides = captured["config"].kwargs["config_overrides"]
   assert "tools.experimental_request_user_input.enabled=false" in overrides
+  assert "tools.view_image=false" in overrides
   assert captured["thread"]["sandbox"] == expected_sandbox
   assert captured["thread"]["approval_mode"] == expected_approval
   control = captured["thread"]["config"]["mcp_servers"]["mobius_control"]
   assert control["tools"] == {
     name: {"approval_mode": "approve"}
-    for name in platform_tools.expected_control_tool_names(
+    for name in platform_tools.codex_control_tool_names(
       top_level=scope is None,
     )
   }

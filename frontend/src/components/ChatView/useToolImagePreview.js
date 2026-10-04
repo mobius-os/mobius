@@ -20,11 +20,9 @@ async function sourceForReference(reference) {
     .split('/')
     .map(encodeURIComponent)
     .join('/')
-  const path = reference.kind === 'tmp'
-    ? `/api/chats/${encodeURIComponent(reference.chatId)}/tmp-images/${encodedFilename}`
-    : reference.kind === 'scratch'
-      ? `/api/chats/${encodeURIComponent(reference.chatId)}/scratch-images/${encodedFilename}`
-      : `/api/chats/${encodeURIComponent(reference.chatId)}/${reference.collection}/${encodedFilename}`
+  const path = reference.kind === 'scratch'
+    ? `/api/chats/${encodeURIComponent(reference.chatId)}/scratch-images/${encodedFilename}`
+    : `/api/chats/${encodeURIComponent(reference.chatId)}/${reference.collection}/${encodedFilename}`
   const generatedPreview = reference.kind === 'generated'
     ? `&preview=true${reference.expectedSha256 ? `&expected_sha256=${reference.expectedSha256}` : ''}`
     : ''

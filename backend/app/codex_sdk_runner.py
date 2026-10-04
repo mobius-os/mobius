@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app import generated_files
+from app import generated_files, viewed_images
 from app.codex_sdk_contract import (
   app_server_exit_code,
   app_server_pid,
@@ -65,6 +65,7 @@ from app.codex_events import (
   _record_collab_child_links,
   _tool_start_event,
   _tool_completed_events,
+  _is_control_image_view,
   _enum_wire_value,
   _codex_user_error,
   _agent_message_phase,
@@ -164,6 +165,9 @@ def _codex_config_overrides() -> list[str]:
   overrides.append("tools.experimental_request_user_input.enabled=false")
   # One provider turn per Möbius admission; never enable a competing loop.
   overrides.append("features.goals=false")
+  # The native viewer reports only a path whose bytes can change after the
+  # read. Möbius's view_image owns the read instead (platform_tools.py).
+  overrides.append("tools.view_image=false")
   overrides += CODEX_NATIVE_HELPERS_OFF
   return overrides
 
@@ -2117,6 +2121,13 @@ async def _run_codex_sdk_turn(
             for event in _tool_completed_events(
               item, sdk, streamed_command_output=streamed_command_output,
             ):
+              if _is_control_image_view(item, sdk):
+                # The preview is the chat snapshot of exactly the image this
+                # call returned to the provider; anything else has none.
+                event["viewed_image_media"] = await asyncio.to_thread(
+                  viewed_images.bound_snapshot,
+                  runtime_data_dir, chat_id, _model_dump(getattr(item, "result", None)),
+                )
               image_view_cls = sdk.get("ImageViewThreadItem")
               if image_view_cls is not None and isinstance(item, image_view_cls):
                 # Bind the completed view to its bytes without retaining a

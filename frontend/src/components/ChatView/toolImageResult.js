@@ -2,7 +2,7 @@
 
 const CHAT_IMAGE_PATH = /^\/data\/chats\/([A-Za-z0-9_-]+)\/(uploads|media)\/([^/]+)$/
 const GENERATED_IMAGE_PATH = /^\/data\/chats\/([A-Za-z0-9_-]+)\/deliverables\/inbox\/([^/]+)$/
-const TMP_IMAGE_PATH = /^\/tmp\/(.+)$/
+const VIEWED_SNAPSHOT_NAME = /^viewed-[a-f0-9]{64}\.(?:png|jpg|gif|webp)$/
 const SCRATCH_IMAGE_PATH = /^\/data\/agent-scratch\/([^/]+)\/(.+)$/
 const INLINE_IMAGE_TYPES = new Set([
   'image/png',
@@ -44,18 +44,12 @@ export function chatImageReference(input) {
   }
 }
 
-/** A native Codex image-view event records only its path. Temporary raster
- * images therefore use the owning chat's narrow, token-protected /tmp route
- * instead of waiting for a base64 result that Codex never emits. */
-export function temporaryImageReference(input, chatId) {
-  if (!chatId) return null
-  const match = imagePathFromInput(input).match(TMP_IMAGE_PATH)
-  if (!match) return null
-  return {
-    kind: 'tmp',
-    chatId,
-    filename: match[1],
-  }
+/** A view bound to a chat-owned snapshot previews exactly the bytes the
+ * provider received, however the viewed path changes afterwards. Unbound views
+ * of shared paths such as /tmp have no served preview. */
+export function viewedSnapshotReference(chatId, name) {
+  if (!chatId || typeof name !== 'string' || !VIEWED_SNAPSHOT_NAME.test(name)) return null
+  return { kind: 'chat', chatId, collection: 'media', filename: name }
 }
 
 /** A viewed deliverable previews through its final same-turn attachment.
@@ -97,8 +91,8 @@ export function scratchImageReference(input, chatId) {
 /** References that can render through an existing protected route without
  * loading the image tool's much larger base64 sidecar. */
 export function servedImageReference(input, chatId, generated = {}) {
-  return chatImageReference(input)
-    || temporaryImageReference(input, chatId)
+  return viewedSnapshotReference(chatId, generated.viewedMedia)
+    || chatImageReference(input)
     || scratchImageReference(input, chatId)
     || generatedImageReference(input, chatId, generated)
 }

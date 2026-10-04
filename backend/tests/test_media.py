@@ -1,9 +1,9 @@
+import tempfile
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
-import app.routes.media as media_routes
 from app.config import agent_scratch_root, get_settings
 
 
@@ -160,53 +160,18 @@ def test_serve_chat_media_rejects_directory(client, auth, chat):
   assert response.status_code == 404
 
 
-def test_serve_agent_tmp_image_with_chat_scoped_token(
-  client, auth, chat, tmp_path, monkeypatch,
-):
-  monkeypatch.setattr(media_routes, "_AGENT_TMP_ROOT", tmp_path)
-  source = tmp_path / "renders" / "preview.png"
-  source.parent.mkdir()
-  source.write_bytes(b"temporary-image-bytes")
+def test_global_tmp_files_have_no_chat_preview_route(client, auth, chat):
+  # A /tmp path is shared and mutable, so it cannot prove what a chat viewed.
+  # Views preview their chat-owned snapshot under /media instead.
+  with tempfile.NamedTemporaryFile(dir="/tmp", suffix=".png") as image:
+    image.write(b"\x89PNG\r\n\x1a\nanother chat's render")
+    image.flush()
+    response = client.get(
+      f"/api/chats/{chat.id}/tmp-images/{Path(image.name).name}",
+      params={"token": _media_token(client, auth, chat.id)},
+    )
 
-  response = client.get(
-    f"/api/chats/{chat.id}/tmp-images/renders/preview.png",
-    params={"token": _media_token(client, auth, chat.id)},
-  )
-
-  assert response.status_code == 200
-  assert response.content == b"temporary-image-bytes"
-  assert response.headers["content-type"] == "image/png"
-  assert response.headers["cache-control"] == "private, no-store"
-
-
-def test_serve_agent_tmp_image_rejects_non_images(
-  client, auth, chat, tmp_path, monkeypatch,
-):
-  monkeypatch.setattr(media_routes, "_AGENT_TMP_ROOT", tmp_path)
-  source = tmp_path / "not-an-image.txt"
-  source.write_text("private temporary text", encoding="utf-8")
-
-  response = client.get(
-    f"/api/chats/{chat.id}/tmp-images/not-an-image.txt",
-    headers=auth,
-  )
-
-  assert response.status_code == 415
-
-
-def test_serve_agent_tmp_image_rejects_symlink_escape(
-  client, auth, chat, tmp_path, monkeypatch,
-):
-  monkeypatch.setattr(media_routes, "_AGENT_TMP_ROOT", tmp_path)
-  link = tmp_path / "outside.png"
-  link.symlink_to("/etc/hosts")
-
-  response = client.get(
-    f"/api/chats/{chat.id}/tmp-images/outside.png",
-    headers=auth,
-  )
-
-  assert response.status_code == 400
+  assert response.status_code == 404
 
 
 def test_serve_agent_scratch_image_from_same_chat_with_media_token(

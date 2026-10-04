@@ -41,10 +41,15 @@ def test_helpers_are_builtin_without_subagents_app(monkeypatch, top_level, coord
     None, control_enabled=True, top_level=top_level,
     coordination_enabled=coordination,
   )["mcp_servers"]["mobius_control"]["tools"]
-  listed = control._dispatch_message({
-    "jsonrpc": "2.0", "id": 1, "method": "tools/list",
-  })["result"]["tools"]
-  assert tuple(configured) == names == tuple(tool["name"] for tool in listed)
+  def listed():
+    return tuple(tool["name"] for tool in control._dispatch_message({
+      "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+    })["result"]["tools"])
+  monkeypatch.delenv("MOBIUS_IMAGE_VIEWER", raising=False)
+  assert names == listed()
+  # The Codex server carries its image-viewer switch and approves that tool.
+  monkeypatch.setenv("MOBIUS_IMAGE_VIEWER", "1")
+  assert tuple(configured) == (*names, "view_image") == listed()
   assert set(platform_tools.HELPER_TOOL_NAMES) <= set(names)
   assert "Delegate to helper agents with spawn_agent" in control._initialize_result({})["instructions"]
   assert "checkpoint_chat" in names and "claim_agent_work" in names
@@ -173,12 +178,16 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
   assert claude_server["args"] == codex_server["args"]
   assert claude_server["args"][0].endswith("/scripts/mobius_control_mcp.py")
   assert "env" not in claude_server
-  assert "env" not in codex_server
+  # Only Codex swaps its native image viewer for view_image; the switch is a
+  # fixed non-secret value.
+  assert codex_server["env"] == {"MOBIUS_IMAGE_VIEWER": "1"}
   assert "env_vars" not in claude_server
   assert codex_server["env_vars"] == list(platform_tools.CONTROL_ENV_VARS)
   assert set(codex_server["env_vars"]) == {
     "API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN",
     "MOBIUS_COORDINATION_ENABLED",
+    # Where view_image stores this chat's snapshot.
+    "DATA_DIR",
     # Non-secret calling-turn selection and delegation identity.
     "MOBIUS_AGENT_PROVIDER", "MOBIUS_AGENT_MODEL", "MOBIUS_AGENT_EFFORT",
     "MOBIUS_DELEGATION_ID",
@@ -189,7 +198,7 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
   assert "default_tools_approval_mode" not in codex_server
   assert codex_server["tools"] == {
     name: {"approval_mode": "approve"}
-    for name in platform_tools.CONTROL_TOOL_NAMES
+    for name in platform_tools.codex_control_tool_names(top_level=True)
   }
 
 
@@ -216,9 +225,9 @@ def test_isolated_owner_control_omits_peer_messaging_tools(monkeypatch):
   configured = platform_tools.codex_turn_mcp_config(
     None, control_enabled=True, coordination_enabled=False,
   )
-  assert set(configured["mcp_servers"]["mobius_control"]["tools"]) == set(
-    expected
-  )
+  assert set(configured["mcp_servers"]["mobius_control"]["tools"]) == {
+    *expected, "view_image",
+  }
 
   control = _control_module()
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")

@@ -8,8 +8,8 @@ import {
   inlineImageReference,
   scratchImageReference,
   servedImageReference,
-  temporaryImageReference,
   toolImageReference,
+  viewedSnapshotReference,
 } from '../toolImageResult.js'
 
 test('a viewed chat-media path resolves to the original protected file', () => {
@@ -56,24 +56,20 @@ test('paths outside chat-owned image storage do not become browser URLs', () => 
   assert.equal(chatImageReference('/data/apps/private.png'), null)
 })
 
-test('a viewed /tmp image resolves through the owning chat only', () => {
+test('a view previews its chat snapshot, never the shared path it named', () => {
+  const name = `viewed-${'a'.repeat(64)}.png`
+  const snapshot = { kind: 'chat', chatId: 'chat-123', collection: 'media', filename: name }
+  assert.deepEqual(viewedSnapshotReference('chat-123', name), snapshot)
   assert.deepEqual(
-    temporaryImageReference('/tmp/visuals/render one.png', 'chat-123'),
-    {
-      kind: 'tmp',
-      chatId: 'chat-123',
-      filename: 'visuals/render one.png',
-    },
+    servedImageReference('/tmp/inspect.png', 'chat-123', { viewedMedia: name }),
+    snapshot,
   )
-  assert.deepEqual(
-    servedImageReference(
-      JSON.stringify({ path: '/tmp/inspect.png', detail: 'original' }),
-      'chat-123',
-    ),
-    { kind: 'tmp', chatId: 'chat-123', filename: 'inspect.png' },
-  )
-  assert.equal(temporaryImageReference('/tmp/visual.png', ''), null)
-  assert.equal(temporaryImageReference('/var/tmp/visual.png', 'chat-123'), null)
+  // An unbound /tmp view has no served preview: another writer can replace it.
+  assert.equal(servedImageReference('/tmp/inspect.png', 'chat-123'), null)
+  assert.equal(servedImageReference('/tmp/inspect.png', 'chat-123', { viewedMedia: '' }), null)
+  assert.equal(viewedSnapshotReference('chat-123', '../uploads/x.png'), null)
+  assert.equal(viewedSnapshotReference('chat-123', 'viewed-abc.png'), null)
+  assert.equal(viewedSnapshotReference('', name), null)
 })
 
 test('a viewed generated image resolves only to matching final attachment bytes', () => {
@@ -145,10 +141,13 @@ test('a base64 image result is an explicit fallback for non-chat paths', () => {
     inlineImageReference(output),
     { kind: 'inline', src: 'data:image/png;base64,aGVsbG8=' },
   )
+  // The tool's own result carries the bytes the provider received.
   assert.deepEqual(
     toolImageReference('/tmp/visual.png', output, 'chat-123'),
-    { kind: 'tmp', chatId: 'chat-123', filename: 'visual.png' },
+    { kind: 'inline', src: 'data:image/png;base64,aGVsbG8=' },
   )
+  // A read that returned text is never shown as an image.
+  assert.equal(toolImageReference('/tmp/visual.png', 'File not found', 'chat-123'), null)
   assert.deepEqual(
     toolImageReference('/var/tmp/visual.png', output, 'chat-123'),
     { kind: 'inline', src: 'data:image/png;base64,aGVsbG8=' },

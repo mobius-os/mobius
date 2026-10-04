@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from app.providers import PROVIDERS
+from app.viewed_images import SNAPSHOT_NAME
 from app.tool_sources import (
   MAX_TOOL_SOURCES,
   enrich_tool_source,
@@ -914,6 +915,10 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       digest = event["viewed_image_sha256"]
       if isinstance(digest, str):
         blk["viewed_image_sha256"] = digest
+    if "viewed_image_media" in event and blk.get("tool") == "ViewImage":
+      name = event["viewed_image_media"]
+      if isinstance(name, str) and (not name or SNAPSHOT_NAME.fullmatch(name)):
+        blk["viewed_image_media"] = name
     return True
 
   if event_type == "skill_loaded":

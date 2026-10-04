@@ -59,6 +59,10 @@ REQUEST_SECRET_TOOL = "request_secret"
 LIST_APPS_TOOL = "list_apps"
 APPLY_APP_TOOL = "apply_app"
 SCREENSHOT_TOOL = "screenshot"
+VIEW_IMAGE_TOOL = "view_image"
+# Set only in the Codex server configuration, where this tool replaces the
+# provider's native image viewer (backend app/platform_tools.py).
+IMAGE_VIEWER_ENV = "MOBIUS_IMAGE_VIEWER"
 # App building is ordinary work a helper may do too; owner-facing interaction
 # (pushes, workspace placement, cards) stays with the top-level turn.
 APP_TOOLS = (LIST_APPS_TOOL, APPLY_APP_TOOL, SCREENSHOT_TOOL)
@@ -205,7 +209,7 @@ _GOAL_TASKS_SCHEMA = {"type": "array", "items": _GOAL_TASK_SCHEMA, "minItems": 1
 
 
 def _helper_module(filename: str, module_name: str) -> ModuleType:
-  path = Path(__file__).with_name(filename)
+  path = Path(__file__).resolve().parent / filename
   spec = importlib.util.spec_from_file_location(module_name, path)
   if spec is None or spec.loader is None:  # pragma: no cover - import invariant
     raise RuntimeError(f"{filename} helper is unavailable")
@@ -218,6 +222,7 @@ _GOALS = _helper_module("goal_promote.py", "mobius_goal_promote")
 _WAITS = _helper_module("chat_wait.py", "mobius_chat_wait")
 _APPROVALS = _helper_module("owner_approval.py", "mobius_owner_approval")
 _SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
+_VIEWED_IMAGES = _helper_module("../app/viewed_images.py", "mobius_viewed_images")
 
 
 def _promote_goal(objective: str) -> dict:
@@ -417,11 +422,12 @@ def _initialize_result(params: Any) -> dict[str, Any]:
 
 
 def _available_tool_names() -> tuple[str, ...]:
+  viewer = (VIEW_IMAGE_TOOL,) if os.environ.get(IMAGE_VIEWER_ENV) == "1" else ()
   if os.environ.get("MOBIUS_RUN_TOKEN"):
     if os.environ.get("MOBIUS_COORDINATION_ENABLED") == "0":
-      return OWNER_TOOLS
-    return (*OWNER_TOOLS, *PEER_TOOLS)
-  return DELEGATED_TOOLS
+      return (*OWNER_TOOLS, *viewer)
+    return (*OWNER_TOOLS, *PEER_TOOLS, *viewer)
+  return (*DELEGATED_TOOLS, *viewer)
 
 
 # Every owner turn is told to use these controls, so Claude Code keeps them
@@ -1165,7 +1171,44 @@ def _call_screenshot(arguments: dict[str, Any]) -> ToolContent:
   ])
 
 
+def _call_view_image(arguments: dict[str, Any]) -> ToolContent:
+  """Show the model one local image, as the chat-owned snapshot it previews.
+
+  The file is read once. Those exact bytes are both returned to the provider
+  and stored as this chat's immutable snapshot, so a later overwrite of the
+  path, or another chat's same-named file, cannot change what the owner's
+  preview shows for this view.
+  """
+  _require_args(VIEW_IMAGE_TOOL, arguments, {"path"}, ("path",))
+  data, mime = _VIEWED_IMAGES.read_viewed_image(arguments["path"])
+  media_dir = _VIEWED_IMAGES.chat_media_dir(
+    os.environ.get("DATA_DIR") or "/data", _chat_id(),
+  )
+  try:
+    _VIEWED_IMAGES.store_snapshot(media_dir, data, mime)
+    note = f"Viewed {arguments['path']}."
+  except OSError:
+    # A read-only run still sees the image; only the owner's preview is lost.
+    note = f"Viewed {arguments['path']} (no preview: this run cannot write chat media)."
+  return ToolContent([
+    {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime},
+    {"type": "text", "text": note},
+  ])
+
+
 _TOOL_DEFINITIONS = {
+  VIEW_IMAGE_TOOL: {
+    "name": VIEW_IMAGE_TOOL,
+    "description": (
+      "Look at a local PNG, JPEG, GIF, or WebP image file (up to 20 MB) by "
+      "absolute path. The image is returned to you and the owner sees the "
+      "same picture in this chat."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False, "required": ["path"],
+      "properties": {"path": {"type": "string", "pattern": "^/"}},
+    },
+  },
   CHECKPOINT_CHAT_TOOL: {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
@@ -1768,6 +1811,7 @@ _TOOL_HANDLERS = {
   LIST_APPS_TOOL: _call_list_apps,
   APPLY_APP_TOOL: _call_apply_app,
   SCREENSHOT_TOOL: _call_screenshot,
+  VIEW_IMAGE_TOOL: _call_view_image,
 }
 
 
