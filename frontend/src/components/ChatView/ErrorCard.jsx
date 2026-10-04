@@ -23,6 +23,7 @@ import { isResourcePause } from './waitingPresentation.js'
 // quota: Möbius continues it by itself, so it
 // reads as "Waiting" and never offers the auto-continue toggle.
 export function errorCardViewModel(block) {
+  const credits = block.pause?.kind === 'credits'
   const resourceWait = isResourcePause(block)
   const modelCapacity = block.pause?.kind === 'model_capacity'
   const modelCapacityExhausted = block.pause?.kind === 'model_capacity_exhausted'
@@ -37,6 +38,7 @@ export function errorCardViewModel(block) {
   )
   const benign = !!block.pause || goalHandoff
   return {
+    credits,
     parked,
     modelCapacity,
     modelCapacityExhausted,
@@ -44,7 +46,7 @@ export function errorCardViewModel(block) {
     goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: goalHandoff ? 'Goal paused' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: credits ? 'Credits needed' : goalHandoff ? 'Goal paused' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     checkLabel: formatResetTime(checkAt),
     resetLabel: parked ? formatResetTime(resetAt) : null,
   }
@@ -148,7 +150,9 @@ export default function ErrorCard({
               {platformHold ? recoveryTitle : vm.resourceWait && manualRecovery ? 'Recovery needed' : vm.label}
             </div>
             <div className="chat__recovery-copy">
-              {platformHold ? recoveryCopy : vm.modelCapacityExhausted
+              {platformHold ? recoveryCopy : vm.credits
+                ? 'Your workspace is out of credits. Your progress is saved. Add credits to your workspace or choose another provider, then Resume.'
+                : vm.modelCapacityExhausted
                 ? 'Five automatic retries were used. Choose another model, then Resume to continue your saved work.'
                 : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'

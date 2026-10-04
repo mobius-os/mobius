@@ -3698,6 +3698,18 @@ _MODEL_CAPACITY_ERROR_MARKERS = (
 )
 
 
+# The provider's exhausted-workspace-credits rejection. It is not a timed limit:
+# nothing resets on its own, so it is a manual pause the owner continues after
+# adding credits or switching providers. Matched exactly so unrelated payment
+# failures keep the error card.
+_WORKSPACE_CREDITS_ERROR = "your workspace is out of credits. add credits to continue."
+
+
+def _is_workspace_credits_error_text(text: str | None) -> bool:
+  """Whether a provider rejected the turn because workspace credits ran out."""
+  return (text or "").strip().lower() == _WORKSPACE_CREDITS_ERROR
+
+
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
 
@@ -4065,6 +4077,11 @@ def _park_exit(
       ),
     })
     return {"parked": False, "oversized": True}
+  # Checked before the limit branch: Codex can also report depleted credits as
+  # a reached rate limit (429), but no reset time will refill them.
+  if _is_workspace_credits_error_text(error_text):
+    sink.publish(_pause_note(error_text, kind="credits", provider=provider_id))
+    return {"parked": False}
   if runner_result is not None:
     limit = _is_limit_terminal(runner_result)
   else:
