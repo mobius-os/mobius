@@ -65,7 +65,7 @@ class QuestionSpec(BaseModel):
 
 class QuestionRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
-  questions: list[QuestionSpec] = Field(min_length=1, max_length=3)
+  questions: list[QuestionSpec] = Field(min_length=1, max_length=10)
 
   @model_validator(mode="after")
   def distinct_questions(self):

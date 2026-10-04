@@ -74,6 +74,27 @@ test('mixed grouped questions describe answering without inventing text-only cho
   assert.doesNotMatch(html, /questions still need|questions to submit|qcard__submit-hint/)
 })
 
+test('a ten-question block renders every prompt and preserves every saved reply', () => {
+  const questions = Array.from({ length: 10 }, (_, index) => ({
+    id: `question-${index + 1}`, header: `Question ${index + 1}`,
+    question: `Decision ${index + 1}?`, options: [],
+  }))
+  for (const answered of [false, true]) {
+    const answeredMap = answered
+      ? Object.fromEntries(questions.map((question, index) => [question.question, `Reply ${index + 1}`]))
+      : undefined
+    const html = renderToStaticMarkup(createElement(QuestionCard, {
+      chatId: 'ten-questions', questionId: 'ten-questions-q', questions, answeredMap,
+    }))
+    assert.match(html, /10 decisions/)
+    assert.equal((html.match(/<textarea\b/g) || []).length, 10)
+    for (let index = 1; index <= 10; index += 1) {
+      assert.ok(html.includes(`Decision ${index}?`))
+      if (answered) assert.ok(html.includes(`>Reply ${index}</textarea>`))
+    }
+  }
+})
+
 test('a written Restart card uses its displayed action list for choice instructions', () => {
   const html = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'filtered-restart', questionId: 'filtered-restart-q',

@@ -178,40 +178,56 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
-def test_core_opens_with_narrow_continuation_handoff_contract():
+def test_core_keeps_scoped_autonomy_without_routine_permission_requests():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(
     encoding="utf-8",
   )
   normalized = " ".join(core.split())
-  handoff = normalized.split(
-    "**Continuation handoff for owner chats.**", 1,
-  )[1].split("The stable constitution:", 1)[0]
+  asking = normalized.split("## Asking the partner", 1)[1]
 
-  assert core.index("**Continuation handoff for owner chats.**") \
-    < core.index("The stable constitution:")
-  assert "deliverable can be complete while its established workstream is not" in handoff
-  assert "specific, in-scope, materially useful continuation" in handoff
-  assert "same requested workstream" in handoff
-  assert "can start now" in handoff
-  assert "owner's decision is unsettled" in handoff
-  assert "This includes plans and read-only work" in handoff
-  assert "excludes factual answers and invented adjacent work" in handoff
-  assert "one contextual saved card as the final action" in handoff
-  assert "**Apply/implement it (Recommended)** and **Not now**" in handoff
-  assert "The **Not now** answer must resume first" in handoff
-  assert 'not a terminal `on_answer: "close"` choice' in handoff
-  assert "release the approval's work claim" in handoff
-  assert "`finish_agent_work(..., release=true)`" in handoff
-  assert "`request_question` for an ordinary choice" in handoff
-  assert "`request_approval` for permission" in handoff
-  assert "`request_restart` for a restart" in handoff
-  assert "If already authorized, proceed without asking again" in handoff
-  assert "if explicitly declined or no qualifying continuation exists, finish declaratively" \
-    in handoff
-  assert "Never substitute a prose question or declarative close" in handoff
-  assert "**Mandatory final-action decision for owner chats.**" not in handoff
-  assert normalized.count("specific, in-scope, materially useful continuation") == 1
+  assert "ordinary implementation choices, dependent steps, and verification within its scope" in asking
+  assert "Ask only when a material decision is missing, scope or risk would change" in asking
+  assert "Do not ask about routine authorized steps" in asking
+  assert "plan request alone does not authorize implementation" in asking
+  assert "**Continuation handoff for owner chats.**" not in core
+  assert "a clear instruction to perform it is already approval" in core
+
+
+def test_side_questions_preserve_work_and_unanswered_decisions():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+
+  assert "A side question is additive" in core
+  assert "continue already-authorized steps, or bring back the unresolved decision through a saved card" in core
+  assert "not choosing or declining it" in core
+  assert "do not revive unrelated or explicitly held work" in core
+  assert "Keep the unresolved next step in the chat note" in core
+
+
+def test_next_step_choices_are_material_bounded_and_can_end_plainly():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+
+  assert "offer one saved choice" in core
+  assert "concrete, materially useful continuation" in core
+  assert "include a finish-here, keep-local, or defer option" in core
+  assert "Use an existing decision surface instead of duplicating it" in core
+  assert "Do not ask about routine authorized steps, invent adjacent work" in core
+  assert "after an answer or decline unless new material evidence" in core
+  assert "no meaningful decision remains, finish declaratively" in core
+
+
+def test_required_owner_cards_keep_terminal_and_decline_claim_boundaries():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+
+  assert "`request_question` for 1–10 ordinary questions" in core
+  assert "`request_approval` for permission" in core
+  assert "`request_restart` for a platform restart" in core
+  assert "Each is the **last action of the turn**" in core
+  assert "**Not now** choice that resumes the chat, not `on_answer: \"close\"`" in core
+  assert "release the approval's work claim with `finish_agent_work(..., release=true)`" in core
 
 
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
@@ -325,8 +341,9 @@ def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution
   assert "durable background delegation may outlive the turn" in normalized
   assert "durable platform or installed capability owns that lifecycle" in normalized
   assert "Contribution preparation is owner-initiated" in normalized
-  assert "leave local changes local without adding an approval card" in normalized
-  assert "offer once through the clarifying-question tool" not in core
+  assert "offer that separate choice once" in normalized
+  assert "An offer is not authorization to prepare or publish" in normalized
+  assert "A completed local outcome stays complete even when a separate upstream choice remains" in normalized
 
 
 def test_owner_policy_and_card_access_stay_simple_and_explicit():

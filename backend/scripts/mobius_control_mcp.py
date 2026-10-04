@@ -1338,7 +1338,7 @@ _TOOL_DEFINITIONS = {
   REQUEST_QUESTION_TOOL: {
     "name": REQUEST_QUESTION_TOOL,
     "description": (
-      "Ask 1–3 ordinary clarifying questions. "
+      "Ask 1–10 ordinary clarifying questions; prefer a small batch when enough. "
       "Only the question text is required; card-only ids, headings, and an "
       "empty options list are supplied when omitted. "
       "The saved card blocks further work until the owner answers or Stops; "
@@ -1355,7 +1355,7 @@ _TOOL_DEFINITIONS = {
       "type": "object", "additionalProperties": False,
       "required": ["questions"],
       "properties": {"questions": {
-        "type": "array", "minItems": 1, "maxItems": 3,
+        "type": "array", "minItems": 1, "maxItems": 10,
         "items": {
           "type": "object", "additionalProperties": False,
           "required": ["question"],

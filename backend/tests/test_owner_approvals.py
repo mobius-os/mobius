@@ -942,6 +942,91 @@ def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(
   ]
 
 
+def test_saved_question_block_preserves_all_ten_questions_and_retry_identity(
+  client, chat, approval_run,
+):
+  payload = {"questions": [
+    {"question": f"Decision {index}?"} for index in range(1, 11)
+  ]}
+  response = client.post(
+    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
+  )
+  retry = client.post(
+    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
+  )
+  assert response.status_code == 200, response.text
+  assert retry.json() == response.json()
+  pending_id, messages, _ = _row(chat.id)
+  assert pending_id == response.json()["question_id"]
+  assert messages[-1]["blocks"][-1]["questions"] == [
+    {"id": f"question-{index}", "header": f"Question {index}",
+     "question": f"Decision {index}?", "options": []}
+    for index in range(1, 11)
+  ]
+
+
+@pytest.mark.parametrize("count", [0, 11])
+def test_question_block_count_outside_one_to_ten_does_not_save_a_card(
+  client, chat, approval_run, count,
+):
+  before = _row(chat.id)
+  response = client.post(
+    f"/api/chats/{chat.id}/question",
+    json={"questions": [{"question": f"Decision {index}?"} for index in range(count)]},
+    headers=approval_run[1],
+  )
+  assert response.status_code == 422, response.text
+  assert _row(chat.id) == before
+
+
+def test_answering_ten_questions_saves_all_answers_and_resumes_once(
+  client, chat, auth, approval_run, monkeypatch,
+):
+  payload = {"questions": [
+    {"question": f"Decision {index}?"} for index in range(1, 11)
+  ]}
+  saved = client.post(
+    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
+  )
+  assert saved.status_code == 200, saved.text
+  question_id = saved.json()["question_id"]
+  _finish(chat, approval_run[0])
+  unregister_active_sink(chat.id, approval_run[0])
+  scheduled = []
+  monkeypatch.setattr(chats_stream, "_schedule_continuation", lambda **kw: scheduled.append(kw))
+  answers = {f"Decision {index}?": f"Reply {index}" for index in range(1, 11)}
+  body = {"content": "Ten decisions answered", "hidden": True,
+          "answers": answers, "question_id": question_id}
+  response = client.post(f"/api/chats/{chat.id}/messages", json=body, headers=auth)
+  assert response.status_code == 202, response.text
+  pending_id, messages, _ = _row(chat.id)
+  assert pending_id is None
+  card = next(
+    block for message in messages for block in message.get("blocks", [])
+    if block.get("question_id") == question_id
+  )
+  assert card["answers"] == answers
+  assert len(scheduled) == 1
+  assert scheduled[0]["next_user"]["continuation_reason"] == "question_answer"
+  retry = client.post(f"/api/chats/{chat.id}/messages", json=body, headers=auth)
+  assert retry.status_code == 410
+  assert len(scheduled) == 1
+
+
+def test_question_tool_and_route_agree_on_ten_questions_without_changing_choices():
+  from app.routes.owner_approvals import QuestionRequest
+  from tests.test_platform_tools import _control_module
+
+  tool = _control_module()._TOOL_DEFINITIONS["request_question"]
+  question_schema = tool["inputSchema"]["properties"]["questions"]
+  route_schema = QuestionRequest.model_json_schema()
+  assert question_schema["minItems"] == route_schema["properties"]["questions"]["minItems"] == 1
+  assert question_schema["maxItems"] == route_schema["properties"]["questions"]["maxItems"] == 10
+  assert question_schema["items"]["properties"]["options"]["maxItems"] == 3
+  assert route_schema["$defs"]["QuestionSpec"]["properties"]["options"]["maxItems"] == 3
+  assert "1–10" in tool["description"]
+
+
 def test_saved_single_question_uses_neutral_default_heading(
   client, chat, approval_run,
 ):
