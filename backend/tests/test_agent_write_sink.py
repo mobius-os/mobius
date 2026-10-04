@@ -220,6 +220,55 @@ def test_saved_owner_card_closes_admissions_but_joins_previously_accepted_writes
   asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('private_suffix', [False, True])
+def test_saved_card_keeps_completed_screenshot_before_card_without_admitting_late_writes(
+    chat,db,monkeypatch,private_suffix):
+  async def scenario():
+    effects=[];sink=sink_for(chat,monkeypatch,effects)
+    item='screenshot-before-card'
+    full='![Mobile](/api/chats/fixture/media/mobile-preview.png)'
+    sink.publish({'type':'text','text_item_id':item,'content':full[:-15]})
+    await sink.publish_question({'type':'question','question_id':'owner-card',
+      'response_mode':'continuation','questions':[{'id':'q','question':'Continue?'}]})
+    late=WriteIntent('late','checkpoint_chat',{'summary':'Must not execute'})
+    completion=full+frame(NONCE,late) if private_suffix else full
+    sdk=_sdk_imports()
+    message=sdk['AgentMessageThreadItem'](type='agentMessage',id=item,
+      text=completion,phase='commentary')
+    for event in _tool_completed_events(message,sdk):sink.publish(event)
+    for event in _tool_completed_events(message,sdk):sink.publish(event)
+    # Neither a fresh item nor another delta may narrate beyond the saved card.
+    sink.publish({'type':'text_final','text_item_id':'new-after-card','content':'Do not show.'})
+    sink.publish({'type':'text','text_item_id':item,'content':'Do not append.'})
+    await sink.finalize()
+    db.expire_all()
+    saved=db.get(models.Chat,chat.id)
+    reply=saved.messages[-1]
+    assert reply['content']==full
+    assert [block['type'] for block in reply['blocks'] if block['type']!='tool']==['text','question']
+    assert saved.pending_question_id=='owner-card'
+    assert not effects and db.get(models.AgentWriteIntent,('sink-write-test','late')) is None
+    surfaces=json.dumps([reply,sink.bc.event_log])
+    assert 'MOBIUS_WRITE' not in surfaces and 'Must not execute' not in surfaces
+    assert 'Do not show.' not in surfaces and 'Do not append.' not in surfaces
+  asyncio.run(scenario())
+
+
+def test_stop_does_not_complete_a_reply_that_started_before_the_saved_card(chat,db,monkeypatch):
+  async def scenario():
+    effects=[];sink=sink_for(chat,monkeypatch,effects)
+    sink.publish({'type':'text','text_item_id':'before','content':'Partial reply'})
+    await sink.publish_question({'type':'question','question_id':'owner-card',
+      'response_mode':'continuation','questions':[{'id':'q','question':'Continue?'}]})
+    sink.interrupt_write_delivery()
+    sink.publish({'type':'text_final','text_item_id':'before','content':'Partial reply completed.'})
+    await sink.finalize()
+    db.expire_all()
+    assert db.get(models.Chat,chat.id).messages[-1]['content']=='Partial reply'
+    assert not effects
+  asyncio.run(scenario())
+
+
 def test_claude_missing_identity_preserves_prose_but_never_authorizes_a_write(chat,monkeypatch):
   async def scenario():
     effects=[];sink=sink_for(chat,monkeypatch,effects)

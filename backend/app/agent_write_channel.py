@@ -268,6 +268,13 @@ class OutputChannel:
     def has_capacity(self, item) -> bool:
         return item in self.items or len(self.items) < 256
 
+    def has_unfinished_item(self, item) -> bool:
+        """Whether an observed item still awaits its authoritative snapshot."""
+        state = self.items.get(item)
+        return bool(not self.closed and state is not None
+                    and state.decoder is not None and not state.abandoned
+                    and state.raw_fingerprint is None)
+
     def delta(self, item: str, text: str) -> str:
         state = self._open_item(item)
         if state.abandoned or state.admitted_fingerprint or state.raw_fingerprint:

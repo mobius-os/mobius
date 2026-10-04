@@ -130,6 +130,32 @@ def test_authoritative_final_seals_deltas_before_durable_admission():
     channel.finish()
 
 
+def test_unfinished_item_query_preserves_snapshot_and_admission_boundaries():
+    channel = OutputChannel(NONCE)
+    assert not channel.has_unfinished_item('unknown')
+    assert not channel.has_unfinished_item(None)
+    assert not channel.items
+    channel.delta('reply', 'Prefix')
+    assert channel.has_unfinished_item('reply')
+    visible, writes = channel.final('reply', 'Full reply.' + frame(NONCE, WRITE))
+    assert not channel.has_unfinished_item('reply')
+    channel.reserve_admission('reply', visible, writes)
+    assert not channel.has_unfinished_item('reply')
+    channel.acknowledge('reply', visible, writes)
+    assert not channel.has_unfinished_item('reply')
+
+
+def test_abandoned_and_closed_items_cannot_be_completed_after_intake_closes():
+    channel = OutputChannel(NONCE)
+    channel.delta('replaced', 'Abandoned prefix')
+    channel.replace('replaced')
+    assert not channel.has_unfinished_item('replaced')
+    channel.delta('reply', 'Prefix')
+    assert channel.has_unfinished_item('reply')
+    channel.finish()
+    assert not channel.has_unfinished_item('reply')
+
+
 def test_provisional_deltas_construct_one_decoder_per_item(monkeypatch):
     constructed = []
     original = FrameDecoder

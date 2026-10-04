@@ -79,9 +79,20 @@ class AgentWriteDelivery:
     kind = event.get("type")
     if kind not in {"text", "text_final", "text_boundary"}:
       return event
-    if not self.accepting:
-      return None
     item = event.get("text_item_id")
+    if not self.accepting:
+      # A saved owner card closes command intake while provider notifications
+      # already in flight still drain. Complete only an observed, unfinished
+      # item: its authoritative prose belongs before the card, not after it.
+      # Stop and teardown remain hard fences, and sanitizing a completion must
+      # never admit the private writes it contains.
+      if (kind == "text_final" and not self.interrupted
+          and self.finish_task is None and self.channel.has_unfinished_item(item)):
+        final = self._presentation_only_final(event, "write_intake_closed")
+        if final is not None:
+          self.channel.acknowledge(item, final["content"], ())
+        return final
+      return None
     if kind == "text" and not item:
       self.unattributed_provisional_seen = True
     if kind == "text" and self.unattributed_provisional_seen:
