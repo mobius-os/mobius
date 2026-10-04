@@ -96,6 +96,41 @@ class RestartRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
 
+class OwnerCardEndRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  question_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/{chat_id}/owner-card-end", dependencies=[Depends(reject_cross_site)])
+async def end_codex_owner_card(
+  chat_id: str,
+  body: OwnerCardEndRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Post-tool rendezvous: interrupt before the completed tool resumes Codex."""
+  from app.runner_registry import RunnerKind, registry
+
+  if principal.chat_id != chat_id:
+    raise HTTPException(403, "Agent run belongs to another chat.")
+  get_active_chat_for_principal(db, chat_id, principal, load_fields=())
+  sink = get_active_sink(chat_id)
+  handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+  if (sink is None or sink.run_token != principal.run_id
+      or not sink.has_continuation_card(body.question_id) or handle is None):
+    raise HTTPException(409, "This turn did not save that owner card.")
+  db.close()  # No database connection is needed while waiting on the provider.
+  interrupt = handle.begin_finish_after_owner_card()
+  try:
+    if interrupt is not None:
+      await interrupt
+    else:
+      await handle.wait_for_owner_card_end()
+  except Exception as exc:
+    raise HTTPException(503, "Could not end the saved-card turn.") from exc
+  return {"ended": handle.owner_card_requested}
+
+
 @router.post("/{chat_id}/question", dependencies=[Depends(reject_cross_site)])
 async def request_question(
   chat_id: str,

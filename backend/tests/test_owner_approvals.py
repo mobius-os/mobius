@@ -196,6 +196,89 @@ def test_continuation_card_save_does_not_interrupt_its_own_receipt(
     registry.unregister(chat.id, handle.kind)
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_codex_post_tool_rendezvous_waits_for_interrupt_ack(
+  client, chat, approval_run, failed,
+):
+  from app.runner_registry import RunnerKind, registry
+
+  class HookHandle(_FakeCardHandle):
+    def __init__(self):
+      super().__init__(chat.id)
+      self.kind = RunnerKind.CODEX_SDK
+      self.owner_card_requested = False
+      self.acknowledged = False
+
+    def begin_finish_after_owner_card(self):
+      if self.owner_card_requested:
+        return None
+      self.owner_card_requested = True
+      self.finishes += 1
+      return self._finish()
+
+    async def _finish(self):
+      await asyncio.sleep(0)
+      if failed:
+        raise RuntimeError("provider interrupt failed")
+      self.acknowledged = True
+
+    async def wait_for_owner_card_end(self):
+      assert self.acknowledged
+
+  handle = HookHandle()
+  registry.register(handle)
+  try:
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    assert handle.finishes == 0  # Save must never cancel its own result.
+    url = f"/api/chats/{chat.id}/owner-card-end"
+    headers = approval_run[1]
+    wrong = client.post(url, json={"question_id": "old-card"}, headers=headers)
+    assert wrong.status_code == 409
+    assert handle.finishes == 0
+    ended = client.post(url, json={"question_id": qid}, headers=headers)
+    if failed:
+      assert ended.status_code == 503
+      assert handle.acknowledged is False
+    else:
+      assert ended.status_code == 200
+      assert ended.json() == {"ended": True}
+      assert handle.acknowledged is True
+      assert client.post(url, json={"question_id": qid}, headers=headers).status_code == 200
+      assert handle.finishes == 1
+    assert _row(chat.id)[0] == qid
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_card_end_rejects_browser_other_chat_and_stale_run(client, chat, approval_run, auth, db):
+  from app.runner_registry import RunnerKind, registry
+
+  qid = _ask(client, chat, approval_run).json()["question_id"]
+  url = f"/api/chats/{chat.id}/owner-card-end"
+  body = {"question_id": qid}
+  assert client.post(url, json=body, headers=auth).status_code == 403
+  assert client.post(f"/api/chats/another-chat/owner-card-end", json=body,
+                     headers=approval_run[1]).status_code == 403
+  assert client.post(url, json=body, headers=approval_run[1]).status_code == 409
+  owner = db.query(models.Owner).first()
+  stale = auth_mod.create_agent_token(
+    chat_id=chat.id, owner_username=owner.username, token_epoch=owner.token_epoch,
+    run_id="previous-physical-run", expires_delta=timedelta(minutes=5),
+  )
+  handle = _FakeCardHandle(chat.id)
+  handle.kind = RunnerKind.CODEX_SDK
+  registry.register(handle)
+  try:
+    # Existing authentication rejects a nonexistent/stale physical run before
+    # the card route can inspect its sink. Do not weaken that earlier guard.
+    assert client.post(url, json=body, headers={"Authorization": f"Bearer {stale}"}).status_code == 401
+    assert handle.finishes == 0
+    assert _row(chat.id)[0] == qid
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_completed_receipt_ends_only_the_exact_saved_card_turn(
   client, chat, approval_run,
 ):

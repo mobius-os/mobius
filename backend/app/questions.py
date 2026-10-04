@@ -37,9 +37,13 @@ resumes a fresh turn (restart-safe). The card is the turn's last act, so the
 agent must say everything before calling it. Claude cuts generation AT the
 card: a PostToolUse hook refuses to continue the agent loop while the receipt
 is still inside the CLI, so no post-card model request is ever made (see
-`ActiveClaudeClient.claim_owner_card_end`). Codex, and a native child agent's
-card, end at the receipt instead — `ChatEventSink.publish` →
-`begin_finish_after_owner_card` — which races generation already in flight.
+`ActiveClaudeClient.claim_owner_card_end`). Codex root agents use a synchronous
+PostToolUse rendezvous that awaits `ActiveCodexTurn`'s interrupt acknowledgment
+before the tool can start another model request. Its hook has thread-scoped
+trust for the exact discovered platform definition, not a global trust bypass.
+The completed receipt (`ChatEventSink.publish` → `begin_finish_after_owner_card`)
+still ends paths not seen by a hook, including native child cards; that path
+can race generation already in flight.
 Anything that does arrive after a card is still recorded and shown: Möbius
 never filters post-card events, so a leak stays visible rather than masked.
 """

@@ -19,6 +19,15 @@ from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_hook_discovery_from_runner_protocol_doubles(monkeypatch):
+  # These runner tests supply fake SDK clients. The discovery/trust contract
+  # has its own unit and installed-Codex tests, not a fake hooks/list service.
+  async def passthrough(codex, sdk, cwd, config):
+    return config
+  monkeypatch.setattr(codex_sdk_runner, "_codex_owner_card_hook_thread_config", passthrough)
+
+
 def test_codex_home_fallback_follows_data_dir_without_overriding_provider_env():
   missing = {}
   codex_sdk_runner._ensure_codex_home(missing, "/srv/mobius-data")
@@ -931,6 +940,31 @@ def test_active_codex_turn_owner_card_finish_defers_to_stop():
     assert active.owner_card_requested is False
 
   asyncio.run(_scenario())
+
+
+def test_card_hook_joins_the_receipt_interrupt_instead_of_racing_its_ack():
+  async def scenario():
+    ack = asyncio.Event()
+
+    class Turn(_FakeTurnHandle):
+      async def interrupt(self):
+        self.interrupt_calls += 1
+        await ack.wait()
+
+    turn = Turn()
+    active = codex_sdk_runner.ActiveCodexTurn(object(), turn, chat_id="card-join")
+    receipt_wait = asyncio.create_task(active.begin_finish_after_owner_card())
+    await asyncio.sleep(0)
+    hook_wait = asyncio.create_task(active.wait_for_owner_card_end())
+    await asyncio.sleep(0)
+    assert not hook_wait.done()
+    assert turn.interrupt_calls == 1
+    ack.set()
+    await asyncio.gather(receipt_wait, hook_wait)
+    assert active.begin_finish_after_owner_card() is None
+    assert turn.interrupt_calls == 1
+
+  asyncio.run(scenario())
 
 
 def test_active_codex_turn_clear_stops_one_attempt_and_waits_for_finish():
@@ -2283,7 +2317,7 @@ def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch
   )
   completed_turn = SimpleNamespace(
     id="turn-1", usage=None, error=None, status=_FakeTurnStatus.completed,
-    items=[replacement],
+    items=[abandoned, replacement],
   )
   notifications = [
     SimpleNamespace(payload=ItemStarted(abandoned)),
@@ -2341,6 +2375,92 @@ def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch
     for event in bus.events
   )
   assert not any(event.get("content") == " (late)" for event in bus.events)
+
+
+@pytest.mark.parametrize("snapshot_loaded", [True, False])
+def test_terminal_snapshot_recovers_full_reply_before_interleaved_card(monkeypatch, snapshot_loaded):
+  from app.events import process_event
+
+  class AgentMessage:
+    def __init__(self, text):
+      self.id = "reply-before-card"
+      self.text = text
+      self.phase = _FakeMessagePhase.final_answer
+
+    @classmethod
+    def model_validate(cls, raw):
+      return cls(raw["text"])
+
+  class Delta:
+    def __init__(self, delta):
+      self.item_id = "reply-before-card"
+      self.delta = delta
+
+  full = "| Operation | Current |\n|---|---|\n| Read | Full history |"
+  item = AgentMessage(full)
+  completed = SimpleNamespace(
+    id="turn-1", usage=None, error=None, status=_FakeTurnStatus.completed,
+    items=[SimpleNamespace(root=item)] if snapshot_loaded else [],
+  )
+
+  class Turn(_FakeTurnHandle):
+    async def stream(self):
+      yield SimpleNamespace(payload=Delta("| Operation |\n|---|"))
+      # Card persistence can interleave independently of the provider stream.
+      bus.publish({"type": "question", "question_id": "saved-card",
+                   "questions": [], "response_mode": "continuation"})
+      yield SimpleNamespace(payload=_FakeTurnCompletedNotification(completed))
+
+  thread = _FakeThread("thread-1", Turn())
+
+  class FakeCodex:
+    def __init__(self, config=None):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      pass
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeCodex)
+  sdk.update({"AgentMessageThreadItem": AgentMessage,
+              "AgentMessageDeltaNotification": Delta})
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  class Client:
+    async def request(self, method, params, response_model):
+      assert not snapshot_loaded  # Inline snapshots need no extra read.
+      assert method == "thread/items/list"
+      assert params["threadId"] == "thread-1"
+      assert params["turnId"] == "turn-1"
+      assert params["cursor"] is None
+      return response_model(data=[{"item": {
+        "id": item.id, "type": "agentMessage", "text": full,
+      }}])
+
+  monkeypatch.setattr(codex_sdk_runner, "control_client", lambda _: Client())
+
+  class Bus(_FakeBroadcast):
+    def __init__(self):
+      super().__init__()
+      self.blocks = []
+
+    def publish(self, event):
+      super().publish(event)
+      process_event(event, self.blocks)
+
+  bus = Bus()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="explain", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-card-prefix", bc=bus, pending_questions={}, db=None,
+  ))
+  assert result["error"] is None
+  assert [block["type"] for block in bus.blocks] == ["text", "question"]
+  assert bus.blocks[0]["content"] == full
 
 
 @pytest.mark.parametrize(

@@ -29,14 +29,18 @@ import asyncio
 import contextlib
 import concurrent.futures as _cf
 import functools
+import json
 import logging
 import os
+import shlex
 import shutil
 import time
+import tomllib
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from pydantic import BaseModel, Field
 
 from app import generated_files
 from app.codex_sdk_contract import (
@@ -166,6 +170,114 @@ def _codex_config_overrides() -> list[str]:
   overrides.append("features.goals=false")
   overrides += CODEX_NATIVE_HELPERS_OFF
   return overrides
+
+
+def _codex_owner_card_hook_override() -> str:
+  """Hold completed card tools at a hook until our turn interrupt is acked.
+
+  PostToolUse's continue:false substitutes tool feedback; it does not end
+  Codex's model loop. The synchronous hook instead rendezvous with the
+  run-bound card owner before Codex can start its next model request.
+  """
+  import sys
+  script = Path(__file__).resolve().parents[1] / "scripts" / "codex_owner_card_hook.py"
+  command = shlex.join([sys.executable, str(script)])
+  matcher = "^(Bash|mcp__mobius_control__.*)$"
+  return (
+    'hooks.PostToolUse=[{matcher=' + json.dumps(matcher)
+    + ',hooks=[{type="command",command=' + json.dumps(command)
+    + ',timeout=15}]}]'
+  )
+
+
+async def _codex_owner_card_hook_thread_config(codex, sdk, cwd, config):
+  """Trust only the platform card hook, for this thread, without config writes.
+
+  Codex owns the definition hash. Read it instead of duplicating its hashing
+  algorithm, and match our exact invocation-owned definition before granting
+  that hash session-scoped trust. Other discovered hooks keep their own trust.
+  """
+  expected = tomllib.loads(_codex_owner_card_hook_override())["hooks"]["PostToolUse"][0]
+  listing = await control_client(codex).request(
+    "hooks/list", {"cwds": [cwd]}, response_model=sdk["HooksListResponse"],
+  )
+  # Newer SDKs wrap each hook variant in HookMetadata.root; older ones
+  # expose the command hook directly.
+  hooks = (
+    getattr(hook, "root", hook)
+    for entry in listing.data for hook in entry.hooks
+  )
+  matches = [
+    hook for hook in hooks
+    if _enum_wire_value(hook.source) == "sessionFlags"
+    and _enum_wire_value(hook.handler_type) == "command"
+    and _enum_wire_value(hook.event_name) == "postToolUse"
+    and hook.command == expected["hooks"][0]["command"]
+    and hook.matcher == expected["matcher"]
+    and hook.timeout_sec == expected["hooks"][0]["timeout"]
+  ]
+  if len(matches) != 1:
+    raise RuntimeError("Codex did not discover the platform owner-card hook.")
+  from copy import deepcopy
+  result = deepcopy(config or {})
+  # Thread config uses CLI dotted paths; replacing the whole hooks table
+  # would erase the PostToolUse definition installed by the launch flags.
+  result["hooks.state"] = {matches[0].key: {"trusted_hash": matches[0].current_hash}}
+  return result
+
+
+class _CodexTurnItemsPage(BaseModel):
+  """Pagination envelope; unrelated item variants need no SDK model here."""
+  data: list[dict[str, Any]]
+  next_cursor: str | None = Field(default=None, alias="nextCursor")
+
+
+async def _recover_unfinished_codex_messages(codex, sdk, thread_id, turn, unfinished_ids, bc):
+  """Recover only observed messages whose authoritative completion was missed.
+
+  Modern turn/completed notifications often omit items. Read that turn's
+  paginated items only when completion is missing, never the full thread or
+  a provider file. Item identity keeps the original text/card chronology.
+  """
+  pending = set(unfinished_ids)
+  recovered_phases = {}
+
+  def recover(item):
+    item = item.root if hasattr(item, "root") else item
+    item_id = str(getattr(item, "id", None) or "")
+    if item_id not in pending or not isinstance(item, sdk["AgentMessageThreadItem"]):
+      return
+    for event in _tool_completed_events(item, sdk):
+      bc.publish(event)
+    recovered_phases[item_id] = _agent_message_phase(item, sdk)
+    pending.discard(item_id)
+
+  for item in getattr(turn, "items", None) or []:
+    recover(item)
+  if not pending:
+    return recovered_phases
+  try:
+    cursor = None
+    while pending:
+      page = await control_client(codex).request(
+        "thread/items/list", {"threadId": thread_id, "turnId": turn.id,
+                              "cursor": cursor, "limit": 100},
+        response_model=_CodexTurnItemsPage,
+      )
+      # The pinned SDK predates this pagination response model. Validate only
+      # the message variant we consume with its existing generated type.
+      for entry in page.data:
+        raw = entry["item"]
+        if raw.get("type") == "agentMessage" and raw.get("id") in pending:
+          recover(sdk["AgentMessageThreadItem"].model_validate(raw))
+      cursor = page.next_cursor
+      if cursor is None:
+        break
+    if pending:
+      log.warning("Codex omitted message completions in turn %s: %s", turn.id, sorted(pending))
+  except Exception:
+    log.warning("Could not recover Codex message completions in turn %s", turn.id, exc_info=True)
+  return recovered_phases
 
 
 def _codex_app_server_launch_args(
@@ -587,6 +699,7 @@ class ActiveCodexTurn:
     # never clears the pending queue or bumps the chat generation, because the
     # chat is meant to resume from the owner's answer.
     self._owner_card_requested = False
+    self._owner_card_interrupt_task: asyncio.Task[None] | None = None
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -617,8 +730,9 @@ class ActiveCodexTurn:
   def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
     """End the turn after a continuation owner-input receipt is delivered.
 
-    The event sink calls this only after Codex emits the completed card tool
-    result. Interrupt the live turn now to stop further generation. Events
+    The post-tool hook joins this before returning the card tool to Codex;
+    the sink also calls it on the completed receipt for paths without a hook.
+    Interrupt the live turn now to stop further generation. Events
     already emitted while that interrupt takes effect still drain through the
     sink and remain visible and durable.
     Distinct from Stop: it marks only `_owner_card_requested`
@@ -637,13 +751,20 @@ class ActiveCodexTurn:
     ):
       return None
     self._owner_card_requested = True
-    return self._interrupt_after_owner_card()
+    self._owner_card_interrupt_task = asyncio.create_task(self._interrupt_after_owner_card())
+    return self.wait_for_owner_card_end()
+
+  async def wait_for_owner_card_end(self) -> None:
+    """A post-tool hook also joins an interrupt the receipt already started."""
+    if self._owner_card_interrupt_task is not None:
+      await asyncio.shield(self._owner_card_interrupt_task)
 
   async def _interrupt_after_owner_card(self) -> None:
     try:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex owner-card interrupt raised: %s", exc)
+      raise
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
@@ -933,6 +1054,7 @@ def _sdk_imports() -> dict[str, Any]:
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
     ImageViewThreadItem,
+    HooksListResponse,
     ItemCompletedNotification,
     ItemGuardianApprovalReviewCompletedNotification,
     ItemGuardianApprovalReviewStartedNotification,
@@ -972,6 +1094,7 @@ def _sdk_imports() -> dict[str, Any]:
     ),
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
+    "HooksListResponse": HooksListResponse,
     "ApprovalMode": ApprovalMode,
     "AsyncCodex": AsyncCodex,
     "CodexConfig": CodexConfig,
@@ -1539,6 +1662,8 @@ async def _run_codex_sdk_turn(
   config_overrides.extend(
     get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
   )
+  if not delegated:
+    config_overrides.append(_codex_owner_card_hook_override())
   # Keep the app-server in its own process group for turn-end cleanup.
   launch_args = _codex_app_server_launch_args(
     codex_bin,
@@ -1581,13 +1706,14 @@ async def _run_codex_sdk_turn(
   active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
   completed_turn: Any | None = None
-  completed_message_phases: list[str | None] = []
+  completed_message_phases: dict[str, str | None] = {}
   # Codex can abandon an in-progress AgentMessage and immediately start a
   # replacement item without completing the first one. Keep that provider
   # lifecycle identity until another item makes the first message deliberate,
   # so the replacement can discard only the orphaned partial text.
   open_agent_message_item_id: str | None = None
   abandoned_agent_message_item_ids: set[str] = set()
+  unfinished_agent_message_item_ids: set[str] = set()
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
   call_token_usages: list[Any] = []
@@ -1703,6 +1829,10 @@ async def _run_codex_sdk_turn(
       # its sole joiner and shields that join before reaping the group.
       if entry_cancel is not None:
         raise entry_cancel
+      if not delegated:
+        connector_thread_config = await _codex_owner_card_hook_thread_config(
+          codex, sdk, cwd, connector_thread_config,
+        )
       # Keep the old request_user_input bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1965,6 +2095,8 @@ async def _run_codex_sdk_turn(
             event = {"type": "text", "content": payload.delta}
             if item_id:
               event["text_item_id"] = item_id
+              unfinished_agent_message_item_ids.add(item_id)
+              completed_message_phases.setdefault(item_id, None)
             bc.publish(event)
           continue
 
@@ -2020,6 +2152,9 @@ async def _run_codex_sdk_turn(
                 open_agent_message_item_id,
               )
             open_agent_message_item_id = item_id or None
+            if item_id:
+              unfinished_agent_message_item_ids.add(item_id)
+              completed_message_phases.setdefault(item_id, None)
             bc.publish(event)
             continue
           # A tool/reasoning item between two assistant messages makes the
@@ -2102,9 +2237,9 @@ async def _run_codex_sdk_turn(
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             item_id = str(getattr(item, "id", None) or "")
             if item_id and item_id in abandoned_agent_message_item_ids:
-              abandoned_agent_message_item_ids.discard(item_id)
               continue
-            completed_message_phases.append(_agent_message_phase(item, sdk))
+            completed_message_phases[item_id] = _agent_message_phase(item, sdk)
+            unfinished_agent_message_item_ids.discard(item_id)
             if item_id and item_id == open_agent_message_item_id:
               open_agent_message_item_id = None
           if not isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
@@ -2225,6 +2360,12 @@ async def _run_codex_sdk_turn(
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
           completed_turn = payload.turn
+          recovered_phases = await _recover_unfinished_codex_messages(
+            codex, sdk, current_session_id, completed_turn,
+            unfinished_agent_message_item_ids - abandoned_agent_message_item_ids, bc,
+          )
+          completed_message_phases.update(recovered_phases)
+          unfinished_agent_message_item_ids.difference_update(recovered_phases)
           break
 
         if (
@@ -2270,7 +2411,11 @@ async def _run_codex_sdk_turn(
         completed_turn,
         sdk,
         interrupt_requested=stop_requested(),
-        completed_message_phases=completed_message_phases,
+        completed_message_phases=[
+          phase for item_id, phase in completed_message_phases.items()
+          if item_id not in unfinished_agent_message_item_ids
+          and item_id not in abandoned_agent_message_item_ids
+        ],
       )
       result: RunnerResult = with_usage({
         "session_id": current_session_id,
