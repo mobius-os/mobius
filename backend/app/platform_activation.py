@@ -159,6 +159,13 @@ _RULES = (
     dependency_fingerprint=True,
   ),
   _Rule(
+    "sqlite_runtime",
+    ActivationLevel.IMAGE_REBUILD,
+    "The image-installed SQLite engine changed.",
+    exact=("backend/sqlite_runtime/build.sh", "backend/sqlite_runtime/verify.py"),
+    dependency_fingerprint=True,
+  ),
+  _Rule(
     "legacy_python_runtime",
     ActivationLevel.IMAGE_REBUILD,
     "The image-installed compatibility runtime changed.",

@@ -24,8 +24,18 @@ RUN npm ci --ignore-scripts && rm -rf /root/.npm
 COPY frontend/ .
 RUN npm run build && rm -rf /root/.npm
 
+# Build the fixed SQLite library for the same target architecture and libc as
+# the runtime. Compiler and parser-generation tools stay out of the final image.
+FROM python:3.12-slim-trixie AS python-runtime
+FROM python-runtime AS sqlite-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gcc libc6-dev libreadline-dev make tcl unzip zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY backend/sqlite_runtime/build.sh /tmp/build-sqlite.sh
+RUN bash /tmp/build-sqlite.sh /sqlite-runtime
+
 # -- Stage 2: backend + everything ------------------------------------
-FROM python:3.12-slim-trixie
+FROM python-runtime
 
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node
@@ -53,7 +63,7 @@ ARG CODEX_VERSION=0.159.0
 ARG CODEX_SDK_VERSION=0.159.0
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux xxd \
+    age ca-certificates cron curl git jq procps ripgrep sudo tini unzip util-linux xxd \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -73,6 +83,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git_version="$(git --version | awk '{print $3}')" \
     && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
     && rm -rf /root/.npm /var/lib/apt/lists/*
+
+# Use the pinned library for Python and other dynamically linked consumers,
+# not just the CLI. Keep Debian's package for its dependency metadata.
+COPY --from=sqlite-runtime /sqlite-runtime/usr/local/lib/libsqlite3.so* /usr/local/lib/
+COPY --from=sqlite-runtime /sqlite-runtime/usr/local/bin/sqlite3 /usr/local/bin/sqlite3
+COPY backend/sqlite_runtime/verify.py /tmp/verify-sqlite.py
+RUN ldconfig && python /tmp/verify-sqlite.py && rm /tmp/verify-sqlite.py
 
 # tectonic is a server-side subprocess; CSP connect-src 'self' applies only to
 # browser fetches from the mini-app iframe, not OS-level subprocesses — tectonic's
@@ -258,6 +275,7 @@ COPY Dockerfile /tmp/test-image-inputs/Dockerfile
 COPY backend/app/platform_activation.py /tmp/test-image-inputs/backend/app/platform_activation.py
 COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
 COPY backend/legacy_runtime/ /tmp/test-image-inputs/backend/legacy_runtime/
+COPY backend/sqlite_runtime/build.sh backend/sqlite_runtime/verify.py /tmp/test-image-inputs/backend/sqlite_runtime/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
 RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
       /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \

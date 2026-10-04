@@ -135,7 +135,29 @@ def test_dependency_fingerprint_comes_from_the_image_rules():
     "backend/requirements.txt",
     "frontend/package-lock.json",
     "frontend/package.json",
+    "backend/sqlite_runtime/build.sh",
+    "backend/sqlite_runtime/verify.py",
   })
+
+
+def test_sqlite_engine_changes_require_replacement_not_server_restart():
+  for path in ("backend/sqlite_runtime/build.sh", "backend/sqlite_runtime/verify.py"):
+    for deployment in ("railway", "self_hosted"):
+      impact = activation.classify_activation([path], deployment=deployment)
+      assert impact["required_actions"] == ["image_rebuild"]
+
+
+def test_sqlite_fingerprint_tracks_build_inputs_not_generated_python_cache(tmp_path):
+  sqlite = tmp_path / "backend/sqlite_runtime"
+  cache = sqlite / "__pycache__"
+  cache.mkdir(parents=True)
+  (sqlite / "build.sh").write_text("#!/bin/bash\n")
+  (sqlite / "verify.py").write_text("import sqlite3\n")
+  (cache / "verify.cpython-312.pyc").write_bytes(b"generated")
+  inputs = activation.dependency_fingerprint_paths(tmp_path)
+  assert "backend/sqlite_runtime/build.sh" in inputs
+  assert "backend/sqlite_runtime/verify.py" in inputs
+  assert not any("__pycache__" in path for path in inputs)
 
 
 def test_python_dependencies_require_a_reviewed_image():
