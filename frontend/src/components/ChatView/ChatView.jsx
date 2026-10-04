@@ -4007,7 +4007,7 @@ export default function ChatView({
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
       // renders no visible user bubble and never pins.
-      const response = await streamSend(text, undefined, {
+      const response = await streamSend(text, questionSubmissionContext?.attachments, {
         hidden: true,
         cid: silentCid,
         answers: resolvedAnswers,
@@ -4055,7 +4055,7 @@ export default function ChatView({
             msg.blocks = (msg.blocks || []).map(b => {
               if (b.type !== 'question') return b
               if (questionId && b.question_id !== questionId) return b
-              return { ...b, ...questionAnswerPatch(response.answers || resolvedAnswers, response) }
+              return { ...b, ...questionAnswerPatch(response.answers || resolvedAnswers, { ...response, attachments: questionSubmissionContext?.attachments }) }
             })
             updated[lastIdx] = msg
           }
@@ -4066,7 +4066,7 @@ export default function ChatView({
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
-        patchQuestionAnswers(questionId, response.answers || resolvedAnswers, response)
+        patchQuestionAnswers(questionId, response.answers || resolvedAnswers, { ...response, attachments: questionSubmissionContext?.attachments })
       }
       // Acceptance and visible response activity are deliberately separate.
       // Keep the card fixed through this answer-only commit; the stream hook

@@ -16,6 +16,11 @@ import {
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import useFileUpload from './useFileUpload.js'
+import { FileChips } from './ChatInputBar.jsx'
+import Attachments from './Attachments.jsx'
+import { pastedFiles, filePasteNeedsDefaultPrevented } from './pasteUpload.js'
+import { Paperclip } from '@openai/apps-sdk-ui/components/Icon'
 import { questionOptionSubmission } from './questionSubmission.js'
 import {
   isRestartCardAction,
@@ -44,13 +49,13 @@ function resizeCustomAnswer(textarea) {
 
 
 function CustomAnswerArea({
-  active,
   answered,
   canSubmit,
   disabled,
   placeholder,
   onChange,
   onSubmitShortcut,
+  onPasteFiles,
   question,
   value,
 }) {
@@ -83,7 +88,7 @@ function CustomAnswerArea({
   return (
     <textarea
       ref={textareaRef}
-      className={`qcard__input${active ? ' qcard__input--active' : ''}`}
+      className="qcard__input"
       data-chat-scroll-region
       data-chat-inline-editor="question-answer"
       aria-label={`Custom answer for: ${question}`}
@@ -93,6 +98,13 @@ function CustomAnswerArea({
       wrap="soft"
       value={value}
       onChange={e => onChange(e.target.value)}
+      onPaste={e => {
+        if (!onPasteFiles) return
+        const files = pastedFiles(e.clipboardData)
+        if (!files.length) return
+        if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) e.preventDefault()
+        onPasteFiles?.(files)
+      }}
       onFocus={e => placeCaretAtTextEnd(e.currentTarget)}
       readOnly={answered}
       disabled={disabled && !answered}
@@ -117,6 +129,7 @@ export default function QuestionCard({
   answeredMap,
   platformAction,
   submittedOptions,
+  attachments,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -142,6 +155,12 @@ export default function QuestionCard({
   const [submitError, setSubmitError] = useState('')
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
+  const fileInputRef = useRef(null)
+  const initialFilesRef = useRef(null)
+  if (initialFilesRef.current === null) initialFilesRef.current = readQuestionDraft(draftKey).files
+  const { files, addFiles, removeFile, clearFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
+  const readyFiles = files.filter(file => file.status === 'done')
+  const uploadingFiles = files.some(file => file.status === 'uploading')
 
   const localAnswers = useContext(LocalAnswersContext)
   const localAnswer = (localAnswers || []).find(record => (
@@ -178,18 +197,18 @@ export default function QuestionCard({
       clearQuestionDraft(draftKey)
       return
     }
-    writeQuestionDraft(draftKey, answers, otherTexts)
-  }, [draftKey, answers, otherTexts, answered])
+    writeQuestionDraft(draftKey, answers, otherTexts, undefined, files)
+  }, [draftKey, answers, otherTexts, files, answered])
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]
-    if (!a) return false
+    if (!a) return q === questions[0] && readyFiles.length > 0
     if (Array.isArray(a)) {
       if (a.length === 0) return false
       if (a.includes('__other__') && !otherTexts[q.question]?.trim()) return false
       return true
     }
-    if (a === '__other__') return !!otherTexts[q.question]?.trim()
+    if (a === '__other__') return !!otherTexts[q.question]?.trim() || (q === questions[0] && readyFiles.length > 0)
     return true
   })
   const selectedOptions = restartCardSelectedOptions(
@@ -197,7 +216,7 @@ export default function QuestionCard({
     questions,
     answers,
   )
-  const canSubmit = allAnswered && (!restartAction || selectedOptions !== null)
+  const canSubmit = allAnswered && !uploadingFiles && (!restartAction || selectedOptions !== null)
 
   function selectOption(question, label) {
     if (selectionLocked || disabled) return
@@ -266,6 +285,7 @@ export default function QuestionCard({
     const resolved = {}
     const lines = questions.map(q => {
       const val = resolveAnswer(answers[q.question], otherTexts[q.question])
+        || (q === questions[0] && readyFiles.length ? `Attached ${readyFiles.length} file${readyFiles.length === 1 ? '' : 's'}` : '')
       resolved[q.question] = val
       return `- ${q.question}: ${val.replace(/\n/g, '\n  ')}`
     })
@@ -276,7 +296,7 @@ export default function QuestionCard({
         lines.join('\n'),
         resolved,
         questionId,
-        { questionCard, preparedSubmission, ...questionOptionSubmission(questions, answers) },
+        { questionCard, preparedSubmission, attachments: readyFiles.map(({ name, size, mime_type }) => ({ name, size, mime_type })), ...questionOptionSubmission(questions, answers) },
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
@@ -284,6 +304,7 @@ export default function QuestionCard({
         if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
       } else {
         setSubmitted(true)
+        clearFiles()
       }
     } catch (error) {
       // Keep the choices and custom text intact so a transient failure is
@@ -316,6 +337,13 @@ export default function QuestionCard({
   return (
     <div
       className={`qcard${grouped ? ' qcard--grouped' : ''}${answered ? ' qcard--answered' : ''}`}
+      onDrop={event => {
+        if (selectionLocked || disabled || platformAction) return
+        const dropped = Array.from(event.dataTransfer?.files || [])
+        if (!dropped.length) return
+        event.preventDefault()
+        addFiles(dropped)
+      }}
       data-scroll-anchor-key={draftKey}
       ref={answered ? null : pendingCardRef}
       aria-disabled={disabled && !answered ? true : undefined}
@@ -468,23 +496,41 @@ export default function QuestionCard({
             </div>}
             {(!completedAction || respondedRestartAction)
               && (!restartAction || writtenRestartAction) && (
-              <CustomAnswerArea
-                active={isOtherSelected || answeredWithOther}
-                answered={selectionLocked}
-                canSubmit={allAnswered}
-                disabled={inactive}
-                placeholder={writtenRestartAction
-                  ? 'Or tell me what you’d like to do instead…'
-                  : hasOptions ? undefined : 'Type your answer…'}
-                onChange={text => setOtherText(q.question, text)}
-                onSubmitShortcut={(questionCard) => {
-                  if (allAnswered) handleSubmit(questionCard, null)
-                }}
-                question={q.question}
-                value={selectionLocked
-                  ? writtenAnswer
-                  : (otherTexts[q.question] || '')}
-              />
+              <div className="qcard__answer-row">
+                {qi === 0 && !selectionLocked && !disabled && !platformAction && (
+                  <div className="qcard__composer-actions">
+                    <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
+                      aria-label="Attach files to your answer"
+                      onChange={e => { const selected = Array.from(e.target.files || []); e.target.value = ''; addFiles(selected) }} />
+                    <button type="button" className="qcard__attach" aria-label="Attach a photo or file"
+                      title="Attach a photo or file" onClick={() => fileInputRef.current?.click()}>
+                      <Paperclip width={18} height={18} aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+                <div className={`qcard__composer${isOtherSelected || answeredWithOther ? ' qcard__composer--active' : ''}`}>
+                  {qi === 0 && (selectionLocked
+                    ? <Attachments attachments={attachments || localAnswer?.body?.attachments} chatId={chatId} />
+                    : files.length > 0 && <FileChips files={files} onRemove={removeFile} chatId={chatId} />)}
+                  <CustomAnswerArea
+                    answered={selectionLocked}
+                    canSubmit={allAnswered}
+                    disabled={inactive}
+                    placeholder={writtenRestartAction
+                      ? 'Or tell me what you’d like to do instead…'
+                      : hasOptions ? undefined : 'Type your answer…'}
+                    onChange={text => setOtherText(q.question, text)}
+                    onPasteFiles={platformAction || selectionLocked || disabled ? undefined : addFiles}
+                    onSubmitShortcut={(questionCard) => {
+                      if (allAnswered) handleSubmit(questionCard, null)
+                    }}
+                    question={q.question}
+                    value={selectionLocked
+                      ? writtenAnswer
+                      : (otherTexts[q.question] || '')}
+                  />
+                </div>
+              </div>
             )}
           </div>
         )

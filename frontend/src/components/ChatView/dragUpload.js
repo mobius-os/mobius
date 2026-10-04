@@ -53,11 +53,12 @@ export function createFileDragHandlers({
 
     onDrop(event) {
       if (!dataTransferHasFiles(event.dataTransfer)) return
+      const handledByChild = event.defaultPrevented
       claimFileDrag(event)
       setDepth(0)
       setActive(false)
       const files = droppedFiles(event.dataTransfer)
-      if (files.length > 0) onFiles(files)
+      if (!handledByChild && files.length > 0) onFiles(files)
     },
   }
 }

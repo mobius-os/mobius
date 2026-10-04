@@ -5,10 +5,62 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import QuestionCard from '../QuestionCard.jsx'
 import { LocalAnswersContext } from '../localAnswersContext.js'
+import { questionDraftKey, writeQuestionDraft } from '../questionDraft.js'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
+
+test('the answer composer keeps one visible keyboard focus ring', () => {
+  assert.match(css, /\.qcard__composer:focus-within\s*\{[^}]*box-shadow:\s*0 0 0 3px var\(--accent-dim\)/)
+  assert.match(css, /\.qcard__input:focus-visible\s*\{[^}]*outline:\s*none/)
+})
+
+test('the attach icon blends into the card while keeping a touch target and focus ring', () => {
+  assert.match(css, /\.qcard__attach\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;[^}]*border:\s*0;[^}]*background:\s*transparent;/)
+  assert.match(css, /\.qcard__attach:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/)
+})
+
+test('a file-only question answer can submit and ordinary cards offer upload', () => {
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) || null },
+    setItem(key, value) { this.values.set(key, value) },
+    removeItem(key) { this.values.delete(key) },
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
+  try {
+    const questions = [{ question: 'Send a picture', options: [] }]
+    const key = questionDraftKey('file-only', 'file-only-q', questions)
+    writeQuestionDraft(key, {}, {}, storage, [{ name: 'photo.png', status: 'done', size: 4, mime_type: 'image/png' }])
+    const html = renderToStaticMarkup(createElement(QuestionCard, {
+      chatId: 'file-only', questionId: 'file-only-q', questions,
+    }))
+    assert.match(html, /Attach a photo or file/)
+    assert.match(html, /class="qcard__submit"[^>]*>Submit</)
+    assert.match(html, /class="qcard__answer-row"><div class="qcard__composer-actions"[\s\S]*<button[^>]*aria-label="Attach a photo or file"[^>]*>[\s\S]*<\/button><\/div><div class="qcard__composer[^"]*"[\s\S]*class="chat__attach-tray"[\s\S]*<textarea/,
+      'the icon sits to the left of the composer containing the image and answer')
+    assert.doesNotMatch(html, /<\/svg>\s*Attach a photo or file/, 'the attach control uses only the icon')
+    assert.doesNotMatch(html, /qcard__attachments/,
+      'the attachment must not sit in a separate row below the answer box')
+    const submitted = renderToStaticMarkup(createElement(QuestionCard, {
+      chatId: 'file-only', questionId: 'file-only-q', questions,
+      answeredMap: { 'Send a picture': 'Attached 1 file' },
+      attachments: [{ name: 'photo.png', size: 4, mime_type: 'image/png' }],
+    }))
+    assert.match(submitted, /class="qcard__composer[^"]*"[\s\S]*class="chat__attachments"[\s\S]*<textarea/,
+      'the submitted image stays inside the answer composer')
+    const restart = renderToStaticMarkup(createElement(QuestionCard, {
+      chatId: 'restart', questionId: 'restart-q', questions,
+      platformAction: { type: 'restart', version: 2, status: 'awaiting_owner' },
+    }))
+    assert.doesNotMatch(restart, /Attach a photo or file/)
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor)
+    else delete globalThis.localStorage
+  }
+})
 
 test('text-only questions never offer choice instructions or empty choice groups', () => {
   for (const options of [undefined, null, []]) {
@@ -140,8 +192,8 @@ test('unanswered question cards do not have a stale gray state', () => {
     'multi-select options should compose with a written custom answer')
   assert.match(component, /if \(!q\?\.multiSelect\) \{\s*setOtherTexts\(prev => \(\{ \.\.\.prev, \[question\]: '' \}\)\)/,
     'choosing a single option should clear custom text that is no longer active')
-  assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts\)/,
-    'unsubmitted selections and custom text should be cached')
+  assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts, undefined, files\)/,
+    'unsubmitted selections, custom text, and files should be cached')
   assert.match(component, /if \(answered\) \{\s*clearQuestionDraft\(draftKey\)/,
     'committed answers should clear their cached draft')
   assert.doesNotMatch(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft/,

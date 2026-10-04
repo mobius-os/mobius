@@ -41,10 +41,11 @@ test('question drafts restore selections and custom text by chat and question', 
   assert.deepEqual(readQuestionDraft(key, storage), {
     answers: { 'Which direction?': ['Polish', '__other__'] },
     otherTexts: { 'Which direction?': 'Keep the current shape' },
+    files: [],
   })
   assert.deepEqual(
     readQuestionDraft(questionDraftKey('chat-2', 'question-7', questions), storage),
-    { answers: {}, otherTexts: {} },
+    { answers: {}, otherTexts: {}, files: [] },
     'another chat must not inherit the selection',
   )
 })
@@ -55,6 +56,22 @@ test('legacy questions without an id get a stable content-derived draft key', ()
   const second = questionDraftKey('chat-1', null, structuredClone(questions))
   assert.equal(first, second)
   assert.notEqual(first, questionDraftKey('chat-1', null, [{ question: 'Different?' }]))
+})
+
+
+test('question drafts retain only completed file metadata and clear file-only drafts', () => {
+  const storage = new MemoryStorage()
+  const key = questionDraftKey('chat-1', 'files', questions)
+  writeQuestionDraft(key, {}, {}, storage, [
+    { name: 'photo.png', size: 12, mime_type: 'image/png', status: 'done', objectUrl: 'blob:secret' },
+    { name: 'pending.pdf', status: 'uploading' },
+  ])
+  assert.deepEqual(readQuestionDraft(key, storage).files, [
+    { name: 'photo.png', size: 12, mime_type: 'image/png', status: 'done' },
+  ])
+  assert.doesNotMatch(storage.getItem(key), /blob:secret|pending.pdf/)
+  writeQuestionDraft(key, {}, {}, storage, [])
+  assert.equal(storage.getItem(key), null)
 })
 
 
@@ -148,7 +165,7 @@ test('clearing a draft removes every fallback copy', () => {
 
     assert.equal(local.getItem(key), null)
     assert.equal(session.getItem(key), null)
-    assert.deepEqual(readQuestionDraft(key), { answers: {}, otherTexts: {} })
+    assert.deepEqual(readQuestionDraft(key), { answers: {}, otherTexts: {}, files: [] })
   } finally {
     if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
     else delete globalThis.localStorage

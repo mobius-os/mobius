@@ -323,6 +323,7 @@ class AnswerQuestion(_Command):
   legacy_save_only: bool = False
   require_exact_card: bool = False
   selected_options: dict | None = None
+  attachments: list[dict] | None = None
   restore_archived: bool = False
 
 
@@ -2477,10 +2478,11 @@ class ChatWriterActor:
         if not accepts_saved_answer(chat, cmd.question_id):
           raise AnswerConflict("This question is no longer open.")
         validate_saved_answer(card, cmd.answers, None)
-    metadata = (
-      {"selected_options": cmd.selected_options}
-      if cmd.selected_options is not None else None
-    )
+    metadata = {}
+    if cmd.selected_options is not None:
+      metadata["selected_options"] = cmd.selected_options
+    if cmd.attachments:
+      metadata["attachments"] = cmd.attachments
     if cmd.close_without_reply:
       from app.questions import (
         AnswerConflict, accepts_saved_answer, closes_without_reply,
@@ -4445,10 +4447,11 @@ class ChatWriterActor:
       )
       applied = True
     else:
-      metadata = (
-        {"selected_options": cmd.selected_options}
-        if cmd.selected_options is not None else None
-      )
+      metadata = {}
+      if cmd.selected_options is not None:
+        metadata["selected_options"] = cmd.selected_options
+      if cmd.answers and new_msg.get("attachments"):
+        metadata["attachments"] = new_msg["attachments"]
       applied = apply_answers_to_last_question(
         chat, cmd.answers, cmd.question_id, metadata=metadata,
       )
@@ -7300,7 +7303,7 @@ def _question_answer_fields(block: dict) -> dict:
   """Persisted settlement wins over stale streaming snapshots, even without Yes."""
   return {
     key: copy.deepcopy(block[key])
-    for key in ("answers", "answer_turn", "selected_options", "platform_action")
+    for key in ("answers", "answer_turn", "selected_options", "platform_action", "attachments")
     if key in block
   }
 

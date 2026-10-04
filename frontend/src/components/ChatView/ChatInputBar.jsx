@@ -288,7 +288,7 @@ function stripExt(name) {
  *     type badge and the filename below.
  *  The remove `×` is a 20×20 button floating at the card's top-
  *  right corner (half-overlapping outside). */
-function FileChips({ files, onRemove, chatId }) {
+export function FileChips({ files, onRemove, chatId }) {
   const trayRef = useRef(null)
   const [tokenState, setTokenState] = useState({
     chatId: null,

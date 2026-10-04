@@ -27,7 +27,7 @@ export function questionOptionSubmission(questions, answers) {
 export function questionAnswerPatch(answers, disposition = {}) {
   return {
     answers,
-    ...Object.fromEntries(['answer_turn', 'selected_options', 'platform_action']
+    ...Object.fromEntries(['answer_turn', 'selected_options', 'platform_action', 'attachments']
       .filter(key => disposition?.[key] !== undefined)
       .map(key => [key, disposition[key]])),
   }

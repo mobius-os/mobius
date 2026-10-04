@@ -282,6 +282,33 @@ def _content_with_uploads(chat: models.Chat, content: str) -> str:
   return content
 
 
+def _question_answer_with_attachments(
+  chat: models.Chat, answers: dict, attachments: list[dict] | None,
+) -> dict:
+  """Give a live question's provider the same verified files as a chat send.
+
+  The persisted answer remains the owner's exact choice. Only the provider
+  result gets file context, and only for names already uploaded to this chat.
+  """
+  if not attachments:
+    return answers
+  uploads = {entry.get("name"): entry for entry in (chat.uploads or [])}
+  lines = []
+  for attachment in attachments:
+    name = attachment.get("name") if isinstance(attachment, dict) else None
+    if not isinstance(name, str) or not name:
+      raise HTTPException(status_code=409, detail="An attached file is no longer available.")
+    entry = uploads.get(name)
+    path = _safe_upload_path(entry.get("path"), get_settings().data_dir) if entry else None
+    if not path:
+      raise HTTPException(status_code=409, detail="An attached file is no longer available.")
+    lines.append(f"- {name} → {path} ({entry.get('mime_type', 'unknown')})")
+  enriched = dict(answers)
+  last = next(reversed(enriched))
+  enriched[last] = f"{enriched[last]}\n\n[Attached files:\n" + "\n".join(lines) + "]"
+  return enriched
+
+
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
   *, initiated_by_app_id: int | None = None, owner_input: bool = False,
@@ -1027,10 +1054,18 @@ async def _send_message_impl(
           and saved_card is not None):
         body = _confine_agent_card_answer(body, saved_card)
         agent_exact_retry = _is_exact_agent_card_retry(body, saved_card)
+      provider_answers = _question_answer_with_attachments(
+        chat, body.answers, body.attachments,
+      )
       try:
         quiet_answer = bool(saved_card and questions.closes_without_reply(
           saved_card, body.answers, body.selected_options,
         ))
+      except questions.AnswerConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+      if quiet_answer and body.attachments:
+        raise HTTPException(409, detail="This choice closes the card without sending files. Remove the attachment to continue.")
+      try:
         if quiet_answer:
           await await_ack(get_writer().submit(AnswerQuestion(
             chat_id=chat_id, question_id=body.question_id,
@@ -1131,6 +1166,7 @@ async def _send_message_impl(
             question_id=(body.question_id or pending.question_id),
             answers=body.answers,
             selected_options=body.selected_options,
+            attachments=body.attachments,
             restore_archived=restore_archived,
           )
         )
@@ -1161,7 +1197,7 @@ async def _send_message_impl(
             detail="The question is no longer accepting answers.",
           )
         if not pending.future.done():
-          pending.future.set_result(body.answers)
+          pending.future.set_result(provider_answers)
         # Tell every connected client (and the catch-up replay) the question
         # is answered. Without this, an already-open stream — or any client
         # that reconnects mid-turn — never learns the answer: the live

@@ -80,3 +80,19 @@ test('drop clears the overlay and attaches files exactly once', () => {
   assert.deepEqual(attached, [[first, second]])
   assert.deepEqual(drop.calls, ['preventDefault', 'stopPropagation'])
 })
+
+test('a Question Box drop clears the overlay without duplicating files in the composer', () => {
+  let depth = 1
+  let active = true
+  const handlers = createFileDragHandlers({
+    getDepth: () => depth,
+    setDepth: value => { depth = value },
+    setActive: value => { active = value },
+    onFiles: () => assert.fail('the Question Box already owns this drop'),
+  })
+  const event = dragEvent({ types: ['Files'], files: [{ name: 'photo.png' }] })
+  event.defaultPrevented = true
+  handlers.onDrop(event)
+  assert.equal(depth, 0)
+  assert.equal(active, false)
+})
