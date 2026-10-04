@@ -570,8 +570,12 @@ export function promoteAssistantStream(
   const bridgedMsg = bridgeIdx >= 0 ? messages[bridgeIdx] : null
 
   if (bridgedMsg) {
+    // media_dimensions is a server projection of the text the stream is
+    // replacing. Keeping it would render any newer local image as "Image
+    // unavailable" until the next detail read re-projects the final text.
+    const { media_dimensions: _staleDimensions, ...bridgedRest } = bridgedMsg
     const merged = {
-      ...bridgedMsg,
+      ...bridgedRest,
       ...(assistantMessageId ? { id: assistantMessageId } : {}),
       content,
       blocks: carryDurableBlockState(blocks, bridgedMsg.blocks || []),

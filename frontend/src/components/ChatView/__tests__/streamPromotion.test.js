@@ -924,3 +924,24 @@ test('streamItemsHaveRenderableContent: any non-text block is renderable', () =>
     true,
   )
 })
+
+test('promoting a stream drops the earlier partial\'s image-size projection', () => {
+  const first = '/api/chats/c1/media/first.png'
+  const second = '/api/chats/c1/media/second.png'
+  const messages = [{
+    id: 'a1',
+    role: 'assistant',
+    content: `![one](${first})`,
+    blocks: [{ type: 'text', content: `![one](${first})` }],
+    // Projected when only the first image was in the saved partial.
+    media_dimensions: { [first]: { width: 10, height: 10 } },
+  }]
+  const text = `![one](${first})\n\n![two](${second})`
+  const [promoted] = promoteAssistantStream(messages, {
+    items: [{ type: 'text', content: text }],
+    assistantMessageId: 'a1',
+  })
+  assert.equal(promoted.content, text)
+  // A stale map would render the second image as "Image unavailable".
+  assert.equal('media_dimensions' in promoted, false)
+})
