@@ -4021,6 +4021,18 @@ def _park_exit(
       ),
     })
     return {"parked": False, "oversized": True}
+  if (runner_result or {}).get("provider_refusal") is True:
+    # The provider's safety check declined this conversation on this model.
+    # Unlike a limit or a busy model, time does not change the outcome:
+    # resending the same context to the same model is refused again. Keep the
+    # provider's report as technical detail and let the card offer the moves
+    # that change the request (another model, or a fresh session).
+    sink.publish(_pause_note(
+      error_text or "The provider declined to continue this conversation.",
+      kind="provider_refusal",
+      provider=provider_id,
+    ))
+    return {"parked": False}
   # Checked before the limit branch: Codex reports depleted credits as a
   # reached rate limit (429), but no reset time will refill them, so it is a
   # manual pause the owner resumes after adding credits. Other credit

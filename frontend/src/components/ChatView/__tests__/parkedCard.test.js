@@ -269,6 +269,53 @@ test('an exhausted busy-model card stops promising retries and offers Resume', (
   assert.doesNotMatch(html, /Trying again/)
 })
 
+const refusalBlock = {
+  type: 'error', resumable: true,
+  message: 'API Error: safeguards flagged this message. Details: `[category]`',
+  pause: { kind: 'provider_refusal', provider: 'claude' },
+}
+
+function withWindow(t) {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+}
+
+test('a provider refusal offers moves that change the request, never a timed retry', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: true,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.match(html, /usually fails again/)
+  assert.match(html, />Switch model<\/button>/)
+  assert.match(html, />Start fresh session<\/button>/)
+  assert.match(html, />Resume<\/button>/)
+  // The provider's raw report stays available but is not the headline.
+  assert.match(html, /Technical details/)
+  assert.doesNotMatch(html, /Trying again|auto-continue|role="alert"/)
+})
+
+test('a refusal card away from the transcript tail offers no actions', (t) => {
+  withWindow(t)
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
+    isLastMsg: false,
+    onResume() {},
+    onRefusalModelChoice() {},
+    onRefusalFreshSession() {},
+  }))
+  assert.match(html, /This model declined to continue/)
+  assert.doesNotMatch(html, /Switch model<\/button>|Start fresh session<\/button>|>Resume</)
+})
+
 for (const [continuationWait, title, explanation] of [
   ['restoring_edits', 'Waiting for the platform update', 'while the update restores unfinished work'],
   ['restart_required', 'Waiting for a server restart', 'until a server restart loads the restored work'],

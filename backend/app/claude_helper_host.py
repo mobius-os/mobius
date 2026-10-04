@@ -134,6 +134,9 @@ class HelperTurn:
   dispatch_error: str | None = None
   # The helper's last API error from its provider, as (kind, message text).
   api_error: tuple[str, str] | None = None
+  # The helper's last provider call ended in a safety refusal (its own
+  # stop reason); a later successful call clears it.
+  refused: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
@@ -355,8 +358,10 @@ class ClaudeHelperHost(Host):
         turn = self._turn_for_parent(parent)
         if turn is None or turn.done.is_set():
           continue
-        if isinstance(message, AssistantMessage) and error:
-          turn.api_error = (str(error), _message_text(message))
+        if isinstance(message, AssistantMessage):
+          turn.refused = message.stop_reason == "refusal"
+          if error:
+            turn.api_error = (str(error), _message_text(message))
         try:
           rooted = dataclasses.replace(message, parent_tool_use_id=None)
           turn.session_state["sid"], _ = dispatch_sdk_message(
@@ -821,6 +826,8 @@ async def run_claude_host_turn(
         )
         if kind == "rate_limit":
           result["api_error_status"] = 429
+        if turn.refused:
+          result["provider_refusal"] = True
       if turn.usage:
         result["usage_metrics"] = {
           "total_tokens": turn.usage.get("total_tokens"),
