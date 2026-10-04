@@ -204,11 +204,12 @@ function GroupedActivityStretch({
   const [detailAttempt, setDetailAttempt] = useState(0)
   const [detailRequested, setDetailRequested] = useState(userOpen)
   const compositeSegments = Array.isArray(detailSegments) ? detailSegments : null
+  // Raw live steps are not reads: appending them must not invalidate an
+  // already-open saved range and collapse/refetch its timeline.
   const urls = compositeSegments
-    ? compositeSegments.map(segment => segment.detail_ref
-        ? activityDetailUrl(chatId, segment.detail_ref)
-        : null)
-    : [detailRef ? activityDetailUrl(chatId, detailRef) : null]
+    ? [...new Set(compositeSegments.filter(segment => segment.detail_ref)
+        .map(segment => activityDetailUrl(chatId, segment.detail_ref)))]
+    : detailRef ? [activityDetailUrl(chatId, detailRef)] : []
   const needsDetail = urls.some(Boolean)
   const detail = useActivityDetails({
     urls,
@@ -220,11 +221,11 @@ function GroupedActivityStretch({
   // Project against current props without canceling the underlying range read.
   const detailEntries = detail.entries === null ? null : restartCardActivityEntries(
     compositeSegments
-      ? compositeSegments.flatMap((segment, index) => {
+      ? compositeSegments.flatMap(segment => {
           if (!segment.detail_ref) return segment.entries || []
           return mergePositionedActivityEntries(
-            detail.entries[index], segment.positioned_entries || [],
-          ).map(entry => ({ ...entry, idx: `${segment.key}:${entry.idx}` }))
+            detail.entries[urls.indexOf(activityDetailUrl(chatId, segment.detail_ref))], segment.positioned_entries || [],
+          ).map(entry => ({ ...entry, idx: segment.key == null ? entry.idx : `${segment.key}:${entry.idx}` }))
         })
       : mergePositionedActivityEntries(detail.entries[0], positionedEntries),
     suppressLatestRestart,

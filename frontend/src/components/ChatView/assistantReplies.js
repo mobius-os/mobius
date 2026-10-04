@@ -1,4 +1,6 @@
 /* Present hidden same-run interruptions as one reply without rewriting source rows. */
+import { isActivityBlock, storedBlockRange, withStoredBlockIndex } from './peerTimeline.js'
+import { waitWokeItsAnswer } from './waitHistory.js'
 import { assistantAnchorKey, messageKey } from '../../lib/chatDetailCache.js'
 import { assistantReplyRoot, isHiddenReplyCarrier, projectSteerContinuationMessage } from './steerContinuity.js'
 
@@ -103,4 +105,66 @@ export function presentAssistantReply(rows, { activeIndex = -1, positions = new 
     }
   }
   return presented
+}
+
+const hasLeadingCause = message => message.continuation_reason
+  || message.wait_summaries?.some(waitWokeItsAnswer)
+const hasTrailingOutcome = message => message.goal_summaries?.length
+  || message.wait_summaries?.some(wait => !waitWokeItsAnswer(wait))
+
+/** The rows are already one proven reply, with live/DB sources selected.
+ * Move only each leading activity seam; retain every source row and coordinate.
+ * The tail owner can precede empty anchors, but never an intervening outcome. */
+export function presentAssistantActivity(rows, { activeIndex = -1, positions: sourcePositions = new Map() } = {}) {
+  const positions = new Map(sourcePositions)
+  const presented = rows.map((row, index) => {
+    if (index !== activeIndex || !row.message.blocks?.length) return { ...row }
+    const blocks = [...row.message.blocks]
+    const last = blocks.findLastIndex(block => !(block.type === 'text' && !block.content?.trim()))
+    if (last < 0 || !isActivityBlock(blocks[last])) return { ...row }
+    blocks[last] = { ...blocks[last], reply_activity_live: true }
+    return { ...row, message: { ...row.message, blocks } }
+  })
+  let tailOwner = 0
+  for (let index = 1; index < presented.length; index += 1) {
+    const target = presented[tailOwner].message
+    const candidate = presented[index].message
+    const targetBlocks = target.blocks || []
+    const candidateBlocks = candidate.blocks || []
+    if (rows[index].notes.length || hasTrailingOutcome(rows[index - 1].message)
+        || hasLeadingCause(candidate) || !isActivityBlock(targetBlocks.at(-1))
+        || !isActivityBlock(candidateBlocks[0])) {
+      tailOwner = index
+      continue
+    }
+    let end = 0
+    while (end < candidateBlocks.length && isActivityBlock(candidateBlocks[end])) end += 1
+    const stored = candidateBlocks.map(withStoredBlockIndex)
+    const leading = stored.slice(0, end)
+    presented[tailOwner].message = { ...target, blocks: [...targetBlocks,
+      ...leading.filter(block => block.type !== 'text').map(block => ({
+        ...block, source_message_id: block.source_message_id ?? candidate.id,
+      })),
+    ] }
+    const boundary = leading.reduce((at, block) => Math.max(at, storedBlockRange(block)?.end ?? 0), 0)
+    const notes = positions.get(candidate.id) || []
+    const moving = notes.filter(note => {
+      const at = note.display_position?.block_index
+      return Number.isInteger(at) && (at < boundary || (end === stored.length && at === boundary))
+    })
+    if (moving.length) {
+      positions.set(target.id, [...(positions.get(target.id) || []), ...moving.map(note => ({
+        ...note, display_position: { ...note.display_position, assistant_message_id: target.id,
+          source_message_id: note.display_position.source_message_id ?? candidate.id },
+      }))])
+      const staying = notes.filter(note => !moving.includes(note))
+      if (staying.length) positions.set(candidate.id, staying)
+      else positions.delete(candidate.id)
+    }
+    const remaining = stored.slice(end)
+    presented[index].message = { ...candidate, blocks: remaining,
+      content: remaining.length ? candidate.content : '' }
+    if (remaining.length) tailOwner = index
+  }
+  return { rows: presented, positions }
 }

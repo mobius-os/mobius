@@ -18,7 +18,11 @@ export function assistantReplyRoot(message) {
 
 export function isHiddenReplyCarrier(message, root) {
   return !!(root && isSteeredUserMessage(message) && message.hidden
-    && (!message.source_work_id || message.source_work_id === root))
+    // Helper delivery names its logical Goal root, not necessarily this
+    // physical attempt. The caller still requires equal explicit reply roots
+    // on both sides; foreign peer/generic carriers remain boundaries.
+    && (!message.source_work_id || message.source_work_id === root
+      || message.kind === 'delegation_result'))
 }
 
 

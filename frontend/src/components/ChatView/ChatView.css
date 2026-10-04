@@ -4815,8 +4815,9 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 .chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }
 
-/* Tool-only continuation rows share one activity rhythm across message boundaries. */
-.chat__msg:has(> .chat__tools:last-child, > .chat__assistant-copy-surface > .chat__tools:last-child)
+/* Only the outer transcript owns the 24px conversation gap being cancelled.
+   Nested reply rows already own their compact spacing; never pull them upward. */
+.chat__list > .chat__msg:has(> .chat__tools:last-child, > .chat__assistant-copy-surface > .chat__tools:last-child)
   + .chat__msg:has(> .chat__tools:first-child, > .chat__assistant-copy-surface > .chat__tools:first-child) {
   margin-block-start: calc(var(--activity-row-gap, 4px) - 24px);
 }

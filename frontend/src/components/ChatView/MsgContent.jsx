@@ -357,7 +357,7 @@ function MsgContentInner({
               chatId={chatId}
               generatedFiles={generatedFiles}
               generatedCapturePending={isStreaming}
-              live={false}
+              live={Boolean(block.reply_activity_live)}
               surfaceKey={messageKey}
               detailRef={block.detail_segments ? null : {
                 message_index: block.message_index,
@@ -630,7 +630,8 @@ function MsgContentInner({
             // the reconnect catch-up window is still live (see ChatView's
             // isStreaming prop). A settled stretch above the tail never
             // re-renders on its own.
-            const live = isActiveAnswer && isStreaming && nodeIdx === nodes.length - 1
+            const live = (isActiveAnswer && isStreaming && nodeIdx === nodes.length - 1)
+              || node.group.some(entry => entry.item.reply_activity_live)
             // Key the stretch by its FIRST entry (assistantBlockKey): a
             // thinking-first stretch keeps its thinking idx, a tool-first stretch
             // its `tool_use_id`/`t-<idx>`, so a single→group / live↔DB /

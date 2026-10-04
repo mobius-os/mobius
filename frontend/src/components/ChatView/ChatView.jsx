@@ -5917,7 +5917,6 @@ export default function ChatView({
     displayedMessages,
     !hidden && transcriptPaintable,
     streamItems,
-    showActiveAssistantSurface ? activeMirrorMsgIdx : -1,
   )
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0

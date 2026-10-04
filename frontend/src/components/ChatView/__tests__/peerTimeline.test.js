@@ -2,13 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   carrierMessages,
-  foldAssistantActivityFragments,
-  mergeProjectedPeerActivity,
+  mergeProjectedActivity,
   peerRecordTool,
   peerTime,
   projectPeerTimeline,
 } from '../peerTimeline.js'
-import { insertPositionedActivity } from '../activityPosition.js'
 const note = (id, ts, extras = {}) => ({ id, created_at: ts, sender_chat_id: 'peer', recipient_chat_id: 'chat', sender_name: 'Other agent', body: 'A decision-changing note', kind: 'finding', ...extras })
 const carrier = (notes, extras = {}) => ({ role: 'user', hidden: true, kind: 'peer_message', ts: 2000, steered: true, content: `<agent_coordination>\n${JSON.stringify({ messages: notes })}\n</agent_coordination>`, ...extras })
 
@@ -111,79 +109,11 @@ test('projected peer rows join a newer live payload once without replacing it', 
   const later = { type: 'thinking', thinking_id: 'later' }
   const peer = { type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-note' }
   assert.deepEqual(
-    mergeProjectedPeerActivity([bash, later], [peer, bash], [bash]),
+    mergeProjectedActivity([bash, later], [peer, bash], [bash]),
     [peer, bash, later],
   )
   assert.deepEqual(
-    mergeProjectedPeerActivity([peer, bash, later], [peer, bash], [bash]),
+    mergeProjectedActivity([peer, bash, later], [peer, bash], [bash]),
     [peer, bash, later],
   )
-})
-
-test('saved fragments of one assistant turn share an uninterrupted activity tail', () => {
-  const activity = id => ({ type: 'activity', activity_id: id, entries: [] })
-  const messages = [
-    { id: 'run', role: 'assistant', blocks: [{ type: 'text', content: 'Intro' }, activity('one')] },
-    { role: 'user', hidden: true, blocks: [] },
-    { id: 'run:assistant:1', role: 'assistant', blocks: [
-      { type: 'text', content: '' }, activity('two'),
-    ] },
-    { role: 'user', hidden: true, blocks: [] },
-    { id: 'run:assistant:2', role: 'assistant', blocks: [activity('three'), { type: 'error', content: 'Paused' }] },
-  ]
-  const positions = new Map([['run:assistant:2', [{
-    id: 'inside-third',
-    display_position: { assistant_message_id: 'run:assistant:2', block_index: 0 },
-  }]]])
-  const folded = foldAssistantActivityFragments(messages, new Map(), -1, positions)
-  const output = folded.messages
-  assert.deepEqual(output[0].blocks.map(block => block.activity_id || block.type), [
-    'text', 'one', 'two', 'three',
-  ])
-  assert.equal(output[2].hidden, true)
-  assert.deepEqual(output[4].blocks.map(block => block.type), ['error'])
-  assert.equal(folded.positions.get('run')[0].display_position.assistant_message_id, 'run')
-  assert.equal(folded.positions.has('run:assistant:2'), false)
-  assert.deepEqual(messages[0].blocks.map(block => block.activity_id || block.type), ['text', 'one'])
-})
-
-test('the active assistant fragment remains owned by the live surface', () => {
-  const messages = [
-    { id: 'run', role: 'assistant', blocks: [{ type: 'tool', tool: 'Bash' }] },
-    { id: 'run:assistant:1', role: 'assistant', blocks: [{ type: 'tool', tool: 'Edit' }] },
-  ]
-  const { messages: output } = foldAssistantActivityFragments(messages, new Map(), 1)
-  assert.equal(output[0].blocks.length, 1)
-  assert.equal(output[1].hidden, undefined)
-})
-
-test('a folded fragment keeps its recorded stored coordinates', () => {
-  const run = start => ({ type: 'activity', activity_id: `a${start}`, start, end: start + 4, entries: [] })
-  const messages = [
-    { id: 'turn', role: 'assistant', blocks: [run(0), { type: 'text', content: 'Middle.', raw_index: 4 }, run(5)] },
-    { role: 'user', hidden: true, blocks: [] },
-    // The later fragment restarts stored numbering at 0.
-    { id: 'turn:assistant:1', role: 'assistant', blocks: [
-      run(0), { type: 'text', content: 'Fragment prose.', raw_index: 4 },
-    ] },
-  ]
-  const helper = {
-    id: 'delegation:late:completed', activityId: 'delegation:late:completed',
-    type: 'helper_result', status: 'completed', created_at: 1000,
-    display_position: { assistant_message_id: 'turn:assistant:1', block_index: 2 },
-  }
-  const folded = foldAssistantActivityFragments(
-    messages, new Map(), -1, new Map([['turn:assistant:1', [helper]]]),
-  )
-  const target = folded.messages[0]
-  const [moved] = folded.positions.get('turn')
-  assert.equal(moved.display_position.source_message_id, 'turn:assistant:1')
-  const output = insertPositionedActivity(
-    target.blocks.map((item, idx) => ({ item, idx })), [moved], target.blocks, 'chat',
-  )
-  // Stored index 2 of the fragment is inside the moved run — not the target's
-  // own first run, which has the same stored range in a different message.
-  assert.equal(output[0].item.positioned_entries, undefined)
-  assert.equal(output.at(-1).item.positioned_entries[0].positionIndex, 2)
-  assert.deepEqual(folded.messages[2].blocks.map(block => [block.type, block.raw_index]), [['text', 4]])
 })

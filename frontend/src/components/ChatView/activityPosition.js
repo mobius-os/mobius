@@ -1,4 +1,5 @@
 /* Place recorded peer activity within an assistant response without renumbering its blocks. */
+import { assistantBlockKey } from './streamPromotion.js'
 import { marked } from 'marked'
 import { peerRecordTool, peerTime, storedBlockRange } from './peerTimeline.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
@@ -109,7 +110,7 @@ const isMergeableActivityEntry = entry => {
 
 const namespacedEntries = (entries, namespace) => entries.map(entry => ({
   ...entry,
-  idx: `${namespace}:${entry.idx}`,
+  idx: namespace == null ? entry.idx : `${namespace}:${entry.idx}`,
 }))
 
 /** Compact activity blocks are storage/render optimization boundaries, not
@@ -142,7 +143,7 @@ export function mergeAdjacentCompactActivityEntries(entries = []) {
     }
     const segments = run.map((entry, index) => {
       const item = entry.item
-      const namespace = `segment-${index}`
+      const namespace = index === 0 ? null : `segment-${index}`
       if (item.type !== 'activity') {
         return {
           key: namespace,
@@ -178,7 +179,8 @@ export function mergeAdjacentCompactActivityEntries(entries = []) {
       idx: run[0].idx,
       item: {
         type: 'activity',
-        activity_id: `combined:${run.map(entry => entry.item.activity_id || entry.idx).join('|')}`,
+        activity_id: run[0].item.activity_id || assistantBlockKey(run[0].item, run[0].idx),
+        reply_activity_live: run.some(entry => entry.item.reply_activity_live),
         entries: segments.flatMap(segment => segment.entries),
         detail_segments: segments,
         activity_sources: run

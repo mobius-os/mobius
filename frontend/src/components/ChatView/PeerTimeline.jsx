@@ -14,7 +14,7 @@ import {
 import { groupTimelineRows } from './timelineRowGrouping.js'
 import { peerRecordTool, peerTime, foldPeerActivity } from './peerTimeline.js'
 
-export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMirrorIndex = -1) {
+export function usePeerTimeline(chatId, messages, enabled, activeTools) {
   const query = useInfiniteQuery({
     queryKey: chatActivityQueryKey(chatId),
     initialPageParam: null,
@@ -37,13 +37,12 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
         messages,
         projectChatActivity(messages, events, chatId, activeTools),
         chatId,
-        activeMirrorIndex,
       ),
       // Source identity for the scroll handover; streaming projection alone
       // must not schedule pre-paint geometry reads on every token.
       activityEvents: events,
     }),
-    [messages, events, chatId, activeTools, activeMirrorIndex],
+    [messages, events, chatId, activeTools],
   )
 }
 
