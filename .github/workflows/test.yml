@@ -10,6 +10,14 @@ on:
         description: Replay historical releases on a disposable hosted runner (up to 60 minutes)
         type: boolean
         default: false
+      dependency_replay:
+        description: Test actual Python and locked-package replacement on a disposable runner (up to 90 minutes)
+        type: boolean
+        default: false
+      dependency_base:
+        description: Exact public source SHA used for both disposable dependency images
+        type: string
+        default: 3c8401779f7635783cbe6e5e54f4c54f585311a6
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
     # same suite for every layer so the chain is reviewable in parallel; main's
@@ -35,6 +43,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-replay:
+    if: github.event_name == 'workflow_dispatch' && inputs.dependency_replay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Check dependency fixture contracts
+        run: python3 -m unittest scripts/test_dependency_upgrade_fixture.py -v
+      - name: Verify dependency replacement and wrong-image recovery
+        env:
+          BASE_SHA: ${{ inputs.dependency_base }}
+        run: scripts/test-dependency-upgrade-path.sh "$BASE_SHA" .
+
   release-replay:
     # Never run replacements on PR/merge events or a self-hosted runner.
     if: github.event_name == 'workflow_dispatch' && inputs.release_replay
