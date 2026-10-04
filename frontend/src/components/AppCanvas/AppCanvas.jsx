@@ -195,7 +195,8 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //
 // Host-level messages (attributed and narrowed here, outcomes owned by the
 // `onHostRequest` callback):
-//   - {type: 'moebius:new-chat', draft?, autoSend?}          frame → host
+//   - {type: 'moebius:new-chat', draft?}                     frame → host
+//     (always an editable draft; see appHostRequest)
 //   - {type: 'moebius:open-chat', chatId, draft?}            frame → host
 //   - {type: 'moebius:open-app', appId, intent?}             frame → host
 //   - {type: 'moebius:open-settings', section?}              frame → host

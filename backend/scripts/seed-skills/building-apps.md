@@ -852,9 +852,9 @@ const { chatId } = await window.mobius.chat.start({
 window.parent.postMessage({ type: 'moebius:open-chat', chatId }, '*')
 ```
 
-Use `moebius:new-chat` only for an editable draft. Do not add an `autoSend`
-field to that shell message: retained panes and navigation make a
-create-then-send handoff inherently timing-sensitive. `window.mobius.chat.start`
+`moebius:new-chat` always opens an editable draft; the owner's own Send is
+what approves app-chosen text, so the shell ignores any `autoSend` field.
+`window.mobius.chat.start`
 is the shared first-turn primitive. It creates a visible app-owned chat, waits
 for the first message to be accepted, then returns its id for navigation. Catch
 errors and preserve the source UI so the owner can retry without losing work.

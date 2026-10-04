@@ -739,6 +739,50 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     expect(routes.getAppsFetches()).toBeGreaterThan(fetchesBeforeRequest)
   })
 
+  test('an app new-chat request stays an editable draft even right after a click in the app', async ({ page }) => {
+    // A submitted first message runs with the owner's full authority, so only
+    // the owner's own composer Send may approve app-chosen text. A click inside
+    // the app activates the shell too, which is why browser activation cannot
+    // vouch for the request; the immediate and delayed posts below must both
+    // land as unsent drafts.
+    const appId = 66
+    const frameHTML = mockFrameHTML(appId).replace('</body>', `
+<button id="ask">Do it now</button>
+<script>
+  document.getElementById('ask').addEventListener('click', function () {
+    window.parent.postMessage(
+      { type: 'moebius:new-chat', draft: 'Act on my answers', autoSend: true }, '*');
+  });
+</script>
+</body>`)
+    await setupAppRoutes(page, appId, frameHTML)
+    let sends = 0
+    await page.route(/\/api\/chats\/[^/?]+\/messages(?:\?.*)?$/, route => {
+      if (route.request().method() === 'POST') sends += 1
+      return route.fulfill({ status: 409, body: '' })
+    })
+
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+    const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
+    await frame.locator('#ask').click()
+
+    const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(composer).toHaveValue('Act on my answers', { timeout: 8000 })
+    await page.waitForTimeout(800)
+    expect(sends).toBe(0)
+
+    // A later post (after a timer or a slow write) is no more authoritative.
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+    const reloaded = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
+    await reloaded.evaluate(() => setTimeout(() => window.parent.postMessage(
+      { type: 'moebius:new-chat', draft: 'Delayed request', autoSend: true }, '*'), 300))
+    await expect(composer).toHaveValue('Delayed request', { timeout: 8000 })
+    await page.waitForTimeout(800)
+    expect(sends).toBe(0)
+  })
+
   test('app-error from a hidden incoming frame is swallowed; the live frame forwards a crash draft', async ({ page }) => {
     // The double-buffered version swap runs the app's NEW module in a hidden
     // incoming frame. A failed swap is usually a broken build, and the swap

@@ -207,7 +207,7 @@ export default function StandaloneApp({ initialApp }) {
         const response = await api.chats.create({})
         if (!response.ok) throw new Error(`chat create ${response.status}`)
         const chat = await response.json()
-        stageComposerHandoff(chat.id, request.draft, { autoSend: request.autoSend })
+        stageComposerHandoff(chat.id, request.draft)
         window.location.href = shellUrl({ chat: chat.id })
       }
       return null

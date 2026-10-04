@@ -7,7 +7,7 @@ test('app host requests expose only the reviewed navigation contract', () => {
   assert.deepEqual(appHostRequest({
     type: 'moebius:new-chat', draft: 'hello', autoSend: 1, secret: 'drop-me',
   }), {
-    type: 'moebius:new-chat', draft: 'hello', autoSend: false,
+    type: 'moebius:new-chat', draft: 'hello',
   })
   assert.deepEqual(appHostRequest({
     type: 'moebius:open-app', appId: 'atlas', intent: 'setup', extra: true,
@@ -81,4 +81,12 @@ test('source import requests retain only the bounded source identity, never a ch
   assert.equal(result.kind, undefined)
   assert.equal(result.token, undefined)
   assert.equal(appHostRequest({ type: 'moebius:projects', requestId: 'projects:abc:2', action: 'import-sources' }).action, 'import-sources')
+})
+
+test('an app new-chat request never asks the host to submit its text', () => {
+  // The owner's composer Send is the only approval of app-chosen text; no
+  // frame flag, click, or activation signal turns the draft into a sent turn.
+  assert.deepEqual(appHostRequest({
+    type: 'moebius:new-chat', draft: 'run this', autoSend: true,
+  }), { type: 'moebius:new-chat', draft: 'run this' })
 })
