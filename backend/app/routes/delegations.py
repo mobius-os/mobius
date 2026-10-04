@@ -554,7 +554,11 @@ async def message_delegation(
   if status in ACTIVE_DELEGATION_STATUSES:
     raise HTTPException(
       status_code=409,
-      detail="The helper is still working. Wait for its result, or stop it.",
+      detail=(
+        "The helper is still working. Wait for its result before a follow-up; "
+        "for a decision-changing note now, use send_agent_message(recipients, body) "
+        "with its peer chat id from list_agent_peers."
+      ),
     )
   from app import chat_queue
   from app.chat_start import start_programmatic_chat_turn

@@ -139,6 +139,28 @@ def test_message_stop_and_list_address_helpers_by_name(monkeypatch):
     control._call_stop_agent({"helper": "missing"})
 
 
+def test_message_agent_reports_wrong_fields_and_peer_chat_target_without_echoing_values(monkeypatch):
+  control = _control(monkeypatch, CHAT_ID="parent-1")
+  calls = _capture_api(control, monkeypatch, {
+    "/api/delegations?parent_chat_id=parent-1": {"items": []},
+  })
+  with pytest.raises(ValueError) as wrong:
+    control._call_message_agent({"recipient": "secret-target", "body": "secret-body"})
+  assert "invalid keys: body, recipient" in str(wrong.value)
+  assert "missing: helper, message" in str(wrong.value)
+  assert "send_agent_message(recipients, body" in str(wrong.value)
+  assert "secret-target" not in str(wrong.value)
+  assert "secret-body" not in str(wrong.value)
+  assert calls == []
+
+  with pytest.raises(ValueError) as target:
+    control._call_message_agent({"helper": "peer-chat-secret", "message": "Follow up"})
+  assert "list_agents" in str(target.value)
+  assert "send_agent_message(recipients, body)" in str(target.value)
+  assert "peer-chat-secret" not in str(target.value)
+  assert calls == [("GET", "/api/delegations?parent_chat_id=parent-1&limit=200", None)]
+
+
 def test_every_agent_level_offers_the_helper_tools(monkeypatch):
   from app import platform_tools
   control = _control(monkeypatch, MOBIUS_RUN_TOKEN="run")
@@ -218,6 +240,8 @@ def test_a_working_or_stopped_helper_cannot_be_messaged(client, owner_token, db)
   gone = client.post(f"/api/delegations/{stopped_id}/messages",
                      json={"message": "x"}, headers=headers)
   assert busy.status_code == 409 and "still working" in busy.text
+  assert "send_agent_message(recipients, body)" in busy.text
+  assert "list_agent_peers" in busy.text
   assert gone.status_code == 409 and "stopped" in gone.text
 
 

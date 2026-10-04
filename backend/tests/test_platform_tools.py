@@ -856,6 +856,27 @@ def test_coordination_tools_validate_discovery_and_send(monkeypatch):
   assert "cannot interrupt" in invalid_broadcast["content"][0]["text"]
 
 
+def test_send_agent_message_reports_wrong_keys_and_target_shape_without_echoing_values():
+  control = _control_module()
+  with pytest.raises(ValueError) as wrong:
+    control._call_send_agent_message({"helper": "secret-helper", "message": "secret-body"})
+  assert "invalid keys: helper, message" in str(wrong.value)
+  assert "recipients (agent/chat ids), body" in str(wrong.value)
+  assert "message_agent(helper, message)" in str(wrong.value)
+  assert "secret-helper" not in str(wrong.value)
+  assert "secret-body" not in str(wrong.value)
+
+  with pytest.raises(ValueError) as target:
+    control._call_send_agent_message({"recipients": "secret-peer", "body": "note"})
+  assert "list of at most 24 agent/chat ids" in str(target.value)
+  assert "secret-peer" not in str(target.value)
+
+  send = control._TOOL_DEFINITIONS["send_agent_message"]
+  followup = control._TOOL_DEFINITIONS["message_agent"]
+  assert "finished helper's follow-up" in send["description"]
+  assert "live helper" in followup["description"]
+
+
 def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
   control = _control_module()
   body = "x" * 4000

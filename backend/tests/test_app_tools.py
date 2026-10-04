@@ -217,6 +217,7 @@ def test_call_runs_the_apps_service_with_arguments_and_moment(
   assert envelope["public"] is False
   assert envelope["body"] == {
     "arguments": {"friction": "retried a flaky command"},
+    "provider_capacity": {},
     "call": {
       "chat_id": "chat-1", "run_id": "run-1",
       "provider": "claude", "call_id": "toolu_9",
@@ -387,3 +388,24 @@ def test_result_independence_is_an_explicit_reviewed_delivery_promise(db):
   assert listed.listing()["_meta"] == {
     "anthropic/alwaysLoad": True, "mobius/resultIndependent": True,
   }
+
+
+def test_tool_capacity_is_host_owned_not_an_argument_or_owner_credential(client, auth, db, monkeypatch):
+  _app(db)
+  _run(db)
+  hint = {"claude": {"state": "exhausted", "expires_at": 2000}}
+  monkeypatch.setattr(app_tools.provider_usage, "cached_provider_capacity", lambda _: hint)
+  envelopes = []
+
+  async def invoke(_app, _owner, envelope, **kwargs):
+    envelopes.append(envelope)
+    return 200, "ok", {}, None
+
+  monkeypatch.setattr(app_tools.app_services, "invoke_service", invoke)
+  response = client.post("/api/agent/app-tools/call", headers=_agent_auth(db), json={
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "example", "provider_capacity": {"forged": True}},
+  })
+  assert response.status_code == 200
+  assert envelopes[0]["body"]["provider_capacity"] == hint
+  assert set(envelopes[0]["body"]) == {"arguments", "call", "provider_capacity"}

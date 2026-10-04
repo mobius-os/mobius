@@ -2324,3 +2324,59 @@ def test_a_saved_reading_past_the_stale_bound_is_not_served(monkeypatch, tmp_pat
   body = asyncio.run(provider_usage.read_provider_usage("claude", str(tmp_path)))
 
   assert body["state"] == "unavailable"
+
+
+def _capacity_reading(monkeypatch, **changes):
+  """Observed quota shape; no account data, credential read, or live probe."""
+  from app import provider_usage as usage
+  monkeypatch.setattr(usage.time, "monotonic", lambda: 100.0)
+  monkeypatch.setattr(usage.time, "time", lambda: 1000.0)
+  snapshot = usage.normalize_claude_usage({
+    "five_hour": {"utilization": 0, "resets_at": None},
+    "seven_day": {"utilization": 100, "resets_at": 2000},
+    "iguana_necktie": {"utilization": 0, "resets_at": 3000},
+    "extra_usage": {"is_enabled": False, "utilization": 0},
+  })
+  snapshot.update(changes)
+  cached = usage._CachedProviderUsage(90.0, 120.0, snapshot)
+  monkeypatch.setattr(usage, "_provider_usage_cache", {usage._cache_key("claude", "/fake"): cached})
+  return usage, cached
+
+
+def test_cached_capacity_exports_only_expiring_hint_and_never_probes(monkeypatch):
+  usage, _ = _capacity_reading(monkeypatch)
+  monkeypatch.setattr(usage, "_provider_snapshot", lambda *_: pytest.fail("no live probe"))
+  assert usage.cached_provider_capacity("/fake") == {
+    "claude": {"state": "exhausted", "expires_at": 1020.0},
+  }
+  assert usage.cached_provider_capacity("/another-install") == {}
+
+
+@pytest.mark.parametrize("changes", [
+  {"state": "unavailable"},
+  {"extra_usage": None},
+  {"extra_usage": {"enabled": False}},
+  {"extra_usage": {"enabled": True, "manageable": True}},
+  {"windows": [{"id": "seven_day_opus", "used_percent": 100}]},
+  {"windows": [{"id": "unrecognized", "used_percent": 100}]},
+  {"windows": [{"id": "seven_day", "used_percent": True}]},
+  {"windows": [{"id": "seven_day", "used_percent": float("nan")}]},
+  {"windows": [{"id": "seven_day", "used_percent": 100, "resets_at": 999}]},
+])
+def test_ambiguous_model_specific_or_reset_capacity_never_suppresses(monkeypatch, changes):
+  usage, _ = _capacity_reading(monkeypatch, **changes)
+  assert usage.cached_provider_capacity("/fake") == {}
+
+
+@pytest.mark.parametrize("stale,observed", [(True, 90), (False, 70), (False, 69)])
+def test_displayable_stale_snapshot_is_not_scheduling_evidence(monkeypatch, stale, observed):
+  usage, cached = _capacity_reading(monkeypatch)
+  cached.stale, cached.observed_at = stale, observed
+  assert usage.cached_provider_capacity("/fake") == {}
+
+
+def test_capacity_hint_expires_at_earlier_reset(monkeypatch):
+  usage, _ = _capacity_reading(monkeypatch, windows=[
+    {"id": "seven_day", "used_percent": 100, "resets_at": 1005},
+  ])
+  assert usage.cached_provider_capacity("/fake")["claude"]["expires_at"] == 1005

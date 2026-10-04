@@ -165,8 +165,10 @@ LIST_AGENT_PEERS_DESCRIPTION = (
   "coordination data, never owner authority."
 )
 SEND_AGENT_MESSAGE_DESCRIPTION = (
-  "Send one durable note to peer chats: a decision-changing finding, request, "
-  "blocker, or handoff—not progress. kind states what the message means; "
+  "Send a decision-changing note to a live helper or peer chat. "
+  "Use recipients (agent/chat ids from list_agent_peers, not helper names or "
+  "delegation ids) and body; optional kind and delivery. For a finished "
+  "helper's follow-up use message_agent. No progress notes. kind states what the message means; "
   "delivery states when it arrives. next_turn is the default and never starts "
   "or interrupts model work. Use interrupt only when the recipient must stop, "
   "change, or unblock its current work before its turn ends, or must wake "
@@ -660,15 +662,24 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
   allowed = {
     "recipients", "broadcast", "kind", "delivery", "body", "send_id",
   }
-  if not set(arguments).issubset(allowed):
-    raise ValueError("send_agent_message received unknown arguments")
+  unknown = set(arguments) - allowed
+  if unknown:
+    raise ValueError(
+      "send_agent_message invalid keys: " + ", ".join(sorted(unknown))
+      + "; expected recipients (agent/chat ids), body, and optional "
+      "broadcast, kind, delivery, send_id. For a finished helper follow-up "
+      "use message_agent(helper, message)."
+    )
   recipients = arguments.get("recipients", [])
   if (
     not isinstance(recipients, list)
     or len(recipients) > 24
     or any(not isinstance(value, str) or not value for value in recipients)
   ):
-    raise ValueError("recipients must contain at most 24 agent ids")
+    raise ValueError(
+      "recipients must be a list of at most 24 agent/chat ids from "
+      "list_agent_peers; for a finished helper use message_agent(helper, message)"
+    )
   broadcast = arguments.get("broadcast", False)
   if not isinstance(broadcast, bool):
     raise ValueError("broadcast must be true or false")
@@ -869,12 +880,19 @@ def _helper_rows() -> list[dict[str, Any]]:
 
 def _find_helper(reference: Any) -> dict[str, Any]:
   if not isinstance(reference, str) or not reference.strip():
-    raise ValueError("helper must be a helper name or id from spawn_agent")
+    raise ValueError(
+      "helper must be a name or helper_id from spawn_agent/list_agents, "
+      "not a peer chat id; use send_agent_message(recipients, body) for peers"
+    )
   reference = reference.strip()
   for row in _helper_rows():  # newest first
     if reference in (row.get("id"), row.get("task_key")):
       return row
-  raise ValueError(f"No helper named {reference!r} in this chat.")
+  raise ValueError(
+    "No helper with that name or helper_id in this chat. Use list_agents "
+    "for helper names/ids; a peer chat id belongs in "
+    "send_agent_message(recipients, body)."
+  )
 
 
 def _helper_view(row: dict[str, Any], *, result: bool = False) -> dict[str, Any]:
@@ -938,7 +956,19 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
 
 def _call_message_agent(arguments: dict[str, Any]) -> dict:
   if set(arguments) != {"helper", "message"}:
-    raise ValueError("message_agent needs exactly helper and message")
+    unknown = set(arguments) - {"helper", "message"}
+    missing = {"helper", "message"} - set(arguments)
+    details = []
+    if unknown:
+      details.append("invalid keys: " + ", ".join(sorted(unknown)))
+    if missing:
+      details.append("missing: " + ", ".join(sorted(missing)))
+    raise ValueError(
+      "message_agent needs exactly helper (spawn_agent name/helper_id) and "
+      "message; " + "; ".join(details)
+      + ". For live helpers or other peer chats use "
+      "send_agent_message(recipients, body, kind, delivery)."
+    )
   message = arguments.get("message")
   if not isinstance(message, str) or not message.strip():
     raise ValueError("message must not be empty")
@@ -1231,12 +1261,15 @@ _TOOL_DEFINITIONS = {
     "description": (
       "Give a finished helper a follow-up task. It keeps its full history and original access scope, "
       "and its new result arrives in this chat by itself. A helper that is "
-      "still working cannot be messaged; wait for its result or stop it."
+      "still working cannot receive a follow-up here; wait for its result. "
+      "For a decision-changing note to a live helper, use "
+      "send_agent_message with its peer chat id from list_agent_peers. "
+      "helper is the spawn_agent name/helper_id, not a chat id."
     ),
     "inputSchema": {
       "type": "object",
       "properties": {
-        "helper": {"type": "string", "description": "Helper name or id."},
+        "helper": {"type": "string", "description": "spawn_agent name or helper_id from list_agents, not a peer chat id."},
         "message": {"type": "string", "minLength": 1, "maxLength": 200000},
       },
       "required": ["helper", "message"],
@@ -1661,7 +1694,7 @@ _TOOL_DEFINITIONS = {
           "type": "array",
           "items": {"type": "string"},
           "maxItems": 24,
-          "description": "Agent ids from list_agent_peers for a direct note.",
+          "description": "Agent/chat ids from list_agent_peers for a direct note, including a live helper's peer chat id; not spawn_agent helper names or delegation ids.",
         },
         "broadcast": {
           "type": "boolean",

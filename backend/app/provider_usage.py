@@ -1237,6 +1237,46 @@ def _held_usage(key: tuple[str, str]) -> dict[str, Any] | None:
   return snapshot
 
 
+def cached_provider_capacity(data_dir: str) -> dict[str, dict[str, Any]]:
+  """Narrow, expiring app-tool advice from fresh readings; never probes.
+
+  Absence means unknown, not available. This is scheduling advice, never a
+  grant or proof a request will succeed. Do not export account/billing details.
+  A displayable stale reading is not strong enough to skip a provider call.
+  """
+  cached = _provider_usage_cache.get(_cache_key("claude", data_dir))
+  if cached is None or cached.stale:
+    return {}
+  remaining = _PROVIDER_USAGE_FRESH_SECONDS - (time.monotonic() - cached.observed_at)
+  snapshot = cached.snapshot
+  if remaining <= 0 or snapshot.get("state") != "ready":
+    return {}
+  # Subscription exhaustion need not block paid overage. Unknown settings
+  # fail open too. Codex's display balance cannot distinguish absent credits
+  # from unquantified credits, so it deliberately provides no skip hint.
+  extra = snapshot.get("extra_usage")
+  if (not isinstance(extra, dict) or extra.get("enabled") is not False
+      or extra.get("manageable") is not True):
+    return {}
+  wall_now = time.time()
+  for window in snapshot.get("windows", []):
+    if not isinstance(window, dict) or window.get("id") not in {
+      "five_hour", "seven_day", "monthly", "seven_day_oauth_apps",
+      "monthly_agent_sdk", "agent_sdk_monthly",
+    }:
+      continue
+    used = window.get("used_percent")
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not used >= 100:
+      continue
+    reset = _reset_iso(window.get("resets_at"))
+    valid_for = remaining
+    if reset is not None:
+      valid_for = min(valid_for, datetime.fromisoformat(reset).timestamp() - wall_now)
+    if valid_for > 0:
+      return {"claude": {"state": "exhausted", "expires_at": wall_now + valid_for}}
+  return {}
+
+
 def _snapshot_resets_are_current(
   snapshot: dict[str, Any],
   *,
