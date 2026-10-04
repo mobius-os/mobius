@@ -325,8 +325,51 @@ def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution
   assert "durable background delegation may outlive the turn" in normalized
   assert "durable platform or installed capability owns that lifecycle" in normalized
   assert "Contribution preparation is owner-initiated" in normalized
-  assert "leave local changes local without adding an approval card" in normalized
+  assert "offer that separate choice once" in normalized
+  assert "An offer is not authorization to prepare or publish" in normalized
   assert "offer once through the clarifying-question tool" not in core
+
+
+def test_sharing_recommendations_follow_project_context_not_missing_approval():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "Recommend upstream submission for useful completed work in shared or upstream-connected projects" in core
+  assert "recommend the next unapproved step toward it" in core
+  assert "not keeping work local merely because approval is missing" in core
+  assert "For new, unshared work, default to continued local development" in core
+  assert "offer publication when it has clear value to others" in core
+  assert "Refrain from sharing offers for bespoke or private work" in core
+  assert "work that would expose personal data or credentials" in core
+  assert "Project context guides recommendations, not permission" in core
+  assert "An offer is not authorization to prepare or publish" in core
+
+
+def test_meaningful_next_steps_are_answerable_choices_not_prose_only_advice():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "Do not end with a prose-only recommendation for that continuation: offer it as the recommended choice" in core
+  assert "Use an existing decision surface instead of duplicating it" in core
+  assert "Do not ask about routine authorized steps, invent adjacent work" in core
+  assert "Once the agreed outcome is verified and no meaningful decision remains, finish declaratively" in core
+
+
+def test_status_questions_offer_undecided_steps_without_granting_authority():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "Status questions can be handoff cues too: answer first" in core
+  assert "offer any useful, unfinished step whose decision remains open" in core
+  assert "A status question is not authorization to perform that step" in core
+  assert "Use an existing decision surface instead of duplicating it" in core
+  assert "Do not ask about routine authorized steps, invent adjacent work, or re-offer the same continuation after an answer or decline" in core
 
 
 def test_owner_policy_and_card_access_stay_simple_and_explicit():
