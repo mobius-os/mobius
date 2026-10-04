@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -4624,3 +4625,84 @@ def test_conflict_markers_count_only_in_paths_the_resolution_changed(tmp_path):
   assert install.committed_conflict_marker_paths(repo, "HEAD", upstream) == [
     "index.jsx",
   ]
+
+
+def _two_commit_switch(repo: Path) -> tuple[str, str]:
+  """A repo checked out at ``before`` whose ``target`` rewrites ``a.txt``."""
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  (repo / "a.txt").write_text("before\n")
+  (repo / "b.txt").write_text("unchanged\n")
+  before = _commit_all(repo, "before")
+  (repo / "a.txt").write_text("target\n")
+  target = _commit_all(repo, "target")
+  app_git._run(repo, "checkout", "-q", before)
+  return before, target
+
+
+def bump_ctime_without_changing_bytes(*paths: Path) -> None:
+  """What a no-op ownership repair does: only ctime changes, and Git's index
+  caches it. Git compares ctime to the second unless built with USE_NSEC, so
+  wait for the clock to pass the file's current second before the chown that
+  makes the cached stat data stale."""
+  for path in paths:
+    second = os.stat(path, follow_symlinks=False).st_ctime_ns // 1_000_000_000
+    deadline = time.monotonic() + 5
+    while time.time_ns() // 1_000_000_000 <= second:
+      assert time.monotonic() < deadline, "clock never advanced"
+      time.sleep(0.01)
+    os.chown(path, os.getuid(), os.getgid(), follow_symlinks=False)
+
+
+def test_worktree_merge_treats_metadata_only_changes_as_unchanged(tmp_path):
+  repo = tmp_path / "repo"
+  before, target = _two_commit_switch(repo)
+  bump_ctime_without_changing_bytes(repo / "a.txt", repo / "b.txt")
+  stale = app_git._run(repo, "diff-files", "--quiet", check=False)
+  assert stale.returncode == 1  # read-tree alone would say "not uptodate"
+
+  dry = app_git.merge_trees_into_worktree(repo, before, target, dry_run=True)
+  assert dry.returncode == 0 and (repo / "a.txt").read_text() == "before\n"
+  app_git.merge_trees_into_worktree(repo, before, target)
+  assert (repo / "a.txt").read_text() == "target\n"
+
+
+def test_worktree_merge_still_refuses_to_overwrite_a_real_edit(tmp_path):
+  """Refreshing stat data is not permission to overwrite local work."""
+  repo = tmp_path / "repo"
+  before, target = _two_commit_switch(repo)
+  (repo / "a.txt").write_text("owner edit\n")
+  bump_ctime_without_changing_bytes(repo / "a.txt", repo / "b.txt")
+
+  refused = app_git.merge_trees_into_worktree(repo, before, target, check=False)
+
+  assert refused.returncode != 0
+  assert "a.txt" in refused.stderr
+  assert (repo / "a.txt").read_text() == "owner edit\n"
+  with pytest.raises(subprocess.CalledProcessError):
+    app_git.merge_trees_into_worktree(repo, before, target, dry_run=True)
+
+
+def test_worktree_merges_all_go_through_the_index_refreshing_primitive():
+  """read-tree never refreshes the index. Any other worktree-updating caller
+  would reintroduce a refusal of unchanged files after a metadata change."""
+  import ast
+
+  app_dir = Path(app_git.__file__).parent
+  offenders = []
+  for source in sorted(app_dir.rglob("*.py")):
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    for function in ast.walk(tree):
+      if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        continue
+      if source.name == "app_git.py" and function.name == "merge_trees_into_worktree":
+        continue
+      for call in ast.walk(function):
+        if not isinstance(call, ast.Call):
+          continue
+        words = {
+          arg.value for arg in call.args
+          if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+        }
+        if {"read-tree", "-m", "-u"} <= words:
+          offenders.append(f"{source.relative_to(app_dir)}:{call.lineno}")
+  assert offenders == []

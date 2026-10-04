@@ -17,6 +17,7 @@ import pytest
 from app.config import get_settings
 from app.routes import github as github_routes
 from app.routes.github import _limiter as _github_limiter
+from tests.test_app_git import bump_ctime_without_changing_bytes
 from tests.test_github_routes import _agent_run_headers, _app_token
 
 _github_limiter.enabled = False
@@ -230,6 +231,22 @@ def test_adoption_brings_only_the_revision_across_a_rebase(staging):
   assert (source / "greet.py").read_text() == REVISED
   # Upstream movement is the updater's job, never smuggled in by a review.
   assert (source / "other.py").read_text() == "y = 1\n"
+
+
+def test_adoption_ignores_a_metadata_only_change_to_live_files(staging):
+  """A no-op ownership repair changes ctime, not bytes: it is not a live edit
+  and must not block bringing a review revision across."""
+  staging["new_record"]()
+  source = staging["source"]
+  bump_ctime_without_changing_bytes(*(source / name for name in ("greet.py", "app.py", "other.py")))
+  dirty = subprocess.run(["git", "diff-files", "--quiet"], cwd=source, check=False)
+  assert dirty.returncode == 1  # the cached stat data no longer matches
+  _commit(staging["worktree"], {"greet.py": REVISED}, "Say hello")
+
+  response = staging["stage"]()
+  assert response.status_code == 200, response.text
+  assert response.json()["source_sync"]["state"] == "adopted"
+  assert (source / "greet.py").read_text() == REVISED
 
 
 def test_live_edits_on_revised_files_are_left_untouched(staging):

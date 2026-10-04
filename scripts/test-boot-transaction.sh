@@ -158,22 +158,26 @@ as_mobius test ! -e /data/platform/boot-smoke-other-image.txt \
   || fail "the reverted update is not prepared again"
 as_mobius rm -f "$record"
 
-echo "4. a record from a newer boot protocol stops the boot"
+echo "4. a record from a newer boot protocol falls back instead of crash-looping"
 write_record "{\"state\":\"prepared\",\"snapshot\":\"$late\",\"prepared\":\"$late\",\"target\":\"$image\",\"protocol\":$((protocol + 1))}"
-docker restart "$name" >/dev/null
-for _ in $(seq 1 60); do
-  [ "$(docker inspect -f '{{.State.Running}}' "$name")" = "true" ] || break
-  sleep 1
-done
-[ "$(docker inspect -f '{{.State.Running}}' "$name")" = "false" ] \
-  || fail "the boot served a record it cannot understand"
-[ "$(docker inspect -f '{{.State.ExitCode}}' "$name")" = "1" ] \
-  || fail "the refused boot did not exit 1"
-docker logs --tail 40 "$name" 2>&1 | grep -qF "refusing to start" \
-  || fail "the refused boot did not say why"
-docker run --rm -v "$volume:/data" --entrypoint rm "$IMAGE" -f "$record"
-docker start "$name" >/dev/null
-wait_healthy
+held=$(as_mobius git -C /data/platform rev-parse HEAD)
+restart  # the protected built-in version serves; the container never exits
+expect_log "boot activate could not settle /data/platform"
+[ "$(docker exec "$name" cat /tmp/serving-source)" = "baked" ] \
+  || fail "the unsettled boot did not fall back to the baked platform"
+[ "$(docker exec "$name" cat /tmp/platform-boot-unsettled)" = "activate" ] \
+  || fail "the fallback did not pause update work"
+docker exec "$name" test ! -e /tmp/platform-boot-transaction \
+  || fail "a failed transaction published its protocol"
+as_mobius grep -qF "boot protocol $((protocol + 1))" /data/logs/platform-boot.jsonl \
+  || fail "the boot log does not say why the transaction failed"
+[ "$(as_mobius git -C /data/platform rev-parse HEAD)" = "$held" ] \
+  || fail "the fallback changed the checkout it left for the next boot"
+as_mobius test -e "$record" || fail "the fallback dropped the update record"
+as_mobius rm -f "$record"
+restart
+docker exec "$name" test ! -e /tmp/platform-boot-unsettled \
+  || fail "a settled boot kept update work paused"
 serving_platform
 
 echo "boot transaction regression: ok"

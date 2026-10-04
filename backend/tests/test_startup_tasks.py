@@ -334,3 +334,27 @@ async def test_an_image_that_still_reconciles_skills_keeps_the_job(
   await startup._reconcile_platform_skills(context())
 
   assert not (tmp_path / "shared" / "skills").exists()
+
+
+def test_a_fallback_boot_tells_the_owner_and_an_ordinary_boot_does_not(
+  owner_token, tmp_path, monkeypatch,
+):
+  """A crash-looping instance cannot report itself; a fallback boot can, so
+  it pushes once per boot, after push is initialized."""
+  from app import platform_update, push
+
+  sent = []
+  monkeypatch.setattr(push, "notify_owner", lambda _db, owner_id, **kw: sent.append(kw))
+  marker = tmp_path / "platform-boot-unsettled"
+  monkeypatch.setattr(platform_update, "BOOT_UNSETTLED_MARKER", marker)
+  names = [task.name for task in startup.DATABASE_STARTUP_TASKS]
+  assert names.index("initialize push") < names.index("report unsettled boot transaction")
+
+  startup._report_unsettled_boot_transaction(context())
+  assert sent == []
+
+  marker.write_text("activate\n")
+  startup._report_unsettled_boot_transaction(context())
+  [notice] = sent
+  assert notice["tag"] == "platform-boot-unsettled"
+  assert "protected version" in notice["title"]

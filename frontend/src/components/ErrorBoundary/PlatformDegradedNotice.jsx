@@ -9,7 +9,8 @@ import './ErrorBoundary.css'
 // but are not what they are looking at:
 //
 // - `serving_source: "baked"` — the entrypoint serves the image-baked BACKEND
-//   because /data/platform failed to import at boot.
+//   because /data/platform failed to import at boot, or its boot transaction
+//   could not settle it (updates then stay paused until a boot does).
 // - `frontend_source: "baked"` — the platform backend serves the image-baked
 //   SHELL because /data/platform/frontend/dist is not a complete build (the
 //   watcher never published one, or the last publish was rejected).
@@ -36,8 +37,12 @@ const VARIANTS = {
         'changes did not finish loading. The latest source is preserved but ' +
         'is not being served.',
       '',
-      'Reproduce the import failure from the served backend, read the relevant ' +
-        'boot/container logs, find the root cause in /data/platform, and ' +
+      'Start with /data/logs/platform-boot.jsonl, the startup transaction\'s ' +
+        'record of each step and the exact error of a failed one. If the last ' +
+        'step failed, the startup could not finish settling the platform: ' +
+        'updates stay paused and /data/platform is left as the failure left it ' +
+        'for the next startup to resume. Otherwise reproduce the import failure ' +
+        'from the served backend. Find the root cause in /data/platform and ' +
         'implement a targeted fix so the normal platform serves again.',
       '',
       'Preserve the edits and all data. Do not reset or restore the platform ' +

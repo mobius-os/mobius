@@ -552,6 +552,40 @@ def _initialize_push(_context: StartupContext) -> None:
   init_vapid()
 
 
+def _report_unsettled_boot_transaction(context: StartupContext) -> None:
+  """Tell the owner this boot fell back because its transaction failed.
+
+  The fallback serves, so this process is the only thing that can say so; the
+  baked-source warning in the shell covers an owner who is looking, this push
+  covers one who is not. One notification per boot, replacing the previous
+  one by tag.
+  """
+  from app import models, platform_update
+  from app.push import notify_owner
+
+  step = platform_update.boot_transaction_unsettled()
+  if step is None:
+    return
+  context.logger.warning(
+    "platform boot %s failed; serving the baked platform with updates paused", step,
+  )
+  with SessionLocal() as db:
+    owner = db.query(models.Owner).first()
+    if owner is None:
+      return
+    notify_owner(
+      db, owner.id,
+      title="Möbius started in its protected version",
+      body=(
+        "The last startup couldn't finish settling the platform, so Möbius "
+        "opened its built-in version and paused updates. Your work is untouched. "
+        "Open Möbius to have an agent repair it."
+      ),
+      source_type="platform_boot",
+      tag="platform-boot-unsettled",
+    )
+
+
 def _notify_reconciled_chats(context: StartupContext) -> None:
   if not context.manual_reconciled_chats:
     return
@@ -729,6 +763,9 @@ DATABASE_STARTUP_TASKS = (
     checkpoint="startup_app_provenance_retired",
   ),
   StartupTask("initialize push", _initialize_push),
+  StartupTask(
+    "report unsettled boot transaction", _report_unsettled_boot_transaction,
+  ),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
   StartupTask(
     "wake completed delegation parents",

@@ -135,6 +135,14 @@ _SET_ASIDE_PREFIX = "refs/mobius/platform-set-aside"
 # Written by the image entrypoint once this boot's own boot transaction
 # (``app.platform_boot``) succeeded; it holds that transaction's protocol.
 BOOT_TRANSACTION_MARKER = Path("/tmp/platform-boot-transaction")
+# Written (root-owned) by the image entrypoint when this boot's transaction
+# failed and the boot fell back to the baked platform instead of refusing to
+# start. ``/data/platform`` and every update record and journal are left
+# exactly as the failure left them: they belong to the next boot's
+# transaction, so this process refuses all update work (``_reconcile_flock``)
+# and its automatic update steps do nothing. It holds the failed step's name;
+# ``app.platform_boot.BOOT_LOG`` holds why.
+BOOT_UNSETTLED_MARKER = Path("/tmp/platform-boot-unsettled")
 # The prepared-update record and boot-transaction semantics an image's boot
 # understands. An image may be asked to activate or revert a record written by
 # newer served code (it is the rollback image), so served code prepares an
@@ -1000,7 +1008,9 @@ def _checkout_transition(repo: Path, before: str, target: str, *, dry_run: bool 
   """
   if _ignored_checkout_obstructions(repo, target):
     raise PlatformUpdateError("checkout_blocked_by_ignored_work")
-  _git("read-tree", *(["-n"] if dry_run else []), "-m", "-u", before, target, repo=repo)
+  app_git.merge_trees_into_worktree(
+    repo, before, target, dry_run=dry_run, timeout=_GIT_TIMEOUT,
+  )
 
 
 def _preserve_checkout_state(
@@ -1243,7 +1253,13 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
 def _reconcile_flock(*, blocking: bool = True):
   """Hold the cross-process reconcile lock (see :data:`RECONCILE_LOCK`). Released
   on context exit AND on process death (the fd closes), so a killed boot
-  reconcile never leaves the lock held."""
+  reconcile never leaves the lock held.
+
+  Every update operation runs under this lock, so it is also where update work
+  pauses while a failed boot transaction owns the checkout
+  (:data:`BOOT_UNSETTLED_MARKER`)."""
+  if boot_transaction_unsettled():
+    raise PlatformUpdateError("boot_transaction_unsettled")
   RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
   fd = os.open(str(RECONCILE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
   try:
@@ -1259,6 +1275,15 @@ def _reconcile_flock(*, blocking: bool = True):
       fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
       os.close(fd)
+
+
+def boot_transaction_unsettled() -> str | None:
+  """The boot step that failed, when this process serves the baked fallback
+  because its boot transaction could not settle ``/data/platform``."""
+  try:
+    return BOOT_UNSETTLED_MARKER.read_text(encoding="utf-8").strip() or "unknown"
+  except FileNotFoundError:
+    return None
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -3364,8 +3389,9 @@ def swap_in_prepared_update(
     )
 
   # Check once without the lock so an ordinary restart never waits on it, then
-  # again under it: the owner may cancel the update in between.
-  if not swappable(read_prepared_update()):
+  # again under it: the owner may cancel the update in between. A fallback
+  # server whose boot transaction failed leaves the record to the next boot.
+  if boot_transaction_unsettled() or not swappable(read_prepared_update()):
     return False
   with _reconcile_flock():
     record = read_prepared_update()
@@ -3914,6 +3940,8 @@ def complete_platform_swap(repo: Path = PLATFORM_REPO) -> str | None:
   """
   if read_prepared_update() is None and not RECONCILE_PRE_FLAG.exists():
     return None  # Nothing to finish; no lock, as on most boots.
+  if boot_transaction_unsettled():
+    return None  # The next boot's transaction owns whatever is left.
   with _reconcile_flock():
     journal = _read_reconcile_journal()
     if journal.get("revert"):
@@ -3984,7 +4012,7 @@ def confirm_platform_swap_loaded(repo: Path = PLATFORM_REPO) -> bool:
   back. A server started from other source (the baked floor) leaves the record
   for the next platform boot.
   """
-  if read_prepared_update() is None:
+  if read_prepared_update() is None or boot_transaction_unsettled():
     return False
   with _reconcile_flock():
     record = read_prepared_update()
@@ -4035,8 +4063,13 @@ def reconcile_bound_operation(status: dict, repo: Path = PLATFORM_REPO) -> str |
   ``unbound``, or None. Idempotent.
   """
   # Settings polls this; skip the lock unless a binding could be affected.
+  # A replacement whose boot transaction failed has not booted the update:
+  # its record is the next boot's, so neither retire nor unbind it here.
   unlocked = read_prepared_update()
-  if unlocked is None or not status_reports_bound_operation(status, unlocked):
+  if (
+    unlocked is None or boot_transaction_unsettled()
+    or not status_reports_bound_operation(status, unlocked)
+  ):
     return None
   with _reconcile_flock():
     record = read_prepared_update()

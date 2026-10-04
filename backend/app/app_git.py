@@ -394,6 +394,7 @@ def _run(
   *args: str,
   check: bool = True,
   read_only: bool = False,
+  timeout: int = _GIT_TIMEOUT,
 ) -> subprocess.CompletedProcess:
   """Runs `git -C <repo> <args>` with the fixed Mobius identity.
 
@@ -412,7 +413,7 @@ def _run(
     *args,
   ]
   return subprocess.run(
-    cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+    cmd, capture_output=True, text=True, timeout=timeout,
     check=check, env=_git_env(repo, read_only=read_only),
   )
 
@@ -438,6 +439,39 @@ def _run_with_index(
   return subprocess.run(
     cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
     check=check, env=env, input=input,
+  )
+
+
+def merge_trees_into_worktree(
+  repo: Path, *trees: str, dry_run: bool = False, check: bool = True,
+  timeout: int = _GIT_TIMEOUT,
+) -> subprocess.CompletedProcess:
+  """Git's native ``read-tree -m -u`` on the real index and worktree.
+
+  Two trees are Git's branch switch (carry unrelated uncommitted work, refuse
+  to overwrite an edited path); three are a merge from an explicit base. Every
+  worktree-updating ``read-tree`` goes through here, because it is plumbing:
+  unlike checkout, merge or status it never refreshes the index, and it
+  rejects any entry whose cached stat data differs as "not uptodate" even when
+  the bytes are unchanged. A metadata-only change such as an ownership or mode
+  repair (which updates ctime) would otherwise refuse a transition with no
+  local edit to protect, and repeat that refusal on every attempt.
+
+  The refresh re-hashes only stat-dirty entries: unchanged bytes become clean,
+  real edits stay dirty, so read-tree's own overwrite checks still refuse
+  genuine local work. ``--unmerged`` leaves an unmerged index for read-tree
+  itself to refuse. A dry run (``-n``) refreshes too; that changes no content.
+  With ``check=False`` the first failing step's result is returned.
+  """
+  refreshed = _run(
+    repo, "update-index", "-q", "--unmerged", "--refresh",
+    check=check, timeout=timeout,
+  )
+  if refreshed.returncode:
+    return refreshed
+  return _run(
+    repo, "read-tree", *(["-n"] if dry_run else []), "-m", "-u", *trees,
+    check=check, timeout=timeout,
   )
 
 
@@ -3577,10 +3611,7 @@ def start_conflict_merge(
       # conflicts as staged 1/2/3 entries. The follow-up checkout writes the
       # familiar markers without collapsing the unmerged index, so binary
       # conflicts stay unresolved until someone explicitly stages a side.
-      _run(
-        repo, "read-tree", "-m", "-u",
-        merge_base, local_branch, upstream_branch,
-      )
+      merge_trees_into_worktree(repo, merge_base, local_branch, upstream_branch)
       # read-tree prepares the exact three-stage index but deliberately does
       # only trivial whole-blob resolution. Run Git's standard content driver
       # so disjoint hunks inside one file merge cleanly; a nonzero result is

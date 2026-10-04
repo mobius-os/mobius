@@ -24,7 +24,7 @@ SPEC.loader.exec_module(host)
 def test_entrypoint_restores_host_control_after_compatibility_chown():
   source = ENTRYPOINT.read_text(encoding="utf-8")
 
-  broad_chown = source.index("chown -R mobius:mobius /data")
+  broad_chown = source.index("if ! _own_as_mobius /data 2>/dev/null; then")
   control_hardening = source.index("chown -R root:root /data/mobius-rebuild")
   inbox_grant = source.index(
     "chown -R mobius:mobius /data/mobius-rebuild/inbox",

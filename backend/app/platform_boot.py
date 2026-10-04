@@ -14,20 +14,80 @@ decides whether served source may run on it:
   ``BOOT_PROTOCOL`` for the running server.
 ``revert``
   After the served tree failed its import probe. Returns a swapped-in update
-  to its saved previous state; exits nonzero when there is none.
+  to its saved previous state; exits ``NOTHING_TO_REVERT`` when there is none.
 ``guard``
   The fail-closed boot guard: prove the served tree is a clean committed
   state, or refuse to serve it.
 
-A nonzero exit means this image cannot establish a state it may serve from
-``/data/platform``; the entrypoint then refuses to serve that tree.
+Exit 1 means the transaction failed: this image cannot establish a state it
+may serve from ``/data/platform``. The entrypoint then serves the baked
+platform instead, leaves ``/data/platform`` and its update records exactly as
+they are for the next boot, and marks the boot unsettled
+(``platform_update.BOOT_UNSETTLED_MARKER``) so the fallback server pauses
+update work and tells the owner.
+
+Every run is also appended to ``BOOT_LOG``. The container's console is outside
+the app container, so this durable record is the only place an agent repairing
+the platform can read why a boot transaction failed.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+BOOT_LOG = Path("/data/logs/platform-boot.jsonl")
+_BOOT_LOG_RECORDS = 200
+_STDERR_CHARS = 2000
+# ``revert`` found no swapped-in update: an answer, not a failed transaction.
+NOTHING_TO_REVERT = 3
+
+
+def failure_detail(exc: BaseException) -> str:
+  """The exception, plus the stderr of every failed command in its chain.
+
+  ``CalledProcessError``'s repr names only the exit code and argv; Git's
+  explanation ("Entry … not uptodate. Cannot merge.") is in its stderr.
+  """
+  parts = [repr(exc)]
+  seen: set[int] = set()
+  current: BaseException | None = exc
+  while current is not None and id(current) not in seen:
+    seen.add(id(current))
+    if isinstance(current, subprocess.CalledProcessError):
+      stderr = current.stderr
+      if isinstance(stderr, bytes):
+        stderr = os.fsdecode(stderr)
+      stderr = (stderr or "").strip()
+      if stderr:
+        parts.append(f"stderr: {stderr[-_STDERR_CHARS:]}")
+    current = current.__cause__ or current.__context__
+  return "; ".join(parts)
+
+
+def record_boot_run(command: str, *, ok: bool, detail: str, log: Path | None = None) -> None:
+  """Append this run to the bounded boot log; never fails the boot."""
+  log = log or BOOT_LOG
+  record = {
+    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "boot_id": os.environ.get("MOBIUS_BOOT_ID"),
+    "command": command,
+    "ok": ok,
+    "detail": detail,
+  }
+  try:
+    lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    lines = [*lines[-(_BOOT_LOG_RECORDS - 1):], json.dumps(record)]
+    staged = log.with_name(f".{log.name}.{os.getpid()}.tmp")
+    staged.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(staged, log)
+  except OSError as exc:
+    print(f"platform boot: could not record this run in {log}: {exc!r}", file=sys.stderr)
 
 
 def main(argv: list[str]) -> int:
@@ -53,14 +113,18 @@ def main(argv: list[str]) -> int:
     elif command == "revert":
       if not platform_update.revert_failed_update(repo):
         print("platform boot revert: no swapped-in update to revert", file=sys.stderr)
-        return 1
+        record_boot_run(command, ok=True, detail="no swapped-in update to revert")
+        return NOTHING_TO_REVERT
       outcome = "reverted"
     else:
       outcome = platform_update.boot_guard_sync()
   except Exception as exc:  # noqa: BLE001 - any failure must refuse the tree
-    print(f"platform boot {command} failed: {exc!r}", file=sys.stderr)
+    detail = failure_detail(exc)
+    print(f"platform boot {command} failed: {detail}", file=sys.stderr)
+    record_boot_run(command, ok=False, detail=detail)
     return 1
   print(f"platform boot {command}: {outcome}")
+  record_boot_run(command, ok=True, detail=str(outcome))
   return 0
 
 

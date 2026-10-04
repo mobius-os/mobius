@@ -88,6 +88,11 @@ _PLAN_ERROR_MESSAGES = {
   "platform_update_in_progress": (
     "Möbius is finishing another update task. Wait a moment, then review again."
   ),
+  "boot_transaction_unsettled": (
+    "Möbius is running its protected built-in version because the last "
+    "startup could not finish settling the platform. Updates are paused until "
+    "a startup succeeds; an agent can repair it from the warning screen."
+  ),
 }
 
 

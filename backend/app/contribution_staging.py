@@ -243,9 +243,7 @@ def adopt_reviewed_revision(
   # Updating files before the branch is the recoverable order: a crash in
   # between leaves the revision staged on the unchanged branch, which the next
   # stage reports as diverged rather than silently losing it.
-  switched = app_git._run(
-    source, "read-tree", "-m", "-u", live, adopted, check=False,
-  )
+  switched = app_git.merge_trees_into_worktree(source, live, adopted, check=False)
   if switched.returncode != 0:
     raise AdoptionRefused(
       "The live source has uncommitted edits on files the revision changes."
@@ -254,7 +252,7 @@ def adopt_reviewed_revision(
     source, "update-ref", "-m", message, "HEAD", adopted, live, check=False,
   )
   if moved.returncode != 0:
-    app_git._run(source, "read-tree", "-m", "-u", adopted, live, check=False)
+    app_git.merge_trees_into_worktree(source, adopted, live, check=False)
     raise AdoptionRefused("The live source moved while the revision was adopted.")
   return adopted
 
