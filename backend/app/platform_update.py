@@ -1205,13 +1205,17 @@ def _clear_upstream(repo: Path) -> None:
   )
 
 
-def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
-  """Run ``import app.main`` as a fresh subprocess with cwd the served backend.
+def _import_probe(
+  repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT, *,
+  smoke_provider: bool = False,
+):
+  """Import the served backend in a fresh subprocess, optionally resolving a provider.
 
-  Single-source probe for both boot and post-merge: it MUST be a subprocess (not
-  an in-process import) so the reconcile process — which already imported the OLD
-  ``app.platform_update`` — validates the NEW on-disk tree without corrupting its
-  own interpreter, and so cwd/env exactly mirror the uvicorn exec. The env scrubs
+  The post-merge variant exercises chat provider selection too: import alone
+  cannot catch a text-clean caller/signature mismatch. This MUST be a subprocess
+  so the reconcile process, which already imported the old ``app.platform_update``,
+  validates the new on-disk tree without corrupting its own interpreter. The
+  subprocess cwd/env mirror the uvicorn exec. The env scrubs
   ``PYTHONPATH`` (no stray path may shadow ``app``) and the ``GIT_*`` pointers,
   and keeps ``DATABASE_URL`` / ``DATA_DIR`` so settings resolve as the served
   process does; the withheld signing key is replaced by an import-only
@@ -1225,9 +1229,12 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
   ):
     env.pop(var, None)
   import_probe_env(env)
+  probe = "import app.main"
+  if smoke_provider:
+    probe += "\nfrom app.providers import get_provider\nget_provider()"
   try:
     proc = subprocess.run(
-      [sys.executable or "python3", "-c", "import app.main"],
+      [sys.executable or "python3", "-c", probe],
       cwd=str(backend), capture_output=True, text=True, timeout=timeout, env=env,
     )
   except subprocess.TimeoutExpired:
@@ -2810,16 +2817,13 @@ def _finalize_update(
   _activate_candidate(repo, local, pre, tip)
   app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
 
-  # Post-reconcile import probe: a text-clean merge can still produce a tree
-  # that fails to import (upstream dropped a module a local edit imports; a bad
-  # deploy). Roll back to the previous served commit rather than serve it
-  # broken. Skip the ~60s throwaway boot when the reconcile touched NO served
-  # backend code (frontend/tests/docs/scripts only): the backend tree is then
-  # byte-identical, so the probe would only re-prove an unchanged import.
+  # A text-clean merge can fail at import or first provider resolution. Roll it
+  # back before accepting the update. Skip the probe when no served backend
+  # code changed: that tree is byte-identical to the already-running version.
   if platform_activation.backend_import_probe_required(changed):
     if progress:
       progress(PlatformUpdatePhase.VALIDATING)
-    ok, err = _import_probe(repo)
+    ok, err = _import_probe(repo, smoke_provider=True)
     if not ok:
       return _roll_back_update(
         repo, local, pre, tip, target, err, err,

@@ -64,6 +64,12 @@ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 # test can delete `foo` upstream to make a text-clean merge import-broken.
 _MAIN_PY = "import app.foo\n\nVALUE = app.foo.VALUE\nLINE_A = 1\nLINE_B = 2\nLINE_C = 3\n"
 _FOO_PY = "VALUE = 'foo'\n"
+# Keep the definition and caller in separate merge hunks for the semantic-merge test.
+_PROVIDERS_PY = (
+  "def sync_app_model_providers(data_dir):\n  return None\n"
+  + "\n" * 20
+  + "def get_provider():\n  return 'ready'\n"
+)
 
 
 def _write_backend(root: Path, main_py: str = _MAIN_PY, foo_py: str | None = _FOO_PY):
@@ -71,6 +77,7 @@ def _write_backend(root: Path, main_py: str = _MAIN_PY, foo_py: str | None = _FO
   app_dir.mkdir(parents=True, exist_ok=True)
   (app_dir / "__init__.py").write_text("")
   (app_dir / "main.py").write_text(main_py)
+  (app_dir / "providers.py").write_text(_PROVIDERS_PY)
   if foo_py is not None:
     (app_dir / "foo.py").write_text(foo_py)
 
@@ -1526,6 +1533,22 @@ def test_import_broken_merge_rolls_back(clone_env):
   assert _served_sha(platform) == pre
 
 
+def test_text_clean_provider_signature_merge_rolls_back_before_chat_start(clone_env):
+  origin, platform = clone_env
+  local = _PROVIDERS_PY.replace("sync_app_model_providers(data_dir):", "sync_app_model_providers():")
+  upstream = _PROVIDERS_PY.replace("return 'ready'", "sync_app_model_providers('/data')\n  return 'ready'")
+  pre = _local_commit(platform, edits={"backend/app/providers.py": local}, msg="local signature")
+  _advance_origin(origin, edits={"backend/app/providers.py": upstream}, msg="upstream caller")
+
+  res = pu.reconcile_clone(platform)
+
+  assert res.status == "rolled_back"
+  assert "TypeError" in (res.error or "")
+  assert _served_sha(platform) == pre
+  assert pu.ROLLED_BACK_FLAG.exists()
+  assert not pu.CONFLICT_FLAG.exists()
+
+
 def test_activation_compare_and_swap_never_rewinds_a_concurrent_writer(
   clone_env, monkeypatch,
 ):
@@ -1556,7 +1579,7 @@ def test_failed_candidate_never_rolls_back_a_newer_concurrent_writer(
   _advance_origin(origin, edits={"backend/app/foo.py": "VALUE = 'update'\n"})
   raced: dict[str, str] = {}
 
-  def fail_after_concurrent_commit(repo=platform, timeout=pu._PROBE_TIMEOUT):
+  def fail_after_concurrent_commit(repo=platform, timeout=pu._PROBE_TIMEOUT, *, smoke_provider=False):
     raced["sha"] = _local_commit(
       platform, edits={"concurrent.txt": "newer owner\n"},
       msg="concurrent writer after activation",
