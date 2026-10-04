@@ -184,14 +184,6 @@ def continuation_protocol_source(
       "automatic size-recovery attempt for this logical turn."
     ),
     "model_capacity": "Resume the interrupted owner work now that the selected model may be available.",
-    "quiet_write_failure": (
-      "A result-independent write reported a failure or uncertain outcome. "
-      "This is one failure-only recovery, not another owner request. Inspect the attached "
-      "write failure reports and the owning saved state before repeating any side effect. "
-      "Repair within the original authority using ordinary result-bearing tools, or "
-      "report the concrete unresolved failure. Never assume an unknown write did not happen. "
-      "Do not repeat completed substantive work. This recovery will not automatically repeat."
-    ),
     "goal_settlement": (
       "The exact Goal remains open after a clean execution ended without an outcome or durable handoff. "
       "This is one targeted settlement recovery, not permission to redo verified work or shrink the objective. "

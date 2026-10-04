@@ -1788,6 +1788,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0081_browser_account_grants",
     "0081_goal_hold",
     "0082_run_owner_input_at",
+    "0082_retire_quiet_write_sessions",
+    "0082_drop_agent_write_journal",
   ]
   assert second == first
 
@@ -4684,3 +4686,16 @@ def test_delegation_goal_task_keeps_existing_name_links(tmp_path):
       "SELECT id, goal_task_id FROM delegations"
     )).all())
   assert links == {"old": "audit", "new": None}
+
+
+def test_retired_write_journal_tables_are_dropped_idempotently(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'write-journal.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE chats (id VARCHAR(64) PRIMARY KEY)"))
+    conn.execute(text("CREATE TABLE chat_runs (id VARCHAR(64) PRIMARY KEY)"))
+  migrations._add_agent_write_journal(eng)
+  migrations._drop_agent_write_journal(eng)
+  migrations._drop_agent_write_journal(eng)
+  tables = set(inspect(eng).get_table_names())
+  assert not {"agent_write_streams", "agent_write_intents"} & tables
+  assert {"chats", "chat_runs"} <= tables

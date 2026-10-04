@@ -385,9 +385,7 @@ def test_platform_control_tools_are_marked_always_loaded(monkeypatch):
   )
   # The meta is added to the listing, not baked into the shared definition.
   assert "_meta" not in control._TOOL_DEFINITIONS[control.PROMOTE_GOAL_TOOL]
-  quiet = [tool["name"] for tool in tools
-           if tool["_meta"].get("mobius/resultIndependent")]
-  assert quiet == ["checkpoint_chat"]
+  assert all(set(tool["_meta"]) == {"anthropic/alwaysLoad"} for tool in tools)
 
 
 def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):

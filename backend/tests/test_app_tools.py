@@ -375,15 +375,12 @@ def test_an_app_may_load_one_tool_up_front(db):
   assert "_meta" not in listings["memory_search"]
 
 
-def test_result_independence_is_an_explicit_reviewed_delivery_promise(db):
+def test_retired_result_independent_declaration_stays_valid_without_effect(db):
+  # Published manifests may still declare it; it no longer changes delivery.
   tool = {**LOG_TOOL, "always_load": True, "result_independent": True}
   validate_manifest_contract(_manifest(tools=[tool]))
-  for invalid in ("yes", 1, None):
-    with pytest.raises(ManifestContractError, match="result_independent"):
-      validate_manifest_contract(_manifest(tools=[{**tool, "result_independent": invalid}]))
+  with pytest.raises(ManifestContractError, match="result_independent"):
+    validate_manifest_contract(_manifest(tools=[{**tool, "result_independent": "yes"}]))
   _app(db, contract=_contract([tool]))
   listed = app_tools.live_app_tools(db)[0]
-  assert listed.result_independent is True
-  assert listed.listing()["_meta"] == {
-    "anthropic/alwaysLoad": True, "mobius/resultIndependent": True,
-  }
+  assert listed.listing()["_meta"] == {"anthropic/alwaysLoad": True}

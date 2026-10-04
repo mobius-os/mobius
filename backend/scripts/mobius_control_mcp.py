@@ -456,11 +456,7 @@ def _tools_list_result() -> dict[str, Any]:
   return {
     "tools": [
       *(
-        {**_TOOL_DEFINITIONS[name], "_meta": {
-          **ALWAYS_LOAD_META,
-          **({"mobius/resultIndependent": True}
-             if name == CHECKPOINT_CHAT_TOOL else {}),
-        }}
+        {**_TOOL_DEFINITIONS[name], "_meta": ALWAYS_LOAD_META}
         for name in _available_tool_names()
       ),
       *_app_tool_listings(),

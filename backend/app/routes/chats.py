@@ -2234,29 +2234,6 @@ def get_thinking_trace_by_id(
   )
 
 
-@router.get("/{chat_id}/write-outcomes/{run_id}/{operation_id}")
-def get_chat_write_outcome(
-  chat_id: str, run_id: str, operation_id: str,
-  _: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-):
-  """Read one original write for repair, without replay or execution authority.
-
-  Like agent-context, this is owner/owner-agent observability, not an app or
-  shared-frame surface. Arguments are never automatically stuffed into failure
-  context; the agent retrieves one bounded operation only when it needs it.
-  """
-  get_active_chat_or_404(db, chat_id, load_fields=())
-  row = db.query(models.AgentWriteIntent).filter_by(
-    chat_id=chat_id, source_run_id=run_id, operation_id=operation_id,
-  ).first()
-  if row is None:
-    raise HTTPException(status_code=404, detail="Write outcome not found.")
-  return {"run_id": run_id, "id": row.operation_id, "tool": row.tool,
-          "arguments": json.loads(row.arguments_json), "status": row.status,
-          "stage": row.stage, "reason": row.reason}
-
-
 @router.get("/{chat_id}/agent-context")
 def get_chat_agent_context(
   chat_id: str,

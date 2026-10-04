@@ -611,43 +611,6 @@ class Delegation(Base):
   )
 
 
-
-class AgentWriteStream(Base):
-  """One physical run's quiet-write admission fence and bounded diagnostics."""
-  __tablename__ = "agent_write_streams"
-  run_id = Column(String(64), ForeignKey("chat_runs.id", ondelete="CASCADE"), primary_key=True)
-  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
-  sealed = Column(Boolean, nullable=False, default=False)
-  accepted_count = Column(Integer, nullable=False, default=0)
-  accepted_bytes = Column(Integer, nullable=False, default=0)
-  diagnostics = Column(JSON, nullable=False, default=list)
-  item_receipts = Column(JSON, nullable=False, default=dict)
-  failure_delivered_by = Column(String(64), nullable=True)
-
-
-class AgentWriteIntent(Base):
-  """Explicit write identity survives physical-run recovery; effects are not retried."""
-  __tablename__ = "agent_write_intents"
-  root_run_id = Column(String(64), primary_key=True)
-  operation_id = Column(String(100), primary_key=True)
-  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
-  source_run_id = Column(String(64), ForeignKey("chat_runs.id", ondelete="CASCADE"), nullable=False)
-  ordinal = Column(Integer, nullable=False)
-  item_id = Column(String(256), nullable=False)
-  item_fingerprint = Column(String(64), nullable=False)
-  tool = Column(String(100), nullable=False)
-  arguments_json = Column(Text, nullable=False)
-  status = Column(String(16), nullable=False)
-  stage = Column(String(32), nullable=False)
-  reason = Column(String(500), nullable=True)
-  created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-  updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-  __table_args__ = (
-    Index("ix_agent_write_run_order", "source_run_id", "status", "ordinal"),
-    Index("ix_agent_write_item", "source_run_id", "item_id"),
-  )
-
-
 class ChatWait(Base):
   """One durable declared wait: resume this chat when a condition is met.
 
@@ -777,6 +740,11 @@ class ChatSessionLink(Base):
   # are set explicitly by record_session_link; these defaults are the safety net.
   first_seen_at = Column(DateTime, default=lambda: now_naive_utc())
   last_seen_at = Column(DateTime, default=lambda: now_naive_utc())
+  # Set once Möbius must never resume this session: its own provider history
+  # teaches an instruction the platform has since withdrawn, so resuming it
+  # would keep the model following that instruction. The chat's next turn
+  # starts a fresh session instead (see ``session_links.resume_retired``).
+  resume_retired_at = Column(DateTime, nullable=True)
 
 
 class ProviderAvailability(Base):

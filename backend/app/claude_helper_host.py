@@ -661,7 +661,7 @@ def _host_options(
       setting_sources=["user", "project"] if skills_enabled else None,
       include_partial_messages=True,
       # Without this the SDK forwards helper tools, but not the text that
-      # owns its visible answer and provider-neutral write intents.
+      # owns its visible answer.
       forward_subagent_text=True,
       can_use_tool=allow_all,
       disallowed_tools=[
