@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { ExternalLink } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 
 const CHATGPT_SECURITY_URL = 'https://chatgpt.com/#settings/Security'
-const OPENAI_DATA_CONTROLS_URL = 'https://help.openai.com/en/articles/7730893-data-controls-faq'
 
 /**
  * Codex device-auth flow. Lifted out of SettingsView so SetupWizard
@@ -193,67 +193,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     setError('')
   }
 
-  if (status === 'pending') {
-    return (
-      <div className="codex-auth">
-        <p className="pa__muted">
-          Copy this one-time code, then open ChatGPT and paste it to continue.
-        </p>
-        <div className="codex-auth__device">
-          <div className="codex-auth__step">
-            <span className="codex-auth__step-num">3</span>
-            <span className="codex-auth__code-copy">
-              <span className="codex-auth__code-label">Copy your sign-in code</span>
-              <code
-                className="codex-auth__code"
-                title="Click to copy"
-                onClick={() => copyCode()}
-              >
-                {code}
-              </code>
-              <button
-                type="button"
-                className="pa__btn pa__btn--sm codex-auth__copy-btn"
-                onClick={() => copyCode()}
-              >
-                {copyState === 'copied' ? 'Copied' : 'Copy code'}
-              </button>
-            </span>
-          </div>
-          {copyState === 'failed' && (
-            <p className="pa__error codex-auth__copy-error" role="alert">
-              Could not copy. Select the code above and copy it manually.
-            </p>
-          )}
-          {copyState === 'copied' && (
-            <p className="pa__muted codex-auth__copy-result" role="status">
-              Code copied. Open ChatGPT, then paste it to continue.
-            </p>
-          )}
-        </div>
-        <div className="codex-auth__pending-actions">
-          <p className="pa__muted codex-auth__waiting">
-            Waiting for sign-in to complete…
-          </p>
-          <button
-            type="button"
-            className="pa__btn pa__btn--sm"
-            onClick={openVerificationPage}
-          >
-            Open ChatGPT
-          </button>
-          <button
-            type="button"
-            className="pa__btn pa__btn--sm"
-            onClick={cancelPending}
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
   if (status === 'complete') {
     return (
       <div className="codex-auth">
@@ -266,46 +205,84 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     <div className="codex-auth">
       {showSetupHint && (
         <div className="codex-auth__preflight">
-          <div className="codex-auth__preflight-head">
-            <span className="codex-auth__step-num" aria-hidden="true">1</span>
-            <div>
-              <strong>Connect ChatGPT</strong>
-              <p className="pa__muted codex-auth__hint">
-                Open <strong>Settings → Security</strong>, scroll to the very
-                bottom, and turn on
-                {' '}<strong>Enable device code authorization for Codex</strong>.
-                This is a one-time account setting.
-              </p>
-            </div>
-          </div>
+          <ol className="codex-auth__setup-steps">
+            <li>Open <strong>Settings → Security</strong>.</li>
+            <li>Scroll to the very bottom.</li>
+            <li>Turn on <strong>Enable device code authorization for Codex</strong>.</li>
+            <li>
+              (Optional for privacy) Open <strong>Settings → Data Controls</strong>
+              {' '}and turn off <strong>Improve the model for everyone</strong>.
+            </li>
+          </ol>
           <a
-            className="pa__btn pa__btn--sm codex-auth__settings-link"
+            className="pa__btn pa__btn--sm codex-auth__settings-button"
             href={CHATGPT_SECURITY_URL}
             target="_blank"
             rel="noopener noreferrer"
           >
             Open ChatGPT settings
+            <ExternalLink width={14} height={14} aria-hidden="true" focusable="false" />
           </a>
-          <div className="codex-auth__privacy">
-            <span className="codex-auth__step-num" aria-hidden="true">2</span>
-            <div>
-              <strong>Optional: disable data sharing</strong>
-              <p className="pa__muted codex-auth__hint">
-                If you do not want new Codex conversations used to improve
-                OpenAI’s models, open <strong>Settings → Data Controls</strong>
-                {' '}and turn off <strong>Improve the model for everyone</strong>.
-                {' '}<a href={OPENAI_DATA_CONTROLS_URL} target="_blank" rel="noopener noreferrer">
-                  OpenAI’s data-controls guide
-                </a>
-              </p>
-            </div>
-          </div>
         </div>
       )}
-      <div className="codex-auth__connect-step">
-        {showSetupHint && <span className="codex-auth__step-num" aria-hidden="true">3</span>}
-        <div>
-          {showSetupHint && <strong>Copy your sign-in code</strong>}
+      {status === 'pending' ? (
+        <>
+          <p className="pa__muted">
+            Copy this one-time code, then open ChatGPT and paste it to continue.
+          </p>
+          <div className="codex-auth__device">
+            <div className="codex-auth__step">
+              <span className="codex-auth__code-copy">
+                <span className="codex-auth__code-label">Copy your sign-in code</span>
+                <code
+                  className="codex-auth__code"
+                  title="Click to copy"
+                  onClick={() => copyCode()}
+                >
+                  {code}
+                </code>
+                <button
+                  type="button"
+                  className="pa__btn pa__btn--sm codex-auth__copy-btn"
+                  onClick={() => copyCode()}
+                >
+                  {copyState === 'copied' ? 'Copied' : 'Copy code'}
+                </button>
+              </span>
+            </div>
+            {copyState === 'failed' && (
+              <p className="pa__error codex-auth__copy-error" role="alert">
+                Could not copy. Select the code above and copy it manually.
+              </p>
+            )}
+            {copyState === 'copied' && (
+              <p className="pa__muted codex-auth__copy-result" role="status">
+                Code copied. Open ChatGPT, then paste it to continue.
+              </p>
+            )}
+          </div>
+          <div className="codex-auth__pending-actions">
+            <p className="pa__muted codex-auth__waiting">
+              Waiting for sign-in to complete…
+            </p>
+            <button
+              type="button"
+              className="pa__btn pa__btn--sm"
+              onClick={openVerificationPage}
+            >
+              Open ChatGPT
+            </button>
+            <button
+              type="button"
+              className="pa__btn pa__btn--sm"
+              onClick={cancelPending}
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
           <button
             className="pa__btn"
             onClick={startLogin}
@@ -313,9 +290,9 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
           >
             {status === 'connecting' ? 'Getting code…' : 'Get sign-in code'}
           </button>
-        </div>
-      </div>
-      {error && <p className="pa__error" role="alert">{error}</p>}
+          {error && <p className="pa__error" role="alert">{error}</p>}
+        </>
+      )}
     </div>
   )
 }

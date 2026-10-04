@@ -140,12 +140,6 @@
   gap: 12px;
 }
 
-.codex-auth__hint {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
 .codex-auth__preflight {
   display: grid;
   gap: 12px;
@@ -155,46 +149,30 @@
   border-radius: 12px;
 }
 
-.codex-auth__preflight-head,
-.codex-auth__privacy,
-.codex-auth__connect-step {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.codex-auth__preflight-head > div,
-.codex-auth__privacy > div,
-.codex-auth__connect-step > div {
+.codex-auth__setup-steps {
   display: grid;
+  list-style: decimal;
   gap: 8px;
-  flex: 1;
-  min-width: 0;
+  margin: 0;
+  padding-left: 22px;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.codex-auth__preflight-head strong,
-.codex-auth__privacy strong,
-.codex-auth__connect-step strong {
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.4;
+.codex-auth__setup-steps li {
+  padding-left: 3px;
 }
 
-.codex-auth__settings-link {
+.codex-auth__settings-button {
+  display: inline-flex;
+  align-items: center;
   justify-self: start;
-  margin-left: 32px;
-  text-decoration: none !important;
+  gap: 6px;
+  text-decoration: none;
 }
 
-.codex-auth__privacy {
-  margin: 2px 0 0;
-  padding-top: 11px;
-  border-top: 1px solid var(--border-light);
-  line-height: 1.5;
-}
-
-.codex-auth__connect-step > div > .pa__btn {
-  align-self: start;
+.codex-auth__settings-button svg {
+  flex-shrink: 0;
 }
 
 .codex-auth__device {
@@ -219,20 +197,6 @@
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-.codex-auth__step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--accent-fg, #ffffff);
-  font-size: 12px;
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
 .codex-auth__code {
@@ -301,12 +265,6 @@
 .codex-auth__waiting {
   margin: 0;
   margin-right: auto;
-}
-
-@media (max-width: 520px) {
-  .codex-auth__settings-link {
-    margin-left: 0;
-  }
 }
 
 /* ── Unified provider rows (shared by Settings + Setup) ──── */
