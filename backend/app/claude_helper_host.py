@@ -130,6 +130,11 @@ class HelperTurn:
   launch_tool_use_id: str | None = None
   status: str | None = None
   summary: str | None = None
+  # Provider report, distinct from task lifecycle summaries and closing text.
+  # Capturing report bytes is not proof that a native tool/attempt succeeded.
+  result: str | None = None
+  handback_seen: bool = False
+  last_response: str | None = None
   usage: dict | None = None
   dispatch_error: str | None = None
   # The helper's last API error from its provider, as (kind, message text).
@@ -262,6 +267,14 @@ class ClaudeHelperHost(Host):
       )
     if turn is None:
       return {}
+    if name == "SubagentHandback" and turn.started.is_set() and not turn.done.is_set():
+      # A handback may replace final assistant prose. Never fall back to its
+      # closing text, even when the handback itself later fails. Möbius owns
+      # delivery of this report independently; task status still owns success.
+      turn.handback_seen = True
+      report = tool_input.get("message")
+      if isinstance(report, str):
+        turn.result = report
     if name == "Bash" and isinstance(tool_input.get("command"), str):
       command = f". {shlex.quote(str(turn.env_file.path))} && {tool_input['command']}"
       return _allow({**tool_input, "command": command})
@@ -304,6 +317,19 @@ class ClaudeHelperHost(Host):
       turn.started.set()
     return {}
 
+  async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
+    """Capture the documented final response, never a task notification summary.
+
+    https://code.claude.com/docs/en/hooks#subagentstop: with SubagentHandback,
+    last_assistant_message is only closing text; PreToolUse owns that report.
+    """
+    turn = self._turn_by_agent.get(input_data.get("agent_id"))
+    report = input_data.get("last_assistant_message")
+    if (turn is not None and turn.started.is_set() and not turn.done.is_set()
+        and not turn.handback_seen and isinstance(report, str)):
+      turn.result = report
+    return {}
+
   async def _turn_for_agent(self, agent_id: str) -> HelperTurn | None:
     # The helper's first tool call can race the host's task_started message.
     for _ in range(40):
@@ -322,6 +348,7 @@ class ClaudeHelperHost(Host):
       TaskNotificationMessage,
       TaskStartedMessage,
       TaskUpdatedMessage,
+      ToolUseBlock,
     )
     from app.claude_events import dispatch_sdk_message
     try:
@@ -355,8 +382,22 @@ class ClaudeHelperHost(Host):
         turn = self._turn_for_parent(parent)
         if turn is None or turn.done.is_set():
           continue
-        if isinstance(message, AssistantMessage) and error:
-          turn.api_error = (str(error), _message_text(message))
+        if isinstance(message, AssistantMessage):
+          if error:
+            turn.api_error = (str(error), _message_text(message))
+          else:
+            # The ordered child stream is available before its task-end event,
+            # even when the SDK hook callback reaches us later. Never use the
+            # dispatcher's prose or overwrite a handback with closing text.
+            for block in message.content:
+              if isinstance(block, ToolUseBlock) and block.name == "SubagentHandback":
+                turn.handback_seen = True
+                report = block.input.get("message")
+                if isinstance(report, str):
+                  turn.result = report
+            text = _message_text(message)
+            if text.strip():
+              turn.last_response = text
         try:
           rooted = dataclasses.replace(message, parent_tool_use_id=None)
           turn.session_state["sid"], _ = dispatch_sdk_message(
@@ -417,6 +458,11 @@ class ClaudeHelperHost(Host):
     if turn is None or turn.done.is_set() or not turn.started.is_set():
       return
     normalized = {"completed": "completed", "failed": "failed"}.get(status, "stopped")
+    report = turn.result
+    if report is None and not turn.handback_seen:
+      report = turn.last_response
+    if report is not None:
+      turn.sink.publish({"type": "assistant_result", "content": report})
     turn.finish(normalized, summary, dict(usage) if usage else None)
 
   # ------------------------------------------------------------------ work
@@ -676,6 +722,7 @@ def _host_options(
       hooks={
         "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
         "PostToolUse": [HookMatcher(matcher="SendMessage", hooks=[host.post_tool_use])],
+        "SubagentStop": [HookMatcher(hooks=[host.subagent_stop])],
       },
       extra_args={"settings": json.dumps({"disableWorkflows": True})},
     )

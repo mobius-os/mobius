@@ -77,6 +77,19 @@ class AgentWriteDelivery:
   def filter(self, event: dict) -> dict | None:
     """Return only public bytes; complete frames schedule durable admission."""
     kind = event.get("type")
+    if kind == "assistant_result":
+      if not self.accepting:
+        return None
+      if "content" not in event:
+        return event  # Reference to already-sanitized transcript text.
+      # A result is a projection of provider output, not fresh command intent.
+      # Strip duplicate private frames without executing or rejecting them.
+      parser = FrameDecoder(self.channel.nonce, validate=False)
+      try:
+        content = parser.feed(event["content"]) + parser.finish()
+        return {**event, "content": content}
+      except ProtocolError:
+        return None
     if kind not in {"text", "text_final", "text_boundary"}:
       return event
     if not self.accepting:

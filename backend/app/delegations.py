@@ -587,27 +587,30 @@ def parent_root_run_id(
 def _assistant_result(chat: models.Chat, *, run_ids: set[str] | None = None) -> str:
   """Return the latest child assistant outcome as plain text."""
   from app.chat_message_identity import assistant_message_run_id
-  parts: list[str] = []
-  for message in reversed(list(chat.messages or [])):
-    if not isinstance(message, dict) or message.get("role") != "assistant":
-      continue
+  messages = [m for m in (chat.messages or [])
+              if isinstance(m, dict) and m.get("role") == "assistant"]
+  for message in reversed(messages):
     if run_ids is not None and assistant_message_run_id(message.get("id")) not in run_ids:
       continue
+    # Legacy transcripts and interrupted attempts retain useful partial output,
+    # but progress at the beginning must not displace their latest response.
+    blocks = message.get("blocks") or []
+    texts = [b["content"].strip() for b in blocks if isinstance(b, dict)
+             and b.get("type") == "text" and isinstance(b.get("content"), str)
+             and b["content"].strip()]
+    errors = [b["message"].strip() for b in blocks if isinstance(b, dict)
+              and b.get("type") == "error" and isinstance(b.get("message"), str)
+              and b["message"].strip()]
+    if isinstance(message.get("result"), str):
+      report = message["result"].strip()
+      # A later failure (including review-required) remains actionable even
+      # when the provider already produced its substantive report.
+      return "\n\n".join([part for part in [report, *errors[-1:]] if part])
+    if texts or errors:
+      return "\n\n".join(texts[-1:] + errors[-1:])
     content = message.get("content")
     if isinstance(content, str) and content.strip():
       return content.strip()
-    blocks = message.get("blocks")
-    if not isinstance(blocks, list):
-      continue
-    for block in blocks:
-      if not isinstance(block, dict):
-        continue
-      if block.get("type") == "text" and isinstance(block.get("content"), str):
-        parts.append(block["content"])
-      elif block.get("type") == "error" and isinstance(block.get("message"), str):
-        parts.append(block["message"])
-    if parts:
-      return "\n".join(part.strip() for part in parts if part.strip()).strip()
   return ""
 
 
@@ -643,7 +646,10 @@ def _result_with_write_repair(db: Session, chat: models.Chat, run: models.ChatRu
                               if repair and repair != substantive else "")
       break
     current = previous
-  return _assistant_result(chat)
+  # A known attempt never borrows unowned legacy prose. Legacy history remains
+  # readable through _assistant_result without an attempt filter, and through
+  # include_history; it cannot safely be attributed to a new blank follow-up.
+  return _assistant_result(chat, run_ids={run.id} if run is not None else None)
 
 
 def derived_status(

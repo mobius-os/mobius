@@ -384,6 +384,7 @@ class ChatEventSink:
       run_token or f"assistant-{uuid.uuid4().hex}"
     )
     self.assistant_blocks: list = []
+    self._assistant_result: tuple[str, str] | None = None
     self._activity_frontier = None
     self._activity_raw_length = 0
     self.session_id: str | None = None
@@ -572,6 +573,9 @@ class ChatEventSink:
     """Build a bounded transcript snapshot plus its full-text sidecars."""
     snapshot = copy.deepcopy(build_assistant_message(blocks))
     snapshot["id"] = assistant_message_id or self.assistant_message_id
+    result = self._assistant_result
+    if result is not None and result[0] == snapshot["id"]:
+      snapshot["result"] = result[1]
     stashes: list[StashThinkingTrace] = []
     for source, persisted in zip(
       [b for b in blocks if b.get("type") != "text_boundary"],
@@ -1123,6 +1127,17 @@ class ChatEventSink:
       if event is None:
         return True
     event_type = event.get("type")
+    if event_type == "assistant_result":
+      # Private projection metadata, persisted with the exact assistant/run
+      # snapshot through the normal writer. It must not replay into the UI.
+      content = event.get("content")
+      if content is None and event.get("text_item_id"):
+        content = next((block.get("content", "") for block in reversed(self.assistant_blocks)
+                        if block.get("type") == "text"
+                        and block.get("text_item_id") == event["text_item_id"]), None)
+      if isinstance(content, str):
+        self._assistant_result = (self.assistant_message_id, content)
+      return True
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
     )
@@ -1357,6 +1372,10 @@ class ChatEventSink:
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.
         blocks = [{"type": "error", "message": self._last_error}]
+      elif (self._assistant_result is not None
+            and self._assistant_result[0] == self.assistant_message_id
+            and self._assistant_result[1]):
+        blocks = [{"type": "text", "content": self._assistant_result[1]}]
       elif getattr(self, "_lost_reply_marker", False):
         # Defense-in-depth: a normally-owned run reached a CLEAN provider
         # terminal but produced zero renderable content (a Claude synthetic-

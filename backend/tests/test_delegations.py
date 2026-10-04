@@ -882,6 +882,7 @@ def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
   child.messages = [
     {"role": "user", "content": "Make the bounded edit."},
     {
+      "id": "child-run",
       "role": "assistant",
       "blocks": [{
         "type": "error",
@@ -1016,7 +1017,7 @@ def _seed_delegation(
   child_id = f"child-{suffix}"
   messages = [{"role": "user", "content": "Do the bounded task."}]
   if result_blocks is not None:
-    messages.append({"role": "assistant", "blocks": result_blocks})
+    messages.append({"id": f"child-run-{suffix}", "role": "assistant", "blocks": result_blocks})
   db.add(models.Chat(
     id=child_id, title="Child", messages=messages,
     provider="claude", created_by_app_id=app.id,

@@ -5174,3 +5174,47 @@ def test_own_stop_does_not_turn_stale_size_details_into_recovery(monkeypatch):
   assert result["error"] is None
   assert result["terminal_status"] == "interrupted"
   assert not result.get("context_window_exceeded")
+
+
+@pytest.mark.parametrize('terminal_phase, status, expected', [
+  ('final_answer', _FakeTurnStatus.completed, 'Final verdict'),
+  ('commentary', _FakeTurnStatus.completed, None),
+  ('final_answer', _FakeTurnStatus.failed, None),
+])
+def test_helper_result_uses_ordered_terminal_answer_not_progress(
+    monkeypatch, terminal_phase, status, expected):
+  class AgentMessage:
+    def __init__(self, id, text, phase):
+      self.id, self.text, self.phase = id, text, phase
+  completed = SimpleNamespace(id='turn-1', status=status, error=None, items=[
+    AgentMessage('progress', 'Checking sources. ' * 400, 'commentary'),
+    AgentMessage('answer', 'Final verdict', terminal_phase),
+  ])
+  result, bc = _run_turn_whose_stream_dies(monkeypatch, AssertionError('past completion'),
+    notifications=[SimpleNamespace(method='turn/completed',
+      payload=_FakeTurnCompletedNotification(completed))],
+    sdk_patch={'AgentMessageThreadItem': AgentMessage})
+  results = [e for e in bc.events if e['type'] == 'assistant_result']
+  assert results == ([{'type': 'assistant_result', 'content': expected}] if expected else [])
+  assert bool(result['error']) == (expected is None)
+
+
+def test_helper_result_references_last_completed_item_when_terminal_omits_items(monkeypatch):
+  class AgentMessage:
+    def __init__(self, id, text, phase):
+      self.id, self.text, self.phase = id, text, phase
+  class ItemCompleted:
+    def __init__(self, item):
+      self.item = item
+  notifications = [SimpleNamespace(payload=ItemCompleted(item)) for item in [
+    AgentMessage('progress', 'Inspecting sources', 'commentary'),
+    AgentMessage('answer', 'Actual report', 'final_answer'),
+  ]]
+  notifications.append(SimpleNamespace(payload=_FakeTurnCompletedNotification(
+    SimpleNamespace(id='turn-1', status=_FakeTurnStatus.completed, error=None, items=[]))))
+  result, bc = _run_turn_whose_stream_dies(monkeypatch, AssertionError('past completion'),
+    notifications=notifications, sdk_patch={
+      'AgentMessageThreadItem': AgentMessage, 'ItemCompletedNotification': ItemCompleted})
+  assert result['error'] is None
+  assert [e for e in bc.events if e['type'] == 'assistant_result'] == [
+    {'type': 'assistant_result', 'text_item_id': 'answer'}]

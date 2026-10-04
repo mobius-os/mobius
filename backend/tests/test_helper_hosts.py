@@ -655,7 +655,7 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
     skill_text="CONSTITUTION", connector_plan=None, skills_enabled=False,
     model=None, supports_effort=supports_effort,
   )
-  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None)
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None, subagent_stop=None)
   for resume in (None, "host-session"):
     with ExitStack() as stack:
       options = factory(host, resume, stack)

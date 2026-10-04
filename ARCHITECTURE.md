@@ -1299,6 +1299,21 @@ or completed Finalize, the result is owed. Stop drops a queued carrier, because
 the Delegation row still owes the result and the next owner turn's context
 carries it.
 
+Helper delivery distinguishes a provider's final report from its progress prose.
+Provider adapters emit a private `assistant_result` event: Codex uses its ordered
+terminal agent item (or an exact completed-item reference), while the Claude
+helper host uses the child response or explicit `SubagentHandback.message`, not
+the task notification's summary. Claude's ordered forwarded messages also cover
+late hook callbacks. The shared sink strips quiet-write frames without admitting
+new commands and persists `result` on the exact assistant segment via its usual
+writer snapshot. The full `content` and blocks stay intact. Result projection
+uses the current physical attempt, retaining substantive findings across only
+verified quiet-write-repair lineage. A blank follow-up cannot inherit earlier
+success. Unattributed historical prose remains readable as history, never guessed
+as the result of a known new attempt. Failed attempts retain partial text and
+errors, and lifecycle status remains independent from report content. This adds
+no summarizer, provider call, new queue, or database table.
+
 An idle recipient is woken only when it has an unfinished Goal. An armed
 external Wait remains active but no longer suppresses an explicitly
 interrupting peer message: the urgent turn can run now, and the independent

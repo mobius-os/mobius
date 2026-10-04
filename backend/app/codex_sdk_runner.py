@@ -69,6 +69,7 @@ from app.codex_events import (
   _codex_user_error,
   _agent_message_phase,
   _codex_terminal_error,
+  _turn_items,
   _codex_size_failure,
   # Compatibility import for existing internal callers; implementation lives
   # beside the Codex event/observability code it supports.
@@ -1582,6 +1583,7 @@ async def _run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
   completed_message_phases: list[str | None] = []
+  final_message_item_id: str | None = None
   # Codex can abandon an in-progress AgentMessage and immediately start a
   # replacement item without completing the first one. Keep that provider
   # lifecycle identity until another item makes the first message deliberate,
@@ -2105,6 +2107,7 @@ async def _run_codex_sdk_turn(
               abandoned_agent_message_item_ids.discard(item_id)
               continue
             completed_message_phases.append(_agent_message_phase(item, sdk))
+            final_message_item_id = item_id or None
             if item_id and item_id == open_agent_message_item_id:
               open_agent_message_item_id = None
           if not isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
@@ -2272,6 +2275,16 @@ async def _run_codex_sdk_turn(
         interrupt_requested=stop_requested(),
         completed_message_phases=completed_message_phases,
       )
+      if not error_text and not stop_requested():
+        # Match terminal validation's ordering: the final turn snapshot wins;
+        # otherwise reference the exact completed item already sanitized by
+        # the sink. Do not concatenate narration or repeat write admission.
+        messages = [item for item in _turn_items(completed_turn)
+                    if isinstance(item, sdk["AgentMessageThreadItem"])]
+        if messages:
+          bc.publish({"type": "assistant_result", "content": messages[-1].text or ""})
+        elif final_message_item_id:
+          bc.publish({"type": "assistant_result", "text_item_id": final_message_item_id})
       result: RunnerResult = with_usage({
         "session_id": current_session_id,
         "cost_usd": None,

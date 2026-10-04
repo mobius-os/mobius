@@ -260,3 +260,21 @@ def test_ambiguous_oversized_deltas_have_no_retained_parser_buffer(chat):
     state=await outcomes(delivery)
     assert not state['diagnostics'] and not state['writes']
   asyncio.run(scenario())
+
+
+def test_result_projection_strips_private_frames_without_authorizing_writes(chat):
+  async def scenario():
+    effects, errors = [], []
+    async def dispatch(write):
+      effects.append(write)
+      return WriteOutcome('succeeded')
+    delivery = setup(chat, dispatch, errors)
+    event = {'type': 'assistant_result', 'content': 'Report.' + frame(NONCE, WRITE)}
+    assert delivery.filter(event) == {'type': 'assistant_result', 'content': 'Report.'}
+    assert delivery.filter({'type': 'assistant_result',
+      'content': f'Hidden\n<MOBIUS_WRITE {NONCE}>\nunfinished'}) is None
+    await delivery.finish()
+    state = await outcomes(delivery)
+    assert not effects and not errors and not state['writes']
+    assert delivery.filter(event) is None
+  asyncio.run(scenario())
