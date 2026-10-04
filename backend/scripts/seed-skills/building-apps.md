@@ -266,13 +266,7 @@ manifest, layered by how always-on they are:
 - **Agent tools (callable by every agent run, while installed).** `"tools"`:
   up to 16 entries requiring `name` (`^[a-z][a-z0-9_]{0,39}$`),
   `description`, and `input_schema` (a JSON Schema `object`). Optional boolean
-  `always_load` controls eager tool discovery. Optional boolean
-  `result_independent` declares that success carries no information needed for
-  subsequent reasoning: eligible writes may use host-owned quiet delivery
-  without a success response to the model. It does not change authority,
-  weaken failure handling or permit blind retries.
-  Keep reads, cards and result-dependent actions ordinary; a caller that needs
-  confirmation still uses the ordinary tool. Requires a
+  `always_load` controls eager tool discovery. Requires a
   `service`: agents see `<app slug>_<name>`, and each call reaches the service
   as `POST /tools/<name>` with body `{"arguments": ..., "call": ...}` and the
   app's own authority (`backend/app/app_tools.py`). Only the platform reaches

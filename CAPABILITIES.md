@@ -265,21 +265,6 @@ a service is owner-installed reviewed code with the platform's file access.
 Paths under `tools/` are reserved for agent tool calls; HTTP callers get 404
 there.
 
-An app tool may declare `result_independent: true` when a successful call has
-no result needed for subsequent agent reasoning (for example, recording one
-fact or incident). It remains an ordinary callable tool; the declaration also
-permits the host's quiet-write channel to invoke the same handler. Quiet
-delivery uses the same caller authority, arguments, locking requirements and
-activity receipts, but sends success only to the owner's activity view, not
-back to the model. Failures retain durable, bounded reports. The declaration
-does not authorize effects, suppress errors, or promise automatic retries.
-Keep reads, approval/card tools and operations whose returned identity or state
-matters result-bearing. `always_load` controls tool discovery separately.
-The shared channel is offered to every normal chat and routed helper turn;
-no provider-specific tool or final-answer format is required. The run-scoped
-instruction lists only the platform controls and installed app tools eligible
-for that turn. A declaration changes delivery, not permission to perform it.
-
 Project output formats are app-owned too. A `project_templates[].artifact_types`
 declaration names the source extensions, preview kind, output path, and reviewed
 builder script. Core confines execution and publishes the resulting artifact;

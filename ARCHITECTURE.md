@@ -1402,6 +1402,16 @@ exists and is useful even when the Memory app is not installed. Its consumers:
   long chat and for the provider-switch handoff below — preferred over a from-scratch
   default compaction.
 
+A closing save may pass `end_turn`. When that save succeeds for the live run,
+the route asks the run's `ChatEventSink` for a receipt (`record_closing_save`)
+and returns it as `turn_end_id`. A receipt is issued only when the chat's
+runner stops at the tool boundary itself (`ends_turn_at_tool_result`: Claude's
+root runner, whose PostToolUse hook refuses the next model request) and no
+other tool of the turn is still running. The sink's interrupting card boundary
+never fires for a closing save, because interrupting a provider that already
+moved on would lose the saving and record an aborted turn. Without a receipt,
+or when the save fails, the turn simply continues.
+
 Two agent mechanisms with similar names deliberately remain separate.
 `app.background_agents` resolves the owner’s primary/fallback ordering for
 scheduled agents; installable jobs such as Memory receive the non-secret system
@@ -1637,69 +1647,6 @@ and ownership semantics without flaky wall-clock thresholds.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.
 
 **GUARDRAIL — never write `Chat.messages` / `Chat.live_assistant` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); all runtime writes otherwise pass through the actor.
-
-### Quiet, result-independent agent writes
-
-`agent_write_context` supplies one shared delivery contract to normal chats
-and routed helpers. It adds no provider-specific write mechanism or new agent tool.
-`checkpoint_chat` includes title, digest and cumulative summary with unchanged
-save semantics. Apps opt in through reviewed `result_independent` declarations.
-
-The per-run prompt declares eligible tools and a nonce-scoped, explicit
-`MOBIUS_WRITE` frame. `agent_write_channel` filters normalized assistant events
-inside `ChatEventSink`, after helper attribution but before reduction, broadcast
-or persistence. Deltas never authorize effects. An authoritative **item** final
-can occur mid-task and authorizes one immutable batch; a whole-turn completion
-is not required. Finals replace rather than concatenate deltas, and late
-deltas cannot expose already-finalized private payloads. Changed finals fail;
-identical replays deduplicate. Frames in tool output/thinking are not commands.
-If a provider omits a delta's identity, provisional presentation stops for that
-turn: complete snapshots still display, but anonymous snapshots never execute
-writes. This deliberately trades incremental presentation for privacy rather
-than guessing how ambiguous suffixes belong together. Capacity overflow uses
-the same presentation-only final path; ordinary prose never creates a write
-failure or repair request merely because tracking capacity was reached.
-
-`agent_write_delivery` admits those batches through the existing writer actor,
-off the event loop, then drains one owned dispatcher asynchronously. Migration
-`0078_agent_write_journal` adds run streams and intents. Admission commits
-before execution; the actor commits an atomic claim before calling the effect.
-Logical-root/operation identity prevents replay, while physical run/item
-receipts preserve immutable accepted/rejected batches. States distinguish
-queued, executing, succeeded, failed, cancelled and unknown. Neither worker
-loss nor restart changes unknown back to queued. Bounds are explicit: 64 KiB
-per frame, eight writes per item, 256 items, 128 admitted writes/1 MiB arguments
-and 32 detailed diagnostics per run, with a count of further omitted diagnostics
-that advances failure-report acknowledgment. These cap one protocol turn, not
-owner data.
-
-`agent_write_tools` launches the existing control dispatcher with the exact
-already-materialized run/delegation environment; payloads cannot choose caller
-identity. Browser grants are revalidated at admission and claim; failure repair
-retains the same grant and cannot renew revoked access. Installed app eligibility
-comes from the accepted manifest contract;
-the platform declares its own eligible controls. Success receipts reach only
-the activity sink/journal, not a provider result or continuation. Result-bearing
-tools and calls whose outcome determines the next action remain ordinary.
-
-The sink retains ownership through joined write teardown, independently of
-whether the provider is still steerable. Stop fences admissions before awaiting
-anything and cancels/joins the exact dispatcher, including during final drain.
-Accepted pre-card writes drain, but a saved terminal owner card closes further
-admission. No worker outlives run teardown. Recovery records ambiguous effects
-without replay and preserves negative reports behind Stop/card/wait barriers.
-
-Only negative outcomes can create one existing-queue recovery continuation,
-subject to exact run ownership, delegation attribution, owner input, activation,
-Wait and Goal boundaries. It prioritizes its exact triggering report, then
-fills a bounded backlog. Successful provider consumption acknowledges report
-fingerprints, never unseen later changes. Helper result projection retains the
-substantive predecessor and appends repair status along exact continuation
-lineage. A repair cannot replace the task answer or revive a cancelled helper.
-Failure metadata links to owner-only `GET /api/chats/{chat}/write-outcomes/{run}/{operation}`
-for exact original arguments when needed. This is a bounded read, not a new
-agent tool, replay operation or automatic payload injection; a fresh provider
-session can repair from durable evidence without relying on its private log.
 
 ## Multi-pane workspace
 

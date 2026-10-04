@@ -89,6 +89,8 @@
     "0078_agent_write_journal": "fb8e95d93687d85b99b308c32f5f987f28ba60a13214b73cfd4a80d9a8d980ed",
     "0081_browser_account_grants": "a8d80a2a6f38f5096e51f7aa08ad794b03efd6f8984852fb294f8d5146051950",
     "0081_goal_hold": "ef656443434b13fed7bd22b99fa1903eef7a1ba86cd24b09967566cf1ed273d8",
-    "0082_run_owner_input_at": "5571a283b567cd3279688869d7ca79a7043d7d4f346548ecdf58f901ebc340ba"
+    "0082_run_owner_input_at": "5571a283b567cd3279688869d7ca79a7043d7d4f346548ecdf58f901ebc340ba",
+    "0082_retire_quiet_write_sessions": "b2335b7e6cbe39dafd09f153c4710f05bb477350170af0f8999f404fb0eab3fc",
+    "0082_drop_agent_write_journal": "ed5d1c08e9bea530937b32e6499da60c211971ea7962fabf1b9dc78ae819a74f"
   }
 }

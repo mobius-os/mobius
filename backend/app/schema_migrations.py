@@ -5822,6 +5822,45 @@ def _add_run_owner_input_at(eng) -> None:
       conn.execute(text("ALTER TABLE chat_runs ADD COLUMN owner_input_at DATETIME"))
 
 
+def _retire_quiet_write_sessions(eng) -> None:
+  """Never resume a provider session that received the quiet-write instruction.
+
+  That instruction rode on every turn while the write journal existed, and a
+  resumed session keeps its own history, so the model kept emitting frames that
+  nothing reads any more: raw text in the reply and a lost save. The journal has
+  one stream row for exactly each run that received it, so this must run before
+  the journal is dropped. Marking every session such a run used is idempotent
+  and leaves chat history untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+  tables = set(sa_inspect(eng).get_table_names())
+  if "chat_session_links" not in tables:
+    return
+  columns = {c["name"] for c in sa_inspect(eng).get_columns("chat_session_links")}
+  with eng.begin() as conn:
+    if "resume_retired_at" not in columns:
+      conn.execute(text("ALTER TABLE chat_session_links ADD COLUMN resume_retired_at DATETIME"))
+    if {"agent_write_streams", "chat_runs"} <= tables:
+      conn.execute(text("""
+        UPDATE chat_session_links SET resume_retired_at = :now
+        WHERE resume_retired_at IS NULL AND session_id IN (
+          SELECT r.provider_session_id FROM chat_runs r
+          JOIN agent_write_streams s ON s.run_id = r.id
+          WHERE r.provider_session_id IS NOT NULL
+        )
+      """), {"now": datetime.now(UTC).replace(tzinfo=None)})
+
+
+def _drop_agent_write_journal(eng) -> None:
+  """Retire the text-frame write journal; saves are ordinary tool calls."""
+  from sqlalchemy import inspect as sa_inspect, text
+  tables = set(sa_inspect(eng).get_table_names())
+  with eng.begin() as conn:
+    for table in ("agent_write_intents", "agent_write_streams"):
+      if table in tables:
+        conn.execute(text(f"DROP TABLE {table}"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5917,6 +5956,8 @@ _SCHEMA_MIGRATIONS = (
   ("0081_browser_account_grants", _add_browser_account_grants),
   ("0081_goal_hold", _add_goal_hold),
   ("0082_run_owner_input_at", _add_run_owner_input_at),
+  ("0082_retire_quiet_write_sessions", _retire_quiet_write_sessions),
+  ("0082_drop_agent_write_journal", _drop_agent_write_journal),
 )
 
 

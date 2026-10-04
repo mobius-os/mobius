@@ -21,11 +21,6 @@ APPROVAL_TOOL_NAME = "request_approval"
 QUESTION_TOOL_NAME = "request_question"
 RESTART_TOOL_NAME = "request_restart"
 CHECKPOINT_CHAT_TOOL_NAME = "checkpoint_chat"
-# The control owns this declaration; the MCP listing and quiet-write host
-# consume it. Result-bearing controls (including cards and Goal reads) stay
-# ordinary tools. Apps opt in through their reviewed tool declarations.
-RESULT_INDEPENDENT_META = "mobius/resultIndependent"
-RESULT_INDEPENDENT_CONTROL_TOOLS = frozenset({CHECKPOINT_CHAT_TOOL_NAME})
 NOTIFY_OWNER_TOOL_NAME = "notify_owner"
 OPEN_ITEM_TOOL_NAME = "open_item"
 SECRET_TOOL_NAME = "request_secret"

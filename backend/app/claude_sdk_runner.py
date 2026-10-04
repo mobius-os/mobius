@@ -84,9 +84,10 @@ from app.claude_events import (
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
-from app.owner_card_receipts import owner_card_receipt_id
+from app.owner_card_receipts import turn_end_receipt_id
 from app.platform_tools import (
   APPROVAL_TOOL_NAME,
+  CHECKPOINT_CHAT_TOOL_NAME,
   CONTROL_SERVER_NAME,
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
@@ -245,13 +246,14 @@ _CLAUDE_BUILTIN_HELPER_TOOLS = (
   "Agent",
   "Task",
 )
-# The tools through which a turn can save an owner-input card: the platform's
-# card tools, plus Bash for the `mobius_control_mcp.py call` / `secure-input`
-# command-line fallbacks, which print the same receipt. Naming them keeps the card-end
-# hook from cutting on an unrelated tool that merely echoes receipt-shaped JSON
-# — notably a Task result quoting a child agent's card.
-_CLAUDE_OWNER_CARD_TOOLS = (
+# The tools whose confirmed result can end a turn: the platform's card tools,
+# the closing `checkpoint_chat` save, plus Bash for the `mobius_control_mcp.py
+# call` / `secure-input` command-line fallbacks, which print the same receipts.
+# Naming them keeps the turn-end hook from cutting on an unrelated tool that
+# merely echoes receipt-shaped JSON — notably a Task result quoting a child's card.
+_CLAUDE_TURN_END_TOOLS = (
   f"mcp__{CONTROL_SERVER_NAME}__{APPROVAL_TOOL_NAME}",
+  f"mcp__{CONTROL_SERVER_NAME}__{CHECKPOINT_CHAT_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{QUESTION_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
@@ -480,6 +482,10 @@ class ActiveClaudeClient:
   closed the broadcast for live SSE subscribers.
   """
 
+  # Its PostToolUse hook refuses the next model request, so a turn can end
+  # cleanly at a confirmed closing save (see ChatEventSink.record_closing_save).
+  ends_turn_at_tool_result = True
+
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
     *, sink=None,
@@ -695,11 +701,12 @@ class ActiveClaudeClient:
     return True
 
   def claim_owner_card_end(self) -> bool:
-    """Own this turn's end at the saved owner card, cutting no generation yet.
+    """Own this turn's end at its turn-ending result, cutting no generation yet.
 
     A saved question / approval / secure-input card is the terminal action of
     the turn: the owner's answer resumes the chat in a LATER turn, so nothing
-    said after the card could be delivered. The PostToolUse card-end hook calls
+    said after the card could be delivered. A confirmed closing save ends the
+    turn the same way, after the final reply. The PostToolUse turn-end hook calls
     this while the card's tool result is still inside the CLI, then refuses to
     continue the agent loop — so the next model request is never made and there
     is no post-card generation to interrupt.
@@ -1241,7 +1248,7 @@ async def run_claude_sdk_turn(
     }
 
   # Fires after every root-agent tool result and ENDS THE TURN when that result
-  # is this turn's saved owner card. `continue_: False` refuses the next model
+  # is this turn's saved owner card or confirmed closing save. `continue_: False` refuses the next model
   # request while the receipt is still inside the CLI, so the response is cut at
   # the card and no post-card text can be generated — instead of racing an
   # interrupt against generation the receipt already started. Möbius never
@@ -1251,37 +1258,37 @@ async def run_claude_sdk_turn(
   # is_error False, stop_reason "tool_use", terminal_reason "hook_stopped",
   # result "". The `stopReason` string is not rendered anywhere and the session
   # stays resumable, which is how the owner's answer continues the chat.
-  async def owner_card_end_hook(
+  async def turn_end_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
-    if hook_input.get("tool_name") not in _CLAUDE_OWNER_CARD_TOOLS:
+    if hook_input.get("tool_name") not in _CLAUDE_TURN_END_TOOLS:
       return {"continue_": True}
     # `agent_id` is present only inside a Task-spawned child. Refusing to
     # continue there would end the CHILD, not the owner's turn, so a child's
     # card stays with the sink's `begin_finish_after_owner_card` fallback.
     if hook_input.get("agent_id"):
       return {"continue_": True}
-    question_id = owner_card_receipt_id(hook_input.get("tool_response"))
-    if question_id is None:
+    receipt_id = turn_end_receipt_id(hook_input.get("tool_response"))
+    if receipt_id is None:
       return {"continue_": True}
-    # Only the card this turn actually saved ends this turn: a tool that merely
-    # printed an old receipt has no matching continuation block here.
-    has_card = getattr(bc, "has_continuation_card", None)
-    if not callable(has_card) or not has_card(question_id):
+    # Only a card or closing save this turn actually produced ends this turn:
+    # a tool that merely printed an old receipt is unknown to this run's sink.
+    ends_turn = getattr(bc, "ends_turn", None)
+    if not callable(ends_turn) or not ends_turn(receipt_id):
       return {"continue_": True}
     if active_client is None or not active_client.claim_owner_card_end():
-      # Stop or another card already owns the cut.
+      # Stop or another turn-ending result already owns the cut.
       return {"continue_": True}
     log.info(
-      "Claude turn ended at saved owner card chat_id=%s question_id=%s",
-      chat_id, question_id,
+      "Claude turn ended at its turn-ending result chat_id=%s receipt_id=%s",
+      chat_id, receipt_id,
     )
     return {
       "continue_": False,
-      "stopReason": "Saved owner card ends the turn.",
+      "stopReason": "A confirmed turn-ending result ends the turn.",
     }
 
   # Per-chat model/effort overrides flow in via `agent_settings`
@@ -1386,7 +1393,7 @@ async def run_claude_sdk_turn(
         "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
-          HookMatcher(matcher=None, hooks=[owner_card_end_hook]),
+          HookMatcher(matcher=None, hooks=[turn_end_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),

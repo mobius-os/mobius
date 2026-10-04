@@ -584,14 +584,11 @@ def parent_root_run_id(
   return (run.goal_id or run.root_run_id or run.id) if run is not None else None
 
 
-def _assistant_result(chat: models.Chat, *, run_ids: set[str] | None = None) -> str:
+def _assistant_result(chat: models.Chat) -> str:
   """Return the latest child assistant outcome as plain text."""
-  from app.chat_message_identity import assistant_message_run_id
   parts: list[str] = []
   for message in reversed(list(chat.messages or [])):
     if not isinstance(message, dict) or message.get("role") != "assistant":
-      continue
-    if run_ids is not None and assistant_message_run_id(message.get("id")) not in run_ids:
       continue
     content = message.get("content")
     if isinstance(content, str) and content.strip():
@@ -611,41 +608,6 @@ def _assistant_result(chat: models.Chat, *, run_ids: set[str] | None = None) -> 
   return ""
 
 
-def _result_with_write_repair(db: Session, chat: models.Chat, run: models.ChatRun | None) -> str:
-  """Bookkeeping repair appends status; it never replaces the task's result.
-
-  Follow only exact physical continuation lineage. Fresh follow-ups and manual
-  Resume keep the ordinary latest-result meaning, even within the same root.
-  Resource/restart resumes of the repair retain its substantive predecessor.
-  """
-  current = run
-  repair_runs: set[str] = set()
-  while current is not None and current.id not in repair_runs:
-    repair_runs.add(current.id)
-    control = current.continuation_json or {}
-    reason = control.get("reason")
-    if reason not in {"quiet_write_failure", "restart", "usage_limit", "memory",
-                      "storage", "model_capacity"}:
-      break
-    previous = db.get(models.ChatRun, control.get("supersedes_run_token")) if control.get("supersedes_run_token") else None
-    if (previous is None or previous.id in repair_runs or previous.chat_id != current.chat_id
-        or (previous.root_run_id or previous.id) != (current.root_run_id or current.id)
-        or previous.initiated_by_app_id != current.initiated_by_app_id
-        or previous.browser_grant_id != current.browser_grant_id):
-      break
-    if reason == "quiet_write_failure":
-      if control.get("source_work_id") != previous.id:
-        break
-      substantive = _assistant_result(chat, run_ids={previous.id})
-      repair = _assistant_result(chat, run_ids=repair_runs)
-      if substantive:
-        return substantive + ("\n\nWrite repair status:\n" + repair
-                              if repair and repair != substantive else "")
-      break
-    current = previous
-  return _assistant_result(chat)
-
-
 def derived_status(
   db: Session, row: models.Delegation, *, load_result: bool = True,
 ) -> tuple[str, models.ChatRun | None, str]:
@@ -655,7 +617,7 @@ def derived_status(
     db.query(models.Chat).filter(models.Chat.id == row.child_chat_id).first()
     if load_result else None
   )
-  result = _result_with_write_repair(db, chat, run) if chat is not None else ""
+  result = _assistant_result(chat) if chat is not None else ""
   return _project_delegation_status(row, run, result)
 
 

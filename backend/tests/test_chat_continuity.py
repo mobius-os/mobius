@@ -173,3 +173,49 @@ def test_retirement_rescues_journal_saves_into_the_note(tmp_path, monkeypatch):
   two = Path(tmp_path, "shared/memory/chats/c2/index.md").read_text(encoding="utf-8")
   assert extract_section(two, "Digest") == "Two now."
   assert extract_cumulative_summary(two) == "Section-less\n### Odd heading\nold note"
+
+
+def test_closing_save_receipt_is_bound_to_the_live_run_sink(client, chat):
+  from app.broadcast import ChatBroadcast
+  from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
+
+  from app.runner_registry import RunnerKind, registry
+
+  class CleanEndingRunner:
+    # Like Claude's root runner: its own hook stops at the tool boundary.
+    kind = RunnerKind.CLAUDE_SDK
+    ends_turn_at_tool_result = True
+
+    def __init__(self, chat_id):
+      self.chat_id = chat_id
+
+    async def stop(self, timeout: float = 2.0) -> bool:
+      return True
+
+    async def force_stop(self, timeout: float = 5.0) -> bool:
+      return True
+
+  headers = _start(chat)
+  sink = ChatEventSink(ChatBroadcast(chat.id), chat.id, run_token="continuity-run")
+  register_active_sink(chat.id, sink)
+  runner = CleanEndingRunner(chat.id)
+  try:
+    registry.register(runner)
+    try:
+      plain = _save(client, headers, summary="Mid-turn progress.")
+      assert plain.status_code == 204
+      closing = _save(client, headers, summary="Closing entry.", end_turn=True)
+      assert closing.status_code == 200
+      receipt_id = closing.json()["turn_end_id"]
+      assert sink.ends_turn(receipt_id) and not sink.ends_turn("someone-else")
+      assert "Closing entry." in _note(chat)
+    finally:
+      registry.unregister(chat.id, runner.kind)
+    # A runner that cannot stop at the tool boundary (Codex, shared helper
+    # hosts) gets no receipt: the save stands and the turn ends normally.
+    assert _save(client, headers, summary="Unsupported.", end_turn=True).status_code == 204
+    assert "Unsupported." in _note(chat)
+  finally:
+    unregister_active_sink(chat.id, sink)
+  # Without this run's live sink the save still stands; the turn just continues.
+  assert _save(client, headers, summary="After.", end_turn=True).status_code == 204

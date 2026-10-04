@@ -393,8 +393,7 @@ def _claude_final_text_item_id(bc, message, block_ordinal: int) -> str | None:
         bc._claude_final_text_items = finals
       except AttributeError:
         return item_id
-    # This is a bounded presentation-identity cache, not the write replay
-    # ledger. Quiet writes retain their durable logical-operation deduplication.
+    # A bounded presentation-identity cache; it remembers no payloads.
     if len(finals) >= 1024:
       finals.pop(next(iter(finals)))
     finals[key] = item_id

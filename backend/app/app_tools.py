@@ -26,7 +26,6 @@ from sqlalchemy.orm import Session
 
 from app import app_services, models
 from app.app_capabilities import agent_tools_from_contract
-from app.platform_tools import RESULT_INDEPENDENT_META
 
 
 log = logging.getLogger(__name__)
@@ -56,9 +55,6 @@ class AppTool:
   # A tool the app's prompt fragment tells every agent to use is loaded up front
   # like the platform's own controls; other app tools stay deferrable.
   always_load: bool = False
-  # Safe to execute without a success result reaching the model. This is a
-  # reviewed delivery promise, not additional caller authority.
-  result_independent: bool = False
 
   def listing(self) -> dict[str, Any]:
     listing = {
@@ -66,13 +62,8 @@ class AppTool:
       "description": self.description,
       "inputSchema": self.input_schema,
     }
-    meta = {}
     if self.always_load:
-      meta["anthropic/alwaysLoad"] = True
-    if self.result_independent:
-      meta[RESULT_INDEPENDENT_META] = True
-    if meta:
-      listing["_meta"] = meta
+      listing["_meta"] = {"anthropic/alwaysLoad": True}
     return listing
 
 
@@ -113,7 +104,6 @@ def live_app_tools(db: Session) -> list[AppTool]:
         description=declaration["description"],
         input_schema=declaration["input_schema"],
         always_load=declaration.get("always_load") is True,
-        result_independent=declaration.get("result_independent") is True,
       ))
   return tools
 

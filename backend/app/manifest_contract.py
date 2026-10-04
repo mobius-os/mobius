@@ -388,10 +388,13 @@ def validate_agent_tools(tools, *, has_service: bool) -> None:
     ):
       _fail(
         f"Manifest `{field}` must contain `name`, `description`, and "
-        "`input_schema`, and optionally `always_load` and `result_independent`."
+        "`input_schema`, and optionally `always_load`."
       )
     if not isinstance(tool.get("always_load", False), bool):
       _fail(f"Manifest `{field}.always_load` must be true or false.")
+    # Retired: `result_independent` once routed calls through a hidden reply
+    # channel. Published manifests may still carry it, so it stays valid and
+    # has no effect; every tool call is an ordinary result-bearing call.
     if not isinstance(tool.get("result_independent", False), bool):
       _fail(f"Manifest `{field}.result_independent` must be true or false.")
     name = tool["name"]

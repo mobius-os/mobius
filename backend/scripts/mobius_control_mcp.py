@@ -456,11 +456,7 @@ def _tools_list_result() -> dict[str, Any]:
   return {
     "tools": [
       *(
-        {**_TOOL_DEFINITIONS[name], "_meta": {
-          **ALWAYS_LOAD_META,
-          **({"mobius/resultIndependent": True}
-             if name == CHECKPOINT_CHAT_TOOL else {}),
-        }}
+        {**_TOOL_DEFINITIONS[name], "_meta": ALWAYS_LOAD_META}
         for name in _available_tool_names()
       ),
       *_app_tool_listings(),
@@ -975,11 +971,22 @@ def _call_list_agents(arguments: dict[str, Any]) -> dict:
 
 
 def _call_checkpoint_chat(arguments: dict[str, Any]) -> str:
-  if not arguments or not set(arguments).issubset({"title", "digest", "summary"}):
+  fields = {key: value for key, value in arguments.items() if key != "end_turn"}
+  if not fields or not set(fields).issubset({"title", "digest", "summary"}):
     raise ValueError("checkpoint_chat takes one or more of title, digest, summary")
-  if not all(isinstance(value, str) for value in arguments.values()):
+  if not all(isinstance(value, str) for value in fields.values()):
     raise ValueError("checkpoint_chat fields must be strings")
-  _agent_api_call("POST", "/api/chat/continuity/checkpoints", arguments)
+  end_turn = arguments.get("end_turn", False)
+  if not isinstance(end_turn, bool):
+    raise ValueError("checkpoint_chat end_turn must be true or false")
+  result = _agent_api_call(
+    "POST", "/api/chat/continuity/checkpoints",
+    {**fields, **({"end_turn": True} if end_turn else {})},
+  )
+  turn_end_id = result.get("turn_end_id")
+  if end_turn and isinstance(turn_end_id, str):
+    # The run's end hook recognizes this receipt and ends the turn here.
+    return json.dumps({"state": "saved_turn_ends", "turn_end_id": turn_end_id})
   return "Saved."
 
 
@@ -1177,7 +1184,13 @@ _TOOL_DEFINITIONS = {
       "risky/long work that needs a recovery checkpoint. Omit unchanged title "
       "and digest; do not repeat saved facts or raw tool output. Omitted fields "
       "stay unchanged. If a save fails, read the note before retrying so an entry "
-      "is not added twice."
+      "is not added twice. Send a save in the same step as your next real tool "
+      "call, never alone mid-turn. For the closing save, send other saves with "
+      "your last real tool call, write your final reply, then call this alone "
+      "and last with end_turn: once the save is confirmed the turn ends with no "
+      "further model call. If it returns only Saved., end the turn normally; if "
+      "it fails, the turn continues. A turn ending with an owner-input card saves "
+      "before the card, without end_turn."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
@@ -1185,6 +1198,8 @@ _TOOL_DEFINITIONS = {
         "title": {"type": "string", "maxLength": 200},
         "digest": {"type": "string", "maxLength": 1000},
         "summary": {"type": "string", "maxLength": 8000},
+        "end_turn": {"type": "boolean",
+                     "description": "True only when this save is the turn's last action, after the final reply text."},
       },
     },
   },

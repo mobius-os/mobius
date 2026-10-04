@@ -10,12 +10,12 @@ from app import auth as auth_mod, chat as chat_mod, models, questions
 from app.broadcast import create_broadcast
 from app.chat_event_sink import (
   ChatEventSink,
-  _owner_card_receipt_id,
   register_active_sink,
   unregister_active_sink,
 )
 from app.chat_writer import AnswerQuestion, Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
+from app.owner_card_receipts import owner_card_receipt_id as _owner_card_receipt_id
 from app.routes import chats_stream
 
 
@@ -243,6 +243,49 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
     assert handle.finishes == 1
   finally:
     registry.unregister(chat.id, handle.kind)
+
+
+def test_closing_save_never_interrupts_a_turn_from_the_sink(client, chat, approval_run):
+  """Only a runner that stops at the tool boundary itself ends on a closing save.
+
+  The sink's card boundary interrupts a provider that may already have moved
+  on; it must never fire for a closing save. Without a clean-ending runner, or
+  while another tool is still running, the save gets no receipt at all.
+  """
+  from app.runner_registry import registry
+  sink, headers = approval_run
+  interrupting = _FakeCardHandle(chat.id)  # Codex-like: ends only by interrupt.
+  registry.register(interrupting)
+  try:
+    def close():
+      return client.post("/api/chat/continuity/checkpoints", headers=headers,
+                         json={"summary": "Done.", "end_turn": True})
+
+    assert close().status_code == 204
+    interrupting.ends_turn_at_tool_result = True  # Now a clean-ending runner.
+    sink.publish({"type": "tool_start", "tool": "Bash", "input": "sleep",
+                  "tool_use_id": "sibling"})
+    sink.publish({"type": "tool_start", "tool": "checkpoint_chat", "input": "",
+                  "tool_use_id": "save"})
+    assert close().status_code == 204  # A sibling tool is still running.
+    sink.publish({"type": "tool_end", "tool_use_id": "sibling"})
+    saved = close()
+    assert saved.status_code == 200, saved.text
+    receipt_id = saved.json()["turn_end_id"]
+    assert sink.ends_turn(receipt_id)
+
+    async def deliver():
+      sink.publish({
+        "type": "tool_output", "output_complete": True, "output_exit_code": 0,
+        "tool_use_id": "save",
+        "content": json.dumps({"state": "saved_turn_ends", "turn_end_id": receipt_id}),
+      })
+      await asyncio.sleep(0)
+
+    asyncio.run(deliver())
+    assert interrupting.finishes == 0
+  finally:
+    registry.unregister(chat.id, interrupting.kind)
 
 
 def test_streamed_receipt_survives_an_empty_completed_payload(

@@ -8,6 +8,7 @@ rather than reaching through the broader chat scheduler.
 
 import asyncio
 import copy
+import secrets
 import time
 import uuid
 from datetime import UTC, datetime
@@ -137,16 +138,6 @@ def register_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
 
 def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   """Return the live sink for `chat_id`, or None when no turn is streaming."""
-  sink = _active_sinks.get(chat_id)
-  return None if getattr(sink, "_provider_stream_ended", False) else sink
-
-
-def get_owned_sink(chat_id: str) -> "ChatEventSink | None":
-  """Stop/teardown retains the same owner through joined write draining.
-
-  This is the owning lifetime view of the existing registry, not another
-  registry. Steering sees only get_active_sink's narrower streaming view.
-  """
   return _active_sinks.get(chat_id)
 
 
@@ -420,52 +411,9 @@ class ChatEventSink:
     # only the bounded raw tail needed by protocol receipts; presentation
     # carving and persisted tool output remain independent.
     self._app_output_tails: dict[str, str] = {}
-    self._write_delivery = None
-    self._quiet_failure_count = 0
-    self._provider_stream_ended = False
-
-  def end_provider_stream(self) -> None:
-    self._provider_stream_ended = True
-    if self._write_delivery is not None:
-      self._write_delivery.accepting = False
-
-  def attach_write_delivery(self, *, nonce: str, env: dict,
-                            eligible_tools: frozenset[str]) -> None:
-    """Attach after helper attribution, before the first provider event.
-
-    The run owner supplies its exact environment; frames cannot select a chat,
-    caller, or credential. This seam does not itself enable the protocol.
-    """
-    from app.agent_write_delivery import AgentWriteDelivery
-    from app.agent_write_tools import QuietToolDispatcher
-    if self._write_delivery is not None or not self.run_token or not self.chat_id:
-      raise RuntimeError("Quiet-write delivery needs one exact run owner")
-    dispatch = QuietToolDispatcher(env=env, eligible_tools=eligible_tools,
-                                   publish=self.publish)
-    self._write_delivery = AgentWriteDelivery(chat_id=self.chat_id,
-      run_token=self.run_token, nonce=nonce, eligible_tools=eligible_tools,
-      dispatch=dispatch, on_failure=self._write_failure)
-
-  def _write_failure(self, failure: dict) -> None:
-    if failure.get("id") and failure.get("stage") == "completion":
-      return  # The real tool receipt already settled its visible activity.
-    self._quiet_failure_count += 1
-    identity = f"quiet-failure:{self.run_token}:{self._quiet_failure_count}"
-    self.publish({"type": "tool_start", "tool": "Write delivery",
-                  "tool_use_id": identity, "input": "{}", "delivery": "quiet"})
-    self.publish({"type": "tool_output", "tool_use_id": identity,
-      "content": "A background write could not be confirmed: " + str(failure.get("reason", "unknown")),
-      "output_complete": True, "output_exit_code": 1, "delivery": "quiet"})
-    self.publish({"type": "tool_end", "tool_use_id": identity, "delivery": "quiet"})
-
-  def interrupt_write_delivery(self) -> None:
-    if self._write_delivery is not None:
-      self._write_delivery.interrupt()
-
-  async def finish_write_delivery(self, *, interrupted=False):
-    if self._write_delivery is not None:
-      return await self._write_delivery.finish(interrupted=interrupted)
-    return None
+    # Receipts of this run's confirmed closing saves (`checkpoint_chat` with
+    # `end_turn`). Like a saved card, only a receipt recorded here ends a turn.
+    self._closing_save_ids: set[str] = set()
 
   def _start_side_task(
     self,
@@ -1118,10 +1066,6 @@ class ChatEventSink:
     Generated files have their own atomic metadata/transcript barrier and may
     not enter this ordinary broadcast-before-save path.
     """
-    if self._write_delivery is not None:
-      event = self._write_delivery.filter(event)
-      if event is None:
-        return True
     event_type = event.get("type")
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
@@ -1337,9 +1281,6 @@ class ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
-    # The turn owner must synchronously fence Stop before it gets here.
-    # Accepted writes finish before the terminal transcript/queue transition.
-    await self.finish_write_delivery()
     # A timed-out RecordGeneratedFile may still be ahead of us in the same
     # FIFO writer. Resolve it before Finalize can replace its atomic live
     # snapshot with this sink's file-less in-memory state. If the writer is
@@ -1611,10 +1552,6 @@ class ChatEventSink:
       undo_question_scrub(receipt, self.assistant_blocks)
       raise
     # Committed durably — now (and only now) show the card.
-    if event.get("response_mode") == "continuation" and self._write_delivery is not None:
-      # Already accepted writes may drain; no command may be admitted after
-      # this terminal owner-card barrier.
-      self._write_delivery.accepting = False
     self._publish_activity_frontier()
     self.bc.publish(event)
     # A continuation card is terminal, but this save path is still inside the
@@ -1667,6 +1604,31 @@ class ChatEventSink:
           failure_message="finish-after-owner-card failed chat_id=%s",
           warn=True,
         )
+
+  def record_closing_save(self) -> str | None:
+    """Name a confirmed closing save so this turn's end hook can honor it.
+
+    Only a runner that stops at the tool boundary itself (it refuses the next
+    model request) may end a turn on a closing save; interrupting a provider
+    that already moved on would lose the saving and record an aborted turn.
+    A closing save sent beside another still-running tool is not honored
+    either: ending the turn could cut that tool or hide its failure.
+    """
+    from app.runner_registry import registry
+    if not any(getattr(handle, "ends_turn_at_tool_result", False)
+               for handle in registry.get_handles(self.chat_id)):
+      return None
+    if sum(1 for block in self.assistant_blocks
+           if block.get("type") == "tool" and block.get("status") == "running") > 1:
+      return None
+    receipt_id = secrets.token_urlsafe(12)
+    self._closing_save_ids.add(receipt_id)
+    return receipt_id
+
+  def ends_turn(self, receipt_id: str) -> bool:
+    """Whether this turn produced this turn-ending receipt: a saved
+    continuation card or a confirmed closing save."""
+    return receipt_id in self._closing_save_ids or self.has_continuation_card(receipt_id)
 
   def has_continuation_card(self, question_id: str) -> bool:
     """Whether this turn saved exactly this continuation owner-input card.

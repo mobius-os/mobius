@@ -27,6 +27,25 @@ def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
   assert 'maxLength' not in complete
 
 
+def test_closing_save_returns_a_turn_end_receipt_only_when_confirmed(monkeypatch):
+  control = _control_module()
+  calls = []
+
+  def api(method, path, body):
+    calls.append(body)
+    return {"turn_end_id": "save-1"} if body.get("end_turn") else {}
+
+  monkeypatch.setattr(control, "_agent_api_call", api)
+  assert control._call_checkpoint_chat({"summary": "Mid-turn."}) == "Saved."
+  closing = json.loads(control._call_checkpoint_chat({"summary": "Done.", "end_turn": True}))
+  assert closing == {"state": "saved_turn_ends", "turn_end_id": "save-1"}
+  assert calls == [{"summary": "Mid-turn."}, {"summary": "Done.", "end_turn": True}]
+  with pytest.raises(ValueError):
+    control._call_checkpoint_chat({"end_turn": True})
+  with pytest.raises(ValueError):
+    control._call_checkpoint_chat({"summary": "x", "end_turn": "yes"})
+
+
 @pytest.mark.parametrize("top_level,coordination", [(True, True), (True, False), (False, True)])
 def test_helpers_are_builtin_without_subagents_app(monkeypatch, top_level, coordination):
   monkeypatch.delenv("MOBIUS_SUBAGENT_HELPER", raising=False)
@@ -385,9 +404,7 @@ def test_platform_control_tools_are_marked_always_loaded(monkeypatch):
   )
   # The meta is added to the listing, not baked into the shared definition.
   assert "_meta" not in control._TOOL_DEFINITIONS[control.PROMOTE_GOAL_TOOL]
-  quiet = [tool["name"] for tool in tools
-           if tool["_meta"].get("mobius/resultIndependent")]
-  assert quiet == ["checkpoint_chat"]
+  assert all(set(tool["_meta"]) == {"anthropic/alwaysLoad"} for tool in tools)
 
 
 def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
@@ -559,12 +576,16 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
   core = (
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
   ).read_text(encoding="utf-8")
-  assert "batch independent informational" in core
-  assert "already-needed tool work in the same model step" in core
-  assert "Await every\n  result and handle failures" in core
-  assert "never delay a required save just to form a batch" in core
-  assert "Owner-input cards remain separate and last" in core
-  assert "measure saved model calls and input/cache tokens" in core
+  flat = " ".join(core.split())
+  assert "in the same step as your next real tool call, never alone mid-turn" in flat
+  assert "send any other saves with your last real tool call" in flat
+  assert "call `checkpoint_chat` with `end_turn` alone as the very last call" in flat
+  assert "a confirmed closing save ends the turn without another model call" in flat
+  assert 'If it returns only "Saved.", end the turn normally' in flat
+  assert "saves before the card, without `end_turn`" in flat
+  assert "Await every result and handle failures" in flat
+  assert "never delay a required save just to form a batch" in flat
+  assert "Owner-input cards remain separate and last" in flat
 
 
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
