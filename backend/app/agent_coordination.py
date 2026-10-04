@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import models
 from app.continuations import PEER_MESSAGE_WAKE_KIND
 from app.goal_plans import paused_goal_run
@@ -755,16 +756,15 @@ def _peer_carrier_cursor(
   """
   row = chat
   if row is None:
-    row = db.query(
-      models.Chat.messages, models.Chat.pending_messages,
-    ).filter(
+    row = db.query(models.Chat).filter(
       models.Chat.id == chat_id,
       models.Chat.deleted_at.is_(None),
     ).first()
   if row is None:
     return None
   result: PeerMessageCursor | None = None
-  for item in [*(row.messages or []), *(row.pending_messages or [])]:
+  from itertools import chain
+  for item in chain(transcript_rows.history(row), row.pending_messages or []):
     if not isinstance(item, dict):
       continue
     value = item.get(PEER_MESSAGE_CURSOR_FIELD)

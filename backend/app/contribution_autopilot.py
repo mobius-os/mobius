@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
+from app import chat_writer
 from app import fs_locks, models, providers
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
@@ -883,7 +884,7 @@ def ensure_followup_chat(
       settings["drawer_hidden"] = True
       existing.agent_settings_json = settings
 
-  chat = models.Chat(
+  chat = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title=title,
     messages=[],

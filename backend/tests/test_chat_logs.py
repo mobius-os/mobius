@@ -6,6 +6,7 @@ structural redaction (tool/thinking/question/error blocks, attachments,
 hidden/pending messages, fs-path augmentation, and secrets never leave
 the server).
 """
+from app.chat_writer import create_chat
 
 from app import models
 
@@ -37,7 +38,7 @@ def _app_token(client, owner_token, app_id):
 
 def _seed_chat(db, chat_id="logchat"):
   """A chat whose transcript exercises every redaction case."""
-  chat = models.Chat(
+  chat = create_chat(
     id=chat_id,
     title="My grocery list and stuff",
     messages=[

@@ -1,4 +1,5 @@
 """Owner MCP connections must follow the owner's own chats only."""
+from app.chat_writer import create_chat
 
 import asyncio
 import hashlib
@@ -112,7 +113,7 @@ async def test_owner_chat_keeps_owner_connections(chat, db, monkeypatch):
 @pytest.mark.asyncio
 async def test_delegated_chat_inherits_owner_connections(chat, db, monkeypatch):
   app_row = _app_row(db, "delegated")
-  parent = models.Chat(
+  parent = create_chat(
     id="grant-policy-parent", title="Parent", messages=[], provider="codex",
   )
   db.add(parent)
@@ -156,7 +157,7 @@ def test_delegated_prompt_allows_relevant_connected_tools():
 
 def test_app_chat_context_states_connections_unavailable(db):
   app_row = _app_row(db, "context")
-  row = models.Chat(
+  row = create_chat(
     id="grant-policy-context-chat",
     title="app chat",
     messages=[],

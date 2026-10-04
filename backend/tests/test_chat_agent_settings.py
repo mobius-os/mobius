@@ -9,6 +9,8 @@ Locks in three contracts:
      into the runner — verified by mocking the SDK runner and
      asserting the `agent_settings` kwarg.
 """
+from app import transcript_rows
+from sqlalchemy.orm import object_session
 
 import asyncio
 import json
@@ -471,10 +473,10 @@ def test_get_chat_has_assistant_turns_reflects_history(
   client, auth, chat, db,
 ):
   """The flag flips to True once an assistant message exists."""
-  chat.messages = [
+  transcript_rows.replace_all(object_session(chat), chat, [
     {"role": "user", "content": "hi"},
     {"role": "assistant", "content": "hello"},
-  ]
+  ])
   db.commit()
   r = client.get(f"/api/chats/{chat.id}", headers=auth)
   assert r.json()["has_assistant_turns"] is True
@@ -536,7 +538,7 @@ def test_first_live_turn_cannot_switch_provider_via_patch(
   """The provider is immutable once the first run has claimed the chat."""
   from app import models
 
-  chat.messages = [{"role": "user", "content": "first request"}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "first request"}])
   db.add(models.ChatRun(
     id="first-live-turn",
     chat_id=chat.id,
@@ -801,10 +803,10 @@ def test_patch_cannot_bypass_handoff_after_assistant_turn(
   )
   chat.session_id = "claude-session"
   chat.agent_settings_json = {"model": "claude-sonnet-4-6"}
-  chat.messages = [
+  transcript_rows.replace_all(object_session(chat), chat, [
     {"role": "user", "content": "hello"},
     {"role": "assistant", "content": "hi"},
-  ]
+  ])
   db.commit()
 
   response = client.patch(

@@ -14,6 +14,7 @@ separate encrypted app-secrets API.
 """
 
 import secrets
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -22,7 +23,8 @@ from sqlalchemy import (
   true,
 )
 
-from sqlalchemy.orm import column_property, relationship, validates
+from sqlalchemy.types import TypeDecorator
+from sqlalchemy.orm import column_property, deferred, relationship, validates
 
 from app.database import Base
 from app.shell_install_pass import ShellInstallPassGrant
@@ -201,11 +203,19 @@ class Chat(Base):
   # then never overwrites it. A clear-title PATCH resets it to false so the name
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
-  messages = Column(JSON, nullable=False, default=list)
+  # Recovery-only legacy values must never load with ordinary chat metadata.
+  # The upgrade archives and clears these; message rows own current history.
+  legacy_messages = deferred(Column("messages_v1", JSON, nullable=False, default=list))
+  transcript_state = relationship(
+    "ChatTranscriptState", uselist=False, cascade="all, delete-orphan",
+  )
+  transcript_rows = relationship(
+    "ChatMessage", cascade="all, delete-orphan", lazy="raise",
+    order_by="ChatMessage.seq",
+  )
   # Drawer/list reads need only to know whether a transcript is empty. Keeping
-  # that fact beside the blob prevents every chat-list request from scanning
-  # every stored transcript. All runtime transcript writes flow through normal
-  # ORM assignment or the two explicit bulk paths in chat_writer.
+  # that fact beside scalar metadata avoids transcript reads in chat lists.
+  # Row mutations update this flag through chat_writer's domain commands.
   has_messages = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
@@ -326,10 +336,6 @@ class Chat(Base):
     DateTime, nullable=True, default=lambda: datetime.now(UTC)
   )
 
-  @validates("messages")
-  def _sync_has_messages(self, _key, value):
-    self.has_messages = bool(value)
-    return value
 
 
 class ChatGoal(Base):
@@ -2132,3 +2138,172 @@ class ChatActivityPosition(Base):
   chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
   event_id = Column(String(128), primary_key=True)
   position = Column(JSON, nullable=True)
+
+
+def transcript_values_equal(left, right):
+  """JSON equality retains bool/int/float and signed-zero distinctions."""
+  from sqlalchemy.orm.attributes import NO_VALUE
+  if left is NO_VALUE or right is NO_VALUE:
+    return left is right
+  return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+class TranscriptJSON(JSON):
+  def compare_values(self, left, right):
+    return transcript_values_equal(left, right)
+
+
+class TranscriptJSONText(TypeDecorator):
+  """Preserve JSON scalar types in transcripts and their projections.
+
+  SQLite gives a column named JSON numeric affinity: 1.0 becomes integer 1
+  and large integers lose precision. TEXT keeps these exact JSON encodings;
+  objects/arrays are unchanged. PostgreSQL can retain its native JSON type.
+  """
+  impl = Text
+  cache_ok = True
+
+  def compare_values(self, left, right):
+    return transcript_values_equal(left, right)
+
+  def process_bind_param(self, value, _dialect):
+    return json.dumps(value)
+
+  def process_result_value(self, value, _dialect):
+    return json.loads(value) if value is not None else None
+
+
+class ChatMessage(Base):
+  """One unchanged transcript item; position, not optional identity, is its key."""
+  __tablename__ = "chat_messages"
+  __table_args__ = (Index("ix_chat_messages_key", "chat_id", "message_key"),)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+  seq = Column(Integer, primary_key=True)
+  message_key = Column(String(256), nullable=True)
+  message_id = Column(TranscriptJSONText, nullable=True)
+  client_id = Column(TranscriptJSONText, nullable=True)
+  role = Column(TranscriptJSONText, nullable=True)
+  ts = Column(TranscriptJSONText, nullable=True)
+  flags = Column(Integer, nullable=False, default=0)
+  body = Column(TranscriptJSON().with_variant(TranscriptJSONText(), "sqlite"), nullable=False)
+
+
+class ChatTranscriptState(Base):
+  """Count and revision advance atomically with the owning writer's row edits."""
+  __tablename__ = "chat_transcript_state"
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+  message_count = Column(Integer, nullable=False, default=0)
+  revision = Column(Integer, nullable=False, default=0)
+
+
+# The compatibility floor table, ``platform_compat``, is deliberately not an
+# ORM model: create_all would create it empty, and an empty floor table must
+# read as damage. app.one_way_upgrades.ensure_compat_record creates it together
+# with its single row in one transaction.
+
+
+class PlatformUpgrade(Base):
+  """One registered one-way step's durable state.
+
+  ``preparing``: the legacy data is still authoritative and untouched.
+  ``active``: the new form is authoritative and the floor has been raised.
+  ``completed_at`` is set once every post-activation task has verified.
+  """
+
+  __tablename__ = "platform_upgrades"
+  __table_args__ = (
+    CheckConstraint(
+      "state IN ('preparing', 'active')", name="ck_platform_upgrades_state",
+    ),
+  )
+
+  level = Column(Integer, primary_key=True)
+  name = Column(String(64), nullable=False)
+  state = Column(String(16), nullable=False)
+  started_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  activated_at = Column(DateTime, nullable=True)
+  completed_at = Column(DateTime, nullable=True)
+  detail = Column(JSON, nullable=True)
+
+
+class UpgradeTask(Base):
+  """Durable progress for one post-activation task of a one-way step.
+
+  The completion contract: owner-visible progress, bounded retries with the
+  last error, and a step counts as complete only when every task is done.
+  """
+
+  __tablename__ = "upgrade_tasks"
+  __table_args__ = (
+    CheckConstraint(
+      "status IN ('pending', 'running', 'done', 'failed')",
+      name="ck_upgrade_tasks_status",
+    ),
+  )
+
+  level = Column(Integer, primary_key=True)
+  task = Column(String(64), primary_key=True)
+  status = Column(String(16), nullable=False, default="pending")
+  done_units = Column(Integer, nullable=False, default=0)
+  remaining_units = Column(Integer, nullable=True)
+  retries = Column(Integer, nullable=False, default=0)
+  last_error = Column(Text, nullable=True)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  completed_at = Column(DateTime, nullable=True)
+
+
+class UpgradeQuarantine(Base):
+  """Raw bytes of a unit a one-way step could not convert.
+
+  Kept independently of the step's archive and of any later retirement of the
+  legacy structure, so a damaged original is never lost. For clearing a hot
+  legacy value, a verified quarantine copy stands in for the archive entry.
+  """
+
+  __tablename__ = "upgrade_quarantine"
+  __table_args__ = (
+    UniqueConstraint("level", "unit_id", name="uq_upgrade_quarantine_unit"),
+  )
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  level = Column(Integer, nullable=False)
+  unit_id = Column(String(128), nullable=False)
+  raw = Column(LargeBinary, nullable=False)
+  raw_length = Column(Integer, nullable=False)
+  sha256 = Column(String(64), nullable=False)
+  error = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class UpgradeUnit(Base):
+  """A one-way step's fingerprint of each unit's raw legacy value.
+
+  Written while PREPARING; the activation re-check compares the current raw
+  value's SHA-256 and length against it, so a legacy write by older code
+  (even one that never bumps ``updated_at``) is always reconverted.
+  """
+
+  __tablename__ = "upgrade_units"
+
+  level = Column(Integer, primary_key=True)
+  unit_id = Column(String(128), primary_key=True)
+  sha256 = Column(String(64), nullable=False)
+  raw_length = Column(Integer, nullable=False)
+  damaged = Column(Boolean, nullable=False, default=False)
+  converted_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class UpgradeArchive(Base):
+  """The compressed raw legacy value of each converted unit.
+
+  Kept outside the hot legacy row so clearing that row later loses nothing;
+  a damaged unit's quarantine copy stands in for its archive entry.
+  """
+
+  __tablename__ = "upgrade_archive"
+
+  level = Column(Integer, primary_key=True)
+  unit_id = Column(String(128), primary_key=True)
+  zlib_raw = Column(LargeBinary, nullable=False)
+  raw_length = Column(Integer, nullable=False)
+  sha256 = Column(String(64), nullable=False)

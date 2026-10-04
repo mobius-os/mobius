@@ -1,4 +1,5 @@
 """The real shared sink and SDK normalizers, with synthetic external effects."""
+from app import transcript_rows
 import asyncio
 import json
 import importlib.util
@@ -67,7 +68,7 @@ def test_quiet_checkpoint_uses_existing_title_digest_summary_handler_once(
     assert extract_cumulative_summary(note).count(args['summary'])==1
     # The ordinary checkpoint route still binds the cumulative handoff, not
     # the short digest, to its exact source history for recovery.
-    summary,_tail=recovery_source(note,list(db.get(models.Chat,chat.id).messages or []))
+    summary,_tail=recovery_source(note,list(transcript_rows.history(db.get(models.Chat, chat.id))))
     assert args['summary'] in summary and 'Current digest.' not in summary
     assert calls==[args,{'digest':'Current digest.'}]
   asyncio.run(scenario())
@@ -131,7 +132,7 @@ def test_provider_normalization_enters_one_private_sink_before_broadcast_and_per
     assert len(effects)==1 and effects[0]['arguments']==WRITE.arguments
     db.expire_all()
     saved=db.get(models.Chat,chat.id)
-    for surface in (sink.bc.event_log,sink.assistant_blocks,saved.messages,saved.live_assistant):
+    for surface in (sink.bc.event_log,sink.assistant_blocks,list(transcript_rows.history(saved)),saved.live_assistant):
       data=json.dumps(surface)
       assert 'MOBIUS_WRITE' not in data and 'private synthetic fact' not in data
     assert 'Before.After.' in json.dumps(sink.assistant_blocks)

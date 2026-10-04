@@ -4,7 +4,7 @@ import filecmp
 import shutil
 from pathlib import Path
 
-from sqlalchemy import String, cast, literal, or_
+from sqlalchemy import String, cast, exists, literal, or_
 from sqlalchemy.orm import Session
 
 from app import models
@@ -60,7 +60,11 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
     for row in (
       db.query(models.Chat.id)
       .filter(or_(
-        cast(models.Chat.messages, String).like(legacy_url),
+        exists().where(
+          models.ChatMessage.chat_id == models.Chat.id,
+          models.ChatMessage.flags.op("&")(4) != 0,
+          cast(models.ChatMessage.body, String).like(legacy_url),
+        ),
         cast(models.Chat.pending_messages, String).like(legacy_url),
       ))
       .all()

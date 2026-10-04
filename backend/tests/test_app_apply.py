@@ -1,4 +1,5 @@
 """Explicit mini-app source application."""
+from app.chat_writer import create_chat
 
 import io
 import json
@@ -126,7 +127,7 @@ def test_new_app_compile_does_not_hold_sqlite_write_lock(
       # five-second busy timeout. WAL permits this write while the apply owns
       # only its preflight read transaction; an early App INSERT does not.
       concurrent.connection().exec_driver_sql("PRAGMA busy_timeout=50")
-      concurrent.add(models.Chat(
+      concurrent.add(create_chat(
         id=concurrent_chat_id,
         title="Concurrent chat",
         messages=[],

@@ -15,7 +15,7 @@ activating, backend only):
 The actor stays dormant; nothing here routes through it.
 """
 
-from app import models
+from app import chat_writer, models, transcript_rows
 from app.events import process_event
 from app.routes.chats import save_question_answers  # noqa: F401 (import guard)
 # The answer-merge helper moved to chat_writer (C1) and the answer routes
@@ -104,7 +104,7 @@ def test_process_event_distinct_question_ids_append_separate_blocks():
 def _chat_with_two_open_questions():
   """A chat whose last assistant message has TWO open question blocks,
   each carrying its own `question_id`, neither answered yet."""
-  return models.Chat(
+  return chat_writer.create_chat(
     id="two-q-chat",
     title="two q",
     messages=[
@@ -144,7 +144,7 @@ def test_answer_with_question_id_updates_only_the_matching_block(db):
   db.commit()
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert blocks[0]["question_id"] == "qid-first"
   assert blocks[0].get("answers") == {"Color?": "red"}
   # The second (latest) block must be UNTOUCHED — proving we didn't fall
@@ -165,7 +165,7 @@ def test_answer_with_question_id_updates_the_second_block_precisely(db):
   db.commit()
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert blocks[1].get("answers") == {"Size?": "m"}
   assert "answers" not in blocks[0]
 
@@ -181,7 +181,7 @@ def test_answer_with_unknown_question_id_matches_nothing(db):
     chat, {"Color?": "red"}, question_id="qid-nonexistent",
   )
   assert ok is False
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert "answers" not in blocks[0]
   assert "answers" not in blocks[1]
 
@@ -199,7 +199,7 @@ def test_answer_without_question_id_falls_back_to_latest(db):
   db.commit()
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   # Latest = the second block.
   assert blocks[1].get("answers") == {"Size?": "m"}
   assert "answers" not in blocks[0]
@@ -207,7 +207,7 @@ def test_answer_without_question_id_falls_back_to_latest(db):
 
 def test_answer_without_question_id_single_question_unchanged(db):
   # The common case (one open question, no id): unchanged behavior.
-  chat = models.Chat(
+  chat = chat_writer.create_chat(
     id="one-q-chat",
     title="one q",
     messages=[
@@ -226,7 +226,7 @@ def test_answer_without_question_id_single_question_unchanged(db):
   assert ok is True
   db.commit()
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert blocks[0].get("answers") == {"Color?": "blue"}
 
 
@@ -244,7 +244,7 @@ def test_legacy_route_with_question_id_hits_matching_block(client, auth, db):
   assert res.status_code == 200, res.text
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert blocks[0].get("answers") == {"Color?": "red"}
   assert "answers" not in blocks[1]
 
@@ -262,7 +262,7 @@ def test_legacy_route_without_question_id_falls_back_to_latest(client, auth, db)
   assert res.status_code == 200, res.text
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = transcript_rows.history(chat)[-1]["blocks"]
   assert blocks[1].get("answers") == {"Size?": "m"}
   assert "answers" not in blocks[0]
 

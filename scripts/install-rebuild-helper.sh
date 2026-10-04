@@ -6,8 +6,21 @@ set -euo pipefail
 # This installs the frozen launcher and seeds it with this checkout's worker;
 # later worker changes arrive with verified official images, so this runs once.
 #
-# Helper protocol revision: 1 (request version 2 echoes the app's nonce).
+# Helper protocol revision: 2 (request version 2 echoes the app's nonce).
 # Keep in step with deployment/self-hosted-helper.required; never decrement.
+
+# A release that advances the helper requirement cannot be installed from the
+# older release's Settings, which reports host work it can never retire. Once
+# this installation verifies the floor-aware worker as ACTIVE, the installer
+# starts that waiting update through the running app's own reviewed updater
+# (scripts/finish-helper-update.py). --no-update installs the helper only.
+FINISH_UPDATE=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-update) FINISH_UPDATE=0 ;;
+    *) echo "usage: sudo scripts/install-rebuild-helper.sh [--no-update]" >&2; exit 2 ;;
+  esac
+done
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run with sudo from the trusted Möbius checkout." >&2
@@ -29,7 +42,7 @@ git -C "$ROOT" ls-files --error-unmatch \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/mobius-rebuild-launcher.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
-  backend/scripts/prepare-container-cutover.py \
+  backend/scripts/prepare-container-cutover.py scripts/finish-helper-update.py \
   docker-compose.yml >/dev/null \
   || { echo "The replacement helper must be tracked in the trusted checkout." >&2; exit 1; }
 
@@ -86,14 +99,14 @@ git -C "$ROOT" diff --quiet HEAD -- \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/mobius-rebuild-launcher.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
-  backend/scripts/prepare-container-cutover.py \
+  backend/scripts/prepare-container-cutover.py scripts/finish-helper-update.py \
   "${FILES[@]#"$ROOT/"}" \
   || { echo "Commit and review every helper and Compose input first." >&2; exit 1; }
 [[ -z $(git -C "$ROOT" status --porcelain=v1 --untracked-files=all -- \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/mobius-rebuild-launcher.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
-  backend/scripts/prepare-container-cutover.py \
+  backend/scripts/prepare-container-cutover.py scripts/finish-helper-update.py \
   "${FILES[@]#"$ROOT/"}") ]] \
   || { echo "The selected helper and Compose inputs must be clean." >&2; exit 1; }
 
@@ -143,6 +156,9 @@ flock 9
 # already adopted from a newer official image.
 MOBIUS_REBUILD_LOCK_HELD=1 \
   /usr/bin/python3 -I -S "$ROOT/scripts/mobius-rebuild-host.py" adopt-self
+# A queued or previously rejected candidate is not installed recovery authority.
+# Refuse rather than silently weaken the launcher's revision high-water guard.
+/usr/bin/python3 -I -S "$ROOT/scripts/mobius-rebuild-host.py" verify-active
 install -D -m 0755 "$ROOT/scripts/mobius-rebuild-launcher.py" \
   /usr/local/libexec/.mobius-rebuild-host.new
 mv -f /usr/local/libexec/.mobius-rebuild-host.new \
@@ -161,6 +177,15 @@ cat >"$OVERRIDE_NEW" <<'EOF'
 services:
   app:
     image: ${MOBIUS_IMAGE:?MOBIUS_IMAGE is required}
+    environment:
+      MOBIUS_HOST_RECOVERY_REQUIRED: "1"
+    volumes:
+      - type: bind
+        source: /var/lib/mobius-rebuild
+        target: /run/mobius-rebuild-host
+        read_only: true
+        bind:
+          create_host_path: false
 EOF
 chmod 0600 "$OVERRIDE_NEW"
 mv -f "$OVERRIDE_NEW" /etc/mobius-rebuild/image.override.yml
@@ -193,6 +218,9 @@ Requires=docker.service
 Type=oneshot
 ExecStart=/usr/local/libexec/mobius-rebuild-host run
 ExecStopPost=/usr/local/libexec/mobius-rebuild-host reconcile
+# Recovery after an interrupted run may restore or restart a container and
+# wait for it; the default 90 s stop limit would cut it off mid-recovery.
+TimeoutStopSec=15min
 EOF
 cat >/etc/systemd/system/mobius-rebuild.path <<EOF
 [Unit]
@@ -234,3 +262,45 @@ systemctl enable --now mobius-rebuild.path
 echo "Container rebuild support installed for Compose project '$PROJECT'."
 echo "Topology: ${FILES[*]:-$FROZEN_SOURCE}"
 echo "Rerun this installer after an intentional Compose topology change."
+
+[[ $FINISH_UPDATE == 1 ]] || exit 0
+TARGET_SHA=$(git -C "$ROOT" rev-parse HEAD)
+PROTOCOL=$(tr -d '[:space:]' < "$ROOT/deployment/self-hosted-helper.required")
+# The app user runs its own updater; this checkout supplies only the bridge.
+if ! FINISH=$(docker exec -i -u mobius -w /data/platform/backend "$CID" \
+    python3 -I - "$TARGET_SHA" "$PROTOCOL" < "$ROOT/scripts/finish-helper-update.py"); then
+  echo "The helper is installed, but the waiting update was not started:" >&2
+  printf '%s\n' "$FINISH" >&2
+  exit 1
+fi
+STATE=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1].splitlines()[-1])["state"])' "$FINISH")
+if [[ $STATE != queued ]]; then
+  echo "No update is waiting for this helper; update from Settings as usual."
+  exit 0
+fi
+NONCE=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1].splitlines()[-1])["request_nonce"])' "$FINISH")
+echo "Installing Möbius ${TARGET_SHA:0:12}, which was waiting for this helper."
+echo "Chats pause briefly while the container is replaced. Large chat histories"
+echo "are converted on first start; this can take a few minutes."
+for _ in $(seq 1 360); do
+  OUTCOME=$(python3 - "$NONCE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    status = json.load(open("/var/lib/mobius-rebuild/status.json"))
+except (OSError, ValueError):
+    raise SystemExit
+if status.get("request_nonce") == sys.argv[1] and status.get("state") in {
+        "succeeded", "no_change", "failed", "rolled_back", "needs_recovery"}:
+    print(status["state"], status.get("message") or "")
+PY
+)
+  case "${OUTCOME%% *}" in
+    succeeded|no_change) echo "Update installed: ${OUTCOME#* }"; exit 0 ;;
+    failed|rolled_back|needs_recovery)
+      echo "The update did not complete (${OUTCOME%% *}): ${OUTCOME#* }" >&2
+      exit 1 ;;
+  esac
+  sleep 5
+done
+echo "The update is still running; follow it in Settings." >&2
+exit 1

@@ -2,7 +2,7 @@
 
 import pytest
 
-from app import models
+from app import models, transcript_rows
 from app import chat_writer
 from app.agent_write_channel import WriteIntent
 from app.chat_writer import (
@@ -45,7 +45,7 @@ def test_pending_handoff_commits_queue_transcript_and_run_together(chat, db):
   run = db.get(models.ChatRun, result["promoted"]["_run_token"])
   assert result["history"][-1].content == "First follow-up"
   assert run.status == "running" and run.root_run_id == run.id
-  assert saved.messages[-1]["content"] == "First follow-up"
+  assert list(transcript_rows.history(saved))[-1]["content"] == "First follow-up"
   assert saved.pending_messages == []
   assert saved.active_assistant_message_id == run.id
   assert saved.live_assistant["id"] == run.id
@@ -68,7 +68,7 @@ def test_clean_recovery_commits_run_without_consuming_owner_queue(chat, db):
   assert run.root_run_id == owner["run_token"]
   assert run.continuation_json["source_work_id"] == owner["run_token"]
   assert saved.pending_messages == []
-  assert len(saved.messages) == 1  # Recovery control is provider-only.
+  assert len(list(transcript_rows.history(saved))) == 1  # Recovery control is provider-only.
   assert saved.active_assistant_message_id == run.id
   assert saved.live_assistant["id"] == run.id
   submit(AdmitProviderExecution(chat_id=chat.id, run_token=run.id))
@@ -98,7 +98,7 @@ def test_failed_admission_commit_preserves_prior_owner_and_pending_work(chat, db
   queued = [{"role": "user", "content": "Follow-up", "cid": "pending", "ts": 20}] if pending else []
   row.pending_messages = queued
   db.commit()
-  before_messages = list(row.messages)
+  before_messages = list(transcript_rows.history(row))
 
   def reject_commit(session):
     session.rollback()
@@ -113,7 +113,7 @@ def test_failed_admission_commit_preserves_prior_owner_and_pending_work(chat, db
   db.expire_all()
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_messages == queued
-  assert saved.messages == before_messages
+  assert list(transcript_rows.history(saved)) == before_messages
   assert saved.active_assistant_message_id == owner["run_token"]
   assert db.get(models.ChatRun, owner["run_token"]).status == "running"
   assert db.query(models.ChatRun).count() == 1

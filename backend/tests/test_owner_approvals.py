@@ -1,4 +1,7 @@
 """Owner approval travels through real saved cards and the ordinary answer queue."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 import json
@@ -57,7 +60,7 @@ def _row(chat_id):
   get_writer().submit(Barrier()).result(timeout=5)
   with SessionLocal() as db:
     row = db.get(models.Chat, chat_id)
-    return row.pending_question_id, row.messages, row.pending_messages
+    return row.pending_question_id, list(transcript_rows.history(row)), row.pending_messages
 
 
 def _ask(client, chat, approval_run, prompt=None):
@@ -73,13 +76,13 @@ def _answer(client, chat, auth, qid):
 
 
 def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
-  chat.messages = [{
+  transcript_rows.replace_all(object_session(chat), chat, [{
     "role": "assistant",
     "blocks": [
       {"type": "question", "question_id": "older", "questions": []},
       {"type": "question", "question_id": "newer", "questions": []},
     ],
-  }]
+  }])
   chat.pending_question_id = "newer"
   db.commit()
 
@@ -89,7 +92,7 @@ def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
   db.expire_all()
   refreshed = db.get(models.Chat, chat.id)
   assert refreshed.pending_question_id == "newer"
-  assert refreshed.messages[0]["blocks"][0]["answers"] == {"Choice": "Yes"}
+  assert list(transcript_rows.history(refreshed))[0]["blocks"][0]["answers"] == {"Choice": "Yes"}
 
 
 def _finish(chat, sink):
@@ -358,7 +361,7 @@ SHARED_KEY = "github:mobius-os/mobius:pr:1079:3134e050:merge"
 
 def _second_approval_chat(db, chat_id="other-approval-chat"):
   """Another running chat with its own Goal and saved-card sink."""
-  other = models.Chat(id=chat_id, title="Duplicate integrator", messages=[])
+  other = create_chat(id=chat_id, title="Duplicate integrator", messages=[])
   other_run = models.ChatRun(
     id=f"{chat_id}-run", root_run_id=f"{chat_id}-run", chat_id=other.id,
     goal_id=f"{chat_id}-goal", goal_objective="Integrate the PR",

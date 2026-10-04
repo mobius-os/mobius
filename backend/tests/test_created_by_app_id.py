@@ -13,6 +13,7 @@ lock in the two invariants that make the column safe to ship independently:
   2. The gate function correctly accepts/rejects principals against the
      column value, independent of any HTTP layer.
 """
+from app.chat_writer import create_chat
 
 import pytest
 from fastapi import HTTPException
@@ -28,7 +29,7 @@ from app.resource_access import get_active_chat_for_principal
 
 def test_created_by_app_id_defaults_to_null(db):
   """Owner-created chats have created_by_app_id = NULL."""
-  chat = models.Chat(id="owner-chat", title="mine", messages=[])
+  chat = create_chat(id="owner-chat", title="mine", messages=[])
   db.add(chat)
   db.commit()
   db.refresh(chat)
@@ -46,7 +47,7 @@ def test_created_by_app_id_persists_integer(db):
   db.commit()
   db.refresh(app)
 
-  chat = models.Chat(
+  chat = create_chat(
     id="app-chat", title="app's", messages=[],
     created_by_app_id=app.id,
   )
@@ -93,7 +94,7 @@ def test_owner_principal_drives_any_chat(db):
   db.commit()
   db.refresh(app)
 
-  chat = models.Chat(
+  chat = create_chat(
     id="some-chat", title="t", messages=[],
     created_by_app_id=app.id,
   )
@@ -107,7 +108,7 @@ def test_owner_principal_drives_any_chat(db):
 
 def test_owner_principal_drives_owner_created_chat(db):
   """An owner token may drive a chat with created_by_app_id = NULL."""
-  chat = models.Chat(id="owner-only", title="t", messages=[])
+  chat = create_chat(id="owner-only", title="t", messages=[])
   db.add(chat)
   db.commit()
 
@@ -127,7 +128,7 @@ def test_app_principal_drives_own_chat(db):
   db.commit()
   db.refresh(app)
 
-  chat = models.Chat(
+  chat = create_chat(
     id="mine", title="t", messages=[],
     created_by_app_id=app.id,
   )
@@ -150,7 +151,7 @@ def test_app_principal_blocked_from_owner_chat(db):
   db.commit()
   db.refresh(app)
 
-  chat = models.Chat(id="owner-chat2", title="t", messages=[])
+  chat = create_chat(id="owner-chat2", title="t", messages=[])
   db.add(chat)
   db.commit()
 
@@ -178,7 +179,7 @@ def test_app_principal_blocked_from_foreign_app_chat(db):
   db.refresh(app_a)
   db.refresh(app_b)
 
-  chat = models.Chat(
+  chat = create_chat(
     id="b-chat", title="t", messages=[],
     created_by_app_id=app_b.id,
   )

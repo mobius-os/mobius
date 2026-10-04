@@ -5,6 +5,7 @@ returns row on active. The helper centralizes a query pattern that
 five route files used to copy; the tests guard the contract against
 silent drift if the soft-delete column ever changes.
 """
+from app.chat_writer import create_chat
 
 from datetime import UTC, datetime
 
@@ -22,7 +23,7 @@ from app.resource_access import (
 
 def test_returns_active_chat(db):
   """An active (non-soft-deleted) chat row is returned."""
-  chat = models.Chat(id="alive", title="hi", messages=[])
+  chat = create_chat(id="alive", title="hi", messages=[])
   db.add(chat)
   db.commit()
   result = get_active_chat_or_404(db, "alive")
@@ -40,7 +41,7 @@ def test_raises_404_on_soft_deleted_chat(db):
   """A chat with `deleted_at` set is treated as not found. This is
   the load-bearing behavior — the helper exists to make sure no
   caller forgets the filter."""
-  chat = models.Chat(
+  chat = create_chat(
     id="dead", title="gone", messages=[], deleted_at=datetime.now(UTC),
   )
   db.add(chat)
@@ -53,7 +54,7 @@ def test_raises_404_on_soft_deleted_chat(db):
 def test_returns_same_row_callers_can_mutate(db):
   """The returned row is the live SQLAlchemy object — callers can
   mutate it and commit, which several route handlers do."""
-  chat = models.Chat(id="mut", title="orig", messages=[])
+  chat = create_chat(id="mut", title="orig", messages=[])
   db.add(chat)
   db.commit()
   result = get_active_chat_or_404(db, "mut")
@@ -65,7 +66,7 @@ def test_returns_same_row_callers_can_mutate(db):
 
 def test_access_only_gate_does_not_select_transcript_json(db):
   """An ownership check never decodes the large chat payload columns."""
-  chat = models.Chat(
+  chat = create_chat(
     id="large",
     title="large transcript",
     messages=[{"role": "user", "content": "x" * 100_000}],
@@ -113,7 +114,7 @@ def test_access_only_gate_preserves_app_chat_ownership(db):
       jsx_source="",
       compiled_path="",
     ),
-    models.Chat(
+    create_chat(
       id="app-chat",
       title="owned",
       messages=[],

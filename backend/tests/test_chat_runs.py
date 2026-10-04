@@ -8,6 +8,8 @@ These drive the REAL `get_writer()` actor (the conftest `fresh_db` fixture
 starts one bound to the test DB) and the real `reconcile_interrupted_chats`, so
 they cover the wired lifecycle + reconciliation maintenance, not a mock.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run
 
@@ -30,7 +32,7 @@ from app.database import SessionLocal
 def _seed_chat(chat_id, messages=None, pending=None):
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id, title="t",
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
@@ -220,11 +222,11 @@ def test_same_root_continuation_attaches_without_a_second_transcript_row():
   with SessionLocal() as db:
     chat = db.get(models.Chat, "continuation-attach")
     assert [
-      message.get("cid") for message in chat.messages
+      message.get("cid") for message in list(transcript_rows.history(chat))
       if message.get("cid") == "continuation-stable-cid"
     ] == ["continuation-stable-cid"]
-    assert chat.messages[-1]["viewport"] == {"width": 390, "height": 844}
-    assert chat.messages[-1]["timezone"] == "Etc/UTC"
+    assert list(transcript_rows.history(chat))[-1]["viewport"] == {"width": 390, "height": 844}
+    assert list(transcript_rows.history(chat))[-1]["timezone"] == "Etc/UTC"
     assert chat.live_assistant["id"] == "continuation-physical"
     assert chat.active_assistant_message_id == "continuation-physical"
     physical = db.get(models.ChatRun, "continuation-physical")
@@ -264,7 +266,7 @@ def test_continuation_recovers_only_its_exact_legacy_pending_row():
     chat = db.get(models.Chat, "continuation-recovery")
     assert chat.pending_messages == []
     assert [
-      message.get("cid") for message in chat.messages
+      message.get("cid") for message in list(transcript_rows.history(chat))
       if message.get("cid") == "recovery-stable-cid"
     ] == ["recovery-stable-cid"]
     assert db.get(models.ChatRun, "recovery-physical").root_run_id == "recovery-root"
@@ -390,7 +392,7 @@ def test_project_agent_completion_advances_recents_and_reconnect_cursor():
       id="project-recency", name="Project recency", project_type="blank",
       root_path="projects/project-recency", template_snapshot_json={},
     ))
-    db.add(models.Chat(
+    db.add(create_chat(
       id="project-agent", title="Builder", messages=[], pending_messages=[],
       session_id="sess", provider="claude", project_id="project-recency",
       activity_at=old_activity,
@@ -532,7 +534,7 @@ def test_record_run_metrics_updates_exact_run_without_touching_transcript():
     assert run.total_tokens == 1_100
     assert run.model_context_window == 200_000
     assert run.usage_json["provider"] == "codex"
-    assert chat.messages == [{"role": "user", "content": "keep me", "ts": 1}]
+    assert list(transcript_rows.history(chat)) == [{"role": "user", "content": "keep me", "ts": 1}]
   finally:
     db.close()
 
@@ -732,7 +734,7 @@ def test_reconcile_uses_running_row_as_the_recovery_authority():
   db = SessionLocal()
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == "r7").first()
-    assert [message["role"] for message in chat.messages] == [
+    assert [message["role"] for message in list(transcript_rows.history(chat))] == [
       "user", "assistant",
     ]
   finally:
@@ -806,8 +808,8 @@ def test_controller_continuation_preserves_exact_content_and_replay_contract():
   assert result["history"][-1].content == content
   with SessionLocal() as db:
     chat = db.get(models.Chat, "controller-exact")
-    assert chat.messages[-1]["content"] == content
-    assert chat.messages[-1]["source_work_id"] == "controller-proof"
+    assert list(transcript_rows.history(chat))[-1]["content"] == content
+    assert list(transcript_rows.history(chat))[-1]["source_work_id"] == "controller-proof"
     run = db.get(models.ChatRun, "controller-next")
     assert run.continuation_json is None
     assert run.root_run_id == "controller-root"
@@ -834,7 +836,7 @@ def test_physical_recovery_replays_device_context_without_synthetic_history():
       db, chat, run, continuation_id="recovery-control", content="continue",
       reason="restart", supersedes_run_token="recovery-park",
     )
-    assert chat.messages == messages
+    assert list(transcript_rows.history(chat)) == messages
     assert replay is not None
     assert replay["promoted"]["viewport"] == result["promoted"]["viewport"]
     assert replay["promoted"]["timezone"] == result["promoted"]["timezone"]

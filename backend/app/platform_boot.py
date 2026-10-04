@@ -14,7 +14,9 @@ decides whether served source may run on it:
   ``BOOT_PROTOCOL`` for the running server.
 ``revert``
   After the served tree failed its import probe. Returns a swapped-in update
-  to its saved previous state; exits nonzero when there is none.
+  to its saved previous state; exits nonzero when there is none, or when the
+  checkout is not exactly that update (compare-and-swap: nothing is touched,
+  and the entrypoint serves the baked platform).
 ``guard``
   The fail-closed boot guard: prove the served tree is a clean committed
   state, or refuse to serve it.

@@ -1,4 +1,6 @@
 """Contracts for durable declared waits: declare, check, resume, restart-safety."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -53,7 +55,7 @@ def _delegated_agent_run_auth(db, chat_id, run_id):
     jsx_source="export default () => null",
     token_nonce=f"nonce-{chat_id}",
   )
-  parent = models.Chat(
+  parent = create_chat(
     id=f"parent-{chat_id}", title="Parent", messages=[],
     pending_messages=[], provider="codex",
   )
@@ -976,7 +978,7 @@ def test_wait_resume_retry_reattaches_to_one_physical_continuation(
   resume_cid = f"wait-result-{row.id}"
   resume_run_id = f"wait-resume-{row.id}"
   assert [
-    message.get("cid") for message in chat.messages
+    message.get("cid") for message in list(transcript_rows.history(chat))
     if message.get("cid") == resume_cid
   ] == [resume_cid]
   assert db.query(models.ChatRun).filter(
@@ -1030,7 +1032,7 @@ def test_wait_resume_survives_commit_before_schedule_restart(
   db.expire_all()
   chat = db.get(models.Chat, chat_id)
   assert [
-    message.get("cid") for message in chat.messages
+    message.get("cid") for message in list(transcript_rows.history(chat))
     if message.get("cid") == f"wait-result-{row.id}"
   ] == [f"wait-result-{row.id}"]
   assert db.query(models.ChatRun).filter_by(id=resume_run_id).count() == 1
@@ -1114,7 +1116,7 @@ def test_owner_turn_adopts_committed_wait_wake_after_schedule_failure(
   chat = db.get(models.Chat, chat_id)
   resume_cid = f"wait-result-{row.id}"
   assert [
-    message.get("cid") for message in chat.messages
+    message.get("cid") for message in list(transcript_rows.history(chat))
     if message.get("cid") == resume_cid
   ] == [resume_cid]
   assert db.get(models.ChatRun, resume_run_id).status == "interrupted"
@@ -1397,7 +1399,7 @@ def test_legacy_wait_without_source_recovers_promoted_schedule_crash_once(
   assert chat.pending_messages == []
   assert sum(
     message.get("cid") == f"wait-result-{row.id}"
-    for message in (chat.messages or [])
+    for message in (list(transcript_rows.history(chat)) or [])
   ) == 1
   assert db.get(models.ChatWait, row.id).resume_delivered_at is None
   assert db.get(models.ChatRun, resume_run_id).status == "running"
@@ -1417,7 +1419,7 @@ def test_legacy_wait_without_source_recovers_promoted_schedule_crash_once(
   assert db.query(models.ChatRun).filter_by(id=resume_run_id).count() == 1
   assert sum(
     message.get("cid") == f"wait-result-{row.id}"
-    for message in (db.get(models.Chat, chat_id).messages or [])
+    for message in (list(transcript_rows.history(db.get(models.Chat, chat_id))) or [])
   ) == 1
 
 
@@ -1457,9 +1459,10 @@ def test_legacy_wait_orphan_preservation_requires_exact_empty_carrier(
     carrier["hidden"] = False
   else:
     live["blocks"] = [{"type": "text", "text": "provider started"}]
-  chat = SimpleNamespace(
-    id=chat_id, messages=[carrier], live_assistant=live,
-  )
+  chat = db.get(models.Chat, chat_id)
+  transcript_rows.replace_all(db, chat, [carrier])
+  chat.live_assistant = live
+  db.flush()
   physical = SimpleNamespace(
     id=resume_run_id, root_run_id=resume_run_id, chat_id=chat_id,
     status="running", initiated_by_app_id=None,
@@ -1536,7 +1539,7 @@ def test_wait_result_data_cannot_terminate_its_carrier_and_latches_once(
   assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is False
   assert sum(
     message.get("cid") == f"wait-result-{row.id}"
-    for message in (db.get(models.Chat, chat_id).messages or [])
+    for message in (list(transcript_rows.history(db.get(models.Chat, chat_id))) or [])
   ) == 1
   chat_mod.discard_starting(chat_id)
 

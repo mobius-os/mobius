@@ -23,9 +23,12 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
 
 ## Code invariants
 
-- **Chat persistence.** Every write to `Chat.messages` or `Chat.pending_messages`
-  goes through `chat_writer.py` domain commands; never assign either JSON column
-  directly. Read that module's docstring before changing chat persistence.
+- **Chat persistence.** Transcript-row and `Chat.pending_messages` mutations
+  go through `chat_writer.py` domain commands, using `transcript_rows.py` inside
+  that transaction. Create chats through `chat_writer.create_chat` so initial
+  rows and count/revision commit together. `Chat.messages` no longer exists;
+  `messages_v1` is non-authoritative recovery shape, never a write fallback.
+  Read the writer module's docstring before changing chat persistence.
 - **Owner-input cards.** Card access is deliberately uniform: any authenticated
   participant that can read a Q&A, Restart, or sealed-input card may answer it
   through that card's ordinary endpoint. The chat access check and exact card
@@ -41,8 +44,10 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
   adds a column to an existing one. A new model field needs a new numbered,
   idempotent function at the append-only end of
   `backend/app/schema_migrations.py`; never edit a migration already in the
-  ledger. Test both a fresh database and the frozen previous-release upgrade
-  fixture.
+  ledger. One-way representation changes and their owned tables instead use
+  the registered, image-gated `one_way_upgrades.py` lifecycle; later ledger
+  migrations must not mutate those tables. Test both a fresh database and the
+  frozen previous-release upgrade fixture.
 - **Bootstrap and privileged runtime.** `platform_activation.py` is the source of
   truth for the image-owned bootstrap allowlist. `backend/runtime/identity_broker.py`
   is served privileged source: the frozen `/app/runtime/served_runtime_launcher.py`

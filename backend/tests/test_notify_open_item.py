@@ -5,6 +5,7 @@ fan-out classification, and the absent-item refusal (a missing or deleted item
 is a 404, so no caller is told something opened; the Shell still confirms
 before placing). See split-pane design §6.3.
 """
+from app.chat_writer import create_chat
 
 import asyncio
 
@@ -25,7 +26,7 @@ def live_items(db):
       source_dir=f"/tmp/mobius-tests/open-item-{app_id}",
       jsx_source="export default function App(){}", compiled_path="/tmp/app.js",
     ))
-  db.add(models.Chat(id="chat-z", title="Chat Z", messages=[]))
+  db.add(create_chat(id="chat-z", title="Chat Z", messages=[]))
   db.commit()
 
 

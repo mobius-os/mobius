@@ -5,6 +5,7 @@ runtime data, so a reinstall reattaches to the SAME numeric id + data instead
 of minting a fresh empty app. Recovery is agent-driven and consistent with
 chats: POST /api/apps/{id}/recover, plus reinstall-reattach for store apps.
 """
+from app.chat_writer import create_chat
 
 import hashlib
 import io
@@ -332,7 +333,7 @@ def test_provider_app_purge_detaches_but_preserves_native_project(
   project_root = data_root / "projects" / project_id
   project_root.mkdir(parents=True)
   (project_root / "keep.txt").write_text("snapshot-owned")
-  db.add(models.Chat(id=chat_id, title="Native project", messages=[]))
+  db.add(create_chat(id=chat_id, title="Native project", messages=[]))
   db.add(models.Project(
     id=project_id,
     name="Native project",

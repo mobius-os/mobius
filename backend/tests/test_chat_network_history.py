@@ -1,4 +1,5 @@
 """Chat history stays confined while paging through all retained mail."""
+from app.chat_writer import create_chat
 from datetime import datetime
 import pytest
 from app import models
@@ -6,7 +7,7 @@ from app.agent_coordination import chat_message_history
 
 
 def test_chat_history_pages_sent_received_and_old_goal_broadcasts_only(db):
-  db.add_all([models.Chat(id=name, title=name, messages=[]) for name in ['self', 'peer', 'other']])
+  db.add_all([create_chat(id=name, title=name, messages=[]) for name in ['self', 'peer', 'other']])
   db.flush()
   db.add(models.ChatRun(id='run-old', chat_id='self', root_run_id='old-goal', status='completed'))
   db.add(models.ChatRun(id='run-new', chat_id='self', root_run_id='new-goal', status='completed'))
@@ -34,7 +35,7 @@ def test_chat_history_pages_sent_received_and_old_goal_broadcasts_only(db):
 
 
 def test_empty_chat_history(db):
-  db.add(models.Chat(id='empty', messages=[]))
+  db.add(create_chat(id='empty', messages=[]))
   db.commit()
   page = chat_message_history(db, 'empty')
   assert page['total'] == 0
@@ -43,7 +44,7 @@ def test_empty_chat_history(db):
 
 
 def test_history_route_requires_authorized_chat_and_rejects_bad_cursor(client, auth, db):
-  db.add(models.Chat(id='history-route', messages=[]))
+  db.add(create_chat(id='history-route', messages=[]))
   db.commit()
   path = '/api/agent-coordination/chats/history-route/history'
   assert client.get(path).status_code == 401

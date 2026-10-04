@@ -30,7 +30,7 @@ def _selects():
 
 
 def _transcript_reads(statements):
-  return [sql for sql in statements if "chats.messages" in sql]
+  return [sql for sql in statements if "chat_messages.body" in sql]
 
 
 def _new_chat(client, auth, messages=None):
@@ -126,12 +126,12 @@ def test_history_preserves_failed_and_unfinished_goal_semantics(
   assert (result[0][0]["status"] if result else None) == expected
 
 
-def test_edit_diffs_reads_transcript_once_after_writer_fence(client, auth):
+def test_edit_diffs_without_candidates_never_hydrates_bodies_after_writer_fence(client, auth):
   chat_id = _new_chat(client, auth)
   with _selects() as statements:
     response = client.get(f"/api/chats/{chat_id}/edit-diffs", headers=auth)
   assert response.status_code == 200, response.text
-  assert len(_transcript_reads(statements)) == 1
+  assert not _transcript_reads(statements)
 
 
 def test_edit_diffs_barrier_failure_does_not_read_transcript(

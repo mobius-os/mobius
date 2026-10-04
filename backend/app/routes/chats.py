@@ -17,6 +17,7 @@ from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import chat_writer, transcript_rows
 from app.chat_handoffs import project_handoff
 from app import (
   activity,
@@ -554,12 +555,13 @@ def _chat_detail_window(
   limit: int,
   before: int | None,
   anchor_key: str | None,
+  metadata: list | None = None,
 ) -> tuple[list, int, bool | None]:
   """Select one authoritative detail window and report anchor coverage."""
   total = len(messages)
   if anchor_key is not None:
     anchor_index = next((
-      index for index, message in enumerate(messages)
+      index for index, message in enumerate(metadata if metadata is not None else messages)
       if _chat_message_matches_key(message, index, anchor_key)
     ), None)
     if anchor_index is not None:
@@ -601,19 +603,20 @@ def _chat_detail_response(
     compact_messages_for_detail,
     historical_tool_output_ids,
     materialized_messages,
+    materialized_metadata,
     project_messages_for_detail,
   )
   from app.providers import effective_agent_settings
 
+  # This read owner pins the scalar/live snapshot and every body window.
+  # General History views must not hold an old read transaction across an
+  # external writer acknowledgement (startup repair and send planning use it).
+  transcript_rows.pin_read_snapshot(db)
+  db.refresh(chat)
   all_msgs = materialized_messages(chat)
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
-  live_snapshot = chat.live_assistant
-  live_message = (
-    next((message for message in all_msgs if message is live_snapshot), None)
-    if running
-    and isinstance(live_snapshot, dict)
-    else None
-  )
+  live_message = all_msgs.live if running else None
+  coordinates = materialized_metadata(chat, all_msgs)
   # A genuinely streaming assistant row must remain self-contained: the live
   # surface may need every block before the next event arrives. A runner parked
   # on an owner question is different. Nothing can extend that row until the
@@ -632,6 +635,7 @@ def _chat_detail_response(
     limit=limit,
     before=before,
     anchor_key=anchor_key,
+    metadata=coordinates if anchor_key is not None else None,
   )
   page = _project_legacy_memory_recall_sidecars(
     page,
@@ -641,7 +645,7 @@ def _chat_detail_response(
   )
   from app.goal_plans import terminal_goal_summaries_by_message_index
   summaries_by_index = terminal_goal_summaries_by_message_index(
-    db, chat.id, all_msgs, message_start=start, message_end=start + len(page),
+    db, chat.id, coordinates, message_start=start, message_end=start + len(page),
   )
   # Insert read-side lifecycle blocks before activity compaction. The completion
   # call then ends its stretch, and later prose/tools cannot drag the card down.
@@ -709,7 +713,7 @@ def _chat_detail_response(
   )
   from app.chat_waits import terminal_wait_summaries_by_message_index
   wait_summaries_by_index = terminal_wait_summaries_by_message_index(
-    db, chat.id, all_msgs,
+    db, chat.id, coordinates,
   )
   if wait_summaries_by_index:
     next_page = list(page)
@@ -723,7 +727,7 @@ def _chat_detail_response(
     page = next_page
   from app.continuations import recovery_reasons_by_message_index
   recovery_reasons = recovery_reasons_by_message_index(
-    db, chat.id, all_msgs, message_start=start, message_end=start + len(page),
+    db, chat.id, coordinates, message_start=start, message_end=start + len(page),
   )
   if recovery_reasons:
     next_page = list(page)
@@ -746,7 +750,7 @@ def _chat_detail_response(
   # the send path does: an explicit per-chat model wins; otherwise a pristine
   # chat follows the current global model (the single source of truth); a chat
   # that already ran keeps its committed provider.
-  _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
+  _has_assistant_turns = any(m.get("role") == "assistant" for m in coordinates)
   provider = (
     providers.provider_of_model((settings_obj or {}).get("model"))
     or (
@@ -1228,7 +1232,7 @@ def create_chat(
         fallback_model=providers.DEFAULT_MODELS.get(provider),
       )
 
-    chat = models.Chat(
+    chat = chat_writer.create_chat(
       id=chat_id,
       title=body.title or "New chat",
       messages=body.messages or [],
@@ -1474,7 +1478,7 @@ async def patch_chat(
     # it isn't locked, so it can never clobber a name the owner chose.
     previous_title = chat.title
     if body.clear_title:
-      chat.title = first_user_message_title(chat.messages) or "New chat"
+      chat.title = first_user_message_title(transcript_rows.history(chat)) or "New chat"
       chat.title_locked = False
     elif body.title is not None:
       new_title = body.title.strip()
@@ -1566,7 +1570,7 @@ async def patch_chat(
     # Capture the provider BEFORE any mutation so provider_switch logs the
     # real transition, and only when it actually changes (see after the commit).
     prev_provider = chat.provider
-    latest_message = (chat.messages or [])[-1] if chat.messages else None
+    latest_message = (transcript_rows.history(chat) or [])[-1] if transcript_rows.history(chat) else None
     legacy_handoff_ready = (
       isinstance(latest_message, dict)
       and latest_message.get("kind") == "compaction"
@@ -1886,6 +1890,7 @@ def get_chat_message_sources(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
+  transcript_rows.pin_read_snapshot(db)
   chat = get_active_chat_for_principal(db, chat_id, principal)
   messages = materialized_messages(chat)
   if message_index >= len(messages):
@@ -1964,6 +1969,7 @@ def get_chat_activity_detail(
   if end <= start or end - start > MAX_ACTIVITY_DETAIL_BLOCKS:
     raise HTTPException(status_code=422, detail="Invalid activity range.")
 
+  transcript_rows.pin_read_snapshot(db)
   chat = get_active_chat_for_principal(db, chat_id, principal)
   messages = materialized_messages(chat)
   if message_index >= len(messages):
@@ -2102,6 +2108,7 @@ def get_chat_edit_diffs(
   # is read once below, after rollback has retired the pre-fence snapshot.
   get_active_chat_or_404(db, chat_id, load_fields=(models.Chat.id,))
   _drain_writer_before_sidecar_read(db, chat_id, "chat changes")
+  transcript_rows.pin_read_snapshot(db)
   chat = get_active_chat_or_404(db, chat_id)
   messages = materialized_messages(chat)
 
@@ -2753,7 +2760,7 @@ async def _compact_chat_locked(
   )
   existing_switch = next((
     message
-    for message in reversed(list(chat.messages or []))
+    for message in reversed(transcript_rows.history(chat))
     if isinstance(message, dict)
     and message.get("kind") == "compaction"
     and message.get("switch_id") == body.switch_id
@@ -2821,7 +2828,7 @@ async def _compact_chat_locked(
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
-  messages = list(chat.messages or [])
+  messages = list(transcript_rows.history(chat) or [])
   source_messages_hash = messages_fingerprint(messages)
   source_summary = load_cumulative_summary(data_dir, chat_id)
   source_summary_hash = (
@@ -2980,7 +2987,7 @@ async def compact_chat(
         detail="Chat is busy — finish or stop the current turn before compacting.",
       )
     source_provider = chat.provider or "claude"
-    messages = list(chat.messages or [])
+    messages = list(transcript_rows.history(chat) or [])
     data_dir = get_settings().data_dir
     try:
       try:
@@ -3235,7 +3242,7 @@ def _has_real_assistant_turn(chat: models.Chat) -> bool:
     isinstance(m, dict)
     and m.get("role") == "assistant"
     and m.get("kind") != "compaction"
-    for m in (chat.messages or [])
+    for m in (transcript_rows.history(chat) or [])
   )
 
 
@@ -3286,7 +3293,7 @@ def _app_chat_started(chat: models.Chat, db: Session) -> bool:
   goal = presented_goal(db, chat.id)
   return bool(
     chat.has_messages
-    or chat.messages
+    or transcript_rows.history(chat)
     or chat.pending_messages
     or chat.pending_question_id
     or chat.session_id
@@ -3435,7 +3442,7 @@ def create_app_chat(
     )
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
-  chat = models.Chat(
+  chat = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
     # An app that names its chat chose that name deliberately, like an owner
@@ -3612,7 +3619,7 @@ async def patch_app_chat(
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id
-        or chat.messages
+        or transcript_rows.history(chat)
         or chat.pending_messages
         or chat.session_id
         or has_nonterminal_run(db, chat_id)
@@ -3650,7 +3657,7 @@ async def patch_app_chat(
         if (
           is_chat_running(chat_id)
           or chat.pending_messages
-          or chat.messages
+          or transcript_rows.history(chat)
           or chat.session_id
           or has_nonterminal_run(db, chat_id)
         ):

@@ -22,6 +22,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
+from app import chat_writer
+from app import transcript_rows
 from app import auth, models
 from app.timeutil import now_naive_utc
 from app.usage_metrics import summarize_chat_run_tokens
@@ -240,7 +242,7 @@ def create_or_attach_delegation(
       intent.parent_chat_id if intent.source_work_id is not None else None
     ),
   )
-  child = models.Chat(
+  child = chat_writer.create_chat(
     id=child_id,
     title=f"Delegation · {intent.task_key}",
     messages=[],
@@ -484,7 +486,7 @@ def normalize_cwd(raw: str | None) -> str:
 
 
 def _first_user_prompt(chat: models.Chat) -> str | None:
-  for message in list(chat.messages or []):
+  for message in list(transcript_rows.history(chat) or []):
     if isinstance(message, dict) and message.get("role") == "user":
       content = message.get("content")
       return content if isinstance(content, str) else None
@@ -596,7 +598,7 @@ def _assistant_result(chat: models.Chat, *, run_ids: set[str] | None = None) -> 
   """Return the latest child assistant outcome as plain text."""
   from app.chat_message_identity import assistant_message_run_id
   parts: list[str] = []
-  for message in reversed(list(chat.messages or [])):
+  for message in reversed(transcript_rows.history(chat)):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     if run_ids is not None and assistant_message_run_id(message.get("id")) not in run_ids:
@@ -2566,7 +2568,7 @@ def safe_parent_wake_startup_writer_orphan(
     return False
   if safe_parent_activity_startup_writer_orphan(db, chat, physical):
     return True
-  messages = list(chat.messages or [])
+  messages = list(transcript_rows.history(chat) or [])
   continuation = messages[-1] if messages else None
   committed = _committed_parent_wake(db, chat, continuation)
   return bool(
@@ -2633,7 +2635,7 @@ def _committed_parent_wake_is_unowned(
     return False
   physical, _rows, _carried = committed
   if physical.status in ("interrupted", "stopped"):
-    messages = list(chat.messages or [])
+    messages = list(transcript_rows.history(chat) or [])
     wake_cid = message.get("cid")
     matches = [
       index for index, candidate in enumerate(messages)
@@ -2831,7 +2833,7 @@ async def _deliver_parent_wake_once(
       # deterministic ChatRun still owns its pre-upgrade recovery attempt.
       committed = next((
         candidate
-        for message in reversed(list(parent_chat.messages or []))
+        for message in reversed(transcript_rows.history(parent_chat))
         if (
           (candidate := _committed_parent_wake(db, parent_chat, message))
           is not None

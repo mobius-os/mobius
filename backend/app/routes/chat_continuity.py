@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
+from app import transcript_rows
 from app import chat_queue, models
 from app.broadcast import get_system_broadcast
 from app.chat_continuity import apply_checkpoint, checkpoint_coverage, note_path, write_note
@@ -41,7 +42,7 @@ def _save_note(data_dir: str, chat_id: str, body: CheckpointBody, run_token: str
       existing, name=chat.title or "",
       digest=(body.digest or "").strip() or None,
       summary=(body.summary or "").strip() or None,
-      coverage=checkpoint_coverage(list(chat.messages or []), run_token),
+      coverage=checkpoint_coverage(list(transcript_rows.history(chat) or []), run_token),
     ))
     return renamed_event(chat)
 

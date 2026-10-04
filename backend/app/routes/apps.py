@@ -20,6 +20,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, defer
 
+from app import chat_writer
+from app import transcript_rows
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
   app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
@@ -1246,7 +1248,7 @@ async def _start_conflict_resolver_turn(
     .first()
   )
   if (
-    chat is None or chat.messages or has_running_run(db, chat_id) or
+    chat is None or transcript_rows.history(chat) or has_running_run(db, chat_id) or
     is_chat_running(chat_id)
   ):
     return False
@@ -1809,7 +1811,7 @@ async def create_conflict_resolver_chat(
         get_settings().data_dir, db,
       )
       provider = choice["provider"]
-      chat = models.Chat(
+      chat = chat_writer.create_chat(
         id=str(uuid.uuid4()),
         title=title,
         messages=[],

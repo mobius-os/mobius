@@ -1,4 +1,5 @@
 """Long provider turns must not pin a pooled database connection."""
+from app.chat_writer import create_chat
 
 import asyncio
 
@@ -180,7 +181,7 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
       hashed_password="unused",
       provider=provider_id,
     ))
-    setup.add(models.Chat(
+    setup.add(create_chat(
       id=chat_id,
       title="pool release",
       messages=[],
@@ -348,7 +349,7 @@ async def test_provider_exception_requests_owned_browser_cleanup(
       hashed_password="unused",
       provider=provider_id,
     ))
-    setup.add(models.Chat(
+    setup.add(create_chat(
       id=chat_id,
       title="browser cleanup",
       messages=[],

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import models, schemas
 from app.continuations import (
   continuation_actor_label,
@@ -86,9 +87,13 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
     chat = (
       db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     )
-    msgs = (chat.messages if chat else None) or []
+    if chat is None:
+      return None
+    size = transcript_rows.count(db, chat)
     now_ms = _time.time() * 1000.0
-    for m in reversed(msgs[:-1]):  # skip the current (just-committed) message
+    for index, m in transcript_rows.reverse_iter(db, chat):
+      if index == size - 1:  # skip the current (just-committed) message
+        continue
       # Only owner-authored USER messages count. Product-owned automatic
       # continuation rows retain role=user for provider history but must not
       # reset the owner's recency clock.
@@ -489,7 +494,7 @@ def _latest_compaction_brief(chat_row) -> str | None:
   """Most recent portable compaction block, if the chat has one."""
   if chat_row is None:
     return None
-  for msg in reversed(list(chat_row.messages or [])):
+  for msg in reversed(transcript_rows.history(chat_row)):
     if not isinstance(msg, dict) or msg.get("kind") != "compaction":
       continue
     content = msg.get("content")
@@ -527,7 +532,7 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   if chat_row is None:
     return None
   entries: list[tuple[dict, str]] = []
-  for msg in chat_row.messages or []:
+  for msg in transcript_rows.history(chat_row):
     if not isinstance(msg, dict):
       continue
     role = msg.get("role")

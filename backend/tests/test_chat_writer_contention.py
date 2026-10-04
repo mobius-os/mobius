@@ -21,9 +21,10 @@ from concurrent.futures import Future
 
 import pytest
 
-from app import models, schemas
+from app import models, schemas, transcript_rows
 from app.chat_writer import (
   _stamp_provider_batch,
+  apply_answers_to_last_question,
   AnswerQuestion,
   AppendPending,
   AppendSteeredUserMessage,
@@ -32,6 +33,7 @@ from app.chat_writer import (
   CancelPending,
   ChatWriterActor,
   ClearPending,
+  create_chat,
   FinishRun,
   Finalize,
   PersistError,
@@ -59,18 +61,19 @@ def _seed_chat(
   active_assistant_message_id=None,
   title="Test chat",
   title_locked=False,
+  provider="claude",
 ):
   """Insert a Chat row and return its id, committed via a throwaway session."""
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id,
       title=title,
       title_locked=title_locked,
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
       session_id=session_id,
-      provider="claude",
+      provider=provider,
       pending_question_id=pending_question_id,
       active_assistant_message_id=active_assistant_message_id,
     )
@@ -116,7 +119,7 @@ def _load_chat(chat_id="c1"):
     run = running_run(db, chat_id)
     # Detach plain copies so the caller can inspect after the session closes.
     return {
-      "messages": list(chat.messages or []),
+      "messages": transcript_rows.read_all(db, chat),
       "live_assistant": chat.live_assistant,
       "pending_messages": list(chat.pending_messages or []),
       "pending_question_id": chat.pending_question_id,
@@ -302,6 +305,12 @@ def test_question_commit_failure_raises_so_card_is_not_broadcast():
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       raise OperationalError("stmt", {}, Exception("database is locked"))
@@ -365,6 +374,95 @@ def test_finalize_ack_only_after_commit(actor):
   tool = next(b for b in blocks if b.get("type") == "tool")
   assert tool["status"] != "running"
   assert chat["pending_question_id"] is None
+
+
+@pytest.mark.parametrize("command", ["finalize", "question"])
+@pytest.mark.parametrize("provider", ["claude", "codex", "mobius"])
+def test_hot_terminal_write_updates_only_owned_message(actor, command, provider):
+  """A long chat's terminal boundary must not decode or rewrite its prefix."""
+  from sqlalchemy import event
+  from app.database import engine
+
+  prefix = [
+    {"role": "user", "content": f"older-{i}", "cid": f"cid-{i}", "ts": i + 1}
+    for i in range(200)
+  ]
+  _seed_chat(provider=provider, messages=[*prefix, {
+    "role": "assistant", "id": "owned-run", "ts": 500,
+    "blocks": [{"type": "text", "content": "partial"}],
+  }])
+  statements = []
+
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    if "chat_messages" in statement.lower():
+      statements.append(statement.lower())
+
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    if command == "question":
+      queued = QuestionCommit(
+        chat_id="c1", run_token="owned-run", snapshot={
+          "role": "assistant", "id": "owned-run", "blocks": [
+            {"type": "question", "question_id": "q-hot", "questions": []},
+          ],
+        },
+      )
+    else:
+      queued = Finalize(
+        chat_id="c1", run_token="owned-run", snapshot={
+          "role": "assistant", "id": "owned-run", "blocks": [
+            {"type": "text", "content": "done"},
+          ],
+        },
+      )
+    assert _await(actor.submit(queued)) is True
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+
+  writes = [sql for sql in statements if sql.lstrip().startswith(
+    ("update", "insert", "delete"))]
+  assert len(writes) == 1, statements
+  assert writes[0].lstrip().startswith("update chat_messages"), statements
+  assert all("message_key" in sql or "seq =" in sql or "ts" in sql
+             for sql in statements if sql.lstrip().startswith("select")), statements
+  assert len(_load_chat()["messages"]) == 201
+
+
+def test_question_answer_scans_one_reverse_page_and_updates_one_row():
+  from sqlalchemy import event
+  from app.database import engine
+
+  _seed_chat(messages=[
+    *({"role": "user", "content": f"old-{i}", "ts": i + 1}
+      for i in range(200)),
+    {"role": "assistant", "id": "owner", "ts": 500, "blocks": [
+      {"type": "question", "question_id": "last-q", "questions": []},
+    ]},
+  ])
+  statements = []
+
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    if "chat_messages" in statement.lower():
+      statements.append(statement.lower())
+
+  db = SessionLocal()
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    chat = db.get(models.Chat, "c1")
+    assert apply_answers_to_last_question(chat, {"answer": "yes"}, "last-q")
+    db.commit()
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+    db.close()
+
+  body_pages = [sql for sql in statements if sql.lstrip().startswith("select")
+                and "chat_messages.body" in sql]
+  writes = [sql for sql in statements if sql.lstrip().startswith("update chat_messages")]
+  assert len(body_pages) == 2, statements
+  assert sum("seq >=" in sql and "seq <" in sql for sql in body_pages) == 1
+  assert sum("seq =" in sql and "seq >=" not in sql for sql in body_pages) == 1
+  assert len(writes) == 1, statements
+  assert _load_chat()["messages"][-1]["blocks"][0]["answers"] == {"answer": "yes"}
 
 
 # -- BLOCKING 2: must-persist commands fail (not falsely ack) on a no-op ---
@@ -1235,6 +1333,12 @@ def test_db_error_recreates_session_and_keeps_serving():
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       if self._fail_next_commit:
@@ -1304,6 +1408,12 @@ def test_fatal_actor_fails_callers():
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       raise InvalidRequestError("session is in a broken state")
@@ -1560,7 +1670,7 @@ def test_reconciliation_works_independent_of_actor():
   # A chat stranded mid-turn with a partial assistant block.
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id="stranded",
       title="t",
       messages=[

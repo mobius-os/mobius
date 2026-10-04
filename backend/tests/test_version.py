@@ -370,3 +370,77 @@ def test_health_reports_the_boot_protocol_only_when_this_boot_ran_it(
 
   marker.write_text(f"{platform_update.BOOT_PROTOCOL}\n")
   assert client.get("/api/health").json()["boot_protocol"] == platform_update.BOOT_PROTOCOL
+
+
+def test_health_reports_the_database_compatibility_floor(client, monkeypatch):
+  """Deployment controllers never roll back below this floor; unknown is None."""
+  from app import one_way_upgrades
+
+  monkeypatch.setattr(one_way_upgrades, "_REPORTED_FLOOR", None)
+  monkeypatch.setattr(one_way_upgrades, "_GATE_SETTLED", False)
+  monkeypatch.setattr(one_way_upgrades, "preflight", lambda _engine: one_way_upgrades.Preflight(
+    floor=0, existing_tables=frozenset(), floor_record="present", missing_authority=()))
+  # While the gate runs a pending conversion may still raise it: unknown.
+  assert client.get("/api/health").json()["compat_floor"] is None
+  monkeypatch.setattr(one_way_upgrades, "_GATE_SETTLED", True)
+  monkeypatch.setattr(one_way_upgrades, "preflight", lambda _engine: one_way_upgrades.Preflight(
+    floor=1, existing_tables=frozenset(), floor_record="present", missing_authority=()))
+  assert client.get("/api/health").json()["compat_floor"] == 1
+  monkeypatch.setattr(one_way_upgrades, "_REPORTED_FLOOR", None)
+  monkeypatch.setattr(one_way_upgrades, "preflight", lambda _engine: one_way_upgrades.Preflight(
+    floor=0, existing_tables=frozenset(), floor_record="missing_row", missing_authority=()))
+  assert client.get("/api/health").json()["compat_floor"] is None
+
+  def unreadable(_engine):
+    raise RuntimeError("locked")
+
+  monkeypatch.setattr(one_way_upgrades, "preflight", unreadable)
+  assert client.get("/api/health").json()["compat_floor"] is None
+
+
+def test_the_floor_is_cached_only_after_the_gate_passed(monkeypatch):
+  from app import one_way_upgrades
+
+  reads = []
+  monkeypatch.setattr(one_way_upgrades, "_REPORTED_FLOOR", None)
+  monkeypatch.setattr(one_way_upgrades, "preflight", lambda _engine: reads.append(1) or
+    one_way_upgrades.Preflight(floor=1, existing_tables=frozenset(),
+                               floor_record="present", missing_authority=()))
+  monkeypatch.setattr(one_way_upgrades, "_GATE_SETTLED", False)
+  assert one_way_upgrades.reported_floor() is None
+  assert reads == []
+  monkeypatch.setattr(one_way_upgrades, "_GATE_SETTLED", True)
+  assert one_way_upgrades.reported_floor() == 1 and one_way_upgrades.reported_floor() == 1
+  assert len(reads) == 1
+
+
+def test_a_refused_gate_reports_the_floor_it_left(monkeypatch):
+  """A refusal keeps the legacy data authoritative and can no longer raise the
+  floor in this process, so the old floor is reported and a controller may
+  restore the previous image rather than strand the instance."""
+  from app import one_way_upgrades
+
+  class Step:
+    level = 1
+    name = "toy"
+
+  monkeypatch.setattr(one_way_upgrades, "_REPORTED_FLOOR", None)
+  monkeypatch.setattr(one_way_upgrades, "_GATE_PASSED", False)
+  monkeypatch.setattr(one_way_upgrades, "_GATE_SETTLED", False)
+  monkeypatch.setattr(one_way_upgrades, "registered_steps", lambda: (Step(),))
+  monkeypatch.setattr(one_way_upgrades, "preflight", lambda _engine: one_way_upgrades.Preflight(
+    floor=0, existing_tables=frozenset(), floor_record="present", missing_authority=()))
+
+  def refuse(*_args):
+    assert one_way_upgrades.reported_floor() is None  # still running: unknown
+    raise one_way_upgrades.StepRefusal("upgrade_needs_space", "Legacy data is unchanged.")
+
+  monkeypatch.setattr(one_way_upgrades, "_run_gate", refuse)
+  try:
+    one_way_upgrades.run_gate("unused.db", frozenset({"chats"}))
+  except one_way_upgrades.StepRefusal:
+    pass
+  else:
+    raise AssertionError("the gate should have refused")
+  assert one_way_upgrades.readiness_verdict() == {"reason": "one_way_upgrade_pending"}
+  assert one_way_upgrades.reported_floor() == 0

@@ -1,3 +1,4 @@
+from app.chat_writer import create_chat
 import asyncio
 import re
 
@@ -59,7 +60,7 @@ async def test_each_runtime_gets_shared_midtask_delivery_without_native_final_sc
   monkeypatch.setattr('app.claude_helper_host.run_claude_host_turn',runner)
   if helper:
     import hashlib
-    db.add(models.Chat(id='context-parent',title='Parent',messages=[],provider=provider))
+    db.add(create_chat(id='context-parent',title='Parent',messages=[],provider=provider))
     db.add(models.Delegation(id='context-helper',parent_chat_id='context-parent',
       parent_root_run_id='context-parent-root',task_key='quiet-context',child_chat_id=chat.id,
       provider=provider,model='synthetic-model',scope='write',cwd='/data',

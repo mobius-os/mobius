@@ -111,5 +111,5 @@ def test_batch_projection_is_one_scalar_select_without_transcript_or_plan(db, ch
   assert len(projected) == 9 and projected[chat.id]["id"] == goal.id
   assert len(statements) == 1
   assert "row_number() OVER" in statements[0]
-  assert "chats.messages" not in statements[0]
+  assert "messages_v1" not in statements[0] and "chat_messages" not in statements[0]
   assert "plan_json" not in statements[0]

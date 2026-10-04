@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from app import models, providers
+from app import models, providers, transcript_rows
 from app.chat_start import start_programmatic_chat_turn
 from app.database import get_db
 from app.config import get_settings
@@ -419,7 +419,7 @@ def get_delegation(
   payload = serialize_delegation(db, row)
   if include_history:
     child = db.query(models.Chat).filter(models.Chat.id == row.child_chat_id).first()
-    payload["history"] = list(child.messages or []) if child is not None else []
+    payload["history"] = transcript_rows.read_all(db, child) if child is not None else []
   return payload
 
 

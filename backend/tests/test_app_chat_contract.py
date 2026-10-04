@@ -8,6 +8,9 @@ The send path spawns the agent runner, which these tests don't want to
 drive end-to-end — they assert on the AUTHORIZATION boundary (which
 status code each actor gets), which is decided before any runner work.
 """
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from fastapi.responses import JSONResponse
 
@@ -32,7 +35,7 @@ def _stub_first_turn(monkeypatch, db):
 
   async def accept(body, chat_id, principal, request_db):
     row = request_db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-    row.messages = [{"role": "user", "content": body.content, "cid": body.cid}]
+    transcript_rows.replace_all(object_session(row), row, [{"role": "user", "content": body.content, "cid": body.cid}])
     row.has_messages = True
     request_db.commit()
     return JSONResponse({"status": "started"}, status_code=202)
@@ -126,7 +129,7 @@ def test_scoped_app_chat_start_reuses_one_exact_first_turn(
     models.Chat.created_by_app_id == app_id,
   ).all()
   assert len(rows) == 1
-  assert [message["cid"] for message in rows[0].messages] == ["first-cid"]
+  assert [message["cid"] for message in list(transcript_rows.history(rows[0]))] == ["first-cid"]
   handoffs = [fields for ev, fields in events if ev == "app_chat_handoff"]
   assert [row["outcome"] for row in handoffs] == ["started", "reused"]
   assert all(row["scope"] == payload["scope"] for row in handoffs)
@@ -345,7 +348,7 @@ def test_app_chat_cannot_change_system_prompt_after_it_started(
   assert created.status_code == 201, created.text
   chat_id = created.json()["id"]
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.messages = [{"role": "user", "content": "started"}]
+  transcript_rows.replace_all(object_session(row), row, [{"role": "user", "content": "started"}])
   db.commit()
 
   changed = client.patch(
@@ -514,10 +517,10 @@ def test_app_chat_patch_rejects_provider_switch_after_assistant_turn(
   chat_id = r.json()["id"]
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   row.session_id = "claude-session"
-  row.messages = [
+  transcript_rows.replace_all(object_session(row), row, [
     {"role": "user", "content": "hello"},
     {"role": "assistant", "content": "hi"},
-  ]
+  ])
   db.commit()
 
   r = client.patch(
@@ -542,7 +545,7 @@ def test_app_chat_patch_rejects_provider_switch_after_first_user_turn(
   )
   chat_id = response.json()["id"]
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.messages = [{"role": "user", "content": "first request"}]
+  transcript_rows.replace_all(object_session(row), row, [{"role": "user", "content": "first request"}])
   db.add(models.ChatRun(
     id="app-first-live-turn",
     chat_id=chat_id,
@@ -563,7 +566,7 @@ def test_app_chat_patch_rejects_provider_switch_after_first_user_turn(
 
 def test_app_cannot_touch_foreign_chat(client, owner_token, db):
   # Owner-created chat (created_by_app_id is NULL).
-  owner_chat = models.Chat(id="owner-chat", title="owner's", messages=[])
+  owner_chat = create_chat(id="owner-chat", title="owner's", messages=[])
   db.add(owner_chat)
   # Another app's chat.
   other = models.App(
@@ -575,7 +578,7 @@ def test_app_cannot_touch_foreign_chat(client, owner_token, db):
   db.add(other)
   db.commit()
   db.refresh(other)
-  other_chat = models.Chat(
+  other_chat = create_chat(
     id="other-app-chat", title="theirs", messages=[],
     created_by_app_id=other.id,
   )
@@ -637,7 +640,7 @@ def test_owner_can_still_send_to_app_owned_chat(client, owner_token, db):
   db.add(app)
   db.commit()
   db.refresh(app)
-  chat = models.Chat(
+  chat = create_chat(
     id="app-owned",
     title="app's",
     messages=[],

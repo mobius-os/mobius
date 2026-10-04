@@ -444,7 +444,11 @@ def test_a_healthy_rollback_to_the_wrong_image_is_not_settled(tmp_path, monkeypa
   monkeypatch.setattr(host, "write_status", lambda _c, **fields: writes.append(fields))
   monkeypatch.setattr(host, "restart_ledger", lambda *a, **k: True)
   monkeypatch.setattr(host, "compose", lambda *a, **k: None)
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: True)
+  # Keep the real floor comparison; isolate only its Docker probe seams.
+  monkeypatch.setattr(host, "fence_app", lambda *a: True)
+  monkeypatch.setattr(host, "rollback_image_level", lambda *a: 1)
+  monkeypatch.setattr(host, "read_database_floor", lambda *a: 0)
+  monkeypatch.setattr(host, "wait_ready", lambda *a: ("ready", None))
   monkeypatch.setattr(host, "app_container", lambda _c: ("cid", "sha256:" + "e" * 64))
   assert host.rollback({}, TXN["operation_id"], TXN["expected_sha"], "x", "y",
                        TXN["previous_image"]) == 1
@@ -495,3 +499,193 @@ def test_a_revision_one_worker_can_still_recover_this_journal(tmp_path, monkeypa
   ))
   assert revision1.read_transaction() is not None
   assert host.read_transaction() is not None
+
+
+@pytest.fixture
+def root_owned_test_state(state, monkeypatch):
+  """Only test-owned temporary paths simulate root uid; bytes/modes stay real."""
+  from types import SimpleNamespace
+  original = Path.lstat
+  def owned(path):
+    info = original(path)
+    if path == state or state in path.parents:
+      return SimpleNamespace(st_mode=info.st_mode, st_uid=0)
+    return info
+  monkeypatch.setattr(Path, "lstat", owned)
+  return state
+
+
+def test_active_receipt_does_not_confuse_trial_writer_with_recovery_owner(root_owned_test_state):
+  host.seed_worker(worker(2))
+  host.offer_worker(worker(4, "ROLLBACK_FLOOR_LEVEL = 1"), IMAGE_ID)
+  receipt = host.active_worker_receipt()
+  assert receipt["revision"] == 2
+  assert receipt["rollback_floor_level"] == 0
+  assert receipt["sha256"] == _index(root_owned_test_state)["active"]["sha256"]
+
+
+def test_installing_new_reviewed_revision_seeds_active_without_relaxing_high_water(root_owned_test_state):
+  state = root_owned_test_state
+  host.seed_worker(worker(2))
+  host.offer_worker(worker(3), IMAGE_ID)
+  assert host.seed_worker(worker(3)).startswith("kept")
+  assert host.active_worker_receipt()["revision"] == 2
+  safe = worker(4, "ROLLBACK_FLOOR_LEVEL = 1")
+  assert host.seed_worker(safe) == "installed: revision 4"
+  assert host.active_worker_receipt() == {
+    "revision": 4, "sha256": hashlib.sha256(safe).hexdigest(), "rollback_floor_level": 1,
+  }
+  assert _index(state)["candidate"] is None
+
+
+def test_active_receipt_refuses_modified_or_public_worker(root_owned_test_state):
+  state = root_owned_test_state
+  host.seed_worker(worker(4, "ROLLBACK_FLOOR_LEVEL = 1"))
+  path = host.WORKERS / _index(state)["active"]["file"]
+  path.chmod(0o755)
+  assert host.active_worker_receipt() is None
+  path.chmod(0o700)
+  path.write_bytes(worker(4, "ROLLBACK_FLOOR_LEVEL = 9"))
+  assert host.active_worker_receipt() is None
+
+
+def test_active_receipt_refuses_symlink_worker(root_owned_test_state):
+  state = root_owned_test_state
+  host.seed_worker(worker(4, "ROLLBACK_FLOOR_LEVEL = 1"))
+  path = host.WORKERS / _index(state)["active"]["file"]
+  target = state / "elsewhere.py"
+  target.write_bytes(path.read_bytes())
+  target.chmod(0o700)
+  path.unlink()
+  path.symlink_to(target)
+  assert host.active_worker_receipt() is None
+
+
+def test_helper_install_prerequisite_is_explicit_and_verifies_active_before_services():
+  marker = (ROOT / "deployment/self-hosted-helper.required").read_text().strip()
+  installer = (ROOT / "scripts/install-rebuild-helper.sh").read_text()
+  assert marker == "2"
+  assert "Helper protocol revision: 2" in installer
+  assert installer.index("adopt-self") < installer.index("verify-active")
+  assert installer.index("verify-active") < installer.index("ExecStart=")
+
+
+def test_mounted_active_proof_rechecks_selection_and_actual_worker_bytes(root_owned_test_state):
+  state = root_owned_test_state
+  host.seed_worker(worker(4, "ROLLBACK_FLOOR_LEVEL = 1"))
+  proof = host.active_worker_receipt(state)
+  assert proof == host.active_worker_receipt()
+  active = host.WORKERS / _index(state)["active"]["file"]
+  active.unlink()
+  assert host.active_worker_receipt(state) is None
+  assert proof["rollback_floor_level"] == 1  # Old proof cannot validate new boot.
+  host.WORKER_INDEX.unlink()
+  assert host.active_worker_receipt(state) is None
+
+
+def test_installer_pins_host_intent_and_readonly_state_outside_writable_data():
+  installer = (ROOT / "scripts/install-rebuild-helper.sh").read_text()
+  assert 'MOBIUS_HOST_RECOVERY_REQUIRED: "1"' in installer
+  assert "source: /var/lib/mobius-rebuild" in installer
+  assert "target: /run/mobius-rebuild-host" in installer
+  assert "read_only: true" in installer
+  assert "create_host_path: false" in installer
+  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text()
+  assert entrypoint.index("export MOBIUS_BOOT_ID") < entrypoint.index("verify-mounted-active")
+  assert entrypoint.index("verify-mounted-active") < entrypoint.index("PHASE 1:")
+  assert "rm -f /run/mobius-rebuild-active.json" in entrypoint
+  assert "chmod 0644 /run/mobius-rebuild-active.json" in entrypoint
+
+
+@pytest.mark.parametrize("version", [2, True, "1", None])
+def test_boot_proof_and_frozen_launcher_reject_unknown_worker_index_version(root_owned_test_state, version):
+  state = root_owned_test_state
+  host.seed_worker(worker(4, "ROLLBACK_FLOOR_LEVEL = 1"))
+  index = _index(state)
+  index["version"] = version
+  host._atomic_json(host.WORKER_INDEX, index)
+  assert host.active_worker_receipt(state) is None
+
+
+# --- A refused rollback settles forward --------------------------------------
+
+
+@pytest.fixture
+def refused(tmp_path, monkeypatch):
+  """The database floor refuses the previous image; Docker seams recorded."""
+  monkeypatch.setattr(host, "TRANSACTION", tmp_path / "transaction.json")
+  host.write_transaction(TXN)
+  calls = {"status": [], "ledger": [], "compose": [], "docker": []}
+  monkeypatch.setattr(host, "write_status", lambda _c, **f: calls["status"].append(f))
+  monkeypatch.setattr(host, "restart_ledger",
+                      lambda _c, cid, cmd, op, image=None: calls["ledger"].append((cmd, image)) or True)
+  monkeypatch.setattr(host, "compose", lambda *a, **k: calls["compose"].append(a))
+  monkeypatch.setattr(host.subprocess, "run", lambda args, **k: calls["docker"].append(args))
+  monkeypatch.setattr(host, "fence_app", lambda *a: True)
+  monkeypatch.setattr(host, "rollback_image_level", lambda *a: 0)
+  monkeypatch.setattr(host, "read_database_floor", lambda *a: 1)
+  monkeypatch.setattr(host, "verify_served_generation", lambda cid, sha: None)
+  monkeypatch.setattr(host, "adopt_from_image", lambda image: "offered")
+  monkeypatch.setattr(host, "inspect_container_image", lambda cid: TXN["target_image"])
+  return calls
+
+
+def _rollback():
+  return host.rollback({}, TXN["operation_id"], TXN["expected_sha"],
+                       "health_check_failed", "slow", TXN["previous_image"])
+
+
+@pytest.mark.parametrize("running_before_fence", [True, False])
+def test_refused_rollback_finishes_on_the_new_release_when_it_serves(
+    refused, monkeypatch, running_before_fence):
+  """Also when the new container had already stopped before the fence."""
+  monkeypatch.setattr(host, "wait_ready", lambda *a: ("ready", {"ready": True}))
+  served = iter([("new-cid", TXN["target_image"])] if running_before_fence else [])
+  monkeypatch.setattr(host, "app_container", lambda _c: next(
+    served, ("new-cid", TXN["target_image"])) if running_before_fence or refused["docker"]
+    else (_ for _ in ()).throw(RuntimeError("no running app")))
+  monkeypatch.setattr(host, "app_container_any", lambda _c: "new-cid")
+  assert _rollback() == 0
+  assert ["docker", "start", "new-cid"] in refused["docker"]
+  assert refused["status"][-1]["state"] == "succeeded"
+  assert ("rearm-cutover", TXN["target_image"]) in refused["ledger"]
+  assert ("finalize-cutover", TXN["target_image"]) in refused["ledger"]
+  assert not any("up" in args for args in refused["compose"])
+  assert host.read_transaction() is None
+
+
+@pytest.mark.parametrize("ready,image", [
+  ("timeout", TXN["target_image"]),
+  ("ready", "sha256:" + "e" * 64),
+])
+def test_refused_rollback_never_leaves_a_journal_that_refences_the_app(
+    refused, monkeypatch, ready, image):
+  """No earlier image may ever run again: the journal has nothing left to
+  restore, and keeping it would fence the serving app on every later run."""
+  monkeypatch.setattr(host, "wait_ready", lambda *a: (ready, None))
+  monkeypatch.setattr(host, "app_container", lambda _c: ("new-cid", image))
+  assert _rollback() == 1
+  assert refused["status"][-1]["state"] == "needs_recovery"
+  assert refused["status"][-1]["code"] == "new_version_not_ready"
+  assert not any("up" in args for args in refused["compose"])
+  assert host.read_transaction() is None
+
+
+def test_a_refused_rollback_never_starts_a_container_that_is_not_the_new_release(
+    refused, monkeypatch):
+  monkeypatch.setattr(host, "app_container", lambda _c: ("cid", TXN["previous_image"]))
+  monkeypatch.setattr(host, "inspect_container_image", lambda cid: TXN["previous_image"])
+  monkeypatch.setattr(host, "wait_ready", lambda *a: (_ for _ in ()).throw(
+    AssertionError("nothing may be started")))
+  assert _rollback() == 1
+  assert not any(args[:2] == ["docker", "start"] for args in refused["docker"])
+  assert refused["status"][-1]["state"] == "needs_recovery"
+  assert host.read_transaction() is None
+
+
+def test_installed_service_allows_recovery_to_finish_after_an_interruption():
+  installer = (ROOT / "scripts/install-rebuild-helper.sh").read_text()
+  unit = installer[installer.index("mobius-rebuild.service <<'EOF'"):]
+  unit = unit[:unit.index("EOF\n")]
+  assert "ExecStopPost=/usr/local/libexec/mobius-rebuild-host reconcile" in unit
+  assert "TimeoutStopSec=15min" in unit

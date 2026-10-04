@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import app.chat_media as chat_media
-from app import models
+from app import models, transcript_rows
 from app.chat_media import fix_forward_chat_media
 from app.config import get_settings
 
@@ -11,7 +11,7 @@ from app.config import get_settings
 def test_fix_forward_chat_media_moves_files_and_rewrites_urls(db, chat):
   old_url = f"/api/chats/{chat.id}/generated/old.png"
   new_url = f"/api/chats/{chat.id}/media/old.png"
-  chat.messages = [{"role": "assistant", "content": f"![image]({old_url})"}]
+  transcript_rows.replace_all(db, chat, [{"role": "assistant", "content": f"![image]({old_url})"}])
   chat.pending_messages = [{"content": {"preview": old_url}}]
   db.commit()
 
@@ -26,7 +26,7 @@ def test_fix_forward_chat_media_moves_files_and_rewrites_urls(db, chat):
   assert changed == 3
   assert not old_dir.exists()
   assert (chat_root / "media" / "old.png").read_bytes() == b"old-image"
-  assert chat.messages[0]["content"] == f"![image]({new_url})"
+  assert transcript_rows.history(chat)[0]["content"] == f"![image]({new_url})"
   assert chat.pending_messages[0]["content"]["preview"] == new_url
 
 
@@ -40,14 +40,14 @@ def test_fix_forward_chat_media_is_idempotent(db, chat):
 def test_fix_forward_chat_media_skips_unrelated_transcripts(
   db, chat, monkeypatch,
 ):
-  chat.messages = [{
+  transcript_rows.replace_all(db, chat, [{
     "role": "assistant",
     "content": (
       "Discussing /api/chats/someone-else/generated/example.png "
       "must not make this chat a migration candidate."
     ),
     "blocks": [{"type": "text", "content": "x" * 100_000}],
-  }]
+  }])
   db.commit()
 
   def unexpected_writer():
@@ -63,17 +63,17 @@ def test_fix_forward_chat_media_rewrites_legacy_url_without_old_directory(
 ):
   old_url = f"/api/chats/{chat.id}/generated/already-moved.png"
   new_url = f"/api/chats/{chat.id}/media/already-moved.png"
-  chat.messages = [{"role": "assistant", "content": old_url}]
+  transcript_rows.replace_all(db, chat, [{"role": "assistant", "content": old_url}])
   db.commit()
 
   assert fix_forward_chat_media(db, get_settings().data_dir) == 1
   db.refresh(chat)
-  assert chat.messages[0]["content"] == new_url
+  assert transcript_rows.history(chat)[0]["content"] == new_url
 
 
 def test_fix_forward_chat_media_preflights_conflicts(db, chat):
   old_url = f"/api/chats/{chat.id}/generated/same.png"
-  chat.messages = [{"role": "assistant", "content": old_url}]
+  transcript_rows.replace_all(db, chat, [{"role": "assistant", "content": old_url}])
   db.commit()
 
   chat_root = Path(get_settings().data_dir) / "chats" / chat.id
@@ -88,7 +88,7 @@ def test_fix_forward_chat_media_preflights_conflicts(db, chat):
     fix_forward_chat_media(db, get_settings().data_dir)
 
   db.refresh(chat)
-  assert chat.messages[0]["content"] == old_url
+  assert transcript_rows.history(chat)[0]["content"] == old_url
   assert (old_dir / "same.png").read_bytes() == b"old"
   assert (media_dir / "same.png").read_bytes() == b"different"
 
@@ -97,7 +97,7 @@ def test_fix_forward_chat_media_keeps_both_copies_when_commit_fails(
   db, chat, monkeypatch,
 ):
   old_url = f"/api/chats/{chat.id}/generated/old.png"
-  chat.messages = [{"role": "assistant", "content": old_url}]
+  transcript_rows.replace_all(db, chat, [{"role": "assistant", "content": old_url}])
   db.commit()
 
   chat_root = Path(get_settings().data_dir) / "chats" / chat.id
@@ -113,7 +113,7 @@ def test_fix_forward_chat_media_keeps_both_copies_when_commit_fails(
   assert old_file.read_bytes() == b"old-image"
   assert (chat_root / "media" / "old.png").read_bytes() == b"old-image"
   persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  assert persisted.messages[0]["content"] == old_url
+  assert transcript_rows.history(persisted)[0]["content"] == old_url
 
 
 def test_fix_forward_chat_media_timeout_stays_valid_after_late_commit(
@@ -121,7 +121,7 @@ def test_fix_forward_chat_media_timeout_stays_valid_after_late_commit(
 ):
   old_url = f"/api/chats/{chat.id}/generated/old.png"
   new_url = f"/api/chats/{chat.id}/media/old.png"
-  chat.messages = [{"role": "assistant", "content": old_url}]
+  transcript_rows.replace_all(db, chat, [{"role": "assistant", "content": old_url}])
   db.commit()
 
   chat_root = Path(get_settings().data_dir) / "chats" / chat.id
@@ -148,4 +148,4 @@ def test_fix_forward_chat_media_timeout_stays_valid_after_late_commit(
 
   db.expire_all()
   persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  assert persisted.messages[0]["content"] == new_url
+  assert transcript_rows.history(persisted)[0]["content"] == new_url

@@ -8,13 +8,15 @@ the duplicated question/answer bug. `_update_last_assistant_message` must
 stamp a ts on first write and hold it stable across every streaming
 replace of the same turn.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from app import models
 from app import chat as chatmod
 
 
 def _mk_chat(db, cid, messages):
-  chat = models.Chat(id=cid, title="t", messages=messages, pending_messages=[])
+  chat = create_chat(id=cid, title="t", messages=messages, pending_messages=[])
   db.add(chat)
   db.commit()
   return chat
@@ -30,7 +32,7 @@ def _assistant(text):
 
 def _last(db, cid):
   chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
-  return chat.messages[-1]
+  return list(transcript_rows.history(chat))[-1]
 
 
 def test_assistant_message_gets_ts_on_first_write(db):
@@ -58,7 +60,7 @@ def test_assistant_ts_clears_pending_user_ts(db):
   """The assistant ts is allocated against persisted AND pending messages,
   so a queued user message can't share its ts once promoted (which would
   produce duplicate React keys client-side)."""
-  chat = models.Chat(
+  chat = create_chat(
     id="ts-pending", title="t",
     messages=[{"role": "user", "content": "hi", "ts": 1000}],
     pending_messages=[{"role": "user", "content": "queued",

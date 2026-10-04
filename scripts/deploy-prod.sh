@@ -851,6 +851,17 @@ report_readiness_failure() {
     *'"reason":"schema_mismatch"'*)
       fail "the database schema does not match this release; run Recovery, then restart cleanly."
       ;;
+    *'"reason":"below_compatibility_floor"'*)
+      fail "this release is below the database's compatibility floor; a newer version is required."
+      ;;
+    *'"reason":"host_helper_outdated"'*)
+      fail "this host has the Settings update helper, which must own this storage conversion."
+      fail "Run sudo scripts/install-rebuild-helper.sh from this checkout instead; it installs"
+      fail "the floor-aware helper and then performs this update. Legacy data is unchanged."
+      ;;
+    *'"reason":"image_below_source"'*)
+      fail "the served source needs a newer image than this one; finish the image update."
+      ;;
     *'"reason":"database_initialization_failed"'*)
       fail "database initialization failed; run Recovery, then restart cleanly."
       ;;
@@ -1100,6 +1111,102 @@ if [ -n "$IMAGE_TAG" ]; then
   )
 fi
 
+# /data as the container serving before this deploy mounts it, as a read-only
+# `--mount` spec for the rollback preflight. Captured while that container is
+# known good, so the preflight reads the database the previous image served
+# even if the failed replacement is gone.
+data_mount_spec() {
+  local mount type name source
+  mount=$(docker inspect -f \
+    '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' \
+    "$CONTAINER" 2>/dev/null) || return 1
+  IFS='|' read -r type name source <<<"$mount"
+  case "$type" in
+    volume) [ -n "$name" ] && [[ "$name" != *,* ]] || return 1
+      printf 'type=volume,src=%s,dst=/data,readonly\n' "$name" ;;
+    bind) [ -n "$source" ] && [[ "$source" != *,* ]] || return 1
+      printf 'type=bind,src=%s,dst=/data,readonly\n' "$source" ;;
+    *) return 1 ;;
+  esac
+}
+DATA_MOUNT=$(data_mount_spec || true)
+
+# ── rollback preflight
+# ONE_WAY_UPGRADES_DESIGN.md, "Host rollbacks": never start an image on a
+# database whose compatibility floor it is below. The failed container is
+# stopped first, so nothing can raise the floor between the read and the
+# replacement; the floor is then read directly with SQLite in read-only mode
+# (never through app code) from a one-off container with /data mounted
+# read-only. Anything ambiguous refuses the automatic rollback.
+ROLLBACK_DATABASE=/data/db/ultimate.db  # every Compose file's DATABASE_URL
+
+fence_failed_container() {
+  local running
+  docker stop "$CONTAINER" >/dev/null 2>&1 || true
+  running=$(docker ps -q --filter "name=^/?${CONTAINER}\$" 2>/dev/null) || return 1
+  [ -z "$running" ]
+}
+
+# The rollback image's baked COMPAT_LEVEL; a baked tree without compat.py
+# predates the floor and is level 0.
+rollback_image_level() {
+  local source level
+  source=$(docker run --rm --network none --entrypoint cat "$PREV_IMAGE" \
+    /app/platform-baked/backend/app/compat.py 2>/dev/null) || source=""
+  level=$(printf '%s' "$source" | python3 "$DEPLOY_SUPPORT" compat-level) || level=0
+  case "$level" in ''|*[!0-9]*) level=0 ;; esac
+  printf '%s\n' "$level"
+}
+
+# Prints the database floor, or the fail-closed reason and returns 1.
+read_database_floor() {
+  local probe out
+  if [ -z "${DATA_MOUNT:-}" ]; then
+    echo "error=data_volume_unknown"; return 1
+  fi
+  if ! probe=$(python3 "$DEPLOY_SUPPORT" floor-probe); then
+    echo "error=probe_unavailable"; return 1
+  fi
+  out=$(docker run --rm --network none --mount "$DATA_MOUNT" \
+    --entrypoint python3 "$PREV_IMAGE" -I -c "$probe" "$ROLLBACK_DATABASE" \
+    2>/dev/null | tail -n 1) || true
+  case "$out" in
+    floor=*[!0-9]*|floor=) ;;
+    floor=*) echo "${out#floor=}"; return 0 ;;
+  esac
+  echo "${out:-error=read_failed}"
+  return 1
+}
+
+rollback_preflight() {
+  local level floor
+  if ! fence_failed_container; then
+    fail "rollback refused: could not stop the failed ${CONTAINER}, so the database floor cannot be read safely."
+    return 1
+  fi
+  level=$(rollback_image_level)
+  if ! floor=$(read_database_floor); then
+    fail "rollback refused: the database compatibility floor could not be read safely (${floor})."
+    fail "Check ${ROLLBACK_DATABASE} on the data volume, then redeploy a version at or above the database's floor."
+    return 1
+  fi
+  if [ "$level" -lt "$floor" ]; then
+    fail "rollback refused: a newer version is required. The previous image understands compatibility level ${level}; the database floor is ${floor}."
+    fail "Redeploy a version at or above level ${floor}. Never start an older image on this database."
+    return 1
+  fi
+  ok "rollback preflight: previous image level ${level} ≥ database floor ${floor}"
+}
+
+# One bounded /api/ready answer: the body (at most 4 KiB), then a line holding
+# the HTTP status. Empty when the container cannot be reached.
+readiness_answer() {
+  docker exec "$CONTAINER" sh -c \
+    "curl -s --max-time 5 -w '\n%{http_code}' '${INTERNAL_BASE}/api/ready' | tail -c 4096" \
+    2>/dev/null || true
+}
+# ── end rollback preflight
+
 # Best-effort restore of the previous image after a failed cutover. Called
 # as `attempt_rollback || true`, which disables errexit inside the function,
 # so a failing docker step here can't itself abort the script. It is
@@ -1109,6 +1216,12 @@ fi
 # digest looks unchanged. A tag-succeeds-then-recreate-fails path can leave
 # the tag pointing at the old image while the broken container still runs —
 # hence the loud failure message for manual follow-up.
+#
+# The rollback preflight runs first and may refuse; then the failed container
+# is started again unchanged and nothing is replaced. Success is the complete
+# /api/ready verdict, not /api/health (which answers 200 while degraded). A
+# rollback boot that reports below_compatibility_floor is terminal: a newer
+# version is required, and no older image is tried.
 #
 # Deliberately NOT presence-gated: rollback only fires when the cutover already
 # FAILED its health probe, i.e. prod is broken and serving nothing. Waiting for
@@ -1120,17 +1233,22 @@ attempt_rollback() {
     fail "no previous image captured — cannot auto-roll back; recover ${CONTAINER} manually."
     return 1
   fi
+  warn "auto-rolling back ${CONTAINER} to the previous image (${IMAGE_TAG} = ${PREV_IMAGE:0:19}…)"
+  if ! rollback_preflight; then
+    docker start "$CONTAINER" >/dev/null 2>&1 || true
+    fail "automatic rollback refused; the failed container was started again unchanged."
+    return 1
+  fi
   # The accepted handoff is one-boot by design. If the replacement boot never
   # became serviceable, root explicitly re-arms the same receipt for the
   # rollback boot; an unrelated later restart can never inherit it.
   rearm_chat_cutover || true
-  warn "auto-rolling back ${CONTAINER} to the previous image (${IMAGE_TAG} = ${PREV_IMAGE:0:19}…)"
   # With an external edge proxy on 80/443, an unselected recreate would also
   # start the bundled caddy service, whose port bindings collide with the
   # edge and fail the rollback exactly when it must not. Select the services
   # this script manages in that topology; a self-hosted (bundled-caddy)
   # rollback keeps the full-project recreate.
-  local rollback_services=()
+  local rollback_services=() answer code body
   if external_prod_caddy_running; then rollback_services=(app); fi
   intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate ${rollback_services[*]}"
   if ! docker tag "$PREV_IMAGE" "$IMAGE_TAG"; then
@@ -1142,15 +1260,25 @@ attempt_rollback() {
     return 1
   fi
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
-    code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
+    answer=$(readiness_answer)
+    code=${answer##*$'\n'}
+    body=${answer%$'\n'*}
     if [ "$code" = "200" ]; then
       finalize_chat_cutover || true
-      ok "rolled back — ${CONTAINER} healthy on the previous image again"
+      ok "rolled back — ${CONTAINER} serviceable on the previous image again"
       return 0
     fi
+    case "$body" in
+      *'"reason":"below_compatibility_floor"'*)
+        fail "rollback refused by the database: a newer version is required."
+        fail "The previous image is below the database's compatibility floor. Do not try an older image; redeploy a version at or above the floor."
+        printf '    /api/ready: %s\n' "$body" >&2
+        return 1
+        ;;
+    esac
     sleep 1
   done
-  fail "rollback did not restore health within ${CUTOVER_WAIT_SECONDS}s — manual intervention required."
+  fail "rollback did not become serviceable within ${CUTOVER_WAIT_SECONDS}s — manual intervention required."
   return 1
 }
 

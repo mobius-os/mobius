@@ -249,6 +249,24 @@ def fresh_db():
   # would otherwise hold a stale identity map across the drop/create.
   from app import chat_writer as chat_writer_mod
   chat_writer_mod.stop_writer(timeout=5)
+  # This fixture owns an empty disposable database. Reproduce the actual
+  # fresh-install activation boundary before any database-backed owner runs.
+  from app import one_way_upgrades
+  import sqlite3
+  with sqlite3.connect(engine.url.database) as conn:
+    conn.execute(one_way_upgrades.COMPAT_TABLE_DDL)
+    conn.execute("INSERT OR IGNORE INTO platform_compat(id,floor,updated_at) "
+                 "VALUES(1,0,datetime('now'))")
+  one_way_upgrades.run_gate(engine.url.database, frozenset())
+  # Complete only the empty initial search generation. Historic migration
+  # tests still need the legacy derived tables, so do not retire them here.
+  # Initial-build tests explicitly set this task pending before seeding chats.
+  from app import chat_search
+  with sqlite3.connect(engine.url.database) as conn:
+    assert chat_search.index_batch(conn) == (0, 0)
+    conn.execute("UPDATE upgrade_tasks SET status='done', done_units=0, "
+                 "remaining_units=0, completed_at=datetime('now') "
+                 "WHERE level=1 AND task='index_messages'")
   from app.database import SessionLocal as _WriterSession
   chat_writer_mod.start_writer(_WriterSession)
   # start_writer intentionally publishes before its worker opens and probes
@@ -301,8 +319,19 @@ def fresh_db():
     # These disposable tables are migration-owned rather than ORM-owned, so
     # Base.metadata cannot include them in the generic deletion pass. Deleting
     # docs first also drives the SQLite external-content FTS trigger.
-    connection.exec_driver_sql("DELETE FROM chat_search_docs")
-    connection.exec_driver_sql("DELETE FROM chat_search_state")
+    # Lifespan tests run the real post-activation owner, which legitimately
+    # retires legacy derived tables. Cleanup cannot assume they still exist.
+    # Keep current mapped tables strict: a missing authoritative table must
+    # still fail rather than silently pass a damaged fixture.
+    tables = {row[0] for row in connection.exec_driver_sql(
+      "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    for name in ("chat_search_docs", "chat_search_state", "chat_search_state_v1"):
+      if name in tables:
+        connection.exec_driver_sql(f'DELETE FROM "{name}"')
+    connection.exec_driver_sql("DELETE FROM chat_search_docs_v2")
+    connection.exec_driver_sql("DELETE FROM chat_search_state_v2")
+    connection.exec_driver_sql("DELETE FROM chat_transcript_cleanup")
     for table in reversed(Base.metadata.sorted_tables):
       connection.execute(table.delete())
 
@@ -360,8 +389,8 @@ def chat(db, owner_token):
   no per-chat model; tests for that admission state clear this field.
   """
   import uuid
-  from app import models
-  c = models.Chat(
+  from app import chat_writer
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Test chat",
     messages=[],

@@ -80,6 +80,9 @@ async def test_reviewed_settings_request_reaches_host_worker_without_connect(
     lambda cid, sha: events.append(("verified", cid, sha)),
   )
   monkeypatch.setattr(host, "restart_ledger", lambda *_args, **_kwargs: True)
+  # The forward floor check: the target is compatible with the live database.
+  monkeypatch.setattr(host, "rollback_image_level", lambda _image: 1)
+  monkeypatch.setattr(host, "live_database_floor", lambda cid: 0 if cid == "old-container" else None)
 
   assert host.run() == 0
   assert not (inbox / "request.json").exists()

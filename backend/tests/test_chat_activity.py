@@ -1,4 +1,6 @@
 """Inline chat activity is durable, exact-chat scoped, and stably paged."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from datetime import datetime
 import hashlib
@@ -32,7 +34,7 @@ def _helper(
 ):
   app = _app(db, suffix)
   child_id = f"child-{suffix}"
-  db.add(models.Chat(
+  db.add(create_chat(
     id=child_id,
     title=f"Child {suffix}",
     messages=[{
@@ -83,10 +85,10 @@ def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
 ):
   stamp = datetime(2026, 9, 9, 2, 15)
   db.add_all([
-    models.Chat(id="activity-self", title="Self", messages=[]),
-    models.Chat(id="activity-peer", title="Peer", messages=[]),
-    models.Chat(id="activity-sibling", title="Sibling", messages=[]),
-    models.Chat(id="activity-other", title="Other", messages=[]),
+    create_chat(id="activity-self", title="Self", messages=[]),
+    create_chat(id="activity-peer", title="Peer", messages=[]),
+    create_chat(id="activity-sibling", title="Sibling", messages=[]),
+    create_chat(id="activity-other", title="Other", messages=[]),
   ])
   db.add(models.ChatRun(
     id="activity-parent-run",
@@ -184,7 +186,7 @@ def test_terminal_inline_helper_without_acceptance_evidence_is_unknown(
   client, auth, db,
 ):
   stamp = datetime(2026, 9, 9, 3, 0)
-  db.add(models.Chat(id="inline-parent", title="Inline", messages=[]))
+  db.add(create_chat(id="inline-parent", title="Inline", messages=[]))
   _helper(
     db,
     suffix="inline-history",
@@ -207,7 +209,7 @@ def test_disconnected_blocking_attachment_claim_does_not_imply_incorporation(
   from app.delegations import claim_inline_delegation_observation
 
   stamp = datetime(2026, 9, 9, 3, 10)
-  db.add(models.Chat(id="claimed-parent", title="Claimed", messages=[]))
+  db.add(create_chat(id="claimed-parent", title="Claimed", messages=[]))
   _helper(
     db,
     suffix="claimed-inline",
@@ -239,7 +241,7 @@ def test_source_only_activity_uses_the_derived_status_terminal_contract(
   client, auth, db,
 ):
   stamp = datetime(2026, 9, 9, 3, 20)
-  db.add(models.Chat(id="source-only-parent", title="Source", messages=[]))
+  db.add(create_chat(id="source-only-parent", title="Source", messages=[]))
   _helper(
     db,
     suffix="source-review",
@@ -287,7 +289,7 @@ def test_source_only_activity_uses_the_derived_status_terminal_contract(
 def test_activity_route_requires_exact_chat_access_and_valid_cursor(
   client, auth, db,
 ):
-  db.add(models.Chat(id="activity-auth", title="Authorized", messages=[]))
+  db.add(create_chat(id="activity-auth", title="Authorized", messages=[]))
   db.commit()
 
   path = "/api/chats/activity-auth/activity"
@@ -306,7 +308,7 @@ def test_a_settled_helper_keeps_its_launch_position(db):
   from app.delegations import wake_parent_after_child_settled
 
   parent_id = 'helper-position-parent'
-  db.add(models.Chat(id=parent_id, messages=[]))
+  db.add(create_chat(id=parent_id, messages=[]))
   _helper(db, suffix='position', parent_chat_id=parent_id,
           created_at=datetime(2026, 9, 9), notify=False)
   db.commit()
@@ -325,7 +327,7 @@ def test_a_settled_helper_keeps_its_launch_position(db):
       'assistant_message_id': sink.assistant_message_id,
       'block_index': 0, 'text_offset': 6,
     }
-    assert db.get(models.Chat, parent_id).messages == []
+    assert list(transcript_rows.history(db.get(models.Chat, parent_id))) == []
   finally:
     unregister_active_sink(parent_id, sink)
 
@@ -334,7 +336,7 @@ def test_a_helper_settled_before_launch_rows_keeps_its_recorded_place(db):
   from app.chat_activity import chat_activity_page
 
   parent_id = 'helper-legacy-parent'
-  db.add(models.Chat(id=parent_id, messages=[]))
+  db.add(create_chat(id=parent_id, messages=[]))
   _helper(db, suffix='legacy', parent_chat_id=parent_id,
           created_at=datetime(2026, 9, 9), notify=False)
   db.add(models.ChatActivityPosition(

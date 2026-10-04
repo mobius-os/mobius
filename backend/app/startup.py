@@ -38,6 +38,12 @@ class DatabaseBootResult:
 
   schema_gaps: tuple[str, ...] = ()
   failure_reason: str | None = None
+  # Key/value context for ``failure_reason`` (for example the database floor
+  # and this code's level), surfaced in the degraded payload.
+  failure_detail: tuple[tuple[str, object], ...] = ()
+  # Application tables present before ``create_all`` ran. One-way steps use it
+  # to tell a genuinely new database from a damaged or partial one.
+  existing_tables: frozenset[str] | None = None
 
   @property
   def reason(self) -> str | None:
@@ -109,8 +115,14 @@ async def run_startup_tasks(
         exc_info=True,
       )
       if task.database_failure_reason:
+        # A gate may name a more specific reason and detail on the exception
+        # (for example one_way_upgrades.StepRefusal).
         context.database_boot = DatabaseBootResult(
-          failure_reason=task.database_failure_reason,
+          failure_reason=(
+            getattr(exc, "database_failure_reason", None)
+            or task.database_failure_reason
+          ),
+          failure_detail=tuple(getattr(exc, "database_failure_detail", ()) or ()),
         )
         break
     else:
@@ -505,6 +517,39 @@ def _retire_integrated_provenance(context: StartupContext) -> None:
     context.logger.warning("app provenance retirement: %s", warning)
 
 
+def _complete_one_way_upgrades(context: StartupContext) -> None:
+  """Bring every registered one-way storage step to ACTIVE before the writer.
+
+  See ONE_WAY_UPGRADES_DESIGN.md. A step that cannot finish raises StepRefusal, which
+  keeps the boot unserviceable while the legacy data stays authoritative.
+  """
+  from app import one_way_upgrades
+  from app.database import engine
+  from app.schema_migrations import mapped_schema_gaps
+
+  one_way_upgrades.run_gate(
+    engine.url.database, context.database_boot.existing_tables,
+  )
+  # The pre-gate schema verdict can defer only chats.messages_v1 on a legacy
+  # database. Activation's rename must close that gap before any writer starts.
+  # Re-check every mapped table/column rather than trusting the expected edit.
+  gaps = mapped_schema_gaps(engine)
+  if gaps:
+    raise one_way_upgrades.StepRefusal(
+      "schema_mismatch",
+      "Database is missing mapped schema after one-way activation: "
+      + ", ".join(gaps),
+      schema_gaps=tuple(gaps),
+    )
+
+
+def _start_one_way_post_activation(_context: StartupContext) -> None:
+  from app import one_way_upgrades
+  from app.database import engine
+
+  one_way_upgrades.start_post_activation_worker(engine.url.database)
+
+
 def _start_chat_writer(_context: StartupContext) -> None:
   from app.chat_writer import start_writer
 
@@ -684,6 +729,13 @@ DATABASE_STARTUP_TASKS = (
     _verify_app_identity_cutover,
     database_failure_reason="app_identity_cutover_incomplete",
   ),
+  # One-way storage steps convert and activate before anything can write
+  # through the new form; the chat writer must start only afterwards.
+  StartupTask(
+    "complete one-way upgrades",
+    _complete_one_way_upgrades,
+    database_failure_reason="one_way_upgrade_incomplete",
+  ),
   # Transcript migrations below are writer domain commands. Start ownership as
   # soon as the schema and required identity cutover exist; later startup
   # failures still fail open exactly as they did when the writer started near
@@ -717,6 +769,9 @@ DATABASE_STARTUP_TASKS = (
     checkpoint="startup_state_reconciled",
   ),
   StartupTask("reconcile agent lifecycle", _reconcile_agent_lifecycle),
+  StartupTask(
+    "start one-way post-activation work", _start_one_way_post_activation,
+  ),
   StartupTask("reap staging bundles", _reap_staging_bundles),
   StartupTask(
     "reconcile compiled bundles",

@@ -1,4 +1,7 @@
 """Provider-neutral global peer discovery, delivery, and confinement."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
@@ -53,29 +56,29 @@ def _network_fixture(db):
     source_dir="/tmp/subagents",
   )
   chats = {
-    "root": models.Chat(
+    "root": create_chat(
       id="room-root", title="Lead", messages=[], provider="codex",
     ),
-    "scout": models.Chat(
+    "scout": create_chat(
       id="room-scout", title="Scout", messages=[], provider="claude",
       created_by_app_id=1,
     ),
-    "builder": models.Chat(
+    "builder": create_chat(
       id="room-builder", title="Builder", messages=[], provider="codex",
       created_by_app_id=1,
     ),
-    "nested": models.Chat(
+    "nested": create_chat(
       id="room-nested", title="Nested verifier", messages=[],
       provider="claude", created_by_app_id=1,
     ),
-    "outsider": models.Chat(
+    "outsider": create_chat(
       id="outside-chat", title="Outside", messages=[], provider="codex",
     ),
-    "outside_helper": models.Chat(
+    "outside_helper": create_chat(
       id="outside-helper", title="Outside helper", messages=[],
       provider="codex", created_by_app_id=1,
     ),
-    "never": models.Chat(
+    "never": create_chat(
       id="never-agent", title="Never started", messages=[], provider="claude",
     ),
   }
@@ -425,13 +428,13 @@ def test_direct_mail_never_mutates_owner_transcripts_or_pending_messages(
   client, auth, db,
 ):
   chats, _ = _network_fixture(db)
-  chats["scout"].messages = [{"role": "assistant", "content": "Scout note"}]
+  transcript_rows.replace_all(object_session(chats['scout']), chats['scout'], [{"role": "assistant", "content": "Scout note"}])
   chats["scout"].pending_messages = [{"content": "Owner steer"}]
-  chats["builder"].messages = [{"role": "assistant", "content": "Builder note"}]
+  transcript_rows.replace_all(object_session(chats['builder']), chats['builder'], [{"role": "assistant", "content": "Builder note"}])
   chats["builder"].pending_messages = []
   db.commit()
   before = {
-    chat.id: (list(chat.messages or []), list(chat.pending_messages or []))
+    chat.id: (list(transcript_rows.history(chat)), list(chat.pending_messages or []))
     for chat in (chats["scout"], chats["builder"])
   }
   sent = client.post(
@@ -446,7 +449,7 @@ def test_direct_mail_never_mutates_owner_transcripts_or_pending_messages(
   db.expire_all()
   for key in ("scout", "builder"):
     chat = db.get(models.Chat, chats[key].id)
-    assert (chat.messages, chat.pending_messages) == before[chat.id]
+    assert (list(transcript_rows.history(chat)), chat.pending_messages) == before[chat.id]
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
@@ -535,7 +538,7 @@ def test_interrupt_delivery_steers_ordered_backlog_once(
   db.expire_all()
   stored = db.get(models.Chat, builder.id)
   assert stored.pending_messages in (None, [])
-  assert stored.messages[-1]["cid"] == carrier["cid"]
+  assert list(transcript_rows.history(stored))[-1]["cid"] == carrier["cid"]
   successor_context = _next_turn_context(
     db, builder, f"builder-after-{provider}-steer",
   )
@@ -1372,7 +1375,7 @@ def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
 
 def test_context_omits_unrelated_global_agents_when_nothing_arrived(db):
   _network_fixture(db)
-  chat = models.Chat(id="quiet-chat", title="Quiet", messages=[])
+  chat = create_chat(id="quiet-chat", title="Quiet", messages=[])
   run = make_goal_run(db,
     id="quiet-run", root_run_id="quiet-run", chat_id=chat.id,
     status="running", provider="codex",
@@ -1414,7 +1417,7 @@ def test_delegated_children_derive_project_scope_without_becoming_project_chats(
     compiled_path="/tmp/subagents.js", slug="subagents",
     source_dir="/tmp/subagents",
   )
-  parent = models.Chat(
+  parent = create_chat(
     id="project-parent", title="Project lead", messages=[],
     project_id=project.id,
   )
@@ -1635,7 +1638,7 @@ def _claim_owner_and_follower(db):
   """A running owner Goal holds CLAIM_KEY; another running Goal follows it."""
   for name in ("owner", "follower"):
     db.add_all([
-      models.Chat(id=f"claim-{name}", title=f"Claim {name}", messages=[],
+      create_chat(id=f"claim-{name}", title=f"Claim {name}", messages=[],
                   provider="codex"),
       models.ChatGoal(id=f"claim-{name}-goal", chat_id=f"claim-{name}",
                       objective=f"{name} objective"),

@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import activity, chat_archive, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat_event_sink import active_sink_stream_snapshot
@@ -175,7 +176,7 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   # durable provider, so the model check must evaluate against that same value.
   if (
     chat.created_by_app_id is None
-    and not (chat.messages or [])
+    and not (transcript_rows.history(chat) or [])
     and not (chat.pending_messages or [])
     and not is_chat_running(chat.id)
     and not is_draining()
@@ -429,7 +430,7 @@ def _duplicate_send_response(
       # idle queue into exactly one run. A preflight acknowledgement here
       # would leave durable work parked until some later user action.
       return None
-  for row in list(chat.messages or []):
+  for row in list(transcript_rows.history(chat) or []):
     if row.get("role") == "user" and cid_of(row) == cid:
       return JSONResponse(
         status_code=200,
@@ -533,7 +534,7 @@ def _is_exact_agent_card_retry(
 # The answer-merge logic lives in `chat_writer.apply_answers_to_last_
 # question` and is no longer called from this route directly: C2 routes
 # every answer write through the writer actor's `AnswerQuestion` command
-# (the sole runtime mutator of `chat.messages`), and the queue append
+# (the sole runtime mutator of transcript rows), and the queue append
 # carries answers via `AppendPending`. The merge runs on the actor thread
 # so it can't lost-update against a concurrent streaming snapshot.
 

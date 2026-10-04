@@ -1,4 +1,5 @@
 """One persisted-model invariant across chat creation and unattended starts."""
+from app.chat_writer import create_chat
 
 import ast
 import json
@@ -62,7 +63,7 @@ def test_new_chat_persists_the_latest_picker_choice(client, auth):
 
 
 def test_programmatic_start_requires_a_persisted_compatible_model(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="model-less-programmatic",
     title="Broken background chat",
     messages=[],
@@ -89,7 +90,7 @@ def test_programmatic_start_requires_a_persisted_compatible_model(db):
 async def test_programmatic_start_rejects_before_claiming_a_model_less_chat(
   db, monkeypatch,
 ):
-  chat = models.Chat(
+  chat = create_chat(
     id="model-less-start",
     title="Broken background chat",
     messages=[],
@@ -123,12 +124,27 @@ def test_every_production_chat_constructor_supplies_agent_settings():
       if not isinstance(node, ast.Call):
         continue
       func = node.func
-      if not (
+      direct_model = (
         isinstance(func, ast.Attribute)
         and func.attr == "Chat"
         and isinstance(func.value, ast.Name)
         and func.value.id == "models"
-      ):
+      )
+      normalized_constructor = (
+        isinstance(func, ast.Attribute)
+        and func.attr == "create_chat"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "chat_writer"
+      ) or (
+        isinstance(func, ast.Name) and func.id == "create_chat"
+        and path.name == "platform_update.py"
+      )
+      # The normalized constructor forwards arbitrary scalar fields, so its
+      # internal ORM call is not a model-selection site. Its production callers
+      # still must make the selection explicit.
+      if direct_model and path.name == "chat_writer.py":
+        continue
+      if not (direct_model or normalized_constructor):
         continue
       keywords = {keyword.arg: keyword.value for keyword in node.keywords}
       if "agent_settings_json" not in keywords:

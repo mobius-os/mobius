@@ -1,4 +1,6 @@
 """Möbius helper tools: spawn/message/stop/list, identity, and result delivery."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 from tests.goal_fixtures import goal_run as make_goal_run
 
@@ -631,10 +633,10 @@ def test_the_conversation_panel_shows_a_helpers_own_steps(client, owner_token, d
     ],
   )
   child = db.get(models.Chat, child_id)
-  child.messages = [
-    *child.messages,
+  transcript_rows.replace_all(object_session(child), child, [
+    *list(transcript_rows.history(child)),
     {"role": "user", "content": "carrier", "hidden": True, "kind": "delegation_result"},
-  ]
+  ])
   db.commit()
   response = client.get(
     f"/api/chats/{_parent}/helpers/{delegation_id}",

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import platform_tools
+from app import app_tools, platform_tools
 
 
 def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():

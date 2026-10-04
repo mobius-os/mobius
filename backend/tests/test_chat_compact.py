@@ -1,10 +1,13 @@
 """Incoming-provider synthesis and atomic provider-switch coverage."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 import asyncio
 from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
+from app.chat_writer import create_chat
 
 import pytest
 
@@ -111,8 +114,8 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   assert row.provider == "codex"
   assert row.session_id is None
   assert row.agent_settings_json["model"] == "gpt-5.4"
-  assert row.messages[-1]["content"] == body["summary"]
-  assert row.messages[0]["content"] == "Build me an app"
+  assert list(transcript_rows.history(row))[-1]["content"] == body["summary"]
+  assert list(transcript_rows.history(row))[0]["content"] == "Build me an app"
   assert chat_mod._latest_compaction_brief(row) == body["summary"]
 
 
@@ -164,7 +167,7 @@ def test_switch_visibility_matches_owner_drawer_contract(
   ])
   for chat_id in (visible_id, hidden_id):
     row = db.get(models.Chat, chat_id)
-    row.messages = [{"role": "user", "content": "Preserve this context"}]
+    transcript_rows.replace_all(object_session(row), row, [{"role": "user", "content": "Preserve this context"}])
   delegated = db.get(models.Chat, hidden_owner_id)
   delegated.agent_settings_json = {
     **(delegated.agent_settings_json or {}),
@@ -237,13 +240,13 @@ def test_switch_visibility_matches_owner_drawer_contract(
 def test_provider_switch_writer_rechecks_hidden_pin_at_commit(chat, db):
   """A visibility flip during synthesis cannot commit a provider handoff."""
   chat.provider = "claude"
-  chat.messages = [{"role": "user", "content": "Keep this context", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "Keep this context", "ts": 1}])
   chat.agent_settings_json = {
     "model": "claude-sonnet-4-6",
     "drawer_hidden": True,
   }
   db.commit()
-  source_messages = list(chat.messages)
+  source_messages = list(transcript_rows.history(chat))
 
   result = get_writer().submit(SwitchProviderWithCompaction(
     chat_id=chat.id,
@@ -262,7 +265,7 @@ def test_provider_switch_writer_rechecks_hidden_pin_at_commit(chat, db):
   db.expire_all()
   unchanged = db.get(models.Chat, chat.id)
   assert unchanged.provider == "claude"
-  assert unchanged.messages == source_messages
+  assert list(transcript_rows.history(unchanged)) == source_messages
 
 
 def test_legacy_bodyless_compact_then_patch_remains_compatible(
@@ -513,7 +516,7 @@ def test_synthesis_failure_leaves_provider_session_settings_and_messages(
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   row.session_id = "old-session"
   row.agent_settings_json = {"model": "claude-sonnet-4-6"}
-  before_messages = list(row.messages)
+  before_messages = list(transcript_rows.history(row))
   db.commit()
 
   response = client.post(
@@ -525,7 +528,7 @@ def test_synthesis_failure_leaves_provider_session_settings_and_messages(
   assert row.provider == "claude"
   assert row.session_id == "old-session"
   assert row.agent_settings_json == {"model": "claude-sonnet-4-6"}
-  assert row.messages == before_messages
+  assert list(transcript_rows.history(row)) == before_messages
 
 
 def test_chat_change_during_synthesis_rejects_without_partial_switch(
@@ -553,7 +556,7 @@ def test_chat_change_during_synthesis_rejects_without_partial_switch(
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   assert row.provider == "claude"
-  assert row.messages == [{"role": "user", "content": "changed concurrently"}]
+  assert list(transcript_rows.history(row)) == [{"role": "user", "content": "changed concurrently"}]
 
 
 def test_turn_start_during_synthesis_wins_without_partial_switch(
@@ -587,8 +590,8 @@ def test_turn_start_during_synthesis_wins_without_partial_switch(
   assert db.query(models.ChatRun).filter_by(
     chat_id=chat_id, status="running",
   ).count() == 1
-  assert row.messages[-1]["content"] == "racing send"
-  assert not any(m.get("kind") == "compaction" for m in row.messages)
+  assert list(transcript_rows.history(row))[-1]["content"] == "racing send"
+  assert not any(m.get("kind") == "compaction" for m in list(transcript_rows.history(row)))
 
 
 def test_route_send_waits_for_handoff_then_starts_on_incoming_provider(
@@ -645,8 +648,8 @@ def test_route_send_waits_for_handoff_then_starts_on_incoming_provider(
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   assert row.provider == "codex"
-  assert row.messages[-2]["kind"] == "compaction"
-  assert row.messages[-1]["content"] == "continue after switching"
+  assert list(transcript_rows.history(row))[-2]["kind"] == "compaction"
+  assert list(transcript_rows.history(row))[-1]["content"] == "continue after switching"
 
 
 def test_retry_with_same_switch_id_is_idempotent(
@@ -679,7 +682,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   assert calls == 1
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  markers = [m for m in row.messages if m.get("kind") == "compaction"]
+  markers = [m for m in list(transcript_rows.history(row)) if m.get("kind") == "compaction"]
   assert len(markers) == 1
   assert db.query(models.Owner).first().provider == "codex"
 
@@ -713,7 +716,7 @@ def test_summary_created_during_synthesis_forces_retry(
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   assert row.provider == "claude"
-  assert not any(m.get("kind") == "compaction" for m in row.messages)
+  assert not any(m.get("kind") == "compaction" for m in list(transcript_rows.history(row)))
 
 
 def test_busy_chat_rejects_before_synthesis(client, auth, db, monkeypatch):
@@ -1262,12 +1265,14 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
   } <= configured
 
 
-def test_latest_compaction_brief_reads_newest_portable_seed():
-  row = SimpleNamespace(messages=[
+def test_latest_compaction_brief_reads_newest_portable_seed(db):
+  row = create_chat(id="compaction-brief-reader", title="Brief", messages=[
     {"role": "assistant", "kind": "compaction", "content": "old"},
     {"role": "user", "content": "continue"},
     {"role": "assistant", "kind": "compaction", "content": "new"},
   ])
+  db.add(row)
+  db.flush()
   assert chat_mod._latest_compaction_brief(row) == "new"
 
 
@@ -1355,7 +1360,7 @@ def test_manual_compaction_uses_verified_note_or_keeps_full_history(
   row = db.get(models.Chat, chat_id)
   row.session_id = "previous-session"
   db.commit()
-  messages = list(row.messages)
+  messages = list(transcript_rows.history(row))
   path = _write_bound_manual_note(chat_id, messages)
   if coverage == "missing":
     path.unlink()
@@ -1374,7 +1379,7 @@ def test_manual_compaction_uses_verified_note_or_keeps_full_history(
   assert response.status_code == 200, response.text
   assert seen[0][0] == (messages[2:] if coverage == "valid" else messages)
   db.expire_all()
-  assert row.messages[:-1] == messages
+  assert list(transcript_rows.history(row))[:-1] == messages
   assert row.session_id is None
 
 
@@ -1390,7 +1395,7 @@ def test_manual_compaction_cannot_commit_after_covered_source_changes(
   row = db.get(models.Chat, chat_id)
   row.session_id = "previous-session"
   db.commit()
-  messages = list(row.messages)
+  messages = list(transcript_rows.history(row))
   path = _write_bound_manual_note(chat_id, messages)
   async def fake(source, **kwargs):
     if change == "note":
@@ -1407,7 +1412,7 @@ def test_manual_compaction_cannot_commit_after_covered_source_changes(
   assert response.status_code == 409, response.text
   db.expire_all()
   assert row.session_id == "previous-session"
-  assert not any(m.get("kind") == "compaction" for m in row.messages)
+  assert not any(m.get("kind") == "compaction" for m in list(transcript_rows.history(row)))
 
 
 @pytest.mark.parametrize("large_part", ["covered_history", "uncovered_tail", "full_digest"])
@@ -1426,7 +1431,7 @@ def test_manual_note_compaction_retains_existing_work_limits(
   row = db.get(models.Chat, chat_id)
   row.session_id = "previous-session"
   db.commit()
-  messages = list(row.messages)
+  messages = list(transcript_rows.history(row))
   _write_bound_manual_note(
     chat_id, messages, large if large_part == "full_digest" else "Keep originals.",
   )
@@ -1446,9 +1451,9 @@ def test_manual_note_compaction_retains_existing_work_limits(
     assert response.status_code == 200, response.text
     assert len(calls) == 1
     assert "Do not publish." in calls[0]
-    assert row.messages[:-1] == messages
+    assert list(transcript_rows.history(row))[:-1] == messages
   else:
     assert response.status_code == 422, response.text
     assert calls == []
     assert row.session_id == "previous-session"
-    assert row.messages == messages
+    assert list(transcript_rows.history(row)) == messages

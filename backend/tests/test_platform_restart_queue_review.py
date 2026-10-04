@@ -1,4 +1,6 @@
 """Activation is an admission owner, not permission to consume later input."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 import asyncio
 import copy
@@ -85,7 +87,7 @@ def test_not_now_releases_owner_queue_without_abandoning_activation(monkeypatch)
   with SessionLocal() as db:
     chat = db.get(models.Chat, "deferred-owner")
     assert chat.pending_messages == []
-    assert chat.messages[-1]["content"] == "B"
+    assert list(transcript_rows.history(chat))[-1]["content"] == "B"
     wait = db.get(models.ChatWait, wait_id)
     assert wait.status == "armed"
     assert wait.resume_delivered_at is None
@@ -118,8 +120,8 @@ def test_goal_dismissal_cancels_only_its_activation_owner(status):
     assert db.get(models.ChatWait, f"generic-{status}").status == "armed"
     chat = db.get(models.Chat, f"dismiss-{status}")
     assert chat.pending_question_id is None
-    assert chat.messages[0]["blocks"][0]["platform_action"]["status"] == "awaiting_owner"
-    assert "answers" not in chat.messages[0]["blocks"][0]
+    assert list(transcript_rows.history(chat))[0]["blocks"][0]["platform_action"]["status"] == "awaiting_owner"
+    assert "answers" not in list(transcript_rows.history(chat))[0]["blocks"][0]
     assert [m["content"] for m in chat.pending_messages] == ["B"]
 
   restart = _submit(chat_writer.ResolvePlatformRestartCard(
@@ -155,9 +157,9 @@ def test_stale_snapshots_preserve_settlement_even_without_forged_yes(monkeypatch
   qid, wait_id, root, _ = _install(cid, status="met" if settled_by == "external_activation" else "armed")
   with SessionLocal() as db:
     chat = db.get(models.Chat, cid)
-    messages = copy.deepcopy(chat.messages)
+    messages = copy.deepcopy(list(transcript_rows.history(chat)))
     messages[0]["id"] = root
-    chat.messages = messages
+    transcript_rows.replace_all(object_session(chat), chat, messages)
     chat.active_assistant_message_id = root
     if settled_by == "external_activation":
       run = db.get(models.ChatRun, root)
@@ -174,7 +176,7 @@ def test_stale_snapshots_preserve_settlement_even_without_forged_yes(monkeypatch
   with SessionLocal() as db:
     if snapshot_kind == "history":
       chat_writer.update_last_assistant_message(db, cid, stale)
-      db.expire_all(); block = db.get(models.Chat, cid).messages[0]["blocks"][0]
+      db.expire_all(); block = list(transcript_rows.history(db.get(models.Chat, cid)))[0]["blocks"][0]
     else:
       # Exercise the persisted-history source after QuestionCommit cleared live.
       chat = db.get(models.Chat, cid); chat.live_assistant = None; db.commit()
@@ -202,7 +204,7 @@ def test_real_stop_cancels_even_met_undelivered_activation(status):
     assert db.get(models.ChatWait, wait_id).status == "cancelled"
     chat = db.get(models.Chat, cid)
     assert chat.pending_question_id is None
-    block = chat.messages[0]["blocks"][0]
+    block = list(transcript_rows.history(chat))[0]["blocks"][0]
     assert block["platform_action"]["status"] == "awaiting_owner"
     assert "answers" not in block
   restart = _submit(chat_writer.ResolvePlatformRestartCard(
@@ -260,7 +262,7 @@ def test_restart_settlement_updates_separated_live_snapshot(monkeypatch, settled
   qid, wait_id, root, _ = _install(cid, status="met" if settled_by == "external_activation" else "armed")
   with SessionLocal() as db:
     chat = db.get(models.Chat, cid)
-    chat.live_assistant = copy.deepcopy(chat.messages[0])
+    chat.live_assistant = copy.deepcopy(list(transcript_rows.history(chat))[0])
     if settled_by == "external_activation":
       run = db.get(models.ChatRun, root)
       run.status = "running"
@@ -293,7 +295,7 @@ def test_deferred_restart_monitor_does_not_suspend_other_work(db, wait_status):
   requirement = _requirement()
   now = now_naive_utc()
   chat = db.get(models.Chat, cid)
-  chat.messages = [{"role": "assistant", "blocks": [_card(question_id, wait_id, requirement)], "ts": 2}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "assistant", "blocks": [_card(question_id, wait_id, requirement)], "ts": 2}])
   chat.pending_question_id = question_id
   db.add(models.ChatWait(
     id=wait_id, chat_id=cid, created_by_run_id=root, root_run_id=root,

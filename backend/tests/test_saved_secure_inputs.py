@@ -1,4 +1,5 @@
 """Sealed owner pauses persist safely; an execution claim is never replayed."""
+from app import transcript_rows
 import asyncio
 from copy import deepcopy
 from datetime import timedelta
@@ -49,7 +50,7 @@ def _state(chat_id, request_id):
   with SessionLocal() as db:
     chat = db.get(models.Chat, chat_id)
     row = db.get(models.SavedSecureInput, request_id)
-    return row.status, chat.pending_question_id, chat.messages, chat.pending_messages
+    return row.status, chat.pending_question_id, list(transcript_rows.history(chat)), chat.pending_messages
 
 
 def test_saved_card_and_private_operation_commit_together_without_values(client, chat, sealed_run, tmp_path):

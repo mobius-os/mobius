@@ -5,16 +5,34 @@ from datetime import timedelta
 import threading
 import uuid
 
-from app import chat_search, models
+from app import chat_search, chat_writer, models, transcript_rows
 from app.chat_search import sql
 from app.chat_visibility import visible_in_owner_drawer
 from app.timeutil import now_naive_utc
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _background_search_build(db, monkeypatch):
+  chat_search.create_schema_v2(db.connection())
+  real_search = chat_search.search
+  def built_search(session, query, limit=20):
+    while True:
+      done, _remaining = chat_search.index_batch(session.connection())
+      session.commit()
+      if _remaining == 0:
+        break
+    return real_search(session, query, limit=limit)
+  built_search.__wrapped__ = real_search
+  monkeypatch.setattr(chat_search, "search", built_search)
+
+
 def _make_chat(db, title, texts, role="user"):
   # Distinct, increasing ts per message: ts is the drawer's reveal anchor and
   # is unique within a chat in production data.
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title=title,
     messages=[
@@ -28,7 +46,7 @@ def _make_chat(db, title, texts, role="user"):
 
 def _doc_count(db, chat_id):
   return db.execute(
-    sql("SELECT count(*) FROM chat_search_docs WHERE chat_id = :c"),
+    sql("SELECT count(*) FROM chat_search_docs_v2 WHERE chat_id = :c"),
     {"c": chat_id},
   ).fetchone()[0]
 
@@ -63,7 +81,7 @@ def test_result_carries_iso_last_active_timestamp(db):
 
 
 def test_result_falls_back_to_role_index_anchor_without_timestamp(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Untimed notes",
     messages=[
@@ -98,7 +116,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
     "Portable result",
     [f"{exact} capybara appears in visible prose"],
   )
-  hidden_row = models.Chat(
+  hidden_row = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Hidden transcript row",
     messages=[{
@@ -108,7 +126,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
       "hidden": True,
     }],
   )
-  hidden_chat = models.Chat(
+  hidden_chat = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Hidden drawer chat",
     messages=[{
@@ -118,7 +136,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
     }],
     agent_settings_json={"drawer_hidden": True},
   )
-  tool_only = models.Chat(
+  tool_only = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Tool output",
     messages=[{
@@ -158,7 +176,7 @@ def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
 ):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
-  verbose_old = models.Chat(
+  verbose_old = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Older verbose match",
     messages=[{
@@ -169,7 +187,7 @@ def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
     activity_at=now - timedelta(days=1),
   )
   recent = [
-    models.Chat(
+    chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title=f"Recent match {index}",
       messages=[{"role": "user", "content": needle, "ts": 1000}],
@@ -199,9 +217,9 @@ def test_appended_message_rebuild_keeps_one_doc_per_transcript_row(db):
   c = _make_chat(db, "Log", ["first entry"])
   chat_search.search(db, "first")  # index it
   before = _doc_count(db, c.id)
-  c.messages = c.messages + [
+  transcript_rows.append_many(db, c, [
     {"role": "assistant", "content": "quokka sighting confirmed", "ts": 2}
-  ]
+  ])
   db.commit()
   assert any(r["id"] == c.id for r in chat_search.search(db, "quokka"))
   assert _doc_count(db, c.id) == before + 1
@@ -211,9 +229,9 @@ def test_same_length_transcript_replacement_updates_existing_search_rows(db):
   c = _make_chat(db, "Mutable", ["oldplatypus phrase"])
   assert any(r["id"] == c.id for r in chat_search.search(db, "oldplatypus"))
 
-  c.messages = [
+  transcript_rows.replace_all(db, c, [
     {"role": "user", "content": "newporcupine phrase", "ts": 1000},
-  ]
+  ])
   db.commit()
 
   assert any(r["id"] == c.id for r in chat_search.search(db, "newporcupine"))
@@ -235,7 +253,7 @@ def test_deleted_chat_leaves_index_and_restore_returns(db):
   c.deleted_at = now_naive_utc()
   db.commit()
   assert chat_search.search(db, "pangolin") == []
-  assert _doc_count(db, c.id) == 0
+  # Generation rows may remain disposable while deleted; queries gate visibility.
   c.deleted_at = None
   db.commit()
   assert any(r["id"] == c.id for r in chat_search.search(db, "pangolin"))
@@ -244,7 +262,7 @@ def test_deleted_chat_leaves_index_and_restore_returns(db):
 def test_shrunk_history_triggers_full_rebuild(db):
   c = _make_chat(db, "Trimmed", ["alpha wombat", "beta wombat"])
   chat_search.search(db, "wombat")
-  c.messages = [{"role": "user", "content": "gamma capybara", "ts": 3}]
+  transcript_rows.replace_all(db, c, [{"role": "user", "content": "gamma capybara", "ts": 3}])
   db.commit()
   assert not any(
     r["id"] == c.id for r in chat_search.search(db, "wombat")
@@ -253,7 +271,7 @@ def test_shrunk_history_triggers_full_rebuild(db):
 
 
 def test_tool_noise_roles_are_not_indexed(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Noise",
     messages=[
@@ -269,7 +287,7 @@ def test_tool_noise_roles_are_not_indexed(db):
 
 
 def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Private transcript mechanics",
     messages=[
@@ -290,9 +308,9 @@ def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):
   )
   assert _doc_count(db, c.id) == 2  # title + visible message
 
-  messages = list(c.messages)
+  messages = list(transcript_rows.history(c))
   messages[1] = {**messages[1], "hidden": False}
-  c.messages = messages
+  transcript_rows.replace_all(db, c, messages)
   db.commit()
   hit = next(
     r for r in chat_search.search(db, "concealedcassowary") if r["id"] == c.id
@@ -314,7 +332,7 @@ def test_search_visibility_matches_owner_drawer_contract(db):
   db.flush()
 
   def chat(label, *, app_owned=False, settings=None):
-    row = models.Chat(
+    row = chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title=label,
       messages=[{"role": "user", "content": needle, "ts": 1000}],
@@ -361,7 +379,7 @@ def test_search_and_drawer_visibility_helpers_share_one_behavior_contract():
     (42, {"drawer_hidden": False}),
   )
   for created_by_app_id, settings in cases:
-    chat = models.Chat(
+    chat = chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title="Visibility contract",
       messages=[],
@@ -467,3 +485,51 @@ def test_search_anchor_opens_one_authoritative_window_through_the_tail(client, a
   assert [row["content"] for row in detail["messages"]] == [
     "before", "the searchable narwhal", "after",
   ]
+
+
+def test_new_chats_reconcile_only_after_initial_generation_done(db):
+  from app import transcript_rows
+  # Call the production search, bypassing this file's simulated background
+  # build wrapper. A new chat is not indexed by a request during initial build.
+  real_search = chat_search.search.__wrapped__
+  db.execute(sql("UPDATE upgrade_tasks SET status='pending' WHERE level=1 AND task='index_messages'"))
+  first = _make_chat(db, "Initial tiger", ["initialtiger prose"])
+  assert real_search(db, "initialtiger") == []
+  done, remaining = chat_search.index_batch(db.connection())
+  assert done >= 1 and remaining == 0
+  db.execute(sql("UPDATE upgrade_tasks SET status='done', done_units=:done, remaining_units=0 "
+                 "WHERE level=1 AND task='index_messages'"), {"done": done})
+  db.commit()
+  assert [r["id"] for r in real_search(db, "initialtiger")] == [first.id]
+
+  visible = _make_chat(db, "New lemur", ["freshlemur body"])
+  archived = _make_chat(db, "Archived mink", ["archivedmink body"])
+  archived.archived_at = now_naive_utc()
+  db.commit()
+  assert [r["id"] for r in real_search(db, "freshlemur")] == [visible.id]
+  archived_hit = real_search(db, "archivedmink")[0]
+  assert archived_hit["id"] == archived.id and archived_hit["archived"] is True
+
+  transcript_rows.replace_all(db, visible, [
+    {"role": "user", "content": "revisedlemur body", "ts": 1000},
+  ])
+  db.commit()
+  assert real_search(db, "freshlemur") == []
+  assert [r["id"] for r in real_search(db, "revisedlemur")] == [visible.id]
+
+
+def test_completed_generation_new_chat_reconcile_is_bounded(db):
+  real_search = chat_search.search.__wrapped__
+  assert db.execute(sql("SELECT status FROM upgrade_tasks WHERE level=1 AND task='index_messages'")).scalar_one() == "done"
+  for i in range(25):
+    db.add(chat_writer.create_chat(
+      id=f"new-search-{i:02d}", title=f"Bounded {i}",
+      messages=[{"role": "user", "content": f"boundedotter{i:02d}", "ts": i}],
+    ))
+  db.commit()
+  assert real_search(db, "boundedotter24") == []
+  indexed = db.execute(sql(
+    "SELECT COUNT(*) FROM chat_search_state_v2 WHERE chat_id LIKE 'new-search-%'"
+  )).scalar_one()
+  assert indexed == chat_search.INDEX_BATCH_MAX_CHATS
+  assert [r["id"] for r in real_search(db, "boundedotter24")] == ["new-search-24"]

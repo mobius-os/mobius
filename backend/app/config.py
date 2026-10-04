@@ -87,6 +87,9 @@ class Settings(BaseSettings):
   domain: str = "localhost"
   database_url: str = "sqlite:////data/db/ultimate.db"
   data_dir: str = "/data"
+  # Set by the reviewed self-host helper's frozen Compose override. Root boot
+  # verifies its mounted ACTIVE worker before any one-way data activation.
+  mobius_host_recovery_required: bool = False
   # Root the owner-facing /api/fs viewer is confined to (reads). Empty falls
   # back to data_dir; ships narrow (`/data`) and can widen later without code.
   # Writes are always pinned to data_dir regardless (the mobius process can

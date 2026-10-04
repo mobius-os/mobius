@@ -2669,10 +2669,12 @@ def _source_chat_metadata(app_id: int, source_root: str) -> list[dict]:
     # without edit previews; streaming bounds Python's transcript working set.
     # Full sidecars remain authoritative even when a preview omitted a path.
     candidates = db.query(models.Chat).options(load_only(
-      models.Chat.id, models.Chat.messages,
+      models.Chat.id,
     ), selectinload(models.Chat.live_snapshot)).filter(
       models.Chat.deleted_at.is_(None),
-      or_(cast(models.Chat.messages, Text).contains('"edit_preview"'),
+      or_(models.Chat.id.in_(db.query(models.ChatMessage.chat_id).filter(
+        models.ChatMessage.flags.op("&")(1) != 0,
+      )),
           models.Chat.live_snapshot.has(
             cast(models.ChatLiveAssistant.snapshot, Text).contains('"edit_preview"'))),
     ).yield_per(20)

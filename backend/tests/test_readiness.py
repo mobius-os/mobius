@@ -25,6 +25,27 @@ from app.database import SessionLocal
 from app.startup import DatabaseBootResult
 
 
+@pytest.fixture(autouse=True)
+def _activate_isolated_test_upgrade(fresh_db):
+  """Model the completed fresh-install gate before asserting writer readiness.
+
+  The shared fixture creates an empty disposable ORM schema but does not run
+  FastAPI's startup lifecycle. Readiness must not be made green by bypassing
+  its gate: actually activate the registered step for that fresh test schema.
+  """
+  import sqlite3
+  from app import one_way_upgrades
+  from app.database import engine
+
+  database_path = engine.url.database
+  with sqlite3.connect(database_path) as conn:
+    conn.execute(one_way_upgrades.COMPAT_TABLE_DDL)
+    conn.execute(
+      "INSERT OR IGNORE INTO platform_compat(id,floor,updated_at) VALUES(1,0,datetime('now'))"
+    )
+  one_way_upgrades.run_gate(database_path, frozenset())
+
+
 def _wait_for_healthy_writer():
   """Wait for an explicit recovery restart's asynchronous DB boot probe."""
   writer = get_writer()
@@ -222,7 +243,10 @@ def test_database_boot_retries_lock_contention(monkeypatch):
   monkeypatch.setattr(main_module, "mapped_schema_gaps", lambda _engine: [])
   monkeypatch.setattr(main_module.time, "sleep", sleeps.append)
 
-  assert main_module._init_db() == DatabaseBootResult()
+  result = main_module._init_db()
+  assert result.failure_reason is None
+  assert result.schema_gaps == ()
+  assert result.existing_tables  # The fixture's schema already exists.
   assert calls == 2
   assert sleeps == [1]
 

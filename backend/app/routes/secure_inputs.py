@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import models, secure_inputs
 from app.broadcast import get_broadcast
 from app.database import get_db
@@ -187,7 +188,7 @@ async def submit_secure_input(
       raise HTTPException(410, detail="Secure input request is no longer open.")
     if saved.status != "pending":
       return {"status": saved.status}
-    card = next((block.get("secure_input") for message in reversed(chat.messages or [])
+    card = next((block.get("secure_input") for message in reversed(transcript_rows.history(chat) or [])
                  for block in message.get("blocks") or []
                  if block.get("question_id") == request_id), None)
     if not isinstance(card, dict):

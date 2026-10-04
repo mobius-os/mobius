@@ -1,4 +1,5 @@
 """Apps edited by a chat remain durable artifacts until explicitly acknowledged."""
+from app.chat_writer import create_chat
 
 from datetime import timedelta
 
@@ -6,7 +7,7 @@ from app import chat_app_artifacts, models
 
 
 def _chat(db, chat_id):
-  chat = models.Chat(id=chat_id, title=chat_id)
+  chat = create_chat(id=chat_id, title=chat_id)
   db.add(chat)
   return chat
 

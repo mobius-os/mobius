@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app import chat_writer
 from app import chat_queue, contribution_review_runs as reviews, models
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
@@ -150,7 +151,7 @@ async def start_reviews(app_id: int, body: StartReviews,
         targets = [{**target, "approval": approval} for target in targets]
       else:
         choice = resolve_round_choice(db)
-        chat = models.Chat(id=str(uuid.uuid4()), title="Review selected contributions",
+        chat = chat_writer.create_chat(id=str(uuid.uuid4()), title="Review selected contributions",
                            provider=choice["provider"],
                            agent_settings_json={
                              key: value for key, value in choice.items()

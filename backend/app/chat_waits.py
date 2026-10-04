@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import models
 from app.chat_message_identity import assistant_message_run_id
 from app.config import get_settings
@@ -757,7 +758,7 @@ def safe_startup_writer_orphan(
     expected_content = _compose_resume_notice(row, outcome)
     expected_cid = "wait-result-" + physical.id[len(prefix):]
     expected_kind = WAIT_RESULT_MESSAGE_KIND
-  messages = list(chat.messages or [])
+  messages = list(transcript_rows.history(chat) or [])
   continuation = messages[-1] if messages else None
   live = chat.live_assistant or {}
   return bool(

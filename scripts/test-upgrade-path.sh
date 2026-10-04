@@ -15,9 +15,19 @@
 #    and must still be in the source afterwards.
 # 3. Stand in for a current self-hosted host helper. This checks the old
 #    updater and the new image's boot against the helper's contract; the
-#    helper's own code (scripts/mobius-rebuild-host.py) is not exercised.
+#    helper's replacement loop (scripts/mobius-rebuild-host.py run) is not
+#    exercised.
 # 4. Press Update through the same HTTP calls Settings makes. Any refusal
-#    fails the check: that is how a release strands existing instances.
+#    fails the check: that is how a release strands existing instances. The
+#    one exception is a release that advances
+#    deployment/self-hosted-helper.required: older releases must refuse it
+#    with external_activation_required, and the documented host path must
+#    then finish it. Like an owner, reinstall the helper from the candidate's
+#    checkout (its real worker seeds and verifies the ACTIVE state the
+#    installer mounts read-only), and let install-rebuild-helper.sh's bridge
+#    (scripts/finish-helper-update.py) queue the update through the old
+#    release's own updater. The candidate then boots with that mount and
+#    must convert a fixture chat exactly.
 # 5. Image updates: take the queued request as the helper would, recreate the
 #    container on the candidate image with the same volume, report success,
 #    and require the candidate to serve its own tree and settle the update.
@@ -30,12 +40,14 @@ CANDIDATE="${2:?candidate image}"
 REPO="${3:-.}"
 name="mobius-upgrade-path-$$"
 volume="${name}-data"
+host_state="${name}-host"
+start_args=()
 work=$(mktemp -d)
 record=/data/.platform-prepared-update.json
 
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker volume rm "$volume" >/dev/null 2>&1 || true
+  docker volume rm "$volume" "$host_state" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -62,6 +74,7 @@ start() {  # <image>
     -e "DOMAIN=localhost" \
     -e "FRONTEND_ORIGIN=http://localhost" \
     -e "MOEBIUS_SKIP_BOOTSTRAP=1" \
+    "${start_args[@]}" \
     "$1" >/dev/null
   for _ in $(seq 1 240); do
     if docker exec "$name" curl -fsS -o /dev/null http://127.0.0.1:8000/api/health 2>/dev/null; then
@@ -89,6 +102,10 @@ field() {  # <json> <python expression over d>; JSON on stdin (a preview can exc
 
 previous=$(image_sha "$PREVIOUS")
 candidate=$(image_sha "$CANDIDATE")
+helper_required() {  # <sha>: the helper revision that release requires (0 = none)
+  git -C "$REPO" show "$1:deployment/self-hosted-helper.required" 2>/dev/null \
+    | tr -d '[:space:]' || true
+}
 [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
   || fail "both images must record their commit in /app/build-info.json"
 [ "$previous" != "$candidate" ] || fail "the previous and candidate images are the same release"
@@ -134,6 +151,25 @@ if as_mobius grep -q "def local_image_changes" /data/platform/backend/app/platfo
     || fail "could not commit the local image-owned customization"
 fi
 
+# A chat with duplicate and missing ids, Unicode and typed values, stored as
+# the previous release stores it. Storage conversions must keep it exact.
+fixture='[{"id":"m1","role":"user","content":"h\u00e9llo \ud83d\ude00","ts":1},{"id":"m1","role":"assistant","content":"same id","blocks":[{"type":"text","content":"x"}],"n":1.0,"flag":true},{"role":"assistant","content":"no id","values":[0,-0.0,2.5,null]}]'
+docker exec -i -u mobius -w /data/platform/backend "$name" python3 - "$fixture" <<'PY' \
+  || fail "could not store the fixture chat"
+import json, sys
+sys.path.insert(0, ".")
+from app import models
+from app.database import SessionLocal
+db = SessionLocal()
+db.add(models.Chat(id="upgrade-path-fixture", title="Upgrade fixture",
+                   messages=json.loads(sys.argv[1]), has_messages=True))
+db.commit()
+db.close()
+PY
+reply=$(api GET "/api/chats/upgrade-path-fixture?limit=50")
+[ "$(code "$reply")" = 200 ] && [ "$(field "$(body "$reply")" 'd.get("total")')" = 3 ] \
+  || fail "the previous release does not serve the fixture chat: $(body "$reply")"
+
 echo "3. a current host helper is installed"
 docker exec "$name" sh -c '
   set -e
@@ -161,10 +197,48 @@ if [ "$local_edits" = true ] && [ "$needs_image" = True ]; then
     || fail "the review does not report the local Dockerfile customization: $preview"
 fi
 
+host_migration=false
+if [ "$(helper_required "$candidate")" != "$(helper_required "$previous")" ]; then
+  host_migration=true
+fi
+
 if [ "$needs_image" = True ]; then
   reply=$(api POST /api/platform/rebuild "$plan")
-  [ "$(code "$reply")" = 202 ] && [ "$(field "$(body "$reply")" 'd.get("state")')" = queued ] \
-    || fail "the previous release refused to install the candidate ($(code "$reply")): $(body "$reply")"
+  if [ "$host_migration" = true ]; then
+    [ "$(code "$reply")" = 409 ] \
+      && [ "$(field "$(body "$reply")" '(d.get("detail") or {}).get("code")')" = external_activation_required ] \
+      || fail "Settings must refuse a release that needs a newer host helper ($(code "$reply")): $(body "$reply")"
+    echo "   Settings refuses it: the release needs a newer host helper"
+    echo "3b. the owner reinstalls the helper from the candidate checkout"
+    # The installer's own steps for the host state: a private root directory,
+    # then the checkout's worker seeds and must verify as ACTIVE.
+    docker volume create "$host_state" >/dev/null
+    host_worker() {
+      docker run --rm --network none --user 0 --entrypoint python3 \
+        -v "$host_state:/var/lib/mobius-rebuild" "$CANDIDATE" \
+        -I -S /app/platform-baked/scripts/mobius-rebuild-host.py "$1"
+    }
+    docker run --rm --network none --user 0 --entrypoint chmod \
+      -v "$host_state:/var/lib/mobius-rebuild" "$CANDIDATE" 0700 /var/lib/mobius-rebuild \
+      || fail "could not prepare the helper state"
+    host_worker adopt-self || fail "the candidate worker could not be seeded"
+    host_worker verify-active >/dev/null || fail "the seeded worker is not a verified floor-aware ACTIVE worker"
+    # The installer's last step: start the waiting update through the old
+    # release's own reviewed updater.
+    finish=$(git -C "$REPO" show "$candidate:scripts/finish-helper-update.py" \
+      | docker exec -i -u mobius -w /data/platform/backend "$name" \
+          python3 -I - "$candidate" "$(helper_required "$candidate")") \
+      || fail "the installer could not start the waiting update: $finish"
+    [ "$(field "$(tail -n1 <<<"$finish")" 'd.get("state")')" = queued ] \
+      || fail "the installer did not queue the waiting update: $finish"
+    # Like the installed override, the replacement mounts the Host state
+    # read-only and declares that Host recovery is required.
+    start_args=(-e MOBIUS_HOST_RECOVERY_REQUIRED=1
+      --mount "type=volume,src=$host_state,dst=/run/mobius-rebuild-host,readonly")
+  else
+    [ "$(code "$reply")" = 202 ] && [ "$(field "$(body "$reply")" 'd.get("state")')" = queued ] \
+      || fail "the previous release refused to install the candidate ($(code "$reply")): $(body "$reply")"
+  fi
   request=$(docker exec "$name" cat /data/mobius-rebuild/inbox/request.json) \
     || fail "Update did not queue a container replacement: $(body "$reply")"
   [ "$(field "$request" 'd.get("expected_sha")')" = "$candidate" ] \
@@ -233,5 +307,27 @@ if [ "$needs_image" = True ]; then
     sleep 2
   done
   as_mobius test ! -e "$record" || fail "the update never settled: $(as_mobius cat "$record")"
+fi
+# The fixture chat survives exactly, however this release stores it.
+reply=$(api GET "/api/chats/upgrade-path-fixture?limit=50")
+[ "$(code "$reply")" = 200 ] || fail "the fixture chat is not readable after the update: $(body "$reply")"
+python3 - "$fixture" "$(body "$reply")" <<'PY' || fail "the fixture chat changed in the update"
+import json, sys
+expected, chat = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+actual = chat.get("messages") or []
+canon = lambda v: json.dumps(v, sort_keys=True, ensure_ascii=False)
+picked = [{k: m.get(k) for k in e} for m, e in zip(actual, expected)]
+assert len(actual) == len(expected), (len(actual), len(expected))
+assert [canon(m) for m in picked] == [canon(m) for m in expected], picked
+PY
+if [ "$host_migration" = true ]; then
+  docker exec "$name" python3 - <<'PY' || fail "the candidate did not convert storage exactly"
+import json, sqlite3
+conn = sqlite3.connect("file:/data/db/upgrade-path.db?mode=ro", uri=True)
+assert conn.execute("SELECT floor FROM platform_compat").fetchone()[0] >= 1
+rows = conn.execute("SELECT body FROM chat_messages WHERE chat_id = 'upgrade-path-fixture' ORDER BY seq").fetchall()
+assert len(rows) == 3, rows
+PY
+  echo "   storage converted with the floor-aware helper ACTIVE"
 fi
 echo "upgrade path: ${previous:0:12} installs ${candidate:0:12}"

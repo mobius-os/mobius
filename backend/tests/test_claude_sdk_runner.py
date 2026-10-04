@@ -9,6 +9,7 @@ never broadcast.
 """
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 import asyncio
 import json
@@ -1712,7 +1713,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
 
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id="claude-early",
       title="t",
       messages=[],

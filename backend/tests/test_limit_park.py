@@ -24,6 +24,7 @@ Locks in the contracts of the limit-park feature:
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
 """
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
@@ -90,7 +91,7 @@ def _seed_chat(
 ):
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="t",
       messages=(
@@ -162,7 +163,7 @@ def _chat_row(chat_id: str):
     from app.run_state import has_running_run
     return {
       "running_status": "running" if has_running_run(db, chat_id) else None,
-      "messages": materialized_messages(row),
+      "messages": list(materialized_messages(row)),
       "pending": list(row.pending_messages or []),
     }
   finally:
@@ -1030,7 +1031,7 @@ def _delegated_limit_park(
     db.add(app)
     db.flush()
     parent_id = f"{cid}-parent"
-    db.add(models.Chat(
+    db.add(create_chat(
       id=parent_id, title="Parent", messages=[], provider="codex",
     ))
     child = db.get(models.Chat, cid)
@@ -1297,7 +1298,7 @@ def test_sweep_auto_resumes_an_active_delegation_under_its_original_identity(
       db.add(app)
       db.flush()
       app_id = app.id
-    db.add(models.Chat(
+    db.add(create_chat(
       id="sweep-delegation-parent", title="Parent", messages=[],
       provider="codex",
     ))

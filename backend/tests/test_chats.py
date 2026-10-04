@@ -1,4 +1,7 @@
 """Chat route regression tests."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
@@ -188,7 +191,7 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
 ):
   started_at = datetime.now(UTC)
   started_ms = int(started_at.timestamp() * 1000)
-  chat.messages = [
+  transcript_rows.replace_all(object_session(chat), chat, [
     {
       "role": "user",
       "content": "/goal finish the review",
@@ -202,7 +205,7 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
       "ts": started_ms + 10,
       "cid": "goal-steer",
     },
-  ]
+  ])
   db.add(make_goal_run(db,
     id="active-goal-run",
     chat_id=chat.id,
@@ -947,14 +950,14 @@ def test_chat_list_orders_by_owner_activity_not_agent_updates(
 ):
   """A later agent write must not outrank a newer owner send or steer."""
   db.add_all([
-    models.Chat(
+    create_chat(
       id="agent-finished",
       title="Agent finished",
       messages=[{"role": "user", "content": "older owner activity"}],
       activity_at=datetime(2026, 7, 28, 9, 0, tzinfo=UTC),
       updated_at=datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
     ),
-    models.Chat(
+    create_chat(
       id="owner-steered",
       title="Owner steered",
       messages=[{"role": "user", "content": "newer owner activity"}],
@@ -1026,7 +1029,7 @@ def test_goal_clear_text_command_is_retired_before_queueing(
   assert response.status_code == 409, response.text
   assert response.json()["detail"]["code"] == "goal_clear_retired"
   db.refresh(chat)
-  assert chat.messages == []
+  assert list(transcript_rows.history(chat)) == []
   assert chat.pending_messages == []
 
 
@@ -1048,7 +1051,7 @@ def test_send_requires_explicit_model_before_any_durable_side_effect(
     "message": "Choose a model before sending this chat.",
   }
   db.refresh(chat)
-  assert chat.messages == []
+  assert list(transcript_rows.history(chat)) == []
   assert chat.pending_messages == []
   assert db.query(models.ChatRun).filter(
     models.ChatRun.chat_id == chat.id,
@@ -1077,7 +1080,7 @@ def test_fresh_send_response_includes_stored_user_message(
   assert isinstance(body["message"]["ts"], int)
 
   db.refresh(chat)
-  assert chat.messages == [body["message"]]
+  assert list(transcript_rows.history(chat)) == [body["message"]]
   assert chat.provider == "claude"
 
 
@@ -1113,7 +1116,7 @@ def test_uploaded_file_can_start_a_turn_without_typed_text(
   assert "brief.txt" in body["message"]["content"]
 
   db.refresh(chat)
-  assert chat.messages == [body["message"]]
+  assert list(transcript_rows.history(chat)) == [body["message"]]
 
 
 def test_retry_of_durable_message_is_acknowledged_without_new_turn(
@@ -1131,7 +1134,7 @@ def test_retry_of_durable_message_is_acknowledged_without_new_turn(
     "ts": 123,
     "cid": "cid-retry",
   }
-  chat.messages = [stored]
+  transcript_rows.replace_all(object_session(chat), chat, [stored])
   db.commit()
 
   response = client.post(
@@ -1147,7 +1150,7 @@ def test_retry_of_durable_message_is_acknowledged_without_new_turn(
     "running": False,
   }
   db.refresh(chat)
-  assert chat.messages == [stored]
+  assert list(transcript_rows.history(chat)) == [stored]
   assert calls == []
 
 
@@ -1160,7 +1163,7 @@ def test_retry_of_durable_message_preserves_a_later_running_turn(
     "ts": 123,
     "cid": "cid-retry",
   }
-  chat.messages = [stored]
+  transcript_rows.replace_all(object_session(chat), chat, [stored])
   db.commit()
   monkeypatch.setattr(
     "app.routes.chats_stream.is_chat_running", lambda _chat_id: True,
@@ -1176,7 +1179,7 @@ def test_retry_of_durable_message_preserves_a_later_running_turn(
   assert response.json()["status"] == "duplicate"
   assert response.json()["running"] is True
   db.refresh(chat)
-  assert chat.messages == [stored]
+  assert list(transcript_rows.history(chat)) == [stored]
 
 
 def test_retry_of_pending_message_returns_its_existing_queue_position(
@@ -1260,7 +1263,7 @@ def test_chat_title_naming_precedence(client, auth, db, chat):
   message; the agent can fill the name again once it's unlocked."""
   from app import models
   cid = chat.id
-  chat.messages = [{"role": "user", "content": "help me dial in espresso"}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "help me dial in espresso"}])
   chat.title = "help me dial in espresso"
   db.commit()
 
@@ -1334,7 +1337,7 @@ def test_clearing_chat_title_uses_the_same_first_message_preview_limit(
     )},
   ]
   first_message = " ".join(part["text"] for part in content)
-  chat.messages = [{"role": "user", "content": content}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": content}])
   chat.title = "Drawer title behavior"
   chat.title_locked = True
   db.commit()
@@ -1445,4 +1448,5 @@ def test_compact_park_handoff_never_selects_chat_transcript(chat, db):
     event.remove(db.bind, "before_cursor_execute", capture)
   chat_reads = [query for query in queries if "FROM chats" in query]
   assert chat_reads
-  assert all("chats.messages" not in query for query in chat_reads)
+  assert all("messages_v1" not in query for query in chat_reads)
+  assert not any("FROM chat_messages" in query for query in queries)

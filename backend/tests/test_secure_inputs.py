@@ -1,4 +1,5 @@
 """Security contract for transient-value input and sealed consumption."""
+from app import transcript_rows
 
 import asyncio
 import importlib.util
@@ -106,7 +107,7 @@ def test_sealed_values_never_enter_events_status_or_chat(
   assert username not in json.dumps(bc.event_log)
   assert password not in json.dumps(bc.event_log)
   db.refresh(chat)
-  assert chat.messages == []
+  assert list(transcript_rows.history(chat)) == []
   assert chat.pending_messages == []
 
 

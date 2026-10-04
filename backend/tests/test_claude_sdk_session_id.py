@@ -191,14 +191,18 @@ def test_resumable_cwd_encoding_nested(tmp_path):
   assert _resumable("sid", "/data", str(tmp_path)) is False
 
 
-class _FakeChatRow:
-  """Stand-in for a Chat ORM row carrying only `.messages`."""
+def _chat_row(db, messages):
+  """Real normalized chat for the resumed-context reader."""
+  from uuid import uuid4
+  from app.chat_writer import create_chat
 
-  def __init__(self, messages):
-    self.messages = messages
+  row = create_chat(id=str(uuid4()), title="Reseed", messages=messages)
+  db.add(row)
+  db.flush()
+  return row
 
 
-def test_resumed_context_block_round_trips_transcript():
+def test_resumed_context_block_round_trips_transcript(db):
   """The reseed block carries the chat's user/assistant turns in order.
 
   This is what chat.py prepends to `user_message` when the stored
@@ -207,7 +211,7 @@ def test_resumed_context_block_round_trips_transcript():
   """
   from app.chat_context import _build_resumed_context
 
-  row = _FakeChatRow([
+  row = _chat_row(db, [
     {"role": "user", "content": "build me a notes app"},
     {"role": "assistant", "content": "Done — notes app is live."},
     {"role": "user", "content": "add tags"},
@@ -224,11 +228,11 @@ def test_resumed_context_block_round_trips_transcript():
   assert "Assistant: Done" in block
 
 
-def test_resumed_context_skips_non_conversation_rows():
+def test_resumed_context_skips_non_conversation_rows(db):
   """Compaction/system rows and blank content are not reseeded."""
   from app.chat_context import _build_resumed_context
 
-  row = _FakeChatRow([
+  row = _chat_row(db, [
     {"role": "system", "content": "ignored"},
     {"kind": "compaction", "role": "assistant", "content": "summary"},
     {"role": "user", "content": "real question"},
@@ -240,10 +244,10 @@ def test_resumed_context_skips_non_conversation_rows():
   assert "ignored" not in block
 
 
-def test_resumed_context_labels_automatic_continuation_as_product_event():
+def test_resumed_context_labels_automatic_continuation_as_product_event(db):
   from app.chat_context import _build_resumed_context
 
-  row = _FakeChatRow([{
+  row = _chat_row(db, [{
     "role": "user",
     "kind": "auto_continuation",
     "continuation_reason": "restart",
@@ -255,15 +259,15 @@ def test_resumed_context_labels_automatic_continuation_as_product_event():
   assert "User: continue" not in block
 
 
-def test_resumed_context_none_when_empty():
+def test_resumed_context_none_when_empty(db):
   """A chat with no usable transcript yields no reseed block."""
   from app.chat_context import _build_resumed_context
 
-  assert _build_resumed_context(_FakeChatRow([])) is None
+  assert _build_resumed_context(_chat_row(db, [])) is None
   assert _build_resumed_context(None) is None
 
 
-def test_resumed_context_truncates_to_budget():
+def test_resumed_context_truncates_to_budget(db):
   """A huge history is truncated to the most-recent budget of turns.
 
   Oldest turns drop first so the block can't blow the context window;
@@ -274,7 +278,7 @@ def test_resumed_context_truncates_to_budget():
   big = "x" * 4000
   msgs = [{"role": "user", "content": f"{i} {big}"} for i in range(20)]
   msgs.append({"role": "user", "content": "MOST_RECENT marker"})
-  block = _build_resumed_context(_FakeChatRow(msgs))
+  block = _build_resumed_context(_chat_row(db, msgs))
   assert block is not None
   assert "MOST_RECENT marker" in block
   # The oldest turn was dropped, and the block respects the budget
@@ -283,7 +287,7 @@ def test_resumed_context_truncates_to_budget():
   assert len(block) < _RESUME_CONTEXT_CHAR_BUDGET + 2000
 
 
-def test_a_reseeded_helper_always_keeps_its_task():
+def test_a_reseeded_helper_always_keeps_its_task(db):
   """A helper's task lives only in its opening request; long later turns
   must never push it out of the reseed, or the helper resumes blind."""
   from app.chat_context import _RESUME_CONTEXT_CHAR_BUDGET, _build_resumed_context
@@ -293,14 +297,14 @@ def test_a_reseeded_helper_always_keeps_its_task():
   msgs += [{"role": "assistant", "content": f"{i} {big}"} for i in range(6)]
   msgs.append({"role": "assistant", "content": "LATEST progress"})
 
-  assert "TASK: audit" not in _build_resumed_context(_FakeChatRow(msgs))
-  block = _build_resumed_context(_FakeChatRow(msgs), keep_task=True)
+  assert "TASK: audit" not in _build_resumed_context(_chat_row(db, msgs))
+  block = _build_resumed_context(_chat_row(db, msgs), keep_task=True)
   assert block.index("User: TASK: audit") < block.index(
     "[Earlier turns omitted.]"
   ) < block.index("LATEST progress")
   assert "0 xxxx" not in block
   assert len(block) < _RESUME_CONTEXT_CHAR_BUDGET + 2000
 
-  short = _build_resumed_context(_FakeChatRow(msgs[:1] + msgs[-1:]), keep_task=True)
+  short = _build_resumed_context(_chat_row(db, msgs[:1] + msgs[-1:]), keep_task=True)
   assert "omitted" not in short
   assert short.count("TASK: audit") == 1

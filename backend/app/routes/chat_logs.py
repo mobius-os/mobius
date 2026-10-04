@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app import activity, chat_log_redaction as redact, models
+from app import activity, chat_log_redaction as redact, models, transcript_rows
 from app.chat_transcript import materialized_messages
 from app.database import get_db
 from app.deps import Principal, get_principal, require_app_permission
@@ -84,6 +84,7 @@ def list_chat_logs(
   higher tier may request chats still inside their seven-day recovery window.
   """
   _gate_summary(principal, db, include_deleted=include_deleted)
+  transcript_rows.pin_read_snapshot(db)
 
   # Recency means "last real activity", same as the owner's drawer
   # (routes/chats.py). updated_at also moves on non-activity writes —
@@ -207,6 +208,7 @@ def get_chat_log(
   readable only during their recovery window.
   """
   _gate_summary(principal, db, include_deleted=include_deleted)
+  transcript_rows.pin_read_snapshot(db)
 
   if include_deleted:
     cutoff = now_naive_utc() - SOFT_DELETE_TTL
@@ -221,7 +223,17 @@ def get_chat_log(
       raise HTTPException(status_code=404, detail="Chat not found")
   else:
     chat = get_active_chat_or_404(db, chat_id)
-  messages = redact.redact_messages(materialized_messages(chat))
+  messages = []
+  for stored in reversed(materialized_messages(chat)):
+    item = redact.redact_message(stored)
+    if item is None:
+      continue
+    if len(item["text"]) > redact.MESSAGE_CHARS:
+      item["text"] = item["text"][:redact.MESSAGE_CHARS] + "…"
+    messages.append(item)
+    if len(messages) >= redact.MAX_MESSAGES_PER_CHAT:
+      break
+  messages.reverse()
 
   if principal.app_id is not None:
     activity.log_event(

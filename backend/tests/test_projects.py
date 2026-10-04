@@ -1,4 +1,5 @@
 """First-class Project persistence, confinement, and legacy compatibility."""
+from app.chat_writer import create_chat
 
 import asyncio
 import json
@@ -1284,7 +1285,7 @@ def test_project_retention_removes_native_root_and_chat_but_preserves_linked_roo
   legacy_root = Path(os.environ["DATA_DIR"]) / "apps" / "legacy" / "files"
   legacy_root.mkdir(parents=True)
   (legacy_root / "keep.txt").write_text("legacy")
-  legacy_chat = models.Chat(id="expired-legacy-chat", title="Legacy", messages=[])
+  legacy_chat = create_chat(id="expired-legacy-chat", title="Legacy", messages=[])
   legacy_project = models.Project(
     id="75e94b57-fe5d-4bd7-a6e0-e74130566f37",
     name="Imported legacy",

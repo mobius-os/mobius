@@ -27,6 +27,13 @@ from app.allocator import limit_glibc_arenas
 
 limit_glibc_arenas()
 
+# Refuse this source on an image whose baked fallback is older than it needs,
+# before anything can open the database. The entrypoint's import probe runs
+# exactly this import, so a refusal takes its revert/baked-fallback path.
+from app.one_way_upgrades import assert_source_supported
+
+assert_source_supported()
+
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -132,7 +139,7 @@ def _database_degraded_payload() -> dict | None:
   if result is None or result.serviceable:
     return None
   if result.failure_reason:
-    return {"reason": result.failure_reason}
+    return {"reason": result.failure_reason, **dict(result.failure_detail)}
   if result.schema_gaps:
     return {
       "reason": "schema_mismatch",
@@ -225,13 +232,46 @@ def _init_db():
   mutates existing tables, so column upgrades remain owned by
   ``run_migrations``.
   """
+  from app import compat, one_way_upgrades
   from app.startup import DatabaseBootResult
 
+  # The import-time check honoured an update validator's candidate level; a
+  # served boot must hold against the real baked image, before any database
+  # access. See app/compat.py.
+  image_refusal = compat.serve_time_image_verdict()
+  if image_refusal is not None:
+    print("CRITICAL: " + image_refusal["message"])
+    return DatabaseBootResult(
+      failure_reason="image_below_source",
+      failure_detail=tuple(image_refusal.items()),
+    )
+
+  preflight = None
   for attempt in range(10):
     try:
+      # Read the floor and snapshot the tables before anything writes. The
+      # snapshot is kept across retries so a partially applied first attempt
+      # can never make a new database look pre-existing.
+      if preflight is None:
+        preflight = one_way_upgrades.preflight(engine)
+      refusal = one_way_upgrades.boot_refusal(preflight)
+      if refusal is not None:
+        reason, detail = refusal
+        print("CRITICAL: " + dict(detail)["message"])
+        return DatabaseBootResult(failure_reason=reason, failure_detail=detail)
+      one_way_upgrades.ensure_compat_record(engine.url.database, preflight)
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
       gaps = mapped_schema_gaps(engine)
+      # A legacy database still has chats.messages until the one-way gate
+      # renames it. The new mapper names only messages_v1, so that one missing
+      # column is expected *before* activation. Do not waive any other gap:
+      # converting a database with an unrelated broken mapped column would
+      # raise its floor before this release can safely serve it.
+      if "chats.messages_v1" in gaps and _legacy_transcript_transition_pending(
+        preflight.existing_tables,
+      ):
+        gaps = [gap for gap in gaps if gap != "chats.messages_v1"]
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
@@ -240,7 +280,10 @@ def _init_db():
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
         )
-      return DatabaseBootResult(schema_gaps=tuple(gaps))
+      return DatabaseBootResult(
+        schema_gaps=tuple(gaps),
+        existing_tables=preflight.existing_tables,
+      )
     except OperationalError as e:
       if attempt < 9 and _database_init_error_is_transient(e):
         delay = min(2 ** attempt, 10)
@@ -248,6 +291,34 @@ def _init_db():
         time.sleep(delay)
       else:
         raise
+
+
+def _legacy_transcript_transition_pending(existing_tables: frozenset[str]) -> bool:
+  """Only the exact pre-activation legacy shape may defer one mapped gap.
+
+  This is a read-only physical-schema check, not an ORM query: the mapper's
+  messages_v1 column is necessarily absent here. An already-ACTIVE step with
+  a restored old chats table must fail closed rather than run another upgrade.
+  """
+  if "chats" not in existing_tables:
+    return False
+  with engine.connect() as conn:
+    columns = {
+      row[1] for row in conn.exec_driver_sql("PRAGMA table_info(chats)")
+    }
+    if "messages" not in columns or "messages_v1" in columns:
+      return False
+    tables = {
+      row[0] for row in conn.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+      )
+    }
+    if "platform_upgrades" not in tables:
+      return True
+    state = conn.exec_driver_sql(
+      "SELECT state FROM platform_upgrades WHERE level = 1"
+    ).scalar()
+    return state is None or state == "preparing"
 
 
 def _assert_provider_defaults(provider_names) -> None:
@@ -1060,6 +1131,10 @@ def health(response: Response):
   # offers a container-only upgrade to a runtime that reports none: its image
   # predates the boot transaction and cannot take a package-changing release.
   payload["boot_protocol"] = BOOT_PROTOCOL if image_activates_updates() else None
+  # The database's compatibility floor (None when unknown). A deployment
+  # controller must never roll back to an image whose level is below it.
+  from app.one_way_upgrades import reported_floor
+  payload["compat_floor"] = reported_floor()
   if degraded:
     # Still HTTP 200: database failure must never masquerade as device offline.
     # The strict and readiness variants below carry the 5xx service verdict.
@@ -1115,6 +1190,10 @@ def service_readiness() -> dict:
   )
   if degraded:
     return {"ready": False, **degraded}
+  from app import one_way_upgrades
+  pending_upgrade = one_way_upgrades.readiness_verdict()
+  if pending_upgrade:
+    return {"ready": False, **pending_upgrade}
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
   if not is_ready:

@@ -8,6 +8,7 @@ owner that can be exercised without Docker or a production environment.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -62,6 +63,111 @@ def rollback_tag_for_image(image: str) -> str:
   if not repository:
     raise DeployInputError("invalid image reference")
   return f"{repository}:rollback-prev"
+
+
+# --- Rollback floor preflight ------------------------------------------------
+#
+# ONE_WAY_UPGRADES_DESIGN.md, "Host rollbacks". Before an automatic rollback
+# replaces a failed container, the host compares the rollback image's baked
+# COMPAT_LEVEL with the database's floor, read directly and read-only. The same
+# probe text is embedded in scripts/mobius-rebuild-host.py, which installs as a
+# single file; a test keeps the two copies identical.
+
+BAKED_COMPAT_PATH = "/app/platform-baked/backend/app/compat.py"
+# The DATABASE_URL every Compose file pins, and app.config's default.
+ROLLBACK_DATABASE = "/data/db/ultimate.db"
+
+# Runs as `python3 -I -c FLOOR_PROBE <db>` in a one-off container with the data
+# mounted read-only, after the failed container is stopped. It never imports
+# application code. The last stdout line is `floor=<n>` (exit 0) or
+# `error=<reason>` (exit 3): anything ambiguous fails closed.
+FLOOR_PROBE = """\
+import os, sqlite3, stat, sys, urllib.parse
+path = sys.argv[1]
+def verdict(text, code):
+  print(text)
+  raise SystemExit(code)
+try:
+  info = os.lstat(path)
+except FileNotFoundError:
+  verdict("error=database_missing", 3)
+if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+  verdict("error=database_not_a_file", 3)
+with open(path, "rb") as handle:
+  if handle.read(16) != b"SQLite format 3\\x00":
+    verdict("error=database_invalid", 3)
+def size(suffix):
+  try:
+    return os.lstat(path + suffix).st_size
+  except FileNotFoundError:
+    return None
+if size("-journal"):
+  verdict("error=hot_journal", 3)
+wal, shm = size("-wal"), size("-shm")
+if wal is not None and shm is None:
+  verdict("error=wal_without_shm", 3)
+# The writer is stopped. Without a WAL the main file is complete; open it as
+# immutable, because a read-only mount cannot create the -shm a WAL-mode open
+# otherwise needs. With a WAL and its -shm, a plain read-only open replays it.
+query = "mode=ro" if wal is not None else "mode=ro&immutable=1"
+try:
+  con = sqlite3.connect("file:" + urllib.parse.quote(path) + "?" + query, uri=True)
+  tables = {row[0] for row in con.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'table'")}
+  if "platform_compat" in tables:
+    row = con.execute("SELECT floor FROM platform_compat WHERE id = 1").fetchone()
+    if row is None:
+      verdict("error=floor_row_missing", 3)
+    floor = row[0]
+  elif "schema_migrations" in tables:
+    floor = 0
+  else:
+    verdict("error=not_a_mobius_database", 3)
+  # A missing or damaged floor row must not look safe: an active step's
+  # level is a floor too.
+  top = None
+  if "platform_upgrades" in tables:
+    top = con.execute(
+      "SELECT MAX(level) FROM platform_upgrades WHERE state = 'active'").fetchone()[0]
+  con.close()
+except sqlite3.Error as exc:
+  verdict("error=read_failed:" + type(exc).__name__, 3)
+if type(floor) is not int or floor < 0:
+  verdict("error=floor_invalid", 3)
+if top is not None:
+  if type(top) is not int or top < 0:
+    verdict("error=floor_invalid", 3)
+  floor = max(floor, top)
+verdict("floor=%d" % floor, 0)
+"""
+
+
+def compat_level(source: str, name: str = "COMPAT_LEVEL") -> int:
+  """``NAME = <int>`` from compat.py text, without importing it.
+
+  Absent, unparsable, or non-literal counts as 0: the lowest level can only
+  make the rollback check stricter. Mirrors app.compat.declared_level.
+  """
+  try:
+    body = ast.parse(source).body
+  except (SyntaxError, ValueError):
+    return 0
+  levels = []
+  for node in body:
+    if isinstance(node, ast.Assign):
+      targets, value = node.targets, node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+      targets, value = [node.target], node.value
+    else:
+      continue
+    if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+      levels.append(value.value if isinstance(value, ast.Constant) else None)
+  # Python uses the last assignment; a duplicate is ambiguous, so it counts as
+  # malformed, like any other value that is not one literal integer.
+  if len(levels) != 1:
+    return 0
+  level = levels[0]
+  return level if type(level) is int and level >= 0 else 0
 
 
 # --- Synthetic-turn oracle ---------------------------------------------------
@@ -212,6 +318,9 @@ def _parser() -> argparse.ArgumentParser:
   rollback = commands.add_parser("rollback-tag")
   rollback.add_argument("image")
 
+  commands.add_parser("compat-level", help="read compat.py text on stdin")
+  commands.add_parser("floor-probe", help="print the rollback floor probe")
+
   classify = commands.add_parser("classify-turn")
   classify.add_argument("chat_json", help="chat runtime JSON, or - for stdin")
 
@@ -235,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
       # A settled synthetic turn that did not pass is a deploy-gate failure.
       if result == SYNTHETIC_FAILED:
         return 2
+    elif args.command == "compat-level":
+      # Bounded: compat.py is a few KiB; anything larger is not one.
+      print(compat_level(sys.stdin.read(1 << 16)))
+    elif args.command == "floor-probe":
+      sys.stdout.write(FLOOR_PROBE)
     elif args.command == "build-receipt":
       receipt = build_deploy_receipt(_read_json_arg(args.receipt_json))
       print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))

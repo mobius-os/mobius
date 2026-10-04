@@ -10,6 +10,10 @@ on:
         description: Replay historical releases on a disposable hosted runner (up to 60 minutes)
         type: boolean
         default: false
+      transcript_host_proof:
+        description: Prove the transcript-row first upgrade, interruptions and floor-aware recovery with the real Host helper on a disposable hosted runner (up to 120 minutes)
+        type: boolean
+        default: false
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
     # same suite for every layer so the chain is reviewable in parallel; main's
@@ -53,6 +57,100 @@ jobs:
           # No image build, publication, live-host credentials, or remote Docker.
           sudo git config --global --add safe.directory '*'
           sudo env MOBIUS_RELEASE_REPLAY=1 scripts/test-host-helper.sh "$PREVIOUS" "$TARGET"
+
+  transcript-host-proof:
+    # Installs root-owned units and replaces containers: never on PR/merge
+    # events or a self-hosted runner, and never with live-host credentials.
+    if: github.event_name == 'workflow_dispatch' && inputs.transcript_host_proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Make room for two releases and a disposable registry
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Build this commit's official-form image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        env:
+          # The next step restarts the daemon, which stops this builder.
+          DOCKER_BUILD_SUMMARY: 'false'
+        with:
+          context: .
+          load: true
+          tags: ghcr.io/mobius-os/mobius:sha-${{ github.sha }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+      - name: Serve both releases to the installed worker from a disposable registry
+        run: |
+          # The worker pulls ghcr.io/mobius-os/mobius:sha-<sha> and checks the
+          # labels itself. Route that name to a registry on this runner only;
+          # the previous release is copied from the real registry first.
+          git fetch -q origin main
+          base=$(git merge-base HEAD FETCH_HEAD)
+          # On main itself the base is this commit; the previous release is older.
+          [ "$base" != "$(git rev-parse HEAD)" ] || base=$(git rev-parse HEAD^)
+          image=ghcr.io/mobius-os/mobius
+          previous=""
+          for sha in $(git rev-list --first-parent --max-count=200 "$base"); do
+            if docker manifest inspect "$image:sha-$sha" >/dev/null 2>&1; then previous=$sha; break; fi
+          done
+          [ -n "$previous" ] || { echo "no published release at or before $base"; exit 1; }
+          docker pull -q "$image:sha-$previous"
+          docker pull -q registry:2
+          certs=$(mktemp -d)
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=ghcr.io" \
+            -addext "subjectAltName=DNS:ghcr.io" -keyout "$certs/ghcr.key" -out "$certs/ghcr.crt" 2>/dev/null
+          # Serve on the Docker bridge address with a CA the daemon verifies, as
+          # it does for the real registry (loopback would be an insecure one).
+          address=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          [[ $address =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no IPv4 bridge address: '$address'"; exit 1; }
+          echo "$address ghcr.io" | sudo tee -a /etc/hosts >/dev/null
+          sudo install -D -m 0644 "$certs/ghcr.crt" /etc/docker/certs.d/ghcr.io/ca.crt
+          # The daemon still reaches the real registry it just pulled from (an
+          # earlier attempt's pushes never arrived here), so restart it before
+          # anything else uses the redirected name.
+          sudo systemctl restart docker
+          docker run -d --name disposable-registry -p "$address:443:443" -v "$certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/ghcr.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/ghcr.key registry:2 >/dev/null
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -fsS --cacert "$certs/ghcr.crt" https://ghcr.io/v2/ >/dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          [ -n "$ready" ] || { echo "the disposable registry never answered"; exit 1; }
+          docker push "$image:sha-$previous"
+          docker push "$image:sha-${{ github.sha }}"
+          # Prove both releases landed here rather than anywhere else.
+          tags=$(curl -fsS --cacert "$certs/ghcr.crt" https://ghcr.io/v2/mobius-os/mobius/tags/list)
+          echo "$tags"
+          for tag in "sha-$previous" "sha-${{ github.sha }}"; do
+            grep -q "\"$tag\"" <<<"$tags" || { echo "$tag is missing from the disposable registry"; exit 1; }
+          done
+          echo "PREVIOUS=$previous" >> "$GITHUB_ENV"
+      - name: Disposable registry diagnostics
+        if: failure()
+        run: |
+          getent hosts ghcr.io || true
+          grep -E '^hosts:' /etc/nsswitch.conf || true
+          sudo cat /etc/docker/daemon.json 2>/dev/null || true
+          systemctl show docker -p Environment -p DropInPaths || true
+          sudo ss -ltnp | grep -E ':(80|443) ' || true
+          docker logs --tail 200 disposable-registry 2>&1 || true
+          sudo journalctl --no-pager -u docker --since '-2h' | tail -n 120 || true
+      - name: First upgrade, interruptions and floor-aware recovery on a real Host
+        run: |
+          # The installer runs as root over this runner-owned checkout.
+          sudo git config --global --add safe.directory '*'
+          sudo scripts/test-transcript-host-cutover.sh "$PREVIOUS" "${{ github.sha }}"
 
   privacy:
     runs-on: ubuntu-latest
@@ -340,7 +438,7 @@ jobs:
           run=true
           if [ "$EVENT" = pull_request ]; then
             git diff --name-only "$PR_BASE" HEAD \
-              | grep -qE '^(Dockerfile|\.dockerignore|backend/requirements\.(txt|lock)|backend/runtime/|backend/scripts/(entrypoint\.sh|install_platform_release\.py|prepare-container-cutover\.py)|backend/app/(platform_update|platform_boot|platform_activation|deployment_control|restart_util|restart_ledger|main|startup|auth)\.py|backend/app/routes/(platform|admin|auth)\.py|scripts/(mobius-rebuild-host\.py|test-upgrade-path\.sh)|deployment/|\.github/workflows/test\.yml)' \
+              | grep -qE '^(Dockerfile|\.dockerignore|backend/requirements\.(txt|lock)|backend/runtime/|backend/scripts/(entrypoint\.sh|install_platform_release\.py|prepare-container-cutover\.py)|backend/app/(platform_update|platform_boot|platform_activation|deployment_control|restart_util|restart_ledger|main|startup|auth)\.py|backend/app/routes/(platform|admin|auth)\.py|scripts/(mobius-rebuild-host\.py|install-rebuild-helper\.sh|finish-helper-update\.py|test-upgrade-path\.sh)|deployment/|\.github/workflows/test\.yml)' \
               || run=false
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"

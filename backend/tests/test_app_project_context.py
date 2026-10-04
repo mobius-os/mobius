@@ -7,6 +7,7 @@ etc. resolve under that project, not the shared app root) and exposes
 APP_PROJECT_ID + an "Active project" context line. These cover the scoping and
 its strict slug validation — a project_id is used as a path component.
 """
+from app.chat_writer import create_chat
 
 import os
 
@@ -27,7 +28,7 @@ def _app_chat(db, *, project_id=None):
   db.commit()
   db.refresh(app)
   settings = {"project_id": project_id} if project_id else None
-  chat = models.Chat(
+  chat = create_chat(
     id=f"proj-chat-{project_id or 'none'}-{app.id}",
     title="p", messages=[],
     created_by_app_id=app.id,
@@ -72,7 +73,7 @@ def test_malformed_project_id_rejected(db):
 
 
 def test_non_app_chat_has_no_context(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="owner-proj-chat", title="x", messages=[],
     agent_settings_json={"project_id": "alpha"},
   )
@@ -84,7 +85,7 @@ def test_non_app_chat_has_no_context(db):
 
 
 def test_build_chat_with_one_linked_app_gets_exact_identity(db):
-  chat = models.Chat(id="builder-one", title="build", messages=[])
+  chat = create_chat(id="builder-one", title="build", messages=[])
   db.add(chat)
   db.commit()
   app = models.App(
@@ -108,7 +109,7 @@ def test_build_chat_with_one_linked_app_gets_exact_identity(db):
 
 
 def test_build_chat_with_multiple_apps_never_guesses_one_app(db):
-  chat = models.Chat(id="builder-many", title="build", messages=[])
+  chat = create_chat(id="builder-many", title="build", messages=[])
   db.add(chat)
   db.commit()
   apps = [
@@ -131,7 +132,7 @@ def test_build_chat_with_multiple_apps_never_guesses_one_app(db):
 def test_deleted_linked_app_is_not_injected(db):
   from datetime import UTC, datetime
 
-  chat = models.Chat(id="builder-deleted", title="build", messages=[])
+  chat = create_chat(id="builder-deleted", title="build", messages=[])
   db.add(chat)
   db.commit()
   db.add(models.App(

@@ -1,4 +1,5 @@
 """Durable normalized helper-lifecycle contract."""
+from app.chat_writer import create_chat
 
 import asyncio
 from concurrent.futures import Future
@@ -20,7 +21,7 @@ from test_app_fixtures import create_local_app
 
 
 def _chat_run(db, chat_id="chat-life", run_id="run-life", *, deleted=False):
-  chat = models.Chat(
+  chat = create_chat(
     id=chat_id,
     title="Lifecycle",
     messages=[],

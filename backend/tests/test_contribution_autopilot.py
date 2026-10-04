@@ -7,6 +7,8 @@ Two layers:
     DB row is the only authorization, a forged ledger block does nothing, agent
     tokens can't forge a claim, status advertises capability.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import json
 import os
@@ -430,7 +432,7 @@ def test_visible_in_owner_drawer_honors_explicit_flag():
   from app.routes.chats import _visible_in_owner_drawer
 
   # An ordinary owner chat (no creating app) is visible by default...
-  owner_chat = models.Chat(
+  owner_chat = create_chat(
     id="c-owner", title="t", messages=[], pending_messages=[],
   )
   assert _visible_in_owner_drawer(owner_chat) is True
@@ -528,7 +530,7 @@ def test_followup_chat_rotates_on_provider_or_model_identity_change(
   assert old.agent_settings_json["drawer_hidden"] is True
   assert new.provider == provider
   assert new.session_id is None
-  assert new.messages == []
+  assert list(transcript_rows.history(new)) == []
   assert new.agent_settings_json["model"] == model
   assert new.agent_settings_json["effort"] == "high"
   assert new.agent_settings_json["drawer_hidden"] is True
@@ -572,7 +574,7 @@ async def test_round_turn_does_not_bypass_pending_owner_question(
       }],
     }],
   }
-  chat = models.Chat(
+  chat = create_chat(
     id="autopilot-question-blocked",
     title="Autopilot follow-up",
     messages=[question],
@@ -603,7 +605,7 @@ async def test_round_turn_does_not_bypass_pending_owner_question(
   assert [start["chat_id"] for start in starts] == [chat.id]
   db.expire_all()
   parked = db.get(models.Chat, chat.id)
-  assert parked.messages == [question]
+  assert list(transcript_rows.history(parked)) == [question]
   assert parked.pending_question_id == "owner-decision"
   assert db.query(models.ChatRun).filter_by(chat_id=chat.id).count() == 0
 

@@ -1,4 +1,5 @@
 """Installed-app system-prompt composition and uninstall boundary."""
+from app.chat_writer import create_chat
 
 from datetime import datetime, UTC
 import json
@@ -135,7 +136,7 @@ def test_installed_app_suffix_also_applies_to_custom_chat_prompts(monkeypatch, d
     "app.system_prompts.compose_system_prompt",
     lambda base, db: base + "\n\n<!-- installed app: memory -->\nRECALL\n",
   )
-  row = models.Chat(id="custom", title="Custom", messages=[])
+  row = create_chat(id="custom", title="Custom", messages=[])
   db.add(row)
   db.commit()
 
@@ -153,8 +154,8 @@ def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
     name="Memory", slug="memory", source_dir=str(source),
     system_prompt_file="memory-core.md",
   )
-  first = models.Chat(id="first", title="First", messages=[])
-  second = models.Chat(id="second", title="Second", messages=[])
+  first = create_chat(id="first", title="First", messages=[])
+  second = create_chat(id="second", title="Second", messages=[])
   db.add_all([app, first, second])
   db.commit()
 
@@ -185,8 +186,8 @@ def test_app_update_changes_only_chats_started_after_update(db):
     name="Memory", slug="updated-memory", source_dir=str(source),
     system_prompt_file="memory-core.md",
   )
-  first = models.Chat(id="before-update", title="Before", messages=[])
-  second = models.Chat(id="after-update", title="After", messages=[])
+  first = create_chat(id="before-update", title="Before", messages=[])
+  second = create_chat(id="after-update", title="After", messages=[])
   db.add_all([app, first, second])
   db.commit()
 
@@ -204,8 +205,8 @@ def test_app_update_changes_only_chats_started_after_update(db):
 
 
 def test_identical_chat_prompts_share_one_snapshot_row(db):
-  first = models.Chat(id="first-shared", title="First", messages=[])
-  second = models.Chat(id="second-shared", title="Second", messages=[])
+  first = create_chat(id="first-shared", title="First", messages=[])
+  second = create_chat(id="second-shared", title="Second", messages=[])
   db.add_all([first, second])
   db.commit()
 
@@ -226,7 +227,7 @@ def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
     name="Memory", slug="preview-memory", source_dir=str(source),
     system_prompt_file="memory-core.md",
   )
-  row = models.Chat(id="preview", title="Preview", messages=[])
+  row = create_chat(id="preview", title="Preview", messages=[])
   db.add_all([app, row])
   db.commit()
 
@@ -237,10 +238,10 @@ def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
 
 
 def test_rollout_backfill_freezes_started_chats_but_not_empty_drafts(db):
-  started = models.Chat(
+  started = create_chat(
     id="legacy-started", title="Started", messages=[{"role": "user", "text": "hi"}],
   )
-  empty = models.Chat(id="legacy-empty", title="Empty", messages=[])
+  empty = create_chat(id="legacy-empty", title="Empty", messages=[])
   db.add_all([started, empty])
   db.commit()
 

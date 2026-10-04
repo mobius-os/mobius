@@ -231,6 +231,15 @@ def debug_status(
       result["platform_pre_clone_active"] = True
 
 
+  try:
+    from app import one_way_upgrades
+    from app.database import engine
+    upgrades = one_way_upgrades.upgrade_status(engine.url.database)
+  except Exception:
+    # Database diagnostics must remain usable when the database is damaged.
+    upgrades = None
+  if upgrades:
+    result["one_way_upgrades"] = upgrades
   return result
 
 

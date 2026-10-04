@@ -1,4 +1,5 @@
 """Atomic ordering contract for the drawer's combined pinned list."""
+from app.chat_writer import create_chat
 
 import threading
 import time
@@ -14,7 +15,7 @@ from app.routes import chats as chat_routes
 def _seed_pinned_rows(db):
   base = datetime(2026, 7, 30, 1, 0, 0)
   chats = [
-    models.Chat(
+    create_chat(
       id=f"chat-{index}",
       title=f"Chat {index}",
       messages=[],
@@ -123,7 +124,7 @@ def test_combined_pinned_order_rejects_a_partial_identity_set_without_writes(
 
 
 def test_chat_pin_response_returns_the_exact_persisted_rank(client, auth, db):
-  chat = models.Chat(id="canonical-pin", title="Canonical pin", messages=[])
+  chat = create_chat(id="canonical-pin", title="Canonical pin", messages=[])
   db.add(chat)
   db.commit()
 
@@ -141,7 +142,7 @@ def test_late_older_pin_intent_cannot_overwrite_newer_unpin(
   client, auth, db, monkeypatch,
 ):
   monkeypatch.setattr(drawer_pins, "_LATEST_INTENT_VERSIONS", OrderedDict())
-  chat = models.Chat(
+  chat = create_chat(
     id="late-pin", title="Late pin", messages=[], pinned_at=datetime.now(),
   )
   db.add(chat)
@@ -373,7 +374,7 @@ def test_concurrent_pin_waits_until_reorder_validation_and_commit_finish(
   client, auth, db, monkeypatch,
 ):
   chats, apps, projects = _seed_pinned_rows(db)
-  later_chat = models.Chat(id="later-pin", title="Later pin", messages=[])
+  later_chat = create_chat(id="later-pin", title="Later pin", messages=[])
   db.add(later_chat)
   db.commit()
   requested = [

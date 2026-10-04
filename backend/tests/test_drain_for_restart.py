@@ -12,6 +12,7 @@ Locks in the five contracts that distinguish a restart-drain from a Stop:
   (e) Stop/finalize failures retain authenticated exact-run intent, and startup
       converts every opted fallback to the same immediate continuation path.
 """
+from app.chat_writer import create_chat
 
 import asyncio
 import hashlib
@@ -52,7 +53,7 @@ def _seed(chat_id: str, *, pending=None, messages=None):
   db = SessionLocal()
   try:
     started = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=30)
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="t",
       messages=messages or [{"role": "user", "content": "do work", "ts": 1}],
@@ -134,7 +135,7 @@ def _delegated_live_turn(chat_id: str, *, pending=None):
     db.add(app)
     db.flush()
     app_id = app.id
-    db.add(models.Chat(
+    db.add(create_chat(
       id=f"parent-{chat_id}", title="Parent", messages=[], provider="claude",
     ))
     child = db.get(models.Chat, chat_id)
@@ -942,7 +943,7 @@ def test_send_while_draining_queues_instead_of_starting(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=cid,
       title="t",
       messages=[],
@@ -977,7 +978,7 @@ def test_force_steer_while_draining_queues_too(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=cid,
       title="t",
       messages=[],

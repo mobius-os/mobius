@@ -26,6 +26,7 @@ import sys
 import threading
 from pathlib import Path
 
+from app import compat
 from app.config import import_probe_env
 
 log = logging.getLogger("mobius.restart")
@@ -44,7 +45,11 @@ class RestartSourceInvalid(RuntimeError):
   """The editable platform would not survive the next startup probe."""
 
 
-def validate_restart_source(platform_root: Path | None = None) -> None:
+def validate_restart_source(
+  platform_root: Path | None = None,
+  *,
+  candidate_target: str | None = None,
+) -> None:
   """Run the production boot import verdict before accepting a restart.
 
   The entrypoint deliberately falls back to the baked platform when an edited
@@ -56,6 +61,13 @@ def validate_restart_source(platform_root: Path | None = None) -> None:
   backend cwd, scrubbed repository/Python controls, and the explicit router
   registry verdict.  A missing editable backend is valid for a baked-only
   installation; first-boot seeding remains owned by the entrypoint.
+
+  ``candidate_target`` is the reviewed release commit of an image-requiring
+  update being prepared (``platform_update._prepare`` only). The child then
+  judges the source against that target's own image level rather than this
+  older image's (see ``platform_update.candidate_validation_env``). Generic
+  restart callers never pass it, and without it the child never sees the
+  candidate variables.
   """
   platform_root = platform_root or Path(
     os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform")
@@ -80,6 +92,17 @@ def validate_restart_source(platform_root: Path | None = None) -> None:
     env.pop(key, None)
   env["PYTHONDONTWRITEBYTECODE"] = "1"
   import_probe_env(env)
+  env.pop(compat.CANDIDATE_MARKER_ENV, None)
+  env.pop(compat.CANDIDATE_LEVEL_ENV, None)
+  if candidate_target is not None:
+    from app.platform_update import candidate_validation_env
+
+    try:
+      candidate_validation_env(env, platform_root, candidate_target)
+    except ValueError as exc:
+      raise RestartSourceInvalid(
+        f"Update stopped: the release's image level could not be read. {exc}"
+      ) from exc
   command = [
     sys.executable,
     "-c",

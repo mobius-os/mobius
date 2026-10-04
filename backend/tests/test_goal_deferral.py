@@ -4,6 +4,8 @@ from copy import deepcopy
 import pytest
 
 from app import models
+from app.chat_writer import create_chat
+from app import transcript_rows
 from app.goals import goal_hold, update_goal_record
 from app.goal_plans import GoalPlanConflict, presented_goal
 from app.chat_writer import FinishRun, StartTurn, StartTurnRecoveryChanged
@@ -160,7 +162,7 @@ def test_settlement_cannot_hide_an_older_live_helper_behind_a_newer_finished_att
     root = "root-" + label
     db.add(models.ChatRun(id=root, root_run_id=root, chat_id=chat.id, goal_id=goal.id,
       goal_objective=goal.objective, status="completed", started_at=started))
-    child = models.Chat(id="child-" + label, title=label, messages=[])
+    child = create_chat(id="child-" + label, title=label, messages=[])
     db.add(child)
     db.flush()
     db.add(models.ChatRun(id="child-run-" + label, chat_id=child.id, status=status))
@@ -224,7 +226,7 @@ async def test_normal_closeout_after_deferral_never_starts_settlement_or_invents
   assert db.get(models.ChatGoal, "goal-run").status == "stopped"
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_question_id is None and not saved.pending_messages
-  assert not [b for m in saved.messages for b in m.get("blocks", []) if b.get("type") == "error"]
+  assert not [b for m in transcript_rows.history(saved) for b in m.get("blocks", []) if b.get("type") == "error"]
 
 
 def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recovery(
@@ -262,7 +264,7 @@ def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recov
   assert successor.status == "completed" and len(scheduled) == 1
   assert db.get(models.ChatGoal, original).status == "stopped"
   assert chat.pending_question_id is None
-  blocks = [b for m in chat.messages for b in m.get("blocks", [])]
+  blocks = [b for m in transcript_rows.history(chat) for b in m.get("blocks", [])]
   assert len([b for b in blocks if b.get("type") == "question"]) == 1
   assert not [b for b in blocks if b.get("type") == "error"]
 

@@ -1,4 +1,6 @@
 """Quiet-write delivery uses the real single writer, never a second queue DB."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
@@ -96,7 +98,7 @@ def test_boot_recovery_retains_unknown_outcome_without_renewed_authority(chat, d
   save(owner,write(),write("w2"))
   submit(ClaimAgentWrite(**owner))
   db.expire_all()
-  submit(ReconcileStartupChat(chat_id=chat.id, messages=db.get(models.Chat,chat.id).messages,
+  submit(ReconcileStartupChat(chat_id=chat.id, messages=list(transcript_rows.history(db.get(models.Chat, chat.id))),
     running_run_ids=(owner["run_token"],),recovered_at=datetime.now(UTC)))
   assert states(owner)==[("w1","unknown"),("w2","cancelled")]
   assert submit(ClaimAgentWrite(**owner))["status"]=="stale_run"
@@ -114,7 +116,7 @@ def test_successor_does_not_accept_its_predecessors_late_writes(chat):
 def test_another_chat_cannot_read_claim_or_settle_the_run(chat, db):
   owner=start(chat)
   save(owner,write())
-  other=models.Chat(id="unrelated",title="Other",messages=[])
+  other=create_chat(id="unrelated",title="Other",messages=[])
   db.add(other);db.commit()
   wrong={**owner,"chat_id":other.id}
   for cmd in (ReadAgentWriteOutcomes(**wrong),ClaimAgentWrite(**wrong),

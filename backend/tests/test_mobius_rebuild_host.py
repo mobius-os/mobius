@@ -151,6 +151,9 @@ def _worker_paths(tmp_path: Path, monkeypatch):
     "project": "mobius", "control_dir": inbox.parent, "data_dir": data,
   }
   monkeypatch.setattr(host, "config", lambda: config)
+  # The forward floor check reads Docker; by default the target is compatible.
+  monkeypatch.setattr(host, "rollback_image_level", lambda _image: 1)
+  monkeypatch.setattr(host, "live_database_floor", lambda _cid: 0)
   return config, inbox
 
 
@@ -383,6 +386,8 @@ def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkey
 
   monkeypatch.setattr(host, "compose", compose)
   monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
+  monkeypatch.setattr(host, "rollback_preflight", lambda *_args: None)
+  monkeypatch.setattr(host, "wait_ready", lambda *_args, **_kwargs: ("ready", {"ready": True}))
   statuses = []
   monkeypatch.setattr(
     host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
@@ -456,6 +461,8 @@ def test_healthy_rollback_reports_degraded_chat_handoff(
   monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "old"))
   monkeypatch.setattr(host, "compose", lambda *_args, **_kwargs: None)
   monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
+  monkeypatch.setattr(host, "rollback_preflight", lambda *_args: None)
+  monkeypatch.setattr(host, "wait_ready", lambda *_args, **_kwargs: ("ready", {"ready": True}))
 
   def ledger(_config, _cid, command, _operation, **_kwargs):
     assert _operation == operation
@@ -715,3 +722,80 @@ def test_an_unverified_claim_that_cannot_be_returned_is_kept(tmp_path, monkeypat
   assert host.run() == 1
   kept = list(config["control_dir"].glob(".unreturned-*"))
   assert [path.read_text(encoding="utf-8") for path in kept] == [newer]
+
+
+def test_an_image_below_the_database_floor_is_refused_before_any_drain(
+    tmp_path, monkeypatch,
+):
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "e" * 40
+  (inbox / "request.json").write_text(
+    f'{{"version":2,"expected_sha":"{expected}","nonce":"{"1" * 32}"}}', encoding="utf-8",
+  )
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "current"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "older"
+  ))
+  monkeypatch.setattr(host, "rollback_image_level", lambda _image: 0)
+  monkeypatch.setattr(host, "live_database_floor", lambda cid: 1 if cid == "cid" else None)
+  discarded = []
+  monkeypatch.setattr(host, "discard_pulled_image", discarded.append)
+  for seam in ("request_drain", "compose", "write_transaction"):
+    monkeypatch.setattr(host, seam, lambda *_a, _s=seam, **_k: (_ for _ in ()).throw(
+      AssertionError(f"{_s} must not run for an image below the floor")))
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+  assert host.run() == 1
+  assert statuses[-1]["state"] == "failed"
+  assert statuses[-1]["code"] == "newer_version_required"
+  assert discarded == [f"{host.IMAGE}:sha-{expected}"]
+  assert host.read_transaction() is None
+
+
+def test_an_unreadable_floor_refuses_the_replacement(tmp_path, monkeypatch):
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "f" * 40
+  (inbox / "request.json").write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "current"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "newer"
+  ))
+
+  def unreadable(_cid):
+    raise RuntimeError("the database compatibility floor could not be read (error=hot_journal)")
+
+  monkeypatch.setattr(host, "live_database_floor", unreadable)
+  monkeypatch.setattr(host, "request_drain", lambda *_a: (_ for _ in ()).throw(
+    AssertionError("an unreadable floor must not drain")))
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+  assert host.run() == 1
+  assert statuses[-1]["state"] == "failed"
+  assert "floor could not be read" in statuses[-1]["message"]
+
+
+def test_the_live_floor_is_read_by_the_app_user_inside_the_serving_container(monkeypatch):
+  seen = []
+
+  def execute(args, **_kwargs):
+    seen.append(args)
+    return subprocess.CompletedProcess(args, 0, stdout="floor=1\n", stderr="")
+
+  monkeypatch.setattr(host.subprocess, "run", execute)
+  assert host.live_database_floor("cid") == 1
+  assert seen[0][:5] == ["docker", "exec", "-u", "mobius", "cid"]
+  assert seen[0][-1] == host.ROLLBACK_DATABASE

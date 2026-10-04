@@ -1,6 +1,7 @@
 """Recovery is an owner-confirmed lifecycle control, never delegated work."""
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 import hashlib
 import uuid
@@ -18,9 +19,9 @@ def _authorization_context(db):
   parent_chat_id = str(uuid.uuid4())
   top_level_chat_id = str(uuid.uuid4())
   db.add_all([
-    models.Chat(id=child_chat_id, title="Recovery child", messages=[]),
-    models.Chat(id=parent_chat_id, title="Recovery parent", messages=[]),
-    models.Chat(id=top_level_chat_id, title="Recovery top level", messages=[]),
+    create_chat(id=child_chat_id, title="Recovery child", messages=[]),
+    create_chat(id=parent_chat_id, title="Recovery parent", messages=[]),
+    create_chat(id=top_level_chat_id, title="Recovery top level", messages=[]),
   ])
   app = models.App(
     name="Recovery boundary",

@@ -25,6 +25,15 @@ def test_debug_status_shape_matches_golden(client, auth):
 
   assert r.status_code == 200
   payload = r.json()
+  upgrades = payload.pop("one_way_upgrades")
+  assert len(upgrades) == 1
+  upgrade = upgrades[0]
+  assert set(upgrade) == {"level", "name", "state", "activated_at", "completed_at", "tasks"}
+  assert (upgrade["level"], upgrade["name"], upgrade["state"]) == (1, "transcript_rows", "active")
+  assert upgrade["activated_at"]
+  assert all(set(task) == {"task", "status", "done_units", "remaining_units", "retries", "last_error"}
+             for task in upgrade["tasks"])
+  assert next(task for task in upgrade["tasks"] if task["task"] == "index_messages")["status"] == "done"
   pool = payload.pop("database_pool")
   assert pool["type"]
   assert pool["current"]["checked_out"] >= 1

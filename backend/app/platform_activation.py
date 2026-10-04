@@ -342,8 +342,9 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
     if level is ActivationLevel.HOST_MAINTENANCE:
       return (
         "Update the Möbius checkout on your host, then run "
-        "sudo scripts/install-rebuild-helper.sh there to update the installed "
-        "Settings update helper. Restarting Möbius does not update that helper."
+        "sudo scripts/install-rebuild-helper.sh there. It updates the installed "
+        "Settings update helper and then starts the update that was waiting for "
+        "it. Restarting Möbius does not update that helper."
       )
   return "Complete this deployment action outside Möbius; an in-product restart is insufficient."
 

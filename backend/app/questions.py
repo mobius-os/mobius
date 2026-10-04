@@ -46,6 +46,7 @@ never filters post-card events, so a leak stays visible rather than masked.
 
 from __future__ import annotations
 
+from app import transcript_rows
 from app.pending_questions import PendingQuestion
 
 
@@ -76,7 +77,7 @@ def accepts_saved_answer(
     return question_id is None or question_id == open_id
   if not question_id:
     return False
-  for msg in reversed(chat.messages or []):
+  for msg in reversed(transcript_rows.history(chat) or []):
     if msg.get("hidden"):
       continue
     if msg.get("role") != "assistant":
@@ -94,7 +95,7 @@ def saved_question(chat, question_id: str | None) -> dict | None:
   """Find one exact durable card, including an already acknowledged answer."""
   if not question_id:
     return None
-  for message in reversed(chat.messages or []):
+  for message in reversed(transcript_rows.history(chat) or []):
     for block in message.get("blocks") or []:
       if block.get("type") == "question" and block.get("question_id") == question_id:
         return block
@@ -194,7 +195,7 @@ def open_continuation_question(chat, question_id: str | None) -> dict | None:
   """
   if not question_id or chat.pending_question_id != question_id:
     return None
-  for message in reversed(chat.messages or []):
+  for message in reversed(transcript_rows.history(chat) or []):
     for block in message.get("blocks") or []:
       if (block.get("type") == "question"
           and block.get("question_id") == question_id
@@ -234,7 +235,7 @@ def require_quiet_close_holds_no_claim(db, chat, question_id: str) -> None:
 def is_secure_question(chat, question_id: str | None) -> bool:
   """Plaintext answer surfaces must never settle a sealed-input receipt."""
   target = question_id or chat.pending_question_id
-  for message in reversed(chat.messages or []):
+  for message in reversed(transcript_rows.history(chat) or []):
     for block in reversed(message.get("blocks") or []):
       if block.get("type") == "question" and (
         target is None or block.get("question_id") == target

@@ -231,7 +231,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
 | `codex_appserver.py` | Small helper module: `codex_sdk_runner.py` imports its one surviving function, `_extract_bash_command`, which pulls the bash command string out of a shell tool item. The SDK runner does its own event/tool classification locally. |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
-| `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL `Chat.messages` / `Chat.pending_messages` mutations route through it (do not write those columns directly) |
+| `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL transcript-row / `Chat.pending_messages` mutations route through it (do not write those records directly) |
 | `chat_queue.py` | Per-chat queue lock + turn-end `drain_and_release` / `promote_pending_messages_locked` + the `TerminalDisposition` state machine; the awaited bridge between `chat.py` and the writer actor |
 | `broadcast.py` | `ChatBroadcast` per-chat in-memory event bus; decouples the turn runner from SSE clients |
 | `events.py` | Pure data transforms accumulating streaming events into the persisted message structure |
@@ -1599,6 +1599,22 @@ and late answers, duplicate submissions, stopped/interrupted/failed runs,
 foreign run authority, and native-question overlap.
 
 ## Chat persistence — single-writer actor
+
+Transcripts are position-addressed `ChatMessage` rows, with count/revision in
+`ChatTranscriptState`; `transcript_rows.py` is the transaction-local read/write
+primitive. Optional message IDs never replace `(chat_id, seq)`. Creation goes
+through `chat_writer.create_chat` so a chat, initial rows and state commit
+atomically. No `Chat.messages` fallback exists. The deferred `messages_v1`
+column is an archived-upgrade compatibility shape, not readable authority.
+Generic history iteration batches 64 rows; a page loads only its body window
+plus small identity/lifecycle coordinates. Read-only detail/log owners pin
+SQLite snapshots; ordinary planning views do not hold transactions across
+external writer acknowledgements. Full provider context/compaction/recovery
+reads remain explicit. The level-1 image/floor gate and resumable conversion
+are described in `TRANSCRIPT_STORAGE_DESIGN.md` and
+`ONE_WAY_UPGRADES_DESIGN.md`; activation needs the matching image, not just a
+server restart.
+
 
 All chat-domain mutations — transcript writes, run-markers, question rows, answers, finalize, error-persist — route through the single-writer actor in `chat_writer.py` as **domain commands** (`PersistTranscript`, `QuestionCommit`, `Finalize`, `PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`). Every command allocates an ack `Future`, but only the strict paths (`QuestionCommit`, `Finalize`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) *await* it (commit-before-ack); `PersistTranscript` and `PersistError` are submitted fire-and-forget — `PersistTranscript` additionally coalesces rapid streaming snapshots, while `PersistError` does not coalesce. One dedicated thread owns the SQLAlchemy session and a FIFO command queue; async callers submit a command and await its `Future`. The blocking `db.commit()` (which SQLite's `busy_timeout` can stall up to 5s) thus never runs on the event loop, and the actor never touches asyncio or `ChatBroadcast` (those stay loop-owned).
 

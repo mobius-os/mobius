@@ -298,6 +298,10 @@ def test_rollback_retags_previous_id_then_recreates_compose_image(tmp_path):
     fail() {{ printf 'FAIL %s\\n' "$1" >&2; }}
     ok() {{ :; }}
     external_prod_caddy_running() {{ return 1; }}
+    rollback_preflight() {{ :; }}
+    rearm_chat_cutover() {{ :; }}
+    finalize_chat_cutover() {{ :; }}
+    readiness_answer() {{ docker exec mobius sh -c "curl /api/ready"; }}
     docker() {{
       printf '%s\\n' "$*" >> {str(docker_log)!r}
       if [ "$1" = exec ]; then printf '200'; fi

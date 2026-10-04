@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from app.chat_message_identity import assistant_message_index
+from app import transcript_rows
 from app.events import tool_output_exit_code
 from app.memory_recall import (
   RecallBinding,
@@ -110,23 +110,78 @@ def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
   return owned
 
 
-def materialized_messages(chat) -> list[dict]:
-  """Return history with a visible in-flight assistant snapshot overlaid."""
-  messages = list(chat.messages or [])
-  live = chat.live_assistant
-  if not isinstance(live, dict) or live.get("role") != "assistant":
-    return messages
-  blocks = live.get("blocks")
-  # StartTurn allocates a stable timestamp with an empty stub; do not expose a
-  # blank assistant row before the provider emits content.
-  if not isinstance(blocks, list) or not blocks:
-    return messages
-  live_index = assistant_message_index(messages, live)
-  if live_index >= 0:
-    messages[live_index] = live
-    return messages
-  messages.append(live)
-  return messages
+class MaterializedHistory:
+  """Position-addressed history with a single live assistant overlay."""
+
+  def __init__(self, chat):
+    self.chat = chat
+    self.history = transcript_rows.history(chat)
+    live = chat.live_assistant
+    self.live = live if (isinstance(live, dict) and live.get("role") == "assistant"
+                         and isinstance(live.get("blocks"), list) and live["blocks"]) else None
+    self.live_index = (transcript_rows.assistant_index(self.history.db, chat, self.live)
+                       if self.live is not None else -1)
+
+  def __len__(self):
+    return len(self.history) + int(self.live is not None and self.live_index < 0)
+
+  def __getitem__(self, key):
+    if isinstance(key, slice):
+      start, stop, step = key.indices(len(self))
+      if step != 1:
+        return [self[i] for i in range(start, stop, step)]
+      rows = self.history[start:min(stop, len(self.history))]
+      if self.live is not None and start <= self.live_index < stop:
+        rows[self.live_index - start] = self.live
+      if self.live is not None and self.live_index < 0 and start <= len(self.history) < stop:
+        rows.append(self.live)
+      return rows
+    index = key + len(self) if key < 0 else key
+    if index < 0 or index >= len(self):
+      raise IndexError(key)
+    if self.live is not None and index == self.live_index:
+      return self.live
+    if index == len(self.history) and self.live is not None:
+      return self.live
+    return self.history[index]
+
+  def __iter__(self):
+    for index, message in enumerate(self.history):
+      yield self.live if index == self.live_index else message
+    if self.live is not None and self.live_index < 0:
+      yield self.live
+
+  def __reversed__(self):
+    if self.live is not None and self.live_index < 0:
+      yield self.live
+    for index, message in transcript_rows.reverse_iter(self.history.db, self.chat):
+      yield self.live if index == self.live_index else message
+
+
+def materialized_messages(chat):
+  return MaterializedHistory(chat)
+
+
+def materialized_metadata(chat, view=None):
+  """Cheap stable coordinates for Goal, Wait and recovery placement."""
+  rows = transcript_rows.metadata(transcript_rows.history(chat).db, chat)
+  view = view if view is not None else materialized_messages(chat)
+  if view.live is not None:
+    if view.live_index < 0:
+      rows.append(view.live)
+    else:
+      rows[view.live_index] = view.live
+  return rows
+
+
+def tail_visible(chat, n):
+  visible = []
+  for message in reversed(materialized_messages(chat)):
+    if isinstance(message, dict) and not message.get("hidden"):
+      visible.append(message)
+      if len(visible) >= n:
+        break
+  return list(reversed(visible))
 
 
 def project_messages_for_detail(
@@ -537,7 +592,7 @@ def compact_messages_for_detail(
 ) -> list[dict]:
   """Project settled activity runs into small, lazily expandable summaries.
 
-  Stored ``Chat.messages`` remains the full source of truth. The normal chat
+  Stored message rows remain the full source of truth. The normal chat
   read only needs prose, cards, and the metadata that paints each collapsed
   activity header. Expanding a header reads its original block range through
   the activity-detail endpoint.

@@ -3,7 +3,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app import models
+from app import models, transcript_rows
 from app.agent_write_channel import WriteIntent
 from app.agent_write_journal import pending_failure_reports
 from app.browser_access import create_invitation, revoke_grant
@@ -124,5 +124,5 @@ def test_rejected_queue_rows_survive_empty_drain_and_quiet_repair(chat, db, repa
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_messages == [{**pending, "delivery_status": "rejected",
     "delivery_error": "browser_grant_unavailable"}]
-  assert all(message.get("content") != pending["content"] for message in saved.messages)
+  assert all(message.get("content") != pending["content"] for message in transcript_rows.history(saved))
   assert all(message.content != pending["content"] for message in result["history"])

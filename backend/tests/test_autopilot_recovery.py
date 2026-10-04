@@ -1,4 +1,5 @@
 """Recovery resumes an existing grant, never grants or publishes anything."""
+from app.chat_writer import create_chat
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -85,7 +86,7 @@ def blocked(db, auth, monkeypatch):
     name="Recovery test", slug="recovery-test", source_dir="recovery-test",
     github_access=True,
   )
-  chat = models.Chat(
+  chat = create_chat(
     id="autopilot-recovery-chat", title="Autopilot recovery",
     agent_settings_json={"drawer_hidden": True},
   )

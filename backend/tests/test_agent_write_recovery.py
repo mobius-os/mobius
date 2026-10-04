@@ -1,4 +1,7 @@
 """Failure-only continuation uses existing actor authority and owner barriers."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 import pytest
 from app import models
 from app.agent_write_channel import WriteIntent
@@ -43,7 +46,7 @@ def test_only_failed_writes_earn_one_exact_same_root_recovery(chat,db,status):
   assert run.continuation_json['supersedes_run_token']==owner['run_token']
   saved=db.get(models.Chat,chat.id)
   assert not saved.pending_messages
-  assert not any(row.get('kind')=='continuation' for row in saved.messages)
+  assert not any(row.get('kind')=='continuation' for row in list(transcript_rows.history(saved)))
   recovery={'chat_id':chat.id,'run_token':run.id}
   submit(AdmitProviderExecution(**recovery));outcome(recovery)
   assert promote(recovery)['promoted'] is None  # No failure feedback loop.
@@ -204,7 +207,7 @@ def test_repair_context_prioritizes_its_exact_cause_ahead_of_old_backlog(chat,db
 def test_helper_failure_repair_keeps_exact_task_policy_and_root(chat,db,provider):
   import hashlib
   from app.delegations import policy_for_chat
-  parent=models.Chat(id='parent',title='Parent',messages=[],provider=provider)
+  parent=create_chat(id='parent',title='Parent',messages=[],provider=provider)
   db.add(parent)
   db.add(models.Delegation(id='helper',parent_chat_id=parent.id,
     parent_root_run_id='parent-root',task_key='bounded-task',child_chat_id=chat.id,
@@ -218,13 +221,13 @@ def test_helper_failure_repair_keeps_exact_task_policy_and_root(chat,db,provider
   assert policy_for_chat(db,chat.id)==before
   assert run.root_run_id==owner['run_token'] and run.provider==provider
   assert run.goal_id is None
-  assert db.get(models.Chat,chat.id).messages[0]['content']=='Test'
+  assert list(transcript_rows.history(db.get(models.Chat, chat.id)))[0]['content']=='Test'
   assert db.get(models.Delegation,'helper').delivered_run_id is None
 
 
 def test_cancelled_helper_cannot_gain_a_failure_repair_turn(chat,db):
   from datetime import datetime,UTC
-  db.add(models.Chat(id='parent',title='Parent',messages=[]))
+  db.add(create_chat(id='parent',title='Parent',messages=[]))
   db.add(models.Delegation(id='cancelled',parent_chat_id='parent',
     parent_root_run_id='parent-root',task_key='bounded-task',child_chat_id=chat.id,
     provider='codex',scope='write',cwd='/data/bounded',prompt_sha256='a'*64,
@@ -240,7 +243,7 @@ def test_app_owned_helper_repair_reuses_delegation_ownership_guard(chat,db,condi
   from datetime import UTC,datetime
   app=models.App(name='Synthetic app',slug='quiet-fixture',source_dir='/tmp/quiet-fixture',jsx_source='')
   db.add(app);db.flush()
-  db.add(models.Chat(id='parent',title='Parent',messages=[]))
+  db.add(create_chat(id='parent',title='Parent',messages=[]))
   db.add(models.Delegation(id='app-helper',app_id=app.id,parent_chat_id='parent',
     parent_root_run_id='parent-root',task_key='bounded-task',child_chat_id=chat.id,
     provider='codex',scope='write',cwd='/data/bounded',prompt_sha256='a'*64))
@@ -269,8 +272,8 @@ def test_helper_result_preserves_findings_only_for_exact_write_repair_lineage(ch
     continuation_json={'reason':'quiet_write_failure','supersedes_run_token':'findings',
                        'source_work_id':'findings'})
   db.add_all([original,repair]);db.flush()
-  chat.messages=[{'id':'findings:assistant:1','role':'assistant','content':'Task findings: defect A and fix B.'},
-    {'id':'repair','role':'assistant','content':'The checkpoint save is repaired.'}]
+  transcript_rows.replace_all(object_session(chat), chat, [{'id':'findings:assistant:1','role':'assistant','content':'Task findings: defect A and fix B.'},
+    {'id':'repair','role':'assistant','content':'The checkpoint save is repaired.'}])
   target=repair
   if continuation=='restart':
     target=models.ChatRun(id='resumed-repair',chat_id=chat.id,root_run_id='findings',
@@ -281,7 +284,7 @@ def test_helper_result_preserves_findings_only_for_exact_write_repair_lineage(ch
     repair.continuation_json={**repair.continuation_json,'reason':'manual'}
   elif continuation=='unrelated-root':repair.root_run_id='unrelated'
   elif continuation=='different-chat':
-    db.add(models.Chat(id='foreign',title='Foreign',messages=[]));db.flush()
+    db.add(create_chat(id='foreign',title='Foreign',messages=[]));db.flush()
     original.chat_id='foreign'
   elif continuation=='different-browser':
     repair.browser_grant_id='another-browser';repair.browser_grant_epoch=0
@@ -330,7 +333,7 @@ def test_app_token_cannot_read_private_write_arguments(client,chat,db,auth):
 def test_helper_can_read_failed_write_only_while_its_own_run_is_live(client,chat,db,auth):
   import hashlib
   from app.delegations import delegation_execution_token,policy_for_chat
-  db.add(models.Chat(id='read-parent',title='Parent',messages=[]))
+  db.add(create_chat(id='read-parent',title='Parent',messages=[]))
   db.add(models.Delegation(id='read-helper',parent_chat_id='read-parent',
     parent_root_run_id='parent-root',task_key='read-write-detail',child_chat_id=chat.id,
     provider='codex',scope='write',cwd='/data',prompt_sha256=hashlib.sha256(b'Test').hexdigest()))

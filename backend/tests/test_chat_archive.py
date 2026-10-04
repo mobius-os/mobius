@@ -1,4 +1,7 @@
 """Owner chat archiving: filing a chat away keeps it whole and restorable."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from datetime import timedelta
 
@@ -22,7 +25,7 @@ def _listed(client, auth, chat_id):
 def test_archiving_keeps_history_and_lists_the_chat_as_archived(
   client, auth, chat, db,
 ):
-  chat.messages = [{"role": "user", "content": "keep me", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "keep me", "ts": 1}])
   chat.has_messages = True
   db.commit()
 
@@ -32,7 +35,7 @@ def test_archiving_keeps_history_and_lists_the_chat_as_archived(
   assert response.json()["archived_at"] is not None
   db.refresh(chat)
   assert chat.deleted_at is None
-  assert chat.messages == [{"role": "user", "content": "keep me", "ts": 1}]
+  assert list(transcript_rows.history(chat)) == [{"role": "user", "content": "keep me", "ts": 1}]
   row = _listed(client, auth, chat.id)
   assert row is not None and row["archived_at"] is not None
   detail = client.get(f"/api/chats/{chat.id}", headers=auth)
@@ -107,7 +110,7 @@ def test_owner_send_and_restore_share_the_writer_commit(
 
   def inspect_commit(session):
     row = session.get(models.Chat, chat.id)
-    if any(m.get("content") == "atomic pickup" for m in row.messages or []):
+    if any(m.get("content") == "atomic pickup" for m in list(transcript_rows.history(row)) or []):
       observed.append(row.archived_at)
     return real_commit(session)
 
@@ -135,7 +138,7 @@ def test_dropped_owner_send_commit_keeps_message_and_archive_together(
 
   def drop_input_commit(session):
     row = session.get(models.Chat, chat.id)
-    if any(m.get("content") == "dropped pickup" for m in row.messages or []):
+    if any(m.get("content") == "dropped pickup" for m in list(transcript_rows.history(row)) or []):
       session.rollback()
       return False
     return real_commit(session)
@@ -150,7 +153,7 @@ def test_dropped_owner_send_commit_keeps_message_and_archive_together(
   assert response.status_code == 503, response.text
   db.refresh(chat)
   assert chat.archived_at is not None
-  assert not any(m.get("content") == "dropped pickup" for m in chat.messages or [])
+  assert not any(m.get("content") == "dropped pickup" for m in list(transcript_rows.history(chat)) or [])
 
 
 def test_rejected_owner_send_keeps_an_archived_chat_archived(client, auth, chat, db):
@@ -168,7 +171,7 @@ def test_rejected_owner_send_keeps_an_archived_chat_archived(client, auth, chat,
   assert response.json()["detail"]["code"] == "model_selection_required"
   db.refresh(chat)
   assert chat.archived_at is not None
-  assert chat.messages == []
+  assert list(transcript_rows.history(chat)) == []
   assert chat.pending_messages == []
 
 
@@ -235,7 +238,7 @@ def test_agent_message_leaves_an_archived_chat_archived(
   _noop_runner(monkeypatch)
   client.post(f"/api/chats/{chat.id}/archive", headers=auth)
   owner = db.query(models.Owner).first()
-  other_chat = models.Chat(id="agent-origin-chat", title="Other")
+  other_chat = create_chat(id="agent-origin-chat", title="Other")
   db.add(other_chat)
   db.commit()
   agent_token = auth_mod.create_agent_token(
@@ -257,7 +260,7 @@ def test_agent_message_leaves_an_archived_chat_archived(
 def test_archived_chats_are_searchable_and_labelled(client, auth, chat, db):
   chat.title = "Quarterly zebra plan"
   chat.has_messages = True
-  chat.messages = [{"role": "user", "content": "zebra budget", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "zebra budget", "ts": 1}])
   db.commit()
   client.post(f"/api/chats/{chat.id}/archive", headers=auth)
 
@@ -275,7 +278,7 @@ def test_archived_chats_are_left_out_of_recent_chat_continuity(
   from app.config import get_settings
 
   data_dir = get_settings().data_dir
-  archived = models.Chat(id="archived-continuity", title="Filed")
+  archived = create_chat(id="archived-continuity", title="Filed")
   db.add(archived)
   db.commit()
   root = memory.memory_dir(data_dir)
@@ -371,7 +374,7 @@ def test_deleting_an_archived_chat_uses_normal_recovery_and_keeps_it_archived(
   client, auth, chat, db,
 ):
   chat.has_messages = True
-  chat.messages = [{"role": "user", "content": "filed", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "filed", "ts": 1}])
   db.commit()
   client.post(f"/api/chats/{chat.id}/archive", headers=auth)
 
@@ -657,7 +660,7 @@ def test_project_collaborators_cannot_see_or_archive_project_chats(
   chat_id = made.json()["id"]
   row = db.get(models.Chat, chat_id)
   row.title = "Private planning"
-  row.messages = [{"role": "user", "content": "owner-only notes", "ts": 1}]
+  transcript_rows.replace_all(object_session(row), row, [{"role": "user", "content": "owner-only notes", "ts": 1}])
   row.has_messages = True
   db.commit()
   _invite_payload, secret = _invite(client, auth, project["id"], role="editor")

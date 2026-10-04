@@ -170,6 +170,18 @@ older source runs on the newer packages; the probe proves that it imports,
 nothing more. A release that also advances `deployment/self-hosted-helper.required`
 then asks you to reinstall the helper from a current trusted checkout.
 
+Older releases refuse such a release in Settings and can never retire that
+refusal themselves. Update the trusted host checkout to the release and run
+`sudo scripts/install-rebuild-helper.sh`: once the reinstalled worker verifies
+as ACTIVE, the installer runs `scripts/finish-helper-update.py` inside the
+running app, which prepares and requests exactly that release through the
+app's own reviewed updater (the same preview, prepared snapshot and bound
+request Settings uses), then reports the replacement's outcome. It refuses
+when any other external work is outstanding, and `--no-update` installs the
+helper only. Do not move the container first with a container-only upgrade:
+a worker offered by that image is a pending candidate, which the installer
+does not promote.
+
 ## Self-updating worker
 
 The installer puts a small frozen **launcher** at

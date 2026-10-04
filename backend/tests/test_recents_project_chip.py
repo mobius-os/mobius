@@ -1,4 +1,5 @@
 """The Recents drawer query now surfaces project chats with a project chip."""
+from app.chat_writer import create_chat
 
 import uuid
 from datetime import timedelta
@@ -86,7 +87,7 @@ def test_legacy_primary_chat_shows_with_project_chip(client, auth, db):
   # A pre-migration project keeps its primary chat via Project.chat_id, with the
   # chat's own project_id still NULL. The drawer join's legacy branch must still
   # attach the chip.
-  chat = models.Chat(
+  chat = create_chat(
     id=str(uuid.uuid4()), title="Legacy primary", messages=[],
   )
   db.add(chat)
@@ -111,7 +112,7 @@ def test_legacy_primary_chat_shows_with_project_chip(client, auth, db):
 
 
 def test_ordinary_chat_has_no_project_chip(client, auth, db):
-  chat = models.Chat(id=str(uuid.uuid4()), title="Plain chat", messages=[])
+  chat = create_chat(id=str(uuid.uuid4()), title="Plain chat", messages=[])
   db.add(chat)
   db.commit()
   rows = _recents_by_id(client, auth)

@@ -29,6 +29,7 @@ out (simulating the auth queries FastAPI's cached get_db sub-dependency
 already ran on it). Checkout observation is pool-agnostic so the same test
 covers production SQLite's NullPool and deployed Postgres's QueuePool.
 """
+from app.chat_writer import create_chat
 
 import pytest
 from sqlalchemy import event, text
@@ -117,7 +118,7 @@ async def test_chat_stream_releases_db_connection_while_open():
   baseline = checked_out_connections()
   db = _pinned_session(baseline)
   setup = SessionLocal()
-  setup.add(models.Chat(
+  setup.add(create_chat(
     id=chat_id,
     title="sse pool test",
     messages=[{"role": "user", "content": "x" * 100_000}],

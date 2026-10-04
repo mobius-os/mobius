@@ -7,6 +7,7 @@ block holds the generation guard and owns transcript teardown. Removing
 the registry entry here would allow a new turn to claim the chat before
 the zombie finalizes — a zombie-run clobber.
 """
+from app.chat_writer import create_chat
 
 import asyncio
 
@@ -122,7 +123,7 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
   from app import models
 
   chat_id = "orphan-after-restart"
-  c = models.Chat(
+  c = create_chat(
     id=chat_id, title="t",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending_messages=[{"role": "user", "content": "queued", "ts": 2}],
@@ -162,7 +163,7 @@ def test_stop_clears_idle_question_barrier_and_queued_followup(client, auth, db)
 
   chat_id = "idle-card-stop"
   question_id = "idle-card-question"
-  db.add(models.Chat(
+  db.add(create_chat(
     id=chat_id,
     title="Idle card",
     messages=[{

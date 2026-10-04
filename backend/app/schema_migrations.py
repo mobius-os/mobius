@@ -5920,6 +5920,12 @@ _SCHEMA_MIGRATIONS = (
 )
 
 
+# Concrete transcript storage owns its data-moving conversion outside this
+# ledger. Subsequent ledger entries must preserve its tables and archive.
+ONE_WAY_BASELINE_MIGRATION = "0078_agent_write_journal"
+MIGRATION_WRITES: dict[str, tuple[str, ...]] = {}
+
+
 def schema_migration_history(eng) -> list[dict]:
   """Return the durable migration ledger in application order."""
   from sqlalchemy import inspect as sa_inspect, text

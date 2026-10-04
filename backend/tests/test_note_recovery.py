@@ -1,4 +1,6 @@
 """Saved handoffs shorten oversized history without losing its uncovered tail."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 import asyncio
 import copy
 from datetime import UTC, datetime
@@ -30,7 +32,7 @@ def _bound(messages, run="run"):
 
 
 def _start(chat, db, *, run="run"):
-  chat.messages = copy.deepcopy(HISTORY)
+  transcript_rows.replace_all(object_session(chat), chat, copy.deepcopy(HISTORY))
   chat.session_id = "old-session"
   db.commit()
   get_writer().submit(StartTurn(chat_id=chat.id, run_token=run,
@@ -38,7 +40,7 @@ def _start(chat, db, *, run="run"):
   )).result(timeout=5)
   db.expire_all()
   row = db.get(models.Chat, chat.id)
-  write_note(note_path(get_settings().data_dir, chat.id), _bound(list(row.messages), run))
+  write_note(note_path(get_settings().data_dir, chat.id), _bound(list(transcript_rows.history(row)), run))
   return row
 
 
@@ -109,14 +111,14 @@ def test_begin_and_park_replace_session_only_with_complete_unchanged_source(clie
   db.expire_all()
   row = db.get(models.Chat, chat.id)
   assert row.session_id is None
-  assert row.messages[:-1] == source.messages
-  assert row.messages[-1]["kind"] == "compaction"
-  assert row.messages[-1]["recovery_run_id"] == "run"
+  assert list(transcript_rows.history(row))[:-1] == source.messages
+  assert list(transcript_rows.history(row))[-1]["kind"] == "compaction"
+  assert list(transcript_rows.history(row))[-1]["recovery_run_id"] == "run"
   assert db.get(models.ChatRun, "run").park_reason == "compaction"
   # A lost acknowledgement cannot append a second marker.
   assert _park(chat, source)
   db.expire_all()
-  assert db.get(models.Chat, chat.id).messages == row.messages
+  assert list(transcript_rows.history(db.get(models.Chat, chat.id))) == list(transcript_rows.history(row))
 
 
 @pytest.mark.parametrize("change", ["pending", "note", "messages", "settings", "session", "stop", "delete"])
@@ -131,7 +133,7 @@ def test_changed_source_or_owner_leaves_original_session(client, chat, db, chang
     path = note_path(get_settings().data_dir, chat.id)
     write_note(path, path.read_text() + "\nchanged\n")
   elif change == "messages":
-    row.messages = [*row.messages, {"role": "user", "content": "new correction"}]
+    transcript_rows.replace_all(object_session(row), row, [*list(transcript_rows.history(row)), {"role": "user", "content": "new correction"}])
   elif change == "settings":
     row.agent_settings_json = {"effort": "low"}
   elif change == "session":
@@ -141,12 +143,12 @@ def test_changed_source_or_owner_leaves_original_session(client, chat, db, chang
   else:
     row.deleted_at = datetime.now(UTC)
   db.commit()
-  before = copy.deepcopy(row.messages)
+  before = copy.deepcopy(list(transcript_rows.history(row)))
   old_session = row.session_id
   assert not _park(chat, source)
   db.expire_all()
   assert row.session_id == old_session
-  assert row.messages == before
+  assert list(transcript_rows.history(row)) == before
 
 
 def test_failed_synthesis_budget_is_not_renewed_by_same_root_resume(client, chat, db):
@@ -212,14 +214,14 @@ async def test_terminal_recovery_finalizes_before_snapshot_and_preserves_on_fail
     close_browser=False, **kwargs)
   db.expire_all()
   row = db.get(models.Chat, chat.id)
-  assert row.messages[:2] == HISTORY
+  assert list(transcript_rows.history(row))[:2] == HISTORY
   run = db.get(models.ChatRun, "run")
   if failure:
     assert row.session_id == "old-session" and run.status == "failed"
-    assert not any(m.get("kind") == "compaction" for m in row.messages)
+    assert not any(m.get("kind") == "compaction" for m in list(transcript_rows.history(row)))
   else:
     assert row.session_id is None and run.status == "parked"
-    assert row.messages[-1]["kind"] == "compaction"
+    assert list(transcript_rows.history(row))[-1]["kind"] == "compaction"
   assert run.note_recovery_attempted is True
   assert run.continuation_json is None  # recovery accounting is not owner-input provenance
 
@@ -294,7 +296,7 @@ async def test_existing_sweep_starts_exact_recovered_context_once(client, chat, 
   db.expire_all()
   successor = db.get(models.ChatRun, scheduled[0]["run_token"])
   assert successor.root_run_id == "run"
-  assert db.get(models.Chat, chat.id).messages[:-1] == source.messages
+  assert list(transcript_rows.history(db.get(models.Chat, chat.id)))[:-1] == source.messages
   # Claim in the successor cannot renew the synthesis budget.
   assert get_writer().submit(BeginNoteRecovery(chat_id=chat.id, run_token=successor.id,
     generation=registry.current_generation(chat.id))).result(5) is None
@@ -371,7 +373,7 @@ def test_missing_note_and_app_work_never_claim_automatic_recovery(client, chat, 
   assert _begin(chat) is None
   db.expire_all()
   row = db.get(models.Chat, chat.id)
-  write_note(path, _bound(list(row.messages)))
+  write_note(path, _bound(list(transcript_rows.history(row))))
   # A hidden app-owned job must not gain reseed permission from this feature.
   run = db.get(models.ChatRun, "run")
   app = models.App(name="job", slug="job", source_dir="/unused/job")
@@ -397,7 +399,7 @@ def test_failed_park_commit_keeps_session_and_transcript(client, chat, db, monke
   db.expire_all()
   row = db.get(models.Chat, chat.id)
   assert row.session_id == "old-session"
-  assert row.messages == source.messages
+  assert list(transcript_rows.history(row)) == source.messages
   assert db.get(models.ChatRun, "run").status == "running"
 
 
@@ -438,7 +440,7 @@ def test_invalid_briefing_cannot_retire_the_old_session(client, chat, db):
   db.expire_all()
   row = db.get(models.Chat, chat.id)
   assert row.session_id == "old-session"
-  assert row.messages == source.messages
+  assert list(transcript_rows.history(row)) == source.messages
 
 
 def test_checkpoint_route_binds_detailed_note_without_renaming_or_changing_save_semantics(
@@ -451,13 +453,13 @@ def test_checkpoint_route_binds_detailed_note_without_renaming_or_changing_save_
                          json={"summary": "Owner also forbids publication.", "digest": "Drafting."})
   assert response.status_code == 204
   path = note_path(get_settings().data_dir, chat.id)
-  summary, tail = recovery_source(path.read_text(), list(row.messages))
+  summary, tail = recovery_source(path.read_text(), list(transcript_rows.history(row)))
   assert "Preserve old files" in summary and "forbids publication" in summary
-  assert tail == list(row.messages)[2:]
+  assert tail == list(transcript_rows.history(row))[2:]
   response = client.post("/api/chat/continuity/checkpoints", headers=headers,
                          json={"digest": "Shorter."})
   assert response.status_code == 204
-  assert recovery_source(path.read_text(), list(row.messages)) == (summary, tail)
+  assert recovery_source(path.read_text(), list(transcript_rows.history(row))) == (summary, tail)
 
 
 @pytest.mark.parametrize("when", ["before_synthesis", "before_commit"])
@@ -478,4 +480,4 @@ def test_closed_goal_never_reseeds_the_old_session(client, chat, db, when):
     assert not _park(chat, source)
   db.expire_all()
   assert db.get(models.Chat, chat.id).session_id == "old-session"
-  assert not any(m.get("kind") == "compaction" for m in db.get(models.Chat, chat.id).messages)
+  assert not any(m.get("kind") == "compaction" for m in list(transcript_rows.history(db.get(models.Chat, chat.id))))

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
 import json
@@ -48,15 +49,84 @@ REQUEST_VERSIONS = [1, 2]
 # each requested official image only when this number is higher than every
 # worker it has run. Increase it with every change to this file; never lower
 # it. The launcher reads it as text, so keep it a plain literal on one line.
-WORKER_REVISION = 2
+WORKER_REVISION = 4
 # The frozen launcher runs the worker selected here; see offer_worker().
 WORKERS = STATE_DIR / "workers"
 WORKER_INDEX = STATE_DIR / "workers.json"
 WORKER_IN_IMAGE = "/app/platform-baked/scripts/mobius-rebuild-host.py"
+ROLLBACK_FLOOR_LEVEL = 1
 MAX_WORKER_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 4096
 _REVISION_LINE = re.compile(rb"^WORKER_REVISION\s*=.*$", re.MULTILINE)
 _REVISION_EXACT = re.compile(rb"^WORKER_REVISION = ([1-9][0-9]{0,5})$")
+# Rollback floor preflight (ONE_WAY_UPGRADES_DESIGN.md, "Host rollbacks").
+BAKED_COMPAT_PATH = "/app/platform-baked/backend/app/compat.py"
+# The DATABASE_URL every Compose file pins, and app.config's default.
+ROLLBACK_DATABASE = "/data/db/ultimate.db"
+READY_URL = "http://127.0.0.1:8000/api/ready"
+FLOOR_REASON = "below_compatibility_floor"
+# Identical to scripts/deploy_support.py FLOOR_PROBE (a test keeps them equal);
+# this helper installs as a single file. Runs as `python3 -I -c` in a one-off
+# container with /data mounted read-only and never imports application code.
+FLOOR_PROBE = """\
+import os, sqlite3, stat, sys, urllib.parse
+path = sys.argv[1]
+def verdict(text, code):
+  print(text)
+  raise SystemExit(code)
+try:
+  info = os.lstat(path)
+except FileNotFoundError:
+  verdict("error=database_missing", 3)
+if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+  verdict("error=database_not_a_file", 3)
+with open(path, "rb") as handle:
+  if handle.read(16) != b"SQLite format 3\\x00":
+    verdict("error=database_invalid", 3)
+def size(suffix):
+  try:
+    return os.lstat(path + suffix).st_size
+  except FileNotFoundError:
+    return None
+if size("-journal"):
+  verdict("error=hot_journal", 3)
+wal, shm = size("-wal"), size("-shm")
+if wal is not None and shm is None:
+  verdict("error=wal_without_shm", 3)
+# The writer is stopped. Without a WAL the main file is complete; open it as
+# immutable, because a read-only mount cannot create the -shm a WAL-mode open
+# otherwise needs. With a WAL and its -shm, a plain read-only open replays it.
+query = "mode=ro" if wal is not None else "mode=ro&immutable=1"
+try:
+  con = sqlite3.connect("file:" + urllib.parse.quote(path) + "?" + query, uri=True)
+  tables = {row[0] for row in con.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'table'")}
+  if "platform_compat" in tables:
+    row = con.execute("SELECT floor FROM platform_compat WHERE id = 1").fetchone()
+    if row is None:
+      verdict("error=floor_row_missing", 3)
+    floor = row[0]
+  elif "schema_migrations" in tables:
+    floor = 0
+  else:
+    verdict("error=not_a_mobius_database", 3)
+  # A missing or damaged floor row must not look safe: an active step's
+  # level is a floor too.
+  top = None
+  if "platform_upgrades" in tables:
+    top = con.execute(
+      "SELECT MAX(level) FROM platform_upgrades WHERE state = 'active'").fetchone()[0]
+  con.close()
+except sqlite3.Error as exc:
+  verdict("error=read_failed:" + type(exc).__name__, 3)
+if type(floor) is not int or floor < 0:
+  verdict("error=floor_invalid", 3)
+if top is not None:
+  if type(top) is not int or top < 0:
+    verdict("error=floor_invalid", 3)
+  floor = max(floor, top)
+verdict("floor=%d" % floor, 0)
+"""
 
 
 def now() -> str:
@@ -161,6 +231,47 @@ def config() -> dict:
 
 
 
+def active_worker_receipt(state_dir: Path | None = None) -> dict | None:
+    """Report the launcher's verified ACTIVE bytes, never the running trial.
+
+    The frozen launcher may run a candidate while recovery still belongs to
+    its active worker. Only the root-owned selection and unchanged private
+    file establish which recovery policy survives a failed trial.
+    """
+    index_path = WORKER_INDEX if state_dir is None else state_dir / "workers.json"
+    workers = WORKERS if state_dir is None else state_dir / "workers"
+    try:
+        root = STATE_DIR if state_dir is None else state_dir
+        for path, directory in ((root, True), (index_path, False), (workers, True)):
+            info = path.lstat()
+            kind = stat.S_ISDIR if directory else stat.S_ISREG
+            if not kind(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+                return None
+        index = read_json(index_path)
+        if type(index.get("version")) is not int or index["version"] != 1:
+            return None
+        entry = index["active"]
+        path = workers / entry["file"]
+        if path.parent != workers:
+            return None
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+            return None
+        if path.stat().st_size > MAX_WORKER_BYTES:
+            return None
+        source = path.read_bytes()
+        if len(source) > MAX_WORKER_BYTES:
+            return None
+        digest = hashlib.sha256(source).hexdigest()
+        revision = worker_revision(source)
+        if digest != entry["sha256"] or revision != entry["revision"]:
+            return None
+        level = compat_level(source.decode("utf-8"), "ROLLBACK_FLOOR_LEVEL")
+        return {"revision": revision, "sha256": digest, "rollback_floor_level": level}
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return None
+
+
 def write_status(config_value: dict, **fields) -> dict:
     current = {
         "supported": True, "operation_id": None, "state": "idle",
@@ -193,6 +304,14 @@ def compose(config_value: dict, *args: str, image: str | None = None,
          "-f", str(COMPOSE), "-f", str(OVERRIDE), *args],
         cwd=CONFIG.parent, env=env, text=True, capture_output=True, check=check,
     )
+
+
+def inspect_container_image(cid: str) -> str:
+    result = subprocess.run(
+        ["docker", "container", "inspect", "-f", "{{.Image}}", cid],
+        text=True, capture_output=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def inspect_image(image: str, template: str) -> str:
@@ -372,6 +491,167 @@ def retain_images(target_ref: str, rollback_image_id: str | None = None) -> None
     })
 
 
+class RollbackRefused(RuntimeError):
+    """The automatic rollback must not start the previous image."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def compat_level(source: str, name: str = "COMPAT_LEVEL") -> int:
+    """``NAME = <int>`` from compat.py text, without importing it.
+
+    Absent, unparsable, or non-literal counts as 0: the lowest level can only
+    make the rollback check stricter. Mirrors app.compat.declared_level.
+    """
+    try:
+        body = ast.parse(source).body
+    except (SyntaxError, ValueError):
+        return 0
+    levels = []
+    for node in body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            levels.append(value.value if isinstance(value, ast.Constant) else None)
+    # Python uses the last assignment; a duplicate is ambiguous, so it counts
+    # as malformed, like any other value that is not one literal integer.
+    if len(levels) != 1:
+        return 0
+    level = levels[0]
+    return level if type(level) is int and level >= 0 else 0
+
+
+def fence_app(config_value: dict, cid: str) -> bool:
+    """Stop the failed container; True once no app container is running."""
+    if cid:
+        subprocess.run(["docker", "stop", cid], text=True, capture_output=True)
+    result = compose(config_value, "ps", "-q", "app", check=False)
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+def rollback_image_level(image: str) -> int:
+    """The image's baked COMPAT_LEVEL; a baked tree without compat.py is 0."""
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "cat",
+         image, BAKED_COMPAT_PATH],
+        text=True, capture_output=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return compat_level(result.stdout[:65536])
+
+
+def read_database_floor(config_value: dict, image: str) -> int:
+    """The database floor, read directly with SQLite from a read-only mount."""
+    data_dir = str(config_value["data_dir"])
+    if "," in data_dir:
+        raise RollbackRefused("rollback_preflight_failed", "error=data_dir_unmountable")
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--mount",
+         f"type=bind,src={data_dir},dst=/data,readonly",
+         "--entrypoint", "python3", image, "-I", "-c", FLOOR_PROBE,
+         ROLLBACK_DATABASE],
+        text=True, capture_output=True,
+    )
+    lines = (result.stdout or "").strip().splitlines()
+    verdict = lines[-1] if lines else ""
+    if result.returncode == 0 and re.fullmatch(r"floor=[0-9]+", verdict):
+        return int(verdict[len("floor="):])
+    raise RollbackRefused("rollback_preflight_failed", verdict or "error=read_failed")
+
+
+def live_database_floor(cid: str) -> int:
+    """The floor as the serving app's own container reads its live database.
+
+    Run as the app user so a WAL read never creates root-owned SQLite files.
+    """
+    result = subprocess.run(
+        ["docker", "exec", "-u", "mobius", cid, "python3", "-I", "-c",
+         FLOOR_PROBE, ROLLBACK_DATABASE],
+        text=True, capture_output=True, timeout=60,
+    )
+    lines = (result.stdout or "").strip().splitlines()
+    verdict = lines[-1] if lines else ""
+    if result.returncode == 0 and re.fullmatch(r"floor=[0-9]+", verdict):
+        return int(verdict[len("floor="):])
+    raise RuntimeError(
+        f"the database compatibility floor could not be read ({verdict or 'no answer'})"
+    )
+
+
+def app_container_any(config_value: dict) -> str:
+    """The app container's ID whether or not it is running ('' if not one)."""
+    result = compose(config_value, "ps", "-a", "-q", "app", check=False)
+    ids = result.stdout.split() if result.returncode == 0 else []
+    return ids[0] if len(ids) == 1 else ""
+
+
+def rollback_preflight(config_value: dict, cid: str) -> None:
+    """Refuse to start the rollback image on a database above its level.
+
+    The failed container is stopped first so nothing can raise the floor
+    between this read and the replacement.
+    """
+    if not fence_app(config_value, cid):
+        raise RollbackRefused(
+            "rollback_preflight_failed",
+            "the failed container could not be stopped, so the database "
+            "floor cannot be read safely",
+        )
+    level = rollback_image_level(ROLLBACK_TAG)
+    try:
+        floor = read_database_floor(config_value, ROLLBACK_TAG)
+    except RollbackRefused as exc:
+        raise RollbackRefused(
+            exc.code,
+            f"the database compatibility floor could not be read safely ({exc})",
+        ) from None
+    if level < floor:
+        raise RollbackRefused(
+            "newer_version_required",
+            f"a newer version is required: the previous image understands "
+            f"compatibility level {level}, but the database floor is {floor}. "
+            f"Update to a version at or above level {floor}",
+        )
+
+
+def _ready_payload(text: str) -> dict | None:
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def wait_ready(config_value: dict, timeout: int = 180) -> tuple[str, dict | None]:
+    """Poll the bounded /api/ready payload: ready, floor (terminal), or timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = compose(config_value, "ps", "-q", "app", check=False)
+        cid = result.stdout.strip()
+        if cid:
+            probe = subprocess.run(
+                ["docker", "exec", cid, "curl", "-s", "--max-time", "5", READY_URL],
+                text=True, capture_output=True,
+            )
+            payload = (
+                _ready_payload(probe.stdout[:4096]) if probe.returncode == 0 else None
+            )
+            if payload is not None:
+                if payload.get("ready") is True:
+                    return "ready", payload
+                if payload.get("reason") == FLOOR_REASON:
+                    return "floor", payload
+        time.sleep(3)
+    return "timeout", None
+
+
 def rollback(config_value: dict, operation: str, expected: str,
              code: str, detail: str, previous_image: str | None = None) -> int:
     """Restore the previous container; a settled outcome retires the
@@ -386,12 +666,38 @@ def rollback(config_value: dict, operation: str, expected: str,
         cid, _current = app_container(config_value)
     except Exception:
         cid = ""
+    try:
+        rollback_preflight(config_value, cid)
+    except RollbackRefused as exc:
+        if exc.code == "newer_version_required":
+            return settle_forward(config_value, operation, expected, cid, detail)
+        # Nothing is replaced: start the fenced container again unchanged.
+        if cid:
+            subprocess.run(["docker", "start", cid], text=True, capture_output=True)
+        write_status(config_value, operation_id=operation, state="needs_recovery",
+                     expected_sha=expected, code=exc.code,
+                     message=f"Automatic rollback refused: {exc}. "
+                             f"Original failure: {detail}"[:300])
+        return 1
     handoff_rearmed = restart_ledger(
         config_value, cid, "rearm-cutover", operation, image=ROLLBACK_TAG,
     )
     compose(config_value, "up", "-d", "--no-build", "--no-deps",
             "--force-recreate", "app", image=ROLLBACK_TAG)
-    if wait_healthy(config_value, 120):
+    verdict, payload = wait_ready(config_value, 120)
+    if verdict == "floor":
+        # Terminal: the rollback image refuses this database. Never count it
+        # as restored, and never try an older image.
+        floor = (payload or {}).get("floor")
+        at = f" (level {floor})" if type(floor) is int else ""
+        write_status(config_value, operation_id=operation, state="needs_recovery",
+                     expected_sha=expected, code="newer_version_required",
+                     message=f"A newer version is required: the previous image is "
+                             f"below the database's compatibility floor{at}. "
+                             f"Update to a version at or above it. "
+                             f"Original failure: {detail}"[:300])
+        return 1
+    if verdict == "ready":
         cid, current = app_container(config_value)
         if previous_image and current != previous_image:
             write_status(
@@ -431,6 +737,82 @@ def rollback(config_value: dict, operation: str, expected: str,
                  expected_sha=expected, code="rollback_failed",
                  message=f"Replacement and rollback failed: {detail}"[:300])
     return 1
+
+
+def settle_forward(config_value: dict, operation: str, expected: str,
+                   cid: str, detail: str) -> int:
+    """Finish a replacement whose previous image the database now refuses.
+
+    Once the new release raised the compatibility floor, no earlier image may
+    ever run again, so the replacement can only end on the new image. Start
+    the fenced container again unchanged (re-armed so its boot continues the
+    drained chats) and give it the rollback readiness window. If it serves
+    exactly the requested release, the replacement succeeded, only late.
+    Either way the journal is retired: its sole purpose was restoring the
+    previous image, and keeping it would make every later run and boot fence
+    the serving app again and block the newer release a failure needs.
+    """
+    target = (read_transaction() or {}).get("target_image")
+    target = target if isinstance(target, str) and target.startswith("sha256:") else None
+    # The fenced (or already stopped) container must be exactly the new
+    # release before anything starts it: never start an image below the floor.
+    cid = cid or app_container_any(config_value)
+    image = inspect_container_image(cid) if cid else ""
+    if target is None or image != target:
+        clear_transaction()
+        write_status(config_value, operation_id=operation, state="needs_recovery",
+                     expected_sha=expected, code="newer_version_required",
+                     message=("The previous version cannot run on this database, and "
+                              "the stopped container is not the requested release, so "
+                              f"nothing was started. Original failure: {detail}")[:300])
+        return 1
+    rearmed = restart_ledger(
+        config_value, cid, "rearm-cutover", operation, image=target,
+    )
+    subprocess.run(["docker", "start", cid], text=True, capture_output=True)
+    verdict, _payload = wait_ready(config_value, 120)
+    if verdict == "ready":
+        try:
+            ready_cid, current = app_container(config_value)
+            if target is None or current != target:
+                raise RuntimeError("the serving container is not the requested image")
+            verify_served_generation(ready_cid, expected)
+        except Exception as exc:  # anything but the exact release is unsettled
+            failure = str(exc)
+        else:
+            finalized = restart_ledger(
+                config_value, ready_cid, "finalize-cutover", operation, image=current,
+            )
+            clear_transaction()
+            message = (
+                "Container rebuilt successfully after a slow first start."
+                if finalized and rearmed else
+                "Container rebuilt after a slow first start, but the Host could "
+                "not verify the exact chat handoff. Check the affected chats."
+            )
+            write_status(config_value, operation_id=operation, state="succeeded",
+                         expected_sha=expected,
+                         code=None if finalized and rearmed else "handoff_finalize_failed",
+                         message=message, worker_adoption=adopt_from_image(current))
+            return 0
+    else:
+        failure = f"the new container did not become ready within 120 seconds ({verdict})"
+    clear_transaction()
+    write_status(config_value, operation_id=operation, state="needs_recovery",
+                 expected_sha=expected, code="new_version_not_ready",
+                 message=(f"The previous version cannot run on this database, so the "
+                          f"new container was started again, but {failure}. It may "
+                          f"still finish starting; otherwise a newer release is "
+                          f"needed. Original failure: {detail}")[:300])
+    return 1
+
+
+def still_settling() -> bool:
+    """Whether the last outcome left the new release's container starting."""
+    try:
+        return read_json(STATUS).get("code") == "new_version_not_ready"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def worker_revision(source: bytes) -> int | None:
@@ -824,6 +1206,20 @@ def run() -> int:
                     worker_adoption=adopt_from_image(digest),
                 )
                 return 0
+            # Never replace the app with an image below the database floor.
+            # Checked before the drain, so a refusal leaves the app untouched.
+            target_level = rollback_image_level(digest)
+            floor = live_database_floor(cid)
+            if target_level < floor:
+                discard_pulled_image(image_ref)
+                write_status(
+                    config_value, operation_id=operation, state="failed",
+                    expected_sha=expected, code="newer_version_required",
+                    message=(f"This database needs compatibility level {floor}; "
+                             f"that release understands only {target_level}. "
+                             "The running version was left unchanged."),
+                )
+                return 1
             subprocess.run(["docker", "tag", previous, ROLLBACK_TAG], check=True,
                            text=True, capture_output=True)
             transaction = transaction_record(operation, expected, nonce,
@@ -848,7 +1244,10 @@ def run() -> int:
                     "health_check_failed", "the new container was unhealthy",
                     previous,
                 )
-                discard_pulled_image(image_ref)
+                if result == 0 or still_settling():  # this release's image runs
+                    retain_images(image_ref)
+                else:
+                    discard_pulled_image(image_ref)
                 return result
             cid, current = app_container(config_value)
             if current != digest:
@@ -881,7 +1280,9 @@ def run() -> int:
                 try:
                     result = rollback(config_value, operation, expected,
                                       "replacement_failed", detail, previous)
-                    if image_ref and pulled_recorded:
+                    if result == 0 or still_settling():  # this release's image runs
+                        retain_images(image_ref)
+                    elif image_ref and pulled_recorded:
                         discard_pulled_image(image_ref)
                     return result
                 except Exception as rollback_exc:
@@ -1019,6 +1420,15 @@ if __name__ == "__main__":
         raise SystemExit(run())
     if len(sys.argv) == 2 and sys.argv[1] == "reconcile" and os.geteuid() == 0:
         raise SystemExit(reconcile())
+    if len(sys.argv) == 2 and sys.argv[1] in {"verify-active", "verify-mounted-active"} and os.geteuid() == 0:
+        mounted = Path("/run/mobius-rebuild-host") if sys.argv[1] == "verify-mounted-active" else None
+        receipt = active_worker_receipt(mounted)
+        safe = bool(receipt and receipt["revision"] >= 4
+                    and receipt["rollback_floor_level"] >= ROLLBACK_FLOOR_LEVEL)
+        proof = {"boot_id": os.environ.get("MOBIUS_BOOT_ID"), "active_worker": receipt} if mounted else receipt
+        safe = safe and (mounted is None or bool(proof["boot_id"]))
+        print(json.dumps(proof) if safe else "No verified floor-aware ACTIVE worker is installed.")
+        raise SystemExit(0 if safe else 1)
     if len(sys.argv) == 2 and sys.argv[1] == "adopt-self" and os.geteuid() == 0:
         # The installer seeds the launcher with this trusted checkout's worker.
         STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
