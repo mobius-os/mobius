@@ -72,11 +72,9 @@ test('app authors are told to zoom content locally, with an accessible control p
   assert.match(buildingApps, /Do not add `user-scalable=no`/)
 })
 
-test('installed shell owns one stable edge-to-edge iOS viewport', () => {
-  assert.match(
-    indexHtml,
-    /apple-mobile-web-app-status-bar-style" content="black-translucent"/,
-  )
+test('installed shell and offline fallback share the chosen opaque iOS status mode', () => {
+  const statusStyle = html => html.match(/apple-mobile-web-app-status-bar-style" content="([^"]+)"/)?.[1]
+  assert.equal(statusStyle(indexHtml), 'black')
   assert.match(
     indexCss,
     /@media \(display-mode: standalone\)[\s\S]*html,[\s\S]*body\s*\{\s*height:\s*100vh/,
@@ -86,10 +84,7 @@ test('installed shell owns one stable edge-to-edge iOS viewport', () => {
     applyTheme,
     /querySelector\(['"]meta\[name=["']apple-mobile-web-app-status-bar-style/,
   )
-  assert.match(
-    offlineHtml,
-    /apple-mobile-web-app-status-bar-style" content="black-translucent"/,
-  )
+  assert.equal(statusStyle(offlineHtml), statusStyle(indexHtml))
   assert.match(
     offlineHtml,
     /@media \(display-mode:standalone\)[\s\S]*height:100vh/,

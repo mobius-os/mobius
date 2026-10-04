@@ -181,8 +181,8 @@ html, body, #root {
   width: 100%;
 }
 
-/* iOS Home Screen apps combine viewport-fit=cover with the launch-time
-   black-translucent status-bar policy. In that display mode WebKit can leave
+/* iOS Home Screen apps combine viewport-fit=cover with a launch-time
+   status-bar policy. In that display mode WebKit can leave
    a bottom strip outside a percentage-height fixed root; sizing the two
    document owners from the large layout viewport closes that strip while the
    React root continues to inherit the document height. Keep browser tabs on
@@ -198,6 +198,26 @@ html, body, #root {
 
   #root {
     height: 100%;
+  }
+}
+
+/* Installed iPhone WebKit can report 100vh larger than its drawable viewport.
+   On the owner's device: 100vh=844, visual viewport=797, and a 100vh shell
+   placed the composer's lower edge at 802, where WebKit cut it off. The foot
+   reserves the 34px bottom safe inset. Sizing the shell to 100dvh + that
+   inset places the input at the drawable edge; ChatView drops its extra 8px
+   inner gap only while the keyboard is closed. Cap at 100vh and give root and
+   shell the SAME size. Browser
+   tabs and Android retain their existing layout viewport sizing. */
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone) {
+    :root {
+      --ios-standalone-height: min(100vh, calc(100dvh + env(safe-area-inset-bottom, 0px)));
+    }
+
+    #root {
+      height: var(--ios-standalone-height);
+    }
   }
 }
 

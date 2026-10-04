@@ -13,6 +13,7 @@ function clearShellFrame(root) {
   root.style.removeProperty('top')
   root.style.removeProperty('bottom')
   root.style.removeProperty('height')
+  root.style.removeProperty('--shell-safe-bottom-inset')
 }
 
 /**
@@ -39,6 +40,9 @@ export function fitShellToVisualViewport(root, viewport) {
   root.style.setProperty('top', `${visibleTop}px`)
   root.style.setProperty('bottom', 'auto')
   root.style.setProperty('height', `${visibleHeight}px`)
+  // The visual viewport ends above the keyboard. iOS can still report its
+  // Home-indicator safe area, but that area is now covered by the keyboard.
+  root.style.setProperty('--shell-safe-bottom-inset', '0px')
   return true
 }
 

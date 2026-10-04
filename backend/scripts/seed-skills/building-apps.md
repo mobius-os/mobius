@@ -869,7 +869,7 @@ app's server-verified bearer.
 
 ## Immersive mode — full-screen apps (games)
 
-The shell's top bar takes ~58px a game wants back. An app can ask the shell to hide its chrome and hand over the full viewport. Your background goes full-bleed automatically — it paints under the iPhone notch / Android punch-hole edge to edge (the iframe ships `viewport-fit=cover`, so its layout viewport extends under the cutout and there's no shell-coloured strip above your app):
+The shell's top bar takes ~58px a game wants back. An app can ask the shell to hide its chrome and hand over the available viewport. Your background fills that area. Android can paint beneath its punch-hole; the installed Möbius shell on iPhone uses an opaque OS status bar, so an in-shell app cannot paint behind the iPhone notch:
 
 ```jsx
 useEffect(() => {
@@ -881,7 +881,7 @@ useEffect(() => {
 ```
 
 - `value: true` hides the top bar while your app is the active canvas; `value: false` (your effect cleanup) restores it. The shell also restores chrome on app switch or unmount on its own, so you can't strand the user — but post the cleanup anyway for the in-place case.
-- The background bleeds full-screen, but **keep your controls clear of the cutout**: pad HUD / score / buttons so the notch or punch-hole doesn't cover them. Use the canonical `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the top-level host resolves `env(safe-area-inset-*)` and forwards the concrete values into the opaque app frame, where direct `env()` values may be zero. The host **zeroes them while your app is windowed**, so `padding-top: max(12px, var(--mobius-safe-top))` clears the notch immersive and stays compact when not. It re-forwards on rotation, VisualViewport changes, and Home Screen resume, so a landscape flip or iOS restore re-pads correctly.
+- **Keep controls clear of cutouts and gesture areas** wherever the host allows edge-to-edge painting: pad HUD / score / buttons with the canonical `--mobius-safe-top/right/bottom/left` CSS variables on `:root`. The top-level host resolves `env(safe-area-inset-*)` and forwards concrete values into the opaque app frame, where direct `env()` values may be zero. The host **zeroes them while your app is windowed**, so `padding-top: max(12px, var(--mobius-safe-top))` stays compact when not immersive. It re-forwards on rotation, VisualViewport changes, and Home Screen resume.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
 - Standalone opens (`/apps/<slug>/`) use the same AppCanvas host without the
   workspace chrome. The host still receives this message and tracks immersive
@@ -894,7 +894,7 @@ useEffect(() => {
 `viewport-fit=cover` lets the top-level host paint edge-to-edge, while the safe variables above keep controls clear. Hiding the Möbius toolbar is separate from asking the browser or OS to remove its own status bar:
 
 - **Installed standalone PWA** — declare `"display": "fullscreen"` in your `mobius.json` to request the browser's most immersive supported launch. Supported Chromium installs can remove the OS status bar. iOS accepts the display mode but can retain its OS status bar, so safe-area padding remains mandatory. Valid values: `standalone` (default), `fullscreen`, `minimal-ui`, `browser`.
-- **In-shell (inside Möbius)** — Möbius itself is one `display: standalone` PWA, so the OS status bar can only be dropped at runtime via the Fullscreen API, which the browser grants **only on a user gesture**. Request it on the player's first tap (re-requesting after a system-gesture exit); the shell calls `exitFullscreen()` for you when the game is left:
+- **In-shell (inside Möbius)** — Möbius itself is one `display: standalone` PWA. On supported browsers, dropping the OS status bar at runtime requires the Fullscreen API, granted **only on a user gesture**. Request it on the player's first tap (re-requesting after a system-gesture exit); the shell calls `exitFullscreen()` for you when the game is left:
 
   ```js
   // in the game's own entry document — where the tap actually lands

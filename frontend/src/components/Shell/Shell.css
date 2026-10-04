@@ -21,6 +21,16 @@
   background: var(--bg); /* CONTRACT: opaque app-wide fill — every surface beneath this must assume nothing shows through */
 }
 
+/* Match the iPhone Home Screen root's drawable-height contract from index.css.
+   The visual-viewport hook still fits the shell above an open keyboard. */
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone) {
+    .shell {
+      height: var(--ios-standalone-height);
+    }
+  }
+}
+
 /* Android Chrome's transparent gesture nav can expose a compositor strip just
    beyond the layout viewport in installed edge-to-edge PWAs. The fixed shell
    paints to `bottom: 0`, but does not contribute pixels below that edge; a real
@@ -51,7 +61,9 @@
   font-size: 13px;
   font-weight: 650;
   text-decoration: none;
-  transform: translateY(calc(-100% - 18px));
+  /* Cancel the safe-area offset too: otherwise iOS leaves this unfocused link
+     visible over the status bar. Focus still restores it below the notch. */
+  transform: translateY(calc(-100% - 18px - env(safe-area-inset-top, 0px)));
 }
 
 .shell__skip-link:focus {
@@ -257,9 +269,9 @@
 
 /* The active app asked for the full viewport (games). The bar leaves
    the layout entirely so .shell__content's flex:1 expands to the whole
-   fixed-inset .shell; with viewport-fit=cover + the translucent iOS
-   status bar (index.html) the canvas reaches under the notch. The app
-   owns its own safe-area padding while immersive. */
+   fixed-inset .shell. Android can paint behind a cutout; the installed iOS
+   shell's opaque status bar remains OS-owned above the canvas. Apps still
+   own safe-area padding wherever the host forwards a nonzero inset. */
 .shell--immersive .shell__bar {
   display: none;
 }

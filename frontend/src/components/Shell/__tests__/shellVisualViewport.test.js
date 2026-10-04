@@ -38,6 +38,7 @@ test('a keyboard overlay fits the shell to the visible viewport', () => {
   assert.equal(root.property('top'), '44px')
   assert.equal(root.property('bottom'), 'auto')
   assert.equal(root.property('height'), '492px')
+  assert.equal(root.property('--shell-safe-bottom-inset'), '0px')
 })
 
 test('desktop author zoom is not mistaken for a software keyboard', () => {
@@ -77,6 +78,7 @@ test('open, close, and open again always remeasure the unframed shell', () => {
 
   assert.equal(fitShellToVisualViewport(root, { height: 860, offsetTop: 0 }), false)
   assert.equal(root.property('height'), undefined)
+  assert.equal(root.property('--shell-safe-bottom-inset'), undefined)
 
   assert.equal(fitShellToVisualViewport(root, keyboardOpen), true)
   assert.equal(root.property('height'), '492px')
@@ -90,4 +92,10 @@ test('ordinary layout resizing and small browser chrome keep the CSS frame', () 
   const chromeRoot = fakeShell(860)
   assert.equal(fitShellToVisualViewport(chromeRoot, { height: 781 }), false)
   assert.equal(chromeRoot.property('height'), undefined)
+})
+
+test('the installed iPhone closed-keyboard frame is not mistaken for an open keyboard', () => {
+  const root = fakeShell(831)
+  assert.equal(fitShellToVisualViewport(root, { height: 797, offsetTop: 0 }), false)
+  assert.equal(root.property('height'), undefined)
 })

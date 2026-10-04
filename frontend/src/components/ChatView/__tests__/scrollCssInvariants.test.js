@@ -52,14 +52,16 @@ test('project copy files hand off inside their dialog, not to the background', (
   assert.match(copyCss, /\.project-copy-dialog\s*\{[^}]*overscroll-behavior:\s*contain;/)
 })
 
-test('the composer and transcript both reserve the full device safe area', () => {
+test('the composer and transcript use the same shell-owned bottom inset', () => {
   const foot = ruleBody('.chat__foot')
   const list = ruleBody('.chat__list')
 
-  assert.match(foot, /bottom:\s*env\(safe-area-inset-bottom,\s*0px\)/)
+  const inset = /var\(--shell-safe-bottom-inset,\s*env\(safe-area-inset-bottom,\s*0px\)\)/
+  const extra = /var\(--chat-foot-extra-bottom,\s*0px\)/
+  assert.match(foot, new RegExp(`bottom:\\s*calc\\(${inset.source}\\s*\\+\\s*${extra.source}\\)`))
   assert.match(
     list,
-    /var\(--composer-h,\s*80px\)\s*\+\s*env\(safe-area-inset-bottom,\s*0px\)\s*\+\s*16px/,
+    new RegExp(`var\\(--composer-h,\\s*80px\\)\\s*\\+\\s*${inset.source}\\s*\\+\\s*${extra.source}\\s*\\+\\s*16px`),
   )
   assert.doesNotMatch(foot, /safe-area-inset-bottom[\s\S]*-\s*14px/)
   assert.doesNotMatch(list, /safe-area-inset-bottom[\s\S]*-\s*14px/)
@@ -71,7 +73,7 @@ test('the composer backdrop fills the safe area without moving controls into it'
 
   assert.match(
     backdrop,
-    /bottom:\s*calc\(0px\s*-\s*env\(safe-area-inset-bottom,\s*0px\)\)/,
+    /bottom:\s*calc\(0px\s*-\s*var\(--shell-safe-bottom-inset,\s*env\(safe-area-inset-bottom,\s*0px\)\)\)/,
   )
   assert.match(embeddedBackdrop, /bottom:\s*0/)
 })
