@@ -24,6 +24,109 @@ var __exportAll = (all, no_symbols) => {
 };
 
 //#endregion
+//#region src/runtime/shortcuts.js
+function makeShortcuts({ getBindings = () => [], target = window, document = target.document } = {}) {
+	const previews = /* @__PURE__ */ new Map();
+	const send = (frame, shortcuts = getBindings()) => {
+		if (frame.contentWindow) frame.contentWindow.postMessage({
+			type: "moebius:frame-shortcuts",
+			shortcuts
+		}, "*");
+	};
+	const onMessage = (event) => {
+		if (event.source === target.parent && event.origin === target.location.origin && event.data?.type === "moebius:frame-shortcuts") {
+			previews.forEach((_, frame) => {
+				if (frame.isConnected) send(frame);
+			});
+			return;
+		}
+		const frame = [...previews.keys()].find((candidate) => candidate.isConnected && candidate.contentWindow === event.source);
+		if (!frame) return;
+		if (event.data?.type === "moebius:frame-shortcuts-ready") send(frame);
+		if (event.data?.type !== "moebius:shell-shortcut") return;
+		const actionId = event.data.actionId;
+		if (!getBindings().some((item) => item.actionId === actionId)) return;
+		target.parent.postMessage({
+			type: "moebius:shell-shortcut",
+			actionId
+		}, target.location.origin);
+	};
+	target.addEventListener("message", onMessage);
+	return Object.freeze({
+		connect(frame) {
+			if (!frame || frame.tagName !== "IFRAME" || frame.ownerDocument !== document) return () => {};
+			if (previews.has(frame)) return previews.get(frame);
+			const onLoad = () => {
+				if (frame.isConnected) send(frame);
+			};
+			const disconnect = () => {
+				if (previews.get(frame) !== disconnect) return;
+				send(frame, []);
+				previews.delete(frame);
+				frame.removeEventListener("load", onLoad);
+			};
+			previews.set(frame, disconnect);
+			frame.addEventListener("load", onLoad);
+			if (frame.isConnected) send(frame);
+			return disconnect;
+		},
+		_destroy() {
+			target.removeEventListener("message", onMessage);
+			for (const disconnect of [...previews.values()]) disconnect();
+		}
+	});
+}
+
+//#endregion
+//#region src/runtime/preview.js
+function installPreviewShortcuts(target) {
+	let shortcuts = [];
+	target.addEventListener("message", (event) => {
+		if (event.source !== target.parent || event.data?.type !== "moebius:frame-shortcuts") return;
+		shortcuts = Array.isArray(event.data.shortcuts) ? event.data.shortcuts : [];
+	});
+	target.document.addEventListener("keydown", (event) => {
+		if (event.isComposing || event.repeat) return;
+		const shortcut = shortcuts.find((item) => {
+			const binding = item?.binding;
+			return binding && String(event.key || "").toLowerCase() === String(binding.key || "").toLowerCase() && Boolean(event.metaKey || event.ctrlKey) === Boolean(binding.mod) && Boolean(event.shiftKey) === Boolean(binding.shift) && Boolean(event.altKey) === Boolean(binding.alt);
+		});
+		if (!shortcut) return;
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		target.parent.postMessage({
+			type: "moebius:shell-shortcut",
+			actionId: shortcut.actionId
+		}, "*");
+	}, true);
+	target.parent.postMessage({ type: "moebius:frame-shortcuts-ready" }, "*");
+}
+function preparePreviewDocument(html) {
+	const script = `<script>${`(${installPreviewShortcuts.toString()})(window)`.replace(/<\/script/gi, "<\\/script")}<\/script>`;
+	const document = String(html ?? "");
+	const doctype = /^((?:\s|<!--[\s\S]*?-->)*<!doctype[^>]*>)/i.exec(document);
+	return doctype ? `${doctype[1]}${script}${document.slice(doctype[1].length)}` : `${script}${document}`;
+}
+function createPreviewFrame(shortcuts, React) {
+	return React.forwardRef(function PreviewFrame({ srcDoc, sandbox = "allow-scripts", ...props }, ref) {
+		const html = React.useMemo(() => preparePreviewDocument(srcDoc), [srcDoc]);
+		const disconnect = React.useRef(null);
+		const register = React.useCallback((frame) => {
+			disconnect.current?.();
+			disconnect.current = frame ? shortcuts.connect(frame) : null;
+			if (typeof ref === "function") ref(frame);
+			else if (ref) ref.current = frame;
+		}, [ref]);
+		return React.createElement("iframe", {
+			...props,
+			sandbox,
+			srcDoc: html,
+			ref: register
+		});
+	});
+}
+
+//#endregion
 //#region src/runtime/network.js
 const READ_TIMEOUT_MS = 2500;
 function fetchBounded(url, init) {
@@ -4464,7 +4567,7 @@ const runtimeFeatures = Object.freeze({
 	idleDocument: true,
 	projects: true
 });
-function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+function init({ appId, appInstanceId = null, getToken, capabilityContract = null, shellShortcuts }) {
 	const identityKey = `${String(appId)}:${appInstanceId || "legacy"}`;
 	if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
 		_runtimeContext.tokenRef.current = getToken;
@@ -4477,6 +4580,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		_runtimeContext.capabilities?._destroy?.();
 		_runtimeContext.projects?._destroy?.();
 		_runtimeContext.chat?._destroy?.();
+		_runtimeContext.shortcuts?._destroy?.();
 	}
 	const tokenRef = { current: getToken };
 	const scopedToken = async (options) => {
@@ -4497,6 +4601,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		getToken: scopedToken,
 		storage
 	});
+	const shortcuts = makeShortcuts({ getBindings: shellShortcuts });
 	const api = {
 		appId,
 		get online() {
@@ -4519,6 +4624,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		onConflict: storage.onConflict,
 		runtimeFeatures,
 		createUseDocument: (React) => createUseDocument(storage, React),
+		createPreviewFrame: (React) => createPreviewFrame(shortcuts, React),
 		signal,
 		capabilities,
 		chat,
@@ -4526,6 +4632,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		split: makeSplit(),
 		immersive: makeImmersive({ appId }),
 		clipboard: makeClipboard(),
+		shortcuts,
 		projects
 	};
 	window.mobius = api;
@@ -4537,6 +4644,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		capabilities,
 		projects,
 		chat,
+		shortcuts,
 		api
 	};
 	storage._drain();

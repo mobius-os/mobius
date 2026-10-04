@@ -87,6 +87,8 @@
 // Smells: see the block at the bottom of this file.
 
 
+import { makeShortcuts } from './shortcuts.js'
+import { createPreviewFrame } from './preview.js'
 import { DurableWriteError, createUseDocument, makeStorage } from './storage.js'
 import { makeSignal } from './signal.js'
 import { makeChat } from './chat.js'
@@ -179,7 +181,7 @@ export const runtimeFeatures = Object.freeze({
   projects: true,
 })
 
-export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+export function init({ appId, appInstanceId = null, getToken, capabilityContract = null, shellShortcuts }) {
   const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
   if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
     // Hosts may replace their token broker after a refresh. Keep one runtime and
@@ -194,6 +196,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     _runtimeContext.capabilities?._destroy?.()
     _runtimeContext.projects?._destroy?.()
     _runtimeContext.chat?._destroy?.()
+    _runtimeContext.shortcuts?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -211,6 +214,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
   const projects = makeProjects()
   const chat = makeChat({ appId, getToken: scopedToken, storage })
+  const shortcuts = makeShortcuts({ getBindings: shellShortcuts })
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -238,6 +242,9 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     // the React they already import — `const useDocument =
     // window.mobius.createUseDocument(React)`.
     createUseDocument: (React) => createUseDocument(storage, React),
+    // Authored srcDoc iframe: inject and connect shortcuts automatically.
+    // Apps bind once: const PreviewFrame = window.mobius.createPreviewFrame(React).
+    createPreviewFrame: (React) => createPreviewFrame(shortcuts, React),
     signal,
     capabilities,
     chat,
@@ -245,10 +252,13 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
+    // The app-frame host owns live shell bindings and source attribution.
+    // Connecting a nested preview never transfers app or owner credentials.
+    shortcuts,
     projects,
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, shortcuts, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive

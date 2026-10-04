@@ -932,6 +932,30 @@ Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: stor
 
 ---
 
+## Authored HTML previews and inherited shortcuts
+
+Ordinary mini-app documents already inherit shell shortcuts. For an interactive
+nested `srcDoc` preview, bind the shared component once with the app's React:
+
+```jsx
+const PreviewFrame = window.mobius.createPreviewFrame(React)
+// Mount only after the final HTML is staged; keep a key per document/version.
+<PreviewFrame title="Preview" srcDoc={html} sandbox="allow-scripts" />
+```
+
+It installs the child shortcut dispatcher before authored scripts and owns
+connection/cleanup against the host's live command catalog. Changing bindings
+does not rewrite `srcDoc` or create hidden browser-history entries. Standard
+iframe props, `onLoad`, and callback/object refs are forwarded; the app still
+owns readiness, link handling, and any scoped data bridge. No credentials enter
+the preview, and the default sandbox stays opaque. Preserve an existing app's
+explicit sandbox; do not add `allow-same-origin` to make shortcuts work.
+
+Use this component instead of copying a shortcut shim or manually calling
+`shortcuts.connect`. Inert thumbnails with scripts disabled remain ordinary
+iframes. URL-based packaged embeds and embedded chat have their own contracts;
+this helper is for authored HTML previews, not every iframe indiscriminately.
+
 ## Back-gesture support (on-demand — skip unless your app has internal navigation)
 
 Most mini-apps don't need any of this. **Skip unless your app has drill-downs, modals, or nested views.**

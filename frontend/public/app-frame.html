@@ -1338,6 +1338,7 @@
         // window.mobius; the opaque frame performs no network module imports.
         globalThis.__mobiusRuntimeConfig = {
           appId: _FRAME_APP_ID,
+          shellShortcuts: () => shellShortcuts,
           appInstanceId: tokenAppInstanceId(currentToken),
           getToken: runtimeToken,
           capabilityContract: currentCapabilityContract,
