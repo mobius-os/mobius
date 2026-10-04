@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import pytest
 from fastapi import HTTPException
 
-from app import app_python_env, app_services, applied_app_runtime, models
+from app import app_git, app_python_env, app_services, applied_app_runtime, models
 from app.config import get_settings
 from app.manifest_contract import (
   ManifestContractError,
@@ -489,6 +489,58 @@ def test_build_smoke_runs_the_service_setup_and_names_a_missing_import(
     app_python_env.prepare_env(tmp_path, 7, root)
 
 
+@pytest.mark.parametrize("reused", [False, True], ids=["new-env", "reused-env"])
+def test_candidate_smokes_both_service_and_python_job(monkeypatch, tmp_path, reused):
+  lock = "a==1\n"
+  root = _runtime_tree(
+    tmp_path / "rev", lock=lock, service=b"import json\n",
+    job=b"#!/usr/bin/env python3\nimport pathlib\n",
+  )
+  builds = _fake_builds(monkeypatch)
+  if reused:
+    _fake_env(_keyed(tmp_path, 7, lock))
+  actual_run = app_python_env._run
+  checked = []
+
+  def observe(command, **kwargs):
+    if kwargs["step"].startswith("Starting the app's"):
+      checked.append((command[-2], Path(command[-1]).name))
+    return actual_run(command, **kwargs)
+
+  monkeypatch.setattr(app_python_env, "_run", observe)
+  staged = app_python_env.prepare_env(tmp_path, 7, root)
+  assert staged.reused is reused
+  assert builds == ([] if reused else [lock])
+  assert checked == [("service", "service.py"), ("job", "job.py")]
+  app_python_env.discard_env(staged)
+
+
+@pytest.mark.parametrize("entry", ["service", "job"])
+@pytest.mark.parametrize("reused", [False, True], ids=["new-env", "reused-env"])
+def test_candidate_rejects_changed_python_entry_even_with_same_lock(
+  monkeypatch, tmp_path, entry, reused,
+):
+  lock = "a==1\n"
+  root = _runtime_tree(
+    tmp_path / "rev", lock=lock, service=b"import json\n",
+    job=b"#!/usr/bin/env python3\nimport pathlib\n",
+  )
+  _fake_builds(monkeypatch)
+  if reused:
+    _fake_env(_keyed(tmp_path, 7, lock))
+  missing = f"not_locked_for_{entry}"
+  shebang = "#!/usr/bin/env python3\n" if entry == "job" else ""
+  (root / f"{entry}.py").write_text(f"{shebang}import {missing}\n")
+
+  with pytest.raises(app_python_env.PythonEnvBuildError, match=missing):
+    app_python_env.prepare_env(tmp_path, 7, root)
+
+  if reused:
+    assert _keyed(tmp_path, 7, lock).exists()
+  else:
+    assert list((tmp_path / "app-envs" / "builds").iterdir()) == []
+
+
 def test_build_step_timeout_kills_the_whole_process_group(monkeypatch, tmp_path):
   marker = tmp_path / "survivor"
   child = f"import time; time.sleep(2); open({str(marker)!r}, 'w')"
@@ -593,7 +645,7 @@ def test_publication_replaces_only_a_link_whose_build_is_gone(tmp_path):
 
 # --- Apply -----------------------------------------------------------------
 
-def _source(lock: str | None, job: bytes | None = None) -> Path:
+def _source(lock: str | None, job: bytes | None = None, service: bytes | None = None) -> Path:
   root = _data_dir() / "apps" / "deps-demo"
   root.mkdir(parents=True, exist_ok=True)
   extra = {"source_files": []}
@@ -603,6 +655,10 @@ def _source(lock: str | None, job: bytes | None = None) -> Path:
   if job is not None:
     (root / "job.py").write_bytes(job)
     extra["schedule"] = {"job": "job.py"}
+  if service is not None:
+    (root / "service.py").write_bytes(service)
+    extra["service"] = {"entry": "service.py"}
+    extra["source_files"].append("service.py")
   (root / "mobius.json").write_text(json.dumps(_manifest(**extra)))
   (root / "index.jsx").write_text("export default function App() { return <div>x</div> }\n")
   return root
@@ -633,6 +689,27 @@ def test_apply_build_failure_keeps_the_previous_revision_live(
   db.expire_all()
   assert db.get(models.App, app_id).runtime_revision == previous
   assert not app_python_env.envs_parent(_data_dir(), app_id).exists()
+
+
+def test_apply_rejects_changed_service_with_reused_lock_and_keeps_previous_revision(
+  client, auth, db, monkeypatch,
+):
+  builds = _fake_builds(monkeypatch)
+  source = _source(lock="a==1\n", service=b"import json\n")
+  first = _apply(client, auth, source)
+  assert first.status_code == 200, first.text
+  app_id = first.json()["app"]["id"]
+  previous = db.get(models.App, app_id).runtime_revision
+
+  (source / "service.py").write_bytes(b"import missing_from_same_lock\n")
+  failed = _apply(client, auth, source)
+  assert failed.status_code == 422, failed.text
+  assert failed.json()["detail"]["code"] == "python_env_failed"
+  assert "missing_from_same_lock" in failed.json()["detail"]["message"]
+  db.expire_all()
+  assert db.get(models.App, app_id).runtime_revision == previous
+  assert builds == ["a==1\n"]
+  assert _keyed(_data_dir(), app_id, "a==1\n").exists()
 
 
 def test_apply_rejects_an_unredirectable_python_job_in_a_declaring_app(
@@ -697,6 +774,24 @@ def test_rebuild_accepted_env_uses_frozen_lock_after_image_change(
   assert len(builds) == 2
 
 
+def test_rebuild_accepted_env_does_not_rerun_code_for_a_usable_env(
+  client, auth, db, monkeypatch,
+):
+  _fake_builds(monkeypatch)
+  source = _source(lock="accepted==1\n", service=b"import json\n")
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  row = db.get(models.App, created.json()["app"]["id"])
+  root = applied_app_runtime.runtime_root(row)
+  existing = app_python_env.resolve_env(_data_dir(), row.id, root)
+
+  def no_smoke(*_args, **_kwargs):
+    raise AssertionError("restoring a usable env must not run app code")
+
+  monkeypatch.setattr(app_python_env, "_smoke", no_smoke)
+  assert app_python_env.rebuild_accepted_env(_data_dir(), row.id, root) == existing
+
+
 def test_apply_failure_after_env_publication_removes_the_new_env(
   client, auth, db, monkeypatch,
 ):
@@ -728,17 +823,21 @@ def store(monkeypatch):
   monkeypatch.setattr("app.install.CRON_SCAFFOLD", Path("/nonexistent/scaffold.sh"))
   base = "https://deps.test/repo/"
 
-  def install(client, auth, *, lock: str, version: str):
+  def install(client, auth, *, lock: str, version: str,
+              service: bytes = b"import json, sys\n",
+              files: dict[str, bytes] | None = None):
+    files = files or {}
     manifest = _manifest(
       version=version, python={"lock": "requirements.lock"},
       service={"entry": "service.py"},
-      source_files=["service.py", "requirements.lock"],
+      source_files=["service.py", "requirements.lock", *files],
     )
     responses = {
       base + "mobius.json": (200, json.dumps(manifest).encode()),
       base + "index.jsx": (200, b"export default function App() { return <div>x</div> }"),
-      base + "service.py": (200, b"import json, sys\n"),
+      base + "service.py": (200, service),
       base + "requirements.lock": (200, lock.encode()),
+      **{base + name: (200, content) for name, content in files.items()},
     }
     with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
       return client.post("/api/apps/install", headers=auth, json={
@@ -802,6 +901,28 @@ def test_store_update_rebuilds_for_a_new_lock_and_a_failed_build_keeps_the_old_o
   assert not _keyed(_data_dir(), app_id, "brokenpkg==1\n").exists()
 
 
+def test_store_update_rejects_changed_service_with_reused_lock(
+  client, auth, db, monkeypatch, store,
+):
+  builds = _fake_builds(monkeypatch)
+  first = store(client, auth, lock="a==1\n", version="1.0.0")
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
+  previous = db.get(models.App, app_id).runtime_revision
+
+  failed = store(
+    client, auth, lock="a==1\n", version="1.1.0",
+    service=b"import missing_from_store_update\n",
+  )
+  assert failed.status_code == 422, failed.text
+  assert failed.json()["detail"]["code"] == "python_env_failed"
+  assert "missing_from_store_update" in failed.json()["detail"]["message"]
+  db.expire_all()
+  assert db.get(models.App, app_id).runtime_revision == previous
+  assert builds == ["a==1\n"]
+  assert _keyed(_data_dir(), app_id, "a==1\n").exists()
+
+
 def test_store_update_whose_merged_lock_diverges_is_refused_and_leaves_no_build(
   client, auth, db, monkeypatch, store,
 ):
@@ -816,18 +937,182 @@ def test_store_update_whose_merged_lock_diverges_is_refused_and_leaves_no_build(
   assert applied.status_code == 200, applied.text
   db.expire_all()
   live = db.get(models.App, app_id).runtime_revision
+  built = list(builds)
 
   diverged = store(client, auth, lock=f"a==1\n{padding}b==2\n", version="1.1.0")
 
   assert diverged.status_code == 409, diverged.text
   assert diverged.json()["detail"]["code"] == "python_lock_diverged"
-  assert builds[-1] == f"a==1\n{padding}b==2\n"
+  assert builds == built
   db.expire_all()
   assert db.get(models.App, app_id).runtime_revision == live
   linked = {
     link.resolve() for link in app_python_env.envs_parent(_data_dir(), app_id).iterdir()
   }
   assert {path.resolve() for path in (_data_dir() / "app-envs" / "builds").iterdir()} == linked
+
+
+def _assert_no_unlinked_env_or_runtime(app_id: int) -> None:
+  linked = {
+    link.resolve() for link in app_python_env.envs_parent(_data_dir(), app_id).iterdir()
+  }
+  assert {path.resolve() for path in (_data_dir() / "app-envs" / "builds").iterdir()} <= linked
+  assert not list((_data_dir() / "app-runtime").glob(".staged-*"))
+
+
+def _locally_edited_store_app(client, auth, db, store) -> tuple[int, Path, str]:
+  """A Store app whose applied local service uses a helper the package ships."""
+  first = store(
+    client, auth, lock="a==1\n", version="1.0.0", files={"lib.py": b"VALUE = 1\n"},
+  )
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
+  source = Path(db.get(models.App, app_id).source_dir)
+  (source / "service.py").write_bytes(b"import json, sys\nfrom lib import VALUE\n")
+  applied = _apply(client, auth, source)
+  assert applied.status_code == 200, applied.text
+  db.expire_all()
+  return app_id, source, db.get(models.App, app_id).runtime_revision
+
+
+def test_store_update_smokes_the_merged_tree_and_publishes_exactly_it(
+  client, auth, db, monkeypatch, store,
+):
+  builds = _fake_builds(monkeypatch)
+  app_id, _, _ = _locally_edited_store_app(client, auth, db, store)
+  actual_smoke = app_python_env._smoke
+  smoked = []
+
+  def observe(env, runtime_root, manifest, relative):
+    smoked.append((
+      (runtime_root / "service.py").read_bytes(),
+      (runtime_root / "lib.py").read_bytes(),
+      applied_app_runtime._prepared(runtime_root).revision,
+    ))
+    actual_smoke(env, runtime_root, manifest, relative)
+
+  monkeypatch.setattr(app_python_env, "_smoke", observe)
+  updated = store(
+    client, auth, lock="a==1\n", version="1.1.0",
+    files={"lib.py": b"VALUE = 2\n"},
+  )
+
+  assert updated.status_code == 201, updated.text
+  db.expire_all()
+  row = db.get(models.App, app_id)
+  assert smoked == [(
+    b"import json, sys\nfrom lib import VALUE\n", b"VALUE = 2\n", row.runtime_revision,
+  )]
+  assert builds == ["a==1\n"]
+  _assert_no_unlinked_env_or_runtime(app_id)
+
+
+def test_store_update_whose_merged_service_fails_keeps_the_old_revision_live(
+  client, auth, db, monkeypatch, store,
+):
+  builds = _fake_builds(monkeypatch)
+  app_id, source, live = _locally_edited_store_app(client, auth, db, store)
+
+  # The package alone passes: its own service never imports VALUE. Only the
+  # merged tree, which keeps the local service, cannot start.
+  failed = store(
+    client, auth, lock="a==1\n", version="1.1.0",
+    files={"lib.py": b"RENAMED = 1\n"},
+  )
+
+  assert failed.status_code == 422, failed.text
+  assert failed.json()["detail"]["code"] == "python_env_failed"
+  assert "VALUE" in failed.json()["detail"]["message"]
+  db.expire_all()
+  row = db.get(models.App, app_id)
+  assert row.runtime_revision == live
+  root = applied_app_runtime.runtime_root(row)
+  assert (root / "lib.py").read_bytes() == b"VALUE = 1\n"
+  assert app_python_env.resolve_env(_data_dir(), app_id, root) == _keyed(_data_dir(), app_id, "a==1\n")
+  assert (source / "lib.py").read_bytes() == b"VALUE = 1\n"
+  assert app_git.head_sha(source, app_git.UPSTREAM_BRANCH) == row.upstream_commit
+  assert builds == ["a==1\n"]
+  _assert_no_unlinked_env_or_runtime(app_id)
+
+
+def test_store_update_refuses_a_tree_that_changed_while_it_was_checked(
+  client, auth, db, monkeypatch, store,
+):
+  from sqlalchemy import text
+  from app import fs_locks
+  from app.database import SessionLocal
+  _fake_builds(monkeypatch)
+  app_id, source, live = _locally_edited_store_app(client, auth, db, store)
+  draft = b"import json, sys\nfrom lib import VALUE\nDRAFT = True\n"
+  actual_smoke = app_python_env._smoke
+
+  def edit_while_checking(env, runtime_root, manifest, relative):
+    # The check holds neither the source lock nor a write transaction, so an
+    # agent edit can land here.
+    assert not fs_locks.source_dir_lock(str(source)).locked()
+    with SessionLocal() as other:
+      other.execute(text("UPDATE apps SET description = description WHERE id = :id"), {"id": app_id})
+      other.commit()
+    actual_smoke(env, runtime_root, manifest, relative)
+    (source / "service.py").write_bytes(draft)
+
+  monkeypatch.setattr(app_python_env, "_smoke", edit_while_checking)
+  stale = store(
+    client, auth, lock="a==1\n", version="1.1.0", files={"lib.py": b"VALUE = 2\n"},
+  )
+
+  assert stale.status_code == 409, stale.text
+  assert stale.json()["detail"]["code"] == "python_check_stale"
+  db.expire_all()
+  row = db.get(models.App, app_id)
+  assert row.runtime_revision == live
+  assert (applied_app_runtime.runtime_root(row) / "lib.py").read_bytes() == b"VALUE = 1\n"
+  assert (source / "service.py").read_bytes() == draft
+  assert (source / "lib.py").read_bytes() == b"VALUE = 1\n"
+  _assert_no_unlinked_env_or_runtime(app_id)
+
+
+@pytest.mark.usefixtures("store")
+def test_git_origin_install_smokes_modules_its_manifest_does_not_list(
+  client, auth, db, monkeypatch, tmp_path,
+):
+  import subprocess
+  from tests.test_apps_install import _fake_async_client, _fixture_commit
+  _fake_builds(monkeypatch)
+  base = "https://deps.test/origin/"
+  manifest = _manifest(
+    python={"lock": "requirements.lock"}, service={"entry": "service.py"},
+    source_files=["service.py", "requirements.lock"],
+  )
+  files = {
+    "mobius.json": json.dumps(manifest).encode(),
+    "index.jsx": b"export default function App() { return <div>x</div> }",
+    "service.py": b"import json, sys\nimport helper\n",
+    "requirements.lock": b"a==1\n",
+  }
+  work = tmp_path / "origin-work"
+  bare = tmp_path / "origin.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+  for name, content in {**files, "helper.py": b"READY = True\n"}.items():
+    (work / name).write_bytes(content)
+  commit = _fixture_commit(work, "v1")
+  subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), commit),
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({base + name: (200, content) for name, content in files.items()}),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert response.status_code == 201, response.text
+  row = db.get(models.App, response.json()["id"])
+  root = applied_app_runtime.runtime_root(row)
+  assert (root / "helper.py").read_bytes() == b"READY = True\n"
+  assert app_python_env.resolve_env(_data_dir(), row.id, root) == _keyed(_data_dir(), row.id, "a==1\n")
 
 
 # --- GC --------------------------------------------------------------------------

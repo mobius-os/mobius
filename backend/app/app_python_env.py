@@ -20,18 +20,19 @@ Lifecycle:
 
 - Build (``prepare_env`` / ``publish_env``): during Apply and Store install,
   before the accepted runtime pointer is published. The venv installs the lock
-  wheels-only (no package build code runs), then passes ``pip check`` and a
-  smoke run of the app's Python entry. The smoke run executes the app's own
+  wheels-only (no package build code runs), then passes ``pip check``. Every
+  tree passed to ``prepare_env``, including one reusing an env, smoke-runs
+  every present declared Python entry. The smoke run executes the app's own
   setup code as the backend user with no sandbox: it is reviewed app code,
   like the service it checks. Every build step runs in its own process group,
   which is killed when the step ends or times out; this is best effort, since
   a descendant that calls ``setsid`` leaves the group, but waiting for a step
   is always bounded. A matching env is reused; a failure fails the Apply or
   install, so the previous revision stays live. A Store install or update
-  builds from the fetched package before its database transaction, so the
-  smoke run checks the fetched service. When local edits are merged into the
-  update, the locally merged service is not what was smoke-tested; only a
-  changed lock is detected (and refused).
+  checks the exact runtime tree it reconciles (local edits merged in, or every
+  module of a Git origin) between two passes of its transaction, holding no
+  lock, and publishes it only if the second pass reconciles the same tree from
+  the same inputs. A local edit to the lock itself is refused.
 - Restore (``rebuild_accepted_env``): after an image replacement, rebuild a
   missing env from the frozen accepted runtime tree, never editable source.
   Restoration uses the same validation and atomic publication as Apply. A
@@ -357,11 +358,12 @@ def _run(command: list[str], *, step: str, timeout: int, env: dict[str, str], cw
     raise PythonEnvBuildError(f"{step} failed:\n{_tail(stdout, stderr)}")
 
 
-def _smoke_target(runtime_root: Path, manifest: dict) -> tuple[str, Path] | None:
+def _smoke_targets(runtime_root: Path, manifest: dict) -> list[tuple[str, Path]]:
+  targets = []
   service = manifest.get("service")
   entry = service.get("entry") if isinstance(service, dict) else None
   if isinstance(entry, str) and (runtime_root / entry).is_file():
-    return "service", runtime_root / entry
+    targets.append(("service", runtime_root / entry))
   schedule = manifest.get("schedule")
   job = schedule.get("job") if isinstance(schedule, dict) else None
   if isinstance(job, str) and (runtime_root / job).is_file():
@@ -370,8 +372,8 @@ def _smoke_target(runtime_root: Path, manifest: dict) -> tuple[str, Path] | None
     except ManifestContractError as exc:
       raise PythonEnvBuildError(str(exc)) from exc
     if arguments is not None:
-      return "job", runtime_root / job
-  return None
+      targets.append(("job", runtime_root / job))
+  return targets
 
 
 def _base_env(names=_BASE_ENV_NAMES) -> dict[str, str]:
@@ -405,23 +407,24 @@ def _build(build: Path, runtime_root: Path, manifest: dict, lock: Path, relative
     step=f"`pip check` of `{relative}` (the lock must be complete)",
     timeout=CHECK_TIMEOUT_SECONDS, env=pip_env,
   )
-  target = _smoke_target(runtime_root, manifest)
-  if target is None:
-    return
-  kind, path = target
-  with tempfile.TemporaryDirectory(prefix="mobius-env-check-") as storage:
-    # Inert values: setup must not need a live token, and the check must not
-    # touch the app's real storage. This is not a sandbox.
-    smoke_env = activated_environment(_base_env(), build)
-    smoke_env.update({
-      "APP_ID": "0", "APP_SLUG": "", "APP_TOKEN": "",
-      "APP_STORAGE_DIR": storage, "API_BASE_URL": "http://127.0.0.1:9",
-    })
-    _run(
-      [python, "-c", _SMOKE_PROGRAM, kind, str(path)],
-      step=f"Starting the app's {kind} `{path.name}` with `{relative}`",
-      timeout=SMOKE_TIMEOUT_SECONDS, env=smoke_env, cwd=str(runtime_root),
-    )
+
+
+def _smoke(env: Path, runtime_root: Path, manifest: dict, relative: str) -> None:
+  python = str(env / "bin" / "python")
+  for kind, path in _smoke_targets(runtime_root, manifest):
+    with tempfile.TemporaryDirectory(prefix="mobius-env-check-") as storage:
+      # Inert values: setup must not need a live token, and the check must not
+      # touch the app's real storage. This is not a sandbox.
+      smoke_env = activated_environment(_base_env(), env)
+      smoke_env.update({
+        "APP_ID": "0", "APP_SLUG": "", "APP_TOKEN": "",
+        "APP_STORAGE_DIR": storage, "API_BASE_URL": "http://127.0.0.1:9",
+      })
+      _run(
+        [python, "-c", _SMOKE_PROGRAM, kind, str(path)],
+        step=f"Starting the app's {kind} `{path.name}` with `{relative}`",
+        timeout=SMOKE_TIMEOUT_SECONDS, env=smoke_env, cwd=str(runtime_root),
+      )
 
 
 def prepare_env(
@@ -445,6 +448,7 @@ def prepare_env(
   if app_id is not None:
     existing = envs_parent(data_dir, app_id) / key
     if _usable(existing):
+      _smoke(existing, runtime_root, manifest, relative)
       return StagedEnv(key=key, root=existing, reused=True)
   builds = _builds(data_dir)
   builds.mkdir(parents=True, exist_ok=True)
@@ -453,6 +457,7 @@ def prepare_env(
   build = builds / uuid.uuid4().hex[:16]
   try:
     _build(build, runtime_root, manifest, lock, relative)
+    _smoke(build, runtime_root, manifest, relative)
   except BaseException:
     shutil.rmtree(build, ignore_errors=True)
     raise
@@ -460,7 +465,15 @@ def prepare_env(
 
 
 def rebuild_accepted_env(data_dir: Path | str, app_id: int, root: Path) -> Path | None:
-  """Restore the pinned accepted tree with the ordinary build/publication path."""
+  """Restore the pinned accepted tree with the ordinary build/publication path.
+
+  An env that is still usable was validated when its tree was accepted, so
+  restoring after every start does not run the app's code again.
+  """
+  try:
+    return resolve_env(data_dir, app_id, root)
+  except PythonEnvUnavailable:
+    pass
   staged = prepare_env(data_dir, app_id, root)
   if staged is None:
     return None

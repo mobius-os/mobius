@@ -895,6 +895,11 @@ def commit_range_touches_paths(
   return any(path in guarded for path in proc.stdout.split("\0") if path)
 
 
+def ref_tree_oid(source_dir: str | Path, ref: str) -> str | None:
+  """The tree ``ref`` names, or None when it does not resolve."""
+  return _tree_oid(Path(source_dir), ref)
+
+
 def ref_trees_equal(
   source_dir: str | Path, left: str, right: str,
 ) -> bool:
