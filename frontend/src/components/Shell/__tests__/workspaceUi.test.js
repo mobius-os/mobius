@@ -54,18 +54,6 @@ const walkthroughCss = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.css', import.meta.url), 'utf8',
 )
 
-test('onboarding discovery delegates access review and installation to App Store', () => {
-  const guide = readFileSync(new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8')
-  const discovery = readFileSync(new URL('../../Walkthrough/WalkthroughStore.jsx', import.meta.url), 'utf8')
-  assert.match(shell, /<WalkthroughOverlay[\s\S]*?onOpenApp=\{openAppWithIntent\}/)
-  assert.match(guide, /onOpenApp\(storeAppId, `app:\$\{id\}`\)/)
-  assert.match(discovery, /findAppStoreApp\(apps\)/)
-  assert.match(shell, /const walkthroughStoreApp = showWalkthrough \? findAppStoreApp\(apps\)/)
-  assert.match(shell, /storeActive=\{activeView === 'canvas' && walkthroughStoreApp != null/)
-  assert.match(discovery, /Review in App Store/)
-  assert.doesNotMatch(discovery, /\/apps\/(?:preview|install)/)
-})
-
 test('the workspace menu avoids an oversized border-and-shadow card', () => {
   const rule = css.match(/\.workspace__menu\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /border:\s*1px/)
@@ -1255,10 +1243,10 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
   // review remains modal while its backdrop is scoped to the Settings pane.
   const navSrc = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
   assert.match(navSrc, /DESTINATIONS, NOT DIALOGS/)
-  // The first-use coach remains modeless while update review is pane-scoped.
-  assert.match(walkthrough, /role="region"/)
+  // The first-use guide is a modal dialog: focus stays inside it and the page behind is inert.
+  assert.match(walkthrough, /role="dialog"/)
+  assert.match(walkthrough, /aria-modal="true"/)
   assert.match(walkthrough, /aria-label="Dismiss welcome"/)
-  assert.doesNotMatch(walkthrough, /aria-modal="true"/)
   const urmCss = readFileSync(
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )

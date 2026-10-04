@@ -1,49 +1,119 @@
-/* First-run coach: teach and optionally set up Möbius while the shell stays usable. */
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+/* First-run guide: a dismissible modal dialog over the shell that introduces Möbius, sets up the
+   owner's profile and agent, and tours the apps. It borrows mobius.you's look: flat dark surfaces,
+   big tight headlines with a lavender second phrase, and quiet bordered cards. */
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Download } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
-import { getInstallPromptSnapshot, requestInstall, subscribeInstallPrompt } from '../../lib/installPrompt.js'
-import { prepareShellInstallPass } from '../../lib/shellInstallPass.js'
-import { detectInstallPlatform, installCopyForPlatform } from '../../utils/installPlatform.js'
-import { AgentSetup, HandleSetup } from './WalkthroughSetup.jsx'
-import WalkthroughStore from './WalkthroughStore.jsx'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
+import WalkthroughSetup from './WalkthroughSetup.jsx'
+import { AgentBrainFlow, AgentChatDemo } from './WalkthroughAgent.jsx'
+import WalkthroughAppGroup from './WalkthroughAppGroup.jsx'
+import WalkthroughInstall from './WalkthroughInstall.jsx'
+import { Reveal, Typewriter, WordReveal } from './WalkthroughMotion.jsx'
+import WalkthroughProfile from './WalkthroughProfile.jsx'
+import WalkthroughAccessConfirm from './WalkthroughAccessConfirm.jsx'
+import WalkthroughStore, { STORE_WINDOW_APPS, useStoreCatalog } from './WalkthroughStore.jsx'
+import { useAppInstall } from './useAppInstall.js'
+import { APP_GROUPS } from './walkthroughGroups.js'
 import './WalkthroughOverlay.css'
+import './WalkthroughScreens.css'
 
-const SLIDES = ['welcome', 'connect', 'chat', 'apps', 'settings', 'identity']
-const GUIDE_COUNT = SLIDES.length
+// `title` is [plain, accent]: the second phrase is set in the accent color.
+const SCREENS = [
+  { id: 'welcome', eyebrow: 'Welcome', title: ['Welcome to Möbius.', 'Your personal agent.'], lead: 'Möbius is your personal agent. It is the interface for the AI agents you choose, with chat, memory, and the apps they build all in one workspace.', typedLead: true, content: 'profile' },
+  { id: 'agent', eyebrow: 'Meet your agent', title: ['Say what you need.', 'Get a working app.'], lead: 'Describe it like you would to a friend. Your agent builds it and shows you the result.', content: 'chat' },
+  { id: 'brain', eyebrow: 'How it thinks', title: ['One agent.', 'Endless errands.'], lead: 'Behind every chat sits your agent. It does the work, then hands you something real.', content: 'brain' },
+  { id: 'store', eyebrow: 'App Store', title: ['Grab an app.', 'Make it yours.'], lead: 'Install what you need, publish what you build, and ask your agent to change anything.', content: 'store' },
+  ...APP_GROUPS.map(group => ({ id: group.id, eyebrow: group.eyebrow, title: group.title, lead: group.lead, content: 'group', group })),
+  { id: 'connect', eyebrow: 'Your agent', title: ['Bring your', 'own agent.'], lead: 'An agent powers everything you just saw. Pick a provider and sign in. You can add more agents, switch models, or disconnect anytime in Settings under AI providers.', content: 'connect' },
+  { id: 'finish', eyebrow: 'All set', title: ['Good luck.', 'Enjoy Möbius.'], lead: 'Your guide is done. Start in Chat and ask for anything.', content: 'finish' },
+]
+const LAST = SCREENS.length - 1
 
-export default function WalkthroughOverlay({ apps, storeActive = false, onOpenApp, onStoreSuspendedChange }) {
+// Bars that change on a jump do so in order, starting next to where the guide was: forward fills them
+// left to right, backward empties them right to left.
+function barRippleDelay(from, to, index) {
+  if (to > from && index > from && index <= to) return (index - from - 1) * 70
+  if (to < from && index > to && index <= from) return (from - index) * 70
+  return 0
+}
+
+// How each screen's title and intro arrive. Neighbouring screens never repeat, so the guide keeps
+// feeling fresh, but every effect is short and quiet (see Reveal in WalkthroughMotion).
+const MOTION = {
+  welcome: { title: 'mask', lead: 'typed' },
+  agent: { title: 'rise', lead: 'rise' },
+  brain: { title: 'blur', lead: 'words' },
+  store: { title: 'drift', lead: 'blur' },
+  system: { title: 'mask', lead: 'rise' },
+  personalize: { title: 'rise', lead: 'words' },
+  artifacts: { title: 'blur', lead: 'rise' },
+  explore: { title: 'rise', lead: 'words' },
+  insight: { title: 'drift', lead: 'blur' },
+  connect: { title: 'mask', lead: 'rise' },
+  finish: { title: 'rise', lead: 'words' },
+}
+
+function LeadText({ kind, text }) {
+  if (kind === 'typed') return <Typewriter text={text} speed={11} startDelay={200} />
+  if (kind === 'words') return <WordReveal text={text} delay={150} stagger={30} />
+  return <Reveal kind={kind} delay={220}>{text}</Reveal>
+}
+
+// Two block lines, plain then accent, so a phrase never breaks across them.
+function Title({ kind, plain, accent }) {
+  return <>
+    <span className="wt__title-line"><Reveal kind={kind} delay={60}>{plain}</Reveal></span>
+    <span className="wt__title-line is-accent"><Reveal kind={kind} delay={190}>{accent}</Reveal></span>
+  </>
+}
+
+export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp, onStoreSuspendedChange }) {
   const queryClient = useQueryClient()
-  const closingRef = useRef(false)
-  const titleRef = useRef(null)
   const cardRef = useRef(null)
-  const pendingFocusRef = useRef(false)
-  const wasSuspendedRef = useRef(false)
-  const installAbortRef = useRef(null)
+  const titleRef = useRef(null)
   const [stepIndex, setStepIndex] = useState(0)
-  const [reviewingStore, setReviewingStore] = useState(false)
-  const suspended = reviewingStore && storeActive
-  const [platform] = useState(() => detectInstallPlatform())
-  const [installCopy] = useState(() => installCopyForPlatform(platform))
-  const [showInstallHelp, setShowInstallHelp] = useState(false)
-  const [installBusy, setInstallBusy] = useState(false)
-  const [installFeedback, setInstallFeedback] = useState('')
-  const installState = useSyncExternalStore(subscribeInstallPrompt, getInstallPromptSnapshot, getInstallPromptSnapshot)
-  const slide = SLIDES[stepIndex]
+  // Where the guide was, so a jump across several screens ripples through the bars one by one.
+  const previousStepRef = useRef(0)
+  const barFrom = previousStepRef.current
+  useEffect(() => { previousStepRef.current = stepIndex }, [stepIndex])
+  const [handoffAppId, setHandoffAppId] = useState(null)
+  const [direction, setDirection] = useState(1)
+  const screen = SCREENS[stepIndex]
+  const [plainTitle, accentTitle] = screen.title
+  // The guide steps aside while the owner works in the app it handed them to.
+  const suspended = handoffAppId != null && activeAppId != null && String(activeAppId) === String(handoffAppId)
+  const wantedIconIds = screen.group ? screen.group.apps.map(app => app.id) : screen.content === 'store' ? STORE_WINDOW_APPS.map(app => app.id) : []
+  const store = useStoreCatalog(apps, wantedIconIds)
+  const installer = useAppInstall(store.catalog)
+  const confirming = installer.confirmation
+  const confirmingApp = confirming ? APP_GROUPS.flatMap(group => group.apps).find(app => app.id === confirming.id) : null
+  const identityApp = apps.find(app => app.slug === 'identity') || null
 
   // The shell's history restore must not queue chat-composer focus while this
-  // guide is handing back from Store. Publish the lease at the same commit that
-  // hides the guide, and release it on return or unmount.
+  // guide is handing back from another app. Publish the lease at the same commit
+  // that hides the guide, and release it on return or unmount.
   useLayoutEffect(() => {
     onStoreSuspendedChange?.(suspended)
     return () => { if (suspended) onStoreSuspendedChange?.(false) }
   }, [onStoreSuspendedChange, suspended])
 
+  // Back from the hand-off, the guide opens again where the owner left it.
+  const wasSuspendedRef = useRef(false)
+  useEffect(() => {
+    if (wasSuspendedRef.current && !suspended) setHandoffAppId(null)
+    wasSuspendedRef.current = suspended
+  }, [suspended])
+
+  // A modal dialog: focus starts on the title, Tab stays inside the card, the page behind is inert,
+  // and focus returns to where it was when the guide goes away. Escape does not dismiss it,
+  // because dismissing marks the guide as done for good.
+  useDialogFocus({ open: !suspended, containerRef: cardRef, initialFocusRef: titleRef, closeOnEscape: false })
+  // Each screen announces itself by moving focus to its title.
+  useEffect(() => { titleRef.current?.focus({ preventScroll: true }) }, [stepIndex])
+
   function finish() {
-    if (closingRef.current) return
-    closingRef.current = true
     queryClient.setQueryData(ownerQueries.walkthrough.key, previous => ({
       ...(previous || { completed_at: null }), completed: true,
     }))
@@ -52,144 +122,55 @@ export default function WalkthroughOverlay({ apps, storeActive = false, onOpenAp
   }
 
   function goTo(index) {
-    pendingFocusRef.current = true
-    setReviewingStore(false)
-    setStepIndex(index)
-    cardRef.current?.scrollTo({ top: 0 })
+    const next = Math.max(0, Math.min(LAST, index))
+    setDirection(next >= stepIndex ? 1 : -1)
+    installer.dismiss()
+    setStepIndex(next)
   }
 
-  // Navigation and Store return announce the current step, but mounting a
-  // modeless coach must not steal focus from the working shell.
-  useEffect(() => {
-    const active = document.activeElement
-    const returnedFromStore = wasSuspendedRef.current && !suspended
-    const focusWasReleased = active === document.body
-      || active === document.documentElement
-      || active?.id === 'main-content'
-      || (active?.tagName === 'IFRAME'
-        && active.closest?.('[data-app-frame-owner]')?.getAttribute('aria-hidden') === 'true')
-    if (!suspended && (pendingFocusRef.current || (returnedFromStore && focusWasReleased))) {
-      titleRef.current?.focus({ preventScroll: true })
-      pendingFocusRef.current = false
-    }
-    wasSuspendedRef.current = suspended
-  }, [stepIndex, suspended])
-
-  useEffect(() => () => installAbortRef.current?.abort(), [])
-
-  async function handleInstall() {
-    setInstallFeedback('')
-    if (platform.ios) {
-      const controller = new AbortController()
-      installAbortRef.current = controller
-      setInstallBusy(true)
-      await prepareShellInstallPass({ force: true, signal: controller.signal })
-      if (controller.signal.aborted) return
-      installAbortRef.current = null
-      setInstallBusy(false)
-    }
-    if (installState !== 'ready') {
-      setShowInstallHelp(value => !value)
-      return
-    }
-    setInstallBusy(true)
-    const result = await requestInstall()
-    setInstallBusy(false)
-    if (result.outcome === 'accepted') {
-      setInstallFeedback('Installed on this device. Your guide is still here.')
-      return
-    }
-    if (result.outcome === 'fallback-ready') {
-      setInstallFeedback('Tap Install again to use your browser’s regular prompt.')
-      return
-    }
-    setShowInstallHelp(true)
-    setInstallFeedback(result.outcome === 'dismissed'
-      ? 'Not installed. You can do this from your browser menu later.'
-      : 'The browser prompt was unavailable. Use the steps below instead.')
+  function openApp(appId, intent) {
+    setHandoffAppId(appId)
+    void onOpenApp(appId, intent)
   }
-
-  const installLabel = installBusy ? 'Opening…' : installState === 'ready' ? 'Install' : showInstallHelp ? 'Hide' : installCopy.ctaLabel
 
   if (suspended) return null
 
-  return <aside ref={cardRef} className="wt__card" role="region" aria-labelledby="wt-title">
+  return <>
+    <div className="wt__backdrop" aria-hidden="true" />
+    <div className="wt__card" ref={cardRef} data-screen={screen.id} role="dialog" aria-modal="true" aria-labelledby="wt-title">
       <div className="wt__topline">
-        <div className="wt__brand"><span className="wt__mark" aria-hidden="true"><span /></span><span>Möbius / Getting started</span><span className="wt__count"><span aria-hidden="true">{String(stepIndex + 1).padStart(2, '0')} / {String(GUIDE_COUNT).padStart(2, '0')}</span><span className="sr-only">Step {stepIndex + 1} of {GUIDE_COUNT}</span></span></div>
+        <div className="wt__brand"><img src="/moebius.png" alt="" width="28" height="28" /><strong>Möbius</strong><span>Getting started</span></div>
+        <span className="wt__count"><span aria-hidden="true">{stepIndex + 1} of {SCREENS.length}</span><span className="sr-only">Step {stepIndex + 1} of {SCREENS.length}</span></span>
         <button type="button" className="wt__close" onClick={finish} aria-label="Dismiss welcome" title="Dismiss guide">×</button>
       </div>
-      <div className="wt__layout">
-        <div className="wt__main">
-          <div className="wt__slide" role="region" aria-labelledby="wt-title" tabIndex={0}>
-        {slide === 'welcome' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Welcome to Möbius</h2>
-          <p className="wt__lead">Möbius is a place to think out loud and make things happen.</p>
-          <p className="wt__body">Bring a question, a rough idea, or a bigger ambition. Your agent can help you find a way forward, while apps give you tools to write, plan, build, and share. Möbius keeps your conversations and work together.</p>
-          <p className="wt__body wt__body--second">This guide shows you around. Along the way, you can connect an agent and choose a public handle.</p>
-          {installState !== 'installed' && <section className="wt__install" aria-labelledby="wt-install-title">
-            <span className="wt__install-icon" aria-hidden="true"><Download width={19} height={19} /></span>
-            <div><h3 id="wt-install-title">Keep Möbius close</h3><p>{installState === 'ready' ? 'Install it on this device for a full-screen, one-tap launch.' : installCopy.summary}</p></div>
-            <button type="button" className="wt__install-btn" onClick={handleInstall} disabled={installBusy} aria-expanded={installState === 'ready' ? undefined : showInstallHelp} aria-controls={installState === 'ready' ? undefined : 'wt-install-help'}>{installLabel}</button>
-            {showInstallHelp && <div className="wt__install-help" id="wt-install-help"><strong>{installCopy.title}</strong><span>{installCopy.body}</span></div>}
-            {installFeedback && <p className="wt__install-feedback" role="status">{installFeedback}</p>}
-          </section>}
-          {installState === 'installed' && installFeedback && <p className="wt__install-feedback" role="status">{installFeedback}</p>}
-        </>}
-
-        {slide === 'connect' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Connect an agent</h2>
-          <p className="wt__lead">Connect an agent to power Chat.</p>
-          <p className="wt__body">Choose OpenAI Codex or Claude Code below, then follow the sign-in steps. Once connected, you can ask questions, plan work, and create things together. You can change your provider or model in Settings.</p>
-          <AgentSetup />
-        </>}
-
-        {slide === 'chat' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Chat and Projects</h2>
-          <p className="wt__lead">Start in Chat. Give bigger work a home in Projects.</p>
-          <p className="wt__body">Ask a question or describe what you want to make in everyday words. When the work has several parts, create a Project to keep its chats, files, and finished results together. Your agent can use a Goal to show the plan, track progress, and pause when it needs a decision from you.</p>
-          <div className="wt__feature-grid">
-            <article><span>Ask and create</span><h3>Chat</h3><p>Ask a question, sketch an idea, or keep refining something in one conversation.</p></article>
-            <article><span>Build over time</span><h3>Projects</h3><p>Start from scratch or a template, then keep every part of the work together.</p></article>
-            <article><span>Track longer work</span><h3>Goals</h3><p>Follow multi-step work and see when your agent needs your input.</p></article>
-          </div>
-        </>}
-
-        {slide === 'apps' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Explore apps</h2>
-          <WalkthroughStore apps={apps} onReviewApp={(id, storeAppId) => {
-            setReviewingStore(true)
-            void onOpenApp(storeAppId, `app:${id}`)
-          }} />
-        </>}
-
-        {slide === 'settings' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Your settings</h2>
-          <p className="wt__lead">Set up Möbius the way you like it.</p>
-          <p className="wt__body">In Settings, manage AI providers and models, choose models for background work, change the theme, check for updates, and sign out. Use the Integrations app to connect outside services.</p>
-          <div className="wt__feature-grid wt__feature-grid--four">
-            <article><span>Connect</span><h3>AI providers</h3><p>Connect or reconnect an agent and choose the model for Chat.</p></article>
-            <article><span>Keep going</span><h3>Background agents</h3><p>Pick models for scheduled work from apps such as Memory and Reflection.</p></article>
-            <article><span>Make it yours</span><h3>Appearance</h3><p>Choose light or dark mode.</p></article>
-            <article><span>Stay current</span><h3>Möbius</h3><p>Check for platform updates and manage this installation.</p></article>
-          </div>
-          <p className="wt__footnote">Find Settings in the Möbius menu whenever you need it.</p>
-        </>}
-
-        {slide === 'identity' && <>
-          <h2 id="wt-title" ref={titleRef} tabIndex={-1}>Choose a handle</h2>
-          <p className="wt__lead">Give your Möbius profile a name people can recognize.</p>
-          <p className="wt__body">Your @handle is the name others see when you share a page or write an app review. It helps them recognize you without showing your email address. Choose one below. You can change it later in Möbius · You.</p>
-          <HandleSetup />
-        </>}
-          </div>
-
-          <div className="wt__footer">
-            {stepIndex > 0 && <button type="button" className="wt__back" onClick={() => goTo(stepIndex - 1)}>Back</button>}
-            <button type="button" className="wt__next" onClick={() => stepIndex === SLIDES.length - 1 ? finish() : goTo(stepIndex + 1)}>
-              {slide === 'identity' ? 'Finish guide' : 'Next'}
-            </button>
-          </div>
-        </div>
+      <div className="wt__bars" role="group" aria-label="Guide progress">
+        {SCREENS.map((item, index) => <button key={item.id} type="button" style={{ '--wt-bar-delay': `${barRippleDelay(barFrom, stepIndex, index)}ms` }} className={index === stepIndex ? 'is-current' : index < stepIndex ? 'is-seen' : ''} aria-label={`Go to ${item.eyebrow}`} aria-current={index === stepIndex ? 'step' : undefined} onClick={() => goTo(index)} />)}
       </div>
-  </aside>
+      <div className={`wt__slide ${direction < 0 ? 'is-back' : 'is-forward'}`} role="region" aria-labelledby="wt-title" tabIndex={0} key={screen.id}>
+        <h2 id="wt-title" ref={titleRef} tabIndex={-1}><Title kind={(MOTION[screen.id] || MOTION.agent).title} plain={plainTitle} accent={accentTitle} /></h2>
+        <p className="wt__lead"><LeadText kind={(MOTION[screen.id] || MOTION.agent).lead} text={screen.lead} /></p>
+        {screen.content === 'profile' && <WalkthroughProfile identityApp={identityApp} onSignIn={() => openApp(identityApp.id)} />}
+        {screen.content === 'chat' && <AgentChatDemo />}
+        {screen.content === 'brain' && <AgentBrainFlow />}
+        {screen.content === 'store' && <WalkthroughStore store={store} />}
+        {screen.content === 'group' && <WalkthroughAppGroup group={screen.group} store={store} statusOf={installer.statusOf} onInstall={installer.begin} />}
+        {screen.content === 'connect' && <WalkthroughSetup />}
+        {screen.content === 'finish' && <>
+          <WalkthroughInstall />
+          <ul className="wt-next">
+            <li><strong>Chat</strong><span>Ask for anything. An app, an answer, or a plan.</span></li>
+            <li><strong>App Store</strong><span>Add apps whenever you feel curious.</span></li>
+            <li><strong>Settings</strong><span>Switch agents or models and change the look.</span></li>
+          </ul>
+        </>}
+      </div>
+      {confirming && confirmingApp && <WalkthroughAccessConfirm confirmation={confirming} app={confirmingApp} icon={store.icons[confirmingApp.id]} onApprove={installer.approve} onCancel={installer.dismiss} />}
+      <div className="wt__footer">
+        {stepIndex > 0 && <button type="button" className="wt__back" onClick={() => goTo(stepIndex - 1)}>Back</button>}
+        <button type="button" className="wt__next" onClick={() => stepIndex === LAST ? finish() : goTo(stepIndex + 1)}>
+          {stepIndex === LAST ? 'Finish guide' : 'Continue'}<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 8h10M9 4l4 4-4 4" /></svg>
+        </button>
+      </div>
+    </div>
+  </>
 }

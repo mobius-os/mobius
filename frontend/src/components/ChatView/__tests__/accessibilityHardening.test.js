@@ -91,15 +91,20 @@ test('Chat Changes is a modeless panel whose outside press reaches its destinati
     'outside activation must remain the browser’s real pointer sequence, not a replayed synthetic click')
 })
 
-test('first-use guidance is a labeled non-modal region with a dismiss action', () => {
+test('first-use guidance is a labeled modal dialog with a dismiss action', () => {
   const source = read('../../Walkthrough/WalkthroughOverlay.jsx')
-  assert.match(source, /role="region"/)
+  assert.match(source, /role="dialog"/)
+  assert.match(source, /aria-modal="true"/)
+  assert.match(source, /useDialogFocus\(\{[\s\S]*?closeOnEscape: false/)
   assert.match(source, /aria-labelledby="wt-title"/)
   assert.match(source, /aria-label="Dismiss welcome"/)
+})
+
+test('first-use device installation has labeled help and status feedback', () => {
+  const source = read('../../Walkthrough/WalkthroughInstall.jsx')
   assert.match(source, /aria-labelledby="wt-install-title"/)
   assert.match(source, /aria-expanded=/)
   assert.match(source, /role="status"/)
-  assert.doesNotMatch(source, /aria-modal="true"/)
 })
 
 test('chat image preview actions use labeled buttons', () => {
