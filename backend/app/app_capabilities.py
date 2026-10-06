@@ -558,6 +558,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "helper_activity_read": bool(perms.get("helper_activity_read", False)),
     },
     "background": (
       {
@@ -688,6 +689,9 @@ def contract_from_app_state(
       ),
       "railway_manage": bool(
         (contract_permissions or {}).get("railway_manage", False)
+      ),
+      "helper_activity_read": bool(
+        (contract_permissions or {}).get("helper_activity_read", False)
       ),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
@@ -888,7 +892,7 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "public.storage.read",
+  "data.railway_manage", "data.helper_activity_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {

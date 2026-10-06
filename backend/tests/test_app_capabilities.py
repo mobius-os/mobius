@@ -57,6 +57,7 @@ def test_legacy_closed_defaults_do_not_manufacture_capability_changes():
     "connect_manage",
     "identity_manage",
     "railway_manage",
+    "helper_activity_read",
   ):
     legacy["data"].pop(field)
 
@@ -103,6 +104,7 @@ def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public
     (("data", "connect_manage"), True),
     (("data", "identity_manage"), True),
     (("data", "railway_manage"), True),
+    (("data", "helper_activity_read"), True),
     (("public", "storage", "read"), True),
     (("public", "storage", "write_prefix"), "public/submissions/"),
   ],
@@ -111,7 +113,9 @@ def test_legacy_receipt_still_reports_real_new_grants(path, value):
   installed, _digest = contract_and_digest(_manifest())
   installed["schema"] = 4
   installed.pop("public")
-  for field in ("connect_manage", "identity_manage", "railway_manage"):
+  for field in (
+    "connect_manage", "identity_manage", "railway_manage", "helper_activity_read",
+  ):
     installed["data"].pop(field)
   candidate = json.loads(json.dumps(installed))
   candidate["schema"] = 6
