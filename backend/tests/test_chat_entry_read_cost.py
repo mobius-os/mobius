@@ -52,16 +52,16 @@ def _run(
     status=status, started_at=base + timedelta(seconds=start),
     ended_at=base + timedelta(seconds=end),
   )
+  plan = None
   if task_status:
-    run.goal_plan_json = {"version": 1, "tasks": [{
+    plan = {"version": 1, "tasks": [{
       "id": "verify", "title": "Verify", "status": task_status,
       "depends_on": [],
     }]}
-    run.goal_plan_revision = 1
   db.add(run)
   persist_goal_fixture(db, run, status=(
     "completed" if status == "completed" and task_status in (None, "completed", "cancelled") else "open"
-  ))
+  ), plan=plan, revision=1 if plan is not None else 0)
   db.commit()
   return run
 
@@ -104,7 +104,7 @@ def test_resumed_goal_only_hydrates_plan_at_final_anchor(
   assert list(result) == ([3] if expected else [])
   assert not _transcript_reads(statements)
   if not expected:
-    assert not any("chat_runs.goal_plan_json" in sql for sql in statements)
+    assert not any("chat_goals.plan_json" in sql for sql in statements)
   else:
     assert result[3][0]["plan"]["summary"]["can_complete"] is True
 
