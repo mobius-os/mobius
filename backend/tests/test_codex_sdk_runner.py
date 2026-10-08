@@ -20,6 +20,42 @@ from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
 
+@pytest.fixture(autouse=True)
+def platform_hook_discovery(monkeypatch):
+  """Supply hook discovery for lifecycle fakes without skipping trust checks.
+
+  These tests fake threads and turns, not the app-server discovery transport.
+  The dedicated hook modules exercise missing, foreign and untrusted hooks.
+  """
+  import tomllib
+  original = codex_sdk_runner._codex_platform_hook_thread_config
+
+  async def discover(codex, sdk, cwd, config, required, *, optional=()):
+    hooks = []
+    for override in [*required, *optional]:
+      ((event, groups),) = tomllib.loads(override)["hooks"].items()
+      group = groups[0]
+      hooks.append(SimpleNamespace(
+        source="sessionFlags", handler_type="command",
+        event_name=event[0].lower() + event[1:],
+        command=group["hooks"][0]["command"], matcher=group["matcher"],
+        timeout_sec=group["hooks"][0]["timeout"],
+        key=event, current_hash=f"test-{event}",
+      ))
+
+    class Client:
+      async def request(self, method, params, response_model):
+        assert method == "hooks/list" and params == {"cwds": [cwd]}
+        return SimpleNamespace(data=[SimpleNamespace(hooks=hooks)])
+
+    return await original(
+      SimpleNamespace(_client=Client()), {"HooksListResponse": object},
+      cwd, config, required, optional=optional,
+    )
+
+  monkeypatch.setattr(codex_sdk_runner, "_codex_platform_hook_thread_config", discover)
+
+
 def test_codex_home_fallback_follows_data_dir_without_overriding_provider_env():
   missing = {}
   codex_sdk_runner._ensure_codex_home(missing, "/srv/mobius-data")

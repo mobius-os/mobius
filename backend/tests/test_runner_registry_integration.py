@@ -129,12 +129,26 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     async def turn(self, *_args, **_kwargs):
       return FakeTurnHandle()
 
+  class FakeControlClient:
+    def __init__(self):
+      self._sync = SimpleNamespace(_approval_handler=None)
+
+    async def request(self, method, params, response_model):
+      import tomllib
+      assert method == "hooks/list"
+      assert params == {"cwds": ["/tmp"]}
+      hook = tomllib.loads(runner._codex_owner_card_hook_override())["hooks"]["PostToolUse"][0]
+      return SimpleNamespace(data=[SimpleNamespace(hooks=[SimpleNamespace(
+        source="sessionFlags", handler_type="command", event_name="postToolUse",
+        command=hook["hooks"][0]["command"], matcher=hook["matcher"],
+        timeout_sec=hook["hooks"][0]["timeout"], key="owner-card",
+        current_hash="owner-card-hash",
+      )])])
+
   class FakeAsyncCodex:
     def __init__(self, config=None):
       self.config = config
-      self._client = SimpleNamespace(
-        _sync=SimpleNamespace(_approval_handler=None)
-      )
+      self._client = FakeControlClient()
 
     async def __aenter__(self):
       return self
@@ -142,13 +156,17 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     async def __aexit__(self, _exc_type, _exc, _tb):
       return None
 
-    async def thread_start(self, *_args, **_kwargs):
+    async def thread_start(self, *_args, **kwargs):
+      assert kwargs["config"]["hooks.state"] == {
+        "owner-card": {"trusted_hash": "owner-card-hash"},
+      }
       return FakeThread()
 
   sdk = {
     "AgentMessageDeltaNotification": type("AgentMessageDeltaNotification", (), {}),
     "ApprovalMode": type("ApprovalMode", (), {"auto_review": "auto_review"}),
     "AsyncCodex": FakeAsyncCodex,
+    "HooksListResponse": object,
     "CodexConfig": lambda **kwargs: SimpleNamespace(**kwargs),
     "CodexRpcError": RuntimeError,
     "TransportClosedError": type("TransportClosedError", (Exception,), {}),
@@ -207,7 +225,8 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     deadline = asyncio.get_running_loop().time() + 1.0
     while asyncio.get_running_loop().time() < deadline:
       if task.done():
-        await task
+        result = await task
+        assert result.get("error") is None, result.get("error")
       handle = registry.get_handle("chat-codex", RunnerKind.CODEX_SDK)
       if handle is not None:
         break
