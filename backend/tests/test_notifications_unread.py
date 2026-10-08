@@ -440,9 +440,11 @@ def test_app_attributed_send_publishes_activity_then_badge(client, auth, db):
     sent_id = _send(
       client, auth, source_type="app", source_id=str(app.id),
     )
-    assert events.get_nowait() == {
-      "type": "app_activity", "appId": str(app.id),
-    }
+    activity = events.get_nowait()
+    assert activity["type"] == "app_activity"
+    assert activity["appId"] == str(app.id)
+    assert isinstance(activity["unseenActivityVersion"], int)
+    assert activity["appCreatedAt"] == app.created_at.isoformat()
     assert events.get_nowait() == {
       "type": "notification_created", "id": sent_id,
     }

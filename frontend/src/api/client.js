@@ -1128,9 +1128,9 @@ export const api = {
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),
-    markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
+    markActivitySeen: (appId, activityVersion, appCreatedAt) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
-      body: JSON.stringify({ activity_version: activityVersion }),
+      body: JSON.stringify({ activity_version: activityVersion, app_created_at: appCreatedAt }),
     }),
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',
