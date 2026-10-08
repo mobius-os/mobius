@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 
+import pytest
+
 import app.codex_skills as codex_skills
 
 from app.codex_skills import (
@@ -289,3 +291,35 @@ def test_safe_dir_name_sanitizes():
   assert _safe_dir_name("a/b c") == "a-b-c"
   assert _safe_dir_name("..") is None
   assert _safe_dir_name("") is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_codex_skill_sync_runs_off_the_event_loop(monkeypatch, enabled):
+  import asyncio
+
+  seen = []
+
+  def sync(data_dir, requested):
+    try:
+      asyncio.get_running_loop()
+      seen.append("on loop")
+    except RuntimeError:
+      seen.append("worker thread")
+    assert data_dir == "/tmp"
+    assert requested is enabled
+    return enabled
+
+  monkeypatch.setattr(codex_skills, "sync_codex_skills_for_prompt", sync)
+  assert asyncio.run(codex_skills.codex_native_skills_ready("/tmp", enabled)) is enabled
+  assert seen == ["worker thread"]
+
+
+def test_codex_skill_sync_propagates_failure(monkeypatch):
+  import asyncio
+
+  def fail(*args):
+    raise OSError("skill cache unavailable")
+
+  monkeypatch.setattr(codex_skills, "sync_codex_skills_for_prompt", fail)
+  with pytest.raises(OSError, match="skill cache unavailable"):
+    asyncio.run(codex_skills.codex_native_skills_ready("/tmp", True))
