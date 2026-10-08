@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 from sqlalchemy import func, or_, update
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm import Session, defer, load_only
 
 from app import models
 from app.chat_message_identity import assistant_message_run_id
@@ -911,7 +911,7 @@ def terminal_goal_summaries_by_message_index(
   move a resumed Goal's card onto an earlier answer. Plans and handoffs for
   off-page Goals are never hydrated.
   """
-  goals = db.query(models.ChatGoal).filter(
+  goals = db.query(models.ChatGoal).options(defer(models.ChatGoal.plan_json)).filter(
     models.ChatGoal.chat_id == chat_id,
     models.ChatGoal.status.in_(("completed", "cannot_complete", "cancelled")),
   ).order_by(models.ChatGoal.created_at.asc(), models.ChatGoal.id.asc()).all()
