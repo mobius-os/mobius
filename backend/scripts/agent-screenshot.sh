@@ -688,11 +688,16 @@ sleep 0.3
 # read inside the page and never appears in argv or output.
 BROWSER_PHASE="authentication verification"
 AUTH_OK="$(browser_eval_retry \
-  "(async () => { const token = localStorage.getItem('token'); const login = () => document.querySelector('[data-auth-surface=login]'); if (!token || login()) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !login(); } catch { return false; } })()" \
+  "(async () => { const token = localStorage.getItem('token'); const login = () => document.querySelector('[data-auth-surface=login]'); if (!token || login()) return 'rejected'; try { const res = await fetch('/api/owner/timezone?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); if (res.status === 401 || res.status === 403) return 'rejected'; if (!res.ok) return 'unavailable'; return !!localStorage.getItem('token') && !login() ? 'ok' : 'rejected'; } catch { return 'unavailable'; } })()" \
   || true)"
-if [ "$AUTH_OK" != "true" ]; then
-  die "authentication failed; the token was rejected or the login page remained visible"
+if [ -s "$BROWSER_TIMEOUT_FILE" ]; then
+  AUTH_OK="unavailable"
 fi
+case "$AUTH_OK" in
+  ok) ;;
+  rejected) die "authentication failed; the token was rejected or the login page remained visible" ;;
+  *) die "authentication probe unavailable; the server or browser did not answer" ;;
+esac
 
 # For shell routes, prove the browser loaded the same hashed entry asset that
 # exists in the currently-built dist. This turns stale screenshots into a clear
