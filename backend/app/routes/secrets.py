@@ -4,7 +4,9 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import (
+  parse_qsl, quote, unquote, urlencode, urlparse, urlunparse,
+)
 
 import httpx
 from cryptography.fernet import InvalidToken
@@ -109,7 +111,25 @@ def _credentialed_fetch_config(app: models.App, provider: str) -> dict:
   return config
 
 
+def _path_is_canonical(path: str) -> bool:
+  """Refuse paths the HTTP client or the provider could resolve elsewhere.
+
+  httpx removes ``.`` and ``..`` segments when it builds the request, so
+  ``/allowed/../admin`` would pass a prefix check and then fetch ``/admin``
+  with the credential attached. Encoded dot segments, encoded separators and
+  backslashes are refused too, since servers may decode them the same way.
+  """
+  if "\\" in path:
+    return False
+  lowered = path.lower()
+  if "%2f" in lowered or "%5c" in lowered:
+    return False
+  return all(unquote(segment) not in (".", "..") for segment in path.split("/"))
+
+
 def _path_is_allowed(path: str, allowed: list[str]) -> bool:
+  if not _path_is_canonical(path):
+    return False
   for prefix in allowed:
     if prefix.endswith("/") and path.startswith(prefix):
       return True
