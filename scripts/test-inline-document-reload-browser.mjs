@@ -160,10 +160,17 @@ function Host(){
  ${layout}
  ${delivery}
  useEffect(()=>{
+  // Hold replacement state at the real message boundary. Promotion must not
+  // count its transient empty presentation as a settled canonical receipt.
+  let holdReplacementState=scenario==='busy-swap'
+  const replacementStates=[]
   const receive=e=>{
    const srcVersion=attributedFrameVersion(framesRef.current,e.source)
    if(srcVersion==null||e.origin!==location.origin)return
    let msg=e.data
+   if(holdReplacementState&&srcVersion==='v2'&&msg.type==='moebius:app-block-state'){
+    replacementStates.push(e);return
+   }
    if(scenario==='failed-unacked'&&window.__loadsByVersion.v1===1&&msg.type==='moebius:app-block-state')msg={...msg,ackNonce:null}
    if(scenario==='wrong-ack'&&window.__loadsByVersion.v1===2&&!window.__allowAck&&msg.type==='moebius:app-block-state')msg={...msg,checkpointAck:'wrong'}
    if(msg.type==='moebius:app-block-state')window.__states.push(msg)
@@ -171,6 +178,11 @@ function Host(){
    ${mounted}
    if(msg.type==='probe-send')window.__sends++
   }
+  window.__releaseReplacementState=()=>{
+   holdReplacementState=false
+   for(const event of replacementStates.splice(0))receive(event)
+  }
+  window.__replacementStateCount=()=>replacementStates.length
   addEventListener('message',receive);return()=>removeEventListener('message',receive)
  },[])
  window.__state=sessionState;window.__event=blockEvent;window.__swap=swap;window.__frames=framesRef.current;window.__documents=blockDocumentsRef.current
@@ -230,10 +242,17 @@ window.runWorkspaceChecks=async()=>{
    check('actual partial checkpoint owns the exact unresolved publication phase',phases.length===1&&(scenario==='partial-batch'?phases[0].unitKey==='record:b'&&JSON.stringify(phases[0].phaseIds)===JSON.stringify(['b']):phases[0].unitKey==='stack:s'&&JSON.stringify(phases[0].phaseIds)===JSON.stringify(['a','b'])))
   }
   if(scenario==='busy-swap'){
+   const settledPromotion=()=>window.__swap.liveVersion==='v2'&&window.__state!==null
+    &&!inlineSessionRetained(window.__state,window.__event)
+    &&window.__state.actions[0]?.links[0]?.url==='https://github.com/team/repo/pull/1'
    window.__version();await wait(()=>window.__documents.get('v2')?.supported===true)
    check('busy native successor cannot take the live document',window.__swap.liveVersion==='v1'&&window.__swap.incomingVersion==='v2')
    check('incoming observation cannot replace the live owner',window.__state.checkpoint.id===before.checkpoint.id)
-   window.__settle();await wait(()=>window.__swap.liveVersion==='v2'&&!window.__state?.retain)
+   window.__settle();await wait(()=>window.__swap.liveVersion==='v2'&&window.__state===null&&window.__replacementStateCount()>0)
+   check('empty replacement presentation cannot satisfy canonical settlement',!settledPromotion())
+   check('held replacement receipt cannot cause another publication',window.__sends===1)
+   window.__releaseReplacementState();await wait(settledPromotion)
+   check('canonical receipt releases all event-aware ownership',!inlineSessionRetained(window.__state,window.__event))
    check('exact settlement permits promotion without replay',window.__sends===1)
    check('settled native promotion releases the right link',window.__state.actions[0].links[0]?.url==='https://github.com/team/repo/pull/1')
    return {status:'pass',scenario,checks,sends:window.__sends}
