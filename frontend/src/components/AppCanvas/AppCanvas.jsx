@@ -1346,7 +1346,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (!blockSession || !swap.liveLoaded) return
     postToFrame(swap.liveVersion, { type: 'moebius:app-block-init',
-      sessionId: blockSession.sessionId, actions: blockSession.actions, initialAction: null })
+      sessionId: blockSession.sessionId, actions: blockSession.actions, initialAction: null,
+      checkpoint: blockSession.checkpoint, retain: blockSession.retain,
+      recoveryError: blockSession.recoveryError })
   }, [swap.liveLoaded, swap.liveVersion, blockSession])
   useEffect(() => {
     if (!blockSession || !blockEvent || !swap.liveLoaded || blockEvent.sessionId !== blockSession.sessionId) return

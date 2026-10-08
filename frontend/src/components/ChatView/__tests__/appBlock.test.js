@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appBlockFromToken, inlineBlockState, inlineSessionRetained, inlineBlockDocumentReset } from '../markdown/appBlock.js'
+import { appBlockFromToken, inlineBlockState, inlineBlockStateUpdate, inlineSessionRetained, inlineBlockDocumentReset } from '../markdown/appBlock.js'
 
 const token = value => ({ type:'code', lang:'mobius-app', text:JSON.stringify(value) })
 test('document reset invalidates frozen confirmation without releasing uncertain publication ownership', () => {
@@ -12,12 +12,64 @@ test('document reset invalidates frozen confirmation without releasing uncertain
   ] }
   const reset = inlineBlockDocumentReset(state)
   assert.equal(reset.retain, true)
-  assert.equal(reset.ackNonce, 'sent')
+  assert.equal(reset.ackNonce, null)
   assert.equal(reset.actions[0].confirming, false)
   assert.equal(reset.actions[0].confirmation, null)
   assert.equal(reset.actions[0].disabled, true)
-  assert.equal(reset.actions[1], state.actions[1])
+  assert.equal(reset.actions[1].disabled, true)
+  assert.equal(reset.recoveryPending, true)
   assert.equal(state.actions[0].confirming, true)
+})
+test('checkpoint handover holds a reset owner until exact observational acknowledgement', () => {
+  const keys = new Set(['send:x'])
+  const parse = fields => inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's',
+    actions: [{ key: 'send:x', label: 'Send', disabled: false }], ...fields }, 's', keys)
+  const old = inlineBlockStateUpdate(null, parse({ retain: true,
+    checkpoint: { id: 'attempt-1', data: '{"phase":"uncertain"}', ignored: 'authority' } }))
+  assert.deepEqual(old.checkpoint, { id: 'attempt-1', data: '{"phase":"uncertain"}' })
+  const reset = inlineBlockDocumentReset(old)
+  assert.equal(reset.recoveryPending, true)
+  const cold = inlineBlockStateUpdate(reset, parse({ retain: false }))
+  assert.equal(cold.checkpoint.id, 'attempt-1')
+  assert.equal(cold.actions[0].disabled, true)
+  assert.equal(inlineSessionRetained(cold, null), true)
+  const wrong = inlineBlockStateUpdate(cold, parse({ checkpointAck: 'other' }))
+  assert.equal(wrong.actions[0].disabled, true)
+  const imported = inlineBlockStateUpdate(wrong, parse({ checkpointAck: 'attempt-1',
+    checkpoint: { id: 'attempt-2', data: 'new' }, retain: false }))
+  assert.equal(imported.recoveryPending, false)
+  assert.equal(imported.retain, true)
+  assert.equal(imported.checkpoint.id, 'attempt-2')
+  const settled = inlineBlockStateUpdate(imported, parse({ checkpoint: null,
+    checkpointAck: 'attempt-2', retain: false }))
+  assert.equal(inlineSessionRetained(settled, null), false)
+})
+test('malformed or oversized replacement checkpoint fails closed without erasing prior data', () => {
+  const keys = new Set(['send:x'])
+  const parse = checkpoint => inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's',
+    actions: [{ key: 'send:x', disabled: false }], checkpoint }, 's', keys)
+  const prior = inlineBlockStateUpdate(null, parse({ id: 'one', data: 'opaque' }))
+  for (const bad of [{ id: '', data: 'x' }, { id: 'two', data: '💫'.repeat(9000) },
+    { id: 'two', data: 7 }, []]) {
+    const held = inlineBlockStateUpdate(prior, parse(bad))
+    assert.deepEqual(held.checkpoint, prior.checkpoint)
+    assert.equal(held.retain, true)
+    assert.equal(held.actions[0].disabled, true)
+    assert.match(held.recoveryError, /Open the app/)
+  }
+  assert.equal(inlineBlockStateUpdate(null, parse({ id: 'x', data: 7 })).retain, true)
+  assert.equal(inlineBlockDocumentReset({ retain: false, actions: [{ confirming: true }] }), null)
+  assert.equal(inlineBlockDocumentReset({ retain: false, actions: [], ackNonce: null }, { event: 'confirm', nonce: 'confirm' }).retain, true)
+})
+test('legacy same-document retain transitions still release without a checkpoint', () => {
+  const keys = new Set(['x:1'])
+  const parse = retain => inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's',
+    actions: [{ key: 'x:1', disabled: !retain }], retain }, 's', keys)
+  const busy = inlineBlockStateUpdate(null, parse(true))
+  assert.equal(inlineSessionRetained(busy, null), true)
+  const done = inlineBlockStateUpdate(busy, parse(false))
+  assert.equal(inlineSessionRetained(done, null), false)
+  assert.equal(done.recoveryPending, false)
 })
 test('app blocks carry a destination and snapshot, not authority', () => {
   const block = appBlockFromToken(token({app:'contribute',intent:'chat-pull:owner/repo#7',title:'PR #7',facts:[{label:'Files',value:'4'}],approved:true,height:9999}))
@@ -201,4 +253,20 @@ test('idle offscreen sessions release their frames, but unacknowledged and uncer
   // A long scroll does not latch all previous idle sessions open.
   const sessions = Array.from({ length: 100 }, (_, i) => ({ near: i > 96, state }))
   assert.equal(sessions.filter(item => item.near || inlineSessionRetained(item.state, null)).length, 3)
+})
+
+
+test('reset cancels idle confirmation even when its live document requested retain', () => {
+  assert.equal(inlineBlockDocumentReset({ retain: true, actions: [{ confirming: true }], ackNonce: 'activate' }, { event: 'activate', nonce: 'activate' }), null)
+  assert.equal(inlineBlockDocumentReset({ retain: true, actions: [{ confirming: true }], ackNonce: 'activate' }, { event: 'confirm', nonce: 'confirm' }).retain, true)
+})
+
+test('valid reset checkpoint is not reported as an application import error', () => {
+  const previous = { checkpoint: { id: 'one', data: 'opaque' }, retain: true, actions: [] }
+  const reset = inlineBlockDocumentReset(previous)
+  assert.equal(reset.recoveryError, null)
+  const cold = inlineBlockStateUpdate(reset, inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's', actions: [] }, 's', new Set()))
+  assert.equal(cold.recoveryError, null)
+  const invalid = inlineBlockStateUpdate(cold, inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's', actions: [], recoveryError: true, checkpointAck: 'one' }, 's', new Set()))
+  assert.equal(invalid.retain, true); assert.ok(invalid.recoveryError); assert.deepEqual(invalid.checkpoint, previous.checkpoint)
 })

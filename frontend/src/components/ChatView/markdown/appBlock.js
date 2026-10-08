@@ -11,6 +11,28 @@ const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger'])
 const INTENT = /^[a-z][a-z0-9-]*:[^\s]+$/
 const shortText = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : ''
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null
+const checkpointId = value => typeof value === 'string' && value.length >= 1 && value.length <= 128
+
+// Opaque handover data is never interpreted by the host. Copy only the two
+// protocol fields, and bound bytes rather than JavaScript code units.
+export function inlineBlockCheckpoint(value) {
+  if (value === null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !checkpointId(value.id) || typeof value.data !== 'string'
+    || new TextEncoder().encode(value.data).length > 32768) return undefined
+  return { id: value.id, data: value.data }
+}
+
+const RECOVERY_ERROR = 'This app session needs recovery. Open the app to check the result before trying again.'
+
+function recoveryHold(previous, incoming, error = previous?.checkpoint && !previous?.recoveryError ? null : RECOVERY_ERROR) {
+  const checkpoint = previous?.checkpoint ?? null
+  const actions = (incoming?.actions?.length ? incoming.actions : previous?.actions || [])
+    .map(action => ({ ...action, disabled: true, busy: false, confirming: false, confirmation: null,
+      hidden: false, note: error || RECOVERY_ERROR }))
+  return { ...incoming, actions, checkpoint, retain: true, recoveryPending: true,
+    recoveryError: error, notice: error || RECOVERY_ERROR, ackNonce: null }
+}
 
 function safeHttps(value) {
   if (typeof value !== 'string' || value.length > 2048) return undefined
@@ -43,17 +65,36 @@ function confirmationOf(value) {
 /** Keep the app-owned publisher alive until the app acknowledges the event
  *  and explicitly releases any active or uncertain operation. */
 export function inlineSessionRetained(state, event) {
-  return Boolean(event && state?.ackNonce !== event.nonce || state?.retain
+  return Boolean(event && state?.ackNonce !== event.nonce || state?.retain || state?.checkpoint || state?.recoveryPending
     || state?.actions.some(action => action.busy || action.confirming))
 }
 
 /** A new document cannot own the previous document's frozen confirmation.
  *  Keep unresolved publication ownership until fresh observation releases it. */
-export function inlineBlockDocumentReset(state) {
-  if (!state?.retain && !state?.actions.some(action => action.busy)) return null
-  return { ...state, actions: state.actions.map(action => action.confirming
-    ? { ...action, confirming: false, confirmation: null, disabled: true, label: 'Checking…' }
-    : action) }
+export function inlineBlockDocumentReset(state, event = null) {
+  const pendingConfirm = event?.event === 'confirm' && state?.ackNonce !== event.nonce
+  const busy = state?.actions.some(action => action.busy)
+  const idleConfirmation = state?.actions.some(action => action.confirming) && !busy
+  if (!state?.checkpoint && !state?.recoveryPending && !busy && !pendingConfirm
+    && (!state?.retain || idleConfirmation)) return null
+  return recoveryHold(state, null)
+}
+
+/** A replacement document must acknowledge the exact prior checkpoint before
+ *  its state can replace an unresolved owner. This ack is observational, not
+ *  an action nonce or publication approval. */
+export function inlineBlockStateUpdate(previous, safe) {
+  if (!safe) return previous
+  if (safe.checkpointInvalid || safe.recoveryError) return recoveryHold(previous, safe, RECOVERY_ERROR)
+  if (previous?.recoveryPending) {
+    if (previous.checkpoint && safe.checkpointAck === previous.checkpoint.id) {
+      return { ...safe, retain: safe.retain || Boolean(safe.checkpoint), recoveryPending: false,
+        recoveryError: null }
+    }
+    return recoveryHold(previous, safe)
+  }
+  return { ...safe, retain: safe.retain || Boolean(safe.checkpoint), recoveryPending: false,
+    recoveryError: null }
 }
 
 /** The iframe contributes text and links, never markup or action authority.
@@ -61,6 +102,7 @@ export function inlineBlockDocumentReset(state) {
 export function inlineBlockState(message, sessionId, keys) {
   if (!message || message.type !== 'moebius:app-block-state' || message.sessionId !== sessionId
     || !Array.isArray(message.actions) || message.actions.length > 24) return null
+  const checkpoint = Object.hasOwn(message, 'checkpoint') ? inlineBlockCheckpoint(message.checkpoint) : null
   const seen = new Set()
   const actions = []
   for (const raw of message.actions) {
@@ -82,7 +124,9 @@ export function inlineBlockState(message, sessionId, keys) {
       ...(Array.isArray(raw.badges) ? { badges: pullBadges(raw.badges) } : {}) })
   }
   return { actions, notice: shortText(message.notice, 500), summary: shortText(message.summary, 240),
-    retain: message.retain === true,
+    retain: message.retain === true || Boolean(checkpoint), checkpoint: checkpoint ?? null,
+    checkpointInvalid: checkpoint === undefined, recoveryError: message.recoveryError === true ? RECOVERY_ERROR : null,
+    checkpointAck: checkpointId(message.checkpointAck) ? message.checkpointAck : null,
     ackNonce: typeof message.ackNonce === 'string' && message.ackNonce.length <= 128 ? message.ackNonce : null }
 }
 

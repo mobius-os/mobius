@@ -59,6 +59,33 @@ test('app-block capability is reported only after the module commits and live so
   assert.match(blockDelivery, /sentBlockEventRef\.current === blockEvent\.nonce/)
 })
 
+test('actual frame init and subsequent block init carry the checkpoint envelope', () => {
+  const checkpoint = { id: 'attempt-1', data: 'opaque' }
+  const blockSession = { sessionId: 'block', actions: [], checkpoint, retain: true,
+    recoveryError: 'Open the app to check the result.' }
+  const messages = []
+  const scope = {
+    loadedDocsRef: { current: new Set(['v1']) }, token: 'token',
+    framesRef: { current: new Map([['v1', { contentWindow: { postMessage(message) { messages.push(message) } } }]]) },
+    getEffectiveTheme() { return { css: '', bg: '#fff' } }, theme: null,
+    readAppFrameStorage() { return {} }, appId: 'app', appSlug: 'app', capabilityContract: null,
+    blockSessionRef: { current: blockSession }, swap: { liveVersion: 'v1', liveLoaded: true },
+    blockSession, postToFrame(_version, message) { messages.push(message) }, useEffect(fn) { fn() },
+  }
+  const init = canvas.slice(canvas.indexOf('  function sendInit(v) {'), canvas.indexOf('  // Keep the swap state machine'))
+  new Function('scope', `with(scope) { ${init}; sendInit('v1') }`)(scope)
+  const delivery = canvas.slice(canvas.indexOf('  // Inline transcript sessions'),
+    canvas.indexOf('  useEffect(() => {\n    if (!blockSession || !blockEvent'))
+  new Function('scope', `with(scope) { ${delivery} }`)(scope)
+  assert.equal(messages[0].type, 'moebius:frame-init')
+  assert.deepEqual(messages[0].blockSession, blockSession)
+  assert.deepEqual(messages[1], { type: 'moebius:app-block-init', sessionId: 'block',
+    actions: [], initialAction: null, checkpoint, retain: true,
+    recoveryError: 'Open the app to check the result.' })
+  assert.match(frame, /currentBlockSession = msg\.blockSession \|\| null/)
+  assert.match(frame, /blockSession: currentBlockSession/)
+})
+
 
 // Execute the actual frame entry functions with isolated, mocked transports.
 function frameFunction(name, next) {

@@ -3,7 +3,7 @@ import { Branch, ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/component
 import { appQueries } from '../../../hooks/queries.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { passiveAppBlockAllowed } from '../../../lib/passiveAppBlocks.js'
-import { inlineBlockState, inlineSessionRetained, inlineBlockDocumentReset } from './appBlock.js'
+import { inlineBlockState, inlineBlockStateUpdate, inlineSessionRetained, inlineBlockDocumentReset } from './appBlock.js'
 import useAppBlockCapability from '../hooks/useAppBlockCapability.js'
 import './AppBlock.css'
 
@@ -95,20 +95,30 @@ export default function AppBlock({ block, onInternalNav }) {
   const [nearViewport, setNearViewport] = useState(false)
   const [sessionId] = useState(() => crypto.randomUUID())
   const [blockEvent, setBlockEvent] = useState(null)
+  const blockEventRef = useRef(null)
+  blockEventRef.current = blockEvent
   const [sessionState, setSessionState] = useState(null)
   const [viewIntent, setViewIntent] = useState(null)
   const retained = inlineSessionRetained(sessionState, blockEvent)
   const viewIntentRef = useRef(viewIntent)
   viewIntentRef.current = viewIntent
   const negotiating = !isSession && canExpand && viewIntent !== null && passiveAllowed
+  // Scalar handover dependencies prevent a state/init echo loop: the parser
+  // copies envelopes on every message even when their observational data agrees.
+  const checkpointId = sessionState?.checkpoint?.id ?? null
+  const checkpointData = sessionState?.checkpoint?.data ?? null
+  const recoveryError = sessionState?.recoveryError ?? null
   const blockSession = useMemo(() => (isSession && (passiveAllowed || retained) || negotiating) ? {
-    sessionId, retain: retained, actions: [block.action, ...block.items.map(item => item.action)].filter(Boolean)
+    sessionId, retain: retained, checkpoint: checkpointId ? { id: checkpointId, data: checkpointData } : null,
+    recoveryError,
+    actions: [block.action, ...block.items.map(item => item.action)].filter(Boolean)
       .map(action => ({ key: action.intent, intent: action.intent, label: action.label })),
-  } : null, [isSession, passiveAllowed, negotiating, sessionId, retained, block])
+  } : null, [isSession, passiveAllowed, negotiating, sessionId, retained, checkpointId, checkpointData, recoveryError, block])
   const allowedKeys = useMemo(() => new Set(blockSession?.actions.map(action => action.key) || []), [blockSession])
   const onSessionFallback = useCallback(key => {
+    if (retained) return // unsupported replacement cannot erase unresolved ownership
     setLegacyMode('view'); setViewIntent(key); setBlockEvent(null); setSessionState(null)
-  }, [])
+  }, [retained])
   const { supported: blockSupported, remember: rememberBlockEvent, observe: observeBlockCapability } =
     useAppBlockCapability({ allowedKeys, onFallback: onSessionFallback })
   useEffect(() => {
@@ -122,8 +132,8 @@ export default function AppBlock({ block, onInternalNav }) {
   const onBlockState = useCallback(message => {
     const safe = inlineBlockState(message, sessionId, allowedKeys)
     if (safe) {
-      setSessionState(safe)
-      setBlockEvent(event => safe.ackNonce === event?.nonce ? null : event)
+      setSessionState(previous => inlineBlockStateUpdate(previous, safe))
+      if (!safe.checkpointInvalid) setBlockEvent(event => safe.ackNonce === event?.nonce ? null : event)
     }
   }, [sessionId, allowedKeys])
   const actionState = key => sessionState?.actions.find(item => item.key === key)
@@ -136,7 +146,10 @@ export default function AppBlock({ block, onInternalNav }) {
   const onBlockCapability = useCallback((supported, document) => {
     // A real document change invalidates idle UI, never an unresolved owner.
     // Active publication prevents promotion; a reload still needs observation.
-    if (document?.reset) setSessionState(inlineBlockDocumentReset)
+    if (document?.reset) {
+      setSessionState(previous => inlineBlockDocumentReset(previous, blockEventRef.current))
+      setBlockEvent(null) // old-document Confirm nonce cannot be replayed
+    }
     if (isSession) {
       observeBlockCapability(supported)
       return
@@ -174,7 +187,7 @@ export default function AppBlock({ block, onInternalNav }) {
   }
   const open = openHref(block.href)
   const show = intent => { setViewIntent(intent); setLegacyMode(!passiveAllowed || isSession && blockSupported === false ? 'view' : null); setDelivered(false); setSessionState(null); setBlockEvent(null) }
-  const actionButton = target => (isSession && (passiveAllowed || retained) && blockSupported !== false || legacyMode === 'inline') && app && target
+  const actionButton = target => (isSession && (passiveAllowed || retained) && (blockSupported !== false || retained) || legacyMode === 'inline') && app && target
     ? (() => {
       const state = actionState(target.intent)
       // Saved actions are history, not current controls. Wait for the app's
@@ -204,7 +217,7 @@ export default function AppBlock({ block, onInternalNav }) {
       onClick={() => show(viewIntent === null ? block.intent : null)}>
       <ChevronDown width={16} height={16} aria-hidden="true" />{viewIntent !== null ? 'Hide details' : block.expandLabel || 'Show details here'}</button>
     : null
-  const view = isSession && (passiveAllowed || retained) && blockSupported !== false && app && (nearViewport || retained) ? <div className="md-app-block__session-host" aria-hidden="true" inert="">
+  const view = isSession && (passiveAllowed || retained) && (blockSupported !== false || retained) && app && (nearViewport || retained) ? <div className="md-app-block__session-host" aria-hidden="true" inert="">
     <Suspense fallback={null}><AppCanvas appId={app.id} appName={app.name} appSlug={app.slug}
       version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capability_contract || app.capabilities}
       active={false} visible={false} interactive={false} blockSession={blockSession} blockEvent={blockEvent}
