@@ -418,7 +418,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
               else:
                 db.refresh(row)
               return {"run": _run_view(db, row)}
-            outcome["merge_attempted"] = True
+            db.refresh(row)
+            outcome = dict(row.outcomes_json[item_key])
             try:
               _parent(db, row, principal)
               if checks.get("isMergeQueueEnabled") is True:
