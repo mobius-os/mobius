@@ -6,12 +6,12 @@
 export const APP_GROUPS = [
   {
     id: 'system',
-    eyebrow: 'Ready on day one', title: ['Collaboration apps.', 'Included with Möbius.'],
-    lead: 'Already installed and ready to use. Find and share apps, manage your profile, and connect with the Möbius community.',
+    eyebrow: 'Work together', title: ['Collaboration apps.', 'Better together.'],
+    lead: 'Talk with the community and plan with others on a shared board. Connect GitHub and you can contribute improvements to Möbius itself and to other apps.',
     apps: [
-      { id: 'store', name: 'App Store', blurb: 'Discover, install, publish, and update apps.' },
-      { id: 'identity', name: 'Möbius · You', blurb: 'Your Möbius account, public profile, and the deployments you run.' },
       { id: 'social', name: 'Social', blurb: 'Message other Möbius people and join the community board.' },
+      { id: 'kanban', name: 'Kanban', blurb: 'Boards for tasks and plans, shared live with people on their own Möbius.' },
+      { id: 'contribute', name: 'Contribute', blurb: 'Turn your changes into proposals, review them privately, and share them through GitHub.' },
     ],
   },
   {

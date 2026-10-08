@@ -19,8 +19,9 @@ export function usePrefersReducedMotion() {
   )
 }
 
-/* Types the text one character at a time with a blinking caret. */
-export function Typewriter({ text, speed = 22, startDelay = 250 }) {
+/* Types the text one character at a time with a blinking caret. By default the full text is laid out
+   invisibly so nothing around it moves; `reserve={false}` lets the box grow as it types, like a message box. */
+export function Typewriter({ text, speed = 22, startDelay = 250, reserve = true, placeholder = null }) {
   const reduced = usePrefersReducedMotion()
   const [count, setCount] = useState(0)
   useEffect(() => {
@@ -37,6 +38,13 @@ export function Typewriter({ text, speed = 22, startDelay = 250 }) {
     return () => { clearTimeout(start); clearInterval(interval); setCount(0) }
   }, [text, speed, startDelay, reduced])
   const shown = reduced ? text.length : count
+  if (!reserve) return <span className="wt-typewriter">
+    <span className="sr-only">{text}</span>
+    {/* Until the first letter lands, a message box shows its placeholder, as the real one does. */}
+    {shown === 0 && placeholder
+      ? <span className="wt-pill__placeholder" aria-hidden="true">{placeholder}</span>
+      : <span aria-hidden="true">{text.slice(0, shown)}{shown < text.length && <i className="wt-caret" />}</span>}
+  </span>
   return <span className="wt-typewriter">
     <span className="sr-only">{text}</span>
     <span className="wt-typewriter__stage" aria-hidden="true">

@@ -11,6 +11,22 @@ const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
+test('the paperclip is an icon left of the last answer box, not a row below', () => {
+  const single = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'clip', questionId: 'clip-q', questions: [{ question: 'Anything else?', options: [] }],
+  }))
+  assert.match(single, /class="qcard__answer-row"><input[^>]*class="qcard__file-input"[^>]*\/><button[^>]*class="qcard__attach"[\s\S]*?<\/button><div class="qcard__composer/)
+  assert.doesNotMatch(single, /attach or paste/)
+  const grouped = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'clip', questionId: 'clip-g', questions: [
+      { question: 'First?', options: [] },
+      { question: 'Second?', options: [] },
+    ],
+  }))
+  assert.equal((grouped.match(/class="qcard__attach"/g) || []).length, 1)
+  assert.ok(grouped.indexOf('class="qcard__attach"') > grouped.indexOf('Second?'))
+})
+
 test('a file-only question answer can submit and ordinary cards offer upload', () => {
   const storage = {
     values: new Map(),

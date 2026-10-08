@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Möbius Halloween mark">
+  <defs>
+    <linearGradient id="pumpkin" x1="18" y1="18" x2="78" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffbd52"/>
+      <stop offset=".55" stop-color="#f47b20"/>
+      <stop offset="1" stop-color="#b83b19"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="50" y1="9" x2="44" y2="31" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8ec67a"/>
+      <stop offset="1" stop-color="#315d3d"/>
+    </linearGradient>
+  </defs>
+  <path d="M50 25c-2-8 0-13 7-18 1 8-1 14-7 20" fill="url(#stem)" stroke="#17251b" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M47 27c-15-8-32 5-35 23-4 23 13 38 36 38s40-15 36-38c-3-18-20-31-35-23Z" fill="url(#pumpkin)" stroke="#31150e" stroke-width="4"/>
+  <path d="M34 29c-8 8-12 20-10 33 2 11 8 20 17 25M61 29c8 8 12 20 10 33-2 11-8 20-17 25M48 28v59" fill="none" stroke="#ffd783" stroke-opacity=".52" stroke-width="3" stroke-linecap="round"/>
+  <path d="m27 51 12 6-13 4M69 51l-12 6 13 4M31 70c10 8 24 8 34 0" fill="none" stroke="#24130f" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M17 46c6-4 11-7 17-8M79 46c-6-4-11-7-17-8" fill="none" stroke="#ffce72" stroke-opacity=".45" stroke-width="2" stroke-linecap="round"/>
+</svg>
