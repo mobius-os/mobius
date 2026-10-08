@@ -74,22 +74,26 @@ def inspect_target(gh, cwd: Path, item: dict, mode: str) -> dict:
     raise HTTPException(409, "A selected target branch changed. Refresh before reviewing.")
   if mode in {"review_merge", "review_fix_merge"} and not merge_permission(repo):
     raise HTTPException(403, "You cannot merge changes in this repository.")
-  repair_identity = {}
-  if mode == "review_fix_merge":
+  branch_identity = {}
+  if mode in {"review_merge", "review_fix_merge"}:
     head = pull.get("head") or {}
     head_repository = head.get("repo") or {}
     slug = head_repository.get("full_name")
     if not isinstance(slug, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug):
       raise HTTPException(409, "GitHub did not confirm the public head repository.")
-    head_repo = read(gh, cwd, f"repos/{slug}")
-    if head_repo.get("id") != head_repository.get("id") or not merge_permission(head_repo):
-      raise HTTPException(403, "Scoped takeover requires push rights on this exact head repository.")
-    if not head.get("ref"):
-      raise HTTPException(409, "GitHub did not confirm the public head branch.")
-    repair_identity = {"head_repo": head_repo["full_name"], "head_repo_id": head_repo["id"],
-                       "head_ref": head["ref"]}
+    branch = head_branch_identity({"head_repo_id": head_repository.get("id"), "head_ref": head.get("ref")})
+    if branch is None:
+      raise HTTPException(409, "GitHub did not confirm a usable public head repository and branch.")
+    branch_identity = {"head_repo": slug, "head_repo_id": branch[0], "head_ref": branch[1]}
+    # Branch exclusion is identity, not repair authority. An ordinary merge
+    # needs rights on the target repository, never push rights to a PR's fork.
+    if mode == "review_fix_merge":
+      head_repo = read(gh, cwd, f"repos/{slug}")
+      if head_repo.get("id") != branch[0] or not merge_permission(head_repo):
+        raise HTTPException(403, "Scoped takeover requires push rights on this exact head repository.")
+      branch_identity["head_repo"] = head_repo["full_name"]
   return {
-    **item, **repair_identity, "repo": repo["full_name"], "repo_id": repo["id"],
+    **item, **branch_identity, "repo": repo["full_name"], "repo_id": repo["id"],
     "pr_id": pull["node_id"], "base_ref": base_ref,
     "base_sha": item["base_sha"], "title": pull["title"],
     "url": pull["html_url"],
@@ -245,6 +249,14 @@ def fence_public_transition(db, row):
     id=models.Owner.id))
 
 
+def head_branch_identity(target) -> tuple[int, str] | None:
+  """A usable immutable branch pair, or historical evidence we cannot match."""
+  repo_id, ref = target.get("head_repo_id"), target.get("head_ref")
+  if type(repo_id) is not int or repo_id <= 0 or not isinstance(ref, str) or not ref or ref.strip() != ref:
+    return None
+  return repo_id, ref
+
+
 def require_public_transition_clear(db, row, target):
   """New mutations must not cross an unresolved item or head-branch attempt.
 
@@ -258,25 +270,29 @@ def require_public_transition_clear(db, row, target):
   current = effective_target(row, original)
   if current["head_sha"] != target["head_sha"] or current["base_sha"] != target["base_sha"]:
     raise HTTPException(409, "This review target changed during public admission.")
+  branch = head_branch_identity(target)
   for grant in grants:
     for original in grant.targets_json:
-      same_item = key(original) == key(target)
-      same_branch = (target.get("head_repo_id") is not None
-        and original.get("head_repo_id") == target["head_repo_id"]
-        and original.get("head_ref") == target.get("head_ref"))
-      if not (same_item or same_branch):
-        continue
       item = (grant.outcomes_json or {}).get(key(original), {})
-      merge_pending = (item.get("state") != "merged" and (
-        item.get("merge_attempted") or item.get("state") in {"merging", "merge_unknown", "queued"}
-      )) or (item.get("state") == "merged" and item.get("head_sha") == target["head_sha"])
+      merge_pending = item.get("state") != "merged" and (
+        item.get("merge_attempted") or item.get("state") in {"merging", "merge_unknown", "queued"})
       repair_pending = any(a.get("state") in {"pushing", "push_unknown"}
         for a in item.get("repair_attempts", []))
       ready = item.get("ready_attempt")
-      if merge_pending or repair_pending or (ready and ready.get("state") != "ready"):
+      unresolved = merge_pending or repair_pending or (ready and ready.get("state") != "ready")
+      merged_head = item.get("state") == "merged" and item.get("head_sha") == target["head_sha"]
+      if not (unresolved or merged_head):
+        continue
+      other_branch = head_branch_identity(original)
+      same_item = key(original) == key(target)
+      same_branch = branch is not None and other_branch == branch
+      # Missing legacy identity is not evidence of disjointness. Do not fill
+      # frozen consent from live data, or assume an uncertain attempt settled.
+      unmatchable_pending = unresolved and (branch is None or other_branch is None)
+      if same_item or same_branch or unmatchable_pending:
         raise HTTPException(409,
-          "An earlier public attempt for this PR or head branch must be reconciled "
-          "read-only in its owning conversation before any new public action.")
+          "An earlier public attempt may affect this PR or head branch. Reconcile "
+          "it read-only in its owning conversation before any new public action.")
 
 
 def arm_merge(db, row, target, outcome, principal):
