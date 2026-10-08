@@ -4348,6 +4348,9 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 .chat__goal-history {
   --lifecycle-tone: var(--green);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   gap: 10px;
@@ -4373,6 +4376,11 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   flex-direction: column;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.chat__answer-cause:has(.chat__wait-history) {
+  width: 100%;
+  min-width: 0;
 }
 
 .chat__answer-cause .chat__wait-history { margin-top: 0; }

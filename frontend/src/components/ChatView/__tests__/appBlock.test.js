@@ -112,3 +112,9 @@ test('live badges may replace a saved snapshot without granting an action or mar
   assert.deepEqual(state([{ label: 'Current', tone: 'neon' }, null]).badges, [{ label: 'Current', tone: 'neutral' }])
   assert.equal(state([]).confirming, false)
 })
+
+test('live batch summary is bounded plain text and cannot alter saved item titles', () => {
+  const message = { type: 'moebius:app-block-state', sessionId: 's', actions: [], summary: '  ' + 'x'.repeat(300) + '  ' }
+  assert.equal(inlineBlockState(message, 's', new Set()).summary.length, 240)
+  assert.equal(inlineBlockState({ ...message, summary: 42 }, 's', new Set()).summary, '')
+})

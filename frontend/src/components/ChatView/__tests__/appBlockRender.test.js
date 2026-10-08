@@ -86,13 +86,14 @@ test('a batch renders every item as its own linked row with one shared action', 
   assert.doesNotMatch(html, /md-app-block__view/)
 })
 
-test('inline session keeps the action in the row without a visible app panel', () => {
+test('inline session waits for its exact read instead of flashing a stale saved action', () => {
   const html = render({ app: 'contribute', intent: 'review:1', title: 'Fix it', interaction: 'inline',
     action: { label: 'Contribute', intent: 'chat-send:1' },
     pull: { repo: 'owner/repo', state: 'proposed' } },
   [{ id: 80, slug: 'contribute', name: 'Contribute' }])
-  assert.match(html, /md-app-block__controls/)
-  assert.match(html, />Contribute<\/button>/)
+  assert.match(html, /md-app-block__pending/)
+  assert.match(html, />Loading…<\/span>/)
+  assert.doesNotMatch(html, />Contribute<\/button>/)
   assert.doesNotMatch(html, /md-app-block__view|md-app-block__toggle|md-app-block__session-host/)
 })
 
@@ -106,7 +107,7 @@ test('compact live receipts preserve tags and diff counts but replace obsolete s
     href: block.href, compact: true, session: { status: 'Open', statusTone: 'neutral', badges: [],
       links: [{ label: 'View PR #42', url: 'https://github.com/owner/repo/pull/42' }] } }))
   assert.match(html, /md-app-pull--compact/)
-  assert.match(html, />Contribution</)
+  assert.doesNotMatch(html, /md-app-pull__identity"/)
   assert.match(html, />Open</)
   assert.match(html, />bug</)
   assert.match(html, /href="https:\/\/github\.com\/owner\/repo"[^>]*>owner\/repo</)

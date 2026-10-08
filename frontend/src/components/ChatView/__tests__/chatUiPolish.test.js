@@ -176,6 +176,21 @@ test('activity surfaces use their intended width and compact status type', () =>
     'Waiting descriptions should use the shared status type token')
 })
 
+test('finished Goal and Waiting receipts fill the message column while composer rails retain their measure', () => {
+  const css = stripComments(chatCss)
+  const receiptRule = css.match(/\.chat__goal-history\s*\{[^}]*\}/)?.[0] || ''
+  assert.match(receiptRule, /width:\s*100%/)
+  assert.match(receiptRule, /box-sizing:\s*border-box/)
+  assert.match(receiptRule, /min-width:\s*0/)
+  const wakeCauseRule = css.match(/\.chat__answer-cause:has\(\.chat__wait-history\)\s*\{[^}]*\}/)?.[0] || ''
+  assert.match(wakeCauseRule, /width:\s*100%/)
+  assert.match(wakeCauseRule, /min-width:\s*0/)
+  for (const selector of ['chat__progress-rail', 'chat__goal-draft', 'chat__waits']) {
+    const rule = css.match(new RegExp(`\\.${selector}\\s*\\{[^}]*\\}`))?.[0] || ''
+    assert.match(rule, /max-width:\s*720px/)
+  }
+})
+
 test('message references use a bounded responsive two-column grid', () => {
   const css = stripComments(chatCss)
   const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''

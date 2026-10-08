@@ -37,25 +37,28 @@ export function PullSnapshot({ block, pull, href, open, action, session, compact
   const ref = !compact && pull.number ? `${pull.repo}#${pull.number}` : pull.repo
   const status = session?.status || STATE_NAMES[pull.state]
   const statusTone = session?.status ? session.statusTone : STATE_TONES[pull.state]
+  const labels = pull.labels.map(label => <span key={label.name} className="md-app-pull__label" style={labelStyle(label.color)}>{label.name}</span>)
+  const links = session?.links?.length ? <span className="md-app-block__links">{session.links.map(link => <a key={link.url} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>)}</span> : null
   return <div className={`md-app-pull${compact ? ' md-app-pull--compact' : ''}`}>
-    {compact ? <>
-      <span className="md-app-pull__identity-icon" aria-hidden="true"><Branch width={18} height={18} /></span>
-      <div className="md-app-pull__identity"><span>Contribution</span><span className={`md-app-pull__status is-${statusTone}`}>{status}</span></div>
-    </> : null}
+    {compact ? <span className="md-app-pull__identity-icon" aria-hidden="true"><Branch width={18} height={18} /></span> : null}
     <div className="md-app-pull__headline">
       <a className="md-app-pull__title" href={href} onClick={open}>{block.title}</a>
-      {pull.labels.map(label => <span key={label.name} className="md-app-pull__label" style={labelStyle(label.color)}>{label.name}</span>)}
+      {compact ? <span className={`md-app-pull__status is-${statusTone}`}>{status}</span> : labels}
     </div>
+    {compact && labels.length ? <div className="md-app-pull__labels">{labels}</div> : null}
     <div className="md-app-pull__footer">
       <div className="md-app-pull__meta">
-        <a className="md-app-pull__repo" href={compact ? pull.repoUrl : pull.url || pull.repoUrl} target="_blank" rel="noopener noreferrer">{ref}</a>
-        {pull.author ? <span>{pull.author}</span> : null}
-        {files ? <span>{files}{pull.additions !== null ? <> <ins>+{pull.additions}</ins> <del>−{pull.deletions ?? 0}</del></> : null}</span> : null}
-        {!compact ? <span className={`md-app-pull__badge is-${statusTone}`}>{status}</span> : null}
-        {(session?.badges ?? pull.badges).map(badge => <span key={badge.label} className={`md-app-pull__badge is-${badge.tone}`}>{badge.label}</span>)}
+        <span className="md-app-pull__source">
+          <a className="md-app-pull__repo" href={compact ? pull.repoUrl : pull.url || pull.repoUrl} target="_blank" rel="noopener noreferrer">{ref}</a>
+          {pull.author ? <span>{pull.author}</span> : null}
+        </span>
+        <span className="md-app-pull__changes">
+          {files ? <span>{files}{pull.additions !== null ? <> <ins>+{pull.additions}</ins> <del>−{pull.deletions ?? 0}</del></> : null}</span> : null}
+          {!compact ? <span className={`md-app-pull__badge is-${statusTone}`}>{status}</span> : null}
+          {(session?.badges ?? pull.badges).map(badge => <span key={badge.label} className={`md-app-pull__badge is-${badge.tone}`}>{badge.label}</span>)}
+        </span>
       </div>
-      {session?.links?.length ? <span className="md-app-block__links">{session.links.map(link => <a key={link.url} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>)}</span> : null}
-      {action}
+      <div className="md-app-pull__outcome">{links}{action}</div>
     </div>
     {session?.note ? <p className={`md-app-block__note is-${session.tone}`} role="status">{session.note}</p> : null}
   </div>
@@ -147,7 +150,10 @@ export default function AppBlock({ block, onInternalNav }) {
   const actionButton = target => (isSession && blockSupported !== false || legacyMode === 'inline') && app && target
     ? (() => {
       const state = actionState(target.intent)
-      if (state?.hidden) return null
+      // Saved actions are history, not current controls. Wait for the app's
+      // exact read before showing either a button or its settled link.
+      if (!state) return <span className="md-app-block__pending" role="status">Loading…</span>
+      if (state.hidden) return null
       return <span className="md-app-block__controls">
         {state?.confirming ? <button type="button" className="md-app-block__cancel" disabled={competingBusy}
           onClick={() => dispatchBlockEvent(target.intent, 'cancel')}>Not now</button> : null}
@@ -155,7 +161,7 @@ export default function AppBlock({ block, onInternalNav }) {
           title={state?.label || target.label}
           aria-busy={state?.busy || undefined}
           onClick={() => dispatchBlockEvent(target.intent, state?.confirming ? 'confirm' : 'activate')}>
-          {state?.busy ? 'Contributing…' : state?.confirming ? 'Confirm' : state?.label || target.label}</button>
+          {state.confirming ? 'Confirm' : state.label || target.label}</button>
       </span>
     })()
     : canExpand && app && target
@@ -185,8 +191,8 @@ export default function AppBlock({ block, onInternalNav }) {
     ? <p>{apps.isLoading ? 'Checking installed apps…' : `${block.app} is not available. The saved snapshot remains here.`}</p>
     : null
   if (block.items.length > 0) {
-    return <section ref={rootRef} className={`md-app-block md-app-block--batch${isSession ? ' md-app-block--compact' : ''}`} aria-label={block.title}>
-      <header className="md-app-batch__head"><strong>{block.title}</strong><span>{block.items.length} {block.items.length === 1 ? 'item' : 'items'}</span></header>
+    return <section ref={rootRef} className={`md-app-block md-app-block--batch${isSession ? ' md-app-block--compact' : ''}`} aria-label={sessionState?.summary || block.title}>
+      <header className="md-app-batch__head"><strong>{sessionState?.summary || block.title}</strong><span>{block.items.length} {block.items.length === 1 ? 'item' : 'items'}</span></header>
       <ul className="md-app-batch__list">
         {block.items.map(item => <li key={item.intent}>
           {item.pull
@@ -194,10 +200,10 @@ export default function AppBlock({ block, onInternalNav }) {
             : <a className="md-app-batch__title" href={sharedBrowserShellHref(item.href)} onClick={openHref(item.href)}>{item.title}</a>}
         </li>)}
       </ul>
-      {action ? <footer className="md-app-batch__foot">
+      {(action || isSession) ? <footer className="md-app-batch__foot">
+        {actionState(block.action?.intent)?.note ? <p className={`md-app-block__note is-${actionState(block.action.intent).tone}`} role="status">{actionState(block.action.intent).note}</p> : null}
         {action}
       </footer> : null}
-      {actionState(block.action?.intent)?.note ? <p className={`md-app-block__note is-${actionState(block.action.intent).tone}`} role="status">{actionState(block.action.intent).note}</p> : null}
       {sessionState?.notice ? <p className="md-app-block__notice" role="status">{sessionState.notice}</p> : null}
       {view}
     </section>

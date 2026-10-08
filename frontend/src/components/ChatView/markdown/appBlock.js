@@ -24,7 +24,8 @@ function pullBadges(value) {
     .map(badge => ({ label: shortText(badge.label, 40), tone: TONES.has(badge.tone) ? badge.tone : 'neutral' }))
 }
 
-/** The iframe contributes text and links, never markup or action authority. */
+/** The iframe contributes text and links, never markup or action authority.
+ *  Optional summary updates a batch heading; immutable item titles stay saved. */
 export function inlineBlockState(message, sessionId, keys) {
   if (!message || message.type !== 'moebius:app-block-state' || message.sessionId !== sessionId
     || !Array.isArray(message.actions) || message.actions.length > 24) return null
@@ -45,7 +46,7 @@ export function inlineBlockState(message, sessionId, keys) {
       // Omission preserves the saved snapshot; an empty list deliberately clears it.
       ...(Array.isArray(raw.badges) ? { badges: pullBadges(raw.badges) } : {}) })
   }
-  return { actions, notice: shortText(message.notice, 500) }
+  return { actions, notice: shortText(message.notice, 500), summary: shortText(message.summary, 240) }
 }
 
 /* A pull-request snapshot renders like a GitHub PR row. Anything malformed is
