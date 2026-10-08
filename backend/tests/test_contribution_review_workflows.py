@@ -1582,3 +1582,26 @@ def test_stop_observation_and_parent_resume_do_not_clear_pending_repair_admissio
   db.refresh(row)
   assert row.outcomes_json[domain.key(ITEM)]["repair_attempts"] == [attempt]
   assert not row.outcomes_json[domain.key(ITEM)].get("merge_attempted")
+
+
+def test_merge_retains_ready_receipt_resolved_during_claim_commit(setup, monkeypatch):
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = ready_takeover(setup, monkeypatch)
+  real_claim = agent_work_claims.claim_work
+  receipt = {"id": "confirmed-ready", "state": "ready", "head_sha": SHA, "base_sha": BASE}
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    with SessionLocal() as writer:
+      current = writer.get(models.ContributionReviewRun, row.id)
+      previous = current.outcomes_json[domain.key(ITEM)]
+      domain.save_outcome(writer, current, domain.key(ITEM), {**previous, "ready_attempt": receipt})
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "draft": False}))
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
+  result = report(setup, tests_passed=True, reviewed_base_sha=BASE,
+    independent_receipt_id="independent-clear")
+  item = result["run"]["items"][0]
+  assert item["state"] == "merged" and item["ready_attempt"] == receipt
+  assert item["independent_reviews"][0]["id"] == "independent-clear"
