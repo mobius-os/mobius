@@ -187,7 +187,7 @@ def review_comment_body(outcome: dict) -> str:
   if (outcome.get("tests") or "").strip():
     parts += ["", f"**Checks:** {outcome['tests'].strip()}"]
   parts += ["", f"_Reviewed at {str(outcome.get('head_sha') or '')[:12]}._"]
-  return "\n".join(parts)[:60000]
+  return "\n".join(parts)
 
 
 def post_review(gh, cwd, target, body):
@@ -195,7 +195,9 @@ def post_review(gh, cwd, target, body):
   response = gh(
     cwd, "api", "--method", "POST",
     f"repos/{target['repo']}/pulls/{target['number']}/reviews",
-    "-f", f"commit_id={target['head_sha']}", "-f", "event=COMMENT", "-f", f"body={body}",
+    "--input", "-", input_text=json.dumps({
+      "commit_id": target["head_sha"], "event": "COMMENT", "body": body,
+    }),
   ).stdout
   result = json.loads(response)
   if not isinstance(result, dict) or not result.get("id"):

@@ -703,9 +703,13 @@ def test_independent_review_must_match_frozen_child_prompt(setup, monkeypatch):
   db.commit()
   register_reviewer(db, row, child, row.targets_json[0])
   reviewer = Principal(owner=principal.owner, app_id=None, chat_id=child_chat.id, run_id="child-review-run", delegation_id=child.id)
-  body = routes.ReviewOutcome(**ITEM, state="all_clear", summary="Full diff clear", scope=sorted(routes.SCOPE), tests="Passed", tests_passed=True, reviewed_base_sha=BASE)
+  summary = "Independent finding " * 250
+  tests = "Independent check " * 250
+  body = routes.ReviewOutcome(**ITEM, state="all_clear", summary=summary, scope=sorted(routes.SCOPE), tests=tests, tests_passed=True, reviewed_base_sha=BASE)
   result = asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
   receipt_id = result["independent_receipt_id"]
+  receipt = result["run"]["items"][0]["independent_reviews"][0]
+  assert receipt["summary"] == summary and receipt["tests"] == tests
   assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"] == receipt_id
   monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
   assert report(setup, tests_passed=True, reviewed_base_sha=BASE, independent_receipt_id=receipt_id)["run"]["state"] == "complete"

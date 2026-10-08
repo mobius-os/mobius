@@ -3,6 +3,7 @@ from app import chat_writer
 from app.chat_writer import create_chat
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +62,54 @@ def report(setup, **changes):
   data = {**ITEM, "state": "all_clear", "summary": "Full diff reviewed",
           "scope": sorted(routes.SCOPE), "tests": "Focused tests passed", **changes}
   return asyncio.run(routes.report_outcome(1, row.id, routes.ReviewOutcome(**data), db, principal))
+
+
+def test_review_evidence_over_4000_characters_survives_reporting(setup):
+  db, row, _ = setup
+  row.mode = "review"
+  db.commit()
+  summary = "finding " * 700
+  tests = "check " * 900
+  item = report(setup, summary=summary, tests=tests)["run"]["items"][0]
+  assert item["summary"] == summary
+  assert item["tests"] == tests
+  db.refresh(row)
+  assert row.outcomes_json[domain.key(ITEM)]["summary"] == summary
+  assert row.outcomes_json[domain.key(ITEM)]["tests"] == tests
+
+
+def test_review_evidence_models_do_not_cap_prose_at_4000_characters():
+  evidence = "e" * 4001
+  assert routes.ReviewOutcome(**ITEM, state="needs_you", summary=evidence, tests=evidence).summary == evidence
+  assert routes.RepairCheckout(**ITEM, findings=evidence).findings == evidence
+  assert routes.RepairPublish(**ITEM, summary=evidence, tests=evidence, tests_passed=True).tests == evidence
+  assert routes.DraftReady(**ITEM, reviewed_base_sha=BASE, independent_receipt_id="receipt",
+    summary=evidence, scope=sorted(routes.SCOPE), tests=evidence, tests_passed=True).summary == evidence
+
+
+def test_public_review_formatter_preserves_evidence_past_60000_characters():
+  summary = "s" * 61000
+  tests = "checks completed after the long summary"
+  body = domain.review_comment_body({"state": "all_clear", "summary": summary,
+    "tests": tests, "head_sha": SHA})
+  assert summary in body
+  assert f"**Checks:** {tests}" in body
+  assert f"_Reviewed at {SHA[:12]}._" in body
+  assert len(body) > 60000
+
+
+def test_owner_requested_public_review_posts_full_long_evidence(setup, monkeypatch):
+  _public_review_run(setup)
+  posted = []
+  monkeypatch.setattr(domain, "post_review", lambda _gh, _cwd, _target, body:
+    posted.append(body) or {"id": 9, "url": "https://github.com/example/project/pull/7#pullrequestreview-9"})
+  summary = "s" * 61000
+  tests = "checks after the long summary"
+  item = report(setup, summary=summary, tests=tests)["run"]["items"][0]
+  assert item["public_review"]["state"] == "posted"
+  assert len(posted) == 1
+  assert summary in posted[0] and tests in posted[0]
+  assert f"_Reviewed at {SHA[:12]}._" in posted[0]
 
 
 def test_review_only_never_merges_even_own_pr(setup, monkeypatch):
@@ -810,9 +859,27 @@ def test_changed_github_account_skips_the_public_review(setup, monkeypatch):
 
 def test_post_review_writes_a_comment_review_bound_to_the_head():
   calls = []
-  def gh(_cwd, *args):
-    calls.append(args)
+  def gh(_cwd, *args, input_text):
+    calls.append((args, json.loads(input_text)))
     return SimpleNamespace(stdout='{"id": 5, "html_url": "https://github.com/x"}')
   assert domain.post_review(gh, "/tmp", TARGET, "Body") == {"id": 5, "url": "https://github.com/x"}
-  assert "event=COMMENT" in calls[0] and f"commit_id={SHA}" in calls[0]
-  assert not any("APPROVE" in part or "REQUEST_CHANGES" in part for part in calls[0])
+  args, payload = calls[0]
+  assert args[-2:] == ("--input", "-")
+  assert payload == {"event": "COMMENT", "commit_id": SHA, "body": "Body"}
+
+
+def test_public_review_transports_large_unicode_evidence_through_subprocess_stdin(tmp_path, monkeypatch):
+  from app import github_contribution_git as git
+
+  executable = tmp_path / "gh"
+  executable.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
+assert sys.argv[1:] == ["api", "--method", "POST", "repos/example/project/pulls/7/reviews", "--input", "-"]
+pathlib.Path("received.json").write_text(sys.stdin.read())
+print(json.dumps({"id": 5, "html_url": "https://github.com/example/project/pull/7#pullrequestreview-5"}))
+''')
+  executable.chmod(0o755)
+  monkeypatch.setattr(git, "_git_env", lambda _cwd: {"PATH": str(tmp_path), "LC_ALL": "C.UTF-8"})
+  body = "finding " * 25000 + '\nRésumé 🧭 "quoted" evidence'
+  assert domain.post_review(git._gh, tmp_path, TARGET, body)["id"] == 5
+  payload = json.loads((tmp_path / "received.json").read_text())
+  assert payload == {"event": "COMMENT", "commit_id": SHA, "body": body}

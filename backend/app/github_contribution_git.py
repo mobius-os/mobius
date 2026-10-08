@@ -140,8 +140,10 @@ def _git(
   )
 
 
-def _gh(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-  return _run_cmd(["gh", *args], cwd=repo, check=check)
+def _gh(
+  repo: Path, *args: str, check: bool = True, input_text: str | None = None,
+) -> subprocess.CompletedProcess:
+  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text)
 
 
 def _assert_clean_worktree(repo: Path) -> None:
