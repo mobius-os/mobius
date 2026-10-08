@@ -113,17 +113,17 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     initialLoad,
-    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*applyMessagesToView\(msgs, detailCache\.offset\)[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
+    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*applyMessagesToView\(msgs, detailCache\.offset\)[\s\S]*settleRuntime\(runtime, msgs, msgs\)[\s\S]*return/,
     'the fast path must reconcile a retained hidden owner before revealing it',
   )
   assert.match(
     chatView,
-    /const settleRuntime = \(runtime, visibleMessages\) => \{[\s\S]*setArmedWaits\(Array\.isArray\(runtime\.waits\) \? runtime\.waits : \[\]\)/,
+    /const settleRuntime = \(runtime, visibleMessages, authoritativeMessages\) => \{[\s\S]*setArmedWaits\(Array\.isArray\(runtime\.waits\) \? runtime\.waits : \[\]\)/,
     'every activation must hydrate the composer wait card from current runtime truth',
   )
   assert.match(
     chatView,
-    /const settleRuntime = \(runtime, visibleMessages\) => \{[\s\S]*retireUnownedRuntimeStream\(\{[\s\S]*running,[\s\S]*pendingQuestionId: runtime\.pending_question_id/,
+    /const settleRuntime = \(runtime, visibleMessages, authoritativeMessages\) => \{[\s\S]*retireUnownedRuntimeStream\(\{[\s\S]*running,[\s\S]*pendingQuestionId: runtime\.pending_question_id/,
     'opening a completed hidden chat must retire any stale failed stream from its previous run',
   )
   assert.match(
@@ -152,7 +152,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /runtime\.requested_anchor_found === false[\s\S]*if \(runtimeAnchorMatch\)[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*retireSavedReadingPosition\(chatId\)[\s\S]*anchorRetired = true/,
     'only an authoritative absent row retires the saved coordinate')
   assert.match(initialLoad,
-    /if \(activationCacheEntryState !== 'missing' && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
+    /if \(activationCacheEntryState !== 'missing' && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages, msgs\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a complete warm window, including nested-coordinate validation, must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback && retry == null\)/,
@@ -221,7 +221,7 @@ test('a fresh empty chat settles before interruptible transcript work', () => {
   )?.[1] || ''
   assert.match(
     emptyBody,
-    /applyMessagesToView\(\[\], refreshed\.offset\)[\s\S]*settleRuntime\(runtime, \[\]\)[\s\S]*return/,
+    /applyMessagesToView\(\[\], refreshed\.offset\)[\s\S]*settleRuntime\(runtime, \[\], msgs\)[\s\S]*return/,
     'the full empty ChatView must become ready without waiting for transcript scheduling',
   )
   assert.doesNotMatch(emptyBody, /startTransition/,

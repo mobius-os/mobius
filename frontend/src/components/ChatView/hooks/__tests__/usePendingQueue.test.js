@@ -645,6 +645,57 @@ test('delivery retirement survives stale empty runtime until exact transcript pr
   remount.unmount()
 })
 
+for (const readOrder of ['outbox-first', 'transcript-first']) {
+  test(`activation consumes the replayed cid with ${readOrder}, preserving identical independent input`, async () => {
+    await localFixture()
+    const content = 'review goals behavior'
+    await enqueueIntent(localIntent('replayed', { body: { cid: 'replayed', content } }))
+    await enqueueIntent(localIntent('next-input', { body: { cid: 'next-input', content } }))
+    const hook = renderHook(() => usePendingQueue([], localScope))
+    if (readOrder === 'outbox-first') {
+      await flushLocalRead()
+      // Delivery ends replay, but not presentation until activation observes
+      // the canonical transcript. An empty runtime alone must not erase input.
+      await retireIntent('replayed', { chatId: localScope.chatId, outcome: 'delivered' })
+      hook.result.current.hydrate([])
+      assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid).sort(), ['next-input', 'replayed'])
+    }
+    // This is the version-matched detail (cold entry) or detail-cache window
+    // (warm entry) used by activation while its resumed turn is still live.
+    hook.result.current.hydrateFromTranscript([], [
+      { role: 'user', cid: 'replayed', content, ts: 42 },
+      { role: 'assistant', id: 'resumed-run', content: 'I will review it.' },
+      { role: 'user', cid: 'next-input', content, optimistic: true },
+    ])
+    await flushLocalRead()
+    assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['next-input'])
+    assert.equal(hook.result.current.pendingMessages[0].content, content)
+    assert.equal(hook.result.current.pendingMessages[0].serverTs, false,
+      'a mounted optimistic suffix is not acceptance proof')
+    hook.result.current.hydrate([])
+    assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['next-input'])
+    hook.unmount()
+  })
+}
+
+test('activation consumes grouped transcript identities but leaves provider-unacknowledged steering reserved', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  for (const cid of ['head', 'consumed', 'steer']) await enqueueIntent(localIntent(cid))
+  hook.result.current.reserveForSteer(['steer'])
+  hook.result.current.hydrateFromTranscript([
+    { role: 'user', cid: 'steer', content: 'message steer', ts: 4 },
+  ], [{ role: 'user', cid: 'head', _consumed_cids: ['head', 'consumed'], ts: 2 }])
+  assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['steer'])
+  assert.deepEqual(hook.result.current.steerReservedMessages.map(m => m.cid), ['steer'])
+  assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+  hook.result.current.hydrateFromTranscript([], [{ role: 'user', cid: 'steer', ts: 4 }])
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  assert.deepEqual(hook.result.current.steerReservedMessages, [])
+  hook.unmount()
+})
+
 test('cancelled local intent disappears and cannot return on hydrate or remount', async () => {
   await localFixture()
   const hook = renderHook(() => usePendingQueue([], localScope))
