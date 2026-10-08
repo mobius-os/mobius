@@ -1,6 +1,8 @@
 """Routes for managing the mini-app registry."""
 
 import asyncio
+import base64
+import binascii
 import io
 import json
 import logging
@@ -26,7 +28,7 @@ from app import (
   activity, app_activity, app_apply, app_badge, app_capability_acceptance, app_git,
   app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
   icon_cache, models, project_git, providers, schemas,
-  source_dirs, workspace_files,
+  resource_access, source_dirs, store_listing_source, workspace_files,
 )
 from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
@@ -1837,33 +1839,13 @@ async def apply_app_source(
     )
 
   async def _apply(app: models.App | None):
-    try:
-      return await app_apply.apply_source_revision(
-        db,
-        source_dir=source_dir,
-        app=app,
-        chat_id=body.chat_id,
-        accept_local_package=body.accept_local_package,
-      )
-    except app_apply.AppApplyError as exc:
-      raise HTTPException(
-        status_code=exc.status_code,
-        detail={"code": exc.code, "message": str(exc)},
-      ) from exc
-    except app_git.SourceTreeChanged as exc:
-      raise HTTPException(
-        status_code=409,
-        detail={"code": "source_changed", "message": str(exc)},
-      ) from exc
-    except CompileError as exc:
-      detail = {
-        "code": "compile_failed",
-        "message": str(exc),
-      }
-      stderr = exc.stderr.strip()
-      if stderr:
-        detail["stderr"] = stderr[-4000:]
-      raise HTTPException(status_code=422, detail=detail) from exc
+    return await _apply_source_or_http(
+      db,
+      source_dir=source_dir,
+      app=app,
+      chat_id=body.chat_id,
+      accept_local_package=body.accept_local_package,
+    )
 
   async with fs_locks.install_uninstall_lock():
     matched = (
@@ -1924,22 +1906,225 @@ async def apply_app_source(
           )
         result = await _apply(None)
 
+  _publish_apply_events(result, body.chat_id)
+  return schemas.AppApplyOut(
+    mode=result.mode,
+    app=result.app,
+    warnings=list(result.warnings),
+  )
+
+
+async def _apply_source_or_http(
+  db: Session,
+  *,
+  source_dir: str,
+  app: models.App | None,
+  chat_id: str | None,
+  accept_local_package: bool = False,
+):
+  """Accept one source revision, reporting failures as API errors."""
+  try:
+    return await app_apply.apply_source_revision(
+      db,
+      source_dir=source_dir,
+      app=app,
+      chat_id=chat_id,
+      accept_local_package=accept_local_package,
+    )
+  except app_apply.AppApplyError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": str(exc)},
+    ) from exc
+  except app_git.SourceTreeChanged as exc:
+    raise HTTPException(
+      status_code=409,
+      detail={"code": "source_changed", "message": str(exc)},
+    ) from exc
+  except CompileError as exc:
+    detail = {
+      "code": "compile_failed",
+      "message": str(exc),
+    }
+    stderr = exc.stderr.strip()
+    if stderr:
+      detail["stderr"] = stderr[-4000:]
+    raise HTTPException(status_code=422, detail=detail) from exc
+
+
+def _publish_apply_events(result, chat_id: str | None) -> None:
   event_type = "app_created" if result.mode == "created" else "app_updated"
-  if result.mode != "unchanged":
-    event = {"type": event_type, "appId": str(result.app.id)}
-    if result.mode == "created" and result.app.chat_id is not None:
-      event["chatId"] = str(result.app.chat_id)
-    get_system_broadcast().publish(event)
-    # Lifecycle refresh and workspace reveal are separate contracts. A preview
-    # action carries the REQUESTING chat (which may be modifying an app created
-    # elsewhere) and is emitted only after the coherent revision committed, so
-    # the shell never opens a half-written or failed build.
-    if body.chat_id:
-      get_system_broadcast().publish({
-        "type": "app_preview_ready",
-        "appId": str(result.app.id),
-        "chatId": str(body.chat_id),
-      })
+  if result.mode == "unchanged":
+    return
+  event = {"type": event_type, "appId": str(result.app.id)}
+  if result.mode == "created" and result.app.chat_id is not None:
+    event["chatId"] = str(result.app.chat_id)
+  get_system_broadcast().publish(event)
+  # Lifecycle refresh and workspace reveal are separate contracts. A preview
+  # action carries the REQUESTING chat (which may be modifying an app created
+  # elsewhere) and is emitted only after the coherent revision committed, so
+  # the shell never opens a half-written or failed build.
+  if chat_id:
+    get_system_broadcast().publish({
+      "type": "app_preview_ready",
+      "appId": str(result.app.id),
+      "chatId": str(chat_id),
+    })
+
+
+def _listing_image(value: schemas.StoreListingImageIn | None, what: str):
+  if value is None:
+    return None
+  if value.data_base64 is not None:
+    try:
+      data = base64.b64decode(value.data_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+      raise HTTPException(
+        status_code=422,
+        detail={"code": "listing_image_invalid", "message": f"The {what} upload is damaged."},
+      ) from exc
+    return store_listing_source.ListingImage(data=data)
+  return store_listing_source.ListingImage(path=value.path or "")
+
+
+@router.put(
+  "/{app_id}/store-listing",
+  response_model=schemas.AppApplyOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def save_store_listing(
+  app_id: int,
+  body: schemas.StoreListingIn,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Write the owner's Store listing into the app source and accept it.
+
+  The save is one accepted revision containing only the listing: an app with
+  unaccepted edits in progress is refused rather than swept into it. A failed
+  accept restores edited bytes only before Git advances; afterward its clean
+  Git revision remains as the normal retry point.
+  """
+  edit = store_listing_source.ListingEdit(
+    tagline=body.tagline,
+    description=body.description,
+    icon=_listing_image(body.icon, "app icon"),
+    hero=_listing_image(body.hero, "banner image"),
+    screenshots=tuple(
+      store_listing_source.ListingScreenshot(
+        image=_listing_image(shot, f"screenshot {index}"),
+        alt=shot.alt,
+        label=shot.label or "",
+      )
+      for index, shot in enumerate(body.screenshots, start=1)
+    ),
+  )
+  async with fs_locks.install_uninstall_lock():
+    found = (
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
+    )
+    if found is None or not found.source_dir:
+      raise HTTPException(
+        status_code=404,
+        detail={"code": "app_not_found", "message": "App not found."},
+      )
+    source_dir = str(found.source_dir)
+    source_nonce = found.token_nonce
+    async with (
+      fs_locks.app_storage_lock(app_id),
+      fs_locks.source_dir_lock(source_dir),
+    ):
+      resource_access.recheck_app_identity(db, app_id, source_nonce)
+      app = (
+        db.query(models.App)
+        .populate_existing()
+        .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+        .first()
+      )
+      if app is None or app.source_dir != source_dir:
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "source_identity_changed",
+            "message": "The app changed while saving. Try again.",
+          },
+        )
+      if _validate_source_dir(source_dir, get_settings().data_dir) != source_dir:
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "source_identity_changed",
+            "message": "The app source directory changed while saving. Try again.",
+          },
+        )
+      source = Path(source_dir)
+      if not await asyncio.to_thread(app_git.is_repo, source):
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "source_unavailable",
+            "message": "This app has no versioned source to hold a listing.",
+          },
+        )
+      if await asyncio.to_thread(app_git.worktree_dirty, source):
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "source_has_draft",
+            "message": (
+              "This app has changes that haven't been applied yet. Finish "
+              "them first, or ask an agent to."
+            ),
+          },
+        )
+      head_before_apply = await asyncio.to_thread(app_git.head_sha, source, "HEAD")
+      accepted_before_apply = app.source_commit
+      async def write_and_accept():
+        try:
+          undo = await asyncio.to_thread(
+            store_listing_source.write_listing, source, app, edit,
+          )
+        except store_listing_source.ListingEditError as exc:
+          raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+          ) from exc
+        try:
+          return await _apply_source_or_http(
+            db, source_dir=source_dir, app=app, chat_id=None,
+          )
+        except BaseException:
+          # Apply may have committed Git before a later build/publish step
+          # failed. That commit is its intentional retry point; restoring only
+          # worktree bytes would instead strand a dirty tree behind HEAD.
+          accepted_now = db.query(models.App.source_commit).filter_by(id=app_id).scalar()
+          if (
+            accepted_now == accepted_before_apply
+            and await asyncio.to_thread(app_git.head_sha, source, "HEAD") == head_before_apply
+          ):
+            await asyncio.to_thread(undo)
+          raise
+
+      save_task = asyncio.create_task(write_and_accept())
+      try:
+        result = await asyncio.shield(save_task)
+      except asyncio.CancelledError:
+        # A cancelled request must keep the source lock until its in-flight
+        # thread/accept settles. Otherwise an undo can race a Git ref move.
+        while not save_task.done():
+          try:
+            await asyncio.shield(save_task)
+          except asyncio.CancelledError:
+            continue
+          except Exception:
+            break
+        if not save_task.cancelled():
+          if save_task.exception() is None:
+            _publish_apply_events(save_task.result(), None)
+        raise
+  _publish_apply_events(result, None)
   return schemas.AppApplyOut(
     mode=result.mode,
     app=result.app,

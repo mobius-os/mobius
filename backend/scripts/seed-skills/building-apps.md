@@ -150,6 +150,41 @@ When the partner asks to share a local-first app as a repo, make the existing so
 4. Run `python3 /data/platform/backend/scripts/validate-app.py /data/apps/<name>` before push. It checks the declared source/import closure and bundles the real entry with the installer’s exact Rolldown contract, catching missing files, missing default exports, and production-only compile failures locally.
 5. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
 
+### Store listing — what the App Store shows before anyone installs
+
+Publishing from the App Store's **Publish** tab makes the app's last applied
+source public, and the Store refuses it without a listing. The listing is part
+of the app's source, so it is reviewed, versioned and published with the code:
+
+```json
+"icon": "icon.png",
+"store": {
+  "tagline": "One line on what it does for the owner (at most 120 bytes).",
+  "description": "Plain text: what it does, who it is for, what stays private (at most 4000 bytes).",
+  "hero": "static/store/hero.png",
+  "screenshots": [
+    {"src": "static/store/main.png", "alt": "What the image shows, concretely.", "label": "Optional short caption"}
+  ]
+}
+```
+
+- `icon` and every listing image must be committed files; listing images live
+  under `static/store/`. `hero` is optional; 1–5 screenshots are required,
+  each with concrete `alt` text (at most 300 bytes) and an optional `label`
+  (at most 120 bytes).
+- Screenshots must be truthful and private: capture the app's real UI in an
+  empty, demo, or fixture state, never the owner's own records, names,
+  accounts, chats, or machines. Build a small demo state if the app has none.
+- Apply the app so the listing is in its accepted source, then check it with
+  `mapi "/api/community/publications/github/preview?app_id=<id>"`. Its
+  `checklist` names every unmet item at once, and `ready` is true only when
+  `listing` is exactly what the Store will publish.
+- The owner can also write the listing by hand in the Store's Publish tab,
+  which saves it into this same source. An older app with no `mobius.json`
+  needs an agent to create one first, preserving its existing permissions,
+  capabilities, and any schedule; a listing save will not guess that contract.
+- Publishing itself stays the owner's action in the Store.
+
 **Don't hand-bump a version constant in app source.** If an app carries its released version inline (e.g. `const APP_VERSION = '1.2.0'`), leave that line alone — the catalog/installer sets it per release, not your edits. Bumping it locally guarantees a merge conflict on the *next* update: your bump and the new release's bump land on the same line, so every update stops to ask the owner to reconcile a version number. Git already tracks your edits — you never need a version bump to record them. (This is the single most common avoidable update conflict.)
 
 ### Verify your own output — don't make the owner the test loop

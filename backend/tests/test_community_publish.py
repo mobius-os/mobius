@@ -109,6 +109,29 @@ def test_preview_asset_reads_the_accepted_tree_not_the_editable_worktree(tmp_pat
   assert changed.value.code == "accepted_revision_changed"
 
 
+def test_incomplete_listing_cannot_make_other_source_public(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  manifest = json.loads((repo / "mobius.json").read_text())
+  manifest["store"] = {
+    "tagline": "Draft", "description": "Incomplete draft",
+    "hero": "private-notes.txt",
+    "screenshots": [{"src": "static/store/screen.png", "alt": "Screen"}],
+  }
+  (repo / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  (repo / "private-notes.txt").write_text("not public", encoding="utf-8")
+  (repo / "static" / "store").mkdir(parents=True)
+  (repo / "static" / "store" / "screen.png").write_bytes(b"screen")
+  _git(repo, "add", "mobius.json", "private-notes.txt", "static/store/screen.png")
+  _git(repo, "commit", "-m", "draft listing")
+  accepted = _git(repo, "rev-parse", "HEAD")
+  app.source_commit = accepted
+
+  with pytest.raises(CommunityPublicationError) as private:
+    read_public_store_asset(app, accepted, "private-notes.txt")
+  assert private.value.code == "listing_asset_unavailable"
+  assert read_public_store_asset(app, accepted, "static/store/screen.png") == b"screen"
+
+
 def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
   repo = tmp_path / "app"
   repo.mkdir()
@@ -381,3 +404,17 @@ def test_partial_success_journal_contains_only_bounded_public_state(
   with pytest.raises(CommunityPublicationError) as raised:
     community_publish.write_publication_journal(journal)
   assert raised.value.code == "publication_journal_invalid"
+
+
+def test_listing_preview_can_inspect_legacy_source_but_publication_requires_manifest(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _git(repo, "rm", "mobius.json")
+  _git(repo, "commit", "-m", "legacy source")
+  app.source_commit = _git(repo, "rev-parse", "HEAD")
+
+  commit, files = build_public_snapshot(app, allow_missing_manifest=True)
+  assert commit == app.source_commit
+  assert files and not any(item["path"] == "mobius.json" for item in files)
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+  assert raised.value.code == "invalid_manifest"

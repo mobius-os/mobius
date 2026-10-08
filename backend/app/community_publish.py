@@ -316,19 +316,26 @@ def _scan_content(path: str, content: bytes) -> None:
     )
 
 
-def public_store_listing(files: list[dict[str, str]]) -> dict:
-  """Validate and project storefront metadata from one accepted snapshot.
+LISTING_ITEMS = (
+  ("details", "App details"),
+  ("icon", "App icon"),
+  ("tagline", "Tagline"),
+  ("description", "Description"),
+  ("screenshots", "Screenshots"),
+  ("hero", "Banner image"),
+)
+_OPTIONAL_LISTING_ITEMS = {"hero"}
+TAGLINE_MAX_BYTES = 120
+DESCRIPTION_MAX_BYTES = 4000
+SCREENSHOT_ALT_MAX_BYTES = 300
+SCREENSHOT_LABEL_MAX_BYTES = 120
 
-  Store-only artwork lives below ``static/store/`` so a commit-bound preview
-  can read it directly without a copy step. It remains ordinary accepted source
-  rather than ``static_assets`` package input; the manifest contract reserves
-  this subtree so installer-owned runtime bytes cannot collide with it.
-  """
-  by_path = {
-    str(item.get("path") or ""): item
-    for item in files
-    if isinstance(item, dict)
-  }
+
+def _incomplete(message: str) -> CommunityPublicationError:
+  return CommunityPublicationError(message, "listing_incomplete")
+
+
+def _listing_manifest(by_path: dict[str, dict]) -> dict:
   manifest_item = by_path.get("mobius.json")
   if manifest_item is None:
     raise CommunityPublicationError(
@@ -343,90 +350,199 @@ def public_store_listing(files: list[dict[str, str]]) -> dict:
     ) from exc
   if not isinstance(manifest, dict):
     raise CommunityPublicationError("mobius.json must be an object.", "invalid_manifest")
-
-  store = manifest.get("store")
-  if not isinstance(store, dict):
+  if not manifest.get("id") or not manifest.get("entry"):
     raise CommunityPublicationError(
-      "Add a Store listing with a tagline, description, and screenshots before publishing.",
-      "listing_incomplete",
+      "mobius.json is missing required publication fields.", "invalid_manifest",
     )
+  return manifest
 
-  def clean_text(field: str, maximum: int) -> str:
-    value = store.get(field)
-    if not isinstance(value, str):
-      raise CommunityPublicationError(
-        f"The Store {field} is required.", "listing_incomplete",
-      )
-    value = value.strip()
-    if not value or len(value.encode("utf-8")) > maximum or "\x00" in value:
-      raise CommunityPublicationError(
-        f"The Store {field} must be 1–{maximum} bytes.", "listing_incomplete",
-      )
-    return value
 
-  icon = str(manifest.get("icon") or "").strip()
-  if not icon or icon not in by_path:
-    raise CommunityPublicationError(
-      "Add a tracked app icon before publishing.", "listing_incomplete",
-    )
+def _listing_text(store: dict, field: str, label: str, maximum: int) -> str:
+  value = store.get(field)
+  value = value.strip() if isinstance(value, str) else ""
+  if not value or "\x00" in value:
+    raise _incomplete(f"Add {label}.")
+  if len(value.encode("utf-8")) > maximum:
+    raise _incomplete(f"Shorten the {field} to {maximum} UTF-8 bytes or fewer.")
+  return value
 
-  def listing_asset(value: object, label: str) -> str:
-    if not isinstance(value, str):
-      raise CommunityPublicationError(
-        f"The Store {label} is required.", "listing_incomplete",
-      )
-    source = value.strip()
+
+def _listing_asset(value: object, label: str, by_path: dict[str, dict]) -> str:
+  source = value.strip() if isinstance(value, str) else ""
+  if not source:
+    raise _incomplete(f"Add the {label}.")
+  try:
     _validate_path(source)
-    if not source.startswith("static/store/") or source not in by_path:
-      raise CommunityPublicationError(
-        f"The Store {label} must be a tracked file under static/store/.",
-        "listing_incomplete",
-      )
-    return source
-
-  hero = None
-  if store.get("hero") not in (None, ""):
-    hero = listing_asset(store.get("hero"), "hero")
-  screenshots = store.get("screenshots")
-  if not isinstance(screenshots, list) or not 1 <= len(screenshots) <= MAX_STORE_SCREENSHOTS:
-    raise CommunityPublicationError(
-      f"Add 1–{MAX_STORE_SCREENSHOTS} Store screenshots before publishing.",
-      "listing_incomplete",
+  except CommunityPublicationError as exc:
+    raise _incomplete(f"The {label} has an unsupported file name.") from exc
+  if source not in by_path:
+    raise _incomplete(f"The {label} file is missing. Add it again.")
+  if not source.startswith("static/store/"):
+    raise _incomplete(
+      f"The {label} must be saved under static/store/. Saving the listing "
+      "again moves it there.",
     )
+  return source
+
+
+def _listing_screenshots(store: dict, by_path: dict[str, dict]) -> list[dict]:
+  screenshots = store.get("screenshots")
+  if not isinstance(screenshots, list) or not screenshots:
+    raise _incomplete(f"Add 1–{MAX_STORE_SCREENSHOTS} screenshots.")
+  if len(screenshots) > MAX_STORE_SCREENSHOTS:
+    raise _incomplete(f"Keep at most {MAX_STORE_SCREENSHOTS} screenshots.")
   projected = []
   for index, item in enumerate(screenshots, start=1):
     if not isinstance(item, dict):
-      raise CommunityPublicationError(
-        f"Store screenshot {index} is invalid.", "listing_incomplete",
-      )
+      raise _incomplete(f"Screenshot {index} is invalid. Add it again.")
+    src = _listing_asset(item.get("src"), f"screenshot {index}", by_path)
     alt = item.get("alt")
-    if not isinstance(alt, str) or not alt.strip() or len(alt.encode("utf-8")) > 300:
-      raise CommunityPublicationError(
-        f"Store screenshot {index} needs concise alternative text.",
-        "listing_incomplete",
+    alt = alt.strip() if isinstance(alt, str) else ""
+    if not alt or len(alt.encode("utf-8")) > SCREENSHOT_ALT_MAX_BYTES:
+      raise _incomplete(
+        f"Screenshot {index} needs a short description of what it shows.",
       )
     label = item.get("label")
     if label is not None and (
       not isinstance(label, str)
       or not label.strip()
-      or len(label.encode("utf-8")) > 120
+      or len(label.encode("utf-8")) > SCREENSHOT_LABEL_MAX_BYTES
     ):
-      raise CommunityPublicationError(
-        f"Store screenshot {index} has an invalid label.", "listing_incomplete",
-      )
+      raise _incomplete(f"Screenshot {index} has an invalid caption.")
     projected.append({
-      "src": listing_asset(item.get("src"), f"screenshot {index}"),
-      "alt": alt.strip(),
+      "src": src,
+      "alt": alt,
       **({"label": label.strip()} if isinstance(label, str) else {}),
     })
+  return projected
 
+
+def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dict:
+  """The listing as currently written, valid or not, for editing."""
+  def text(field: str) -> str:
+    value = store.get(field)
+    return value if isinstance(value, str) else ""
+
+  def tracked(value: object) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() in by_path else ""
+
+  screenshots = []
+  raw_shots = store.get("screenshots")
+  for item in raw_shots if isinstance(raw_shots, list) else []:
+    if not isinstance(item, dict):
+      continue
+    screenshots.append({
+      "src": tracked(item.get("src")),
+      "alt": item.get("alt") if isinstance(item.get("alt"), str) else "",
+      "label": item.get("label") if isinstance(item.get("label"), str) else "",
+    })
   return {
-    "tagline": clean_text("tagline", 120),
-    "description": clean_text("description", 4000),
-    "icon": icon,
-    **({"hero": {"path": hero}} if hero else {"hero": None}),
-    "screenshots": projected,
+    "tagline": text("tagline"),
+    "description": text("description"),
+    "icon": tracked(manifest.get("icon")),
+    "hero": tracked(store.get("hero")),
+    "screenshots": screenshots,
   }
+
+
+def store_listing_review(files: list[dict[str, str]]) -> dict:
+  """Check every Store listing requirement of one accepted snapshot at once.
+
+  The Store's checklist and the publish gate both read this review, so the
+  checklist can never call a listing ready that publishing would refuse. Store
+  artwork lives below ``static/store/`` so a commit-bound preview can read it
+  directly without a copy step. It remains ordinary accepted source rather
+  than ``static_assets`` package input; the manifest contract reserves this
+  subtree so installer-owned runtime bytes cannot collide with it.
+  """
+  by_path = {
+    str(item.get("path") or ""): item
+    for item in files
+    if isinstance(item, dict)
+  }
+  problems: dict[str, CommunityPublicationError] = {}
+  results: dict[str, object] = {}
+
+  def check(item: str, validate) -> None:
+    try:
+      results[item] = validate()
+    except CommunityPublicationError as exc:
+      problems[item] = exc
+
+  check("details", lambda: _listing_manifest(by_path))
+  manifest = results.get("details") if isinstance(results.get("details"), dict) else {}
+  store = manifest.get("store") if isinstance(manifest.get("store"), dict) else {}
+
+  def icon() -> str:
+    source = str(manifest.get("icon") or "").strip()
+    if not source or source not in by_path:
+      raise _incomplete("Add an app icon.")
+    return source
+
+  check("icon", icon)
+  check("tagline", lambda: _listing_text(
+    store, "tagline", "a one-line tagline", TAGLINE_MAX_BYTES,
+  ))
+  check("description", lambda: _listing_text(
+    store, "description", "a description", DESCRIPTION_MAX_BYTES,
+  ))
+  check("screenshots", lambda: _listing_screenshots(store, by_path))
+  check("hero", lambda: (
+    _listing_asset(store.get("hero"), "banner image", by_path)
+    if store.get("hero") not in (None, "") else None
+  ))
+
+  checklist = [
+    {
+      "id": item,
+      "label": label,
+      "optional": item in _OPTIONAL_LISTING_ITEMS,
+      "done": item not in problems,
+      "code": problems[item].code if item in problems else "",
+      "message": problems[item].detail if item in problems else "",
+    }
+    for item, label in LISTING_ITEMS
+  ]
+  listing = None
+  if not problems:
+    hero = results["hero"]
+    listing = {
+      "tagline": results["tagline"],
+      "description": results["description"],
+      "icon": results["icon"],
+      "hero": {"path": hero} if hero else None,
+      "screenshots": results["screenshots"],
+    }
+  draft = _listing_draft(manifest, store, by_path)
+  return {
+    "ready": listing is not None,
+    "checklist": checklist,
+    "listing": listing,
+    "draft": draft,
+  }
+
+
+def public_store_listing(files: list[dict[str, str]]) -> dict:
+  """Return the publishable listing, or raise its first unmet requirement."""
+  review = store_listing_review(files)
+  if review["listing"] is None:
+    first = next(item for item in review["checklist"] if not item["done"])
+    raise CommunityPublicationError(first["message"], first["code"])
+  return review["listing"]
+
+
+def listing_draft_assets(review: dict) -> set[str]:
+  """Only artwork paths safe for the unauthenticated preview endpoint."""
+  draft = review["draft"]
+  # The accepted manifest's icon has always been public. An incomplete draft
+  # must not make arbitrary other tracked source files public as artwork.
+  paths = {draft["icon"]}
+  paths.update(
+    path for path in [draft["hero"], *(shot["src"] for shot in draft["screenshots"])]
+    if path.startswith("static/store/")
+  )
+  paths.discard("")
+  return paths
 
 
 def _public_tree_entries(repo: Path, commit: str) -> list[_PublicTreeEntry]:
@@ -508,16 +624,7 @@ def read_public_store_asset(
     }
     for entry in entries
   ]
-  listing = public_store_listing(listing_files)
-  allowed = {str(listing["icon"])}
-  hero = listing.get("hero")
-  if isinstance(hero, dict):
-    allowed.add(str(hero.get("path") or ""))
-  allowed.update(
-    str(item.get("src") or "")
-    for item in listing.get("screenshots", [])
-    if isinstance(item, dict)
-  )
+  allowed = listing_draft_assets(store_listing_review(listing_files))
   entry = by_path.get(asset_path)
   if asset_path not in allowed or entry is None:
     raise CommunityPublicationError(
@@ -535,8 +642,13 @@ def read_public_store_asset(
   return content
 
 
-def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
+def build_public_snapshot(
+  app: models.App, *, allow_missing_manifest: bool = False,
+) -> tuple[str, list[dict[str, str]]]:
   """Return the exact accepted commit and every regular tracked file.
+
+  Listing previews may inspect legacy source without a manifest. Publication
+  still requires a valid, installable manifest and the declared package budget.
 
   Reading a Git tree rather than the editable worktree prevents an unsaved or
   concurrently-changing draft from crossing the public-source consent boundary.
@@ -574,6 +686,8 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
     })
 
   manifest_item = next((item for item in files if item["path"] == "mobius.json"), None)
+  if manifest_item is None and allow_missing_manifest:
+    return commit, files
   if manifest_item is None:
     raise CommunityPublicationError(
       "The accepted revision must include mobius.json before it can be public.",
