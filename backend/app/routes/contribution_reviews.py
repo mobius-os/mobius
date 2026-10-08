@@ -335,7 +335,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
     if target is None or target["head_sha"] != body.head_sha:
       raise HTTPException(409, "This head was not in the approved selection.")
     previous = row.outcomes_json.get(item_key, {})
-    attempted = previous.get("merge_attempted") is True or previous.get("state") in {"merging", "merge_unknown", "queued", "merged"}
+    attempted = reviews.merge_attempted(previous)
     if previous.get("state") == "merged":
       return {"run": _run_view(db, row)}
     cwd = Path(get_settings().data_dir) / "platform"
@@ -353,16 +353,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
                "head_sha": body.head_sha,
                "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
     if attempted:
-      if pull.get("merged"):
-        outcome = {**previous, "state": "merged", "merge_sha": pull.get("merge_commit_sha")}
-      else:
-        checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
-        entry = reviews.queue_entry(checks, target)
-        if entry:
-          outcome = {**previous, "state": "queued", "queue_entry_id": entry["id"]}
-        else:
-          outcome = {**previous, "state": "merge_unknown", "summary":
-            "The earlier merge or queue request is not confirmed. Check GitHub; it was not repeated."}
+      outcome = await asyncio.to_thread(reviews.reconcile_merge, _gh, cwd, target, previous, pull)
       _parent(db, row, principal)
       reviews.save_outcome(db, row, item_key, outcome)
       return {"run": _run_view(db, row)}
@@ -393,7 +384,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       if existing_entry:
         await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
         _parent(db, row, principal)
-        outcome.update(state="queued", queue_entry_id=existing_entry["id"])
+        outcome.update(state="queued", **reviews.queue_receipt(existing_entry))
         reviews.save_outcome(db, row, item_key, outcome)
         return {"run": _run_view(db, row)}
       blocker = reviews.merge_blocker(target, repo, pull, checks)
@@ -423,7 +414,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
               _parent(db, row, principal)
               if checks.get("isMergeQueueEnabled") is True:
                 receipt = await asyncio.to_thread(reviews.enqueue, _gh, cwd, target)
-                outcome.update(state="queued", queue_entry_id=receipt["id"])
+                outcome.update(state="queued", **reviews.queue_receipt(receipt))
               else:
                 receipt = await asyncio.to_thread(reviews.perform_merge, _gh, cwd, target, repo)
                 if receipt.get("merged") is not True:
@@ -768,19 +759,19 @@ async def repair_checkout(app_id: int | None, run_id: str, body: RepairCheckout,
     target = _target(row, body)
     previous = row.outcomes_json.get(reviews.key(target), {})
     _require_ready_attempt_resolved(previous)
-    if previous.get("merge_attempted") or previous.get("state") in {"merged", "queued", "merge_unknown"}:
-      raise HTTPException(409, "An existing merge attempt must be reconciled before any repair.")
     attempts = previous.get("repair_attempts", [])
     if any(r.get("state") in {"pushing", "push_unknown"} for r in attempts):
       raise HTTPException(409, "An earlier push has an unclear public outcome. Reconcile it; do not prepare another repair.")
     reviews.require_repair_round_available(row, attempts)
-    if previous.get("checkout") and previous["checkout"].get("initial_head_sha") == target["head_sha"]:
-      return {"checkout": previous["checkout"], "run": _run_view(db, row)}
     cwd = Path(get_settings().data_dir) / "platform"
     async with _github_connection_transaction():
       actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
       if str(actor.get("id") or "") != row.github_actor_id:
         raise HTTPException(409, "The connected GitHub actor changed. Approve a new selection.")
+      await asyncio.to_thread(reviews.require_repairable_merge, _gh, cwd, target, previous)
+      _parent(db, row, principal)
+      if previous.get("checkout") and previous["checkout"].get("initial_head_sha") == target["head_sha"]:
+        return {"checkout": previous["checkout"], "run": _run_view(db, row)}
       # Scope was frozen during admission, never supplied by an editing agent.
       allowed = target.get("allowed_files")
       if not allowed:
@@ -826,9 +817,8 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
         return {"run": _run_view(db, row), "blocked": "The earlier push is not confirmed. It was not repeated."}
       _parent(db, row, principal)
       attempts = [{**r, "state": "pushed"} if r is pending else r for r in attempts]
-      reviews.save_outcome(db, row, reviews.key(original), {**previous,
-        "repair_attempts": attempts, "successor": {"head_sha": pending["head_sha"], "base_sha": pending["base_sha"]},
-        "head_sha": pending["head_sha"], "state": "reviewing"})
+      reviews.save_outcome(db, row, reviews.key(original),
+        reviews.confirmed_successor(previous, attempts, pending))
       return {"run": _run_view(db, row)}
     _require_ready_attempt_resolved(previous)
     target = _target(row, body)
@@ -844,6 +834,7 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
       actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
       if str(actor.get("id") or "") != row.github_actor_id:
         raise HTTPException(409, "The connected GitHub actor changed. No push started.")
+      await asyncio.to_thread(reviews.require_repairable_merge, _gh, cwd, target, previous)
       current_base = await asyncio.to_thread(reviews.base_head, _gh, cwd, target["repo"], target["base_ref"])
       try:
         validation = await asyncio.to_thread(repairs.validate_repair, _gh, cwd, row, target,
@@ -853,6 +844,10 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
         raise
       if await asyncio.to_thread(reviews.base_head, _gh, cwd, target["repo"], target["base_ref"]) != current_base:
         raise HTTPException(409, "The target base moved during repair validation. Test the new combined result first.")
+      if (validation["head_sha"] == target["head_sha"] or any(
+          attempt.get("head_sha") == validation["head_sha"]
+          for attempt in previous.get("merge_attempts", []))):
+        raise HTTPException(409, "A repair must introduce a new, never-attempted head.")
       validation["base_sha"] = current_base
       _parent(db, row, principal)
       receipt = {**validation, "id": str(uuid.uuid4()), "state": "pushing",
@@ -870,6 +865,8 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
         loop = asyncio.get_running_loop()
         async def final_push_guard():
           _parent(db, row, principal)
+          await asyncio.to_thread(reviews.require_repairable_merge, _gh, cwd, target, previous)
+          _parent(db, row, principal)
         def before_push():
           asyncio.run_coroutine_threadsafe(final_push_guard(), loop).result()
         # push_repair confirms the new head from the branch ref. Re-reading the
@@ -884,9 +881,8 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
           "summary": "The public push outcome is not confirmed. Reconcile it without repeating the push."})
       else:
         attempts[-1] = {**attempts[-1], "state": "pushed"}
-        reviews.save_outcome(db, row, reviews.key(target), {**previous,
-          "repair_attempts": attempts, "successor": {"head_sha": validation["head_sha"], "base_sha": validation["base_sha"]},
-          "head_sha": validation["head_sha"], "state": "reviewing", "summary": "Repair published; fresh independent full-diff review required."})
+        reviews.save_outcome(db, row, reviews.key(target),
+          reviews.confirmed_successor(previous, attempts, validation))
     return {"run": _run_view(db, row)}
 
 
@@ -1078,22 +1074,15 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
           continue
         _assert_app_current(db, row.app_id, row.app_nonce)
         attempts = [{**a, "state": "pushed"} if a is pending else a for a in attempts]
-        reviews.save_outcome(db, row, reviews.key(original), {**previous,
-          "repair_attempts": attempts, "successor": {"head_sha": pending["head_sha"], "base_sha": pending["base_sha"]},
-          "head_sha": pending["head_sha"], "state": "reviewing",
-          "summary": "The exact earlier repair push is confirmed; fresh independent review is still required."})
+        reviews.save_outcome(db, row, reviews.key(original),
+          reviews.confirmed_successor(previous, attempts, pending))
         previous = row.outcomes_json[reviews.key(original)]
       target = reviews.effective_target(row, original)
-      attempted = previous.get("merge_attempted") is True or previous.get("state") in {"merging", "merge_unknown", "queued", "merged"}
+      attempted = reviews.merge_attempted(previous)
       try:
         _repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
-        if attempted and pull.get("merged"):
-          outcome = {**previous, "state": "merged", "merge_sha": pull.get("merge_commit_sha")}
-        elif attempted:
-          checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
-          entry = reviews.queue_entry(checks, target)
-          outcome = ({**previous, "state": "queued", "queue_entry_id": entry["id"]} if entry else
-            {**previous, "state": "merge_unknown", "summary": "The exact earlier merge/queue attempt remains unclear. It was not repeated."})
+        if attempted:
+          outcome = await asyncio.to_thread(reviews.reconcile_merge, _gh, cwd, target, previous, pull)
         elif previous.get("state") == "all_clear":
           await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
           continue

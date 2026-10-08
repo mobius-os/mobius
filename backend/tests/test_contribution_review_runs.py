@@ -883,3 +883,154 @@ print(json.dumps({"id": 5, "html_url": "https://github.com/example/project/pull/
   assert domain.post_review(git._gh, tmp_path, TARGET, body)["id"] == 5
   payload = json.loads((tmp_path / "received.json").read_text())
   assert payload == {"event": "COMMENT", "commit_id": SHA, "body": body}
+
+
+QUEUE_TIME = "2026-10-07T20:13:24Z"
+REMOVED_TIME = "2026-10-07T20:18:09Z"
+
+
+def queue_timeline():
+  # Actual GraphQL shapes: removal has no entry id and beforeCommit is NOT
+  # the PR head. Neither reason nor this synthetic SHA supplies identity.
+  return {"id": TARGET["pr_id"], "headRefOid": SHA, "state": "OPEN",
+    "merged": False, "mergeQueueEntry": None, "timelineItems": {
+      "pageInfo": {"hasPreviousPage": False, "hasNextPage": False},
+      "nodes": [
+        {"__typename": "AddedToMergeQueueEvent", "id": "added-1", "createdAt": QUEUE_TIME},
+        {"__typename": "RemovedFromMergeQueueEvent", "id": "removed-1",
+         "createdAt": REMOVED_TIME, "beforeCommit": {"oid": "e" * 40},
+         "reason": "failed_checks token=PRIVATE ghp_do_not_disclose"}]}}
+
+
+def queue_graphql(monkeypatch, node):
+  """Schema fake for only the read-only fields these routes actually request."""
+  calls = []
+  def gh(cwd, *args):
+    query = next(a[len("query="):] for a in args if a.startswith("query="))
+    assert query.startswith("query(") and "mutation" not in query
+    assert f"id={TARGET['pr_id']}" in args
+    assert "timelineItems(last:100," in query
+    assert "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT" in query
+    assert "pageInfo{hasPreviousPage hasNextPage}" in query
+    assert "... on AddedToMergeQueueEvent{id createdAt}" in query
+    assert "... on RemovedFromMergeQueueEvent{id createdAt}" in query
+    assert "beforeCommit" not in query and "reason" not in query
+    calls.append(query)
+    return SimpleNamespace(stdout=json.dumps({"data": {"node": node}}))
+  monkeypatch.setattr(routes, "_gh", gh)
+  return gh, calls
+
+
+def saved_queue_receipt(**changes):
+  return {"state": "queued", "head_sha": SHA, "merge_attempted": True,
+    "queue_entry_id": "entry-1", "queue_enqueued_at": QUEUE_TIME, **changes}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_confirmed_queue_removal_uses_admission_not_synthetic_commit(monkeypatch, legacy):
+  gh, calls = queue_graphql(monkeypatch, queue_timeline())
+  previous = saved_queue_receipt()
+  if legacy:
+    previous.pop("queue_enqueued_at")
+  proof = domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous)
+  assert proof == {"queue_entry_id": "entry-1", "head_sha": SHA,
+    "added_event_id": "added-1", "enqueued_at": QUEUE_TIME,
+    "removed_event_id": "removed-1", "removed_at": REMOVED_TIME}
+  assert len(calls) == 1 and "PRIVATE" not in json.dumps(proof)
+
+
+@pytest.mark.parametrize("case", ["missing_receipt", "unknown_receipt", "missing_events",
+  "incomplete", "later_page", "missing_paging", "stale", "ambiguous_legacy", "readded",
+  "readded_removed", "equal_time", "unordered", "duplicate_id", "bad_date", "wrong_pr",
+  "changed_head", "merged", "closed", "live_entry", "unknown_entry", "prior_proof_changed"])
+def test_removal_proof_fails_closed(monkeypatch, case):
+  node = queue_timeline()
+  previous = saved_queue_receipt()
+  timeline = node["timelineItems"]
+  events = timeline["nodes"]
+  later = [{**events[0], "id": "added-2", "createdAt": "2026-10-07T21:00:00Z"},
+           {**events[1], "id": "removed-2", "createdAt": "2026-10-07T21:05:00Z"}]
+  if case == "missing_receipt": previous.pop("queue_entry_id")
+  elif case == "unknown_receipt": previous["queue_receipt_unconfirmed"] = True
+  elif case == "missing_events": timeline["nodes"] = []
+  elif case == "incomplete": timeline["pageInfo"]["hasPreviousPage"] = True
+  elif case == "later_page": timeline["pageInfo"]["hasNextPage"] = True
+  elif case == "missing_paging": timeline.pop("pageInfo")
+  elif case == "stale": previous["queue_enqueued_at"] = "2026-10-07T20:00:00Z"
+  elif case == "ambiguous_legacy":
+    previous.pop("queue_enqueued_at")
+    events.extend(later)
+  elif case == "readded": events.extend(later[:1])
+  elif case == "readded_removed": events.extend(later)
+  elif case == "equal_time": events[1]["createdAt"] = QUEUE_TIME
+  elif case == "unordered": events.reverse()
+  elif case == "duplicate_id": events[1]["id"] = events[0]["id"]
+  elif case == "bad_date": events[1]["createdAt"] = "unparseable"
+  elif case == "wrong_pr": node["id"] = "PR_other"
+  elif case == "changed_head": node["headRefOid"] = "c" * 40
+  elif case == "merged": node["merged"] = True
+  elif case == "closed": node["state"] = "CLOSED"
+  elif case == "live_entry": node["mergeQueueEntry"] = {"id": "entry-2"}
+  elif case == "unknown_entry": node.pop("mergeQueueEntry")
+  elif case == "prior_proof_changed": previous["queue_removal"] = {"removed_event_id": "older"}
+  gh, _ = queue_graphql(monkeypatch, node)
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous) is None
+
+
+def test_timestamp_receipt_can_match_latest_pair_in_complete_history(monkeypatch):
+  node = queue_timeline()
+  events = node["timelineItems"]["nodes"]
+  events[:0] = [
+    {**events[0], "id": "added-older", "createdAt": "2026-10-07T19:00:00Z"},
+    {**events[1], "id": "removed-older", "createdAt": "2026-10-07T19:05:00Z"}]
+  gh, _ = queue_graphql(monkeypatch, node)
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, saved_queue_receipt())["added_event_id"] == "added-1"
+
+
+def test_enqueue_timestamp_is_requested_and_durably_saved(setup, monkeypatch):
+  calls = []
+  def gh(cwd, *args):
+    query = next(a for a in args if a.startswith("query="))
+    assert "mergeQueueEntry{id enqueuedAt}" in query
+    calls.append(query)
+    return SimpleNamespace(stdout=json.dumps({"data": {"enqueuePullRequest": {
+      "mergeQueueEntry": {"id": "entry-1", "enqueuedAt": QUEUE_TIME}}}}))
+  monkeypatch.setattr(routes, "_gh", gh)
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "isMergeQueueEnabled": True})
+  result = report(setup)["run"]["items"][0]
+  assert result["queue_enqueued_at"] == QUEUE_TIME and result["merge_attempted"]
+  assert len(calls) == 1
+  assert setup[1].outcomes_json[domain.key(ITEM)]["queue_enqueued_at"] == QUEUE_TIME
+
+
+def test_requeue_observation_never_overwrites_original_receipt(setup, monkeypatch):
+  db, row, _ = setup
+  domain.save_outcome(db, row, domain.key(ITEM), saved_queue_receipt())
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS,
+    "mergeQueueEntry": {"id": "entry-2", "enqueuedAt": "2026-10-07T21:00:00Z"}})
+  result = report(setup)["run"]["items"][0]
+  assert result["state"] == "queued" and result["queue_entry_id"] == "entry-1"
+  assert result["queue_enqueued_at"] == QUEUE_TIME
+
+
+@pytest.mark.parametrize("timestamp", [None, "bad", "2026-10-07T20:13:24"])
+def test_new_receipt_missing_valid_timestamp_cannot_use_legacy_exception(monkeypatch, timestamp):
+  previous = saved_queue_receipt(**domain.queue_receipt({"id": "entry-1", "enqueuedAt": timestamp}))
+  assert previous["queue_receipt_unconfirmed"] is True
+  gh, calls = queue_graphql(monkeypatch, queue_timeline())
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous) is None
+  assert calls == []
+
+
+def test_unknown_attempt_observed_in_queue_never_becomes_legacy_repair_receipt(setup, monkeypatch):
+  db, row, _ = setup
+  domain.save_outcome(db, row, domain.key(ITEM), {
+    "state": "merge_unknown", "head_sha": SHA, "merge_attempted": True})
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS,
+    "mergeQueueEntry": {"id": "entry-1", "enqueuedAt": QUEUE_TIME}})
+  queued = report(setup)["run"]["items"][0]
+  assert queued["state"] == "queued" and queued["queue_receipt_unconfirmed"] is True
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: CHECKS)
+  queue_graphql(monkeypatch, queue_timeline())
+  removed = report(setup)["run"]["items"][0]
+  assert removed["state"] == "merge_unknown" and not removed.get("queue_removal")
