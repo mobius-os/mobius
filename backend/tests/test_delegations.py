@@ -765,6 +765,83 @@ def test_delegation_listing_exposes_run_usage_without_loading_result(
   }
 
 
+def test_delegation_listing_reads_a_fixed_number_of_queries_for_any_page_size(
+  client, owner_token, db, monkeypatch,
+):
+  """The polled helper list batches runs, parent titles, and lifecycle repair
+  instead of three queries per row, and still matches the single-row view."""
+  from sqlalchemy import event
+
+  from app.database import engine
+  from app.delegations import serialize_delegation
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  parent_chat_id = _parent_with_run(client, owner_token, db)
+
+  async def fake_start(**_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
+  )
+  created = []
+  for index, status in enumerate(("completed", "running", None)):
+    response = client.post("/api/delegations", json={
+      "parent_chat_id": parent_chat_id,
+      "task_key": f"batched-{index}",
+      "prompt": "Review only.",
+      "provider": "codex",
+      "scope": "write",
+    }, headers=owner_auth)
+    assert response.status_code == 201, response.text
+    created.append(response.json())
+    if status is not None:
+      db.add(make_goal_run(db,
+        id=f"batched-run-{index}", root_run_id=f"batched-run-{index}",
+        chat_id=response.json()["child_chat_id"], status=status,
+        provider="codex", total_tokens=10 * (index + 1),
+      ))
+  db.commit()
+
+  def selects_for(limit):
+    statements = []
+
+    def capture(_conn, _cursor, statement, *_args):
+      if statement.lstrip().upper().startswith("SELECT"):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+      response = client.get(
+        f"/api/delegations?parent_chat_id={parent_chat_id}&limit={limit}",
+        headers=owner_auth,
+      )
+    finally:
+      event.remove(engine, "before_cursor_execute", capture)
+    assert response.status_code == 200, response.text
+    return response.json()["items"], len(statements)
+
+  selects_for(3)  # first read records the lifecycle facts it repairs
+  one, one_selects = selects_for(1)
+  items, three_selects = selects_for(3)
+  assert len(one) == 1 and len(items) == 3
+  assert three_selects == one_selects
+
+  db.expire_all()
+  rows = {
+    row.id: row for row in db.query(models.Delegation).filter(
+      models.Delegation.parent_chat_id == parent_chat_id,
+    )
+  }
+  assert {item["id"] for item in items} == {row["id"] for row in created}
+  for item in items:
+    assert item == serialize_delegation(
+      db, rows[item["id"]], include_result=False,
+    )
+  assert {item["status"] for item in items} == {"completed", "running", "starting"}
+  assert all(item["parent_chat_title"] == "Parent" for item in items)
+
+
 def test_helper_without_resumable_session_needs_parent_review(
   client, owner_token, db, monkeypatch,
 ):

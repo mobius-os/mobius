@@ -81,7 +81,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity, generated_files
+from app import activity, generated_files, tracing
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
 from app.claude_events import (
   NativeContinuationTracker,
@@ -1527,21 +1527,23 @@ async def run_claude_sdk_turn(
     try:
       try:
         try:
-          await asyncio.wait_for(client.connect(), timeout=30.0)
-          control_ready_error = await _await_control_mcp_ready(
-            client,
-            enabled=(
-              control_server_enabled and connector_config_handle is not None
-            ),
-            expected_tool_names=(
-              expected_control_tool_names(
-                top_level=run_policy is None,
-                coordination_enabled=coordination_enabled,
-              )
-              if control_server_enabled and connector_config_handle is not None
-              else None
-            ),
-          )
+          with tracing.span("claude.connect"):
+            await asyncio.wait_for(client.connect(), timeout=30.0)
+          with tracing.span("claude.control_mcp_ready"):
+            control_ready_error = await _await_control_mcp_ready(
+              client,
+              enabled=(
+                control_server_enabled and connector_config_handle is not None
+              ),
+              expected_tool_names=(
+                expected_control_tool_names(
+                  top_level=run_policy is None,
+                  coordination_enabled=coordination_enabled,
+                )
+                if control_server_enabled and connector_config_handle is not None
+                else None
+              ),
+            )
           if control_ready_error:
             log.warning(
               "Claude control MCP unavailable before query chat_id=%s: %s",
@@ -1575,6 +1577,10 @@ async def run_claude_sdk_turn(
       active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
       active_client.mark_ready()
+      # Startup timing: from the query to Claude's first message of any kind,
+      # and to its first model output (stream or assistant message).
+      first_message_span = tracing.start_span("claude.wait_first_message")
+      first_output_span = tracing.start_span("claude.wait_first_output")
 
       # Provider-native finite work can finish after its spawning turn, or even
       # immediately before that turn's ResultMessage. Keep its exact
@@ -1587,6 +1593,13 @@ async def run_claude_sdk_turn(
       usage_state: dict[str, Any] = {}
       while True:
         async for sdk_msg in client.receive_response():
+          if first_message_span is not None:
+            tracing.annotate(first_message_span, {"mobius.message_type": type(sdk_msg).__name__})
+            tracing.end_span(first_message_span)
+            first_message_span = None
+          if first_output_span is not None and isinstance(sdk_msg, (StreamEvent, AssistantMessage)):
+            tracing.end_span(first_output_span)
+            first_output_span = None
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every

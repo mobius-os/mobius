@@ -1503,10 +1503,7 @@ export default function ChatView({
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
       if (!preserveLocalTurn) {
-        pendingQueue.hydrate(data.pending_messages || [], {
-          completedCids: (data.messages || []).filter(message => message.role === 'user')
-            .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])]),
-        })
+        pendingQueue.hydrateFromTranscript(data.pending_messages || [], data.messages || [])
       }
       const runtime = {
         running: !!data.running,
@@ -1536,7 +1533,7 @@ export default function ChatView({
   }, [
     chatId,
     commitMessages,
-    pendingQueue.hydrate,
+    pendingQueue.hydrateFromTranscript,
     embedded,
     queryClient,
     reconcileFailedSendOutbox,
@@ -2554,7 +2551,7 @@ export default function ChatView({
       setActivationPhase('ready')
     }
 
-    const settleRuntime = (runtime, visibleMessages) => {
+    const settleRuntime = (runtime, visibleMessages, authoritativeMessages) => {
       const transition = inspectRuntimeSnapshot(runtime)
       if (!transition.adopt) {
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
@@ -2592,7 +2589,10 @@ export default function ChatView({
       setLoading(false)
       setActivationRetrying(false)
       setActivationPhase('ready')
-      pendingQueue.hydrate(runtime.pending_messages || [])
+      // Activation can follow an offline/restart replay whose delivery receipt
+      // was missed while this pane was hidden. The validated detail/cache
+      // transcript, not just an empty runtime queue, owns that cid's handoff.
+      pendingQueue.hydrateFromTranscript(runtime.pending_messages || [], authoritativeMessages)
       retireUnownedRuntimeStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2727,7 +2727,7 @@ export default function ChatView({
           ),
         })
         applyMessagesToView(msgs, detailCache.offset)
-        settleRuntime(runtime, msgs)
+        settleRuntime(runtime, msgs, msgs)
         return
       }
 
@@ -2761,7 +2761,7 @@ export default function ChatView({
             ...handoffWindow,
           }
         })
-        settleRuntime(runtime, messagesRef.current)
+        settleRuntime(runtime, messagesRef.current, msgs)
         return
       }
 
@@ -2794,7 +2794,7 @@ export default function ChatView({
       // own real reflow.
       if (refreshed.messages.length === 0) {
         applyMessagesToView([], refreshed.offset)
-        settleRuntime(runtime, [])
+        settleRuntime(runtime, [], msgs)
         return
       }
 
@@ -2817,7 +2817,7 @@ export default function ChatView({
       if (activationCacheEntryState !== 'missing' && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, msgs)
         })
         return
       }
@@ -2829,7 +2829,7 @@ export default function ChatView({
         // transcript; cached activations above remain immediate.
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, msgs)
         })
         return
       }
@@ -2862,7 +2862,7 @@ export default function ChatView({
         if (frameIndex === lastFrame) break
         if (performance.now() - commitStartedAt < 48) stride *= 2
       }
-      settleRuntime(runtime, refreshed.messages)
+      settleRuntime(runtime, refreshed.messages, msgs)
     }
 
     loadActivation()
@@ -2946,6 +2946,7 @@ export default function ChatView({
     commitRuntimeSnapshot,
     inspectRuntimeSnapshot,
     onRuntimeSettledIdle,
+    pendingQueue.hydrateFromTranscript,
     reconcileFailedSendOutbox,
     retireUnownedRuntimeStream,
     retryActivation,
