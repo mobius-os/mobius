@@ -1,8 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appBlockFromToken, inlineBlockState } from '../markdown/appBlock.js'
+import { appBlockFromToken, inlineBlockState, inlineSessionRetained, inlineBlockDocumentReset } from '../markdown/appBlock.js'
 
 const token = value => ({ type:'code', lang:'mobius-app', text:JSON.stringify(value) })
+test('document reset invalidates frozen confirmation without releasing uncertain publication ownership', () => {
+  assert.equal(inlineBlockDocumentReset(null), null)
+  assert.equal(inlineBlockDocumentReset({ actions: [], retain: false }), null)
+  const state = { retain: true, ackNonce: 'sent', actions: [
+    { confirming: true, confirmation: [{ title: 'Old document', facts: [] }], disabled: false },
+    { busy: true, label: 'Contributing' },
+  ] }
+  const reset = inlineBlockDocumentReset(state)
+  assert.equal(reset.retain, true)
+  assert.equal(reset.ackNonce, 'sent')
+  assert.equal(reset.actions[0].confirming, false)
+  assert.equal(reset.actions[0].confirmation, null)
+  assert.equal(reset.actions[0].disabled, true)
+  assert.equal(reset.actions[1], state.actions[1])
+  assert.equal(state.actions[0].confirming, true)
+})
 test('app blocks carry a destination and snapshot, not authority', () => {
   const block = appBlockFromToken(token({app:'contribute',intent:'chat-pull:owner/repo#7',title:'PR #7',facts:[{label:'Files',value:'4'}],approved:true,height:9999}))
   assert.equal(block.height,640)
@@ -148,4 +164,41 @@ test('live batch summary is bounded plain text and cannot alter saved item title
   const message = { type: 'moebius:app-block-state', sessionId: 's', actions: [], summary: '  ' + 'x'.repeat(300) + '  ' }
   assert.equal(inlineBlockState(message, 's', new Set()).summary.length, 240)
   assert.equal(inlineBlockState({ ...message, summary: 42 }, 's', new Set()).summary, '')
+})
+
+test('confirmation presents every current frozen identity without silently shortening or dropping members', () => {
+  const confirmation = [{ title: 'Current change', facts: [{ label: 'Destination', value: 'actual/repo → release' }] },
+    { title: 'Additional stack member', facts: [{ label: 'Version', value: 'abc123' }] }]
+  const parse = value => inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's', actions: [
+    { key: 'send:a', confirming: true, confirmation: value },
+  ] }, 's', new Set(['send:a'])).actions[0]
+  assert.deepEqual(parse(confirmation).confirmation, confirmation)
+  assert.equal(parse(confirmation).disabled, false)
+  for (const value of [undefined, [], [{ title: '', facts: [] }],
+    [{ title: 'x'.repeat(513), facts: [] }], [...confirmation, { title: 'Hidden', facts: [{ label: 'x', value: 42 }] }],
+    Array.from({ length: 257 }, () => confirmation[0])]) {
+    const state = parse(value)
+    assert.equal(state.confirmation, null)
+    assert.equal(state.disabled, true, 'an incomplete display cannot offer Confirm')
+    assert.match(state.note, /Open the app/)
+  }
+})
+
+
+test('idle offscreen sessions release their frames, but unacknowledged and uncertain publication owners stay retained', () => {
+  const state = { actions: [{ busy: false, confirming: false }], retain: false, ackNonce: 'one' }
+  assert.equal(inlineSessionRetained(state, null), false)
+  assert.equal(inlineSessionRetained(null, null), false)
+  assert.equal(inlineSessionRetained(state, { nonce: 'two' }), true)
+  assert.equal(inlineSessionRetained(state, { nonce: 'one' }), false)
+  assert.equal(inlineSessionRetained({ ...state, retain: true }, null), true)
+  assert.equal(inlineSessionRetained({ actions: [{ busy: true }] }, null), true)
+  assert.equal(inlineSessionRetained({ actions: [{ confirming: true }] }, null), true)
+  const parsed = inlineBlockState({ type: 'moebius:app-block-state', sessionId: 's', actions: [],
+    retain: true, ackNonce: 'two' }, 's', new Set())
+  assert.equal(parsed.retain, true)
+  assert.equal(parsed.ackNonce, 'two')
+  // A long scroll does not latch all previous idle sessions open.
+  const sessions = Array.from({ length: 100 }, (_, i) => ({ near: i > 96, state }))
+  assert.equal(sessions.filter(item => item.near || inlineSessionRetained(item.state, null)).length, 3)
 })

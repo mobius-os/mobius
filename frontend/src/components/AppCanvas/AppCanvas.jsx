@@ -486,6 +486,16 @@ const AppCanvas = forwardRef(function AppCanvas({
   const onBlockCapabilityRef = useRef(onBlockCapability)
   onBlockCapabilityRef.current = onBlockCapability
   const sentBlockEventRef = useRef(null)
+  // Negotiation belongs to an exact document, including a buffered successor.
+  const blockDocumentsRef = useRef(new Map())
+  const reportedBlockDocumentRef = useRef(null)
+  const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
+  function publishBlockCapability(v) {
+    const doc = blockDocumentsRef.current.get(v)
+    if (!doc || doc.supported == null || reportedBlockDocumentRef.current === doc) return
+    reportedBlockDocumentRef.current = doc
+    onBlockCapabilityRef.current?.(doc.supported, { version: v, reset: true })
+  }
   const storageHost = useMemo(() => createAppStorageHost({
     appId,
     getCurrentToken: () => hostTokenRef.current,
@@ -574,6 +584,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           framesRef.current.delete(v)
           loadedDocsRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
+          blockDocumentsRef.current.delete(v)
           cache.delete(v)
         }
       }
@@ -767,11 +778,13 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (swap.incomingVersion == null) return
     const v = swap.incomingVersion
+    // A mounted successor waiting on active publication ownership is not hung.
+    if (blockDocumentsRef.current.get(v)?.supported != null) return
     const id = setTimeout(() => {
       dispatchSwap({ type: 'incoming-timeout', version: v })
     }, INCOMING_SWAP_TIMEOUT_MS)
     return () => clearTimeout(id)
-  }, [swap.incomingVersion])
+  }, [swap.incomingVersion, blockDocumentRevision])
 
   // Single message listener for BOTH buffered frames. Registered once per appId
   // mount (deliberately minimal deps: it reads live state through refs +
@@ -845,7 +858,14 @@ const AppCanvas = forwardRef(function AppCanvas({
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
-        if (srcVersion === liveVersionRef.current) onBlockCapabilityRef.current?.(msg.supportsAppBlocks === true)
+        const doc = blockDocumentsRef.current.get(srcVersion)
+        if (!doc) return
+        doc.supported = msg.supportsAppBlocks === true
+        setBlockDocumentRevision(value => value + 1)
+        if (srcVersion === liveVersionRef.current) publishBlockCapability(srcVersion)
+        // The outgoing document may still own a public attempt or unknown result.
+        // A read-only successor cannot take that ownership by mounting.
+        if (srcVersion !== liveVersionRef.current && blockSessionRef.current?.retain) return
         dispatchSwap({ type: 'frame-mounted', version: srcVersion })
         return
       }
@@ -1312,6 +1332,15 @@ const AppCanvas = forwardRef(function AppCanvas({
     })
   }, [swap.liveLoaded, swap.liveVersion, pendingIntent])
 
+  useLayoutEffect(() => {
+    const incoming = swap.incomingVersion
+    if (incoming != null && !blockSession?.retain
+        && blockDocumentsRef.current.get(incoming)?.supported != null) {
+      dispatchSwap({ type: 'frame-mounted', version: incoming })
+    }
+    publishBlockCapability(swap.liveVersion)
+  }, [swap.liveVersion, swap.incomingVersion, blockSession?.retain, blockDocumentRevision])
+
   // Inline transcript sessions are optional. Unlike an app intent, init has no
   // action and is repeated only when a newly promoted document needs it.
   useEffect(() => {
@@ -1655,6 +1684,12 @@ const AppCanvas = forwardRef(function AppCanvas({
         framesRef.current.get(v)?.contentWindow,
       )
       dispatchSwap({ type: 'live-reload', version: v })
+    }
+    // onLoad denotes a new document even if its WindowProxy/version survives.
+    blockDocumentsRef.current.set(v, { supported: null })
+    if (v === liveVersionRef.current && reportedBlockDocumentRef.current) {
+      reportedBlockDocumentRef.current = null
+      onBlockCapabilityRef.current?.(null, { version: v, reset: true })
     }
     loadedDocsRef.current.add(v)
     sendInit(v)

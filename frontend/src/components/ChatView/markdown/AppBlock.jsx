@@ -2,7 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Branch, ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appQueries } from '../../../hooks/queries.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
-import { inlineBlockState } from './appBlock.js'
+import { passiveAppBlockAllowed } from '../../../lib/passiveAppBlocks.js'
+import { inlineBlockState, inlineSessionRetained, inlineBlockDocumentReset } from './appBlock.js'
 import useAppBlockCapability from '../hooks/useAppBlockCapability.js'
 import './AppBlock.css'
 
@@ -64,12 +65,31 @@ export function PullSnapshot({ block, pull, href, open, action, session, compact
   </div>
 }
 
-/** Reuse the opaque app host; inline sessions hydrate only near the viewport. */
+/** A deliberate confirmation step presents the app's complete frozen action,
+ *  not the possibly stale or mismatched transcript snapshot above it. */
+export function InlineConfirmation({ state, competingBusy, onConfirm, onCancel }) {
+  if (!state) return null
+  return <div className="md-app-block__confirmation">
+    <strong>Confirm current changes</strong>
+    {state.confirmation ? <ul>{state.confirmation.map((item, i) => <li key={i}>
+      <span>{item.title}</span>
+      <dl>{item.facts.map((fact, j) => <div key={j}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
+    </li>)}</ul> : <p role="status">{state.note}</p>}
+    <div className="md-app-block__controls">
+      <button type="button" className="md-app-block__cancel" disabled={competingBusy} onClick={onCancel}>Not now</button>
+      <button type="button" className="md-app-block__action" disabled={state.disabled || competingBusy}
+        onClick={onConfirm}>Confirm</button>
+    </div>
+  </div>
+}
+
+/** Reuse the opaque app host; idle sessions exist only near the viewport. */
 export default function AppBlock({ block, onInternalNav }) {
   const apps = appQueries.list.useQuery()
   const app = (apps.data || []).find(item => item.slug === block.app && !item.deleted_at)
   const canExpand = block.inline !== false
   const isSession = block.interaction === 'inline'
+  const passiveAllowed = passiveAppBlockAllowed(app)
   const [legacyMode, setLegacyMode] = useState(null)
   const rootRef = useRef(null)
   const [nearViewport, setNearViewport] = useState(false)
@@ -77,13 +97,14 @@ export default function AppBlock({ block, onInternalNav }) {
   const [blockEvent, setBlockEvent] = useState(null)
   const [sessionState, setSessionState] = useState(null)
   const [viewIntent, setViewIntent] = useState(null)
+  const retained = inlineSessionRetained(sessionState, blockEvent)
   const viewIntentRef = useRef(viewIntent)
   viewIntentRef.current = viewIntent
-  const negotiating = !isSession && canExpand && viewIntent !== null
-  const blockSession = useMemo(() => (isSession || negotiating) ? {
-    sessionId, actions: [block.action, ...block.items.map(item => item.action)].filter(Boolean)
+  const negotiating = !isSession && canExpand && viewIntent !== null && passiveAllowed
+  const blockSession = useMemo(() => (isSession && (passiveAllowed || retained) || negotiating) ? {
+    sessionId, retain: retained, actions: [block.action, ...block.items.map(item => item.action)].filter(Boolean)
       .map(action => ({ key: action.intent, intent: action.intent, label: action.label })),
-  } : null, [isSession, negotiating, sessionId, block])
+  } : null, [isSession, passiveAllowed, negotiating, sessionId, retained, block])
   const allowedKeys = useMemo(() => new Set(blockSession?.actions.map(action => action.key) || []), [blockSession])
   const onSessionFallback = useCallback(key => {
     setLegacyMode('view'); setViewIntent(key); setBlockEvent(null); setSessionState(null)
@@ -93,14 +114,17 @@ export default function AppBlock({ block, onInternalNav }) {
   useEffect(() => {
     if (!isSession || !rootRef.current || typeof IntersectionObserver === 'undefined') return
     const observer = new IntersectionObserver(entries => {
-      if (entries[0]?.isIntersecting) setNearViewport(true)
+      setNearViewport(entries.some(entry => entry.isIntersecting))
     }, { rootMargin: '400px 0px' })
     observer.observe(rootRef.current)
     return () => observer.disconnect()
   }, [isSession])
   const onBlockState = useCallback(message => {
     const safe = inlineBlockState(message, sessionId, allowedKeys)
-    if (safe) setSessionState(safe)
+    if (safe) {
+      setSessionState(safe)
+      setBlockEvent(event => safe.ackNonce === event?.nonce ? null : event)
+    }
   }, [sessionId, allowedKeys])
   const actionState = key => sessionState?.actions.find(item => item.key === key)
   const competingBusy = sessionState?.actions.some(item => item.busy)
@@ -109,7 +133,10 @@ export default function AppBlock({ block, onInternalNav }) {
     rememberBlockEvent(message)
     setBlockEvent(message)
   }, [sessionId, rememberBlockEvent])
-  const onBlockCapability = useCallback(supported => {
+  const onBlockCapability = useCallback((supported, document) => {
+    // A real document change invalidates idle UI, never an unresolved owner.
+    // Active publication prevents promotion; a reload still needs observation.
+    if (document?.reset) setSessionState(inlineBlockDocumentReset)
     if (isSession) {
       observeBlockCapability(supported)
       return
@@ -146,22 +173,21 @@ export default function AppBlock({ block, onInternalNav }) {
     event.preventDefault(); navigate(target)
   }
   const open = openHref(block.href)
-  const show = intent => { setViewIntent(intent); setLegacyMode(isSession && blockSupported === false ? 'view' : null); setDelivered(false); setSessionState(null); setBlockEvent(null) }
-  const actionButton = target => (isSession && blockSupported !== false || legacyMode === 'inline') && app && target
+  const show = intent => { setViewIntent(intent); setLegacyMode(!passiveAllowed || isSession && blockSupported === false ? 'view' : null); setDelivered(false); setSessionState(null); setBlockEvent(null) }
+  const actionButton = target => (isSession && (passiveAllowed || retained) && blockSupported !== false || legacyMode === 'inline') && app && target
     ? (() => {
       const state = actionState(target.intent)
       // Saved actions are history, not current controls. Wait for the app's
       // exact read before showing either a button or its settled link.
       if (!state) return <span className="md-app-block__pending" role="status">Loading…</span>
       if (state.hidden) return null
+      if (state.confirming) return <span className="md-app-block__pending">Review below</span>
       return <span className="md-app-block__controls">
-        {state?.confirming ? <button type="button" className="md-app-block__cancel" disabled={competingBusy}
-          onClick={() => dispatchBlockEvent(target.intent, 'cancel')}>Not now</button> : null}
         <button type="button" className="md-app-block__action" disabled={state?.disabled || competingBusy}
           title={state?.label || target.label}
           aria-busy={state?.busy || undefined}
-          onClick={() => dispatchBlockEvent(target.intent, state?.confirming ? 'confirm' : 'activate')}>
-          {state.confirming ? 'Confirm' : state.label || target.label}</button>
+          onClick={() => dispatchBlockEvent(target.intent, 'activate')}>
+          {state.label || target.label}</button>
       </span>
     })()
     : canExpand && app && target
@@ -169,22 +195,26 @@ export default function AppBlock({ block, onInternalNav }) {
       onClick={() => show(viewIntent === target.intent ? null : target.intent)}>{target.label}</button>
     : null
   const action = actionButton(block.action)
+  const confirming = sessionState?.actions.find(item => item.confirming)
+  const confirmation = <InlineConfirmation state={confirming} competingBusy={competingBusy}
+    onCancel={() => dispatchBlockEvent(confirming.key, 'cancel')}
+    onConfirm={() => dispatchBlockEvent(confirming.key, 'confirm')} />
   const toggle = canExpand && app && !isSession && legacyMode !== 'inline'
     ? <button type="button" className="md-app-block__toggle" aria-expanded={viewIntent !== null}
       onClick={() => show(viewIntent === null ? block.intent : null)}>
       <ChevronDown width={16} height={16} aria-hidden="true" />{viewIntent !== null ? 'Hide details' : block.expandLabel || 'Show details here'}</button>
     : null
-  const view = isSession && blockSupported !== false && app && nearViewport ? <div className="md-app-block__session-host" aria-hidden="true" inert="">
+  const view = isSession && (passiveAllowed || retained) && blockSupported !== false && app && (nearViewport || retained) ? <div className="md-app-block__session-host" aria-hidden="true" inert="">
     <Suspense fallback={null}><AppCanvas appId={app.id} appName={app.name} appSlug={app.slug}
-      version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capabilities}
+      version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capability_contract || app.capabilities}
       active={false} visible={false} interactive={false} blockSession={blockSession} blockEvent={blockEvent}
       onBlockState={onBlockState} onBlockCapability={onBlockCapability} onHostRequest={hostRequest} /></Suspense>
-  </div> : canExpand && app && pending && (!isSession || blockSupported === false) && <div className={legacyMode === 'view' ? 'md-app-block__view' : 'md-app-block__session-host'}
+  </div> : canExpand && app && pending && (!isSession || !passiveAllowed || blockSupported === false) && <div className={legacyMode === 'view' ? 'md-app-block__view' : 'md-app-block__session-host'}
     style={legacyMode === 'view' ? { height: block.height } : undefined} aria-hidden={legacyMode !== 'view' ? 'true' : undefined} inert={legacyMode !== 'view' ? '' : undefined}>
     <Suspense fallback={legacyMode === 'view' ? <p role="status">Opening details…</p> : null}><AppCanvas key={viewIntent} appId={app.id} appName={app.name} appSlug={app.slug}
-      version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capabilities}
+      version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capability_contract || app.capabilities}
       active={false} visible={legacyMode === 'view'} interactive={legacyMode === 'view'} pendingIntent={legacyMode === 'view' && !delivered ? pending : null}
-      blockSession={blockSession} blockEvent={blockEvent} onBlockState={onBlockState} onBlockCapability={onBlockCapability}
+      blockSession={legacyMode === 'view' ? null : blockSession} blockEvent={legacyMode === 'view' ? null : blockEvent} onBlockState={onBlockState} onBlockCapability={onBlockCapability}
       onIntentDelivered={() => setDelivered(true)} onHostRequest={hostRequest} /></Suspense>
   </div>
   const unavailable = canExpand && !app
@@ -204,6 +234,7 @@ export default function AppBlock({ block, onInternalNav }) {
         {actionState(block.action?.intent)?.note ? <p className={`md-app-block__note is-${actionState(block.action.intent).tone}`} role="status">{actionState(block.action.intent).note}</p> : null}
         {action}
       </footer> : null}
+      {confirmation}
       {sessionState?.notice ? <p className="md-app-block__notice" role="status">{sessionState.notice}</p> : null}
       {view}
     </section>
@@ -214,6 +245,7 @@ export default function AppBlock({ block, onInternalNav }) {
     const label = block.pull.number ? `Pull request ${block.pull.repo}#${block.pull.number}` : `Proposed pull request for ${block.pull.repo}`
     return <section ref={rootRef} className={`md-app-block md-app-block--pull${isSession ? ' md-app-block--compact' : ''}`} aria-label={label}>
       <PullSnapshot block={block} pull={block.pull} href={href} open={open} action={action} session={actionState(block.action?.intent)} compact={isSession} />
+      {confirmation}
       {sessionState?.notice ? <p className="md-app-block__notice" role="status">{sessionState.notice}</p> : null}
       {view}
     </section>
@@ -224,6 +256,6 @@ export default function AppBlock({ block, onInternalNav }) {
         <a key={link.url} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>)}</span> : null}
       {action}<a href={href} onClick={open}>Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></a></span></header>
     {block.facts.length > 0 && <dl>{block.facts.map((fact, i) => <div key={i}><dt>{fact.label}</dt><dd>{fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{fact.value}</a> : fact.value}</dd></div>)}</dl>}
-    {toggle}{unavailable}{sessionState?.notice ? <p className="md-app-block__notice" role="status">{sessionState.notice}</p> : null}{view}
+    {toggle}{unavailable}{confirmation}{sessionState?.notice ? <p className="md-app-block__notice" role="status">{sessionState.notice}</p> : null}{view}
   </section>
 }

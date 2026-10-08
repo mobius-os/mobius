@@ -62,6 +62,17 @@
 .md-app-block__links { display:flex; flex-wrap:wrap; gap:4px 10px; min-width:0; font-size:14px; }
 .md-app-block__links a { overflow-wrap:anywhere; }
 .md-app-block__session-host { position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; clip-path:inset(50%); }
+.md-app-block__confirmation { display:grid; gap:12px; padding:16px; border-top:1px solid var(--border); font-size:14px; }
+.md-app-block__confirmation > strong { font-size:14px; }
+.md-app-block__confirmation > ul { display:grid; gap:16px; list-style:none; margin:0; padding:0; }
+.md-app-block__confirmation li { display:grid; gap:6px; min-width:0; overflow-wrap:anywhere; }
+.md-app-block__confirmation li > span { font-weight:600; }
+.md-app-block__confirmation dl { display:grid; gap:4px; margin:0; }
+.md-app-block__confirmation dl > div { display:grid; grid-template-columns:100px minmax(0, 1fr); gap:12px; align-items:baseline; }
+.md-app-block__confirmation dt,.md-app-block__confirmation dd { margin:0; font-size:13px; line-height:1.5; }
+.md-app-block__confirmation dd { color:var(--text); }
+.md-app-block__confirmation > .md-app-block__controls { justify-self:end; }
+.md-app-block__confirmation > p { margin:0; }
 @media (max-width:480px) { .md-app-pull__footer { flex-wrap:wrap; } .md-app-block__controls { margin-left:auto; } }
 
 /* A batch: one header, the item rows, and the shared action at the bottom right. */

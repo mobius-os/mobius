@@ -26,8 +26,38 @@ function pullBadges(value) {
     .map(badge => ({ label: shortText(badge.label, 40), tone: TONES.has(badge.tone) ? badge.tone : 'neutral' }))
 }
 
+// Confirmation is a complete presentation of the app's frozen action. Unlike
+// historical decoration, it must never silently drop or shorten a member.
+function confirmationOf(value) {
+  const text = raw => typeof raw === 'string' && raw.trim() && raw.length <= 512
+  if (!Array.isArray(value) || !value.length || value.length > 256) return null
+  const items = []
+  for (const item of value) {
+    if (!text(item?.title) || !Array.isArray(item.facts) || item.facts.length > 8
+      || item.facts.some(fact => !text(fact?.label) || !text(fact?.value))) return null
+    items.push({ title: item.title, facts: item.facts.map(({ label, value }) => ({ label, value })) })
+  }
+  return items
+}
+
+/** Keep the app-owned publisher alive until the app acknowledges the event
+ *  and explicitly releases any active or uncertain operation. */
+export function inlineSessionRetained(state, event) {
+  return Boolean(event && state?.ackNonce !== event.nonce || state?.retain
+    || state?.actions.some(action => action.busy || action.confirming))
+}
+
+/** A new document cannot own the previous document's frozen confirmation.
+ *  Keep unresolved publication ownership until fresh observation releases it. */
+export function inlineBlockDocumentReset(state) {
+  if (!state?.retain && !state?.actions.some(action => action.busy)) return null
+  return { ...state, actions: state.actions.map(action => action.confirming
+    ? { ...action, confirming: false, confirmation: null, disabled: true, label: 'Checking…' }
+    : action) }
+}
+
 /** The iframe contributes text and links, never markup or action authority.
- *  Optional summary updates a batch heading; immutable item titles stay saved. */
+ *  Saved snapshots remain history; confirmation describes the current action. */
 export function inlineBlockState(message, sessionId, keys) {
   if (!message || message.type !== 'moebius:app-block-state' || message.sessionId !== sessionId
     || !Array.isArray(message.actions) || message.actions.length > 24) return null
@@ -39,16 +69,21 @@ export function inlineBlockState(message, sessionId, keys) {
     const links = (Array.isArray(raw.links) ? raw.links : []).slice(0, 12)
       .map(link => ({ label: shortText(link?.label, 120), url: safeHttps(link?.url) }))
       .filter(link => link.label && link.url)
+    const confirmation = raw.confirming === true ? confirmationOf(raw.confirmation) : null
+    const incomplete = raw.confirming === true && !confirmation
     actions.push({ key: raw.key, label: shortText(raw.label, 40),
-      disabled: raw.disabled === true, busy: raw.busy === true, confirming: raw.confirming === true,
-      hidden: raw.hidden === true, note: shortText(raw.note, 500),
+      disabled: raw.disabled === true || incomplete, busy: raw.busy === true, confirming: raw.confirming === true,
+      confirmation,
+      hidden: raw.hidden === true, note: incomplete ? 'Open the app to review this action. Its full current identity is unavailable here.' : shortText(raw.note, 500),
       tone: SESSION_TONES.has(raw.tone) ? raw.tone : 'neutral',
       status: shortText(raw.status, 40),
       statusTone: SESSION_TONES.has(raw.statusTone) ? raw.statusTone : 'neutral', links,
       // Omission preserves the saved snapshot; an empty list deliberately clears it.
       ...(Array.isArray(raw.badges) ? { badges: pullBadges(raw.badges) } : {}) })
   }
-  return { actions, notice: shortText(message.notice, 500), summary: shortText(message.summary, 240) }
+  return { actions, notice: shortText(message.notice, 500), summary: shortText(message.summary, 240),
+    retain: message.retain === true,
+    ackNonce: typeof message.ackNonce === 'string' && message.ackNonce.length <= 128 ? message.ackNonce : null }
 }
 
 /* A pull-request snapshot renders like a GitHub PR row. Anything malformed is

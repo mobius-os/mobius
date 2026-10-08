@@ -902,6 +902,8 @@ async def install_app(
     system_prompt_file=app.system_prompt_file,
     chat_log_access=app.chat_log_access,
     capability_contract=app.capability_contract,
+    runtime_revision=app.runtime_revision,
+    source_commit=app.source_commit,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,

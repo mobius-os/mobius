@@ -4,7 +4,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-import AppBlock, { PullSnapshot } from '../markdown/AppBlock.jsx'
+import AppBlock, { PullSnapshot, InlineConfirmation } from '../markdown/AppBlock.jsx'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
 
@@ -90,7 +90,7 @@ test('inline session waits for its exact read instead of flashing a stale saved 
   const html = render({ app: 'contribute', intent: 'review:1', title: 'Fix it', interaction: 'inline',
     action: { label: 'Contribute', intent: 'chat-send:1' },
     pull: { repo: 'owner/repo', state: 'proposed' } },
-  [{ id: 80, slug: 'contribute', name: 'Contribute' }])
+  [{ id: 80, slug: 'contribute', name: 'Contribute', capability_contract: { runtime: { 'chat.blocks.passive': { version: 1 } } }, passive_block_module_digest: 'a'.repeat(64) }])
   assert.match(html, /md-app-block__pending/)
   assert.match(html, />Loading…<\/span>/)
   assert.doesNotMatch(html, />Contribute<\/button>/)
@@ -126,4 +126,37 @@ test('compact live receipts preserve tags and diff counts but replace obsolete s
   assert.match(html, /5 files <ins>\+91<\/ins> <del>−16<\/del>/)
   assert.match(html, /View PR #42/)
   assert.doesNotMatch(html, /3 linked PRs|Review details|Not sent yet/)
+})
+
+
+test('the confirmation step shows all current identities, not just the saved or addressed snapshot', () => {
+  const state = { confirmation: [
+    { title: 'Current target title', facts: [{ label: 'Destination', value: 'actual/repo → release' }] },
+    { title: 'Additional current phase', facts: [{ label: 'Version', value: 'current-sha' }] },
+  ] }
+  const html = renderToStaticMarkup(createElement(InlineConfirmation, { state }))
+  assert.match(html, /Confirm current changes/)
+  assert.match(html, /Current target title/)
+  assert.match(html, /actual\/repo → release/)
+  assert.match(html, /Additional current phase/)
+  assert.match(html, /current-sha/)
+  assert.equal((html.match(/<li>/g) || []).length, 2)
+  assert.match(html, />Not now<\/button>/)
+  assert.match(html, />Confirm<\/button>/)
+})
+
+test('an incomplete confirmation keeps cancellation available but disables Confirm', () => {
+  const html = renderToStaticMarkup(createElement(InlineConfirmation, { state: {
+    confirmation: null, disabled: true, note: 'Open the app to review this action.' }, competingBusy: false }))
+  assert.match(html, /Open the app/)
+  assert.match(html, /class="md-app-block__action" disabled=""/)
+  assert.doesNotMatch(html, /class="md-app-block__cancel" disabled/)
+})
+
+
+test('unknown inline apps are click-open, never imported for passive capability discovery', () => {
+  const html = render({ app: 'legacy', intent: 'view:a', title: 'Saved legacy app', interaction: 'inline',
+    action: { label: 'Open action', intent: 'act:a' } }, [{ id: 81, slug: 'legacy', name: 'Legacy' }])
+  assert.match(html, />Open action<\/button>/)
+  assert.doesNotMatch(html, /md-app-block__session-host|Loading…/)
 })
