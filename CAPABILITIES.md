@@ -567,7 +567,11 @@ rotation or deleting either resource invalidates it. Re-granting creates a new
 identity, never revives an old stream.
 
 Apps must supply the exact `X-Mobius-Chat-Connection` header for text sends and
-SSE on that chat. Streams and queued sends recheck the grant. Connected apps do
+SSE on that chat. Queued sends recheck the grant; streams recheck it at least
+once a second and on every keepalive. A connected stream and the connection's
+message recovery route carry only visible conversation text, run lifecycle and
+the id of a pending owner-input card: never tool inputs or outputs, thinking,
+files, stream snapshots or other activity. Connected apps do
 not gain general chat discovery, settings, attachments or card-answer access;
 owner-input cards in these owner-created chats stay in the owner workspace.
 Existing app-owned/participant card-answer contracts are unchanged.
