@@ -410,6 +410,9 @@ class ChatEventSink:
     # only the bounded raw tail needed by protocol receipts; presentation
     # carving and persisted tool output remain independent.
     self._app_output_tails: dict[str, str] = {}
+    # Match timing to live blocks because tool calls may interleave.
+    self._tool_observed_starts: dict[int, float] = {}
+    self._tool_observed_errors: set[int] = set()
 
   def _start_side_task(
     self,
@@ -1160,7 +1163,41 @@ class ChatEventSink:
     # Accumulate the event into assistant_blocks and decide whether a
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
+    # This measures observed provider events, not the tool's actual execution.
+    tool_end_target = (
+      _tool_block_for_event(self.assistant_blocks, event.get("tool_use_id"))
+      if event_type == "tool_end" else None
+    )
     accumulated = process_event(event, self.assistant_blocks)
+    if event_type == "tool_start" and accumulated:
+      block = self.assistant_blocks[-1]
+      if block.get("type") == "tool":
+        self._tool_observed_starts[id(block)] = time.monotonic()
+    elif event_type == "tool_output" and accumulated and (
+      event.get("is_error") is True or bool(event.get("error"))
+    ):
+      block = _tool_block_for_event(self.assistant_blocks, event.get("tool_use_id"))
+      if block is not None:
+        self._tool_observed_errors.add(id(block))
+    elif event_type == "tool_end" and accumulated and tool_end_target is not None:
+      started = self._tool_observed_starts.pop(id(tool_end_target), None)
+      explicit_error = (
+        id(tool_end_target) in self._tool_observed_errors
+        or event.get("is_error") is True or bool(event.get("error"))
+      )
+      self._tool_observed_errors.discard(id(tool_end_target))
+      if started is not None and "observation" not in tool_end_target:
+        exit_code = tool_end_target.get("output_exit_code")
+        has_exit_code = type(exit_code) is int
+        outcome = (
+          "failed" if explicit_error or (has_exit_code and exit_code != 0)
+          else "succeeded" if has_exit_code and exit_code == 0
+          else "unknown"
+        )
+        tool_end_target["observation"] = {
+          "observed_duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+          "outcome": outcome,
+        }
     if event_type == "thinking_final":
       if not accumulated:
         # The stream already matched the completed block: nothing to send.
@@ -1378,6 +1415,8 @@ class ChatEventSink:
       # Reset BEFORE the first await so the continuation accumulates into a
       # fresh list the instant the steer lands.
       self.assistant_blocks = []
+      self._tool_observed_starts.clear()
+      self._tool_observed_errors.clear()
       self._publish_activity_frontier()
       # Skip the seal when the pre-steer segment has no renderable content — a
       # steer that lands before the assistant emitted any real output would
