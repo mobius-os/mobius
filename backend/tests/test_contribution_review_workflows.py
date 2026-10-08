@@ -860,3 +860,241 @@ def test_public_review_option_is_refused_outside_review_only(setup, mode):
   with pytest.raises(HTTPException) as error:
     asyncio.run(routes.start_reviews(1, body, db, owner))
   assert error.value.status_code == 422
+
+
+def overlapping_grant(db, row, *, number=None):
+  target = {**row.targets_json[0]}
+  if number is not None:
+    target.update(number=number, pr_id=f"PR_{number}")
+  peer = models.ContributionReviewRun(id="overlapping-grant", app_id=row.app_id,
+    owner_id=row.owner_id, request_id="overlapping-request", mode=row.mode,
+    github_actor_id=row.github_actor_id, app_nonce=row.app_nonce,
+    options_json=dict(row.options_json), targets_json=[target], outcomes_json={}, chat_id=row.chat_id)
+  db.add(peer)
+  db.commit()
+  return peer
+
+
+@pytest.mark.parametrize("state", ["merge_unknown", "queued"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_prepared_repair_cannot_publish_behind_pending_merge(setup, monkeypatch, state, overlap):
+  db, row, principal = configure_repair(setup, monkeypatch)
+  grant = overlapping_grant(db, row) if overlap else row
+  prior = grant.outcomes_json.get(domain.key(ITEM), {})
+  domain.save_outcome(db, grant, domain.key(ITEM), {**prior, "state": state,
+    "head_sha": SHA, "merge_attempted": True})
+  monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pytest.fail("PUBLIC_PUSH"))
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  assert error.value.status_code == 409
+  assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
+
+
+@pytest.mark.parametrize("state", ["pushing", "push_unknown"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_lagging_predecessor_merge_blocked_by_pending_repair(setup, monkeypatch, state, overlap):
+  db, row, principal = takeover(setup, monkeypatch)
+  grant = overlapping_grant(db, row) if overlap else row
+  domain.save_outcome(db, grant, domain.key(ITEM), {"state": "needs_you", "repair_attempts": [
+    {"state": state, "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}]})
+  prior = row.outcomes_json.get(domain.key(ITEM), {})
+  domain.save_outcome(db, row, domain.key(ITEM), {**prior, "independent_reviews": [
+    {"id": "clear", "state": "all_clear", "head_sha": SHA, "base_sha": BASE, "tests_passed": True}]})
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("PUBLIC_MERGE"))
+  with pytest.raises(HTTPException) as error:
+    report(setup, tests_passed=True, reviewed_base_sha=BASE, independent_receipt_id="clear")
+  assert error.value.status_code == 409
+  assert not row.outcomes_json[domain.key(ITEM)].get("merge_attempted")
+
+
+@pytest.mark.parametrize("state", ["pushing", "push_unknown"])
+def test_pending_later_repair_with_new_base_keeps_detail_list_and_observation_readable(setup, monkeypatch, state):
+  db, row, principal = takeover(setup, monkeypatch)
+  head = completed_repairs(db, row, 1)
+  prior = row.outcomes_json[domain.key(ITEM)]
+  domain.save_outcome(db, row, domain.key(ITEM), {**prior, "state": "needs_you",
+    "repair_attempts": [*prior["repair_attempts"], {"state": state, "from_sha": head,
+      "head_sha": NEW, "base_sha": "d" * 40}]})
+  target = domain.effective_target(row, row.targets_json[0])
+  assert target["head_sha"] == head and target["base_sha"] == BASE
+  owner = Principal(owner=principal.owner, app_id=None)
+  db.get(models.ChatRun, principal.run_id).status = "stopped"
+  db.commit()
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (_ for _ in ()).throw(HTTPException(409, "projection lags")))
+  detail = routes.get_review(1, row.id, db, owner)["run"]
+  listed = routes.list_reviews(1, db, owner)["runs"][0]
+  observed = asyncio.run(routes.observe_review(1, row.id, db, owner))["run"]
+  for view in (detail, listed, observed):
+    assert view["items"][0]["repair_attempts"][-1]["state"] == state
+    assert view["items"][0]["successor"] == {"head_sha": head, "base_sha": BASE}
+    assert view["execution_state"] == "stopped"
+
+
+def test_reviewer_registration_failure_leaves_no_recoverable_unauthorized_child(setup, monkeypatch):
+  from app.database import SessionLocal
+  db, row, principal = takeover(setup, monkeypatch)
+  def fail_registration(*args, **kwargs):
+    raise RuntimeError("registration storage failed")
+  with monkeypatch.context() as patch:
+    patch.setattr(domain, "write_outcome", fail_registration, raising=False)
+    patch.setattr(domain, "save_outcome", fail_registration)
+    with pytest.raises(RuntimeError):
+      asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  db.rollback()
+  with SessionLocal() as restarted:
+    assert restarted.query(models.Delegation).count() == 0
+    assert restarted.query(models.Chat).count() == 1
+  starts = []
+  async def start(**kwargs):
+    with SessionLocal() as writer:
+      child = writer.query(models.Delegation).filter_by(child_chat_id=kwargs["chat_id"]).one()
+      registered = writer.get(models.ContributionReviewRun, row.id)
+      assert registered.outcomes_json[domain.key(ITEM)]["reviewer_steps"][0]["delegation_id"] == child.id
+      writer.add(models.ChatRun(id="retry-reviewer", chat_id=child.child_chat_id, status="stopped"))
+      writer.commit()
+    starts.append(kwargs["chat_id"])
+    return True
+  monkeypatch.setattr(routes, "start_programmatic_chat_turn", start)
+  asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  assert len(starts) == 1
+
+
+@pytest.mark.parametrize("same_item", [False, True])
+def test_cross_action_concurrent_claims_admit_only_one_pending_attempt(setup, monkeypatch, same_item):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Barrier
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = takeover(setup, monkeypatch)
+  peer = overlapping_grant(db, row, number=None if same_item else 8)
+  target, peer_target = dict(row.targets_json[0]), dict(peer.targets_json[0])
+  real_claim = agent_work_claims.claim_work
+  barrier = Barrier(2)
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    barrier.wait(timeout=10)
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  def arm(action):
+    with SessionLocal() as session:
+      current = session.get(models.ContributionReviewRun, row.id if action == "repair" else peer.id)
+      try:
+        if action == "repair":
+          result = domain.arm_repair(session, current, target, {}, {"id": "push", "state": "pushing",
+            "head_sha": NEW, "base_sha": BASE, "from_sha": SHA}, principal)
+        else:
+          result = domain.arm_merge(session, current, peer_target, {"head_sha": SHA}, principal)
+        return result
+      except HTTPException as exc:
+        session.rollback()
+        assert exc.status_code == 409
+        return "blocked"
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    results = list(pool.map(arm, ["repair", "merge"]))
+  assert results.count(None) == 1 and results.count("blocked") == 1
+  with SessionLocal() as restarted:
+    receipts = [r.outcomes_json for r in restarted.query(models.ContributionReviewRun).all()]
+    assert sum(bool(i.get("repair_attempts") or i.get("merge_attempted"))
+      for outcomes in receipts for i in outcomes.values()) == 1
+
+
+@pytest.mark.parametrize("action", ["merge", "repair"])
+def test_cross_action_is_revalidated_after_claim_commit(setup, monkeypatch, action):
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = takeover(setup, monkeypatch)
+  peer = overlapping_grant(db, row)
+  target = dict(row.targets_json[0])
+  real_claim = agent_work_claims.claim_work
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    with SessionLocal() as other:
+      current = other.get(models.ContributionReviewRun, peer.id)
+      pending = ({"state": "merge_unknown", "head_sha": SHA, "merge_attempted": True}
+        if action == "repair" else {"state": "needs_you", "repair_attempts": [
+          {"state": "push_unknown", "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}]})
+      domain.save_outcome(other, current, domain.key(ITEM), pending)
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  with pytest.raises(HTTPException) as error:
+    if action == "merge":
+      domain.arm_merge(db, row, target, {"head_sha": SHA}, principal)
+    else:
+      domain.arm_repair(db, row, target, {}, {"state": "pushing", "from_sha": SHA,
+        "head_sha": NEW, "base_sha": BASE}, principal)
+  assert error.value.status_code == 409
+  db.rollback()
+  db.refresh(row)
+  assert not row.outcomes_json
+
+
+def test_registered_reviewer_survives_restart_before_first_run_and_stopped_reattachment(setup, monkeypatch):
+  from app import delegations
+  from app.database import SessionLocal
+  db, row, principal = takeover(setup, monkeypatch)
+  async def crash(*args, **kwargs):
+    raise RuntimeError("process lost before child run")
+  with monkeypatch.context() as patch:
+    patch.setattr(delegations, "ensure_delegation_started", crash)
+    with pytest.raises(RuntimeError):
+      asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  with SessionLocal() as restarted:
+    saved = restarted.query(models.Delegation).one()
+    registered = restarted.get(models.ContributionReviewRun, row.id)
+    assert registered.outcomes_json[domain.key(ITEM)]["reviewer_steps"][0]["delegation_id"] == saved.id
+    assert saved.startup_prompt and not restarted.query(models.ChatRun).filter_by(chat_id=saved.child_chat_id).first()
+    saved_id, child_id = saved.id, saved.child_chat_id
+  starts = []
+  async def start(**kwargs):
+    with SessionLocal() as writer:
+      writer.add(models.ChatRun(id="recovered-reviewer", chat_id=kwargs["chat_id"], status="stopped"))
+      writer.commit()
+    starts.append(kwargs["chat_id"])
+    return True
+  monkeypatch.setattr(routes, "start_programmatic_chat_turn", start)
+  recovered = asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  assert recovered["delegation"]["id"] == saved_id and starts == [child_id]
+  again = asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  assert again["delegation"]["id"] == saved_id and starts == [child_id]
+
+
+def test_process_loss_after_reviewer_registration_before_commit_rolls_back_both(setup, monkeypatch):
+  from app.database import SessionLocal
+  db, row, principal = takeover(setup, monkeypatch)
+  class ProcessLoss(BaseException):
+    pass
+  def lose_commit():
+    assert db.query(models.Delegation).count() == 1
+    # Registration was written, but another process cannot recover either row.
+    db.refresh(row)
+    assert row.outcomes_json[domain.key(ITEM)]["reviewer_steps"]
+    with SessionLocal() as other:
+      assert other.query(models.Delegation).count() == 0
+      assert not other.get(models.ContributionReviewRun, row.id).outcomes_json
+    raise ProcessLoss()
+  with monkeypatch.context() as patch:
+    patch.setattr(db, "commit", lose_commit)
+    with pytest.raises(ProcessLoss):
+      asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, principal))
+  with SessionLocal() as other:
+    assert other.query(models.Delegation).count() == 0
+    assert not other.get(models.ContributionReviewRun, row.id).outcomes_json
+
+
+@pytest.mark.parametrize("corruption", ["head", "base", "chain"])
+def test_pending_receipt_does_not_hide_corrupted_confirmed_successor(setup, monkeypatch, corruption):
+  db, row, _ = takeover(setup, monkeypatch)
+  head = completed_repairs(db, row, 1)
+  previous = row.outcomes_json[domain.key(ITEM)]
+  successor = dict(previous["successor"])
+  attempts = [dict(previous["repair_attempts"][0]), {"state": "push_unknown", "from_sha": head,
+    "head_sha": NEW, "base_sha": "d" * 40}]
+  if corruption == "chain":
+    attempts[0]["from_sha"] = "e" * 40
+  else:
+    successor[corruption + "_sha"] = "e" * 40
+  domain.save_outcome(db, row, domain.key(ITEM), {**previous, "successor": successor, "repair_attempts": attempts})
+  with pytest.raises(HTTPException) as error:
+    domain.effective_target(row, row.targets_json[0])
+  assert error.value.status_code == 409

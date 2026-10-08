@@ -234,6 +234,51 @@ def merge_work_key(target):
   return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:merge"
 
 
+def fence_public_transition(db, row):
+  """Serialize admission, not public I/O, across distinct action work keys.
+
+  The existing owner row is a cross-process write fence shared by merge,
+  repair and readiness. Hold it through the pending-receipt check and receipt
+  commit: per-action claims alone cannot exclude an incompatible action.
+  """
+  db.execute(update(models.Owner).where(models.Owner.id == row.owner_id).values(
+    id=models.Owner.id))
+
+
+def require_public_transition_clear(db, row, target):
+  """New mutations must not cross an unresolved item or head-branch attempt.
+
+  Observation and exact-action replay are handled before this boundary. Never
+  infer resolution from the PR projection, which can lag a public branch push.
+  Call again under the database fence after claim acquisition commits.
+  """
+  grants = db.query(models.ContributionReviewRun).filter_by(
+    owner_id=row.owner_id).populate_existing().all()
+  original = next(t for t in row.targets_json if key(t) == key(target))
+  current = effective_target(row, original)
+  if current["head_sha"] != target["head_sha"] or current["base_sha"] != target["base_sha"]:
+    raise HTTPException(409, "This review target changed during public admission.")
+  for grant in grants:
+    for original in grant.targets_json:
+      same_item = key(original) == key(target)
+      same_branch = (target.get("head_repo_id") is not None
+        and original.get("head_repo_id") == target["head_repo_id"]
+        and original.get("head_ref") == target.get("head_ref"))
+      if not (same_item or same_branch):
+        continue
+      item = (grant.outcomes_json or {}).get(key(original), {})
+      merge_pending = (item.get("state") != "merged" and (
+        item.get("merge_attempted") or item.get("state") in {"merging", "merge_unknown", "queued"}
+      )) or (item.get("state") == "merged" and item.get("head_sha") == target["head_sha"])
+      repair_pending = any(a.get("state") in {"pushing", "push_unknown"}
+        for a in item.get("repair_attempts", []))
+      ready = item.get("ready_attempt")
+      if merge_pending or repair_pending or (ready and ready.get("state") != "ready"):
+        raise HTTPException(409,
+          "An earlier public attempt for this PR or head branch must be reconciled "
+          "read-only in its owning conversation before any new public action.")
+
+
 def arm_merge(db, row, target, outcome, principal):
   """Reserve one exact public attempt across grants as well as within a grant.
 
@@ -250,6 +295,7 @@ def arm_merge(db, row, target, outcome, principal):
             "summary": "This exact merge already has an owning conversation. Open that conversation to follow its result."}
   # Keep this write and save_outcome in one transaction. A second worker must
   # wait for the first receipt before checking other overlapping batches.
+  fence_public_transition(db, row)
   fenced = db.execute(update(models.AgentWorkClaim).where(
     models.AgentWorkClaim.id == claim["id"],
     models.AgentWorkClaim.revision == claim["revision"],
@@ -277,11 +323,13 @@ def arm_merge(db, row, target, outcome, principal):
               "summary": "An earlier review already attempted this exact merge. Follow its saved result; no request was repeated."}
     db.rollback()
     return result
+  require_public_transition_clear(db, row, target)
   save_outcome(db, row, item_key, {**outcome, "state": "merging", "merge_attempted": True})
   return None
 
 
-def save_outcome(db, row, item_key, outcome):
+def write_outcome(db, row, item_key, outcome):
+  """CAS an outcome inside the caller's admission transaction; do not commit."""
   revision = row.revision
   previous = (row.outcomes_json or {}).get(item_key, {})
   history = list(previous.get("steps", []))
@@ -298,6 +346,10 @@ def save_outcome(db, row, item_key, outcome):
   if changed.rowcount != 1:
     db.rollback()
     raise HTTPException(409, "This review changed. Refresh before continuing.")
+
+
+def save_outcome(db, row, item_key, outcome):
+  write_outcome(db, row, item_key, outcome)
   db.commit()
   db.refresh(row)
 
@@ -400,13 +452,15 @@ def effective_target(row, original):
     return original
   receipts = outcome.get("repair_attempts", [])
   current = original["head_sha"]
+  confirmed = None
   for receipt in receipts:
     if receipt.get("state") != "pushed":
       break
     if receipt.get("from_sha") != current:
       raise HTTPException(409, "The repair receipt chain is ambiguous. Clarify with the owner.")
     current = receipt["head_sha"]
-  if successor.get("head_sha") != current or not receipts or successor.get("base_sha") != receipts[-1].get("base_sha"):
+    confirmed = receipt
+  if successor.get("head_sha") != current or confirmed is None or successor.get("base_sha") != confirmed.get("base_sha"):
     raise HTTPException(409, "This successor has no confirmed guarded repair receipt.")
   return {**original, "head_sha": successor["head_sha"], "base_sha": successor["base_sha"]}
 
@@ -510,6 +564,7 @@ def arm_repair(db, row, target, previous, receipt, principal):
     save_outcome(db, row, key(target), {**row.outcomes_json.get(key(target), {}),
       "state": "needs_you", "summary": summary, "review_chat_id": claim["owner_chat_id"]})
     return summary
+  fence_public_transition(db, row)
   fenced = db.execute(update(models.AgentWorkClaim).where(
     models.AgentWorkClaim.id == claim["id"], models.AgentWorkClaim.revision == claim["revision"],
     models.AgentWorkClaim.owner_chat_id == row.chat_id,
@@ -531,10 +586,7 @@ def arm_repair(db, row, target, previous, receipt, principal):
             "state": "needs_you", "summary": summary, "review_chat_id": owner_chat_id,
             "review_selection_id": selection_id})
           return summary
-  db.refresh(row)
-  if effective_target(row, next(t for t in row.targets_json if key(t) == key(target)))["head_sha"] != target["head_sha"]:
-    db.rollback()
-    raise HTTPException(409, "This predecessor changed while reserving the repair.")
+  require_public_transition_clear(db, row, target)
   previous = row.outcomes_json.get(key(target), {})
   save_outcome(db, row, key(target), {**previous, "state": "pushing",
     "repair_attempts": [*previous.get("repair_attempts", []), {**receipt, "work_key": work_key}]})

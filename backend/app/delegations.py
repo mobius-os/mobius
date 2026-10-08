@@ -10,6 +10,7 @@ projection. It never writes Chat.messages or Chat.pending_messages directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
@@ -168,13 +169,16 @@ def _attach_existing_delegation(
 
 def create_or_attach_delegation(
   db: Session, intent: DelegationIntent,
+  *, admit_child: Callable[[models.Delegation], None] | None = None,
 ) -> tuple[models.Delegation, bool]:
   """Persist one child intent idempotently under its parent logical run.
 
   Execution is intentionally separate: callers commit the control/chat rows
   here, then start the ordinary programmatic ChatRun.  A crash between those
   steps leaves a discoverable ``starting`` delegation that reconciliation can
-  safely start with the same immutable prompt.
+  safely start with the same immutable prompt. ``admit_child`` registers any
+  server-owned authorization in this same transaction before recovery can see
+  the child; it must not commit or start execution.
   """
   spawning_run = db.query(models.ChatRun).filter(
     models.ChatRun.chat_id == intent.parent_chat_id,
@@ -253,6 +257,9 @@ def create_or_attach_delegation(
   )
   db.add_all((child, row))
   try:
+    db.flush()
+    if admit_child is not None:
+      admit_child(row)
     db.commit()
   except IntegrityError:
     db.rollback()
@@ -263,6 +270,9 @@ def create_or_attach_delegation(
     if row is None:
       raise ValueError("different delegation claimed the task key")
     return _attach_existing_delegation(db, row, resolved_intent)
+  except BaseException:
+    db.rollback()
+    raise
   # Anchor the parent's live "helper working" row where the launch happened.
   from app.activity_position import record_activity_position
   record_activity_position(
