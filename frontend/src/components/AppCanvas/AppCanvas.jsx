@@ -2,6 +2,7 @@ import {
   forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo,
   useReducer, useRef, useState,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
@@ -1691,7 +1692,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     blockDocumentsRef.current.set(v, { supported: null })
     if (v === liveVersionRef.current && reportedBlockDocumentRef.current) {
       reportedBlockDocumentRef.current = null
-      onBlockCapabilityRef.current?.(null, { version: v, reset: true })
+      // The new document consumes its first init before any later block-init.
+      // Commit the owner's reset now: React batching would otherwise hand over
+      // an idle confirmation's retain flag before its state and event clear.
+      flushSync(() => {
+        onBlockCapabilityRef.current?.(null, { version: v, reset: true })
+      })
     }
     loadedDocsRef.current.add(v)
     sendInit(v)

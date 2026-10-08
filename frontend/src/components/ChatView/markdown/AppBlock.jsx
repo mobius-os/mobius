@@ -147,7 +147,10 @@ export default function AppBlock({ block, onInternalNav }) {
     // A real document change invalidates idle UI, never an unresolved owner.
     // Active publication prevents promotion; a reload still needs observation.
     if (document?.reset) {
-      setSessionState(previous => inlineBlockDocumentReset(previous, blockEventRef.current))
+      // Capture before clearing the event: React may evaluate this updater
+      // during the next render, after blockEventRef has already become null.
+      const previousEvent = blockEventRef.current
+      setSessionState(previous => inlineBlockDocumentReset(previous, previousEvent))
       setBlockEvent(null) // old-document Confirm nonce cannot be replayed
     }
     if (isSession) {

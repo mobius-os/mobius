@@ -86,6 +86,89 @@ test('actual frame init and subsequent block init carry the checkpoint envelope'
   assert.match(frame, /blockSession: currentBlockSession/)
 })
 
+// Native React ordering is covered by scripts/test-inline-document-reload-browser.mjs.
+// This narrower check executes the same onLoad/init path for its document scope.
+function reloadCanvasLifecycle() {
+  const posts = [], resets = [], flushes = []
+  const session = { sessionId: 'block', actions: [], retain: true, checkpoint: null }
+  const scope = {
+    loadedDocsRef: { current: new Set() }, framesRef: { current: new Map([
+      ['live', { contentWindow: { postMessage(message) { posts.push(message) } } }],
+      ['next', { contentWindow: { postMessage(message) { posts.push(message) } } }],
+    ]) },
+    liveVersionRef: { current: 'live' }, blockDocumentsRef: { current: new Map() },
+    reportedBlockDocumentRef: { current: null }, blockSessionRef: { current: session },
+    accountLinkRef: { current: null }, capabilityHostRef: { current: { detachSource() {} } },
+    storageHostRef: { current: { detachSource() {} } }, frameVisibleRef: { current: false },
+    interactiveRef: { current: false }, token: 'fixture', appId: 'app', appSlug: 'app', theme: null,
+    capabilityContract: null, getEffectiveTheme() { return { css: '', bg: '#fff' } },
+    readAppFrameStorage() { return {} }, dispatchSwap() {}, retireFrameMediaSession() {},
+    clearAccountLinkRegistration() {}, sendOnlineStatus() {}, sendInsets() {},
+    sendImmersiveState() {}, sendShellShortcuts() {}, sendVisibility() {}, sendInteractivity() {},
+    onBlockCapabilityRef: { current(supported, metadata) {
+      resets.push({ supported, ...metadata })
+      scope.queued = () => { scope.blockSessionRef.current = { ...session, retain: false } }
+    } },
+    flushSync(callback) {
+      flushes.push(posts.length)
+      callback()
+      scope.queued?.()
+      scope.queued = null
+    },
+  }
+  const init = canvas.slice(canvas.indexOf('  function sendInit(v) {'), canvas.indexOf('  // Keep the swap state machine'))
+  const load = canvas.slice(canvas.indexOf('  function handleFrameLoad(v) {'), canvas.indexOf('  // The frames to render:'))
+  const onLoad = new Function('scope', `with(scope) { ${init}; ${load}; return handleFrameLoad }`)(scope)
+  return { scope, posts, resets, flushes, onLoad }
+}
+
+test('actual live document reload commits the owner reset before its first init', () => {
+  const host = reloadCanvasLifecycle()
+  host.onLoad('live')
+  host.scope.reportedBlockDocumentRef.current = host.scope.blockDocumentsRef.current.get('live')
+  host.onLoad('live')
+  assert.deepEqual(host.flushes, [1], 'the reload boundary flushes before any replacement init')
+  assert.deepEqual(host.resets, [{ supported: null, version: 'live', reset: true }])
+  assert.equal(host.posts[1].type, 'moebius:frame-init')
+  assert.equal(host.posts[1].blockSession.retain, false)
+  assert.equal(host.scope.reportedBlockDocumentRef.current, null)
+  assert.equal(host.scope.blockDocumentsRef.current.size, 1, 'reload replaces its prior document entry')
+})
+
+test('initial load and hidden successor loads cannot reset the live document owner', () => {
+  const host = reloadCanvasLifecycle()
+  host.onLoad('live')
+  host.scope.reportedBlockDocumentRef.current = host.scope.blockDocumentsRef.current.get('live')
+  host.onLoad('next')
+  host.onLoad('next')
+  assert.deepEqual(host.flushes, [])
+  assert.deepEqual(host.resets, [])
+  assert.ok(host.posts.every(message => message.blockSession.retain))
+  assert.equal(host.scope.blockDocumentsRef.current.size, 2, 'only the live and buffered frame have entries')
+})
+
+test('document reset captures an unacknowledged Confirm before deferred state evaluation clears the event ref', async () => {
+  const { inlineBlockDocumentReset } = await import('../../components/ChatView/markdown/appBlock.js')
+  const block = readFileSync(new URL('../../components/ChatView/markdown/AppBlock.jsx', import.meta.url), 'utf8')
+  const start = block.indexOf('  const onBlockCapability = useCallback(')
+  const callback = block.slice(start, block.indexOf('  // The open view', start))
+  let update
+  const scope = {
+    blockEventRef: { current: { event: 'confirm', nonce: 'confirm:unacknowledged' } },
+    inlineBlockDocumentReset, isSession: true, allowedKeys: new Set(),
+    dispatchBlockEvent() {}, observeBlockCapability() {}, useCallback(fn) { return fn },
+    setSessionState(updater) { update = updater },
+    setBlockEvent() { scope.blockEventRef.current = null },
+  }
+  const reset = new Function('scope', `with(scope) { ${callback}; return onBlockCapability }`)(scope)
+  reset(null, { reset: true })
+  const state = update({ retain: true, actions: [{ confirming: true }], ackNonce: 'activate:previous' })
+  assert.equal(state.retain, true, 'deferred evaluation cannot mistake an unacknowledged Confirm for idle UI')
+  assert.equal(state.recoveryPending, true)
+  assert.ok(state.recoveryError, 'without a checkpoint the operation remains failclosed')
+  assert.equal(state.actions[0].confirming, false)
+})
+
 
 // Execute the actual frame entry functions with isolated, mocked transports.
 function frameFunction(name, next) {
