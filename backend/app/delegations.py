@@ -1185,18 +1185,24 @@ def open_questions(
   }
   if not candidates:
     return {}
-  found = db.query(models.DelegationQuestion).join(
+  return {
+    question.delegation_id: question
+    for question in _newest_unanswered_questions(db, list(candidates))
+    if _awaits_answer(*candidates[question.delegation_id], question.root_run_id)
+  }
+
+
+def _newest_unanswered_questions(
+  db: Session, delegation_ids: list[str],
+) -> list[models.DelegationQuestion]:
+  return db.query(models.DelegationQuestion).join(
     models.Delegation,
     models.Delegation.id == models.DelegationQuestion.delegation_id,
   ).filter(
-    models.Delegation.id.in_(list(candidates)),
+    models.Delegation.id.in_(delegation_ids),
     models.DelegationQuestion.id == _newest_question_id(),
     _unanswered(models.DelegationQuestion),
   ).all()
-  return {
-    question.delegation_id: question for question in found
-    if _awaits_answer(*candidates[question.delegation_id], question.root_run_id)
-  }
 
 
 def _awaits_answer(
@@ -1611,7 +1617,10 @@ def serialize_delegation(
     .filter(models.Chat.id == row.parent_chat_id)
     .scalar()
   )
-  return _delegation_payload(row, status, run, result, parent_chat_title)
+  return _delegation_payload(
+    row, status, run, result, parent_chat_title,
+    _awaited_question_view(db, row, run, status),
+  )
 
 
 def serialize_delegation_list(
@@ -1636,14 +1645,26 @@ def serialize_delegation_list(
       models.Chat.id.in_({row.parent_chat_id for row in rows}),
     ).all()
   )
+  rows_by_id = {row.id: row for row in rows}
+  questions = {
+    question.delegation_id: question
+    for question in _newest_unanswered_questions(db, list(rows_by_id))
+    if _awaits_answer(
+      rows_by_id[question.delegation_id],
+      run_by_chat.get(rows_by_id[question.delegation_id].child_chat_id),
+      question.root_run_id,
+    )
+  }
   payloads = []
   lifecycle = []
   for row in rows:
     status, run, result = _project_delegation_status(
-      row, run_by_chat.get(row.child_chat_id), "",
+      row, run_by_chat.get(row.child_chat_id), "", awaiting_answer=row.id in questions,
     )
+    question = questions.get(row.id)
     payloads.append(_delegation_payload(
       row, status, run, result, titles.get(row.parent_chat_id),
+      question_view(question) if question is not None else None,
     ))
     values = _lifecycle_values(row, status)
     if values is not None:
@@ -1659,6 +1680,7 @@ def _delegation_payload(
   run: models.ChatRun | None,
   result: str,
   parent_chat_title: str | None,
+  question: dict | None,
 ) -> dict:
   return {
     "id": row.id,
@@ -1694,7 +1716,7 @@ def _delegation_payload(
       "cost_usd": run.cost_usd,
     } if run is not None else None),
     "result": result,
-    "question": _awaited_question_view(db, row, run, status),
+    "question": question,
   }
 
 
