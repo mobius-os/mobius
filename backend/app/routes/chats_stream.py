@@ -192,32 +192,6 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
-# A connected app's grant is rechecked off the event loop at most this often
-# while events flow, and always before the first event and on each keepalive.
-_CONNECTION_RECHECK_SECONDS = 1.0
-
-
-def _connection_event(event: dict) -> dict | None:
-  """Reduce one chat event to what a connected text-conversation app may see.
-
-  An owner conversation connection is a text channel: it receives visible
-  assistant text, run lifecycle and the identity of a pending owner-input
-  card, never tool inputs or outputs, thinking, files or other activity
-  (the same boundary as the connection's message recovery route).
-  """
-  kind = event.get("type")
-  if kind in ("text", "text_final"):
-    return {"type": kind, "content": event.get("content", "")}
-  if kind in ("text_boundary", "done", "chat_run_finished"):
-    return {"type": kind}
-  if kind == "error":
-    return {"type": "error", "message": event.get("message", "")}
-  if kind == "question":
-    return {"type": "question", "question_id": event.get("question_id")}
-  if kind == "queued_turn_starting":
-    message = event.get("message") or {}
-    return {"type": kind, "ts": event.get("ts"), "cid": message.get("cid")}
-  return None
 
 # A server-owned assistant snapshot already contains every content-bearing
 # event reduced by ChatEventSink. These few replay-safe control facts live
@@ -1891,11 +1865,8 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
-    # A snapshot carries complete blocks (tool payloads included), which a
-    # connected app must not receive.
     snapshot_state = (
-      active_sink_stream_snapshot(chat_id, bc)
-      if snapshot and connection_id is None else None
+      active_sink_stream_snapshot(chat_id, bc) if snapshot else None
     )
     if snapshot_state is not None:
       catch_up = [
@@ -1913,45 +1884,23 @@ async def stream_chat(
         return True
       last_embed_auth_check = now_mono
       return chat_embed_session_is_active(embed_session_id)
-    last_connection_check: float | None = None
-
-    async def connection_active(force: bool = False) -> bool:
-      # The grant lookup is sync DB and file work, so it runs off the loop
-      # and is throttled like embed_session_active: a streaming turn emits
-      # many deltas and must not pay a lookup for each one.
-      nonlocal last_connection_check
-      if connection_id is None:
-        return True
-      now_mono = time.monotonic()
-      if (
-        not force and last_connection_check is not None
-        and now_mono - last_connection_check < _CONNECTION_RECHECK_SECONDS
-      ):
-        return True
-      last_connection_check = now_mono
-      return await asyncio.to_thread(
-        connection_is_active,
-        connection_id, principal.app_id, chat_id, principal.app_instance_id,
-      )
-
-    def visible(event: dict) -> dict | None:
-      return event if connection_id is None else _connection_event(event)
+    def connection_active():
+      return connection_id is None or connection_is_active(
+        connection_id, principal.app_id, chat_id, principal.app_instance_id)
 
     try:
-      if not await connection_active(force=True) or not embed_session_active():
+      if not connection_active() or not embed_session_active():
         return
       if snapshot_state is not None:
         yield _sse({"type": "stream_snapshot", **snapshot_state})
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:
-        if not await connection_active():
+        if not connection_active():
           return
+        yield _sse(event)
         if event.get("type") == "done":
           has_done = True
-        shown = visible(event)
-        if shown is not None:
-          yield _sse(shown)
 
       # Signal the client that catch-up is complete and live events follow.
       # The client uses this to switch from instant rendering to typewriter.
@@ -1974,7 +1923,7 @@ async def stream_chat(
 
       # Stream live events from the queue.
       while True:
-        if not await connection_active() or not embed_session_active():
+        if not connection_active() or not embed_session_active():
           return
         if await request.is_disconnected():
           break
@@ -1984,7 +1933,7 @@ async def stream_chat(
             queue.get(), timeout=_KEEPALIVE_INTERVAL
           )
         except asyncio.TimeoutError:
-          if not await connection_active(force=True):
+          if not connection_active():
             return
           # Send a keepalive comment — invisible to EventSource clients
           # but keeps the TCP connection alive through proxies.
@@ -1995,11 +1944,9 @@ async def stream_chat(
         if event is None:
           break
 
-        if not await connection_active():
+        if not connection_active():
           return
-        shown = visible(event)
-        if shown is not None:
-          yield _sse(shown)
+        yield _sse(event)
 
         if event.get("type") == "done":
           break

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.chat_app_connections import binding_digest, valid_connection
-from app.chat_log_redaction import _assistant_text
 from app.database import get_db
 from app.deps import (Principal, get_principal, get_current_owner_for_owner_input,
                       reject_cross_site)
@@ -74,30 +73,6 @@ def disconnect(app_id: int, connection_id: str, owner=Depends(get_current_owner_
   db.commit()
 
 
-def recovery_message(msg):
-  """One visible conversation turn, or None for internals and tool-only turns.
-
-  Hidden deliveries and ``kind`` rows (compaction summaries, continuations)
-  are not conversation. Finished assistant turns keep their text in blocks,
-  so only their text blocks are returned.
-  """
-  if not isinstance(msg, dict) or msg.get('hidden') or msg.get('kind'):
-    return None
-  role = msg.get('role')
-  if role == 'assistant':
-    content = _assistant_text(msg.get('blocks') or [], msg.get('content') or '')
-    if not content:
-      return None
-  elif role == 'user':
-    content = msg.get('content') or ''
-  else:
-    return None
-  out = {'role': role, 'content': content}
-  if 'cid' in msg:
-    out['cid'] = msg['cid']
-  return out
-
-
 @router.get('/{connection_id}/messages')
 def messages(app_id: int, connection_id: str, limit: int = Query(100, ge=1, le=100),
              principal: Principal = Depends(get_principal), db: Session = Depends(get_db)):
@@ -108,5 +83,8 @@ def messages(app_id: int, connection_id: str, limit: int = Query(100, ge=1, le=1
   chat = get_active_chat_or_404(db, row.chat_id)
   # Recovery only needs visible conversation text + send identity, never tool
   # payloads, provider sessions, credentials, settings, attachments or sidecars.
-  visible = [m for m in map(recovery_message, chat.messages or []) if m is not None]
-  return {**metadata(db, row), 'messages': visible[-limit:]}
+  return {**metadata(db, row), 'messages': [
+    {key: msg[key] for key in ('role', 'content', 'cid') if key in msg}
+    for msg in (chat.messages or [])[-limit:]
+    if msg.get('role') in ('user', 'assistant')
+  ]}

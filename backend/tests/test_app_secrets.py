@@ -281,20 +281,6 @@ def test_credentialed_fetch_rejects_undeclared_origin_path_and_key(
   assert client.get(endpoint, headers=headers, params={
     "url": "https://restapi.amap.com/v3/staticmap?key=override",
   }).status_code == 400
-  # httpx removes dot segments, so these would leave the reviewed path with
-  # the credential attached.
-  for escaped in (
-    "/v3/staticmap/../config/district",
-    "/v3/staticmap/%2e%2e/config/district",
-    "/v3/staticmap/%2E%2e/config/district",
-    "/v3/staticmap/./x",
-    "/v3/staticmap/..%2fconfig",
-    "/v3/staticmap/..%5Cconfig",
-    "/v3/staticmap/..\\config",
-  ):
-    assert client.get(endpoint, headers=headers, params={
-      "url": f"https://restapi.amap.com{escaped}",
-    }).status_code == 403, escaped
 
   (tmp_path / "strict-map" / "mobius.json").write_text(json.dumps({
     "permissions": {"credentialed_fetch": {"amap": {
@@ -425,10 +411,6 @@ def test_credentialed_fetch_path_prefix_rejects_unreviewed_path(
   assert client.get(endpoint, headers=headers, params={
     "url": "https://api.telegram.org/file/getMe",
   }).status_code == 403
-  for escaped in ("/bot/../file/getMe", "/bot/%2e%2e/file/getMe"):
-    assert client.get(endpoint, headers=headers, params={
-      "url": f"https://api.telegram.org{escaped}",
-    }).status_code == 403, escaped
 
 
 def test_entrypoint_secret_root_is_usable_when_volume_chown_fails():

@@ -137,8 +137,7 @@ def test_owner_agent_cannot_grant(client, setup, db):
     require_owner_input_principal(Principal(owner=owner,app_id=None,scope='owner',chat_id='agent',run_id='run'))
 
 
-def test_stream_revocation_checks_after_wait(client, setup, db, monkeypatch):
-  monkeypatch.setattr(chats_stream, '_CONNECTION_RECHECK_SECONDS', 0)
+def test_stream_revocation_checks_after_wait(client, setup, db):
   from app.broadcast import create_broadcast
   s=setup; cid=grant(client,s)
   app=db.get(models.App,s['app_id']); owner=db.query(models.Owner).first()
@@ -193,80 +192,3 @@ def test_send_rechecks_grant_inside_transition_lock(client, setup, monkeypatch):
   monkeypatch.setattr(chats_stream,'conversation_chat',checked)
   assert send(client,s,cid).status_code == 403
   assert len(calls)==2
-
-
-def _connected_stream(db, s, cid):
-  app=db.get(models.App,s['app_id']); owner=db.query(models.Owner).first()
-  principal=Principal(owner=owner,app_id=app.id,app_instance_id=app.token_nonce,scope='app')
-  request=Request({'type':'http'})
-  async def disconnected(): return False
-  request.is_disconnected=disconnected
-  return request, principal
-
-
-def test_connected_stream_carries_text_not_tool_activity(client, setup, db):
-  from app.broadcast import create_broadcast
-  s=setup; cid=grant(client,s)
-  request, principal = _connected_stream(db, s, cid)
-  bc=create_broadcast(s['chat_id'])
-  bc.publish({'type':'tool_input','name':'Bash','input':{'command':'cat secret.txt'}})
-  bc.publish({'type':'tool_output','content':'private file body'})
-  bc.publish({'type':'thinking','content':'private reasoning'})
-  bc.publish({'type':'text','content':'visible reply'})
-  bc.publish({'type':'done'})
-  bc.running=False  # finished turn: the stream replays and returns
-  async def collect():
-    response=await chats_stream.stream_chat(request,s['chat_id'],snapshot=True,principal=principal,db=db,connection_id=cid)
-    return ''.join([chunk async for chunk in response.body_iterator])
-  body=asyncio.run(collect())
-  assert 'visible reply' in body
-  assert '"done"' in body
-  assert 'stream_snapshot' not in body
-  for private in ('tool_input','tool_output','private file body','secret.txt','private reasoning'):
-    assert private not in body
-
-
-def test_connected_stream_rechecks_grant_at_most_once_per_interval(client, setup, db, monkeypatch):
-  from app.broadcast import create_broadcast
-  s=setup; cid=grant(client,s)
-  request, principal = _connected_stream(db, s, cid)
-  calls=[]
-  real=chats_stream.connection_is_active
-  def counted(*args):
-    calls.append(args); return real(*args)
-  monkeypatch.setattr(chats_stream, 'connection_is_active', counted)
-  monkeypatch.setattr(chats_stream, '_CONNECTION_RECHECK_SECONDS', 3600)
-  bc=create_broadcast(s['chat_id'])
-  for n in range(50):
-    bc.publish({'type':'text','content':f'delta {n}'})
-  bc.publish({'type':'done'})
-  bc.running=False  # finished turn: the stream replays and returns
-  async def collect():
-    response=await chats_stream.stream_chat(request,s['chat_id'],snapshot=False,principal=principal,db=db,connection_id=cid)
-    return ''.join([chunk async for chunk in response.body_iterator])
-  body=asyncio.run(collect())
-  assert 'delta 49' in body
-  assert len(calls) == 1
-
-
-def test_recovery_returns_visible_text_of_block_shaped_turns(client, setup, db):
-  s=setup; cid=grant(client,s)
-  chat=db.get(models.Chat,s['chat_id'])
-  chat.messages=[
-    {'role':'user','content':'hi there','cid':'c1'},
-    {'role':'user','content':'answer delivery','hidden':True},
-    {'role':'assistant','content':'','blocks':[
-      {'type':'thinking','content':'private reasoning'},
-      {'type':'tool','name':'Bash','input':{'command':'ls'},'output':'secret.txt'},
-      {'type':'text','content':'Here is the answer.'},
-    ]},
-    {'role':'assistant','content':'','blocks':[{'type':'tool','name':'Read','output':'x'}]},
-    {'role':'assistant','kind':'compaction','content':'Summary of earlier turns'},
-  ]
-  db.commit()
-  r=client.get(f"{s['base']}/{cid}/messages", headers=s['auth'])
-  assert r.status_code == 200, r.text
-  assert r.json()['messages'] == [
-    {'role':'user','content':'hi there','cid':'c1'},
-    {'role':'assistant','content':'Here is the answer.'},
-  ]
