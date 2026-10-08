@@ -773,6 +773,7 @@ async def repair_checkout(app_id: int | None, run_id: str, body: RepairCheckout,
     attempts = previous.get("repair_attempts", [])
     if any(r.get("state") in {"pushing", "push_unknown"} for r in attempts):
       raise HTTPException(409, "An earlier push has an unclear public outcome. Reconcile it; do not prepare another repair.")
+    reviews.require_public_transition_clear(db, row, target)
     reviews.require_repair_round_available(row, attempts)
     if previous.get("checkout") and previous["checkout"].get("initial_head_sha") == target["head_sha"]:
       return {"checkout": previous["checkout"], "run": _run_view(db, row)}
@@ -1004,6 +1005,9 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
         # Never revive a stopped child when observing a saved step, even across
         # parent turns with a fresh logical root id.
         _assert_independent_reviewer(row, existing, target)
+        if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
+          await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
+          _parent(db, row, principal)
         return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
       root_id = parent_root_run_id(db, row.chat_id, require_active=True)
       if not root_id:
@@ -1012,14 +1016,16 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
         parent_root_run_id=root_id, task_key=task_key, prompt=prompt,
         provider=frozen["provider"], model=frozen["model"], effort=frozen.get("reasoning_effort"),
         cwd=str(Path(get_settings().data_dir)), notify_parent_on_complete=True)
-      child, _ = create_or_attach_delegation(db, intent)
+      def register_reviewer(admitted):
+        reviews.write_outcome(db, row, reviews.key(target), {**previous,
+          "state": "reviewing", "head_sha": target["head_sha"],
+          "reviewer_steps": [*previous.get("reviewer_steps", []), {
+            "delegation_id": admitted.id, "head_sha": target["head_sha"], "base_sha": target["base_sha"],
+            "prompt_sha256": admitted.prompt_sha256, "provider": admitted.provider, "model": admitted.model,
+            "effort": admitted.effort}]})
+      child, _ = create_or_attach_delegation(db, intent, admit_child=register_reviewer)
       db.refresh(row)
-      reviews.save_outcome(db, row, reviews.key(target), {**previous,
-        "state": "reviewing", "head_sha": target["head_sha"],
-        "reviewer_steps": [*previous.get("reviewer_steps", []), {
-          "delegation_id": child.id, "head_sha": target["head_sha"], "base_sha": target["base_sha"],
-          "prompt_sha256": child.prompt_sha256, "provider": child.provider, "model": child.model,
-          "effort": child.effort}]})
+      _assert_independent_reviewer(row, child, target)
       _parent(db, row, principal)
       await ensure_delegation_started(db, child, prompt, start_turn=start_programmatic_chat_turn)
       _parent(db, row, principal)
