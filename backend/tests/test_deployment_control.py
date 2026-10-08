@@ -1876,7 +1876,99 @@ async def test_withdrawing_an_unclaimed_request_releases_exactly_its_binding(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["queued", "replacing", "verifying"])
+async def test_unresolved_host_recovery_keeps_exact_binding_and_status_even_with_inbox(
+  tmp_path, monkeypatch, bound_operations,
+):
+  control, inbox = _install_control(tmp_path, monkeypatch)
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
+  nonce = "e" * 32
+  target = "c" * 40
+  operation = {"controller": "host", "id": nonce}
+  prepared_path = tmp_path / "prepared-update.json"
+  prepared = {**_prepared_record(target), "operation": operation}
+  prepared_path.write_text(json.dumps(prepared), encoding="utf-8")
+  monkeypatch.setattr(dc.platform_update, "PREPARED_UPDATE_PATH", prepared_path)
+  monkeypatch.setattr(dc.platform_update, "RECONCILE_LOCK", tmp_path / "reconcile.lock")
+  monkeypatch.setattr(dc.platform_update, "CONFLICT_FLAG", tmp_path / "no-conflict.json")
+  journal = control / "transaction.json"
+  journal.write_text(json.dumps({"operation": "original", "request_nonce": nonce}), encoding="utf-8")
+  original = {
+    "state": "needs_recovery", "request_nonce": nonce, "expected_sha": target,
+    "operation_id": "original", "message": "Host recovery required.",
+    "handoff": "external-cutover-v1", "request_versions": [1, 2],
+  }
+  (control / "status.json").write_text(json.dumps(original), encoding="utf-8")
+  queued = {"version": 2, "expected_sha": target, "nonce": "f" * 32}
+  (inbox / "request.json").write_text(json.dumps(queued), encoding="utf-8")
+
+  status = await dc.read_rebuild_status()
+  assert status["state"] == "needs_recovery"
+  assert status["request_nonce"] == nonce
+  assert status["operation_id"] == "original"
+  assert dc._host_request_ended(nonce) is False
+  with pytest.raises(dc.DeploymentControlError, match="unresolved container replacement") as exc:
+    await dc.release_ended_binding()
+  assert exc.value.code == "recovery_required"
+  assert bound_operations == []
+  with pytest.raises(dc.platform_update.PlatformUpdateError, match="update_operation_bound"):
+    dc.platform_update.cancel_unfinished_update(repo=tmp_path)
+  for action in (
+    lambda: dc._request_self_hosted_rebuild(expected_sha=target, final_check=lambda: None),
+    dc.withdraw_unclaimed_host_request,
+  ):
+    with pytest.raises(dc.DeploymentControlError) as exc:
+      await action()
+    assert exc.value.code == "recovery_required"
+  assert json.loads(journal.read_text(encoding="utf-8"))["operation"] == "original"
+  assert json.loads(prepared_path.read_text(encoding="utf-8")) == prepared
+  assert json.loads((inbox / "request.json").read_text(encoding="utf-8")) == queued
+  assert bound_operations == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_cancel_even_without_a_prepared_binding(
+  tmp_path, monkeypatch,
+):
+  control, _inbox = _install_control(tmp_path, monkeypatch)
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
+  (control / "status.json").write_text(json.dumps({
+    "state": "needs_recovery", "handoff": "external-cutover-v1",
+    "request_versions": [1, 2],
+  }), encoding="utf-8")
+  monkeypatch.setattr(dc.platform_update, "read_prepared_update", lambda: None)
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc.release_ended_binding()
+  assert exc.value.code == "recovery_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["failed", "rolled_back", "no_change"])
+async def test_safe_terminal_host_status_releases_binding_and_allows_retry(
+  tmp_path, monkeypatch, bound_operations, state,
+):
+  control, _inbox = _install_control(tmp_path, monkeypatch)
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
+  old = {"controller": "host", "id": "e" * 32}
+  target = "c" * 40
+  monkeypatch.setattr(
+    dc.platform_update, "read_prepared_update",
+    lambda: {**_prepared_record(target), "operation": old},
+  )
+  (control / "status.json").write_text(json.dumps({
+    "state": state, "request_nonce": old["id"], "expected_sha": target,
+    "handoff": "external-cutover-v1", "request_versions": [1, 2],
+  }), encoding="utf-8")
+  await dc.release_ended_binding()
+  assert bound_operations == [("unbind", target, old)]
+  outcome = await dc._request_self_hosted_rebuild(
+    expected_sha=target, final_check=lambda: None,
+  )
+  assert outcome["state"] == "queued"
+  assert bound_operations[-1][0:2] == ("bind", target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["queued", "replacing", "verifying", "needs_recovery"])
 async def test_the_owner_cannot_keep_an_update_while_its_replacement_runs(
   monkeypatch, state,
 ):
@@ -1898,7 +1990,7 @@ async def test_the_owner_cannot_keep_an_update_while_its_replacement_runs(
   with pytest.raises(dc.DeploymentControlError) as exc:
     await dc.keep_settling_update()
 
-  assert exc.value.code == "already_running"
+  assert exc.value.code == ("recovery_required" if state == "needs_recovery" else "already_running")
   assert kept == []
 
 

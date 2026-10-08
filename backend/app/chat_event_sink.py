@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Awaitable
 
+from app import tracing
 from app.agent_lifecycle import normalize_chat_event
 from app.broadcast import get_broadcast
 from app.chat_logging import get_logger as _get_logger
@@ -413,6 +414,8 @@ class ChatEventSink:
     # carving and persisted tool output remain independent.
     self._app_output_tails: dict[str, str] = {}
     self._turn_end_ids: set[str] = set()
+    # Open tracing spans for this turn's tool calls, keyed by tool_use_id.
+    self._tool_spans: dict[str, object] = {}
 
   def _start_side_task(
     self,
@@ -1048,6 +1051,27 @@ class ChatEventSink:
         retry = RecordAgentLifecycle(values=cmd.values)
         await _await_ack(get_writer().submit(retry))
 
+  def _trace_tool_event(self, event: ChatEvent) -> None:
+    """One span per tool call: its name, duration and failure, never content."""
+    tool_use_id = event.get("tool_use_id")
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+      return
+    event_type = event.get("type")
+    if event_type == "tool_start" and tool_use_id not in self._tool_spans:
+      tool = str(event.get("tool") or "unknown")
+      self._tool_spans[tool_use_id] = tracing.start_span(
+        f"tool {tool}", {"mobius.tool": tool, "mobius.chat_id": self.chat_id},
+      )
+    elif event_type == "tool_output" and event.get("output_exit_code") not in (None, 0):
+      tracing.annotate(self._tool_spans.get(tool_use_id), {"mobius.tool.failed": True})
+    elif event_type == "tool_end":
+      tracing.end_span(self._tool_spans.pop(tool_use_id, None))
+
+  def _end_open_tool_spans(self) -> None:
+    for handle in self._tool_spans.values():
+      tracing.end_span(handle, error="turn ended before the tool finished")
+    self._tool_spans.clear()
+
   def publish(self, event: ChatEvent) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
@@ -1081,6 +1105,7 @@ class ChatEventSink:
     # live transcript surface.
     if event_type in ("tool_start", "tool_input"):
       self._stash_full_edit_diff(event)
+    self._trace_tool_event(event)
     if event_type in ("tool_start", "tool_input"):
       # A helper's parent shows what the helper is doing right now. Claude
       # names the tool on tool_start and sends its text on tool_input.
@@ -1281,6 +1306,7 @@ class ChatEventSink:
     The error block shape matches the renderer's "error" branch (see
     reconcile_interrupted_chats and MsgContent.jsx: keyed on block["message"]).
     """
+    self._end_open_tool_spans()
     if not (self.chat_id and self.run_token):
       return
     # A timed-out RecordGeneratedFile may still be ahead of us in the same
