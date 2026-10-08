@@ -248,13 +248,13 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "ready independent sibling leaves concurrently" in planning_normalized
   assert "Parallelism itself is not the saving" in planning_normalized
   assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
-  assert "call `update_goal` with `complete" in planning_normalized
+  assert "call `update_goal(complete: true)`" in planning_normalized
   assert "No outcome closes while helpers are active" in planning_normalized
   assert "goal_plan.py" not in planning
   assert "not a keyword trigger" in planning_normalized
-  assert "first-class `promote_goal` tool" in planning_normalized
-  assert "resilience, not an equivalent convenience path" in planning_normalized
-  assert "an attempted tool call returns a failure" in planning_normalized
+  assert "first-class `promote_goal(objective:" in planning_normalized
+  assert "Use the script only when the tool is absent" in planning_normalized
+  assert "A refusal is an answer; do not retry it through the script" in planning_normalized
   assert "one targeted settlement continuation in the existing runner" in planning_normalized
   assert "Terminal settlement" not in planning_normalized
   assert "turns are not a budget" in planning_normalized
@@ -298,7 +298,7 @@ def test_goal_responsibility_requires_truthful_outcome_or_real_handoff():
   assert "### Responsibility, handoffs and outcomes" in planning
   assert "Its answer resumes the same work" in planning_normalized
   assert "A temporary approval gate or outage is not capitulation" in planning_normalized
-  assert "Stop and arbitrary process crashes never grant automatic continuation" in planning_normalized
+  assert "Stop, owner holds, and arbitrary crashes never grant automatic continuation" in planning_normalized
   # The retired rule demanded one owning interaction at every Goal turn end.
   assert "create exactly one owning interaction" not in planning_normalized
   assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting

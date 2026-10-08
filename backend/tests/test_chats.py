@@ -230,6 +230,7 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
     "status": "active",
     "resumable": False,
     "handoff": {"kind": "working", "reason": None},
+    "plan": None,
   }
   assert runtime.json()["goal"] == detail.json()["goal"]
 
@@ -382,6 +383,7 @@ def test_chat_reads_retain_completed_and_paused_goals(client, auth, chat, db):
     "resumable": True,
     "pause_reason": "unknown",
     "handoff": {"kind": "recovery", "reason": "unknown_stop"},
+    "plan": None,
   }
   assert runtime["goal"] == detail["goal"]
 

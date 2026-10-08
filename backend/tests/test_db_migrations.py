@@ -29,6 +29,16 @@ PREVIOUS_RELEASE_SCHEMA = (
 )
 
 
+def _create_schema_with_historical_goal_snapshots(eng):
+  """Supply the retired columns when simulating an already-migrated release.
+
+  Current ORM metadata omits run-owned plans. A historical migration test must
+  still create those columns before claiming their migration was applied.
+  """
+  models.Base.metadata.create_all(eng)
+  migrations._add_chat_run_goal_plan(eng)
+
+
 def test_legacy_helper_interruption_column_upgrades_idempotently(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'legacy-helper.db'}")
   models.Base.metadata.create_all(eng)
@@ -117,10 +127,12 @@ def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatc
   eng = create_engine(f"sqlite:///{db_path}")
   models.Base.metadata.create_all(bind=eng)
   versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
-  assert versions[-3:] == [
+  transcript_position = versions.index("0087_transcript_rows")
+  assert versions[transcript_position - 2:transcript_position + 1] == [
     "0083_swap_chat_note_sections", "0086_drop_chat_note_backup", "0087_transcript_rows",
   ]
-  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS",
+                      migrations._SCHEMA_MIGRATIONS[:transcript_position])
   run_migrations(eng)  # The previous release's ledger.
   monkeypatch.undo()
   monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -472,7 +484,7 @@ def test_chat_wait_condition_owner_migration_is_additive_and_idempotent(tmp_path
 
 def test_chat_wait_condition_owner_migration_adds_nullable_column(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'wait-condition-owner.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with eng.begin() as conn:
     conn.execute(text("ALTER TABLE chat_waits DROP COLUMN condition_owner"))
     conn.execute(text(
@@ -1851,6 +1863,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0083_swap_chat_note_sections",
     "0086_drop_chat_note_backup",
     "0087_transcript_rows",
+    "0086_goal_execution_identity",
   ]
   assert second == first
 
@@ -2653,7 +2666,7 @@ def test_legacy_chat_models_pin_only_established_unselected_chats(
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'legacy-chat-models.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   established = [
     {"role": "user", "content": "hello"},
     {"role": "assistant", "content": "hi"},
@@ -3365,7 +3378,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
   tmp_path,
 ):
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-plan.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with eng.begin() as conn:
     conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_json"))
     conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_revision"))
@@ -3396,14 +3409,13 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
   tmp_path,
 ):
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-identity.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(create_chat(id="goal-chat", title="Goal", messages=[]))
     session.add_all([
       models.ChatRun(
         id="planned", root_run_id="planned", chat_id="goal-chat",
         status="interrupted", provider="codex", goal_objective="Ship",
-        goal_plan_json={"version": 1, "tasks": []},
         started_at=datetime(2026, 8, 18, 10),
       ),
       models.ChatRun(
@@ -3414,6 +3426,8 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
     ])
     session.commit()
   with eng.begin() as conn:
+    conn.execute(text("UPDATE chat_runs SET goal_plan_json = :plan WHERE id = 'planned'"),
+                 {"plan": json.dumps({"version": 1, "tasks": []})})
     conn.execute(text("DROP INDEX ix_chat_runs_goal_id"))
     conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_id"))
     conn.execute(text(
@@ -3439,7 +3453,7 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
 
 def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-index-repair.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(create_chat(id="goal-chat", title="Goal", messages=[]))
     session.add(models.ChatRun(
@@ -3481,7 +3495,7 @@ def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
 
 def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'agent-coordination.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(models.Project(
       id="project-1", name="Project", project_type="blank",
@@ -3554,7 +3568,7 @@ def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
 
 def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-dismissal.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with eng.begin() as conn:
     conn.execute(text("ALTER TABLE chats DROP COLUMN dismissed_goal_id"))
     conn.execute(text(
@@ -3579,7 +3593,7 @@ def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
 
 def test_project_color_migration_adds_nullable_column_once(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'project-color.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with eng.begin() as conn:
     conn.execute(text("ALTER TABLE projects DROP COLUMN color"))
     conn.execute(text(
@@ -3614,7 +3628,7 @@ def test_active_chat_model_migrations_pin_lazy_drafts_and_scoped_rows(
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'active-models.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   transcript = [
     {"role": "user", "content": "review"},
     {"role": "assistant", "content": "done"},
@@ -3800,7 +3814,7 @@ def test_active_chat_model_migration_never_reassigns_queued_provider_state(
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'queued-chat.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="codex",
@@ -3852,7 +3866,7 @@ def test_active_chat_model_migration_honors_unknown_picker_model_provider_pair(
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'unknown-model.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="claude",
@@ -3890,7 +3904,7 @@ def test_post_explicit_model_repair_pins_all_later_gaps_without_provider_handoff
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'post-explicit-model-gaps.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="codex",
@@ -4005,7 +4019,7 @@ def test_post_explicit_model_repair_preserves_only_genuine_first_install_chat(
   (data_dir / "shared" / "agent-settings.json").write_text("{}")
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'post-explicit-model-first-chat.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="claude",
@@ -4060,7 +4074,7 @@ def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
 
 def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'result-incorporation.db'}")
-  models.Base.metadata.create_all(eng)
+  _create_schema_with_historical_goal_snapshots(eng)
   with Session(eng) as session:
     app = models.App(
       slug="incorporation-migration", source_dir="/tmp/incorporation",

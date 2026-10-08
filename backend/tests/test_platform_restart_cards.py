@@ -1247,7 +1247,9 @@ def test_any_restart_card_wakes_all_registered_chats_once_without_bypassing_inpu
         row = read.get(models.Chat, chat_id)
         resumed = read.get(models.ChatRun, f"activation-resume-{wait_id}")
         assert resumed.root_run_id == root_id
-        assert resumed.goal_id == root_id
+        saved_goal_id = read.get(models.ChatWait, wait_id).goal_id
+        assert saved_goal_id and saved_goal_id != root_id
+        assert resumed.goal_id == saved_goal_id
         assert row.pending_question_id is None
         assert [m["content"] for m in row.pending_messages] == ["B"]
         assert sum(m.get("cid") == f"activation-result-{wait_id}" for m in list(transcript_rows.history(row))) == 1

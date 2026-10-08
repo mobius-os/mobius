@@ -194,9 +194,9 @@ def _goal(chat, approval_run, status='pending'):
     run = db.get(models.ChatRun, approval_run[0].run_token)
     run.goal_id = run.id
     run.goal_objective = 'Finish the repair'
-    run.goal_plan_json = {'version': 1, 'tasks': [
+    plan = {'version': 1, 'tasks': [
       {'id': 'repair', 'title': 'Repair', 'status': status, 'depends_on': []}]}
-    persist_goal_fixture(db, run, status='completed' if status == 'completed' else 'open')
+    persist_goal_fixture(db, run, status='completed' if status == 'completed' else 'open', plan=plan)
     db.commit()
 
 
