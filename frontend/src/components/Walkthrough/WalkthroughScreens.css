@@ -34,7 +34,6 @@
 .wt-note, .wt-success { margin: 14px 0 0; padding: 12px 14px; border-radius: 11px; background: color-mix(in srgb, var(--accent, #8b6cf7) 9%, transparent); font-size: 13px; line-height: 1.5; }
 .wt-success { display: flex; align-items: center; gap: 8px; color: var(--green, #5ac799); background: color-mix(in srgb, var(--green, #5ac799) 10%, transparent); }
 .wt-error { margin: 10px 0 0; color: var(--danger, #eb6a6a); font-size: 13px; }
-.wt-fine { margin: 14px 0 0; color: var(--muted, #a1a1aa); font-size: 12px; line-height: 1.5; }
 .wt-skeleton { display: block; border-radius: 8px; background: linear-gradient(100deg, var(--surface-2, #1a1f28) 30%, color-mix(in srgb, var(--accent, #8b6cf7) 16%, var(--surface-2, #1a1f28)) 50%, var(--surface-2, #1a1f28) 70%) 0 0 / 250% 100%; animation: wt-shimmer 1.4s linear infinite; }
 .wt-skeleton--line { height: 12px; }
 .wt-skeleton--avatar { width: 72px; height: 72px; border-radius: 50%; flex: none; }
@@ -81,21 +80,21 @@
 .wt-claimed__badge { display: grid; place-items: center; width: 26px; height: 26px; flex: none; border-radius: 50%; color: #fff; background: var(--green, #5ac799); font-size: 13px; font-weight: 800; animation: wt-pop .45s var(--wt-ease); }
 
 /* ---------- the Möbius chat as both demos draw it ---------- */
-.wt-user { align-self: flex-end; max-width: min(85%, 75ch); padding: 11px 16px; border-radius: 18px 18px 5px 18px; font-size: 15px; line-height: 1.4; color: #fff; background: linear-gradient(135deg, var(--accent, #8b6cf7), color-mix(in srgb, var(--accent, #8b6cf7) 78%, black)); box-shadow: 0 2px 14px -4px color-mix(in srgb, var(--accent, #8b6cf7) 40%, transparent); animation: wt-pop .4s var(--wt-ease) both; }
-.wt-steps { width: 100%; max-width: none; padding-left: 0; animation: wt-pop .4s var(--wt-ease) both; }
+.wt-user { margin-bottom: 14px; align-self: flex-end; max-width: min(85%, 75ch); padding: 11px 16px; border-radius: 18px 18px 5px 18px; font-size: 15px; line-height: 1.7; color: #fff; background: linear-gradient(135deg, var(--accent, #8b6cf7), color-mix(in srgb, var(--accent, #8b6cf7) 78%, black)); box-shadow: 0 2px 14px -4px color-mix(in srgb, var(--accent, #8b6cf7) 40%, transparent); animation: wt-pop .4s var(--wt-ease) both; }
+.wt-steps { width: 100%; max-width: none; padding-left: 6px; animation: wt-pop .4s var(--wt-ease) both; }
 .wt-steps__row { animation: wt-pop .4s var(--wt-ease) both; animation-delay: calc(var(--i) * 260ms); }
 .wt-native { margin: 0; animation: wt-pop .45s var(--wt-ease) both; }
 .wt-chatmock__composer { display: flex; align-items: center; gap: 8px; padding: 10px; }
 .wt-brainbtn { display: grid; place-items: center; width: 48px; height: 48px; flex: none; border: 1px solid var(--border-light, #1f1f1f); border-radius: 50%; color: var(--text, #e4e4e7); background: color-mix(in srgb, var(--surface, #14181f) 60%, transparent); transition: background .15s, border-color .15s; }
 .wt-brainbtn.is-open { border-color: var(--accent, #8b6cf7); background: color-mix(in srgb, var(--surface-2, #1a1f28) 82%, transparent); }
-.wt-pill { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; min-height: 48px; padding: 4px 4px 4px 16px; border: 1px solid var(--border-light, #1f1f1f); border-radius: 24px; background: color-mix(in srgb, var(--surface, #14181f) 60%, transparent); font-size: 13px; white-space: nowrap; transition: border-color .2s, box-shadow .2s; }
+.wt-pill { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; min-height: 48px; padding: 4px 4px 4px 16px; border: 1px solid var(--border-light, #1f1f1f); border-radius: 24px; background: color-mix(in srgb, var(--surface, #14181f) 60%, transparent); font-size: 15px; transition: border-color .2s, box-shadow .2s; }
 .wt-pill.is-focused { border-color: var(--accent, #8b6cf7); box-shadow: 0 0 0 3px var(--accent-dim, color-mix(in srgb, var(--accent, #8b6cf7) 25%, transparent)); }
-.wt-pill__text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wt-pill__line { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; min-height: 40px; }
+.wt-pill--attach { --attach-card: 96px; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 4px 4px 12px; border-radius: 22px; }
+.wt-pill--attach .chat__attach-card { animation: wt-pop .35s var(--wt-ease) both; }
+.wt-attach-size { margin-top: -4px; color: var(--muted, #a1a1aa); font-size: 11px; line-height: 1; }
+.wt-pill__text { flex: 1; min-width: 0; padding: 6px 0; line-height: 1.5; overflow-wrap: anywhere; }
 .wt-pill__placeholder { color: var(--muted, #a1a1aa); }
-.wt-pill__action { display: grid; place-items: center; width: 32px; height: 32px; flex: none; }
-.wt-mic { flex: none; color: var(--muted, #a1a1aa); }
-.wt-send { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 50%; color: var(--muted, #a1a1aa); background: var(--surface, #14181f); font-weight: 800; transition: .3s; }
-.wt-send.is-armed { color: #fff; background: var(--accent, #8b6cf7); }
 
 /* A finger as the mobius.you demos draw it: it appears at the centre of its container, glides to the
    target, presses (the disc squeezes and turns lavender while a ring expands) and fades. A "still"
@@ -119,14 +118,17 @@
 .wt-chatmock { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border, #252b36); border-radius: 16px; background: var(--bg, #0d0d0d); }
 .wt-chatmock__chat { position: relative; display: flex; flex-direction: column; min-height: 334px; min-width: 0; border-right: 1px solid var(--border, #252b36); }
 .wt-chatmock__log { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; padding: 14px; }
-.wt-chatmock__hint { margin: 0; color: var(--muted, #a1a1aa); font-size: 12.5px; text-align: center; }
 .wt-chatmock__pane { display: flex; flex-direction: column; min-width: 0; background: var(--surface, #14181f); }
 .wt-chatmock__title { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border, #252b36); font-size: 13px; animation: wt-pop .4s var(--wt-ease) both; }
 .wt-chatmock__title small { margin-left: auto; color: var(--muted, #a1a1aa); font-size: 11px; }
 .wt-chatmock__icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; color: #fff; background: #10b981; font-size: 12px; font-weight: 800; }
 .wt-chatmock__empty { margin: auto; padding: 0 18px; color: var(--muted, #a1a1aa); font-size: 12.5px; line-height: 1.5; text-align: center; }
 .wt-picker { position: absolute; left: 10px; bottom: 62px; z-index: 3; width: min(288px, calc(100% - 20px)); max-height: calc(100% - 56px); overflow: hidden; padding: 6px; border: 1px solid var(--border, #252b36); border-radius: 14px; background: var(--surface, #14181f); box-shadow: 0 14px 36px rgba(0, 0, 0, .45); animation: wt-pop .35s var(--wt-ease) both; }
-.wt-picker__attach { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid var(--border, #252b36); }
+.wt-picker__attach { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid var(--border, #252b36); border-radius: 8px; transition: background .25s; }
+.wt-picker__attach.is-aimed { background: color-mix(in srgb, var(--accent, #8b6cf7) 14%, var(--surface, #14181f)); }
+.wt-sent { margin-bottom: 14px; align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 100%; }
+.wt-sent__files { align-items: flex-end; }
+.wt-sent .wt-user { margin-bottom: 0; }
 .wt-picker__heading { padding: 10px 8px 6px; }
 .wt-picker__label { color: var(--muted, #a1a1aa); font-size: 11.5px; font-weight: 700; }
 .wt-picker__usage { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; color: var(--muted, #a1a1aa); font-size: 10.5px; line-height: 1.3; }
@@ -160,22 +162,25 @@
 /* ---------- screen 3: one chat, three examples ---------- */
 .wt-chatflow-wrap, .wt-mockwrap { position: relative; }
 .wt-chatflow { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border, #252b36); border-radius: 16px; background: var(--bg, #0d0d0d); }
-.wt-chatflow .wt-chatmock__composer { border-top: 1px solid var(--border, #252b36); }
 .wt-chatflow__chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 10px 12px 0; padding: 4px; border: 1px solid var(--border, #252b36); border-radius: 12px; background: var(--surface, #14181f); }
 .wt-chatflow__tab { padding: 8px 10px; border: 1px solid transparent; border-radius: 9px; color: var(--muted, #a1a1aa); background: none; font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; transition: color .2s, background .2s, border-color .2s; }
 .wt-chatflow__tab:hover { color: var(--text, #e4e4e7); }
 .wt-chatflow__tab.is-active { color: var(--text, #e4e4e7); border-color: color-mix(in srgb, var(--accent, #8b6cf7) 45%, var(--border, #252b36)); background: color-mix(in srgb, var(--accent, #8b6cf7) 12%, var(--surface-2, #1a1f28)); }
 .wt-chatflow__tab:focus-visible { outline: 2px solid var(--accent, #8b6cf7); outline-offset: 1px; }
-.wt-chatflow__log { position: relative; display: flex; flex-direction: column; gap: 8px; height: 236px; padding: 10px 16px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; font-size: 13px; }
+.wt-chatflow__log { position: relative; display: flex; flex-direction: column; gap: 8px; height: 240px; padding: 14px; overflow-y: hidden; overscroll-behavior: contain; scrollbar-width: none; font-size: 15px; }
 .wt-chatflow__log::-webkit-scrollbar { display: none; }
+/* Like a chat, newer lines push older ones up; they fade out under the tabs instead of being cut off. */
+.wt-chatflow__log { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px); mask-image: linear-gradient(to bottom, transparent 0, #000 14px); }
 .wt-chatflow__log > * { flex: none; }
 .wt-chatflow__log .wt-user { align-self: flex-end; }
 /* Results are the real chat components. They are read-only here, so only their placement and
    compact sizing are set, and the question card's Submit button is hidden. */
-.wt-chatflow__reply { display: grid; gap: 8px; min-width: 0; width: 100%; }
-.wt-chatflow__reply .qcard { width: 100%; margin: 0; padding: 10px 12px; gap: 6px; }
-.wt-chatflow__reply .qcard__submit, .wt-chatflow__reply .qcard__submit-error { display: none; }
-.wt-chatflow__reply .chat__text--assistant { width: 100%; max-width: none; box-sizing: border-box; padding: 0 2px; }
+.wt-chatflow__reply { display: grid; gap: 14px; min-width: 0; width: 100%; }
+.wt-chatflow__reply .qcard { width: 100%; margin: 0; padding: 8px 12px; gap: 4px; }
+.wt-chatflow__reply .qcard__submit, .wt-chatflow__reply .qcard__submit-error, .wt-chatflow__reply .qcard__attach { display: none; }
+/* The confirmation follows the card with room to breathe, as a new line of the agent's reply would. */
+.wt-chatflow__reply .qcard + .chat__text--assistant { margin-top: 22px; }
+.wt-chatflow__reply .chat__text--assistant { width: 100%; max-width: none; box-sizing: border-box; padding: 0; }
 .wt-chatflow__reply .chat__sources-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .wt-chatflow__reply .chat__source-item { flex: 0 0 auto; width: auto; }
 .wt-chatflow__reply .chat__goal-history { width: 100%; max-width: none; box-sizing: border-box; margin-top: 0; padding: 8px 10px; gap: 8px; font-size: 12.5px; }
@@ -183,6 +188,7 @@
 .wt-chatflow__reply .chat__goal-history-copy > .chat__goal-history-meta:has(+ .chat__goal-plan) { display: none; }
 .wt-chatflow__reply .chat__goal-plan { flex: 0 0 auto; max-height: none; overflow: visible; margin-top: 0; padding-top: 4px; font-size: 12.5px; }
 .wt-chatflow__reply .chat__goal-task { padding: 2px 4px; font-size: 12.5px; }
+.wt-chatflow__reply .chat__goal-task-meta { display: none; }
 .wt-chatflow__reply .chat__goal-task-marker svg { flex: none; }
 
 /* ---------- screen 4: App Store window, with Workout opening inside it ---------- */
@@ -249,7 +255,7 @@
 .wt-install__help, .wt-install__feedback { grid-column: 1 / -1; display: grid; gap: 2px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted, #a1a1aa); }
 .wt-install__help strong { color: var(--text, #e4e4e7); }
 .wt-next { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0 0; padding: 0; list-style: none; }
-.wt-next--below { margin-top: 8px; }
+.wt-next--below { margin-top: 12px; gap: 12px; }
 .wt-next li { display: grid; gap: 2px; padding: 11px 13px; border: 1px solid var(--border, #252b36); border-radius: 13px; background: var(--surface-2, #1a1f28); animation: wt-pop .5s var(--wt-ease) both; }
 .wt-next li:nth-child(2) { animation-delay: .1s; }
 .wt-next li:nth-child(3) { animation-delay: .2s; }
@@ -265,10 +271,6 @@
 .wt-setup__tick { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; color: #0b1a12; background: var(--green, #5ac799); }
 .wt-setup__form { min-height: 36px; }
 .wt-setup .wt-note, .wt-setup .wt-success { margin-top: 0; }
-.wt-setup .codex-auth__preflight { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 22px; padding: 10px 14px; }
-.wt-setup .codex-auth__preflight-head { grid-column: 1; grid-row: 1; }
-.wt-setup .codex-auth__settings-link { grid-column: 1; grid-row: 2; }
-.wt-setup .codex-auth__privacy { grid-column: 2; grid-row: 1 / span 2; margin: 0; padding: 0 0 0 22px; border-top: 0; border-left: 1px solid var(--border-light); }
 
 /* ---------- access confirmation: a small popup in the guide's own window ---------- */
 .wt-confirm { position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; padding: 20px; background: color-mix(in srgb, var(--bg, #0d0d0d) 70%, transparent); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); animation: wt-fade-in .25s ease both; }
@@ -305,9 +307,6 @@
   .wt__slide:has(.wt-chatflow-wrap) > .wt-chatflow-wrap { flex: 1 0 auto; display: flex; flex-direction: column; min-height: 420px; }
   .wt-chatflow-wrap > .wt-chatflow { flex: 1; min-height: 0; }
   .wt-chatflow__log { flex: 1 1 0; height: auto; min-height: 200px; }
-  .wt-setup .codex-auth__preflight { grid-template-columns: 1fr; }
-  .wt-setup .codex-auth__preflight-head, .wt-setup .codex-auth__settings-link, .wt-setup .codex-auth__privacy { grid-column: 1; grid-row: auto; }
-  .wt-setup .codex-auth__privacy { padding: 11px 0 0; border-left: 0; border-top: 1px solid var(--border-light); }
 }
 @media (max-width: 560px) {
   .wt-profile__body { flex-direction: column; align-items: stretch; gap: 18px; }
@@ -326,3 +325,74 @@
   .wt-reveal__inner { animation: none; transform: none; }
   .wt-mock__open, .wt-wk__row, .wt-profile, .wt-user, .wt-steps, .wt-steps__row, .wt-native, .wt-picker, .wt-app, .wt-app__bars i, .wt-app__rows li, .wt-store-card, .wt-next li, .wt-confirm { animation: none; }
 }
+
+/* The "Shape Möbius" screen: one miniature Möbius, menu and chat together, that repaints as a whole
+   when the agent edits the theme. The guide's own accent and surfaces are overridden inside it only. */
+.wt-themed { --accent: #8b6cf7; --accent-dim: color-mix(in srgb, #8b6cf7 25%, transparent); position: relative; isolation: isolate; --wt-menu-width: 200px; grid-template-columns: var(--wt-menu-width) minmax(0, 1fr); color: var(--text); }
+/* Halloween, as on the Möbius homepage: its orange accent, plum backdrop, warm borders, pumpkin mark,
+   crescent moon, mist and flying witches. Everything fades in together when the agent finishes. */
+.wt-themed.is-themed { --accent: #ed8238; --accent-hover: #b65d2d; --accent-dim: color-mix(in srgb, #ed8238 25%, transparent); --focus-ring: #f0a05d; }
+.wt-themed::before { content: ''; position: absolute; inset: 0; z-index: -2; pointer-events: none; opacity: 0; transition: opacity 1.1s ease; background: radial-gradient(circle at 82% 12%, rgba(255, 139, 52, .27), transparent 30%), radial-gradient(circle at 4% 86%, rgba(104, 49, 120, .24), transparent 36%), linear-gradient(155deg, #170d1a 0%, #0e0a12 52%, #17100c 100%); }
+.wt-themed.is-themed::before { opacity: 1; }
+.wt-themed .wt-chatmock__chat, .wt-themed .wt-chatmock__pane { background: transparent; }
+.wt-themed .wt-chatmock__chat { border-right: 0; }
+.wt-themed .chat__action, .wt-themed .wt-pill, .wt-themed .wt-menu, .wt-themed .wt-user, .wt-themed .shell__wordmark { transition: background-color .9s ease, border-color .9s ease, color .9s ease, box-shadow .9s ease; }
+/* The composer button keeps the real chat's own quick swap between send and stop. */
+.wt-themed .chat__action { transition: background-color .16s ease, color .16s ease, border-color .16s ease, transform .16s ease; }
+.wt-themed.is-themed .shell__wordmark { color: #f1d8c5; }
+.wt-themed.is-themed .wt-pill { border-color: #a35a34; border-radius: 18px; background: linear-gradient(145deg, rgba(43, 22, 34, .98), rgba(27, 17, 24, .98)); box-shadow: 0 14px 30px rgba(0, 0, 0, .36), inset 0 0 0 1px rgba(255, 163, 87, .08); }
+.wt-themed .wt-chatmock__log, .wt-themed .wt-chatmock__composer { position: relative; z-index: 1; }
+
+.wt-menu { z-index: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 8px 10px 10px; border-right: 1px solid var(--border); background: var(--bg); }
+.wt-themed.is-themed .wt-menu { border-color: #6d3c2e; background: rgba(25, 14, 22, .97); }
+.wt-menu .drawer__item { min-height: 34px; padding: 4px 12px; font-size: 14.5px; cursor: default; pointer-events: none; }
+.wt-menu__brand { display: flex; align-items: center; gap: 8px; min-height: 44px; margin-bottom: 6px; padding: 0 4px; }
+.wt-menu__brand .shell__wordmark { font-size: 18px; }
+.wt-menu__search { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; color: var(--text); }
+.wt-menu__foot { margin-top: auto; }
+.wt-menu__pumpkin { display: none; width: 28px; height: 28px; }
+.wt-themed.is-themed .wt-menu__pumpkin { display: block; }
+.wt-themed.is-themed .wt-menu .shell__logo { display: none; }
+
+.wt-themed__sky { position: absolute; inset: 0 0 0 var(--wt-menu-width); z-index: 0; overflow: hidden; pointer-events: none; opacity: 0; transition: opacity 1.1s ease; }
+.wt-themed.is-themed .wt-themed__sky { opacity: 1; }
+.wt-themed__moon { position: absolute; top: 14px; left: 9%; width: 64px; height: 64px; border-radius: 50%; background: #f6c96e; box-shadow: 0 12px 42px rgba(238, 126, 45, .24); opacity: .8; }
+.wt-themed__moon::after { content: ''; position: absolute; width: 58px; height: 58px; left: -11px; top: -5px; border-radius: inherit; background: #170d1a; }
+.wt-themed__mist { position: absolute; left: -16%; width: 132%; height: 80px; border-radius: 50%; background: rgba(137, 104, 149, .12); filter: blur(24px); }
+.wt-themed__mist--one { top: 34%; transform: rotate(-7deg); }
+.wt-themed__mist--two { top: 72%; transform: rotate(8deg); opacity: .7; }
+.wt-themed__witch { position: absolute; left: -30%; width: 96px; height: auto; filter: brightness(1.3) saturate(1.14) drop-shadow(0 10px 14px rgba(0, 0, 0, .56)); opacity: .68; }
+.wt-themed__witch--one { top: 16%; animation: wt-witch-one 12s linear infinite; }
+.wt-themed__witch--two { top: 50%; left: auto; right: -30%; width: 68px; opacity: .5; animation: wt-witch-two 15s linear 2.4s infinite; }
+.wt-themed__witch--anchor { top: auto; right: -34px; bottom: -18px; left: auto; width: 140px; opacity: .3; transform: rotate(-5deg); }
+/* The witches only fly while the theme is on; hidden, they stand still. */
+.wt-themed .wt-themed__witch { animation-play-state: paused; }
+.wt-themed.is-themed .wt-themed__witch { animation-play-state: running; }
+@keyframes wt-witch-one { 0% { transform: translate3d(0, 10px, 0) rotate(-3deg); } 48% { transform: translate3d(560px, -14px, 0) rotate(3deg); } 100% { transform: translate3d(920px, 6px, 0) rotate(-2deg); } }
+@keyframes wt-witch-two { 0% { transform: translate3d(0, -6px, 0) scaleX(-1); } 52% { transform: translate3d(-520px, 16px, 0) scaleX(-1); } 100% { transform: translate3d(-900px, -8px, 0) scaleX(-1); } }
+@media (max-width: 640px) { .wt-themed { grid-template-columns: 1fr; } .wt-menu, .wt-themed__sky { display: none; } }
+@media (prefers-reduced-motion: reduce) { .wt-themed, .wt-themed *, .wt-themed::before { transition: none; } .wt-themed__witch--one, .wt-themed__witch--two { animation: none; } .wt-themed__witch--one { left: 8%; } .wt-themed__witch--two { right: 8%; } }
+
+/* The three chat previews take all the height the window leaves, with the same bottom padding as the
+   sides, and keep it from start to finish: the chat inside them moves up and fades instead of growing. */
+@media (min-width: 701px) {
+  .wt__slide:has(> .wt-chatmock, > .wt-chatflow-wrap) { display: flex; flex-direction: column; }
+  /* Fill what the window leaves, but never less than the preview needs: a short window scrolls the slide. */
+  .wt__slide > .wt-chatmock { flex: 1 1 0; min-height: 334px; }
+  .wt__slide > .wt-chatflow-wrap { flex: 1 1 0; min-height: 360px; }
+  .wt-chatmock__chat { min-height: 0; }
+  .wt-chatmock__log { min-height: 0; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px); mask-image: linear-gradient(to bottom, transparent 0, #000 14px); }
+  .wt-chatflow-wrap { display: flex; flex-direction: column; }
+  .wt-chatflow-wrap > .wt-chatflow { flex: 1 1 0; min-height: 0; }
+  .wt-chatflow__log { flex: 1 1 0; height: auto; min-height: 0; }
+}
+
+/* The empty chat, as the real one opens: the Möbius mark above "What's on your mind?". */
+.wt-landing { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.wt-landing .chat__empty-glyph { margin: 0; }
+.wt-landing .chat__empty-title { margin: 0; font-size: 22px; }
+
+/* For an owner who already has a handle: a quiet welcome-back note under their profile. */
+.wt-returning { display: grid; gap: 3px; margin-top: 14px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent, #8b6cf7) 32%, var(--border, #252b36)); border-left-width: 3px; border-radius: 12px; background: color-mix(in srgb, var(--accent, #8b6cf7) 9%, transparent); font-size: 14px; line-height: 1.5; }
+.wt-returning strong { font-size: 14.5px; }
+.wt-returning span { color: var(--muted, #a1a1aa); }

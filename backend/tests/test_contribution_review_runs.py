@@ -223,7 +223,8 @@ def test_removed_permission_stops_merge():
 
 
 def test_live_target_branch_not_pull_comparison_base_binds_selection():
-  pull = {**PULL, "base": {"ref": "main", "sha": "c" * 40}}
+  pull = {**PULL, "base": {"ref": "main", "sha": "c" * 40},
+    "head": {"sha": SHA, "repo": {"id": 1, "full_name": "example/project"}, "ref": "topic"}}
   def gh(cwd, command, endpoint):
     value = REPO if endpoint == "repos/example/project" else REF if "/git/ref/" in endpoint else pull
     return SimpleNamespace(stdout=json.dumps(value))

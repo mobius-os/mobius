@@ -155,7 +155,7 @@ def _resolve_grant(token: str, *, expected_app_id: int | None = None) -> PublicS
 
 def _same_live_grant(token: str, grant: PublicStorageGrant) -> PublicStorageGrant:
   """Re-resolve under the app storage lock: the anonymous lane's uninstall /
-  freed-id-reuse guard, matching the owner lane's `_recheck_app_identity`."""
+  freed-id-reuse guard, matching the owner lane's `recheck_app_identity`."""
   current = _resolve_grant(token, expected_app_id=grant.app_id)
   if current.kind != grant.kind or current.binding != grant.binding:
     raise HTTPException(401, "Public storage session is no longer valid.")

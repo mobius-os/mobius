@@ -859,6 +859,44 @@ app-to-shell messages use `'*'`. For reply protocols, require
 are routing guards, not authorization; privileged operations still require the
 app's server-verified bearer.
 
+### Unread badge on the sidebar row
+
+An app with its own notion of unread items (messages, mentions, tasks waiting
+on the owner) can show that number as a pill on its sidebar row. The app owns
+the count: report the current total whenever it changes, and `0` to clear it.
+The pill replaces the generic new-activity dot while it is shown.
+
+```jsx
+const reply = await fetch(`/api/apps/${appId}/badge`, {
+  method: 'PUT',
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ count: unreadTotal, revision }),
+})
+// -> { count, revision, applied }: the stored badge and whether this report won
+```
+
+Report from wherever the count actually changes. If items can arrive while the
+app is closed, report from the app's service or job (with its `APP_TOKEN`), not
+only from the open frame. An app token can only set its own badge.
+
+**Ordering.** When reports can run concurrently, send `revision`: your own
+state revision for the data the count comes from, captured together with the
+count (for example, read under the same lock that writes it). The platform
+ignores a report whose revision is not newer than the stored one and answers
+`applied: false`, so a slow, stale report cannot overwrite a fresh one. Do not
+use clock time as a revision: clocks have coarse resolution and can move
+backwards. Wiping the app's data clears its badge, so revisions may restart
+from zero afterwards. If your revisions can otherwise go backwards (you restore
+your own data from a backup), recognise it when a report comes back
+`applied: false` with a stored `revision` newer than your current one, and send
+one report without `revision`: it always applies and resets the ordering.
+
+**Delivery.** Treat the badge as a projection that you reconcile: remember the
+last revision the platform acknowledged, and resend until it catches up. A
+failed report then repairs itself on a later request instead of leaving a
+stale count, and an installation that already has unread items reports them
+the first time it runs.
+
 ### Shell shortcuts
 
 Shell shortcuts (Cmd/Ctrl+K search, Cmd/Ctrl+N new chat, Cmd/Ctrl+, back, and

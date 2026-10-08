@@ -534,6 +534,26 @@
   text-overflow: ellipsis;
 }
 
+.drawer__item-text--unread {
+  font-weight: 600;
+}
+
+/* An app's own unread count, e.g. Social's unread messages. Matches the
+   notification bell's count so the two read as one system. */
+.drawer__badge {
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 19px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .drawer__app-icon {
   width: 28px;
   height: 28px;
