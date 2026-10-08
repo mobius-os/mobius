@@ -2986,8 +2986,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Allowance changes leave sign-in and available models unchanged.
       void settingsQueries.providerUsage.reset(queryClient, ev.provider)
     } else if (ev.type === 'app_activity') {
-      // The durable marker was committed with an app-attributed notification.
-      // A refetch surfaces the dot; if the app is already visible, the effect
+      // A durable activity marker (an app-attributed notification) or the
+      // app's reported unread badge changed. A refetch surfaces the dot or
+      // pill; if the app is already visible, the effect
       // above immediately acknowledges it instead of leaving a stale nudge.
       void invalidateShellListCache('apps').then(refreshApps)
     } else if (ev.type === 'chat_deleted') {

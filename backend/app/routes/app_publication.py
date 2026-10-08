@@ -53,7 +53,7 @@ from app.publication import (
   replace_publication_record,
 )
 from app.resource_access import live_app_or_404
-from app.routes.storage import _recheck_app_identity
+from app.resource_access import recheck_app_identity
 from app.storage_io import (
   app_dir_usage, atomic_write, read_capped_body,
   rmtree_strict as _rmtree_strict,
@@ -270,7 +270,7 @@ async def artifact_data_keys(
   expected_nonce = app.token_nonce
   settings = get_settings()
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     try:
       keys = list_artifact_keys(
         artifact_dir_path(settings, app_id, artifact_id),
@@ -312,7 +312,7 @@ async def artifact_data_value(
 
   settings = get_settings()
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     try:
       artifact_root, file_path = artifact_file_path(
         settings, app_id, artifact_id, key,
@@ -559,7 +559,7 @@ async def publish_app_site(
   expected_nonce = app.token_nonce
   settings = get_settings()
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     _validate_publish_paths(settings, app, project_id)
     site_dir, token_file = _publish_paths(settings, app, project_id)
     try:
@@ -693,7 +693,7 @@ async def unpublish_app_site(
   project_id = project_id or None
   settings = get_settings()
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     # The registry lives OUTSIDE app-writable storage and is the authority for
     # what is public, so enumerate + revoke registry-owned tokens first and let
     # nothing app-controlled gate it. The legacy publish-token.txt hint lives in
