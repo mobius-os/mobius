@@ -908,9 +908,10 @@ def test_lagging_predecessor_merge_blocked_by_pending_repair(setup, monkeypatch,
 
 
 @pytest.mark.parametrize("state", ["pushing", "push_unknown"])
-def test_pending_later_repair_with_new_base_keeps_detail_list_and_observation_readable(setup, monkeypatch, state):
+@pytest.mark.parametrize("confirmed_count", [1, 3])
+def test_pending_later_repair_with_new_base_keeps_detail_list_and_observation_readable(setup, monkeypatch, state, confirmed_count):
   db, row, principal = takeover(setup, monkeypatch)
-  head = completed_repairs(db, row, 1)
+  head = completed_repairs(db, row, confirmed_count)
   prior = row.outcomes_json[domain.key(ITEM)]
   domain.save_outcome(db, row, domain.key(ITEM), {**prior, "state": "needs_you",
     "repair_attempts": [*prior["repair_attempts"], {"state": state, "from_sha": head,
@@ -1098,3 +1099,53 @@ def test_pending_receipt_does_not_hide_corrupted_confirmed_successor(setup, monk
   with pytest.raises(HTTPException) as error:
     domain.effective_target(row, row.targets_json[0])
   assert error.value.status_code == 409
+
+
+def test_merge_keeps_new_server_receipts_admitted_during_claim_commit(setup, monkeypatch):
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = setup
+  real_claim = agent_work_claims.claim_work
+  saved_steps = [{"delegation_id": "newly-registered", "head_sha": SHA, "base_sha": BASE}]
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    with SessionLocal() as writer:
+      current = writer.get(models.ContributionReviewRun, row.id)
+      domain.save_outcome(writer, current, domain.key(ITEM), {"state": "reviewing",
+        "head_sha": SHA, "reviewer_steps": saved_steps})
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
+  result = report(setup)
+  assert result["run"]["items"][0]["reviewer_steps"] == saved_steps
+  assert result["run"]["items"][0]["merge_attempted"] is True
+
+
+@pytest.mark.parametrize("state", ["pushing", "push_unknown"])
+def test_stop_observation_and_parent_resume_do_not_clear_pending_repair_admission(setup, monkeypatch, state):
+  db, row, principal = takeover(setup, monkeypatch)
+  attempt = {"state": state, "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}
+  domain.save_outcome(db, row, domain.key(ITEM), {"state": "needs_you", "repair_attempts": [attempt],
+    "independent_reviews": [{"id": "clear", "head_sha": SHA, "base_sha": BASE,
+      "state": "all_clear", "tests_passed": True}]})
+  db.get(models.ChatRun, principal.run_id).status = "stopped"
+  db.commit()
+  def lagging_pull(_gh, _cwd, target):
+    if target["head_sha"] != SHA:
+      raise HTTPException(409, "PR projection still shows the predecessor")
+    return REPO, PULL
+  monkeypatch.setattr(domain, "current_pull", lagging_pull)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("PUBLIC_MERGE"))
+  observed = asyncio.run(routes.observe_review(1, row.id, db, Principal(owner=principal.owner, app_id=None)))
+  assert observed["run"]["execution_state"] == "stopped"
+  assert observed["run"]["items"][0]["repair_attempts"] == [attempt]
+  db.add(models.ChatRun(id="resumed-parent", chat_id=row.chat_id, status="running"))
+  db.commit()
+  principal.run_id = "resumed-parent"
+  with pytest.raises(HTTPException) as error:
+    report(setup, tests_passed=True, reviewed_base_sha=BASE, independent_receipt_id="clear")
+  assert error.value.status_code == 409
+  db.rollback()
+  db.refresh(row)
+  assert row.outcomes_json[domain.key(ITEM)]["repair_attempts"] == [attempt]
+  assert not row.outcomes_json[domain.key(ITEM)].get("merge_attempted")

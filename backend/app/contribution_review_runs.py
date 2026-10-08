@@ -324,7 +324,14 @@ def arm_merge(db, row, target, outcome, principal):
     db.rollback()
     return result
   require_public_transition_clear(db, row, target)
-  save_outcome(db, row, item_key, {**outcome, "state": "merging", "merge_attempted": True})
+  # Claim acquisition may have admitted new reviewer/other-action receipts.
+  # Carry forward those current audit lists, not the preflight's older copy.
+  review_fields = ("summary", "scope", "tests", "tests_passed", "reviewed_base_sha",
+    "independent_receipt_id", "head_sha", "review_chat_id", "review_run_id")
+  armed = {**row.outcomes_json.get(item_key, {}),
+    **{k: outcome[k] for k in review_fields if k in outcome},
+    "state": "merging", "merge_attempted": True}
+  save_outcome(db, row, item_key, armed)
   return None
 
 
