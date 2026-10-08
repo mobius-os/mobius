@@ -698,6 +698,7 @@ async def mark_draft_ready(app_id: int | None, run_id: str, body: DraftReady,
             "ready_attempt": {**attempt, "state": "ready"}})
         return {"run": _run_view(db, row)}
       return {"run": _run_view(db, row), "blocked": "The earlier readiness attempt is not confirmed; it was not repeated."}
+    reviews.require_public_transition_clear(db, row, target)
     if body.tests_passed is not True or set(body.scope) != SCOPE or not body.tests.strip():
       raise HTTPException(422, "Fresh full-rubric review and passing tests are required before draft readiness.")
     reviews.require_independent_clear(row, target, body)

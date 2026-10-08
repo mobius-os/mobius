@@ -364,6 +364,7 @@ def arm_ready(db, row, target, receipt, principal):
     summary=f"Mark reviewed draft {key(target)} ready at {target['head_sha'][:12]}.")
   if claim["state"] in {"held_by_peer", "completed"}:
     raise HTTPException(409, "This draft readiness already has an owning conversation. Follow its saved result.")
+  fence_public_transition(db, row)
   fenced = db.execute(update(models.AgentWorkClaim).where(
     models.AgentWorkClaim.id == claim["id"],
     models.AgentWorkClaim.revision == claim["revision"],
@@ -382,7 +383,7 @@ def arm_ready(db, row, target, receipt, principal):
   if prior is not None:
     db.rollback()
     raise HTTPException(409, "An earlier draft readiness attempt is saved. Reconcile it read-only; do not repeat it.")
-  db.refresh(row)
+  require_public_transition_clear(db, row, target)
   previous = (row.outcomes_json or {}).get(item_key, {})
   save_outcome(db, row, item_key, {**previous, "ready_attempt": receipt})
 

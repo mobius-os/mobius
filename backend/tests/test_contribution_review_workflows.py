@@ -1412,3 +1412,122 @@ def test_pending_receipt_does_not_hide_corrupted_confirmed_successor(setup, monk
   with pytest.raises(HTTPException) as error:
     domain.effective_target(row, row.targets_json[0])
   assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("state", ["pushing", "push_unknown"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_draft_ready_cannot_cross_pending_repair_with_lagging_head(setup, monkeypatch, state, overlap):
+  db, row, principal = ready_takeover(setup, monkeypatch)
+  grant = overlapping_grant(db, row) if overlap else row
+  previous = grant.outcomes_json.get(domain.key(ITEM), {})
+  domain.save_outcome(db, grant, domain.key(ITEM), {**previous, "state": "needs_you",
+    "repair_attempts": [{"state": state, "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}]})
+  monkeypatch.setattr(domain, "mark_ready", lambda *a: pytest.fail("PUBLIC_READY"))
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.mark_draft_ready(1, row.id, ready_body(), db, principal))
+  assert error.value.status_code == 409
+  assert not row.outcomes_json[domain.key(ITEM)].get("ready_attempt")
+
+
+@pytest.mark.parametrize("state", ["merge_unknown", "queued"])
+def test_draft_ready_cannot_cross_overlapping_pending_merge(setup, monkeypatch, state):
+  db, row, principal = ready_takeover(setup, monkeypatch)
+  peer = overlapping_grant(db, row)
+  domain.save_outcome(db, peer, domain.key(ITEM), {"state": state,
+    "head_sha": SHA, "merge_attempted": True})
+  monkeypatch.setattr(domain, "mark_ready", lambda *a: pytest.fail("PUBLIC_READY"))
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.mark_draft_ready(1, row.id, ready_body(), db, principal))
+  assert error.value.status_code == 409
+  assert not row.outcomes_json[domain.key(ITEM)].get("ready_attempt")
+
+
+@pytest.mark.parametrize("other_action", ["merge", "repair"])
+@pytest.mark.parametrize("same_item", [False, True])
+def test_readiness_and_incompatible_action_share_database_admission_fence(setup, monkeypatch, other_action, same_item):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Barrier
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = ready_takeover(setup, monkeypatch)
+  peer = overlapping_grant(db, row, number=None if same_item else 8)
+  target, peer_target = dict(row.targets_json[0]), dict(peer.targets_json[0])
+  real_claim = agent_work_claims.claim_work
+  barrier = Barrier(2)
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    barrier.wait(timeout=10)
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  def arm(action):
+    with SessionLocal() as session:
+      current = session.get(models.ContributionReviewRun, row.id if action == "ready" else peer.id)
+      try:
+        if action == "ready":
+          result = domain.arm_ready(session, current, target, {"id": "ready", "state": "attempting",
+            "head_sha": SHA, "base_sha": BASE}, principal)
+        elif action == "repair":
+          result = domain.arm_repair(session, current, peer_target, {}, {"id": "repair", "state": "pushing",
+            "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}, principal)
+        else:
+          result = domain.arm_merge(session, current, peer_target, {"head_sha": SHA}, principal)
+        assert result is None
+        return "admitted"
+      except HTTPException as exc:
+        session.rollback()
+        assert exc.status_code == 409
+        return "blocked"
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    results = list(pool.map(arm, ["ready", other_action]))
+  assert sorted(results) == ["admitted", "blocked"]
+  with SessionLocal() as restarted:
+    assert sum(bool(item.get("ready_attempt") or item.get("merge_attempted") or item.get("repair_attempts"))
+      for grant in restarted.query(models.ContributionReviewRun).all()
+      for item in grant.outcomes_json.values()) == 1
+
+
+@pytest.mark.parametrize("pending", ["merge", "repair"])
+def test_readiness_revalidates_pending_public_actions_after_claim_commit(setup, monkeypatch, pending):
+  from app import agent_work_claims
+  from app.database import SessionLocal
+  db, row, principal = ready_takeover(setup, monkeypatch)
+  peer = overlapping_grant(db, row)
+  target = dict(row.targets_json[0])
+  real_claim = agent_work_claims.claim_work
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    with SessionLocal() as writer:
+      saved = writer.get(models.ContributionReviewRun, peer.id)
+      outcome = ({"state": "queued", "merge_attempted": True, "head_sha": SHA}
+        if pending == "merge" else {"state": "needs_you", "repair_attempts": [
+          {"state": "push_unknown", "from_sha": SHA, "head_sha": NEW, "base_sha": BASE}]})
+      domain.save_outcome(writer, saved, domain.key(ITEM), outcome)
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  with pytest.raises(HTTPException) as error:
+    domain.arm_ready(db, row, target, {"id": "ready", "state": "attempting",
+      "head_sha": SHA, "base_sha": BASE}, principal)
+  assert error.value.status_code == 409
+  db.rollback()
+  db.refresh(row)
+  assert not row.outcomes_json[domain.key(ITEM)].get("ready_attempt")
+
+
+@pytest.mark.parametrize("action", ["merge", "repair"])
+def test_pending_readiness_in_overlapping_grant_blocks_other_public_actions(setup, monkeypatch, action):
+  db, row, principal = configure_repair(setup, monkeypatch)
+  peer = overlapping_grant(db, row)
+  domain.save_outcome(db, peer, domain.key(ITEM), {"state": "reviewing", "ready_attempt": {
+    "state": "unknown", "head_sha": SHA, "base_sha": BASE}})
+  target = dict(row.targets_json[0])
+  with pytest.raises(HTTPException) as error:
+    if action == "merge":
+      domain.arm_merge(db, row, target, {"head_sha": SHA}, principal)
+    else:
+      domain.arm_repair(db, row, target, {}, {"state": "pushing", "from_sha": SHA,
+        "head_sha": NEW, "base_sha": BASE}, principal)
+  assert error.value.status_code == 409
+  db.rollback()
+  db.refresh(row)
+  assert not row.outcomes_json[domain.key(ITEM)].get("repair_attempts")
+  assert not row.outcomes_json[domain.key(ITEM)].get("merge_attempted")
