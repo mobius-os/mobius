@@ -1354,3 +1354,37 @@ def test_nested_question_commit_invalidates_idle_goal_owner_and_direct_parent(cl
   assert {event["chat_id"] for event in emitted if event.get("source") == "goal"} == {
     "idle-goal-owner", row.parent_chat_id}
   assert db.get(models.ChatRun, "ask-nested-invalidation").status == "running"
+
+
+def test_batched_listing_preserves_questions_and_constant_read_cost(client, owner_token, db):
+  from sqlalchemy import event
+
+  rows = [_asked(client, owner_token, db, suffix=f"batch-question-{index}")[0]
+          for index in range(3)]
+  # Seed lifecycle receipts before measuring the ordinary polling path.
+  delegations.serialize_delegation_list(db, rows)
+
+  def read(selected):
+    db.expire_all()
+    selected = [db.get(models.Delegation, row.id) for row in selected]
+    statements = []
+
+    def capture(_conn, _cursor, statement, *_args):
+      if statement.lstrip().upper().startswith("SELECT"):
+        statements.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", capture)
+    try:
+      result = delegations.serialize_delegation_list(db, selected)
+    finally:
+      event.remove(db.bind, "before_cursor_execute", capture)
+    return result, len(statements)
+
+  one, one_reads = read(rows[:1])
+  many, many_reads = read(rows)
+  assert one_reads == many_reads
+  assert len(one) == 1 and len(many) == 3
+  for item, row in zip(many, rows):
+    assert item["status"] == "needs_input"
+    assert item["question"]["question"] == "Which database?"
+    assert item == delegations.serialize_delegation(db, row, include_result=False)
