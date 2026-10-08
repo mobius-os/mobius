@@ -72,7 +72,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models
+from app import activity, models, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -298,6 +298,10 @@ async def lifespan(app):
   )
   database_boot = await run_startup_plan(startup_context)
   _set_database_boot_state(database_boot)
+  if database_boot.serviceable:
+    # A database that failed its boot check is left untouched for Recovery.
+    from app.database import open_wal_anchor
+    open_wal_anchor()
   from app.runtime_supervisors import RuntimeSupervisors
   supervisors = RuntimeSupervisors(
     settings=settings,
@@ -366,6 +370,10 @@ async def lifespan(app):
       stop_writer()
     except Exception as exc:
       _log.error("chat writer stop failed: %s", exc, exc_info=True)
+    # Last database user out: closing the anchor lets SQLite checkpoint the
+    # log on the way down.
+    from app.database import close_wal_anchor
+    close_wal_anchor()
 
 settings = get_settings()
 
@@ -390,6 +398,9 @@ app = FastAPI(
   version="0.1.0",
   lifespan=lifespan,
 )
+
+# Opt-in, off unless <data_dir>/tracing.json enables it; see app.tracing.
+tracing.configure(app, engine)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

@@ -912,10 +912,8 @@ def limit_resume_successor_delegation(
   return delegation
 
 
-def _record_lifecycle(
-  db: Session, row: models.Delegation, status: str,
-) -> None:
-  from app.agent_lifecycle import normalize_chat_event, record_event
+def _lifecycle_values(row: models.Delegation, status: str) -> dict | None:
+  from app.agent_lifecycle import normalize_chat_event
 
   terminal = status in TERMINAL_DELEGATION_STATUSES
   event = {
@@ -936,7 +934,7 @@ def _record_lifecycle(
     "source": "delegation",
     "source_event_id": f"delegation:{row.id}:{'terminal:' + status if terminal else 'started'}",
   }
-  values = normalize_chat_event(
+  return normalize_chat_event(
     chat_id=row.parent_chat_id,
     # Source-attached work belongs to the chat but deliberately creates no
     # source ChatRun. Its stable source_work_id is the lifecycle activation;
@@ -944,10 +942,32 @@ def _record_lifecycle(
     chat_run_id=(None if row.source_work_id is not None else row.parent_root_run_id),
     event=event,
   )
-  if values is not None and not db.query(models.AgentLifecycleEvent.id).filter(
-    models.AgentLifecycleEvent.event_key == values["event_key"],
-  ).first():
-    record_event(db, values)
+
+
+def _record_missing_lifecycles(db: Session, values: list[dict]) -> None:
+  """Append the lifecycle facts not yet recorded, checking them in one read."""
+  if not values:
+    return
+  from app.agent_lifecycle import record_event
+
+  recorded = {
+    key for (key,) in db.query(models.AgentLifecycleEvent.event_key).filter(
+      models.AgentLifecycleEvent.event_key.in_(
+        {item["event_key"] for item in values}
+      ),
+    )
+  }
+  for item in values:
+    if item["event_key"] not in recorded:
+      record_event(db, item)
+      recorded.add(item["event_key"])
+
+
+def _record_lifecycle(
+  db: Session, row: models.Delegation, status: str,
+) -> None:
+  values = _lifecycle_values(row, status)
+  _record_missing_lifecycles(db, [values] if values is not None else [])
 
 
 def serialize_delegation(
@@ -962,6 +982,55 @@ def serialize_delegation(
     .filter(models.Chat.id == row.parent_chat_id)
     .scalar()
   )
+  return _delegation_payload(row, status, run, result, parent_chat_title)
+
+
+def serialize_delegation_list(
+  db: Session, rows: list[models.Delegation],
+) -> list[dict]:
+  """Serialize a page of helpers without results in a fixed number of reads.
+
+  Same projection as `serialize_delegation(include_result=False)`, but child
+  runs, parent titles, and lifecycle repair are each one batched read rather
+  than three queries per row (the Subagents app polls this list).
+  """
+  if not rows:
+    return []
+  runs = db.query(models.ChatRun).join(
+    models.Delegation, models.ChatRun.id == _latest_child_run_id(),
+  ).filter(
+    models.Delegation.id.in_([row.id for row in rows]),
+  ).all()
+  run_by_chat = {run.chat_id: run for run in runs}
+  titles = dict(
+    db.query(models.Chat.id, models.Chat.title).filter(
+      models.Chat.id.in_({row.parent_chat_id for row in rows}),
+    ).all()
+  )
+  payloads = []
+  lifecycle = []
+  for row in rows:
+    status, run, result = _project_delegation_status(
+      row, run_by_chat.get(row.child_chat_id), "",
+    )
+    payloads.append(_delegation_payload(
+      row, status, run, result, titles.get(row.parent_chat_id),
+    ))
+    values = _lifecycle_values(row, status)
+    if values is not None:
+      lifecycle.append(values)
+  # Payloads are built first: recording commits, which would expire every row.
+  _record_missing_lifecycles(db, lifecycle)
+  return payloads
+
+
+def _delegation_payload(
+  row: models.Delegation,
+  status: str,
+  run: models.ChatRun | None,
+  result: str,
+  parent_chat_title: str | None,
+) -> dict:
   return {
     "id": row.id,
     "app_id": row.app_id,

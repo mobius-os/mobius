@@ -118,6 +118,7 @@ from app.chat_writer import (
   wait_ack as _wait_ack,
 )
 from app.config import get_settings
+from app import tracing
 from app.events import (
   blocks_have_renderable_content,
   build_assistant_message,
@@ -657,6 +658,10 @@ async def _record_run_metrics(
   # still measured facts; only a wholly empty result is a true no-op.
   if usage is None and cost_usd is None and provider_session_id is None:
     return
+  tracing.annotate(None, {
+    f"mobius.usage.{key}": value for key, value in (usage or {}).items()
+    if isinstance(value, (int, float)) and not isinstance(value, bool)
+  })
   try:
     await _await_ack(get_writer().submit(RecordRunMetrics(
       chat_id=chat_id,
@@ -5259,18 +5264,25 @@ async def _run_chat_impl(
   from app.database import SessionLocal
   db = SessionLocal()
   try:
-    return await _run_chat_impl_with_db(
-      messages=messages,
-      chat_id=chat_id,
-      session_id=session_id,
-      provider_id=provider_id,
-      run_gen=run_gen,
-      attachments=attachments,
-      timezone=timezone,
-      viewport=viewport,
-      run_token=run_token,
-      db=db,
-    )
+    with tracing.span("agent.turn", {
+      "mobius.chat_id": chat_id,
+      "mobius.provider": provider_id,
+      "mobius.resumed_session": bool(session_id),
+    }) as turn_span:
+      disposition = await _run_chat_impl_with_db(
+        messages=messages,
+        chat_id=chat_id,
+        session_id=session_id,
+        provider_id=provider_id,
+        run_gen=run_gen,
+        attachments=attachments,
+        timezone=timezone,
+        viewport=viewport,
+        run_token=run_token,
+        db=db,
+      )
+      tracing.annotate(turn_span, {"mobius.disposition": str(disposition)})
+      return disposition
   finally:
     # Several setup paths can raise before reaching their explicit terminal
     # cleanup.  A single outer owner guarantees the request's checkout is

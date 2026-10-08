@@ -74,6 +74,7 @@ import { cidOf } from '../messageIdentity.js'
  *   cancelByCid: (cid: string) => void,
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
+ *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
  *   clear: () => void,
@@ -439,6 +440,19 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [acknowledgeServerIntent, applySteerReservations])
 
+  // A runtime-only empty queue cannot end a local intent's lifetime. A
+  // version-matched authoritative transcript can: its exact user identities
+  // own the handoff, including when the initial outbox read settles later.
+  // Never use the mounted optimistic suffix as acceptance evidence.
+  const hydrateFromTranscript = useCallback((serverList, authoritativeMessages) => {
+    hydrate(serverList, {
+      completedCids: (authoritativeMessages || [])
+        .filter(message => message.role === 'user' && !message.optimistic)
+        .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])])
+        .filter(Boolean),
+    })
+  }, [hydrate])
+
   const clear = useCallback(() => {
     if (initialReadPendingRef.current) {
       for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
@@ -585,6 +599,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     cancelByCid,
     restoreByCid,
     hydrate,
+    hydrateFromTranscript,
     clear,
     markInFlight,
     clearInFlight,

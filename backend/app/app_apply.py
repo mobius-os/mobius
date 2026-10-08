@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app import (
   app_git, app_python_env, chat_app_artifacts, icon_assets, managed_paths, models,
-  service_preload, timeutil,
+  service_preload, timeutil, tracing,
 )
 from app.app_capabilities import (
   contract_from_app_state,
@@ -647,6 +647,28 @@ def _live_runtime_state(app: models.App) -> tuple:
 
 
 async def apply_source_revision(
+  db: Session,
+  *,
+  source_dir: str,
+  app: models.App | None,
+  chat_id: str | None,
+  accept_local_package: bool = False,
+) -> ApplyResult:
+  """Compile, accept, and publish one source revision (traced as app.apply)."""
+  with tracing.span("app.apply", {
+    "mobius.app_id": app.id if app is not None else None,
+    "mobius.chat_id": chat_id,
+  }):
+    return await _apply_source_revision(
+      db,
+      source_dir=source_dir,
+      app=app,
+      chat_id=chat_id,
+      accept_local_package=accept_local_package,
+    )
+
+
+async def _apply_source_revision(
   db: Session,
   *,
   source_dir: str,
