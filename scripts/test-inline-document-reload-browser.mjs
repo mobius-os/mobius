@@ -164,7 +164,7 @@ function Host(){
    const srcVersion=attributedFrameVersion(framesRef.current,e.source)
    if(srcVersion==null||e.origin!==location.origin)return
    let msg=e.data
-   if(scenario==='failed-unacked'&&msg.type==='moebius:app-block-state')msg={...msg,ackNonce:null}
+   if(scenario==='failed-unacked'&&window.__loadsByVersion.v1===1&&msg.type==='moebius:app-block-state')msg={...msg,ackNonce:null}
    if(scenario==='wrong-ack'&&window.__loadsByVersion.v1===2&&!window.__allowAck&&msg.type==='moebius:app-block-state')msg={...msg,checkpointAck:'wrong'}
    if(msg.type==='moebius:app-block-state')window.__states.push(msg)
    ${receiveState}
@@ -267,6 +267,7 @@ window.runWorkspaceChecks=async()=>{
    check('prepared/unsupported/invalid observation cannot release ownership',inlineSessionRetained(window.__state,null)&&window.__state.actions[0].disabled)
    if(genuine&&scenario!=='unsupported'){
     window.__settle();await wait(()=>!window.__state?.retain&&!window.__state?.checkpoint&&!window.__state?.recoveryPending)
+    check('canonical settlement releases the whole frame owner',!inlineSessionRetained(window.__state,window.__event))
     const links=[...new Set(window.__state.actions.flatMap(action=>action.links.map(link=>link.url)))]
     const expected=window.__canonical.map(rec=>rec.url)
     check('canonical exact settlement releases every right link',JSON.stringify(links)===JSON.stringify(expected))
