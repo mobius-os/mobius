@@ -6,7 +6,9 @@
 const PULL_STATES = new Set(['proposed', 'open', 'draft', 'merged', 'closed'])
 const TONES = new Set(['success', 'attention', 'danger', 'accent', 'neutral'])
 const SESSION_TONES = new Set(['neutral', 'success', 'attention', 'danger'])
-const INTENT = /^[a-z][a-z0-9-]*:[^\s]{1,256}$/
+// The complete JSON block bounds size; an app owns its opaque destination
+// payload, which may name a batch rather than one short record identifier.
+const INTENT = /^[a-z][a-z0-9-]*:[^\s]+$/
 const shortText = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : ''
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null
 

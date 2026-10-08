@@ -85,6 +85,37 @@ test('inline sessions are opt-in and preserve link-only and legacy blocks', () =
   assert.equal(appBlockFromToken(token({ app: 'contribute', intent: 'x:1', title: 'x', inline: false, interaction: 'inline' })).interaction, null)
 })
 
+test('all twelve batch records survive opaque app intents without losing their shared action', () => {
+  for (const width of [36, 128]) {
+    const ids = Array.from({ length: 12 }, (_, i) => width === 36
+      ? `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`
+      : `${i}`.padEnd(width, 'a'))
+    const intent = `chat-send-batch:${ids.join(',')}`
+    for (const destination of [`review:${ids[0]}`, intent]) {
+      const block = appBlockFromToken(token({ app: 'contribute', intent: destination, title: 'Prepared contributions',
+        action: { label: 'Contribute all', intent },
+        items: ids.map(id => ({ title: id, intent: `review:${id}`,
+          action: { label: 'Contribute', intent: `chat-send:${id}` } })) }))
+      assert.equal(block.intent, destination)
+      assert.deepEqual(block.action, { label: 'Contribute all', intent })
+      assert.equal(block.items.length, 12)
+      assert.equal(new URL(block.href, 'https://example.test').searchParams.get('intent'), destination)
+      assert.ok(block.items.every(item => item.action))
+    }
+  }
+})
+
+test('the complete app block bounds opaque intents while malformed destinations remain rejected', () => {
+  assert.equal(appBlockFromToken(token({ app: 'example', intent: `open:${'x'.repeat(16384)}`, title: 'Too large' })), null)
+  for (const intent of ['open:', 'open:two words', 'open:line\nbreak', ':item']) {
+    assert.equal(appBlockFromToken(token({ app: 'example', intent, title: 'Invalid' })), null)
+    const block = appBlockFromToken(token({ app: 'example', intent: 'open:item', title: 'Valid',
+      action: { label: 'Open', intent }, items: [{ title: 'Invalid', intent }] }))
+    assert.equal(block.action, null)
+    assert.deepEqual(block.items, [])
+  }
+})
+
 test('inline state is session and key scoped, bounded, plain, and uncredentialed HTTPS only', () => {
   const keys = new Set(['x:1'])
   assert.equal(inlineBlockState({ type: 'moebius:app-block-state', sessionId: 'other', actions: [] }, 'live', keys), null)

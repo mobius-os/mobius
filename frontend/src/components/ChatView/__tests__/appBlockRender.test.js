@@ -97,6 +97,17 @@ test('inline session waits for its exact read instead of flashing a stale saved 
   assert.doesNotMatch(html, /md-app-block__view|md-app-block__toggle|md-app-block__session-host/)
 })
 
+test('a twelve-record batch keeps its shared control instead of silently falling back to individual actions', () => {
+  const ids = Array.from({ length: 12 }, (_, i) => `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`)
+  const html = render({ app: 'contribute', intent: `review:${ids[0]}`, title: 'Prepared contributions',
+    action: { label: 'Contribute all', intent: `chat-send-batch:${ids.join(',')}` },
+    items: ids.map(id => ({ title: id, intent: `review:${id}`,
+      action: { label: 'Contribute', intent: `chat-send:${id}` }, pull: { repo: 'owner/repo', state: 'proposed' } })),
+  }, [{ id: 80, slug: 'contribute', name: 'Contribute' }])
+  assert.equal((html.match(/class="md-app-block__action"/g) || []).length, 13)
+  assert.match(html, />Contribute all<\/button>/)
+})
+
 test('compact live receipts preserve tags and diff counts but replace obsolete saved badges', () => {
   const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
     app: 'contribute', intent: 'review:a', title: 'Fix it', interaction: 'inline',
