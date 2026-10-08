@@ -1,4 +1,6 @@
-/* Goal-command parsing and the shared footer progress-rail view model. */
+import { goalHelperWaitingLabel, goalHelpers } from './goalHelpers.js'
+
+/* Message formatting and the server-owned Goal progress view model. */
 
 /**
  * Return the objective carried by a real leading `/goal` command.
@@ -22,10 +24,6 @@ function goalCommandObjective(text) {
 /** Canonical one-line objective used by every compact Goal surface. */
 export function compactGoalObjective(objective) {
   return String(objective || '').replace(/\s+/g, ' ').trim()
-}
-
-export function goalObjectiveFromText(text) {
-  return compactGoalObjective(goalCommandObjective(text))
 }
 
 /** Keep the owner's formatting while hiding the command token in the bubble. */
@@ -54,30 +52,6 @@ export function draftGoalObjective(text) {
   return objective
 }
 
-/** Keep a live event from being regressed by an older initial fetch. */
-export function newestGoalPlan(current, incoming) {
-  if (!incoming) return current || null
-  if (!current) return incoming
-  if (
-    current.root_run_id === incoming.root_run_id
-    && Number.isInteger(current.revision)
-    && Number.isInteger(incoming.revision)
-    && current.revision > incoming.revision
-  ) {
-    return current
-  }
-  return incoming
-}
-
-export function planForGoal(plan, goal) {
-  if (!plan || !goal?.id) return null
-  return String(plan.goal_id || plan.root_run_id) === String(goal.id) ? plan : null
-}
-
-function isContinue(text) {
-  return typeof text === 'string' && text.trim().toLowerCase() === 'continue'
-}
-
 const GOAL_PRESENTATION_STATUSES = new Set([
   'active', 'paused', 'completed', 'cannot_complete', 'cancelled',
 ])
@@ -93,7 +67,7 @@ export function normalizeGoalPresentation(goal) {
     objective,
     status: goal.status,
     resumable: goal.resumable === true,
-    ...(goal.plan ? { plan: goal.plan } : {}),
+    plan: goal.plan || null,
     ...(goal.status === 'paused' && ['owner', 'agent', 'unknown', 'deferred'].includes(goal.pause_reason)
       ? { pause_reason: goal.pause_reason } : {}),
     ...(goal.status === 'paused' && goal.pause_reason === 'deferred' && typeof goal.hold_reason === 'string'
@@ -123,7 +97,7 @@ export function goalStatusLabel(goal) {
   return goal.status === 'paused' ? 'Interrupted' : null
 }
 
-/** Pause provenance never removes manual recovery; actual chat conflicts do. */
+/** Required recovery is available only when the Goal permits it and no executor owns the next move. */
 export function canResumeGoal(goal, { turnActive, hasPendingQuestion, chatHandoff } = {}) {
   return goal?.status === 'paused'
     && goal.resumable === true
@@ -133,101 +107,9 @@ export function canResumeGoal(goal, { turnActive, hasPendingQuestion, chatHandof
     && !['automatic', 'owner_input'].includes(chatHandoff)
 }
 
-/** Resolve a server runtime snapshot, with one rolling-server fallback. */
-export function goalPresentationFromRuntime(runtime, fallback = null) {
-  if (runtime && Object.prototype.hasOwnProperty.call(runtime, 'goal')) {
-    return normalizeGoalPresentation(runtime.goal)
-  }
-  const normalizedFallback = typeof fallback === 'string'
-    ? normalizeGoalPresentation({ objective: fallback, status: 'active' })
-    : normalizeGoalPresentation(fallback)
-  if (!runtime?.running) return normalizedFallback
-  const objective = compactGoalObjective(
-    runtime.active_goal_objective || normalizedFallback?.objective,
-  )
-  return objective
-    ? normalizeGoalPresentation({ objective, status: 'active' })
-    : null
-}
-
-function hasResumableTail(message) {
-  if (message?.role !== 'assistant' || !Array.isArray(message.blocks)) return false
-  const tail = message.blocks[message.blocks.length - 1]
-  return tail?.type === 'error' && tail.resumable === true
-}
-
-function previousVisibleMessageIndex(messages, beforeIndex) {
-  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
-    if (!messages[i]?.hidden) return i
-  }
-  return -1
-}
-
-function priorGoalObjective(messages, beforeIndex) {
-  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message?.role !== 'user' || message.hidden) continue
-    if (isContinue(message.content)) continue
-    return goalObjectiveFromText(message.content)
-  }
-  return ''
-}
-
-/**
- * Recover a goal when mounting into a turn that is already running.
- *
- * An ordinary attach reads the objective from the latest visible owner
- * message. A resumed goal instead starts with the synthetic owner message
- * "continue"; accept that as goal continuity only when it directly follows
- * the same resumable assistant tail that exposes the Resume action.
- */
-export function latestGoalObjective(messages) {
-  if (!Array.isArray(messages)) return ''
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message?.role !== 'user' || message.hidden) continue
-    const directObjective = goalObjectiveFromText(message.content)
-    if (directObjective) return directObjective
-    if (!isContinue(message.content)) return ''
-    const resumeTailIndex = previousVisibleMessageIndex(messages, i)
-    if (resumeTailIndex < 0 || !hasResumableTail(messages[resumeTailIndex])) return ''
-    return priorGoalObjective(messages, resumeTailIndex)
-  }
-  return ''
-}
-
-/**
- * Resolve the goal at the synchronous run-start seam.
- *
- * Before a one-tap Resume is appended, the resumable assistant note is still
- * the visible transcript tail. This mirrors latestGoalObjective's cold-attach
- * rule so live starts and reconnects cannot disagree about the active goal.
- */
-export function goalObjectiveAtRunStart(text, messages) {
-  const directObjective = goalObjectiveFromText(text)
-  if (directObjective || !isContinue(text) || !Array.isArray(messages)) {
-    return directObjective
-  }
-  const tailIndex = previousVisibleMessageIndex(messages, messages.length)
-  if (tailIndex < 0 || !hasResumableTail(messages[tailIndex])) return ''
-  return priorGoalObjective(messages, tailIndex)
-}
-
-/** Keep settled Goals visible across ordinary turns; reactivate only Resume. */
-export function goalPresentationAtRunStart(text, messages, current = null) {
-  const directObjective = goalObjectiveAtRunStart(text, messages)
-  if (directObjective) {
-    return normalizeGoalPresentation({
-      objective: directObjective,
-      status: 'active',
-    })
-  }
-  const normalizedCurrent = normalizeGoalPresentation(current)
-  if (isContinue(text) && normalizedCurrent?.status === 'paused') {
-    const { pause_reason: _pauseReason, hold_reason: _holdReason, handoff: _handoff, ...continuingGoal } = normalizedCurrent
-    return { ...continuingGoal, status: 'active', resumable: false }
-  }
-  return normalizedCurrent
+/** Runtime/detail is the sole lifecycle owner; message text is formatting only. */
+export function goalPresentationFromRuntime(runtime) {
+  return normalizeGoalPresentation(runtime?.goal)
 }
 
 /**
@@ -248,11 +130,11 @@ function progressLabel(task) {
 
 /**
  * A task with a helper still working shows as running, whatever it was marked;
- * otherwise the task's own status stands. A failed helper shows on its own row
- * beneath the task, since another helper may already have redone its work.
+ * otherwise the task's own status stands. A failed helper remains in execution history, since another helper may
+ * already have redone its work.
  */
 export function goalTaskDisplayStatus(task, helpers = []) {
-  const active = ['starting', 'running', 'resuming', 'paused']
+  const active = ['accepted', 'retrying', 'starting', 'running', 'resuming', 'paused', 'needs_input']
   return helpers.some(helper => active.includes(helper?.status))
     ? 'running'
     : task?.status
@@ -276,40 +158,24 @@ function deepestPlanTasks(tasks, candidates) {
 
 /** Active work first; when nothing is running, expose every newly ready task. */
 export function visibleGoalTasks(goalPlan) {
-  const activeStatuses = new Set(['starting', 'running', 'resuming', 'paused'])
-  const delegatedLeaves = []
-  const collectDelegatedLeaves = (node, ancestors = new Set()) => {
-    if (!node || ancestors.has(node.id)) return
-    const branch = new Set(ancestors).add(node.id)
-    const activeChildren = (node?.children || []).filter(child => (
-      activeStatuses.has(child?.status) && !branch.has(child?.id)
-    ))
-    if (activeChildren.length) {
-      activeChildren.forEach(child => collectDelegatedLeaves(child, branch))
-    } else if (activeStatuses.has(node?.status)) {
-      const title = String(node.task_key || '')
-        .replace(/[._-]+/g, ' ')
-        .replace(/^./, letter => letter.toUpperCase())
-      delegatedLeaves.push({ id: node.id, title, status: 'running' })
-    }
-  }
-  ;(goalPlan?.delegations || []).forEach(node => collectDelegatedLeaves(node))
-  if (delegatedLeaves.length) return delegatedLeaves
+  const activeStatuses = new Set(['accepted', 'retrying', 'starting', 'running', 'resuming', 'paused', 'needs_input'])
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
-  const running = tasks.filter(task => task?.status === 'running')
-  if (running.length) return deepestPlanTasks(tasks, running)
+  const delegatedTasks = new Set(goalHelpers({ plan: goalPlan })
+    .filter(node => activeStatuses.has(node.status))
+    .map(node => node.plan_task))
+  const working = tasks.filter(task => delegatedTasks.has(task.id) || task.status === 'running')
+  if (working.length) return deepestPlanTasks(tasks, working)
   return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
 export function progressRailViewModel(
   goal,
   buildPhases,
-  goalPlan = null,
+  { turnActive = false } = {},
 ) {
   const items = []
-  const presentation = typeof goal === 'string'
-    ? normalizeGoalPresentation({ objective: goal, status: 'active' })
-    : normalizeGoalPresentation(goal)
+  const presentation = normalizeGoalPresentation(goal)
+  const goalPlan = presentation?.plan
   const goalObjective = presentation?.objective || ''
   if (goalObjective) {
     const completed = goalPlan?.summary?.completed
@@ -317,7 +183,7 @@ export function progressRailViewModel(
     const planned = Number.isInteger(completed) && Number.isInteger(total)
     const activeTasks = visibleGoalTasks(goalPlan)
     const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
-    const statusLabel = goalStatusLabel(presentation)
+    const statusLabel = goalHelperWaitingLabel(presentation, { turnActive }) || goalStatusLabel(presentation)
     const progressSummary = planned ? `${completed}/${total}` : goalObjective
     items.push({
       key: 'goal',

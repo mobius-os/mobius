@@ -3192,12 +3192,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         if (!ev.compacting) markChatRunReconcile(ev.chatId)
       }
     } else if (ev.type === 'chat_wait_changed') {
-      if (ev.chatId) {
-        // Self-resuming handoffs are durable chat state, not a running turn.
-        // Reconcile ChatView immediately and refresh the compact list so its
-        // Waiting card and Recents marker agree across tabs and reconnects.
-        markChatRunReconcile(ev.chatId)
-        refreshChatRows(ev.chatId)
+      const changedChatId = ev.chat_id ?? ev.chatId
+      if (changedChatId) {
+        // Goal and Wait invalidations use the same always-live reconciliation owner.
+        markChatRunReconcile(changedChatId)
+        refreshChatRows(changedChatId)
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {

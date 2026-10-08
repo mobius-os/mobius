@@ -21,6 +21,11 @@ export function sharedRuntimeRead(chatId, read) {
   return promise
 }
 
+/** A committed invalidation makes a pre-change shared read ineligible to join. */
+export function invalidateSharedRuntimeRead(chatId) {
+  inFlightReads.delete(String(chatId))
+}
+
 export function resetRuntimeReadsForTests() {
   inFlightReads.clear()
 }

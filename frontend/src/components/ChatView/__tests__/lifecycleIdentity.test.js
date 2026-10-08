@@ -44,7 +44,7 @@ test('automatic resume markers explain what caused the continuation', () => {
 
  assert.match(restarted, /Server restarted — continuing automatically/)
  assert.match(goalHandoff, /Continuing Goal/)
- assert.match(goalHandoff, /The agent turn ended, but the Goal is still unfinished/)
+ assert.match(goalHandoff, /Continuing toward the Goal/)
  assert.match(recovered, /Interrupted work recovered — continuing automatically/)
 })
 

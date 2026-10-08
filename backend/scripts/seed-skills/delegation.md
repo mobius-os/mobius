@@ -53,3 +53,12 @@ provider availability. Planned restarts preserve accepted work; never infer
 permission to restart from delegation itself. Helpers may create bounded
 children; pass task-specific constraints to each child. Nested helpers remain
 under their own parent, and owner/public-action/secret safeguards still apply.
+
+## Shared checklist work
+
+Goal helpers use `update_goal_tasks` for meaningful substeps inside their
+assigned branch and `spawn_agent(plan_task=...)` to file children under them.
+No routine plan approval or progress-message exchange is needed; checklist
+writes update shared state without waking the parent. The parent accepts the
+assigned task from the normal final report. See goal-planning for checklist
+editing; send messages only when they change another agent's work.

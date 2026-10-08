@@ -457,3 +457,61 @@ async def update_goal(
     from app.agent_coordination import settle_claims_with_owner
     await settle_claims_with_owner(chat_id)
   return {"goal": _goal_summary(db, goal), "plan": plan}
+
+
+class HelperTaskUpdateRequest(BaseModel):
+  """A partial checklist edit, never an outcome or whole-plan replacement."""
+  model_config = ConfigDict(extra="forbid")
+  tasks: list[dict[str, Any]] = Field(min_length=1)
+
+
+@router.post("/{chat_id}/goal/tasks", dependencies=[Depends(reject_cross_site)])
+async def update_helper_goal_tasks(
+  chat_id: str, body: HelperTaskUpdateRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Merge helper patches under the same lock and revision as coordinator edits.
+
+  No parent wake or approval handshake: the UI invalidation is enough. A
+  routine write returns only touched task states, not a fresh full brief.
+  """
+  from app import chat_queue, models
+  from app.goal_plans import goal_assignment, stage_helper_task_edits
+  from app.goals import update_goal_record
+
+  if principal.chat_id != chat_id or principal.delegation_id is None:
+    raise HTTPException(status_code=403, detail="Only the assigned helper may edit its branch.")
+  get_active_chat_for_principal(db, chat_id, principal)
+  assignment = goal_assignment(db, chat_id)
+  if assignment is None or assignment.delegation_id != principal.delegation_id:
+    raise HTTPException(status_code=403, detail="This helper has no Goal assignment.")
+  owner_chat_id, goal_id = assignment.goal.chat_id, assignment.goal.id
+  # Follow cancellation's ancestor-before-descendant lock order. A helper
+  # being stopped must settle before its write can recheck run authority.
+  async with (chat_queue.get_transition_lock(owner_chat_id),
+              chat_queue.get_transition_lock(chat_id)):
+    # The caller may have waited behind a coordinator edit or Stop. Resolve
+    # authority again and merge into fresh state, never the pre-lock snapshot.
+    db.rollback()
+    db.expire_all()
+    assignment = goal_assignment(db, chat_id)
+    row = db.get(models.Delegation, principal.delegation_id)
+    run = db.get(models.ChatRun, principal.run_id)
+    if (assignment is None or assignment.delegation_id != principal.delegation_id
+        or assignment.goal.id != goal_id or row is None
+        or row.cancelled_at is not None or row.interrupted_at is not None
+        or run is None or run.chat_id != chat_id or run.status != "running"):
+      raise HTTPException(status_code=409, detail="This helper no longer owns the assignment.")
+    try:
+      stage_helper_task_edits(assignment, body.tasks)
+      update_goal_record(db, run, assignment.goal, assignment.goal.revision, tasks=body.tasks)
+    except (GoalPlanError, GoalPlanConflict) as exc:
+      db.rollback()
+      if isinstance(exc, GoalPlanError):
+        raise _plan_refusal(exc) from exc
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+    touched = {edit["id"] for edit in body.tasks}
+    return {"goal_id": goal_id, "revision": assignment.goal.revision,
+            "tasks": [{"id": task["id"], "status": task["status"]}
+                      for task in assignment.goal.plan_json["tasks"] if task["id"] in touched]}

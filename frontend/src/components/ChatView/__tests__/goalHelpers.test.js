@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createElement as h } from 'react'
 import { renderToStaticMarkup as render } from 'react-dom/server'
 import { createServer } from 'vite'
-import { goalHelpers, helpersOutsideGoal } from '../goalHelpers.js'
+import { goalHelpers, helpersOutsideGoal, goalHelperWaitingLabel } from '../goalHelpers.js'
 import { progressRailViewModel } from '../goalProgress.js'
 import { goalContinuationHandoff } from '../chatHandoffPresentation.js'
 
@@ -71,11 +71,42 @@ test('only exactly Goal-owned helpers fold; unrelated Goal B work and unprojecte
 })
 
 test('helper counts never invent automatic wake ownership or optional recovery actions', () => {
-  const held = { ...goal, status: 'paused', resumable: true, handoff: { kind: 'owner_hold' } }
+  const noQuestion = structuredClone(goal)
+  noQuestion.plan.delegations[0].children[0].status = 'running'
+  noQuestion.plan.delegations[0].children[0].question = null
+  assert.equal(goalHelperWaitingLabel(noQuestion), 'Waiting on 2 helpers · resumes automatically')
+  assert.equal(goalHelperWaitingLabel(noQuestion, { turnActive: true }), null)
+  const held = { ...noQuestion, status: 'paused', resumable: true, handoff: { kind: 'owner_hold' } }
+  assert.equal(goalHelperWaitingLabel(held), 'On hold · Waiting on 2 helpers')
   assert.ok(goalContinuationHandoff(held))
   assert.equal(goalContinuationHandoff({ ...held, handoff: { kind: 'automatic' } }), null)
   assert.equal(goalContinuationHandoff({ ...held, handoff: { kind: 'owner_input' } }), null)
   const backgroundHelpers = { count: 1, items: [{ id: 'other', task_key: 'secret' }] }
   assert.doesNotMatch(render(h(Waiting, { backgroundHelpers, handoff: { kind: 'recovery' } })), /resumes automatically|secret/)
   assert.match(render(h(Waiting, { backgroundHelpers, handoff: { kind: 'automatic' } })), /resumes automatically/)
+})
+
+
+test('counted checklist contains work only; helper attempts stay in closed secondary history', () => {
+  const plan = structuredClone(goal.plan)
+  plan.delegations.push({ id: 'retry', title: 'Verify the migration', plan_task: 'check', status: 'failed' })
+  const html = render(h(Details, { plan }))
+  const [checklist, history] = html.split('<details class="chat__goal-execution">')
+  assert.equal((checklist.match(/role="listitem"/g) || []).length, 2)
+  assert.equal((checklist.match(/Verify the migration/g) || []).length, 1)
+  assert.match(history, /Helper activity · 3/)
+  assert.match(history, /not additional checklist steps/)
+  assert.doesNotMatch(history, /role="listitem"|chat__goal-task-marker/)
+  assert.doesNotMatch(html, /<details[^>]* open/)
+})
+
+test('an inherited nested helper affects its task without adding checklist rows', () => {
+  const plan = structuredClone(goal.plan)
+  plan.tasks[0].status = 'completed'
+  plan.delegations[0].status = 'completed'
+  plan.delegations[0].children = [{ id: 'inherited', status: 'running', children: [] }]
+  const html = render(h(Details, { plan })).split('<details')[0]
+  assert.match(html, /chat__goal-task--running/)
+  assert.match(html, /In progress/)
+  assert.equal((html.match(/role="listitem"/g) || []).length, 2)
 })

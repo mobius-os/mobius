@@ -1,7 +1,7 @@
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resetRuntimeReadsForTests, sharedRuntimeRead } from '../runtimeReads.js'
+import { invalidateSharedRuntimeRead, resetRuntimeReadsForTests, sharedRuntimeRead } from '../runtimeReads.js'
 
 function deferred() {
   let resolve
@@ -49,4 +49,18 @@ test('a failed read is shared and then released', async () => {
   await assert.rejects(first, /Runtime refresh failed/)
   await assert.rejects(second, /Runtime refresh failed/)
   assert.equal(await sharedRuntimeRead('chat-a', async () => 'fresh'), 'fresh')
+})
+
+test('Goal invalidation retires a pre-change read without releasing its newer successor', async () => {
+  const old = deferred()
+  const fresh = deferred()
+  const first = sharedRuntimeRead('chat-a', () => old.promise)
+  invalidateSharedRuntimeRead('chat-a')
+  const second = sharedRuntimeRead('chat-a', () => fresh.promise)
+  assert.notEqual(first, second)
+  old.resolve({ goal: { plan: { revision: 1, delegations: [{ status: 'running' }] } } })
+  await first
+  assert.equal(sharedRuntimeRead('chat-a', () => assert.fail('the successor still owns the read')), second)
+  fresh.resolve({ goal: { plan: { revision: 1, delegations: [{ status: 'needs_input' }] } } })
+  assert.equal((await second).goal.plan.delegations[0].status, 'needs_input')
 })

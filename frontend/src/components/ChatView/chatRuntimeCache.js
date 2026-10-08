@@ -29,7 +29,6 @@ export function classifyChatHandoff({
   turnActive = false,
   ownerInput = false,
   waits = [],
-  backgroundHelpers = null,
   resourcePause = null,
   autoResumeEnabled = false,
   authoritativeHandoff = null,
@@ -50,7 +49,7 @@ export function classifyChatHandoff({
   const kind = resourcePause?.pause?.kind
   const eligibleResource = ['memory', 'storage'].includes(kind)
     || (['rate_limit', 'usage_limit', 'limit'].includes(kind) && autoResumeEnabled)
-  if (eligibleWait || normalizeBackgroundHelpers(backgroundHelpers).count > 0 || eligibleResource) {
+  if (eligibleWait || eligibleResource) {
     return 'automatic'
   }
   return 'none'

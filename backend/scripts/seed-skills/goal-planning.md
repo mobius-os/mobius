@@ -145,3 +145,22 @@ ends your run at once and cuts off anything after it. Stop remains a
 recoverable interruption, distinct from owner cancellation of the outcome.
 Only when the owner explicitly asks you to stop, summarize, then honor it last with
 `mapi -X POST /api/chat/stop -d "{\"chat_id\":\"$CHAT_ID\"}"`.
+
+## One shared nested checklist
+
+A Goal plan describes work, not agents or execution attempts. Create a task for a
+meaningful outcome; several reviewers or retries may work on the same task.
+Helpers assigned to a task can use `update_goal_tasks(tasks=[...])` to add and
+update substeps within that branch, then file children under those steps with
+`spawn_agent(plan_task=...)`. Prefix new task ids with the branch id to avoid
+collisions. Helpers without a filed assignment have no checklist-write scope.
+
+No plan-approval exchange is needed. Batch related checklist updates; they
+update the shared state and UI without waking the parent. Send messages only
+when a decision, blocker, finding or result changes another agent's work. Read
+task details on demand instead of copying full plans into prompts or messages.
+
+The assigning parent accepts its helper's boundary task after reviewing the
+normal final report; the helper leaves that task unfinished, but may verify and
+complete work beneath it. Only the coordinator settles the overall Goal. This
+reuses ordinary result delivery, not another approval protocol.

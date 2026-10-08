@@ -902,7 +902,7 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_wait_changed'[\s\S]*?markChatRunReconcile\(ev\.chatId\)[\s\S]*?refreshChatRows\(ev\.chatId\)/,
+    /ev\.type === 'chat_wait_changed'[\s\S]*?markChatRunReconcile\(changedChatId\)[\s\S]*?refreshChatRows\(changedChatId\)/,
     'a wait change must refresh both the visible chat and durable drawer state',
   )
   assert.match(

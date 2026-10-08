@@ -342,3 +342,17 @@ test('Resume keeps the shared recovery action compact inside the status grid', (
   assert.match(layout, /justify-self:\s*start/)
   assert.match(layout, /max-width:\s*100%/)
 })
+
+test('runtime-only refresh waits for Resume acknowledgement without blocking transcript reconciliation', () => {
+  const runtimeRead = chatView.slice(
+    chatView.indexOf('const refreshRuntimeState ='),
+    chatView.indexOf('const reconcileRuntimeState ='),
+  )
+  assert.match(runtimeRead, /resumeRequestRef\.current\?\.chatId === String\(chatId\)/)
+  assert.ok(runtimeRead.indexOf('resumeRequestRef.current') < runtimeRead.indexOf('inspectRuntimeSnapshot(data)'))
+  const transcriptRead = chatView.slice(
+    chatView.indexOf('const fetchMessages ='),
+    chatView.indexOf('const settleAmbiguousSendConfirmation ='),
+  )
+  assert.doesNotMatch(transcriptRead, /resumeRequestRef/)
+})

@@ -14,7 +14,7 @@ test('idle waking helpers own one visible automatic Waiting handoff', () => {
     count: 2,
     items: [{ title: 'Review copy' }, { title: 'Verify build' }],
   }
-  assert.equal(classifyChatHandoff({ backgroundHelpers: helpers }), 'automatic')
+  assert.equal(classifyChatHandoff({ backgroundHelpers: helpers, authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
   assert.deepEqual(helperPresentation(helpers, { kind: 'automatic' }), {
     count: 2,
     tasks: ['Review copy', 'Verify build'],
@@ -59,7 +59,7 @@ test('waits without timestamps keep their ordinary fallback labels', () => {
 
 test('live parent work suppresses the helper handoff without erasing it', () => {
   const backgroundHelpers = { count: 1, items: [] }
-  assert.equal(classifyChatHandoff({ backgroundHelpers }), 'automatic')
+  assert.equal(classifyChatHandoff({ backgroundHelpers, authoritativeHandoff: { kind: 'automatic' } }), 'automatic')
   assert.equal(classifyChatHandoff({
     turnActive: true,
     backgroundHelpers,
@@ -143,3 +143,8 @@ for (const kind of ['model_capacity', 'rate_limit', 'memory', 'storage']) {
     assert.doesNotMatch(restart.wakeUp, /choose another model/)
   })
 }
+
+test('helper count alone cannot promise an automatic executor', () => {
+  assert.equal(classifyChatHandoff({ backgroundHelpers: { count: 3, items: [] } }), 'none')
+  assert.equal(helperPresentation({ count: 3 }).automatic, false)
+})

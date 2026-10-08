@@ -55,6 +55,7 @@ const SETTLED = {
   failed: ['failed', 'Failed'],
   needs_review: ['failed', 'Needs review'],
   interrupted: ['failed', 'Interrupted'],
+  // Paused on its question to this chat's agent: not finished, not failed.
   needs_input: ['running', 'Needs an answer'],
 }
 

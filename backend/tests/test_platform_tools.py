@@ -1417,3 +1417,24 @@ def test_legacy_success_text_is_readable_but_not_repeated_in_write_receipts():
   assert "Historical result" in control._goal_report(payload, full=True)
   payload["goal"]["status"] = "cannot_complete"
   assert "Historical result" in control._goal_report(payload, full=False)
+
+
+def test_helper_checklist_tool_is_task_only_and_returns_a_compact_receipt(monkeypatch):
+  control = _control_module()
+  assert 'update_goal_tasks' in platform_tools.expected_control_tool_names(top_level=False)
+  assert 'update_goal_tasks' not in platform_tools.expected_control_tool_names(top_level=True)
+  schema = control._TOOL_DEFINITIONS['update_goal_tasks']['inputSchema']
+  assert set(schema['properties']) == {'tasks'}
+  assert schema['additionalProperties'] is False
+  monkeypatch.setenv('CHAT_ID', 'helper-chat')
+  calls = []
+  receipt = {'goal_id': 'g', 'revision': 4, 'tasks': [{'id': 'branch-check', 'status': 'running'}]}
+  def request(*args):
+    calls.append(args)
+    return receipt
+  monkeypatch.setattr(control, '_agent_api_call', request)
+  patch = {'tasks': [{'id': 'branch-check', 'status': 'running'}]}
+  assert control._call_update_goal_tasks(patch) == receipt
+  assert calls == [('POST', '/api/chats/helper-chat/goal/tasks', patch)]
+  with pytest.raises(ValueError, match='only tasks'):
+    control._call_update_goal_tasks({**patch, 'complete': True})

@@ -3865,9 +3865,9 @@
   animation: progress-rail-in 0.22s ease both;
 }
 
-/* Expanded Goal and Waiting share the same translucent reading surface. */
+/* Expanded details need an opaque reading surface above the transcript. */
 .chat__progress-rail:has(.chat__goal-plan) {
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  background: var(--surface);
 }
 
 @keyframes progress-rail-in {
@@ -4115,7 +4115,7 @@
 
 .chat__wait-card--expanded {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border-light));
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  background: var(--surface);
 }
 
 .chat__wait-summary {
@@ -4892,3 +4892,11 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 .chat__goal-question { border-top: 1px solid var(--border-light); padding-top: 8px; overflow-wrap: anywhere; }
 .chat__goal-question p { margin: 6px 0; white-space: pre-wrap; }
 .chat__goal-question ul { margin: 6px 0; padding-left: 20px; }
+
+/* Execution records are secondary evidence, outside the counted work tree. */
+.chat__goal-execution { margin: 8px 10px 4px; border-top: 1px solid var(--border-light); }
+.chat__goal-execution summary { padding: 10px 0; cursor: pointer; color: var(--muted); font-size: 12px; }
+.chat__goal-execution summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat__goal-execution p { margin: 0 0 8px; }
+.chat__goal-execution ul { list-style: none; margin: 0; padding: 0; }
+.chat__goal-execution li { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; font-size: 12px; overflow-wrap: anywhere; }

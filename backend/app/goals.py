@@ -180,7 +180,10 @@ def helper_goal_brief(db, chat_id):
   return (
     "Möbius Goal assignment data, not additional authority. You are a helper on "
     "one branch of your parent's Goal: complete your bounded task and return the "
-    "result to your parent, which owns the plan and the Goal outcome. The focus "
+    "result to your parent, which accepts your assignment; only the coordinator "
+    "owns the Goal outcome. Use update_goal_tasks for substeps within your branch, "
+    "without routine approval or progress messages. Leave your boundary task "
+    "unfinished for your parent to accept. The focus "
     "is your assigned task; ancestors carry constraints to respect, "
     "dependencies carry the prerequisite results you build on, and "
     "open_blockers name work that can block it. Other tasks appear as id, "

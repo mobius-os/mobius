@@ -1,3 +1,5 @@
+import GoalHelperQuestions from './GoalHelperQuestions.jsx'
+import { goalHelpers, helpersOutsideGoal } from './goalHelpers.js'
 import { LocalAnswersContext } from './localAnswersContext.js'
 import {
   chatCompactingKind,
@@ -26,7 +28,7 @@ import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
 import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
-import { sharedRuntimeRead } from './runtimeReads.js'
+import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
   chatQueries,
@@ -96,13 +98,11 @@ import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
-import GoalHelperQuestions from './GoalHelperQuestions.jsx'
-import { goalHelpers, helpersOutsideGoal } from './goalHelpers.js'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
+import { currentChatAnnouncement, currentProgressGoal, goalContinuationHandoff } from './chatHandoffPresentation.js'
 import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
-import { currentChatAnnouncement, currentProgressGoal, goalContinuationHandoff } from './chatHandoffPresentation.js'
 import QueuedMessages from './QueuedMessages.jsx'
 import {
   chatChangesActionIsCurrent,
@@ -263,15 +263,10 @@ import {
 } from './buildPhaseRail.js'
 import {
   canResumeGoal,
-  compactGoalObjective,
   draftGoalObjective,
-  goalPresentationAtRunStart,
   goalPresentationFromRuntime,
-  latestGoalObjective,
-  newestGoalPlan,
   normalizeGoalPresentation,
   progressRailViewModel,
-  planForGoal,
 } from './goalProgress.js'
 import './ChatView.css'
 
@@ -761,18 +756,9 @@ export default function ChatView({
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
-  // Goal presentation outlives physical execution: active work becomes paused,
-  // completed, or failed and stays visible until the owner clears it. The
-  // server projection is authoritative across reloads; activeGoalObjective is
-  // accepted only as a rolling-server fallback.
+  // One server-owned Goal snapshot includes its plan and survives reattachment.
   const [goalPresentation, setGoalPresentation] = useState(() => (
     normalizeGoalPresentation(cached?.goal)
-    || (cached?.running && cached?.activeGoalObjective
-      ? normalizeGoalPresentation({
-          objective: cached.activeGoalObjective,
-          status: 'active',
-        })
-      : null)
   ))
   const goalPresentationRef = useRef(goalPresentation)
   goalPresentationRef.current = goalPresentation
@@ -804,7 +790,6 @@ export default function ChatView({
       // the cancel didn't commit.
     }
   }, [chatId, queryClient])
-  const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setGoalPresentationLocalState = useCallback((goal) => {
     const normalized = normalizeGoalPresentation(goal)
     goalPresentationRef.current = normalized
@@ -818,26 +803,9 @@ export default function ChatView({
       chatMessagesQueryKey(chatId),
       {
         goal: normalized,
-        activeGoalObjective: normalized?.status === 'active'
-          ? normalized.objective
-          : '',
       },
     )
   }, [chatId, queryClient, setGoalPresentationLocalState])
-  const setActiveGoalState = useCallback((objective) => {
-    const compactObjective = compactGoalObjective(objective)
-    setGoalState(compactObjective
-      ? { objective: compactObjective, status: 'active' }
-      : null)
-  }, [setGoalState])
-  const setGoalAtRunStart = useCallback((text, visibleMessages) => {
-    setGoalState(goalPresentationAtRunStart(
-      text,
-      visibleMessages,
-      goalPresentationRef.current,
-    ))
-  }, [setGoalState])
-
   useEffect(() => setGoalClearError(''), [goalPresentation?.id])
 
   useEffect(() => () => {
@@ -857,39 +825,13 @@ export default function ChatView({
   }, [])
   useEffect(() => {
     const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    setGoalPresentationLocalState(
-      normalizeGoalPresentation(runtime?.goal)
-      || (runtime?.running && runtime?.activeGoalObjective
-        ? normalizeGoalPresentation({
-            objective: runtime.activeGoalObjective,
-            status: 'active',
-          })
-        : null),
-    )
+    setGoalPresentationLocalState(runtime?.goal)
     // A pane can reuse ChatView for a different chat. Reset immediately to the
     // destination cache so the prior chat's wait never flashes during fetch.
     setArmedWaits(Array.isArray(runtime?.waits) ? runtime.waits : [])
     setServerHandoff(runtime?.handoff || null)
     setBackgroundHelpers(normalizeBackgroundHelpers(runtime?.background_helpers))
   }, [chatId, queryClient, setGoalPresentationLocalState])
-
-  useEffect(() => {
-    let cancelled = false
-    setActiveGoalPlan(null)
-    if (!activeGoalObjective) {
-      return () => { cancelled = true }
-    }
-    apiFetch(`/chats/${chatId}/goal-plan`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
-      .then(response => response.ok ? response.json() : null)
-      .then(payload => {
-        if (!cancelled) {
-          const matchingPlan = planForGoal(payload?.plan, goalPresentationRef.current)
-          setActiveGoalPlan(current => newestGoalPlan(current, matchingPlan))
-        }
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [activeGoalObjective, chatId, goalPresentation?.id])
 
   // Pending queue (the items shown in the queued-tray above the
   // composer) lives entirely inside usePendingQueue. Every mutation
@@ -1512,10 +1454,7 @@ export default function ChatView({
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
         setServerRunningLocalState(!!data.running)
       }
-      const runtimeGoal = goalPresentationFromRuntime(
-        data,
-        goalPresentationRef.current || latestGoalObjective(msgs),
-      )
+      const runtimeGoal = goalPresentationFromRuntime(data)
       // A new provider session is created during the first turn, after this
       // ChatView has already mounted. Preserve the authoritative detail
       // metadata alongside the settled transcript so the runtime-policy owner
@@ -1548,9 +1487,6 @@ export default function ChatView({
         continuationWait: data.continuation_wait || null,
         handoff: data.handoff || null,
         goal: runtimeGoal,
-        activeGoalObjective: runtimeGoal?.status === 'active'
-          ? runtimeGoal.objective
-          : '',
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
         ...(adoptAssistantOwner ? {
@@ -1646,10 +1582,7 @@ export default function ChatView({
       // never loaded; a resumed reply would then look like the whole chat.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
-      // While Resume awaits its acknowledgement, that request owns the
-      // recovery-to-running transition and refreshes the transcript when it
-      // settles. Adopting a successor observed by this poll first would remove
-      // the recovery card before its continuation row exists.
+      // Runtime-only reads cannot retire recovery before Resume appends its acknowledged row.
       if (resumeRequestRef.current?.chatId === String(chatId)) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
       if (!runtimeTransition.adopt) return null
@@ -1735,12 +1668,7 @@ export default function ChatView({
       // optimistic transitions; using them here made one poll emit up to three
       // persisted-cache updates for a single server response.
       setServerRunningLocalState(!!data.running)
-      const cachedGoal = queryClient.getQueryData(
-        chatMessagesQueryKey(chatId),
-      )?.goal || goalPresentationRef.current
-      const runtimeGoal = goalPresentationFromRuntime(
-        data, cachedGoal,
-      )
+      const runtimeGoal = goalPresentationFromRuntime(data)
       setGoalPresentationLocalState(runtimeGoal)
       const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
@@ -1757,9 +1685,6 @@ export default function ChatView({
         continuationWait: data.continuation_wait || null,
         handoff: data.handoff || null,
         goal: runtimeGoal,
-        activeGoalObjective: runtimeGoal?.status === 'active'
-          ? runtimeGoal.objective
-          : '',
         pending_messages: serverPending,
         pending_question_id: pendingQuestionId,
         ...(adoptAssistantOwner ? {
@@ -1969,23 +1894,6 @@ export default function ChatView({
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
-      if (event?.type === 'goal_activated') {
-        setActiveGoalPlan(null)
-        setActiveGoalState(event.objective || '')
-        return
-      }
-      if (event?.type === 'goal_plan_updated') {
-        setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
-        return
-      }
-      if (event?.type === 'goal_cleared') {
-        const current = goalPresentationRef.current
-        if (!event.goal_id || current?.id === String(event.goal_id)) {
-          setGoalState(null)
-          setActiveGoalPlan(null)
-        }
-        return
-      }
       // A build_phase is chat-local: it only feeds this chat's milestone rail,
       // so accumulate it here (deduped by ts) instead of forwarding it to the
       // Shell, which has no handler for it.
@@ -2005,10 +1913,6 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
-      setGoalAtRunStart(
-        message?.content,
-        messagesRef.current,
-      )
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -2232,6 +2136,18 @@ export default function ChatView({
           || isStreamingRef.current
           || localStartRequestRef.current?.chatId === String(chatId)
         ) && !externalClaimedRunRef.current
+        if (!delta.started && !delta.finished) {
+          // Retire reads begun before this committed invalidation.
+          fetchGenRef.current += 1
+          invalidateSharedRuntimeRead(chatId)
+          // Read fresh rather than joining a poll that predates the change.
+          await refreshRuntimeState()
+          // Idle lifecycle changes also add finished records to the transcript.
+          if (!sendingRef.current && !isStreamingRef.current) {
+            await fetchMessages({ force: true, authoritative: true })
+          }
+          continue
+        }
         if (locallyActive) {
           // A hidden retained pane can miss the terminal stream event while
           // Shell still records the run finish. Re-enter the runtime owner
@@ -2293,6 +2209,7 @@ export default function ChatView({
     fetchMessages,
     isStreamingRef,
     reconcileRuntimeState,
+    refreshRuntimeState,
   ])
   useEffect(() => {
     if (hidden || provisionalNewChat) return
@@ -2652,10 +2569,7 @@ export default function ChatView({
       setActiveAssistantMessageId(
         runtime.active_assistant_message_id || null,
       )
-      setGoalPresentationLocalState(goalPresentationFromRuntime(
-        runtime,
-        goalPresentationRef.current || latestGoalObjective(visibleMessages),
-      ))
+      setGoalPresentationLocalState(goalPresentationFromRuntime(runtime))
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
       setArmedWaits(Array.isArray(runtime.waits) ? runtime.waits : [])
@@ -2793,9 +2707,7 @@ export default function ChatView({
         // One narrow cache publication updates queue/liveness only. Reconcile
         // the mounted hidden owner from the newest version-matched cache object
         // before readiness so a concurrent terminal refresh wins this race.
-        const runtimeGoal = goalPresentationFromRuntime(
-          runtime, goalPresentationRef.current || latestGoalObjective(msgs),
-        )
+        const runtimeGoal = goalPresentationFromRuntime(runtime)
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
           runId: runtime.run_id || null,
@@ -2807,9 +2719,6 @@ export default function ChatView({
           activeAssistantMessageId:
             runtime.active_assistant_message_id || null,
           goal: runtimeGoal,
-          activeGoalObjective: runtimeGoal?.status === 'active'
-            ? runtimeGoal.objective
-            : '',
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
           waits: runtime.waits || [],
@@ -2835,10 +2744,7 @@ export default function ChatView({
         setActivationPhase('cold')
       }
       if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
-        const runtimeGoal = goalPresentationFromRuntime(
-          runtime,
-          goalPresentationRef.current || latestGoalObjective(messagesRef.current),
-        )
+        const runtimeGoal = goalPresentationFromRuntime(runtime)
         queryClient.setQueryData(queryKey, existing => {
           const handoffWindow = optimisticHandoffWindow(
             existing,
@@ -2852,9 +2758,6 @@ export default function ChatView({
             // make the next activation take the authoritative detail path.
             updated_at: null,
             goal: runtimeGoal,
-            activeGoalObjective: runtimeGoal?.status === 'active'
-              ? runtimeGoal.objective
-              : '',
             ...handoffWindow,
           }
         })
@@ -2876,16 +2779,10 @@ export default function ChatView({
             recentMessages: msgs,
             recentOffset: runtime.offset || 0,
           })
-      const runtimeGoal = goalPresentationFromRuntime(
-        runtime,
-        goalPresentationRef.current || latestGoalObjective(refreshed.messages),
-      )
+      const runtimeGoal = goalPresentationFromRuntime(runtime)
       queryClient.setQueryData(queryKey, {
         ...detailCache,
         goal: runtimeGoal,
-        activeGoalObjective: runtimeGoal?.status === 'active'
-          ? runtimeGoal.objective
-          : '',
         messages: refreshed.messages,
         offset: refreshed.offset,
       })
@@ -3443,10 +3340,6 @@ export default function ChatView({
             // the rail resets. A plain enqueue (started falsy) must NOT
             // touch the in-flight build's rail.
             setBuildPhases(railAtRunStart())
-            setGoalAtRunStart(
-              text,
-              messagesRef.current,
-            )
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn, so
@@ -3519,10 +3412,6 @@ export default function ChatView({
           // Same run-start semantics as the branch above: this send became
           // the first message of a NEW run, so the rail resets here too.
           setBuildPhases(railAtRunStart())
-          setGoalAtRunStart(
-            text,
-            messagesRef.current,
-          )
           // Apply the shared send-intent rule before appending. A message that
           // raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -3630,7 +3519,6 @@ export default function ChatView({
     // above) wiped the in-flight build's rail, which the next catch-up
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
-    setGoalAtRunStart(text, messagesRef.current)
 
     // Direct sends use the same submit-time decision as queued/steered sends.
     // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
@@ -3762,7 +3650,7 @@ export default function ChatView({
           if (Array.isArray(result.message?._consumed_cids)) {
             pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
-          // The pin already landed at submit for this same cid; see below.
+          // The pin already landed at submit for this same cid.
           const startedMessages = startedMessagesFromResponse(result)
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
@@ -3877,8 +3765,6 @@ export default function ChatView({
     clearFiles,
     restoreFiles,
     releaseFiles,
-    setGoalAtRunStart,
-    setActiveGoalState,
     acknowledgeFirstMessageAccepted,
   ])
 
@@ -4271,7 +4157,6 @@ export default function ChatView({
       }
       if (goalPresentationRef.current?.id === String(goalId)) {
         setGoalState(null)
-        setActiveGoalPlan(null)
       }
     } catch (err) {
       setGoalClearError(err?.message || 'Could not clear this Goal.')
@@ -4682,7 +4567,6 @@ export default function ChatView({
           running: false,
           pending_question_id: null,
           goal: pausedGoal,
-          activeGoalObjective: '',
         },
       )
       setSendFailure(null)
@@ -5139,18 +5023,6 @@ export default function ChatView({
     wasTurnActiveRef.current = turnActive
   }, [chatId, chatProvider, turnActive, queryClient])
 
-  useEffect(() => {
-    if (!turnActive) return
-    // Ordinary live turns set this synchronously at their run-start seam. This
-    // branch is the cold remount/reconnect recovery path. The query cache
-    // retains a known goal across keyed chat switches, including after a
-    // steer; latestGoalObjective covers a truly cold attach before this client
-    // has seen that run.
-    if (!activeGoalObjective) {
-      const recovered = latestGoalObjective(messages)
-      if (recovered) setActiveGoalState(recovered)
-    }
-  }, [turnActive, messages, activeGoalObjective, setActiveGoalState])
   useEffect(() => {
     function freezeStreamingReturn(event) {
       if (!shouldFreezeStreamingReturn({
@@ -5643,15 +5515,17 @@ export default function ChatView({
     onExternalRunEventRef.current?.('auto_resume_waiting')
   }, [autoResumeEnabled, embedded, pendingLimitPark, pendingLimitCheckAt])
   const handleEmbeddedRunEvent = useCallback((event) => {
+    if (!embedded) return
+    if (event.type === 'chat_wait_changed') {
+      if (String(event.chat_id ?? event.chatId ?? '') !== String(chatId || '')) return
+      setEmbeddedRunSignal(previous => advanceChatRunSignal(previous, 'chat_run_reconcile'))
+      return
+    }
     if (
-      !embedded
-      || String(event.chatId || '') !== String(chatId || '')
-      || (event.type !== 'chat_run_started'
-        && event.type !== 'chat_run_finished')
+      String(event.chatId || '') !== String(chatId || '')
+      || (event.type !== 'chat_run_started' && event.type !== 'chat_run_finished')
     ) return
-    setEmbeddedRunSignal(previous => (
-      advanceChatRunSignal(previous, event.type)
-    ))
+    setEmbeddedRunSignal(previous => advanceChatRunSignal(previous, event.type))
     setEmbeddedRunActive(event.type === 'chat_run_started')
     onExternalRunEventRef.current?.(event.type)
   }, [chatId, embedded])
@@ -5661,12 +5535,12 @@ export default function ChatView({
     ))
   }, [])
   // Embedded chats do not have Shell's process stream. Subscribe only while
-  // an enabled limit park is waiting (and through its observed run), rather
+  // a Goal or enabled limit park is waiting (and through its observed run), rather
   // than holding one permanent SSE connection per retained app iframe.
   useSystemEventStream(handleEmbeddedRunEvent, {
     enabled: !!(
       embedded
-      && ((autoResumeEnabled && pendingLimitPark && pendingLimitCheckAt) || embeddedRunActive)
+      && (goalPresentation?.id || (autoResumeEnabled && pendingLimitPark && pendingLimitCheckAt) || embeddedRunActive)
     ),
     onOpen: handleEmbeddedStreamOpen,
   })
@@ -5873,18 +5747,17 @@ export default function ChatView({
   const continuationHandoff = goalContinuationHandoff(goalPresentation, {
     turnActive, hasPendingQuestion, hasPendingResume: !!pendingResumeBlock, chatHandoff,
   })
-  const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
-  // Goal ownership comes from explicit run boundaries and authoritative
-  // runtime reconciliation, never a momentary browser transport signal.
-  const visibleGoalObjective = activeGoalObjective
   const progressGoal = currentProgressGoal(goalPresentation, { turnActive })
-  const progressPlan = progressGoal?.plan || planForGoal(activeGoalPlan, progressGoal)
-  const goalOwnedHelpers = goalHelpers({ plan: progressPlan })
-  const separateBackgroundHelpers = helpersOutsideGoal(backgroundHelpers, { plan: progressPlan })
+  const goalOwnedHelpers = goalHelpers(progressGoal)
+  const separateBackgroundHelpers = helpersOutsideGoal(backgroundHelpers, progressGoal)
+  const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
+  // Goal ownership comes from authoritative runtime reconciliation, never
+  // message text or a momentary browser transport signal.
+  const visibleGoalObjective = activeGoalObjective
   const progressRail = progressRailViewModel(
     progressGoal,
     buildPhaseRail,
-    progressPlan,
+    { turnActive },
   ).map(item => {
     if (item.key !== 'goal') return item
     // The Goal step owns a two-tap clear affordance and the plan details.
@@ -5919,9 +5792,9 @@ export default function ChatView({
       ...(goalOwnedHelpers.some(node => node.status === 'needs_input' && node.question?.text)
         ? { notice: <GoalHelperQuestions helpers={goalOwnedHelpers} /> } : {}),
       icon: <Flag width={14} height={14} aria-hidden="true" />,
-      ...(progressPlan || goalPresentation?.hold_reason || continuationHandoff
+      ...(goalPresentation?.plan || goalPresentation?.hold_reason || continuationHandoff
         ? { details: <GoalPlanDetails
-            plan={progressPlan}
+            plan={goalPresentation?.plan}
             holdReason={continuationHandoff
               ? `${continuationHandoff.description} ${continuationHandoff.boundary}`
               : goalPresentation?.hold_reason}
@@ -6376,7 +6249,7 @@ export default function ChatView({
                             : 'Provider limit reached — continuation available'
                         : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
-                          : 'Turn paused — tap to resume'}
+                            : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (

@@ -599,15 +599,16 @@ def publish_goal_changed(chat_id: str) -> None:
     _LOG.exception("Goal invalidation failed for chat %s", chat_id)
 
 
-def _active_helper_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _active_helper_nodes(nodes: list[dict[str, Any]], inherited_task: str | None = None) -> list[dict[str, Any]]:
   """Delegation-tree nodes, at any depth, whose execution has not settled."""
   from app.delegations import TERMINAL_DELEGATION_STATUSES
 
   active: list[dict[str, Any]] = []
   for node in nodes:
+    task = node.get("plan_task") or inherited_task
     if node.get("status") not in TERMINAL_DELEGATION_STATUSES:
-      active.append(node)
-    active.extend(_active_helper_nodes(node.get("children") or []))
+      active.append({**node, "plan_task": task})
+    active.extend(_active_helper_nodes(node.get("children") or [], task))
   return active
 
 
@@ -1146,3 +1147,37 @@ TASK_EDIT_FIELDS = frozenset({
   "title", "status", "depends_on", "parent_id", "completion_condition",
   "note", "result", "progress",
 })
+
+
+def stage_helper_task_edits(assignment: GoalAssignment, edits: list[dict[str, Any]]) -> dict[str, Any]:
+  """Authorize a patch against both sides of one assigned work branch.
+
+  The assignment is a contract accepted by its parent, not a second Goal.
+  Helpers own its decomposition; its final acceptance stays with the parent.
+  """
+  goal, branch = assignment.goal, assignment.plan_task
+  if goal.status != "open" or branch is None or assignment.plan_task_missing:
+    raise GoalPlanError("An open Goal and an assigned checklist task are required")
+  before = {task["id"]: task for task in normalize_tasks(goal.plan_json["tasks"])}
+  parents = {key: task.get("parent_id") for key, task in before.items()}
+  current = branch
+  while current is not None:
+    if before[current]["status"] in SETTLED_TASK_STATUSES:
+      raise GoalPlanError("The assigned branch has already been accepted or cancelled")
+    current = parents[current]
+  document = staged_task_edits(goal, edits)
+  after = {task["id"]: task for task in document["tasks"]}
+  after_parents = {key: task.get("parent_id") for key, task in after.items()}
+  for key, task in after.items():
+    old = before.get(key)
+    if old == task:
+      continue
+    if (old is not None and not _within_branch(key, branch, parents)) or not _within_branch(key, branch, after_parents):
+      raise GoalPlanError("Helpers may edit only their assigned checklist branch")
+    if key == branch:
+      contract = ("title", "parent_id", "depends_on", "completion_condition")
+      if any(old.get(field) != task.get(field) for field in contract):
+        raise GoalPlanError("The assigning parent owns the branch's objective and constraints")
+      if task["status"] in SETTLED_TASK_STATUSES:
+        raise GoalPlanError("Return the result; the assigning parent accepts the branch")
+  return document

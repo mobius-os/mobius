@@ -39,6 +39,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 PROMOTE_GOAL_TOOL = "promote_goal"
 UPDATE_GOAL_TOOL = "update_goal"
 READ_GOAL_TOOL = "read_goal"
+UPDATE_GOAL_TASKS_TOOL = "update_goal_tasks"
 DECLARE_WAIT_TOOL = "declare_wait"
 CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
@@ -103,7 +104,7 @@ OWNER_TOOLS = (
 )
 DELEGATED_TOOLS = (
   *HELPER_TOOLS, ASK_PARENT_TOOL, *PEER_TOOLS, *WORK_OWNERSHIP_TOOLS,
-  CHECKPOINT_CHAT_TOOL, READ_GOAL_TOOL, *APP_TOOLS,
+  CHECKPOINT_CHAT_TOOL, READ_GOAL_TOOL, UPDATE_GOAL_TASKS_TOOL, *APP_TOOLS,
 )
 # A helper turn's identity when it runs inside a shared helper host: the
 # process environment belongs to the whole host, so the turn's own values
@@ -582,6 +583,17 @@ def _call_update_goal(arguments: dict[str, Any]) -> str:
   if unknown:
     raise ValueError(f"update_goal does not take: {', '.join(sorted(unknown))}")
   return _update_goal(arguments)
+
+
+def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"tasks"}:
+    raise ValueError("update_goal_tasks needs only tasks")
+  chat_id = os.environ.get("CHAT_ID") or ""
+  if not chat_id:
+    raise RuntimeError("missing environment: CHAT_ID")
+  return _agent_api_call(
+    "POST", f"/api/chats/{quote(chat_id, safe='')}/goal/tasks", arguments,
+  )
 
 
 def _call_read_goal(arguments: dict[str, Any]) -> dict:
@@ -1730,6 +1742,22 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  UPDATE_GOAL_TASKS_TOOL: {
+    "name": UPDATE_GOAL_TASKS_TOOL,
+    "description": (
+      "Update your assigned Goal checklist branch in one batch. Add meaningful "
+      "substeps with parent_id; update their progress, evidence and status. "
+      "No plan approval or progress message is needed. Your assigning parent "
+      "accepts your boundary task: leave it unfinished and return your final "
+      "result normally. You cannot change its objective/constraints, other "
+      "branches or the Goal outcome. Reuse stable task ids; prefer a branch "
+      "prefix for new ids. read_goal expands details when needed."
+    ),
+    "inputSchema": {
+      "type": "object", "properties": {"tasks": _GOAL_TASKS_SCHEMA},
+      "required": ["tasks"], "additionalProperties": False,
+    },
+  },
   READ_GOAL_TOOL: {
     "name": READ_GOAL_TOOL,
     "description": READ_GOAL_DESCRIPTION,
@@ -1926,6 +1954,7 @@ _TOOL_HANDLERS = {
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   UPDATE_GOAL_TOOL: _call_update_goal,
   READ_GOAL_TOOL: _call_read_goal,
+  UPDATE_GOAL_TASKS_TOOL: _call_update_goal_tasks,
   DECLARE_WAIT_TOOL: _call_declare_wait,
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,

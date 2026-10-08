@@ -1,432 +1,83 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-
+import { advanceChatRunSignal, chatRunSignalDelta, EMPTY_CHAT_RUN_SIGNAL } from '../../../lib/chatRunSignal.js'
 import {
-  canResumeGoal,
-  goalStatusLabel,
-  compactGoalObjective,
-  draftGoalObjective,
-  goalObjectiveAtRunStart,
-  goalObjectiveFromText,
-  goalMessageObjectiveFromText,
-  goalPresentationAtRunStart,
-  goalPresentationFromRuntime,
-  goalTaskDisplayStatus,
-  latestGoalObjective,
-  newestGoalPlan,
-  normalizeGoalPresentation,
-  planForGoal,
-  progressRailViewModel,
-  visibleGoalTasks,
+  canResumeGoal, goalStatusLabel, compactGoalObjective, draftGoalObjective,
+  goalMessageObjectiveFromText, goalPresentationFromRuntime, goalTaskDisplayStatus,
+  normalizeGoalPresentation, progressRailViewModel, visibleGoalTasks,
 } from '../goalProgress.js'
-
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-const streamConnection = readFileSync(
-  new URL('../useStreamConnection.js', import.meta.url),
-  'utf8',
-)
+const streamConnection = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
-const goalPlanDetails = readFileSync(
-  new URL('../GoalPlanDetails.jsx', import.meta.url),
-  'utf8',
-)
-const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
+const goalPlanDetails = readFileSync(new URL('../GoalPlanDetails.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const shellSource = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
 
-test('completed Goal tasks remain readable while cancelled tasks stay crossed out', () => {
-  assert.doesNotMatch(
-    chatCss,
-    /\.chat__goal-task--completed \.chat__goal-task-title[^{}]*\{[^}]*text-decoration:\s*line-through/,
-  )
-  assert.match(
-    chatCss,
-    /\.chat__goal-task--cancelled \.chat__goal-task-title\s*\{[^}]*text-decoration: line-through;/,
-  )
-})
+const plan = {
+  root_run_id: 'run-a', goal_id: 'goal-a', revision: 1,
+  summary: { completed: 1, total: 2 },
+  tasks: [{ id: 'verify', title: 'Verify the release', status: 'running' }],
+  delegations: [],
+}
+const goal = {
+  id: 'goal-a', revision: 1, objective: 'Ship the release', status: 'active',
+  resumable: false, handoff: { kind: 'automatic', reason: 'helpers' }, plan,
+}
 
-test('goalObjectiveFromText follows the backend command boundary', () => {
-  assert.equal(goalObjectiveFromText('/goal Ship the review'), 'Ship the review')
-  assert.equal(
-    goalObjectiveFromText('\n/goal   Build the first slice\nthen verify it'),
-    'Build the first slice then verify it',
-  )
-  assert.equal(goalObjectiveFromText('please /goal later'), '')
-  assert.equal(goalObjectiveFromText(' /goal indented is prose'), '')
-  assert.equal(goalObjectiveFromText('/data/apps/x'), '')
-  assert.equal(goalObjectiveFromText('/goal\nShip after review'), 'Ship after review')
-})
-
-test('goalObjectiveFromText does not present clear or an empty command as active', () => {
-  assert.equal(goalObjectiveFromText('/goal'), '')
-  assert.equal(goalObjectiveFromText('/goal   '), '')
-  assert.equal(goalObjectiveFromText('/goal clear'), '')
-  assert.equal(goalObjectiveFromText('/goal CLEAR'), '')
-})
-
-test('goal owner messages hide only a real command token and preserve objective formatting', () => {
-  assert.equal(
-    goalMessageObjectiveFromText('/goal Build the first slice\nthen verify it'),
-    'Build the first slice\nthen verify it',
-  )
+test('message and composer formatting survives without lifecycle inference', () => {
+  assert.equal(goalMessageObjectiveFromText('/goal Ship\nthen verify'), 'Ship\nthen verify')
   assert.equal(goalMessageObjectiveFromText('please /goal later'), '')
   assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
-  assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
-  assert.match(msgContent, /className="chat__goal-message-tag" aria-hidden="true">Goal<\/span>/)
-  assert.match(msgContent, /className="chat__sr-only">Goal: <\/span>/)
-  assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: inline;/)
-  assert.match(chatCss, /\.chat__goal-message-tag\s*\{[\s\S]*?display: inline-block;/)
+  assert.equal(compactGoalObjective(' Ship\nthen verify '), 'Ship then verify')
+  assert.doesNotMatch(chatView, /latestGoalObjective|goalPresentationAtRunStart|setGoalAtRunStart|active_goal_objective|activeGoalObjective:/)
 })
 
-test('newestGoalPlan rejects a stale fetch without hiding a new logical goal', () => {
-  const current = { root_run_id: 'root-a', revision: 3 }
-  assert.equal(newestGoalPlan(current, null), current)
-  assert.equal(
-    newestGoalPlan(current, { root_run_id: 'root-a', revision: 2 }),
-    current,
-  )
-
-  const newer = { root_run_id: 'root-a', revision: 4 }
-  assert.equal(newestGoalPlan(current, newer), newer)
-
-  const newGoal = { root_run_id: 'root-b', revision: 1 }
-  assert.equal(newestGoalPlan(current, newGoal), newGoal)
+test('runtime is authoritative including explicit clear and ordinary absence', () => {
+  assert.deepEqual(goalPresentationFromRuntime({ running: false, goal }), goal)
+  assert.equal(goalPresentationFromRuntime({ goal: null }), null)
+  assert.equal(goalPresentationFromRuntime({ running: true, active_goal_objective: 'obsolete' }), null)
+  assert.doesNotMatch(chatView, /goal_activated|goal_plan_updated|goal_cleared|activeGoalPlan|newestGoalPlan|planForGoal|\/goal-plan/)
 })
 
-test('latestGoalObjective recovers only the current visible owner turn', () => {
-  assert.equal(latestGoalObjective([
-    { role: 'user', content: '/goal old objective' },
-    { role: 'assistant', content: 'Done' },
-    { role: 'user', content: 'ordinary follow-up' },
-  ]), '')
-  assert.equal(latestGoalObjective([
-    { role: 'user', content: '/goal build the indicator' },
-    { role: 'user', content: 'hidden answer', hidden: true },
-    { role: 'assistant', content: 'Working', partial: true },
-  ]), 'build the indicator')
+test('same Goal reattachment keeps its plan and disclosure identity until a new snapshot arrives', () => {
+  const before = goalPresentationFromRuntime({ goal })
+  const after = goalPresentationFromRuntime({ goal: { ...goal, revision: 2 } })
+  assert.equal(after.plan, before.plan)
+  assert.equal(after.id, before.id)
+  assert.deepEqual(progressRailViewModel(after, []), progressRailViewModel(before, []))
 })
 
-test('compact Goal objectives are canonical before the first paint', () => {
-  assert.equal(
-    compactGoalObjective('Review every issue\nthen verify the result'),
-    'Review every issue then verify the result',
-  )
-  assert.equal(compactGoalObjective(null), '')
+test('Goal A cannot lend its plan to Goal B even within the same execution root', () => {
+  const bPlan = { ...plan, goal_id: 'goal-b', tasks: [{ id: 'next', title: 'New work', status: 'running' }] }
+  const b = goalPresentationFromRuntime({ goal: { ...goal, id: 'goal-b', plan: bPlan } })
+  assert.equal(b.plan, bPlan)
+  assert.doesNotMatch(progressRailViewModel(b, [])[0].label, /Verify the release/)
+  assert.match(progressRailViewModel(b, [])[0].label, /New work/)
+  assert.equal(goalPresentationFromRuntime({ goal: { ...goal, id: 'goal-b', plan: null } }).plan, null)
 })
 
-test('a resumable continue keeps the same goal through live start and cold attach', () => {
-  const interruptedGoal = [
-    { role: 'user', content: '/goal finish the migration' },
-    {
-      role: 'assistant',
-      content: 'Partly done',
-      blocks: [{
-        type: 'error',
-        message: 'Interrupted',
-        resumable: true,
-      }],
-    },
-  ]
-  assert.equal(
-    goalObjectiveAtRunStart('continue', interruptedGoal),
-    'finish the migration',
-  )
-  assert.equal(
-    latestGoalObjective([
-      ...interruptedGoal,
-      { role: 'user', content: 'continue' },
-      { role: 'assistant', content: 'Working', partial: true },
-    ]),
-    'finish the migration',
-  )
-})
-
-test('continuation recovery preserves only an active goal', () => {
-  assert.equal(goalObjectiveAtRunStart('continue', [
-    { role: 'user', content: '/goal old objective' },
-    { role: 'assistant', content: 'Done' },
-  ]), '')
-  assert.equal(latestGoalObjective([
-    { role: 'user', content: '/goal old objective' },
-    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
-    { role: 'user', content: '/goal clear' },
-    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
-    { role: 'user', content: 'continue' },
-  ]), '')
-  assert.equal(latestGoalObjective([
-    { role: 'user', content: '/goal old objective' },
-    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
-    { role: 'user', content: 'new subject' },
-    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
-    { role: 'user', content: 'continue' },
-  ]), '')
-})
-
-test('durable Goal presentation survives terminal runtime states', () => {
-  const paused = {
-    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
-    resumable: true,
+test('required owner holds and recovery remain actionable, automatic and question ownership do not', () => {
+  for (const kind of ['owner_hold', 'recovery', 'none']) {
+    const held = { ...goal, status: 'paused', resumable: true, handoff: { kind } }
+    assert.equal(canResumeGoal(held), true)
+    assert.equal(goalStatusLabel(held), 'Interrupted')
+    for (const conflict of [{ turnActive: true }, { hasPendingQuestion: true }, { chatHandoff: 'automatic' }]) {
+      assert.equal(canResumeGoal(held, conflict), false)
+    }
   }
-  assert.deepEqual(goalPresentationFromRuntime({
-    running: false,
-    goal: paused,
-  }), paused)
-  assert.deepEqual(goalPresentationFromRuntime({
-    running: false,
-    goal: {
-      id: 'goal-1', objective: 'Finish the migration', status: 'completed',
-    },
-  }), {
-    id: 'goal-1', objective: 'Finish the migration', status: 'completed',
-    resumable: false,
-  })
-  assert.equal(goalPresentationFromRuntime({ running: false, goal: null }), null)
-})
-
-test('who moves next comes from the exact Goal handoff, never an obsolete wait field', () => {
-  assert.deepEqual(normalizeGoalPresentation({
-    id: 'goal-1', objective: 'Finish the review', status: 'paused',
-    resumable: true,
-    wait_kind: 'monitor',
-  }), {
-    id: 'goal-1', objective: 'Finish the review', status: 'paused',
-    resumable: true,
-  })
-  assert.match(chatView, /const goalHandoff = goalPresentation\?\.handoff\?\.kind \|\| 'none'/)
-  assert.doesNotMatch(chatView, /wait_kind/)
-})
-
-test('ordinary turns retain settled Goals while Resume reactivates a pause', () => {
-  const paused = {
-    id: 'goal-1', objective: 'Finish the migration', status: 'paused', resumable: true,
-  }
-  assert.deepEqual(
-    goalPresentationAtRunStart('ordinary question', [], paused),
-    { ...paused, resumable: true },
-  )
-  assert.deepEqual(
-    goalPresentationAtRunStart('continue', [], paused),
-    { ...paused, status: 'active', resumable: false },
-  )
-  assert.deepEqual(
-    goalPresentationAtRunStart('/goal Start another', [], paused),
-    { id: null, objective: 'Start another', status: 'active', resumable: false },
-  )
-  assert.deepEqual(
-    goalPresentationAtRunStart('/goal clear', [], paused),
-    { ...paused, resumable: true },
-    'the retired text command must not optimistically hide a durable Goal',
-  )
-})
-
-test('the goal reuses the progress rail and stays as context for build phases', () => {
-  assert.deepEqual(
-    progressRailViewModel('Build the indicator', []),
-    [{
-      key: 'goal',
-      label: 'Goal · Build the indicator',
-      current: true,
-      expandable: true,
-      tone: 'active',
-    }],
-  )
-  assert.deepEqual(
-    progressRailViewModel('Build the indicator', [
-      { ts: 1, label: 'First slice ready' },
-      { ts: 2, label: 'Verifying' },
-    ]),
-    [
-      {
-        key: 'goal',
-        label: 'Goal · Build the indicator',
-        current: false,
-        expandable: true,
-        tone: 'active',
-      },
-      { key: 'phase-1', label: 'First slice ready', current: false },
-      { key: 'phase-2', label: 'Verifying', current: true },
-    ],
-  )
-})
-
-test('terminal Goals remain visible and paused Goals do not invent an owner turn', () => {
-  const plan = { summary: { completed: 2, total: 3 }, tasks: [] }
-  assert.match(progressRailViewModel({ objective: 'Ship it', status: 'paused' }, [], plan)[0].label,
-    /Goal · Interrupted/)
-  for (const [status, label] of [
-    ['completed', 'Completed'], ['cannot_complete', 'Cannot complete'], ['cancelled', 'Cancelled'],
-  ]) {
-    assert.match(progressRailViewModel({ objective: 'Ship it', status }, [], plan)[0].label,
-      new RegExp(`Goal · ${label}`))
+  for (const kind of ['automatic', 'owner_input']) {
+    assert.equal(canResumeGoal({ ...goal, status: 'paused', handoff: { kind } }), false)
   }
 })
 
-test('Goal labels and announcements share exact pause provenance and handoff', () => {
-  const goal = { objective: 'Ship it', status: 'paused' }
-  const plan = { summary: { completed: 0, total: 1 } }
+test('retained pause labels preserve owner, agent, and interruption provenance', () => {
   for (const [pause_reason, label] of [
     ['owner', 'Paused by you'], ['agent', 'Paused by agent'],
-    ['unknown', 'Interrupted'], [undefined, 'Interrupted'], ['invalid', 'Interrupted'],
+    ['unknown', 'Interrupted'], ['deferred', 'On hold'],
   ]) {
-    const normalized = normalizeGoalPresentation({ ...goal, pause_reason })
-    assert.equal(normalized.pause_reason, ['owner', 'agent', 'unknown'].includes(pause_reason) ? pause_reason : undefined)
-    assert.equal(goalStatusLabel(normalized), label)
-    const item = progressRailViewModel(normalized, [], plan)[0]
-    assert.ok(item.label.includes(label))
-    assert.ok(item.ariaLabel.includes(label))
+    assert.equal(goalStatusLabel({ ...goal, status: 'paused', pause_reason }), label)
   }
-  for (const [kind, label] of [['owner_input', 'Waiting for you'], ['automatic', 'Waiting'], ['recovery', 'Interrupted']]) {
-    assert.equal(goalStatusLabel({ ...goal, handoff: { kind } }), label)
-  }
-  for (const status of ['active', 'completed', 'cannot_complete', 'cancelled']) {
-    const normalized = normalizeGoalPresentation({ ...goal, status, pause_reason: 'owner' })
-    assert.equal(normalized.pause_reason, undefined)
-    assert.notEqual(goalStatusLabel(normalized), 'Paused by you')
-  }
-  assert.match(chatView, /goal: goalPresentation/,
-    'the current announcement receives exact Goal provenance without giving history priority')
-  assert.match(chatView, /hasPendingQuestion && goalHandoff === 'owner_input'/)
-})
-
-test('retained pauses survive unrelated cards, working turns, reconnect and manual Resume', () => {
-  const plan = { summary: { completed: 1, total: 3 } }
-  for (const [pause_reason, label, handoff] of [
-    ['owner', 'Paused by you', { kind: 'owner_hold', reason: 'owner' }],
-    ['agent', 'Paused by agent', { kind: 'recovery', reason: 'agent_pause' }],
-    ['unknown', 'Interrupted', { kind: 'recovery', reason: 'unknown_stop' }],
-    ['deferred', 'On hold', { kind: 'none', reason: null }],
-    [undefined, 'Interrupted', undefined],
-  ]) {
-    let goal = normalizeGoalPresentation({ id: 'retained', revision: 7, objective: 'Ship it', status: 'paused', resumable: true, pause_reason, handoff })
-    for (const chat of [
-      { turnActive: false, hasPendingQuestion: true, chatHandoff: 'owner_input' },
-      { turnActive: false, chatHandoff: 'automatic' },
-      { turnActive: true, chatHandoff: 'none' },
-      { turnActive: false, chatHandoff: 'recovery' },
-      { turnActive: false, chatHandoff: 'none' },
-    ]) {
-      goal = goalPresentationAtRunStart('Unrelated question', [], goal)
-      goal = goalPresentationFromRuntime({ running: chat.turnActive, goal, handoff: { kind: chat.chatHandoff } })
-      assert.equal(goal.id, 'retained')
-      assert.equal(goal.revision, 7)
-      assert.equal(goal.status, 'paused')
-      assert.equal(goalStatusLabel(goal), label)
-      const rail = progressRailViewModel(goal, chat.turnActive ? [{ ts: 1, label: 'Unrelated work' }] : [], plan)
-      assert.ok(rail[0].label.includes(label))
-      assert.ok(rail[0].ariaLabel.includes(label))
-      assert.equal(canResumeGoal(goal, chat), !chat.turnActive && !chat.hasPendingQuestion && chat.chatHandoff !== 'automatic')
-    }
-    const resumed = goalPresentationAtRunStart('continue', [], goal)
-    assert.equal(resumed.id, 'retained')
-    assert.equal(resumed.status, 'active')
-    assert.equal(resumed.pause_reason, undefined)
-    assert.equal(resumed.handoff, undefined)
-    assert.equal(goalStatusLabel(resumed), null)
-    assert.equal(canResumeGoal(resumed), false)
-  }
-})
-
-test('deliberate deferral preserves its explanation without implying an error or an owner question', () => {
-  const held = normalizeGoalPresentation({
-    id: 'original', revision: 8, objective: 'Verify the original outcome',
-    status: 'paused', resumable: true, pause_reason: 'deferred', hold_reason: 'Owner deferred the remaining tests.',
-    handoff: { kind: 'none', reason: null },
-  })
-  const hydrated = goalPresentationFromRuntime({ running: false, goal: held })
-  assert.deepEqual(hydrated, held)
-  assert.equal(goalStatusLabel(held), 'On hold')
-  assert.equal(canResumeGoal(held), true)
-  assert.equal(held.hold_reason, 'Owner deferred the remaining tests.')
-  const rail = progressRailViewModel(held, [], { summary: { completed: 2, total: 3 } })[0]
-  assert.match(rail.label, /On hold · 2\/3/)
-  assert.match(rail.ariaLabel, /On hold/)
-  assert.doesNotMatch(rail.label, /Interrupted|Failed|Waiting for you/)
-  const resumed = goalPresentationAtRunStart('continue', [], held)
-  assert.equal(resumed.hold_reason, undefined)
-  assert.equal(resumed.pause_reason, undefined)
-  assert.equal(resumed.status, 'active')
-})
-
-test('Resume respects exact Goal waits and terminal outcomes without requiring a recovery card', () => {
-  for (const kind of ['automatic', 'owner_input']) {
-    assert.equal(canResumeGoal({ status: 'paused', handoff: { kind } }), false)
-  }
-  for (const status of ['active', 'completed', 'cannot_complete', 'cancelled']) {
-    assert.equal(canResumeGoal({ status, pause_reason: 'owner' }), false)
-  }
-  assert.equal(canResumeGoal(null), false)
-  assert.equal(canResumeGoal({ status: 'paused', resumable: true, pause_reason: 'unknown' }), true)
-  assert.equal(canResumeGoal({ status: 'paused', pause_reason: 'unknown' }), false)
-})
-
-test('a fetched plan never crosses Goal identity even when its revision is newer', () => {
-  const goal = { id: 'b', objective: 'New goal', status: 'active' }
-  const old = { goal_id: 'a', root_run_id: 'root-a', revision: 99, tasks: [{ id: 'stale' }] }
-  assert.equal(planForGoal(old, goal), null)
-  assert.equal(planForGoal({ ...old, goal_id: 'b' }, goal)?.goal_id, 'b')
-  assert.match(chatView, /planForGoal\(activeGoalPlan, progressGoal\)/)
-})
-
-test('stale plan data cannot show tasks after the active goal has ended', () => {
-  const plan = {
-    tasks: [{ id: 'old', title: 'Old work', status: 'running' }],
-  }
-  assert.deepEqual(progressRailViewModel('', [], plan), [])
-})
-
-test('a planned goal shows every running branch and dependency progress', () => {
-  const plan = {
-    summary: { completed: 1, total: 4 },
-    tasks: [
-      { id: 'done', title: 'Inspect', status: 'completed' },
-      { id: 'a', title: 'Run A', status: 'running', progress: { current: 2, total: 3 } },
-      { id: 'b', title: 'Run B', status: 'running' },
-      { id: 'c', title: 'Run C', status: 'pending', ready: false },
-    ],
-  }
-  assert.deepEqual(visibleGoalTasks(plan).map(task => task.id), ['a', 'b'])
-  assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
-    {
-      key: 'goal',
-      label: 'Goal · 1/4 · Run A · 2/3 + Run B',
-      expandable: true,
-      title: 'Goal: Ship it',
-      ariaLabel: 'Goal: Ship it. Working; 1 of 4 complete',
-      tone: 'active',
-      current: true,
-    },
-  ])
-})
-
-test('a plan with no running work presents every independent ready task', () => {
-  const plan = {
-    summary: { completed: 0, total: 3 },
-    tasks: [
-      { id: 'a', title: 'A', status: 'pending', ready: true },
-      { id: 'b', title: 'B', status: 'pending', ready: true },
-      { id: 'c', title: 'C', status: 'pending', ready: false },
-    ],
-  }
-  assert.deepEqual(
-    visibleGoalTasks(plan).map(task => task.id),
-    ['a', 'b'],
-  )
-})
-
-test('the deepest live delegated owners replace their parent in the collapsed label', () => {
-  const plan = {
-    tasks: [{ id: 'b', title: 'Do B', status: 'running' }],
-    delegations: [{
-      id: 'delegation-b', task_key: 'b', status: 'running', children: [
-        { id: 'delegation-x', task_key: 'x', status: 'running', children: [] },
-        { id: 'delegation-y', task_key: 'y', status: 'running', children: [] },
-      ],
-    }],
-  }
-  assert.deepEqual(
-    visibleGoalTasks(plan).map(task => task.title),
-    ['X', 'Y'],
-  )
 })
 
 test('the deepest running plan nodes replace coordinating parents', () => {
@@ -460,7 +111,7 @@ test('malformed delegation cycles cannot recurse forever', () => {
   a.children = [b]
   assert.deepEqual(
     visibleGoalTasks({ delegations: [a] }).map(task => task.id),
-    ['b'],
+    [],
   )
 })
 
@@ -494,15 +145,6 @@ test('ChatView retains settled goals independently of transport liveness', () =>
     1,
     'one server snapshot should publish one complete runtime cache patch',
   )
-  const runStarts = chatView.split('setBuildPhases(railAtRunStart())').slice(1)
-  assert.equal(runStarts.length, 4, 'every current run-start seam should be covered')
-  for (const suffix of runStarts) {
-    assert.match(
-      suffix.slice(0, 380),
-      /setGoalAtRunStart\(/,
-      'goal and build progress must reconcile together at each run boundary',
-    )
-  }
   assert.doesNotMatch(
     chatView,
     /if \(!turnActive\)[\s\S]{0,100}setActiveGoalState\(''\)/,
@@ -545,7 +187,7 @@ test('ChatView retains settled goals independently of transport liveness', () =>
   )
   assert.match(
     chatView,
-    /goalPresentationFromRuntime\(\s*runtime,/,
+    /goalPresentationFromRuntime\(runtime\)/,
     'a cold chat read should restore the durable Goal presentation',
   )
   assert.match(
@@ -700,4 +342,100 @@ test('a /goal draft renders the composer goal chip', () => {
     'the draft chip needs its frosted-card styling')
   assert.match(chatCss, /\.chat__progress-clear\s*\{/,
     'the clear X needs its button styling')
+})
+
+// Exercise the mounted view's actual signal-drain callback with its I/O owners stubbed.
+function invalidationHarness({ running = false } = {}) {
+  const callback = chatView.match(/const reconcileExternalActivity = useCallback\((async \(\) => \{[\s\S]*?\n  \}), \[/)[1]
+  const state = {
+    hiddenRef: { current: false }, activationSettledRef: { current: true },
+    processedExternalSignalRef: { current: EMPTY_CHAT_RUN_SIGNAL },
+    externalSignalRef: { current: EMPTY_CHAT_RUN_SIGNAL },
+    externalReconcileInFlightRef: { current: false }, externalClaimedRunRef: { current: false },
+    sendingRef: { current: running }, isStreamingRef: { current: running },
+    localStartRequestRef: { current: null }, fetchGenRef: { current: 0 }, chatId: 'owner',
+    chatRunSignalDelta, invalidateSharedRuntimeRead: () => {},
+    readRuntime: async () => {}, readDetail: async () => {},
+    refreshRuntimeState: (...args) => state.readRuntime(...args),
+    fetchMessages: (...args) => state.readDetail(...args),
+  }
+  const drain = new Function('state', `const { ${Object.keys(state).join(', ')} } = state; return ${callback}`)(state)
+  const handler = shellSource.split("} else if (ev.type === 'chat_wait_changed') {")[1]
+    .split("} else if (ev.type === 'chat_run_started')")[0]
+  const route = new Function('ev', 'markChatRunReconcile', 'refreshChatRows', handler)
+  return { state, drain, invalidate(event = { type: 'chat_wait_changed', chat_id: 'owner', source: 'goal' }) {
+    route(event, chatId => {
+      if (chatId === state.chatId) {
+        state.externalSignalRef.current = advanceChatRunSignal(state.externalSignalRef.current, 'chat_run_reconcile')
+      }
+    }, () => {})
+  } }
+}
+
+test('idle invalidation reads runtime and its embedded plan without a turn or revision change', async () => {
+  const owner = invalidationHarness()
+  let snapshot = { running: false, goal: structuredClone(goal) }
+  let displayed = goalPresentationFromRuntime(snapshot)
+  let runtimeReads = 0
+  let detailReads = 0
+  owner.state.readRuntime = async () => { runtimeReads++; displayed = goalPresentationFromRuntime(snapshot) }
+  owner.state.readDetail = async () => { detailReads++ }
+  snapshot.goal.plan.summary.completed = 2
+  snapshot.goal.plan.tasks[0].status = 'completed'
+  owner.invalidate()
+  await owner.drain()
+  assert.equal(runtimeReads, 1)
+  assert.equal(detailReads, 1)
+  assert.equal(owner.state.fetchGenRef.current, 1, 'pre-invalidation reads are fenced out')
+  assert.equal(displayed.plan.summary.completed, 2)
+  assert.equal(displayed.plan.tasks[0].status, 'completed')
+})
+
+test('nested live invalidations arriving during a read drain again and keep the same Goal attached', async () => {
+  const owner = invalidationHarness({ running: true })
+  const snapshot = { running: true, goal: structuredClone(goal) }
+  let reads = 0
+  let displayed = goalPresentationFromRuntime(snapshot)
+  snapshot.goal.plan.delegations = [{
+    id: 'parent', task_key: 'internal.parent', plan_task: 'verify', title: 'Coordinate verification',
+    provider: 'claude', status: 'running', question: null, children: [{
+      id: 'child', task_key: 'internal.child', plan_task: 'verify', title: 'Verify the release',
+      provider: 'codex', status: 'running', question: null, children: [],
+    }],
+  }]
+  owner.state.readRuntime = async () => {
+    reads++
+    displayed = goalPresentationFromRuntime(structuredClone(snapshot))
+    if (reads === 1) {
+      snapshot.goal.plan.delegations[0].children[0].status = 'needs_input'
+      snapshot.goal.plan.delegations[0].children[0].question = { id: 'q', text: 'Which release?', options: [] }
+      owner.invalidate()
+    }
+  }
+  owner.state.readDetail = async () => assert.fail('live invalidation must not replace the transcript')
+  owner.invalidate()
+  await owner.drain()
+  assert.equal(reads, 2)
+  assert.equal(displayed.id, goal.id)
+  assert.equal(displayed.plan.delegations[0].children[0].question.text, 'Which release?')
+})
+
+test('Goal invalidation payload targets only the owning chat', async () => {
+  const owner = invalidationHarness()
+  owner.state.readRuntime = async () => assert.fail('another Goal chat cannot invalidate this view')
+  owner.invalidate({ type: 'chat_wait_changed', chat_id: 'other-goal-chat', source: 'goal' })
+  await owner.drain()
+  assert.equal(owner.state.externalSignalRef.current.seq, 0)
+})
+
+test('parallel helpers and retries label their work once, not their execution rows', () => {
+  const plan = {
+    tasks: [{ id: 'check', title: 'Check result', status: 'pending' }],
+    delegations: [
+      { id: 'a', title: 'Helper work', plan_task: 'check', status: 'running' },
+      { id: 'b', title: 'Helper work', plan_task: 'check', status: 'running' },
+    ],
+  }
+  assert.deepEqual(visibleGoalTasks(plan).map(task => task.id), ['check'])
+  assert.deepEqual(visibleGoalTasks({ tasks: [], delegations: plan.delegations }), [])
 })
