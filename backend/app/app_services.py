@@ -98,6 +98,37 @@ def service_max_bytes(service: dict) -> int:
   return request_limit
 
 
+def _reject_oversize_json_strings(value, max_bytes: int) -> None:
+  """Reject a scalar before JSONEncoder can materialize its entire escaped form.
+
+  Structural overhead and the sum of small scalars are still counted by the
+  streaming encoder. Six UTF-8 bytes per character is a safe upper bound for
+  one JSON string character with ensure_ascii=False.
+  """
+  if isinstance(value, str):
+    if len(value) > max_bytes:
+      raise HTTPException(413, "App service request is too large.")
+    if len(value) * 6 + 2 <= max_bytes:
+      return
+    size = 2  # JSON quotes
+    for start in range(0, len(value), 64 * 1024):
+      # The standard encoder's escaping, applied in bounded slices, has the
+      # same result for a string regardless of where it is split.
+      part = json.encoder.encode_basestring(value[start:start + 64 * 1024])
+      size += len(part[1:-1].encode("utf-8"))
+      if size > max_bytes:
+        raise HTTPException(413, "App service request is too large.")
+    if size > max_bytes:
+      raise HTTPException(413, "App service request is too large.")
+  elif isinstance(value, dict):
+    for key, item in value.items():
+      _reject_oversize_json_strings(key, max_bytes)
+      _reject_oversize_json_strings(item, max_bytes)
+  elif isinstance(value, (list, tuple)):
+    for item in value:
+      _reject_oversize_json_strings(item, max_bytes)
+
+
 def request_actor(db, principal, caller=None) -> dict:
   """Who is calling an app's service, as the request's `actor` states it.
 
@@ -338,6 +369,7 @@ async def invoke_service(
   service = service_contract(app, access="public" if public else "self")
   max_bytes = service_max_bytes(service)
   try:
+    _reject_oversize_json_strings(request_envelope, max_bytes)
     # Tool calls bypass HTTP body admission. Bound their serialization too,
     # rather than building an arbitrarily large complete request first.
     buffer = io.BytesIO()

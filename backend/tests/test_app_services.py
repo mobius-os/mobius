@@ -362,6 +362,71 @@ async def test_tool_lane_rejects_oversize_request_before_execution(db, auth, mon
   assert caught.value.status_code == 413
 
 
+@pytest.mark.asyncio
+async def test_oversize_nested_tool_string_rejects_without_scalar_copy_or_execution(
+  db, auth, monkeypatch,
+):
+  import tracemalloc
+
+  app = _service_app(db, max_bytes=1024)
+  owner = db.query(models.Owner).first()
+  envelope = {"actor": {}, "body": {"arguments": {"nested": ["\"" * (8 * 1024 * 1024)]}}}
+  monkeypatch.setattr(app_services, "service_entry", lambda *_: pytest.fail("service executed"))
+  tracemalloc.start()
+  try:
+    with pytest.raises(HTTPException) as caught:
+      await app_services.invoke_service(app, owner, envelope, lane="tools")
+    _current, peak = tracemalloc.get_traced_memory()
+  finally:
+    tracemalloc.stop()
+  assert caught.value.status_code == 413
+  assert peak < 2 * 1024 * 1024, "oversize scalar was escaped and UTF-8 encoded before admission"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scalar", ["\x00" * 512, "\"" * 512, "é" * 512])
+async def test_tool_string_escape_or_utf8_expansion_counts_toward_limit(
+  db, auth, monkeypatch, scalar,
+):
+  app = _service_app(db, max_bytes=1024)
+  owner = db.query(models.Owner).first()
+  monkeypatch.setattr(app_services, "service_entry", lambda *_: pytest.fail("service executed"))
+  with pytest.raises(HTTPException) as caught:
+    await app_services.invoke_service(
+      app, owner, {"actor": {}, "body": {scalar: "ok"}}, lane="tools",
+    )
+  assert caught.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_valid_nested_tool_json_bytes_and_invalid_data_errors_are_unchanged(
+  db, auth, monkeypatch,
+):
+  from app import service_preload
+
+  app = _service_app(db, max_bytes=1024)
+  owner = db.query(models.Owner).first()
+  envelope = {"actor": {}, "body": {"café\"": ["\x00" * 20, "雪" * 20]}}
+  monkeypatch.setattr(service_preload, "ready_host", lambda *_: object())
+
+  async def run(_host, _environment, request, **kwargs):
+    assert request == json.dumps(
+      envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return b'{"body": {"ok": true}}', b"", 0
+
+  monkeypatch.setattr(service_preload, "run", run)
+  status, body, _headers, _media = await app_services.invoke_service(
+    app, owner, envelope, lane="tools",
+  )
+  assert (status, body) == (200, {"ok": True})
+  with pytest.raises(HTTPException) as caught:
+    await app_services.invoke_service(
+      app, owner, {"actor": {}, "body": {"bad": object()}}, lane="tools",
+    )
+  assert caught.value.status_code == 400
+
+
 def test_authenticated_service_receives_one_bounded_json_envelope(
   client, auth, db,
 ):
