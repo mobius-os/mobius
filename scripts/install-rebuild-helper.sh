@@ -6,7 +6,7 @@ set -euo pipefail
 # This installs the frozen launcher and seeds it with this checkout's worker;
 # later worker changes arrive with verified official images, so this runs once.
 #
-# Helper protocol revision: 2 (bounded, phase-owned replacement recovery).
+# Helper protocol revision: 3 (recurring, interruption-safe replacement recovery).
 # Keep in step with deployment/self-hosted-helper.required; never decrement.
 
 if [[ $EUID -ne 0 ]]; then
@@ -195,15 +195,17 @@ Requires=docker.service
 Type=oneshot
 ExecStart=/usr/local/libexec/mobius-rebuild-host run
 ExecStopPost=/usr/local/libexec/mobius-rebuild-host reconcile
-# Reconcile may observe the target, then one 300s rollback boot, plus bounded Docker commands.
-TimeoutStopSec=900
+# Target readiness, rollback creation/start and readiness, plus bounded observations.
+TimeoutStopSec=2400
 EOF
 cat >/etc/systemd/system/mobius-rebuild.path <<EOF
 [Unit]
 Description=Watch for a Möbius container rebuild request
 
 [Path]
-PathExists=$DATA_SOURCE/mobius-rebuild/inbox/request.json
+# Edge-trigger requests; a queued request behind recovery must not spin this
+# unit until systemd rate-limits the watcher. The timer supplies catch-up.
+PathChanged=$DATA_SOURCE/mobius-rebuild/inbox/request.json
 Unit=mobius-rebuild.service
 
 [Install]
@@ -219,14 +221,29 @@ Before=mobius-rebuild.path
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile
-TimeoutStartSec=900
+TimeoutStartSec=2400
 
 [Install]
 WantedBy=multi-user.target
 EOF
+cat >/etc/systemd/system/mobius-rebuild-reconcile.timer <<'EOF'
+[Unit]
+Description=Retry interrupted Möbius container recovery
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=30
+AccuracySec=1
+# The worker dispatches queued requests and always reconciles in ExecStopPost.
+Unit=mobius-rebuild.service
+
+[Install]
+WantedBy=timers.target
+EOF
 chmod 0644 /etc/systemd/system/mobius-rebuild.service \
   /etc/systemd/system/mobius-rebuild.path \
-  /etc/systemd/system/mobius-rebuild-reconcile.service
+  /etc/systemd/system/mobius-rebuild-reconcile.service \
+  /etc/systemd/system/mobius-rebuild-reconcile.timer
 systemctl daemon-reload
 # Release the lock so reconcile can settle interrupted work and refresh the
 # capability status, then let queued requests run.
@@ -234,6 +251,7 @@ flock -u 9
 exec 9>&-
 /usr/local/libexec/mobius-rebuild-host reconcile
 systemctl enable mobius-rebuild-reconcile.service
+systemctl enable --now mobius-rebuild-reconcile.timer
 systemctl enable --now mobius-rebuild.path
 
 echo "Container rebuild support installed for Compose project '$PROJECT'."
