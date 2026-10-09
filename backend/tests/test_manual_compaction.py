@@ -133,6 +133,7 @@ def test_missing_or_unbound_notes_do_not_replace_original_history(client, auth, 
   assert batch(client, auth, chat_id).json()["ok"]
   assert "Preserve originals" in fake_synthesis[0][0]
   assert "Original answer" in fake_synthesis[0][0]
+  assert "Unbound old note" in fake_synthesis[0][0]
 
 
 def test_verified_full_digest_replaces_only_its_covered_prefix(client, auth, db, fake_synthesis):
