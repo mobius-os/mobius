@@ -1659,6 +1659,158 @@ def test_activity_scope_keeps_goal_source_distinct_from_physical_root(db):
   ) == "stable-goal-source"
 
 
+def _seed_nested_goal_wake(db, suffix, *, awaiting_answer=False):
+  """A coordinator Goal, its assigned helper, and that helper's sub-helper."""
+  goal_id = f"shared-goal-{suffix}"
+  coordinator = f"coordinator-{suffix}"
+  db.add(create_chat(id=coordinator, title="Coordinator", provider="claude"))
+  db.add(make_goal_run(
+    db, id=f"coordinator-run-{suffix}", root_run_id=f"coordinator-run-{suffix}",
+    chat_id=coordinator, status="completed", provider="claude",
+    goal_id=goal_id, goal_objective="Complete shared work",
+    goal_plan_json={"tasks": [
+      {"id": "assigned", "title": "Assigned branch", "status": "running",
+       "depends_on": []},
+      {"id": "subtask", "title": "Nested result", "status": "running",
+       "parent_id": "assigned", "depends_on": []},
+    ]},
+    started_at=now_naive_utc() - timedelta(minutes=2),
+  ))
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix=suffix, result_blocks=[{"type": "text", "content": "violet"}],
+    parent_messages=[{"role": "user", "content": "Work on the assigned branch."}],
+  )
+  outer_parent, _outer_child, outer_id = _seed_delegation(
+    db, suffix=f"{suffix}-outer", parent_id=coordinator,
+    parent_root_id=f"coordinator-run-{suffix}", child_status=None,
+  )
+  assert outer_parent == coordinator
+  outer = db.get(models.Delegation, outer_id)
+  outer.child_chat_id = parent_id
+  outer.goal_id = goal_id
+  outer.goal_task_id = "assigned"
+  outer.app_id = None
+  inner = db.get(models.Delegation, delegation_id)
+  inner.goal_id = goal_id
+  inner.goal_task_id = "subtask"
+  inner.app_id = None
+  root = _seed_idle_parent_wake_root(db, delegation_id)
+  if awaiting_answer:
+    db.add(models.DelegationQuestion(
+      id=f"question-{suffix}", delegation_id=delegation_id,
+      child_chat_id=child_id, root_run_id=f"child-run-{suffix}",
+      asking_run_id=f"child-run-{suffix}",
+      answer_run_id=f"answer-run-{suffix}",
+      question="Which marker?", options_json=["violet", "amber"],
+    ))
+  db.commit()
+  return parent_id, child_id, delegation_id, outer_id, goal_id, root
+
+
+@pytest.mark.parametrize("awaiting_answer", [True, False], ids=["needs-input", "completed"])
+def test_nested_goal_parent_wake_keeps_foreign_goal_scoped_not_admitted(
+  db, awaiting_answer,
+):
+  from app.chat_writer import (
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
+    StartContinuationAttached,
+  )
+  from app.goals import turn_goal_brief
+
+  suffix = f"nested-shared-{awaiting_answer}"
+  parent_id, _child_id, delegation_id, _outer_id, goal_id, root = (
+    _seed_nested_goal_wake(db, suffix, awaiting_answer=awaiting_answer)
+  )
+  row = db.get(models.Delegation, delegation_id)
+  assert derived_status(db, row, load_result=False)[0] == (
+    "needs_input" if awaiting_answer else "completed"
+  )
+  token = delegations_mod._activity_continuation_run_id(db, row)
+  cmd = StartActivityContinuation(
+    chat_id=parent_id, run_token=token, root_run_id=root,
+    source_work_id=goal_id, activity_id=delegation_id,
+  )
+  started = get_writer().submit(cmd).result(timeout=5)
+  assert "promoted" not in started
+  assert get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id, run_token=token, root_run_id=root,
+    source_work_id=goal_id, activity_id=delegation_id,
+  )).result(timeout=5) == StartContinuationAttached()
+  db.expire_all()
+  run = db.get(models.ChatRun, token)
+  assert run.goal_id is None and run.goal_objective is None
+  assert run.root_run_id == root
+  assert run.activity_delivery_json == {
+    "delegation_ids": [delegation_id], "source_work_id": goal_id,
+  }
+  assert delegations_mod.activity_continuation_delivery_source_work_id(
+    db, parent_id, token,
+  ) == goal_id
+  brief = turn_goal_brief(db, parent_id, token, delegated=True)
+  assert '"focus":"assigned"' in brief
+  assert '"plan_task":"assigned"' in brief
+  assert '"depth":1' in brief
+  assert db.get(models.Delegation, delegation_id).delivered_run_id is None
+  assert db.query(models.ChatRun).filter_by(id=token).count() == 1
+
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=parent_id, run_token=token,
+    activity_results=_current_result(db, delegation_id),
+  )).result(timeout=5)
+  terminal = Finalize(
+    chat_id=parent_id, run_token=token,
+    snapshot={"id": token, "role": "assistant", "blocks": [
+      {"type": "text", "content": "Result received."},
+    ]},
+    incorporate_activity_delivery=True,
+  )
+  assert get_writer().submit(terminal).result(timeout=5) is True
+  db.expire_all()
+  delivered = db.get(models.Delegation, delegation_id).delivered_run_id
+  assert delivered == f"child-run-{suffix}"
+  assert get_writer().submit(Finalize(
+    chat_id=terminal.chat_id, run_token=terminal.run_token,
+    snapshot=terminal.snapshot, incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).delivered_run_id == delivered
+
+
+@pytest.mark.parametrize("boundary", [
+  "stopped", "closed", "missing-goal", "foreign-assignment",
+])
+def test_nested_goal_parent_wake_rejects_unowned_or_closed_work(db, boundary):
+  from app.chat_writer import StartActivityContinuation, StartContinuationBlocked
+
+  suffix = f"nested-boundary-{boundary}"
+  parent_id, _child_id, delegation_id, outer_id, goal_id, root = (
+    _seed_nested_goal_wake(db, suffix)
+  )
+  if boundary == "stopped":
+    db.get(models.ChatRun, root).status = "stopped"
+  elif boundary == "closed":
+    db.get(models.ChatGoal, goal_id).status = "completed"
+  elif boundary == "missing-goal":
+    db.delete(db.get(models.ChatGoal, goal_id))
+  else:
+    db.get(models.Delegation, outer_id).goal_id = f"unrelated-{suffix}"
+  db.commit()
+  token = delegations_mod._activity_continuation_run_id(
+    db, db.get(models.Delegation, delegation_id),
+  )
+  result = get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id, run_token=token, root_run_id=root,
+    source_work_id=goal_id, activity_id=delegation_id,
+  )).result(timeout=5)
+  assert result == StartContinuationBlocked({
+    "stopped": "parent_not_waiting", "closed": "goal_closed",
+    "missing-goal": "goal_missing",
+    "foreign-assignment": "foreign_goal_not_assigned",
+  }[boundary])
+  db.expire_all()
+  assert db.get(models.ChatRun, token) is None
+
+
 def test_successful_finalize_consumes_exact_activity_once(db):
   from app.chat_writer import (
     AdmitProviderExecution, Finalize, StartActivityContinuation,
