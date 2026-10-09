@@ -741,6 +741,13 @@ def rollback(config_value: dict, operation: str, expected: str,
                  message="Replacement failed; restoring the previous container.")
     cid, current, health = container_health(config_value)
     observing = current == previous_image and health in {"healthy", "starting", "unhealthy", "running", "restarting"}
+    if observing and transaction.get("phase") == "replacement_started":
+        # A timed-out daemon request may still be stopping this source. It is
+        # not a rollback boot: marking rollback_started here would strand the
+        # target if the delayed mutation removes the source after this probe.
+        write_status(config_value, state="needs_recovery", code="source_still_running",
+                     message="The source container is still running; waiting for the interrupted replacement to settle.")
+        return 1
     if not observing:
         if current and current not in {previous_image, transaction.get("target_image")}:
             write_status(config_value, state="needs_recovery", code="rollback_wrong_image",

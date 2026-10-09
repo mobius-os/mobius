@@ -201,6 +201,30 @@ def test_power_loss_loses_docker_metadata_but_cannot_replay_consumed_ledger(inci
   assert host.TRANSACTION.exists()
 
 
+@pytest.mark.parametrize("later", ["created", "healthy"])
+def test_delayed_compose_source_observation_does_not_become_a_rollback(incident, later):
+  config, tx, ledger, docker, _clock = incident
+  docker.image, docker.state, docker.started = tx["previous_image"], "running", -203
+  accepted = ledger.ACCEPTED_PATH.read_bytes()
+  host.recover(config, tx)
+  assert host.read_transaction()["phase"] == "replacement_started"
+  assert ledger.ACCEPTED_PATH.read_bytes() == accepted
+  assert docker.creates == docker.boots == 0
+  docker.image = tx["target_image"]
+  if later == "healthy":
+    assert ledger.begin_boot("delayed-target-boot", now=host.time.time())
+  else:
+    docker.state, docker.started = "created", None
+  host.reconcile()
+  assert not host.TRANSACTION.exists()
+  if later == "healthy":
+    assert docker.creates == docker.boots == 0
+    assert host.read_json(host.STATUS)["state"] == "succeeded"
+  else:
+    assert docker.creates == docker.boots == 1
+    assert host.read_json(host.STATUS)["state"] == "rolled_back"
+
+
 @pytest.mark.parametrize("state", ["running", "restarting"])
 def test_target_with_large_data_gets_more_than_180_seconds_to_become_ready(incident, monkeypatch, state):
   config, tx, ledger, docker, clock = incident
