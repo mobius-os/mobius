@@ -218,6 +218,23 @@ test('ordinary whole-block copy retains the original Markdown source', () => {
   assert.equal(assistantClipboardText(clipboardData), '__ordinary__')
 })
 
+for (const legacy of [false, true]) {
+  for (const [source, marker, tag] of [['**ab **cde**fg**', '**', 'strong'], ['~~ab ~~cde~~fg~~', '~~', 'del']]) {
+    test(`nested ${tag} copy keeps prefix and suffix formatting (legacy=${legacy})`, () => {
+      const rows = [assistant(source.slice(0, 5)), steer, assistant(source, 'run:assistant:1')]
+      if (legacy) rows.forEach(row => { delete row.blocks })
+      const shown = projectSettledSteerContinuations(rows)
+      for (const [msg, text] of [[shown[0], 'ab'], [shown[2], 'cdefg']]) {
+        const { html, clipboardData } = copyWholeFragment(msg, text)
+        assert.ok(html.includes(`<${tag}>`), 'display retains its original formatting')
+        assert.equal(assistantClipboardText(clipboardData), `${marker}${text}${marker}`)
+        assert.equal(assistantClipboardText(clipboardData, true), text)
+      }
+      assert.equal(rows[2].content, source, 'copy never changes authoritative prose')
+    })
+  }
+}
+
 for (const earlierAssistant of [false, true]) test(`ID-less active formatting targets the sealed predecessor, never an earlier row (earlierAssistant=${earlierAssistant})`, () => {
   const earlier = earlierAssistant ? assistant('**Old') : { role: 'user', content: 'Initial prompt' }
   const rows = [earlier, { role: 'user', content: 'Next prompt' }, assistant('**Plan'), steer]

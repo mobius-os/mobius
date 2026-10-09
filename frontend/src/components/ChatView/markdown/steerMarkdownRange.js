@@ -60,9 +60,7 @@ function inlineProjection(tokens, source, base, start, end) {
         if (!children?.length) return null
         result.push({ ...token, raw: source.slice(lo, hi),
           text: source.slice(Math.max(lo, innerStart), Math.min(hi, innerEnd)),
-          tokens: children, rangeMarkup: {
-            opening: raw.slice(0, opening), closing: raw.slice(opening + innerRaw.length),
-          } })
+          tokens: children })
       } else {
         return null
       }
@@ -134,29 +132,33 @@ export function markdownRangeTokens(range) {
 }
 
 /** Whole-fragment copy keeps source atoms (especially private image hrefs),
- * while balancing only the formatting that the range clipped. DOM media URLs
+ * with standalone formatting at clipped boundaries. DOM media URLs
  * may be authorized URLs; they must never become clipboard source. */
 export function markdownRangeSource(range) {
-  function source(token) {
+  function source(token, formats = []) {
     // Literal text can gain Markdown meaning at a new fragment boundary (for
     // example "* tail" becomes a list). Escape text, not complete source atoms.
     if (token.type === 'text' && !token.tokens) return token.raw
       .replace(/\\/g, '\\\\').replace(/([`*_[\]~<>#+\-!|])/g, '\\$1')
       .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')
-    if (!token.rangeMarkup) return token.raw
-    const content = token.tokens.map(source).join('')
-    const { opening, closing } = token.rangeMarkup
-    if (!containers.has(token.type)) return opening + content + closing
+    if (!containers.has(token.type)) {
+      if (!token.rangeMarkup) return token.raw
+      const { opening, closing } = token.rangeMarkup
+      return opening + token.tokens.map(child => source(child, formats)).join('') + closing
+    }
+    // Identical nested styles have the same visible effect. Normalize them in
+    // clipboard Markdown: joined markers can change emphasis or start a fence.
+    const inherited = formats.includes(token.type)
+    const childFormats = inherited ? formats : [...formats, token.type]
+    const content = token.tokens.map(child => source(child, childFormats)).join('')
+    if (inherited) return content
     // Markdown emphasis cannot open/close beside whitespace. Keep that space
     // outside the wrapper without changing any selected characters.
     const [, leading, body, trailing] = /^(\s*)([\s\S]*?)(\s*)$/.exec(content)
-    // Clipping nested *emphasis* may bring its stars together as **bold**.
-    // Alternate the outer emphasis marker when the child touches that edge.
-    const marker = token.type === 'em' && (body.startsWith(opening) || body.endsWith(closing))
-      ? (opening === '*' ? '_' : '*') : null
-    return leading + (body ? (marker || opening) + body + (marker || closing) : '') + trailing
+    const marker = token.type === 'strong' ? '**' : token.type === 'em' ? '*' : '~~'
+    return leading + (body ? marker + body + marker : '') + trailing
   }
-  return markdownRangeTokens(range).map(source).join('')
+  return markdownRangeTokens(range).map(token => source(token)).join('')
 }
 
 /** Slice using offsets relative to this descriptor's currently displayed raw span. */
