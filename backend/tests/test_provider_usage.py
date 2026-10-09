@@ -2346,3 +2346,41 @@ async def test_usage_snapshot_checks_provider_auth_off_the_event_loop(monkeypatc
   snapshot = await provider_usage._provider_snapshot("mobius", str(tmp_path))
   assert snapshot["state"] == "disconnected"
   assert seen and loop_thread not in seen
+
+
+def test_usage_invalidation_during_publication_cannot_restore_old_balance(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  key = provider_usage._cache_key("mobius", data_dir)
+  provider_usage.forget_provider_usage("mobius", data_dir)
+  copying = threading.Event()
+  resume = threading.Event()
+  calls = []
+  original_copy = provider_usage.copy.deepcopy
+
+  async def snapshot(_provider_id, _data_dir):
+    calls.append(len(calls) + 1)
+    return {"state": "ready", "plan_label": "Möbius", "windows": [],
+            "credit_balance": str(calls[-1])}
+
+  def paused_copy(value, *args, **kwargs):
+    if isinstance(value, dict) and value.get("credit_balance") == "1":
+      copying.set()
+      assert resume.wait(3)
+    return original_copy(value, *args, **kwargs)
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  monkeypatch.setattr(provider_usage.copy, "deepcopy", paused_copy)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    future = pool.submit(
+      lambda: asyncio.run(provider_usage.read_provider_usage("mobius", data_dir))
+    )
+    assert copying.wait(3)
+    provider_usage.forget_provider_usage("mobius", data_dir)
+    resume.set()
+    result = future.result(timeout=3)
+  assert result["credit_balance"] == "2"
+  assert provider_usage._provider_usage_cache[key].snapshot["credit_balance"] == "2"

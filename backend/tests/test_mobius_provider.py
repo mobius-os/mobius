@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 
 from app import providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
@@ -18,6 +20,48 @@ def _provider():
     ],
   })
   return provider
+
+
+def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
+  monkeypatch,
+):
+  from contextlib import contextmanager
+  from app import runtime_identity
+
+  provider = _provider()
+  copying = threading.Event()
+  resume = threading.Event()
+  original_copy = providers.copy.deepcopy
+
+  class Client:
+    def get(self, _route):
+      return self
+
+    def raise_for_status(self):
+      pass
+
+    def json(self):
+      return {"linked": False}
+
+  @contextmanager
+  def broker_client(**_kwargs):
+    yield Client()
+
+  def paused_copy(value, *args, **kwargs):
+    if isinstance(value, dict) and value == {"linked": False}:
+      copying.set()
+      assert resume.wait(3)
+    return original_copy(value, *args, **kwargs)
+
+  monkeypatch.setattr(runtime_identity, "broker_client", broker_client)
+  monkeypatch.setattr(providers.copy, "deepcopy", paused_copy)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    future = pool.submit(provider._identity)
+    assert copying.wait(3)
+    provider.forget_account_reads()
+    resume.set()
+    assert future.result(timeout=3) == {"linked": False}
+  assert "/identity" not in provider._held_reads
 
 
 def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):

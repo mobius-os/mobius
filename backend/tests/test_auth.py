@@ -753,7 +753,9 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
     "spendable_units": 500,
     "grants": [{"amount": 500, "expires_at": "2026-12-31"}],
   }
-  monkeypatch.setattr(providers.PROVIDERS["mobius"], "check_auth", lambda data_dir: None)
+  # Patch the class: restoring an inherited method on the shared instance
+  # leaves a bound attribute that shadows later class-level auth tests.
+  monkeypatch.setattr(MobiusProvider, "check_auth", lambda self, data_dir: None)
   monkeypatch.setattr(MobiusProvider, "trial_status", lambda self: balance)
 
   # The owner sees the trial balance.

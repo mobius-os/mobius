@@ -986,6 +986,7 @@ class MobiusProvider(BaseProvider):
     self.app_id: int | None = None
     self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
     self._held_generation = 0
+    self._held_lock = threading.Lock()
 
   def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
     self.app_id = app_id
@@ -1013,16 +1014,18 @@ class MobiusProvider(BaseProvider):
 
   def forget_account_reads(self) -> None:
     """Drop held identity and balance reads, including reads in flight."""
-    self._held_generation += 1
-    self._held_reads.clear()
+    with self._held_lock:
+      self._held_generation += 1
+      self._held_reads.clear()
 
   def _held_broker_read(
     self, route: str, *, hold_seconds: float, timeout: float,
   ) -> dict[str, Any]:
-    held = self._held_reads.get(route)
-    if held is not None and time.monotonic() - held[0] < hold_seconds:
-      return copy.deepcopy(held[1])
-    generation = self._held_generation
+    with self._held_lock:
+      held = self._held_reads.get(route)
+      if held is not None and time.monotonic() - held[0] < hold_seconds:
+        return copy.deepcopy(held[1])
+      generation = self._held_generation
     from app.runtime_identity import broker_client
     with broker_client(timeout=timeout) as client:
       response = client.get(route)
@@ -1032,8 +1035,10 @@ class MobiusProvider(BaseProvider):
       raise ValueError(f"invalid broker response for {route}")
     # A read that started before forget_account_reads() may describe the
     # previous account state; serve it to its own caller but never hold it.
-    if generation == self._held_generation:
-      self._held_reads[route] = (time.monotonic(), copy.deepcopy(value))
+    copied = copy.deepcopy(value)
+    with self._held_lock:
+      if generation == self._held_generation:
+        self._held_reads[route] = (time.monotonic(), copied)
     return value
 
   def _identity(self) -> dict[str, Any]:
@@ -2200,16 +2205,15 @@ async def list_models(
 
 
 async def model_supports_effort(data_dir: str, model: str | None) -> bool:
-  """Read Claude's capability without refreshing unrelated providers.
+  """Use a current Claude capability at execution, not a stale picker row.
 
-  A cold Claude cache refreshes only Claude, so a saved live-only effortless
-  model works before its picker opens. Cached entries answer a turn without
-  waiting (an expired one refreshes in the background); Codex and
-  app-provider discovery never belongs here.
+  Display lists may be stale-while-revalidate, but a saved effort sent to a
+  newly effortless model is rejected by Claude. Refresh only this provider
+  when its catalog has expired; unrelated discovery never belongs here.
   """
   if not model:
     return True
-  entries = _served_model_entries(data_dir, "claude")
+  entries = _fresh_model_entries("claude")
   if entries is None:
     entries = (await _fetch_model_entries(data_dir, "claude"))[1]
   for entry in entries:

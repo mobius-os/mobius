@@ -64,7 +64,7 @@ _file_receipt.touch()
 # created when missing, so a real build is never clobbered.
 from pathlib import Path as _Path
 
-_static = _Path(__file__).resolve().parents[1] / "static"
+_static = _Path(_tmp) / "static"
 # The warm publisher validates emitted JavaScript with a checked-in Node
 # script. Production uses /data/platform/frontend; host CI must point at the
 # checkout under test before importing app.frontend_watcher.

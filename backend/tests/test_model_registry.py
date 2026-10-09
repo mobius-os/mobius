@@ -270,11 +270,10 @@ async def test_effort_support_fetches_only_claude_when_cache_is_cold(
 
 
 @pytest.mark.asyncio
-async def test_effort_support_answers_from_expired_claude_cache_and_refreshes_only_claude(
+async def test_effort_support_waits_for_fresh_claude_capability_at_execution(
   monkeypatch, tmp_path,
 ):
-  """An expired catalog answers the turn at once; one Claude-only refresh
-  replaces it in the background."""
+  """A stale picker row cannot make execution send rejected saved effort."""
   monkeypatch.setattr(providers, "_model_registry_cache", {})
   monkeypatch.setattr(providers, "_model_refresh_tasks", {})
   monkeypatch.setitem(providers._model_registry_cache, "claude", (
@@ -286,8 +285,6 @@ async def test_effort_support_answers_from_expired_claude_cache_and_refreshes_on
     monkeypatch, calls, [{"id": "claude-live-no-effort", "effort_levels": []}],
   )
   data_dir = str(tmp_path)
-  assert await providers.model_supports_effort(data_dir, "claude-live-no-effort") is True
-  await providers._model_refresh_tasks["claude"]
   assert await providers.model_supports_effort(data_dir, "claude-live-no-effort") is False
   assert calls == ["claude"]
 
