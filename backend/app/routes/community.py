@@ -7,6 +7,7 @@ import base64
 from datetime import UTC, datetime
 import hashlib
 import mimetypes
+from pathlib import Path
 import re
 from typing import Any, Literal
 from urllib.parse import quote
@@ -18,7 +19,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import fs_locks, github_auth, models
+from app import fs_locks, github_auth, models, store_listing_source
 from app.community_broker import (
   COMMUNITY_PREFIX,
   CommunityBrokerError,
@@ -32,6 +33,7 @@ from app.community_publish import (
   list_publication_journals,
   new_publication_journal,
   public_store_listing,
+  store_listing_review,
   read_public_store_asset,
   read_publication_journal,
   write_publication_journal,
@@ -893,8 +895,14 @@ async def preview_local_app_publication(
     raise HTTPException(404, "App not found.")
   try:
     async with fs_locks.source_dir_lock(str(app.source_dir)):
-      accepted_commit, files = await asyncio.to_thread(build_public_snapshot, app)
-    listing = await asyncio.to_thread(public_store_listing, files)
+      accepted_commit, files = await asyncio.to_thread(
+        build_public_snapshot, app, allow_missing_manifest=True,
+      )
+      review = await asyncio.to_thread(store_listing_review, files)
+      await asyncio.to_thread(
+        store_listing_source.note_what_saving_fixes,
+        review["checklist"], Path(str(app.source_dir)), app,
+      )
   except CommunityPublicationError as exc:
     raise HTTPException(
       exc.status_code, {"code": exc.code, "message": exc.detail},
@@ -903,15 +911,19 @@ async def preview_local_app_publication(
     f"/api/community/publications/github/preview/assets/{app.id}/"
     f"{accepted_commit}/"
   )
+  icon = (review["listing"] or review["draft"])["icon"]
   return {
     "app_id": app.id,
     "name": app.name,
     "slug": app.slug,
     "accepted_commit": accepted_commit,
     "repository_name": app.slug,
-    "icon_url": preview_base + quote(str(listing["icon"]), safe="/"),
-    "asset_base": preview_base + "static/",
-    "listing": listing,
+    "icon_url": preview_base + quote(str(icon), safe="/") if icon else None,
+    "asset_root": preview_base,
+    "ready": review["ready"],
+    "checklist": review["checklist"],
+    "listing": review["listing"],
+    "draft": review["draft"],
   }
 
 

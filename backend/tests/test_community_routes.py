@@ -116,6 +116,8 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
     name="Pocket List",
     source_dir="/data/apps/pocket-list",
     updated_at="2026-08-27 12:00:00",
+    icon_png=None,
+    icon_override_png=None,
   )
 
   class Query:
@@ -146,9 +148,18 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
   files = [{"path": "mobius.json", "content_base64": "e30="}]
   monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
   monkeypatch.setattr(
-    community, "build_public_snapshot", lambda _: ("a" * 40, files),
+    community, "build_public_snapshot", lambda _, *, allow_missing_manifest: ("a" * 40, files),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda value: listing)
+  review = {
+    "ready": True,
+    "checklist": [
+      {"id": item, "done": True, "code": "", "message": ""}
+      for item in ("details", "icon", "tagline", "description", "screenshots", "hero")
+    ],
+    "listing": listing,
+    "draft": {**listing, "hero": ""},
+  }
+  monkeypatch.setattr(community, "store_listing_review", lambda value: review)
 
   preview = await community.preview_local_app_publication(42, DB(), None)
 
@@ -160,7 +171,8 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
     + "/"
   )
   assert preview["icon_url"] == accepted_base + "icon.png"
-  assert preview["asset_base"] == accepted_base + "static/"
+  assert preview["asset_root"] == accepted_base
+  assert preview["ready"] is True
   assert preview["listing"] is listing
 
 

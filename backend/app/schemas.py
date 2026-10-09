@@ -101,6 +101,39 @@ class AppApply(BaseModel):
   accept_local_package: bool = False
 
 
+class StoreListingImageIn(BaseModel):
+  """Keep a tracked source image (``path``) or upload new bytes."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  path: str | None = Field(default=None, max_length=512)
+  # 8 MiB of image bytes in base64.
+  data_base64: str | None = Field(default=None, max_length=11_184_812)
+
+  @model_validator(mode="after")
+  def _one_source(self):
+    if (self.path is None) == (self.data_base64 is None):
+      raise ValueError("Give either path or data_base64.")
+    return self
+
+
+class StoreListingScreenshotIn(StoreListingImageIn):
+  alt: str = Field(default="", max_length=2000)
+  label: str | None = Field(default=None, max_length=1000)
+
+
+class StoreListingIn(BaseModel):
+  """The whole Store listing as the owner wants it saved."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  tagline: str = Field(default="", max_length=1000)
+  description: str = Field(default="", max_length=20_000)
+  icon: StoreListingImageIn | None = None
+  hero: StoreListingImageIn | None = None
+  screenshots: list[StoreListingScreenshotIn] = Field(default_factory=list, max_length=5)
+
+
 class AppResolveUpdate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
