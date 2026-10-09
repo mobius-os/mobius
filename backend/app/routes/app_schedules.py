@@ -555,6 +555,8 @@ def get_app_job_context(
     accepted_root = None
   return {
     "app_id": app_id,
+    # Owner-facing links use configured origin, never the job's request host.
+    "public_origin": get_settings().frontend_origin.rstrip("/"),
     # The supervisor binds the scheduled script to this exact app before
     # granting its token. This is non-secret durable identity, not owner
     # configuration or a filesystem grant.

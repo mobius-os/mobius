@@ -8,6 +8,9 @@ The send path spawns the agent runner, which these tests don't want to
 drive end-to-end — they assert on the AUTHORIZATION boundary (which
 status code each actor gets), which is decided before any runner work.
 """
+import json
+
+import pytest
 from sqlalchemy.orm import object_session
 from app import transcript_rows
 from app.chat_writer import create_chat
@@ -754,3 +757,159 @@ def test_app_chat_list_shows_whether_a_run_is_live(client, owner_token, db, monk
   listed = {chat["id"]: chat["running"] for chat in client.get("/api/app-chats", headers=auth).json()}
 
   assert listed == {live: True, idle: False}
+
+
+def test_app_can_rename_and_promote_only_its_own_chat(client, owner_token, db):
+  app_id, token = _make_app(client, owner_token, "companion-chat")
+  auth = {"Authorization": f"Bearer {token}"}
+  created = client.post("/api/app-chats", headers=auth, json={
+    "scope": "companion:one", "system_prompt": "Keep this prompt",
+  })
+  assert created.status_code == 201, created.text
+  chat_id = created.json()["id"]
+  row = db.get(models.Chat, chat_id)
+  original_settings = dict(row.agent_settings_json)
+  assert row.title_locked is False
+
+  changed = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": "  Companion conversation  ", "owner_visible": True,
+  })
+  assert changed.status_code == 200, changed.text
+  db.refresh(row)
+  assert row.title == "Companion conversation"
+  assert row.title_locked is True
+  assert row.created_by_app_id == app_id
+  assert row.agent_settings_json == {**original_settings, "owner_visible": True}
+  summary = client.get("/api/app-chats", headers=auth).json()[0]
+  assert summary["title"] == row.title
+  assert summary["title_locked"] is True
+  assert summary["owner_visible"] is True
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  assert chat_id in {r["id"] for r in client.get("/api/chats", headers=owner_auth).json()}
+
+  # Omission, null and blank titles do not undo an explicit name or visibility.
+  for payload in ({}, {"title": None, "owner_visible": None}, {"title": "   "}):
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json=payload)
+    assert response.status_code == 200, response.text
+    db.refresh(row)
+    assert row.title == "Companion conversation"
+    assert row.title_locked is True
+    assert row.agent_settings_json == {**original_settings, "owner_visible": True}
+
+  hidden = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "owner_visible": False,
+  })
+  assert hidden.status_code == 200, hidden.text
+  db.refresh(row)
+  assert row.agent_settings_json == original_settings
+  summary = client.get("/api/app-chats", headers=auth).json()[0]
+  assert summary["owner_visible"] is False
+  assert summary["title_locked"] is True
+  assert chat_id not in {r["id"] for r in client.get("/api/chats", headers=owner_auth).json()}
+
+
+@pytest.mark.parametrize("title", ["x" * 501, "bad\x00title", "bad\ntitle"])
+def test_app_chat_patch_rejects_invalid_title_without_promoting_chat(
+  client, owner_token, db, title,
+):
+  _, token = _make_app(client, owner_token, "invalid-title")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": title, "owner_visible": True,
+  })
+  assert response.status_code == 422, response.text
+  row = db.get(models.Chat, chat_id)
+  assert row.title == "New chat"
+  assert row.title_locked is False
+  assert not row.agent_settings_json.get("owner_visible")
+
+
+def test_app_chat_presentation_patch_preserves_started_chat_guards(
+  client, owner_token, db,
+):
+  _, token = _make_app(client, owner_token, "started-presentation")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={
+    "provider": "claude", "system_prompt": "Original prompt",
+  }).json()["id"]
+  row = db.get(models.Chat, chat_id)
+  row.has_messages = True
+  db.commit()
+  for rejected in ({"system_prompt": "Replacement"}, {"provider": "codex"}):
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+      **rejected, "title": "Must not stick", "owner_visible": True,
+    })
+    assert response.status_code == 409, response.text
+    db.refresh(row)
+    assert row.title == "New chat"
+    assert row.title_locked is False
+    assert not row.agent_settings_json.get("owner_visible")
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": "x" * 500, "owner_visible": True,
+  })
+  assert response.status_code == 200, response.text
+  db.refresh(row)
+  assert row.title == "x" * 500
+  assert row.title_locked is True
+  assert row.agent_settings_json["system_prompt"] == "Original prompt"
+  assert row.provider == "claude"
+
+
+def test_app_chat_presentation_patch_cannot_change_foreign_or_deleted_chats(
+  client, owner_token, db,
+):
+  app_id, token = _make_app(client, owner_token, "presentation-owner")
+  other_id, _ = _make_app(client, owner_token, "presentation-other")
+  from datetime import UTC, datetime
+
+  for chat_id, app, deleted, status in (
+    ("owner-presentation", None, None, 403),
+    ("other-presentation", other_id, None, 403),
+    ("deleted-presentation", app_id, datetime.now(UTC), 404),
+  ):
+    row = create_chat(id=chat_id, title="Original", messages=[], created_by_app_id=app)
+    row.deleted_at = deleted
+    db.add(row)
+    db.commit()
+    response = client.patch(f"/api/app-chats/{chat_id}", json={
+      "title": "Changed", "owner_visible": True,
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == status, response.text
+    db.refresh(row)
+    assert row.title == "Original"
+    assert not (row.agent_settings_json or {}).get("owner_visible")
+  own = client.post("/api/app-chats", json={}, headers={
+    "Authorization": f"Bearer {token}",
+  }).json()["id"]
+  response = client.patch(f"/api/app-chats/{own}", json={"title": "Owner"}, headers={
+    "Authorization": f"Bearer {owner_token}",
+  })
+  assert response.status_code == 403, response.text
+
+
+def test_app_chat_summary_tracks_card_identity_without_card_contents(
+  client, owner_token, db,
+):
+  app_id, token = _make_app(client, owner_token, "card-status")
+  row = create_chat(
+    id="card-status-chat", title="Card status", created_by_app_id=app_id,
+    messages=[{"role": "assistant", "content": "Private prose", "blocks": [{
+      "type": "question", "id": "card-one", "questions": ["Private question"],
+      "answers": {"answer": "Private answer"},
+    }]}],
+  )
+  db.add(row)
+  db.commit()
+  for pending in ("card-one", "card-two", None):
+    row.pending_question_id = pending
+    db.commit()
+    response = client.get("/api/app-chats", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    summary = response.json()[0]
+    assert summary["pending_question_id"] == pending
+    assert summary["awaiting_owner"] is bool(pending)
+    assert summary["owner_visible"] is False
+    assert summary["title_locked"] is False
+    assert not {"messages", "blocks", "questions", "answers"} & summary.keys()
+    assert "Private" not in json.dumps(summary)
