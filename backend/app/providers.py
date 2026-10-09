@@ -22,6 +22,8 @@ an app-owned setup UI, not another platform runner or picker branch.
 import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -725,6 +727,15 @@ class BaseProvider:
   def codex_config_overrides(self) -> list[str]:
     return []
 
+  def measured_run_accounting(
+    self, cost_usd: float | None, usage: dict | None,
+  ) -> tuple[float | None, dict | None]:
+    """The run cost and usage this provider's engine truthfully measured.
+
+    Recorded as-is by default; `None` means unknown and is omitted from display.
+    """
+    return cost_usd, usage
+
   async def fetch_models(self, data_dir: str) -> list[Any]:
     """Return the provider's live or declared catalog before normalization."""
     raise NotImplementedError
@@ -1106,17 +1117,38 @@ class MobiusProvider(BaseProvider):
     return env
 
 
-class AppModelProvider(BaseProvider):
-  """An accepted app's declarative Responses-API model connection."""
+def model_relay_token(provider_id: str) -> str:
+  """Local credential the agent presents to the model relay for one provider.
 
-  runtime_kind = "codex_sdk"
-  cli_cmd = "codex"
+  Derived from the server secret, so it needs no storage and survives restarts,
+  and it is only honoured by the loopback-only relay. The provider's real key
+  never enters the agent process.
+  """
+  from app.config import get_settings
+  return hmac.new(
+    get_settings().secret_key.encode(),
+    f"mobius-model-relay:v1:{provider_id}".encode(),
+    hashlib.sha256,
+  ).hexdigest()
+
+
+class AppModelProvider(BaseProvider):
+  """An accepted app's declarative model connection.
+
+  `responses` declarations run on the Codex engine and `anthropic_messages`
+  declarations on the Claude engine. Both talk to the local model relay
+  (`routes/model_relay.py`) with a relay token; the relay holds the real key
+  and repairs request shapes compatible providers reject.
+  """
 
   def __init__(self, app_id: int, declaration: dict[str, Any]):
     self.app_id = app_id
     self.declaration = declaration
     self.name = declaration["name"]
     self.auth_dir = f"app-{app_id}"
+    self.protocol = declaration.get("protocol", "responses")
+    self.runtime_kind = "claude_sdk" if self.protocol == "anthropic_messages" else "codex_sdk"
+    self.cli_cmd = "claude" if self.protocol == "anthropic_messages" else "codex"
     self.switch_efforts = frozenset(
       effort for model in declaration["models"]
       for effort in model.get("effort_levels", [])
@@ -1139,17 +1171,32 @@ class AppModelProvider(BaseProvider):
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
 
+  def measured_run_accounting(self, cost_usd, usage):
+    # The engines price tokens at their own vendor's rates, meaningless for
+    # another company's model, so no cost is kept. Some compatible providers
+    # stream no usage at all and the engine then reports zeros, which would
+    # read as a free run: all-zero usage is unknown, not zero.
+    counted = isinstance(usage, dict) and any(
+      (usage.get(field) or 0) > 0
+      for field in ("input_tokens", "output_tokens", "total_tokens")
+    )
+    return None, (usage if counted else None)
+
+  def _relay_base_url(self) -> str:
+    from app.config import get_settings
+    return f"{get_settings().api_base_url.rstrip('/')}/api/model-relay/app-{self.app_id}"
+
   def codex_config_overrides(self) -> list[str]:
     provider_id = f"app_{self.app_id}"
     key_name = f"MOBIUS_APP_MODEL_KEY_{self.app_id}"
     return [
       f'model_provider={json.dumps(provider_id)}',
       f'model_providers.{provider_id}.name={json.dumps(self.name)}',
-      f'model_providers.{provider_id}.base_url={json.dumps(self.declaration["base_url"])}',
+      f'model_providers.{provider_id}.base_url={json.dumps(self._relay_base_url() + "/v1")}',
       f'model_providers.{provider_id}.env_key={json.dumps(key_name)}',
       f'model_providers.{provider_id}.wire_api="responses"',
       f'model_catalog_json={json.dumps(str(self._catalog_path()))}',
-      # The key is for the inference transport, not shell tools.
+      # The relay token is for the inference transport, not shell tools.
       f'shell_environment_policy.exclude=[{json.dumps(key_name)}]',
       'features.enable_request_compression=false',
       'features.apps=false',
@@ -1162,21 +1209,60 @@ class AppModelProvider(BaseProvider):
     return Path(get_settings().data_dir) / "apps" / str(self.app_id) / "model-runtime" / "catalog.json"
 
   def build_env(self, base_env, data_dir, chat_id=None):
-    from app.app_secret_crypto import decrypt_app_secret
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    key = decrypt_app_secret(path)
     env = dict(base_env)
     for name in list(env):
       if name.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN")) or name in {
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
       }:
         env[name] = ""
-    env[f"MOBIUS_APP_MODEL_KEY_{self.app_id}"] = key
+    if self.protocol == "anthropic_messages":
+      return self._claude_relay_env(env, data_dir, chat_id)
+    env[f"MOBIUS_APP_MODEL_KEY_{self.app_id}"] = model_relay_token(f"app-{self.app_id}")
     # Isolate custom-provider threads and auth from the owner's Codex login.
     home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime"
     home.mkdir(parents=True, exist_ok=True)
     _write_responses_catalog(home / "catalog.json", self.declaration)
     env["CODEX_HOME"] = str(home)
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    return env
+
+  def _claude_relay_env(self, env, data_dir, chat_id):
+    """Point the Claude engine at the loopback relay with a relay-only token."""
+    provider_id = f"app-{self.app_id}"
+    # Own config dir: sessions and settings never mix with the owner's Claude
+    # sign-in, which must not be used for another company's models.
+    home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime" / "claude"
+    home.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_CONFIG_DIR"] = str(home)
+    # The SDK merges os.environ underneath options.env. Omitting a key here
+    # would restore ambient owner auth or select a different inference route.
+    for name in (
+      "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+      "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+      "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_MANTLE",
+      "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_GATEWAY_TOKEN",
+      "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    ):
+      env[name] = ""
+    env.update(CLAUDE_CLI_POLICY_ENV)
+    env["ANTHROPIC_BASE_URL"] = self._relay_base_url()
+    env["ANTHROPIC_API_KEY"] = model_relay_token(provider_id)
+    # Background and alias model slots must resolve to this provider's models;
+    # Anthropic model ids would be unknown to it.
+    default_model = self.declaration["default_model"]
+    for slot in (
+      "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    ):
+      env[slot] = default_model
+    # Nothing in this run should reach Anthropic's services (updates, telemetry).
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
@@ -2109,22 +2195,28 @@ async def list_models(
   return result
 
 
-async def model_supports_effort(data_dir: str, model: str | None) -> bool:
-  """Read Claude's capability without refreshing unrelated providers.
+async def model_supports_effort(
+  data_dir: str, model: str | None, *, provider_id: str = "claude",
+) -> bool:
+  """Read the active Claude-runtime provider without unrelated discovery.
 
-  A cold or expired Claude cache refreshes only Claude, so a saved live-only
-  effortless model works before its picker opens. Fresh entries answer a turn
-  without I/O; Codex and app-provider discovery never belongs here.
+  A cold or expired cache refreshes only that provider, so a saved live-only
+  effortless model works before its picker opens. App providers read their
+  own declared catalog, never the owner's Claude connection.
   """
   if not model:
     return True
-  entries = _fresh_model_entries("claude")
-  if entries is None:
-    entries = (await _fetch_model_entries(data_dir, "claude"))[1]
+  provider = PROVIDERS[provider_id]
+  if isinstance(provider, AppModelProvider):
+    entries = provider.declaration["models"]
+  else:
+    entries = _fresh_model_entries(provider_id)
+    if entries is None:
+      entries = (await _fetch_model_entries(data_dir, provider_id))[1]
   for entry in entries:
     if entry.get("id") == model:
       return entry.get("effort_levels") != []
-  return MODEL_EFFORT_LEVELS.get(model) != []
+  return provider_id != "claude" or MODEL_EFFORT_LEVELS.get(model) != []
 
 
 def invalidate_model_cache() -> None:

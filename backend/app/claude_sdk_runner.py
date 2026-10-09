@@ -1121,6 +1121,7 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
+  provider_id: str = "claude",
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1315,7 +1316,9 @@ async def run_claude_sdk_turn(
   # A saved or global default effort must not reach a model that rejects the
   # parameter (the picker hides the control, but defaults still carry one).
   from app.config import get_settings
-  if not await model_supports_effort(get_settings().data_dir, _model):
+  if not await model_supports_effort(
+    get_settings().data_dir, _model, provider_id=provider_id,
+  ):
     _effort = None
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
@@ -1327,10 +1330,11 @@ async def run_claude_sdk_turn(
   # Cross-provider mismatch defense (mirrors codex_sdk_runner). Admission and
   # effective settings normally reject this before the SDK boundary. Keep the
   # boundary strict too: a legacy/corrupt value must never become an implicit
-  # provider-chosen model.
-  if _model and _model_belongs_to_other_provider(_model, "claude"):
+  # provider-chosen model. This runner also serves app Messages providers, so
+  # validate against the active provider rather than a hardcoded 'claude'.
+  if _model and _model_belongs_to_other_provider(_model, provider_id):
     raise ValueError(
-      f"Selected model {_model!r} does not belong to provider 'claude'."
+      f"Selected model {_model!r} does not belong to provider {provider_id!r}."
     )
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""

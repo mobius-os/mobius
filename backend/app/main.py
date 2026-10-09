@@ -85,6 +85,7 @@ from app.routes import (
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
   chats_router, chats_stream_router,
   secure_inputs_router,
+  model_relay_router,
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
@@ -347,6 +348,11 @@ async def lifespan(app):
       await close_public_fetch_clients()
     except Exception as exc:
       _log.error("public fetch client shutdown failed: %s", exc, exc_info=True)
+    try:
+      from app.routes.model_relay import close_model_relay_client
+      await close_model_relay_client()
+    except Exception as exc:
+      _log.error("model relay client shutdown failed: %s", exc, exc_info=True)
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
@@ -1031,6 +1037,7 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(model_relay_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
 app.include_router(delegations_router)
