@@ -84,6 +84,37 @@ test('an exact post-steer replay renders only its unseen suffix', () => {
     'The key is preserving the boundary.', 'durable source stays untouched')
 })
 
+for (const legacy of [false, true]) {
+  test(`projection is idempotent but fresh live content inheriting metadata still updates (legacy=${legacy})`, () => {
+    const sealed = assistant('**ab ')
+    const raw = assistant('**ab **ab cd**ef**')
+    if (legacy) { delete sealed.blocks; delete raw.blocks }
+    const projected = projectSteerContinuationMessage(sealed, raw)
+    assert.equal(projected.content, '**ab cd**ef**')
+    assert.equal(projectSteerContinuationMessage(sealed, projected), projected)
+    assert.equal(projectSteerContinuationMessage(sealed, projected, { active: true }), projected)
+    const grown = { ...projected, content: '**ab **ab cd**ef** tail',
+      ...(legacy ? {} : { blocks: [{ type: 'text', content: '**ab **ab cd**ef** tail' }] }) }
+    const fresh = projectSteerContinuationMessage(sealed, grown, { active: true })
+    assert.equal(fresh.content, '**ab cd**ef** tail')
+    if (!legacy) {
+      assert.equal(fresh.blocks[0].source_text_offset, sealed.content.length)
+      const freshCollision = { ...projected,
+        blocks: [{ type: 'text', content: projected.content }] }
+      assert.equal(projectSteerContinuationMessage(sealed, freshCollision, { active: true }).content,
+        projected.content.slice(sealed.content.length),
+        'fresh raw blocks are not mistaken for a projection even when text coincides')
+    }
+    const divergent = { ...projected, content: 'Different answer',
+      ...(legacy ? {} : { blocks: [{ type: 'text', content: 'Different answer' }] }) }
+    const different = projectSteerContinuationMessage(sealed, divergent, { active: true })
+    assert.equal(different.content, 'Different answer')
+    assert.equal(different.steer_replay, undefined)
+    assert.equal(different.markdown_range, undefined)
+    assert.equal(raw.content, '**ab **ab cd**ef**')
+  })
+}
+
 
 test('a plain word may continue across the steered user row', () => {
   const messages = [

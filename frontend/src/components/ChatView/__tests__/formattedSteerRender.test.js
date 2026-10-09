@@ -97,6 +97,29 @@ test('active text_final and saved reload render the same content without a repea
   }
 })
 
+for (const legacy of [false, true]) {
+  test(`DB and settled Reply never trim an already-projected repeated-prefix suffix (legacy=${legacy})`, () => {
+    const sealed = assistant('**ab ')
+    const source = assistant('**ab **ab cd**ef**', 'run:assistant:1')
+    if (legacy) { delete sealed.blocks; delete source.blocks }
+    const shown = projectSettledSteerContinuations([sealed, steer, source])
+    const group = assistantReplyGroups(shown).get(2)
+    const expected = '<strong><strong>ab cd</strong>ef</strong>'
+    for (const activeRowIndex of [-1, 0]) {
+      const html = render(Reply, { replyGroup: group, activeRowIndex,
+        activeMirrorMsg: group.rows[0].message, useDbActivePayload: true,
+        sealedSteerAssistant: sealed, isStreaming: activeRowIndex === 0, chatId: 'fixture' })
+      assert.ok(html.includes(expected), html)
+      assert.doesNotMatch(html, /ef\*\*/)
+    }
+    const live = render(Reply, { replyGroup: group, activeRowIndex: 0,
+      activeMirrorMsg: group.rows[0].message, useDbActivePayload: false, hasLivePayload: true,
+      streamItems: [{ type: 'text', content: source.content }],
+      sealedSteerAssistant: sealed, isStreaming: true, chatId: 'fixture' })
+    assert.ok(live.includes(expected), 'fresh live payloads must replace inherited projection metadata')
+  })
+}
+
 test('multiple visible steers retain each exact character interval', () => {
   const middle = '**3. Don’t confuse'
   const rows = [assistant('**3. Don'), steer, assistant(middle, 'run:assistant:1'),

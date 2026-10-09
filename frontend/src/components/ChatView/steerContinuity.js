@@ -91,6 +91,21 @@ function projectedText(prefix, text, { active }) {
   return null
 }
 
+function isCurrentSteerProjection(message) {
+  const replay = message.steer_replay
+  if (!replay) return false
+  const blocks = message.blocks
+  const index = blocks?.length ? firstContinuationTextBlock(blocks) : 0
+  if (index !== replay.textIndex) return false
+  const text = blocks?.length ? blocks[index].content : message.content
+  const output = replay.text.startsWith(replay.prefix)
+    ? replay.text.slice(replay.prefix.length)
+    : replay.prefix.startsWith(replay.text) ? '' : null
+  return output !== null && text === output && (!blocks?.length
+    || (blocks[index].source_text_offset || 0)
+      === replay.sourceOffset + replay.text.length - output.length)
+}
+
 
 /**
  * Return a presentation-only assistant message. Stored content is never
@@ -104,6 +119,14 @@ export function projectSteerContinuationMessage(
 ) {
   if (!sealedMessage || continuationMessage?.role !== 'assistant') {
     return continuationMessage
+  }
+  // Transcript presentation and Reply source selection can meet at this seam.
+  // Reuse an exact projection, but not stale metadata inherited by fresh SSE.
+  if (isCurrentSteerProjection(continuationMessage)) return continuationMessage
+  if (continuationMessage.steer_replay) {
+    continuationMessage = { ...continuationMessage }
+    delete continuationMessage.steer_replay
+    delete continuationMessage.markdown_range
   }
   if (sealedMessage.id && continuationMessage.id
       && assistantReplyRoot(sealedMessage)
