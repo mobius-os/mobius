@@ -5,14 +5,15 @@ Installed once as ``/usr/local/libexec/mobius-rebuild-host`` and never changed
 by updates. It holds no replacement logic. It runs a copy of
 ``scripts/mobius-rebuild-host.py`` recorded in ``workers.json``:
 
-- ``active``: the proven worker. It always runs ``reconcile`` and runs a
-  replacement when there is no candidate.
+- ``active``: the proven worker. It runs replacements without a candidate
+  and reconciliation without a pinned trial recovery owner.
 - ``candidate``: a newer worker the active one took from a verified official
   image after a successful replacement. The launcher removes it from the
-  record before trying it on the next replacement, so a trial the host
-  interrupts is never repeated. It becomes active only when that replacement
-  succeeds; the worker's revision high-water mark keeps it from ever being
-  offered again otherwise.
+  record before trying it on the next replacement, pinning it as the recovery
+  owner. A trial the host interrupts is never repeated, but its unfinished
+  transaction is reconciled by the same worker. It becomes active only when
+  that replacement succeeds; the worker's revision high-water mark keeps it
+  from ever being offered again otherwise.
 
 Worker changes therefore ship in releases and activate without a host command,
 and a faulty one costs one attempt. Only a change to this file needs a
@@ -30,12 +31,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-LAUNCHER_REVISION = 1
+LAUNCHER_REVISION = 2
 STATE_DIR = Path("/var/lib/mobius-rebuild")
 WORKERS = STATE_DIR / "workers"
 INDEX = STATE_DIR / "workers.json"
 STATUS = STATE_DIR / "status.json"
 LOCK = STATE_DIR / "replace.lock"
+TRIAL_LOCK = STATE_DIR / "candidate.lock"
+TRANSACTION = STATE_DIR / "transaction.json"
 PYTHON = "/usr/bin/python3"
 ENV = {
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -88,7 +91,12 @@ def load_index() -> dict | None:
     if active is None:
         return None
     candidate = _worker(index["candidate"]) if index.get("candidate") else None
-    return {**index, "active": active, "candidate": candidate}
+    recovery_entry = index.get("recovery")
+    recovery = _worker(recovery_entry) if recovery_entry is not None else None
+    if recovery_entry is not None and recovery is None:
+        return None  # never fall back to an incompatible active worker
+    return {**index, "active": active, "candidate": candidate,
+            "recovery": recovery}
 
 
 def _record(entry: dict) -> dict:
@@ -125,48 +133,155 @@ def _status() -> bytes:
         return b""
 
 
-def execute(worker: dict, command: str) -> int:
+def _pending_transaction() -> bool:
+    """Check journal presence only while holding replace.lock.
+
+    An untrusted journal is not evidence that it is safe to discard the pin.
+    """
+    try:
+        TRANSACTION.lstat()
+    except FileNotFoundError:
+        return False
+    if not _root_private(TRANSACTION, directory=False):
+        raise RuntimeError("untrusted replacement transaction")
+    return True
+
+
+def _same_worker(left: dict | None, right: dict) -> bool:
+    return left == _record(right)
+
+
+def _attributable_success(recovery: dict, after: bytes) -> bool:
+    """Only a fresh outcome from this exact trial can prove promotion."""
+    if hashlib.sha256(after).hexdigest() == recovery.get("trial_status_sha256"):
+        return False
+    try:
+        status = json.loads(after)
+    except (ValueError, UnicodeError):
+        return False
+    if not isinstance(status, dict):
+        return False
+    operation = status.get("operation_id")
+    return bool(
+        status.get("state") in {"succeeded", "no_change"}
+        and status.get("worker_revision") == recovery["revision"]
+        and isinstance(operation, str) and len(operation) == 32
+        and all(char in "0123456789abcdef" for char in operation)
+        and operation != recovery.get("trial_operation_id")
+    )
+
+
+def _settle_recovery(stored: dict, recovery: dict) -> bool:
+    """Settle an absent journal, including an exact attributable success."""
+    if not _same_worker(stored.get("recovery"), recovery) or _pending_transaction():
+        return False
+    promoted = bool(
+        (stored.get("active") or {}).get("sha256") == recovery.get("trial_replaced_sha")
+        and _attributable_success(recovery, _status())
+    )
+    if promoted:
+        stored["active"] = {key: value for key, value in _record(recovery).items()
+                            if not key.startswith("trial_")}
+    stored["recovery"] = None
+    return promoted
+
+
+def _clear_recovery(recovery: dict) -> None:
+    def clear(stored):
+        _settle_recovery(stored, recovery)
+
+    _update(clear)
+
+
+def recover_pinned(recovery: dict) -> tuple[int, bool]:
+    """Resume only the pinned worker; never replay its original run."""
+    with TRIAL_LOCK.open("a+") as trial:
+        try:
+            fcntl.flock(trial, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0, True  # original trial may still be before journaling
+        pending = []
+        promoted = []
+
+        def inspect(stored):
+            if not _same_worker(stored.get("recovery"), recovery):
+                return
+            if _pending_transaction():
+                pending.append(True)
+            else:
+                if _settle_recovery(stored, recovery):
+                    promoted.append(True)
+
+        _update(inspect)
+        if not pending:
+            return 0, bool(promoted)
+        result = execute(recovery, "reconcile", trial_fd=trial.fileno())
+        _clear_recovery(recovery)
+        return result, True
+
+
+def execute(worker: dict, command: str, *, trial_fd: int | None = None) -> int:
     return subprocess.run(
         [PYTHON, "-I", "-S", str(worker["path"]), command],
         env=ENV, cwd="/", check=False,
+        pass_fds=(trial_fd,) if trial_fd is not None else (),
     ).returncode
 
 
 def try_candidate(candidate: dict, replaced: str) -> int:
     """Run one replacement with the candidate, taken out of the record first."""
-    digest = candidate["sha256"]
-    taken = []
+    with TRIAL_LOCK.open("a+") as trial:
+        try:
+            fcntl.flock(trial, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 1
+        taken = []
+        pinned = []
+        before = []
 
+        def take(stored):
+            if (_same_worker(stored.get("candidate"), candidate)
+                    and not stored.get("recovery")
+                    and (stored.get("active") or {}).get("sha256") == replaced):
+                stored["candidate"] = None
+                baseline = _status()
+                try:
+                    prior_operation = json.loads(baseline).get("operation_id")
+                except (ValueError, AttributeError):
+                    prior_operation = None
+                recovery = {**_record(candidate),
+                            "trial_replaced_sha": replaced,
+                            "trial_status_sha256": hashlib.sha256(baseline).hexdigest(),
+                            "trial_operation_id": prior_operation}
+                stored["recovery"] = recovery
+                pinned.append(recovery)
+                before.append(baseline)
+                taken.append(True)
 
-    def take(stored):
-        if (stored.get("candidate") or {}).get("sha256") == digest:
-            stored["candidate"] = None
-            taken.append(True)
+        _update(take)
+        if not taken:
+            return 1  # the record changed first; the next run reads it afresh
+        # The child keeps the trial lock if the launcher is killed after
+        # Popen but before the worker acquires replace.lock or journals.
+        result = execute(candidate, "run", trial_fd=trial.fileno())
+        after = _status()
+        def settle(stored):
+            if not _same_worker(stored.get("recovery"), pinned[0]):
+                return
+            if _pending_transaction():
+                return  # only this worker may finish its journal
+            stored["recovery"] = None
+            if (stored.get("active") or {}).get("sha256") != replaced:
+                return  # a newer worker was installed while it ran
+            if after == before[0] and result == 0:
+                # Nothing was queued: the candidate has not been tried.
+                if stored.get("high_water") == candidate["revision"] and not stored.get("candidate"):
+                    stored["candidate"] = _record(candidate)
+            elif _attributable_success(pinned[0], after):
+                stored["active"] = _record(candidate)
 
-    _update(take)
-    if not taken:
-        return 1  # the record changed first; the next run reads it afresh
-    before = _status()
-    result = execute(candidate, "run")
-    after = _status()
-    try:
-        state = json.loads(after).get("state") if after != before else None
-    except ValueError:
-        state = None
-
-    def settle(stored):
-        if (stored.get("active") or {}).get("sha256") != replaced:
-            return  # a newer worker was installed while it ran
-        if after == before and result == 0:
-            # Nothing was queued: the candidate has not been tried, and it
-            # goes back unless a newer worker was offered meanwhile.
-            if stored.get("high_water") == candidate["revision"]:
-                stored["candidate"] = _record(candidate)
-        elif state in {"succeeded", "no_change"}:
-            stored["active"] = _record(candidate)
-
-    _update(settle)
-    return result
+        _update(settle)
+        return result
 
 
 def main(argv: list[str]) -> int:
@@ -180,6 +295,13 @@ def main(argv: list[str]) -> int:
         print("no verified replacement worker is installed; rerun "
               "scripts/install-rebuild-helper.sh", file=sys.stderr)
         return 1
+    if index["recovery"]:
+        result, reconciled = recover_pinned(index["recovery"])
+        if result != 0 or reconciled:
+            return result
+        index = load_index()
+        if index is None or index["recovery"]:
+            return 0 if index is not None else 1
     if argv[1] == "run" and index["candidate"]:
         return try_candidate(index["candidate"], index["active"]["sha256"])
     return execute(index["active"], argv[1])

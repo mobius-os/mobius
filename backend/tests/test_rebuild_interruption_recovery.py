@@ -341,3 +341,73 @@ def test_lost_or_attempted_rollback_cannot_be_recreated(incident, stage, state):
   host.reconcile()
   assert docker.creates == docker.boots == 0
   assert host.TRANSACTION.exists()
+
+
+@pytest.mark.parametrize("delay,continued", [(601, True), (3590, True), (5400, False)])
+def test_delayed_preboot_retry_refreshes_only_unexpired_handoff(incident, delay, continued):
+  config, tx, ledger, docker, clock = incident
+  docker.crash = "start-before"
+  with pytest.raises(PowerLoss):
+    host.recover(config, tx)
+  assert host.read_transaction()["rollback_stage"] == "starting"
+  assert docker.boots == 0
+  receipt = ledger.CUTOVER_RECEIPT_PATH.read_bytes()
+  clock[0] += delay
+  host.reconcile()
+  assert docker.boots == 1
+  assert ledger.ACK_PATH.exists() == continued
+  assert host.TRANSACTION.exists() != continued
+  if not continued:
+    assert ledger.CUTOVER_RECEIPT_PATH.read_bytes() == receipt
+    assert host.read_json(host.STATUS)["code"] == "handoff_boot_unconfirmed"
+  host.reconcile()
+  assert docker.boots == 1
+
+
+@pytest.mark.parametrize("boundary", ["prepared-before", "prepared-after", "rearm-after", "starting-after"])
+def test_interruption_during_delayed_acceptance_refresh_recovers(incident, monkeypatch, boundary):
+  config, tx, ledger, docker, clock = incident
+  docker.crash = "start-before"
+  with pytest.raises(PowerLoss):
+    host.recover(config, tx)
+  clock[0] += 601
+  docker.crash = boundary
+  persist = host.write_transaction
+  def write(value):
+    stage = value.get("rollback_stage", "other")
+    docker.boundary(f"{stage}-before")
+    persist(value)
+    docker.boundary(f"{stage}-after")
+  rearm = host.rearm_rollback
+  def arm(*args, **kwargs):
+    result = rearm(*args, **kwargs)
+    if not kwargs.get("witness_only"):
+      docker.boundary("rearm-after")
+    return result
+  monkeypatch.setattr(host, "write_transaction", write)
+  monkeypatch.setattr(host, "rearm_rollback", arm)
+  with pytest.raises(PowerLoss):
+    host.reconcile()
+  host.reconcile()
+  assert docker.boots == 1 and ledger.ACK_PATH.exists()
+  assert not host.TRANSACTION.exists()
+
+
+def test_duplicate_containers_never_choose_or_mutate_arbitrarily(incident, monkeypatch):
+  config, tx, ledger, docker, _clock = incident
+  accepted = ledger.ACCEPTED_PATH.read_bytes()
+  original = docker.command
+  ambiguous = [True]
+  def command(args, **kwargs):
+    if ambiguous[0] and args[1] == "compose" and "ps" in args:
+      return subprocess.CompletedProcess(args, 0, stdout=docker.cid + "\n" + "f" * 64, stderr="")
+    return original(args, **kwargs)
+  monkeypatch.setattr(host, "docker_command", command)
+  host.recover(config, tx)
+  host.reconcile()
+  assert docker.creates == docker.boots == 0
+  assert ledger.ACCEPTED_PATH.read_bytes() == accepted
+  assert host.TRANSACTION.exists()
+  ambiguous[0] = False
+  host.reconcile()
+  assert docker.boots == 1 and not host.TRANSACTION.exists()

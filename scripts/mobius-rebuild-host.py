@@ -51,7 +51,7 @@ REQUEST_VERSIONS = [1, 2]
 # each requested official image only when this number is higher than every
 # worker it has run. Increase it with every change to this file; never lower
 # it. The launcher reads it as text, so keep it a plain literal on one line.
-WORKER_REVISION = 10
+WORKER_REVISION = 11
 # The frozen launcher runs the worker selected here; see offer_worker().
 WORKERS = STATE_DIR / "workers"
 WORKER_INDEX = STATE_DIR / "workers.json"
@@ -540,8 +540,12 @@ def rearm_rollback(config_value: dict, operation: str, *,
                 or receipt.get("action") != "external_cutover"
                 or receipt.get("cutover_id") != operation
                 or not valid(receipt.get("nonce")) or not valid(receipt.get("source_boot_id"))
-                or not valid(boot)
-                or not 0 <= current - float(receipt.get("accepted_at", 0)) + 5 <= 3605):
+                or not valid(boot)):
+            return False
+        accepted_at = float(receipt.get("accepted_at", 0))
+        if not 0 <= accepted_at <= current + 5:
+            return False
+        if not witness_only and current - accepted_at > 3600:
             return False
         accepted, ack = read("accepted.json"), read("ack.json")
 
@@ -557,6 +561,9 @@ def rearm_rollback(config_value: dict, operation: str, *,
         elif not matches(ack) or ack.get("target_boot_id") != boot:
             return False
         if witness_only:
+            # Expiry forbids issuing handoff authority, not proving that an
+            # existing acceptance remains unconsumed. An expired receipt can
+            # still permit exact service recovery without chat continuation.
             # Docker can lose its started metadata on power failure after a
             # process booted. Its 'created' state alone is NOT proof that the
             # one-shot ledger authorization remains unconsumed.
@@ -692,6 +699,17 @@ def prepare_rollback(config_value: dict, transaction: dict) -> None:
     cid = transaction["rollback_container"]
     if not never_started(cid, previous):
         return  # a boot may have started; observation, never rearm, owns it
+    if transaction.get("rollback_stage") == "starting":
+        witness = transaction.get("rollback_authorization")
+        if not witness or witness != rearm_rollback(
+                config_value, transaction["operation_id"], witness_only=True):
+            return
+        # The exact container is still unstarted and the trusted acceptance
+        # is unchanged: no boot consumed this attempt. Persist that proof's
+        # preboot transition BEFORE refreshing its short-lived acceptance.
+        # A crash after the refresh must not strand an obsolete witness.
+        transaction["rollback_stage"] = "prepared"
+        write_transaction(transaction)
     first_start = False
     if transaction.get("rollback_stage") == "prepared":
         transaction["handoff_rearmed"] = restart_ledger(
