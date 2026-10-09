@@ -46,6 +46,12 @@ class BrowserSessionScan:
     return self.complete and not self.targets and not self.processes
 
 
+@dataclass(frozen=True)
+class BrowserChatUsage:
+  """Exact owned process exists; None means its PSS could not be measured."""
+  pss_bytes: int | None
+
+
 def _process_state(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int]:
   fields = (proc_root / str(pid) / 'stat').read_text().rsplit(') ', 1)[1].split()
   if fields[0] == 'Z':
@@ -73,6 +79,49 @@ def _profile_arg(args: tuple[str, ...]) -> str | None:
   return None
 
 
+def _browser_inventory(proc_root: Path) -> tuple[dict, bool]:
+  """One executable-verified inventory for reset and memory attribution."""
+  try:
+    entries = list(proc_root.iterdir())
+  except OSError:
+    return {}, False
+  records = {}
+  complete = True
+  for entry in entries:
+    if not entry.name.isdigit():
+      continue
+    pid = int(entry.name)
+    try:
+      parent, ticks = _process_state(pid, proc_root)
+      args = tuple(x.decode('utf-8', errors='surrogateescape')
+                   for x in (entry / 'cmdline').read_bytes().split(b'\0') if x)
+      # argv cannot establish browser identity, but an argv0 naming an
+      # unrelated program can exclude it before an unreadable exe poisons
+      # the exact-owner inventory (for example, the root Python broker).
+      argv0 = args[0].split(' ', 1)[0] if args else ''
+      if argv0 and Path(argv0).name not in DAEMONS | BROWSERS:
+        continue
+      exe = Path(os.readlink(entry / 'exe')).name
+      if exe not in DAEMONS | BROWSERS:
+        continue
+      env = {}
+      for raw in (entry / 'environ').read_bytes().split(b'\0'):
+        key, sep, value = raw.partition(b'=')
+        if sep and key in (b'CHAT_ID', b'AGENT_BROWSER_PROFILE',
+                           b'AGENT_BROWSER_SESSION', b'AGENT_BROWSER_NAMESPACE',
+                           b'AGENT_BROWSER_SOCKET_DIR'):
+          env[key.decode()] = value.decode('utf-8', errors='surrogateescape')
+      if _identity(pid, proc_root).start_ticks != ticks:
+        complete = False
+        continue
+      records[pid] = (ProcessIdentity(pid, ticks), parent, exe, args, env)
+    except (FileNotFoundError, ProcessLookupError):
+      continue
+    except (OSError, ValueError, IndexError):
+      complete = False
+  return records, complete
+
+
 def scan_browser_processes(*, chat_id: str | None = None,
                            profile: str | None = None,
                            proc_root: Path = PROC_ROOT) -> BrowserSessionScan:
@@ -86,41 +135,7 @@ def scan_browser_processes(*, chat_id: str | None = None,
   if not chat_id and not profile:
     return BrowserSessionScan(frozenset(), False)
   profile = os.path.abspath(profile) if profile else None
-  try:
-    entries = list(proc_root.iterdir())
-  except OSError:
-    return BrowserSessionScan(frozenset(), False)
-  complete = True
-  records = {}
-  for entry in entries:
-    if not entry.name.isdigit():
-      continue
-    pid = int(entry.name)
-    try:
-      parent, ticks = _process_state(pid, proc_root)
-      args = tuple(x.decode('utf-8', errors='surrogateescape')
-                   for x in (entry / 'cmdline').read_bytes().split(b'\0') if x)
-      if not args:
-        continue
-      exe = Path(args[0]).name
-      if exe not in DAEMONS | BROWSERS:
-        continue
-      env = {}
-      for raw in (entry / 'environ').read_bytes().split(b'\0'):
-        key, sep, value = raw.partition(b'=')
-        if sep and key in (b'CHAT_ID', b'AGENT_BROWSER_PROFILE',
-                           b'AGENT_BROWSER_SESSION', b'AGENT_BROWSER_NAMESPACE',
-                           b'AGENT_BROWSER_SOCKET_DIR'):
-          env[key.decode()] = value.decode('utf-8', errors='surrogateescape')
-      # A PID recycled between reads is not a coherent ownership record.
-      if _identity(pid, proc_root).start_ticks != ticks:
-        complete = False
-        continue
-      records[pid] = (ProcessIdentity(pid, ticks), parent, exe, args, env)
-    except (FileNotFoundError, ProcessLookupError):
-      continue
-    except (OSError, ValueError, IndexError):
-      complete = False
+  records, complete = _browser_inventory(proc_root)
   selected = set()
   foreign = set()
   for pid, (_, _, exe, args, env) in records.items():
@@ -166,6 +181,66 @@ def scan_browser_processes(*, chat_id: str | None = None,
   ordered = sorted(selected, key=lambda pid: (records[pid][2] not in DAEMONS, pid))
   return BrowserSessionScan(frozenset(targets), complete,
                             tuple(records[pid][0] for pid in ordered))
+
+
+def _pss_bytes(pid: int, proc_root: Path = PROC_ROOT) -> int:
+  """Proportional set size, so pages Chrome processes share count once."""
+  try:
+    for line in (proc_root / str(pid) / 'smaps_rollup').read_text().splitlines():
+      if line.startswith('Pss:'):
+        return int(line.split()[1]) * 1024
+  except (OSError, IndexError, ValueError) as exc:
+    raise SessionResetError('browser PSS could not be measured') from exc
+  raise SessionResetError('browser PSS is missing')
+
+
+def browser_usage_by_chat(*, proc_root: Path = PROC_ROOT) -> dict[str, BrowserChatUsage]:
+  """Live agent-browser ownership and optional PSS per launching chat.
+
+  Processes are recognised by executable, not argv: Chrome rewrites its
+  helpers' command lines into one string, and those helpers (renderers, GPU)
+  hold most of the memory. They also lack the inherited CHAT_ID, so each
+  process belongs to the CHAT_ID of its nearest tagged browser ancestor.
+  Browsers no chat owns (named sessions) are not reported. Unknown PSS keeps
+  ownership visible without asserting zero memory. Exact-owner reset re-scans
+  before any signal is sent.
+  """
+  records, complete = _browser_inventory(proc_root)
+  if not complete:
+    raise SessionResetError('browser memory inventory is incomplete')
+  usage: dict[str, int | None] = {}
+  for pid, (identity, parent, _, _, env) in records.items():
+    process_identity = identity
+    owner = env.get('CHAT_ID') or None
+    seen = {pid}
+    while owner is None and parent in records and parent not in seen:
+      seen.add(parent)
+      parent_identity, grandparent, _, _, parent_env = records[parent]
+      # Same recycled-PID guard as scan_browser_processes.
+      if parent_identity.start_ticks > identity.start_ticks:
+        break
+      owner, parent, identity = parent_env.get('CHAT_ID') or None, grandparent, parent_identity
+    if owner is not None:
+      try:
+        pss = _pss_bytes(pid, proc_root)
+      except SessionResetError:
+        if _still_same_process(process_identity, proc_root):
+          usage[owner] = None
+        continue
+      if _still_same_process(process_identity, proc_root):
+        previous = usage.get(owner, 0)
+        if previous is not None:
+          usage[owner] = previous + pss
+  return {owner: BrowserChatUsage(pss) for owner, pss in usage.items()}
+
+
+def browser_memory_by_chat(*, proc_root: Path = PROC_ROOT) -> dict[str, int]:
+  """Strict sizing view for callers that cannot represent unknown PSS."""
+  usage = browser_usage_by_chat(proc_root=proc_root)
+  if any(sample.pss_bytes is None for sample in usage.values()):
+    raise SessionResetError('browser PSS could not be measured')
+  return {owner: sample.pss_bytes for owner, sample in usage.items()
+          if sample.pss_bytes is not None}
 
 
 def terminate_processes(processes: tuple[ProcessIdentity, ...], *,

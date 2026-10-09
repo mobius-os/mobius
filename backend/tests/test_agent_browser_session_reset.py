@@ -13,6 +13,8 @@ def _write_process(proc_root, pid, *, ppid=1, start_ticks=None,
   fields = [state, str(ppid), *("0" for _ in range(17)), str(start_ticks or pid)]
   (process / "stat").write_text(f"{pid} (process with spaces) {' '.join(fields)}\n")
   (process / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
+  (process / "exe").unlink(missing_ok=True)
+  (process / "exe").symlink_to(args[0])
   (process / "environ").write_bytes(b"\0".join(
     f"{key}={value}".encode() for key, value in (environment or {}).items()) + b"\0")
 
@@ -79,6 +81,43 @@ def test_unknown_executable_is_never_selected_even_as_owned_child(tmp_path):
   _write_process(tmp_path, 101, ppid=100, args=("/opt/agent-browser-linux-x64-wrapper",),
                  environment={"CHAT_ID": "a"})
   assert _pids(RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)) == [100]
+
+
+def test_forged_browser_argv_does_not_override_executable(tmp_path):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  (tmp_path / "100" / "exe").unlink()
+  (tmp_path / "100" / "exe").symlink_to("/usr/bin/python3")
+  assert RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path).idle
+  assert RESET.browser_memory_by_chat(proc_root=tmp_path) == {}
+
+
+def test_unreadable_browser_executable_is_unknown_not_idle(tmp_path, monkeypatch):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  original = RESET.os.readlink
+  def readlink(path):
+    if path == tmp_path / "100" / "exe":
+      raise PermissionError("denied")
+    return original(path)
+  monkeypatch.setattr(RESET.os, "readlink", readlink)
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert not scan.complete and not scan.idle
+  with pytest.raises(RESET.SessionResetError, match="incomplete"):
+    RESET.browser_memory_by_chat(proc_root=tmp_path)
+
+
+@pytest.mark.parametrize("argv0", ["/usr/sbin/sshd", "python3"])
+def test_unreadable_unrelated_executable_does_not_poison_browser_inventory(tmp_path, monkeypatch, argv0):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  _write_process(tmp_path, 200, args=(argv0,))
+  original = RESET.os.readlink
+  def readlink(path):
+    if path == tmp_path / "200" / "exe":
+      raise PermissionError("foreign executable")
+    return original(path)
+  monkeypatch.setattr(RESET.os, "readlink", readlink)
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert scan.complete
+  assert _pids(scan) == [100]
 
 
 def test_zombies_are_ignored_even_with_identifying_cmdline(tmp_path):
@@ -229,3 +268,80 @@ def test_ancestry_does_not_attach_older_helper_to_recycled_parent_pid(tmp_path):
   scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
   assert scan.complete
   assert _pids(scan) == [100, 103, 104]
+
+
+
+def _write_browser(proc_root, pid, *, pss_kb, exe="/opt/chrome", **process):
+  """A process as Chrome leaves it: real executable, possibly rewritten argv."""
+  _write_process(proc_root, pid, **process)
+  (proc_root / str(pid) / "exe").unlink()
+  (proc_root / str(pid) / "exe").symlink_to(exe)
+  (proc_root / str(pid) / "smaps_rollup").write_text(
+    f"Rss:  {pss_kb * 2} kB\nPss:  {pss_kb} kB\n")
+
+
+def test_browser_memory_counts_helpers_chrome_renamed_and_untagged(tmp_path):
+  # Chrome collapses a helper's argv into one string and drops CHAT_ID; the
+  # renderer still belongs to the chat through zygote -> tagged root.
+  _write_browser(tmp_path, 100, pss_kb=100, args=("/opt/chrome",),
+                 environment={"CHAT_ID": "a"})
+  _write_browser(tmp_path, 101, pss_kb=10, ppid=100,
+                 args=("/opt/chrome --type=zygote --user-data-dir=/p/chat-a",))
+  _write_browser(tmp_path, 102, pss_kb=2_000_000, ppid=101,
+                 args=("/opt/chrome --type=renderer",))
+  # A named session belongs to no chat, and a non-browser is never counted.
+  _write_browser(tmp_path, 200, pss_kb=9000, args=("/opt/chrome",))
+  _write_browser(tmp_path, 300, pss_kb=9000, exe="/usr/bin/python3",
+                 environment={"CHAT_ID": "a"})
+  assert RESET.browser_memory_by_chat(proc_root=tmp_path) == {
+    "a": 2_000_110 * 1024}
+
+
+def test_browser_memory_ancestry_skips_recycled_parent_pid(tmp_path):
+  _write_browser(tmp_path, 100, pss_kb=10, start_ticks=50,
+                 environment={"CHAT_ID": "a"})
+  _write_browser(tmp_path, 101, pss_kb=5000, ppid=100, start_ticks=20)
+  assert RESET.browser_memory_by_chat(proc_root=tmp_path) == {"a": 10 * 1024}
+
+
+def test_browser_memory_skips_pid_recycled_during_pss_read(tmp_path, monkeypatch):
+  _write_browser(tmp_path, 100, pss_kb=2000, start_ticks=10,
+                 environment={"CHAT_ID": "a"})
+  def recycled(pid, root):
+    _write_browser(root, pid, pss_kb=3000, start_ticks=99,
+                   environment={"CHAT_ID": "b"})
+    return 2_000 * 1024
+  monkeypatch.setattr(RESET, "_pss_bytes", recycled)
+  assert RESET.browser_memory_by_chat(proc_root=tmp_path) == {}
+
+
+def test_unreadable_pss_is_unknown_not_measured_zero(tmp_path, monkeypatch):
+  _write_browser(tmp_path, 100, pss_kb=2000, environment={"CHAT_ID": "a"})
+  original = Path.read_text
+  def read(path, *args, **kwargs):
+    if path == tmp_path / "100" / "smaps_rollup":
+      raise PermissionError("PSS denied")
+    return original(path, *args, **kwargs)
+  monkeypatch.setattr(Path, "read_text", read)
+  with pytest.raises(RESET.SessionResetError, match="PSS"):
+    RESET.browser_memory_by_chat(proc_root=tmp_path)
+
+
+def test_preclose_identity_keeps_rewritten_helper_after_root_exit(tmp_path, monkeypatch):
+  _write_browser(tmp_path, 100, pss_kb=10, environment={"CHAT_ID": "a"})
+  _write_browser(tmp_path, 101, pss_kb=2000, ppid=100,
+                 args=("/opt/chrome --type=renderer",))
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert _pids(scan) == [100, 101]
+  signals = []
+
+  def kill(pid, sig):
+    signals.append(pid)
+    shutil.rmtree(tmp_path / str(pid))
+    if pid == 100:
+      _write_browser(tmp_path, 101, pss_kb=2000, ppid=1,
+                     args=("/opt/chrome --type=renderer",))
+
+  monkeypatch.setattr(RESET.os, "kill", kill)
+  RESET.terminate_processes(scan.processes, wait_seconds=0, proc_root=tmp_path)
+  assert signals == [100, 101]
