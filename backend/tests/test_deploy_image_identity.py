@@ -31,6 +31,7 @@ def test_mismatched_running_reference_migrates_to_compose_image():
     info() { :; }
     docker() {
       case "$*" in
+        *"{{.Id}}"*) printf 'container-old\\n' ;;
         *"{{.Image}}"*) printf 'sha256:old-image\\n' ;;
         *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
         *"config --images app"*) printf 'mobius:prod\\n' ;;
@@ -68,6 +69,7 @@ def test_compose_image_comes_from_rendered_prod_config():
     info() { :; }
     docker() {
       case "$*" in
+        *"{{.Id}}"*) printf 'container-old\\n' ;;
         *"{{.Image}}"*) printf 'sha256:old-image\\n' ;;
         *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
         *"config --images app"*) printf 'mobius\\n' ;;
@@ -94,6 +96,7 @@ def test_test_target_uses_its_rendered_image_not_the_prod_default(tmp_path):
     docker() {{
       printf '%s\\n' "$*" >> {str(docker_log)!r}
       case "$*" in
+        *"{{{{.Id}}}}"*) printf 'container-test\\n' ;;
         *"{{{{.Image}}}}"*) printf 'sha256:test-image\\n' ;;
         *"{{{{.Config.Image}}}}"*) printf 'mobius-test:ci\\n' ;;
         *"config --images app"*) printf 'mobius-test:ci\\n' ;;
@@ -122,6 +125,7 @@ def test_skip_build_refuses_a_stale_compose_tag():
     fail() { printf '%s\\n' "$1" >&2; }
     docker() {
       case "$*" in
+        *"{{.Id}}"*) printf 'container-old\\n' ;;
         *"{{.Image}}"*) printf 'sha256:serving\\n' ;;
         *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
         *"config --images app"*) printf 'mobius\\n' ;;

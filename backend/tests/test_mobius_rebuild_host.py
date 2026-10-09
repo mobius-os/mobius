@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from tests.test_admission_host_recovery import incident as admitted_incident, prepare as prepare_admitted
 
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "mobius-rebuild-host.py"
@@ -208,6 +209,10 @@ def _worker_paths(tmp_path: Path, monkeypatch):
   monkeypatch.setattr(host, "IMAGES", state / "images.json")
   monkeypatch.setattr(host, "TRANSACTION", state / "transaction.json")
   monkeypatch.setattr(host, "FAILED_TARGET_LOG", state / "failed-target.json")
+  monkeypatch.setattr(host, "ADMISSION_CODE", SCRIPT.with_name("mobius-boot-admission.py"))
+  admission_root = state / "admission"
+  admission_root.mkdir()
+  monkeypatch.setattr(host, "ADMISSION_ROOT", admission_root)
   data = tmp_path / "data"
   data.mkdir()
   config = {
@@ -451,154 +456,104 @@ def test_lock_loser_preserves_active_operation_and_queued_request(tmp_path, monk
 
 
 
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkeypatch, cleanup_fails):
-  config, inbox = _worker_paths(tmp_path, monkeypatch)
-  expected = "d" * 40
-  (inbox / "request.json").write_text(
-    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
-  )
-  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "sha256:old"))
-  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
-  monkeypatch.setattr(host, "docker_command", lambda *_args, **_kwargs: None)
-  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
-    expected if "revision" in template else
-    host.IMAGE_SOURCE if "source" in template else
-    "amd64" if "Architecture" in template else "sha256:new"
-  ))
-  snapshots = iter([("cid", "sha256:new", "dead"), ("cid", "sha256:new", "dead"),
-                    ("old", "sha256:old", "created"), ("old", "sha256:old", "healthy")])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda *_a: next(snapshots))
-  monkeypatch.setattr(host, "docker_command", lambda *_a, **_k: None)
-  if cleanup_fails:
-    monkeypatch.setattr(host, "discard_pulled_image", lambda *_a:
-                        (_ for _ in ()).throw(RuntimeError("cleanup failed")))
+@pytest.mark.parametrize("diagnostics_fail", [False, True])
+def test_replacement_drains_then_rolls_back_after_cutover_error(
+  admitted_incident, monkeypatch, diagnostics_fail,
+):
+  c = admitted_incident
+  c.host.clear_transaction()
+  c.tx.pop("phase")
+  c.docker.auto_enter = False
   order = []
-  ready = inbox / "ready"
-  monkeypatch.setattr(
-    host, "request_drain", lambda *_args: order.append("drain") or ready,
-  )
-  monkeypatch.setattr(host, "restart_ledger", lambda *_args, **_kwargs: True)
+  monkeypatch.setattr(c.host, "request_drain", lambda *_a: order.append("drain"))
+  real_attempt = c.host.prepare_attempt
 
-  def compose(_config, *args, image=None, **_kwargs):
-    order.append(f"compose:{image}")
-    if image == host.TARGET_TAG:
-      raise RuntimeError("cutover failed")
+  def fail_target(config, transaction, role):
+    cid = real_attempt(config, transaction, role)
+    order.append((role, cid))
+    if role == "target":
+      raise RuntimeError("cutover failed after target Start submission")
+    return cid
 
-  monkeypatch.setattr(host, "compose", compose)
-  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
-  statuses = []
-  monkeypatch.setattr(
-    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
-  )
-
-  assert host.run() == 1
-  assert order == [
-    "drain",
-    f"compose:{host.TARGET_TAG}",
-    "compose:sha256:old",
-  ]
-  assert statuses[-1]["state"] == "rolled_back"
-  assert statuses[-1]["code"] == "replacement_failed"
+  monkeypatch.setattr(c.host, "prepare_attempt", fail_target)
+  if diagnostics_fail:
+    monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid:
+                        (_ for _ in ()).throw(OSError("diagnostic disk full")))
+  assert c.host.execute_replacement(c.config, c.tx) == 1
+  assert order[0] == "drain" and order[1][0] == "target"
+  assert c.host.read_transaction()["phase"] == "replacement_started"
+  assert c.host.read_json(c.host.STATUS)["state"] == "needs_recovery"
+  c.docker.auto_enter = True
+  c.host.reconcile()
+  status = c.host.read_json(c.host.STATUS)
+  assert status["state"] == "rolled_back"
+  assert status["failure_code"] == "observation_unconfirmed"
+  assert [role for role, _cid in order[1:]] == ["target", "rollback"]
+  assert len(c.docker.starts) == 2
+  assert c.docker.starts[0] in c.docker.removes
+  assert c.docker.entries == [(c.docker.starts[1], "continuation", True)]
+  assert not c.host.TRANSACTION.exists()
 
 
 @pytest.mark.parametrize("outcome_write_fails", [False, True])
 def test_verified_success_never_rolls_back_for_handoff_or_outcome_write_failure(
-  tmp_path, monkeypatch, outcome_write_fails,
+  admitted_incident, monkeypatch, outcome_write_fails,
 ):
-  _config, inbox = _worker_paths(tmp_path, monkeypatch)
-  expected = "9" * 40
-  (inbox / "request.json").write_text(
-    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
-  )
-  # The running container holds the previous image until Compose replaces it.
-  replaced = []
-  monkeypatch.setattr(
-    host, "app_container", lambda _config: ("cid", "new" if replaced else "old"),
-  )
-  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
-  monkeypatch.setattr(host, "docker_command", lambda *_args, **_kwargs: None)
-  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
-    expected if "revision" in template else
-    host.IMAGE_SOURCE if "source" in template else
-    "amd64" if "Architecture" in template else "new"
-  ))
-  monkeypatch.setattr(host, "request_drain", lambda *_args: None)
-  monkeypatch.setattr(host, "compose", lambda *_args, **_kwargs: replaced.append(1))
-  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
-  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
-  monkeypatch.setattr(host, "verify_served_generation", lambda *_args: None)
-  monkeypatch.setattr(
-    host, "restart_ledger",
-    lambda _config, _cid, command, _operation, **_kwargs:
-      command != "finalize-cutover",
-  )
-  monkeypatch.setattr(host, "adopt_from_image", lambda _image: "not adopted: test")
-  statuses = []
-  monkeypatch.setattr(
-    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
-  )
-
-  write = host.write_transaction
+  c = admitted_incident
+  c.host.clear_transaction()
+  c.tx.pop("phase")
+  monkeypatch.setattr(c.host, "request_drain", lambda *_a: None)
+  monkeypatch.setattr(c.host, "restart_ledger", lambda *_a, **_k: False)
+  monkeypatch.setattr(c.host, "rollback", lambda *_a, **_k:
+                      pytest.fail("verified target must not roll back"))
+  write = c.host.write_transaction
 
   def persist(value):
     if outcome_write_fails and value.get("outcome"):
       raise OSError("outcome write failed")
     write(value)
 
-  monkeypatch.setattr(host, "write_transaction", persist)
-  monkeypatch.setattr(host, "rollback", lambda *a, **k: pytest.fail("verified service must not roll back"))
-  assert host.run() == int(outcome_write_fails)
-  assert replaced == [1]
+  monkeypatch.setattr(c.host, "write_transaction", persist)
+  assert c.host.execute_replacement(c.config, c.tx) == int(outcome_write_fails)
+  assert len(c.docker.starts) == 1
+  assert c.gate.observe()["slots"]["target"]["consumed"]
+  status = c.host.read_json(c.host.STATUS)
   if outcome_write_fails:
-    assert statuses[-1]["state"] == "needs_recovery"
-    assert statuses[-1]["code"] == "outcome_record_failed"
-    assert host.TRANSACTION.exists()
+    assert status["state"] == "needs_recovery"
+    assert status["code"] == "observation_unconfirmed"
+    assert c.host.TRANSACTION.exists()
   else:
-    assert statuses[-1]["state"] == "succeeded"
-    assert statuses[-1]["code"] == "handoff_finalize_unconfirmed"
-    assert "finalization is unconfirmed" in statuses[-1]["message"]
+    assert status["state"] == "succeeded"
+    assert status["code"] == "handoff_finalize_unconfirmed"
+    assert "finalization is unconfirmed" in status["message"]
+    assert not c.host.TRANSACTION.exists()
 
 
 @pytest.mark.parametrize(
-  ("rearmed", "finalized", "expected_code", "message_fragment"),
+  ("boot_confirmed", "expected_state", "expected_code", "message_fragment"),
   [
-    (False, False, "handoff_finalize_unconfirmed", "manual Resume may be needed"),
-    (True, False, "handoff_finalize_unconfirmed", "finalization is unconfirmed"),
+    (False, "needs_recovery", "handoff_boot_unconfirmed", "manual Host recovery"),
+    (True, "rolled_back", "handoff_finalize_unconfirmed", "finalization is unconfirmed"),
   ],
 )
 def test_healthy_rollback_reports_degraded_chat_handoff(
-  tmp_path, monkeypatch, rearmed, finalized, expected_code, message_fragment,
+  admitted_incident, monkeypatch, boot_confirmed, expected_state, expected_code, message_fragment,
 ):
-  config, _inbox = _worker_paths(tmp_path, monkeypatch)
-  operation = "a" * 32
-  expected = "b" * 40
-  host.write_transaction(host.transaction_record(operation, expected, None, "sha256:old", "sha256:new"))
-  snapshots = iter([("new", "sha256:new", "dead"), ("new", "sha256:new", "dead"),
-                    ("old", "sha256:old", "created"), ("old", "sha256:old", "healthy")])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda *_a: next(snapshots))
-  monkeypatch.setattr(host, "docker_command", lambda *_a, **_k: None)
-  monkeypatch.setattr(host, "compose", lambda *_args, **_kwargs: None)
-  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
-
-  def ledger(_config, _cid, command, _operation, **_kwargs):
-    assert _operation == operation
-    return rearmed if command == "rearm-cutover" else finalized
-
-  monkeypatch.setattr(host, "restart_ledger", ledger)
-  statuses = []
-  monkeypatch.setattr(
-    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
-  )
-
-  assert host.rollback(
-    config, operation, expected, "health_check_failed", "new image unhealthy",
-  ) == 1
-  assert statuses[-1]["state"] == "rolled_back"
-  assert statuses[-1]["code"] == expected_code
-  assert message_fragment in statuses[-1]["message"]
+  c = admitted_incident
+  cid = prepare_admitted(c)
+  assert c.docker.complete_start(cid)
+  c.tx.update(failure_code="health_check_failed", failure_detail="new image unhealthy")
+  c.host.write_transaction(c.tx)
+  if not boot_confirmed:
+    monkeypatch.setattr(c.host, "cutover_boot_consumed", lambda *_a, **_k: False)
+  monkeypatch.setattr(c.host, "restart_ledger", lambda *_a, **_k: False)
+  c.host.recover(c.config, c.tx)
+  status = c.host.read_json(c.host.STATUS)
+  assert status["state"] == expected_state
+  assert status["code"] == expected_code
+  assert message_fragment in status["message"]
+  assert c.docker.starts == [cid]  # finalization uncertainty never starts again
+  assert c.gate.observe()["slots"]["rollback"]["consumed"]
 
 
 def test_reconcile_marks_interrupted_active_worker_failed(tmp_path, monkeypatch):
@@ -787,16 +742,16 @@ def test_docker_observations_and_drain_use_finite_deadlines(tmp_path, monkeypatc
 
   monkeypatch.setattr(host, "docker_command", command)
   monkeypatch.setattr(host, "compose", lambda *_a, **_k:
-                      subprocess.CompletedProcess([], 0, stdout="cid\n", stderr=""))
+                      subprocess.CompletedProcess([], 0, stdout="c" * 64 + "\n", stderr=""))
   monkeypatch.setattr(host, "restart_ledger", lambda *_a, **_k: True)
   assert host.inspect_image("image", "{{.Id}}") == "sha256:image"
-  assert host.app_container(config) == ("cid", "sha256:image")
+  assert host.app_container(config) == ("c" * 64, "sha256:image")
   assert str(host._docker_root()) == "sha256:image"
-  host.request_drain(config, "a" * 32, "cid")
+  host.request_drain(config, "a" * 32, "c" * 64)
   host.discard_pulled_image(f"{host.IMAGE}:sha-{'b' * 40}")
   assert [args[1:3] for args, _ in calls] == [
     ["image", "inspect"], ["container", "inspect"], ["info", "--format"],
-    ["exec", "cid"], ["image", "rm"],
+    ["exec", "c" * 64], ["image", "rm"],
   ]
   assert [kwargs["timeout"] for _, kwargs in calls] == [30, 30, 30, 90, 30]
 
@@ -824,62 +779,66 @@ def test_uncertain_image_removal_keeps_its_recorded_reference(tmp_path, monkeypa
   assert host.read_json(host.IMAGES)["sha_refs"] == [target]
 
 
-@pytest.mark.parametrize("stage", ["pull", "drain", "target_tag", "post_inspect"])
+@pytest.mark.parametrize("stage", ["pull", "drain", "target_create", "post_inspect"])
 def test_run_timeout_never_guesses_the_replacement_outcome(
-  tmp_path, monkeypatch, stage,
+  tmp_path, monkeypatch, admitted_incident, stage,
 ):
-  _config, inbox = _worker_paths(tmp_path, monkeypatch)
-  expected = "f" * 40
-  (inbox / "request.json").write_text(
-    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
-  )
-  observations = []
-  compose_calls = []
-  deadlines = []
-
-  def app_container(_config):
-    observations.append("inspect")
-    if stage == "post_inspect" and len(observations) == 2:
-      raise subprocess.TimeoutExpired("docker container inspect", 30)
-    return "cid", "sha256:old" if len(observations) == 1 else "sha256:new"
-
-  def command(args, **kwargs):
-    deadlines.append((args[1:3], kwargs["timeout"]))
-    if ((stage == "pull" and args[1] == "pull") or
-        (stage == "target_tag" and args[1:3] == ["tag", "sha256:new"])):
+  if stage == "pull":
+    pull_root = tmp_path / "pull"
+    pull_root.mkdir()
+    _config, inbox = _worker_paths(pull_root, monkeypatch)
+    expected = "f" * 40
+    (inbox / "request.json").write_text(
+      f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+    )
+    deadlines = []
+    monkeypatch.setattr(host, "app_container", lambda _c: ("c" * 64, "sha256:old"))
+    monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+    def pull_timeout(args, **kwargs):
+      deadlines.append((args[1:3], kwargs["timeout"]))
       raise subprocess.TimeoutExpired(args, kwargs["timeout"])
-    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    monkeypatch.setattr(host, "docker_command", pull_timeout)
+    assert host.run() == 1
+    assert host.read_json(host.STATUS)["state"] == "failed"
+    assert host.read_json(host.STATUS)["code"] == "observation_timed_out"
+    assert not host.TRANSACTION.exists()
+    assert deadlines == [(["pull", f"{host.IMAGE}:sha-{expected}"], 3600)]
+    return
 
-  def drain(*_args):
-    if stage == "drain":
-      raise subprocess.TimeoutExpired("docker exec prepare", 90)
-
-  monkeypatch.setattr(host, "app_container", app_container)
-  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
-  monkeypatch.setattr(host, "docker_command", command)
-  monkeypatch.setattr(host, "request_drain", drain)
-  monkeypatch.setattr(host, "compose", lambda *_a, **_k: compose_calls.append(1))
-  monkeypatch.setattr(host, "wait_healthy", lambda *_a: True)
-  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
-    expected if "revision" in template else host.IMAGE_SOURCE if "source" in template
-    else "amd64" if "Architecture" in template else "sha256:new"
-  ))
-
-  assert host.run() == 1
-  status = host.read_json(host.STATUS)
-  assert status["code"] == "observation_timed_out"
-  assert status["state"] == ("failed" if stage == "pull" else "needs_recovery")
-  transaction = host.read_transaction()
-  assert (transaction is None) == (stage == "pull")
-  if transaction:
-    assert transaction["previous_image"] == "sha256:old"
-    assert transaction.get("phase") == (None if stage == "drain" else "replacement_started")
-  assert compose_calls == ([1] if stage == "post_inspect" else [])
-  assert (["pull", f"{host.IMAGE}:sha-{expected}"], 3600) in deadlines
-  if stage != "pull":
-    assert (["tag", "sha256:old"], 30) in deadlines
-  if stage in {"target_tag", "post_inspect"}:
-    assert (["tag", "sha256:new"], 30) in deadlines
+  c = admitted_incident
+  c.host.clear_transaction()
+  c.tx.pop("phase")
+  original = c.docker.command
+  deadlines = []
+  def command(args, **kwargs):
+    deadlines.append((args[1:3], kwargs.get("timeout")))
+    if stage == "target_create" and args[1] == "compose" and "up" in args:
+      raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+    return original(args, **kwargs)
+  monkeypatch.setattr(c.host, "docker_command", command)
+  if stage == "drain":
+    monkeypatch.setattr(c.host, "request_drain", lambda *_a:
+                        (_ for _ in ()).throw(subprocess.TimeoutExpired("drain", 90)))
+  else:
+    monkeypatch.setattr(c.host, "request_drain", lambda *_a: None)
+  if stage == "post_inspect":
+    monkeypatch.setattr(c.host, "wait_healthy", lambda *_a, **_k:
+                        (_ for _ in ()).throw(subprocess.TimeoutExpired("inspect", 10)))
+  assert c.host.execute_replacement(c.config, c.tx) == 1
+  transaction = c.host.read_transaction()
+  assert transaction["operation_id"] == c.tx["operation_id"]
+  assert transaction["previous_image"] == c.tx["previous_image"]
+  assert transaction.get("phase") == (None if stage == "drain" else "replacement_started")
+  assert c.host.read_json(c.host.STATUS)["state"] == "needs_recovery"
+  assert c.host.read_json(c.host.STATUS)["code"] == "observation_unconfirmed"
+  if stage == "drain":
+    assert not c.gate.state_dir.joinpath("state.json").exists()
+  assert len(c.docker.starts) == (1 if stage == "post_inspect" else 0)
+  if stage == "target_create":
+    assert any(parts == ["compose", "-p"] and timeout == c.host.COMPOSE_MUTATION_SECONDS
+               for parts, timeout in deadlines)
+  if stage == "post_inspect":
+    assert (["start", c.docker.starts[0]], c.host.COMPOSE_MUTATION_SECONDS) in deadlines
 
 
 @pytest.mark.parametrize("scenario", [
@@ -888,47 +847,41 @@ def test_run_timeout_never_guesses_the_replacement_outcome(
   "wrong_revision", "protected_runtime",
 ])
 def test_run_preserves_unknown_provenance_but_rolls_back_proven_rejection(
-  tmp_path, monkeypatch, scenario,
+  admitted_incident, monkeypatch, scenario,
 ):
-  _config, inbox = _worker_paths(tmp_path, monkeypatch)
-  expected = "a" * 40
-  (inbox / "request.json").write_text(
-    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
-  )
-  containers = iter([("old", "sha256:old"), ("new", "sha256:new")])
-  monkeypatch.setattr(host, "app_container", lambda _c: next(containers))
-  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
-  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
-    expected if "revision" in template else host.IMAGE_SOURCE if "source" in template
-    else "amd64" if "Architecture" in template else "sha256:new"
-  ))
-  docker_calls = []
-  monkeypatch.setattr(host, "docker_command", _provenance_command(scenario, docker_calls))
-  monkeypatch.setattr(host, "request_drain", lambda *_a: None)
-  compose_images = []
-  monkeypatch.setattr(host, "compose", lambda *_a, image=None, **_k:
-                      compose_images.append(image))
-  monkeypatch.setattr(host, "wait_healthy", lambda *_a, **_k: True)
-  health = iter([("new", "sha256:new", "healthy"),
-                 ("new", "sha256:new", "healthy"),
-                 ("old", "sha256:old", "created"),
-                 ("old", "sha256:old", "healthy")])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda _c: next(health))
-  monkeypatch.setattr(host, "restart_ledger", lambda *_a, **_k: True)
+  c = admitted_incident
+  c.host.clear_transaction()
+  c.tx.pop("phase")
+  monkeypatch.setattr(c.host, "request_drain", lambda *_a: None)
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid:
+                      (b"", b"", False, False))
+  probes = []
 
-  assert host.run() == 1
-  status = host.read_json(host.STATUS)
+  def provenance(cid, expected):
+    assert expected == c.tx["expected_sha"]
+    probes.append(cid)
+    if scenario in {"wrong_revision", "protected_runtime"}:
+      raise c.host.ProvenanceRejected("proven served mismatch")
+    raise c.host.ProvenanceUnconfirmed("private Docker failure")
+
+  monkeypatch.setattr(c.host, "verify_served_generation", provenance)
+  assert c.host.execute_replacement(c.config, c.tx) == 1
+  assert len(probes) == 1
+  assert c.host.read_transaction()["phase"] == "replacement_started"
+  # A proven mismatch is eligible for fenced rollback only on reconciliation.
+  c.host.reconcile()
+  status = c.host.read_json(c.host.STATUS)
   if scenario in {"wrong_revision", "protected_runtime"}:
     assert status["state"] == "rolled_back"
     assert status["code"] == "replacement_failed"
-    assert host.read_transaction() is None
-    assert compose_images == [host.TARGET_TAG, "sha256:old"]
+    assert c.host.read_transaction() is None
+    assert len(c.docker.starts) == 2
+    assert c.gate.observe()["slots"]["rollback"]["attempts"][-1]["image"] == c.tx["previous_image"]
   else:
     assert status["state"] == "needs_recovery"
     assert status["code"] == "observation_unconfirmed"
-    assert host.read_transaction()["phase"] == "replacement_started"
-    assert compose_images == [host.TARGET_TAG]
+    assert c.host.read_transaction()["phase"] == "replacement_started"
+    assert c.docker.starts == [probes[0]]
   assert "private" not in json.dumps(status)
 
 
@@ -1160,6 +1113,15 @@ def test_recovery_observes_exact_previous_boot_without_recreating_or_rearming(
 
   monkeypatch.setattr(host, "wait_healthy", finish_boot)
   host.recover(config, transaction)
+  if health != "healthy":
+    # An already-issued unwrapped legacy start cannot be retroactively gated.
+    # Observe only; the healthy proof may arrive in a later reconciliation.
+    assert calls == []
+    assert observed == [health]
+    assert host.read_json(host.STATUS)["state"] == "needs_recovery"
+    assert host.read_json(host.STATUS)["code"] == "legacy_admission_unconfirmed"
+    assert host.read_transaction() is not None
+    return
   assert calls == [("finalize-cutover", transaction["operation_id"],
                     {"image": transaction["previous_image"]})]
   status = host.read_json(host.STATUS)
@@ -1203,69 +1165,62 @@ def test_failed_rollback_boot_cannot_authorize_another_boot(
   assert host.read_transaction()["phase"] == "rollback_started"
 
 
-def test_first_rollback_is_journaled_before_rearm_and_uses_exact_image(
-  interrupted_rollback, monkeypatch,
+def test_first_rollback_is_journaled_before_admission_and_uses_exact_image(
+  admitted_incident, monkeypatch,
 ):
-  config, transaction, calls = interrupted_rollback
-  transaction.pop("phase")
-  host.write_transaction(transaction)
-  snapshots = iter([
-    ("target", transaction["target_image"], "dead"),
-    ("target", transaction["target_image"], "dead"),
-    ("previous", transaction["previous_image"], "created"),
-    ("previous", transaction["previous_image"], "healthy"),
-  ])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda _c: next(snapshots))
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: True)
+  c = admitted_incident
+  order = []
+  allocate = c.gate.allocate
 
-  def ledger(_config, cid, command, operation, **kwargs):
-    assert operation == transaction["operation_id"]
-    assert host.read_transaction()["phase"] == "rollback_started"
-    calls.append((command, operation, kwargs))
-    return True
+  def journaled_allocate(role, token, image):
+    journal = c.host.read_transaction()
+    assert journal["phase"] == "rollback_started"
+    assert journal["operation_id"] == c.tx["operation_id"]
+    assert role == "rollback" and image == c.tx["previous_image"]
+    order.append("allocate")
+    return allocate(role, token, image)
 
-  monkeypatch.setattr(host, "restart_ledger", ledger)
-  host.rollback(config, transaction["operation_id"], transaction["expected_sha"], "new", "new")
-  assert [call[0] for call in calls] == ["docker", "compose", "rearm-cutover", "docker", "finalize-cutover"]
-  assert calls[1][1]["image"] == transaction["previous_image"]
-  assert calls[1][1]["timeout"] == host.COMPOSE_MUTATION_SECONDS
+  monkeypatch.setattr(c.gate, "allocate", journaled_allocate)
+  cid = prepare_admitted(c)
+  assert order == ["allocate"]
+  slot = c.gate.observe()["slots"]["rollback"]
+  assert slot["attempts"][-1]["cid"] == cid
+  assert slot["attempts"][-1]["image"] == c.tx["previous_image"]
+  assert c.docker.containers[cid]["Image"] == c.tx["previous_image"]
+  assert c.docker.starts == [cid]
+  assert not slot["consumed"]  # Start submission alone never consumes authority
 
 
 def test_failed_target_evidence_precedes_replacement_and_preserves_both_streams(
-  interrupted_rollback, monkeypatch,
+  admitted_incident, monkeypatch,
 ):
-  config, transaction, calls = interrupted_rollback
-  transaction.pop("phase")
-  host.write_transaction(transaction)
-  target_cid = "a" * 64
-  snapshots = iter([
-    (target_cid, transaction["target_image"], "unhealthy"),
-    (target_cid, transaction["target_image"], "unhealthy"),
-    ("previous", transaction["previous_image"], "created"),
-    ("previous", transaction["previous_image"], "healthy"),
-  ])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda _c: next(snapshots))
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: True)
+  c = admitted_incident
+  c.host.prepare_admission(c.config, c.tx)
+  target_cid = c.host.prepare_attempt(c.config, c.tx, "target")
+  order = []
+  remove = c.host.remove_exact_container
+  monkeypatch.setattr(c.host, "remove_exact_container", lambda cid:
+                      order.append(("remove", cid)) or remove(cid))
 
   def logs(cid):
     assert cid == target_cid
-    calls.append(("logs", cid))
+    order.append(("logs", cid))
     return b"startup stdout", b"startup stderr", False, False
 
-  monkeypatch.setattr(host, "_bounded_docker_logs", logs)
-  host.rollback(config, transaction["operation_id"], transaction["expected_sha"], "x", "y")
-  assert [call[0] for call in calls[:4]] == ["logs", "docker", "compose", "rearm-cutover"]
-  artifact = host.read_json(host.FAILED_TARGET_LOG)
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", logs)
+  assert c.host.rollback(c.config, c.tx["operation_id"], c.tx["expected_sha"], "x", "y") == 1
+  assert order[:2] == [("logs", target_cid), ("remove", target_cid)]
+  assert c.docker.starts[1] != target_cid
+  assert c.gate.observe()["slots"]["rollback"]["attempts"][-1]["image"] == c.tx["previous_image"]
+  artifact = c.host.read_json(c.host.FAILED_TARGET_LOG)
   assert artifact["container_id"] == target_cid
-  assert artifact["target_image"] == transaction["target_image"]
+  assert artifact["target_image"] == c.tx["target_image"]
   assert base64.b64decode(artifact["stdout_b64"]) == b"startup stdout"
   assert base64.b64decode(artifact["stderr_b64"]) == b"startup stderr"
-  assert host.FAILED_TARGET_LOG.stat().st_mode & 0o777 == 0o600
-  assert host.read_json(host.STATUS)["evidence_capture"] == "saved"
-  assert "startup stdout" not in json.dumps(host.read_json(host.STATUS))
-  assert "startup stderr" not in json.dumps(host.read_json(config["control_dir"] / "status.json"))
+  assert c.host.FAILED_TARGET_LOG.stat().st_mode & 0o777 == 0o600
+  assert c.host.read_json(c.host.STATUS)["evidence_capture"] == "saved"
+  assert "startup stdout" not in json.dumps(c.host.read_json(c.host.STATUS))
+  assert "startup stderr" not in json.dumps(c.host.read_json(c.config["control_dir"] / "status.json"))
 
 
 @pytest.mark.parametrize("observed", ["sha256:previous", "sha256:alien", ""])
@@ -1288,29 +1243,24 @@ def test_non_target_container_never_captured(interrupted_rollback, monkeypatch, 
 @pytest.mark.parametrize("capture_error", [PermissionError(), OSError("disk full"),
                                                subprocess.TimeoutExpired("docker logs", 0.1)])
 def test_evidence_replay_does_not_overwrite_and_capture_error_does_not_block(
-  interrupted_rollback, monkeypatch, capture_error,
+  admitted_incident, monkeypatch, capture_error,
 ):
-  config, transaction, calls = interrupted_rollback
+  c = admitted_incident
   cid = "c" * 64
-  monkeypatch.setattr(host, "_bounded_docker_logs", lambda _cid: (b"first", b"error", False, False))
-  assert host.capture_failed_target(transaction["operation_id"], cid, transaction["target_image"]) == "saved"
-  first = host.FAILED_TARGET_LOG.read_bytes()
-  monkeypatch.setattr(host, "_bounded_docker_logs", lambda _cid: pytest.fail("replayed logs"))
-  assert host.capture_failed_target(transaction["operation_id"], cid, transaction["target_image"]) == "saved"
-  assert host.FAILED_TARGET_LOG.read_bytes() == first
-  transaction.pop("phase")
-  host.write_transaction(transaction)
-  monkeypatch.setattr(host, "container_health", lambda _c:
-                      ("e" * 64, transaction["previous_image"], "created")
-                      if any(call[0] == "compose" for call in calls)
-                      else ("d" * 64, transaction["target_image"], "dead"))
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "_bounded_docker_logs", lambda _cid: (_ for _ in ()).throw(capture_error))
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: False)
-  assert host.rollback(config, transaction["operation_id"], transaction["expected_sha"], "x", "y") == 1
-  assert [call[0] for call in calls[:3]] == ["docker", "compose", "rearm-cutover"]
-  assert host.read_json(host.STATUS)["evidence_capture"] == "failed"
-  assert host.FAILED_TARGET_LOG.read_bytes() == first
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid: (b"first", b"error", False, False))
+  assert c.host.capture_failed_target(c.tx["operation_id"], cid, c.tx["target_image"]) == "saved"
+  first = c.host.FAILED_TARGET_LOG.read_bytes()
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid: pytest.fail("replayed logs"))
+  assert c.host.capture_failed_target(c.tx["operation_id"], cid, c.tx["target_image"]) == "saved"
+  assert c.host.FAILED_TARGET_LOG.read_bytes() == first
+  c.host.prepare_admission(c.config, c.tx)
+  target = c.host.prepare_attempt(c.config, c.tx, "target")
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid:
+                      (_ for _ in ()).throw(capture_error))
+  assert c.host.rollback(c.config, c.tx["operation_id"], c.tx["expected_sha"], "x", "y") == 1
+  assert target in c.docker.removes and len(c.docker.starts) == 2
+  assert c.host.read_json(c.host.STATUS)["evidence_capture"] == "failed"
+  assert c.host.FAILED_TARGET_LOG.read_bytes() == first
 
 
 def test_docker_log_capture_has_byte_and_wall_clock_bounds(monkeypatch):
@@ -1470,7 +1420,7 @@ def test_generated_units_allow_the_bounded_recovery_budget(tmp_path):
   assert main["Service"]["ExecStopPost"] == "/usr/local/libexec/mobius-rebuild-host reconcile"
   assert reconcile["Service"]["ExecStart"] == "/usr/local/libexec/mobius-rebuild-host reconcile"
   assert main["Service"]["Type"] == "oneshot"
-  assert "TimeoutStartSec" not in main["Service"]  # don't cap legitimate pulls
+  assert main["Service"].getint("TimeoutStartSec") == 9000  # bounded pull plus recovery
   budget = host.TARGET_HEALTH_SECONDS + 2 * host.COMPOSE_MUTATION_SECONDS + host.ROLLBACK_HEALTH_SECONDS
   assert main["Service"].getint("TimeoutStopSec") > budget
   assert reconcile["Service"].getint("TimeoutStartSec") > budget
@@ -1485,8 +1435,8 @@ def test_generated_units_allow_the_bounded_recovery_budget(tmp_path):
   assert host.ROLLBACK_HEALTH_SECONDS == 600
   assert host.WORKER_REVISION > 2
   marker = SCRIPT.parents[1] / "deployment" / "self-hosted-helper.required"
-  assert marker.read_text().strip() == "3"
-  assert "# Helper protocol revision: 3 " in source
+  assert marker.read_text().strip() == "5"
+  assert "# Helper protocol revision: 5 " in source
   impact = platform_activation.classify_activation(
     ["deployment/self-hosted-helper.required"], deployment="self_hosted",
   )
@@ -1526,8 +1476,8 @@ def test_missing_previous_image_never_rearms_or_launches(interrupted_rollback, m
 
 def test_wrong_image_after_rollback_never_finalizes_receipt(interrupted_rollback, monkeypatch):
   config, transaction, calls = interrupted_rollback
-  transaction.pop("phase")
-  host.write_transaction(transaction)
+  # This is an already-issued legacy rollback; an alien image is explicit
+  # wrong-image evidence, not permission to construct another attempt.
   snapshots = iter([
     ("target", transaction["target_image"], "dead"),
     ("target", transaction["target_image"], "dead"),
@@ -1586,32 +1536,26 @@ def test_interrupted_target_boot_gets_observed_before_rollback(interrupted_rollb
 
 @pytest.mark.parametrize("scenario", ["wrong_revision", "protected_runtime"])
 def test_recovery_rolls_back_only_proven_served_rejection(
-  interrupted_rollback, monkeypatch, scenario,
+  admitted_incident, monkeypatch, scenario,
 ):
-  config, transaction, calls = interrupted_rollback
-  transaction["phase"] = "replacement_started"
-  transaction.pop("failure_code")
-  transaction.pop("failure_detail")
-  host.write_transaction(transaction)
-  observations = iter([
-    ("target", transaction["target_image"], "healthy"),
-    ("target", transaction["target_image"], "healthy"),
-    ("target", transaction["target_image"], "healthy"),
-    ("previous", transaction["previous_image"], "created"),
-    ("previous", transaction["previous_image"], "healthy"),
-  ])
-  monkeypatch.setattr(host, "never_started", lambda *_a: True)
-  monkeypatch.setattr(host, "container_health", lambda _c: next(observations))
-  monkeypatch.setattr(host, "wait_healthy", lambda *_a: True)
-  docker_calls = []
-  monkeypatch.setattr(host, "docker_command", _provenance_command(scenario, docker_calls))
-  host.recover(config, transaction)
-  assert [call[0] for call in calls] == ["compose", "rearm-cutover", "finalize-cutover"]
-  assert calls[0][1]["image"] == transaction["previous_image"]
-  assert docker_calls[-1] == "other_docker"  # exact previous image tag
-  assert host.read_json(host.STATUS)["state"] == "rolled_back"
-  assert host.read_json(host.STATUS)["code"] == "replacement_failed"
-  assert host.read_transaction() is None
+  c = admitted_incident
+  c.tx["phase"] = "replacement_started"
+  c.host.write_transaction(c.tx)
+  c.host.prepare_admission(c.config, c.tx)
+  target = c.host.prepare_attempt(c.config, c.tx, "target")
+  assert c.docker.complete_start(target)
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid:
+                      (b"", b"", False, False))
+  monkeypatch.setattr(c.host, "verify_served_generation", lambda *_a:
+                      (_ for _ in ()).throw(c.host.ProvenanceRejected(scenario)))
+  c.host.recover(c.config, c.tx)
+  assert c.host.read_json(c.host.STATUS)["state"] == "rolled_back"
+  assert c.host.read_json(c.host.STATUS)["code"] == "replacement_failed"
+  assert target in c.docker.removes
+  rollback_cid = c.docker.starts[-1]
+  assert c.docker.containers[rollback_cid]["Image"] == c.tx["previous_image"]
+  assert c.gate.observe()["slots"]["rollback"]["consumed"]
+  assert c.host.read_transaction() is None
 
 
 @pytest.mark.parametrize("scenario", [
@@ -1680,150 +1624,102 @@ def test_unknown_target_health_at_deadline_preserves_boot_and_receipt(
 @pytest.mark.parametrize("target_health", ["starting", "running"])
 @pytest.mark.parametrize("unknown_observation", [False, True])
 def test_readiness_budget_preserves_single_rollback_policy(
-  tmp_path, monkeypatch, path, target_health, unknown_observation,
+  admitted_incident, monkeypatch, path, target_health, unknown_observation,
 ):
-  # Exercise run/recover -> wait_healthy -> container_health and the real
-  # rollback/journal/ledger-command/settlement paths. The fixture supplies a
-  # consumed-boot proof; Docker transport, logs, disk preflight and time are fake.
-  config, inbox = _worker_paths(tmp_path, monkeypatch)
-  expected, nonce = "a" * 40, "2" * 32
-  previous, target = "sha256:previous", "sha256:target"
-  clock = [0.0]
-  current = [previous if path == "run" else target]
-  previous_health = ["starting"]
-  unstarted = [False]
-  target_probes, boots, ledger_calls, deadlines = [], [], [], []
-  monkeypatch.setattr(host.time, "monotonic", lambda: clock[0])
-  monkeypatch.setattr(host.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
-  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
-  monkeypatch.setattr(host, "_bounded_docker_logs", lambda _cid: (b"", b"", False, False))
+  # Real gate and stateful asynchronous Docker; clock advances without wall sleep.
+  c = admitted_incident
+  monkeypatch.setattr(c.host, "ROLLBACK_HEALTH_SECONDS", 600)
+  target_image, previous_image = c.tx["target_image"], c.tx["previous_image"]
+  initial = c.clock[0]
+  original_complete = c.docker.complete_start
+  original_observe = c.host.container_health
+  probes, deadlines = [], []
 
-  def command(args, **kwargs):
-    output = ""
-    if args[1] == "compose":
-      if "ps" in args:
-        output = "b" * 64 if current[0] == previous else "c" * 64
-        if "-a" in args:
-          deadlines.append((clock[0], kwargs["timeout"]))
-      elif "up" in args:
-        image = kwargs["env"]["MOBIUS_IMAGE"]
-        journal = host.read_transaction()
-        assert journal["phase"] == ("replacement_started" if image == host.TARGET_TAG else "rollback_started")
-        assert image in {host.TARGET_TAG, previous}
-        if "--no-start" in args:
-          unstarted[0] = True
+  def complete(cid, **kwargs):
+    result = original_complete(cid, **kwargs)
+    if result and cid in c.docker.containers:
+      item = c.docker.containers[cid]
+      if item["Image"] == target_image:
+        if target_health == "starting":
+          item["State"]["Health"] = {"Status": "starting"}
         else:
-          boots.append((clock[0], image, journal["operation_id"]))
-        current[0] = target if image == host.TARGET_TAG else previous
-      else:
-        pytest.fail(f"unexpected Compose command: {args}")
-    elif args[1:3] == ["image", "inspect"]:
-      template = args[-2]
-      output = (expected if "revision" in template else
-                host.IMAGE_SOURCE if "source" in template else
-                "amd64" if "Architecture" in template else target)
-    elif args[1:3] == ["container", "inspect"]:
-      if args[-2] == "{{.Image}}":
-        output = current[0]
-      elif args[-2] == "{{json .}}":
-        output = json.dumps({"Id": args[-1], "Image": previous, "RestartCount": 0,
-                             "State": {"Status": "created" if unstarted[0] else "running",
-                                       "StartedAt": "0001-01-01T00:00:00Z"}})
-      else:
-        health = previous_health[0]
-        if current[0] == target:
-          target_probes.append(clock[0])
-          if unknown_observation and len(target_probes) > 1:
-            raise subprocess.CalledProcessError(1, args)
-          health = target_health
-        # "running" has no Docker healthcheck, "starting" has one.
-        output = (f"{current[0]} created" if unstarted[0] else
-                  f"{current[0]} running" + (f" {health}" if health != "running" else ""))
-    elif args[1] == "start":
-      assert unstarted[0]
-      unstarted[0] = False
-      boots.append((clock[0], previous, host.read_transaction()["operation_id"]))
-    elif args[1] == "exec":
-      action, operation = args[-2:]
-      assert operation == host.read_transaction()["operation_id"]
-      if action == "rearm-cutover":
-        assert host.read_transaction()["phase"] == "rollback_started"
-      ledger_calls.append((action, operation))
-    elif args[1] not in {"pull", "tag", "image", "ps"}:
-      pytest.fail(f"unexpected Docker command: {args}")
-    return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+          item["State"].pop("Health", None)
+      elif item["Image"] == previous_image:
+        item["State"]["Health"] = {"Status": "starting"}
+    return result
 
-  monkeypatch.setattr(host, "docker_command", command)
-  monkeypatch.setattr(host, "rearm_rollback", lambda _c, operation, **kwargs:
-                      "unconsumed" if kwargs.get("witness_only") else
-                      ledger_calls.append(("rearm-cutover", operation)) or True)
+  monkeypatch.setattr(c.docker, "complete_start", complete)
+  def observe(config, timeout=10):
+    state_file = c.gate.state_dir / "state.json"
+    slot = c.gate.observe()["slots"]["target"] if state_file.exists() else None
+    if slot and slot["consumed"]:
+      probes.append(c.clock[0])
+      if unknown_observation and len(probes) > 1:
+        raise subprocess.CalledProcessError(1, "Docker target observation")
+    deadlines.append(timeout)
+    return original_observe(config, timeout=timeout)
+  monkeypatch.setattr(c.host, "container_health", observe)
+  monkeypatch.setattr(c.host, "_bounded_docker_logs", lambda _cid: (b"", b"", False, False))
+
   if path == "run":
-    (inbox / "request.json").write_text(json.dumps({
-      "version": 2, "expected_sha": expected, "nonce": nonce,
-    }))
-    assert host.run() == 1
-    assert not (inbox / "request.json").exists()
+    c.host.clear_transaction()
+    c.tx.pop("phase")
+    monkeypatch.setattr(c.host, "request_drain", lambda *_a: None)
+    assert c.host.execute_replacement(c.config, c.tx) == 1
   else:
-    transaction = host.transaction_record("1" * 32, expected, nonce, previous, target)
-    transaction["phase"] = "replacement_started"
-    host.write_transaction(transaction)
-    host.recover(config, transaction)
+    c.tx["phase"] = "replacement_started"
+    c.host.write_transaction(c.tx)
+    c.host.prepare_admission(c.config, c.tx)
+    target = c.host.prepare_attempt(c.config, c.tx, "target")
+    assert c.docker.complete_start(target)
+    c.host.recover(c.config, c.tx)
 
-  journal = host.read_transaction()
-  operation = journal["operation_id"]
-  status = host.read_json(host.STATUS)
+  journal = c.host.read_transaction()
+  status = c.host.read_json(c.host.STATUS)
   assert status["state"] == "needs_recovery"
-  assert status["request_nonce"] == nonce and status["expected_sha"] == expected
-  assert all(0 < timeout <= 10 for _at, timeout in deadlines)
-  # The final pair of Docker queries must fit the remaining readiness budget.
-  if not unknown_observation:
-    assert (host.TARGET_HEALTH_SECONDS - 3, 1.5) in deadlines
-    count = host.TARGET_HEALTH_SECONDS // 3
-    wait_probes = target_probes[:count] if path == "run" else target_probes[1:count + 1]
-    assert wait_probes == [float(t) for t in range(0, host.TARGET_HEALTH_SECONDS, 3)]
-  rollback_boots = [boot for boot in boots if boot[1] == previous]
+  assert status["request_nonce"] == c.tx["request_nonce"]
+  assert status["expected_sha"] == c.tx["expected_sha"]
+  assert len(c.docker.starts) >= 1
+  assert probes and all(0 < budget <= 10 for budget in deadlines)
+  assert c.clock[0] - initial >= c.host.TARGET_HEALTH_SECONDS
+
   if unknown_observation:
-    assert clock[0] == host.TARGET_HEALTH_SECONDS
     assert journal["phase"] == "replacement_started"
-    assert not rollback_boots
-    assert not any(action in {"rearm-cutover", "finalize-cutover"} for action, _op in ledger_calls)
-    before = list(boots), list(ledger_calls)
-    assert host.reconcile() == 0
-    assert host.reconcile() == 0
-    assert (boots, ledger_calls) == before
-    assert host.read_json(host.STATUS)["state"] == "needs_recovery"
-    assert host.read_transaction()["phase"] == "replacement_started"
+    assert len(c.docker.starts) == 1
+    assert not c.gate.observe()["slots"]["rollback"]["attempts"]
+    before = list(c.docker.starts)
+    assert c.host.reconcile() == 0
+    assert c.docker.starts == before
+    assert c.host.read_transaction()["phase"] == "replacement_started"
+    assert c.host.read_json(c.host.STATUS)["state"] == "needs_recovery"
     return
 
-  assert clock[0] == host.TARGET_HEALTH_SECONDS + host.ROLLBACK_HEALTH_SECONDS
-  assert rollback_boots == [(host.TARGET_HEALTH_SECONDS, previous, operation)]
   assert journal["phase"] == "rollback_started"
+  assert probes[-1] - probes[0] >= c.host.TARGET_HEALTH_SECONDS - 3
+  assert min(deadlines) <= 1.5  # final two-query observation fits remaining time
   assert journal["failure_code"] == "readiness_budget_exhausted"
-  subject = "the new container" if path == "run" else "the interrupted replacement"
-  detail = f"{subject} was not serviceable within the readiness budget"
-  assert journal["failure_detail"] == detail
-  assert [(action, op) for action, op in ledger_calls if action == "rearm-cutover"] == [("rearm-cutover", operation)]
-  # Reconciliation may observe the same slow rollback, but cannot boot it again.
-  before = list(boots), list(ledger_calls)
-  assert host.reconcile() == 0
-  assert clock[0] == host.TARGET_HEALTH_SECONDS + 2 * host.ROLLBACK_HEALTH_SECONDS
-  assert (boots, ledger_calls) == before
-  assert host.read_transaction()["failure_code"] == "readiness_budget_exhausted"
-  previous_health[0] = "healthy"
-  assert host.reconcile() == 0
-  status = host.read_json(host.STATUS)
+  assert "not serviceable within the readiness budget" in journal["failure_detail"]
+  assert len(c.docker.starts) == 2
+  target_cid, rollback_cid = c.docker.starts
+  assert target_cid in c.docker.removes
+  assert c.docker.containers[rollback_cid]["Image"] == previous_image
+  assert c.gate.observe()["slots"]["rollback"]["consumed"]
+  assert c.clock[0] - initial >= c.host.TARGET_HEALTH_SECONDS + c.host.ROLLBACK_HEALTH_SECONDS
+  before = list(c.docker.starts)
+  assert c.host.reconcile() == 0
+  assert c.docker.starts == before
+  assert c.host.read_transaction()["failure_code"] == "readiness_budget_exhausted"
+  c.docker.containers[rollback_cid]["State"]["Health"]["Status"] = "healthy"
+  assert c.host.reconcile() == 0
+  status = c.host.read_json(c.host.STATUS)
   assert status["state"] == "rolled_back"
   assert status["code"] == status["failure_code"] == "readiness_budget_exhausted"
-  assert status["failure_detail"] == detail
-  assert status["message"] == f"The previous container was restored: {detail}"
-  assert status["operation_id"] == operation and status["request_nonce"] == nonce
-  assert host.read_json(config["control_dir"] / "status.json") == status
-  assert host.read_transaction() is None
-  assert ledger_calls[-1] == ("finalize-cutover", operation)
-  before = list(boots), list(ledger_calls)
-  assert host.reconcile() == 0
-  assert host.reconcile() == 0
-  assert (boots, ledger_calls) == before
+  assert status["failure_detail"] == journal["failure_detail"]
+  assert status["operation_id"] == c.tx["operation_id"]
+  assert status["request_nonce"] == c.tx["request_nonce"]
+  assert c.host.read_json(c.config["control_dir"] / "status.json") == status
+  assert c.host.read_transaction() is None
+  assert c.docker.starts == before
 
 
 def test_installer_stops_before_publishing_units_when_seeding_refuses(tmp_path):
@@ -1856,8 +1752,8 @@ def test_run_keeps_real_drain_authorization_owned_until_recovery(tmp_path, monke
 
   proof = host.cutover_boot_consumed
   config, inbox = _worker_paths(tmp_path, monkeypatch)
-  monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op:
-                      proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid()))
+  monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op, **kwargs:
+                      proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid(), **kwargs))
   ledger = _load_supervisor()
   _bind(ledger, config["data_dir"], monkeypatch)
   now = time.time()
@@ -1915,6 +1811,14 @@ def test_run_keeps_real_drain_authorization_owned_until_recovery(tmp_path, monke
     else "amd64" if "Architecture" in template else "sha256:target"
   ))
   monkeypatch.setattr(host, "compose", lambda *_a, **_k: pytest.fail("must not recreate the source"))
+  preflight = []
+  class UnconfirmedAdmission:
+    def prepare_for_recovery(self, *_a, **_k):
+      raise RuntimeError("source still running; exact boot admission unavailable")
+  monkeypatch.setattr(host, "admission_store", lambda _c, _t:
+                      preflight.append("gate") or UnconfirmedAdmission())
+  monkeypatch.setattr(host, "wrapped_configuration", lambda _c, _t, role, _token, image:
+                      preflight.append((role, image)) or {})
 
   # Real run -> request_drain -> restart_ledger; only Docker transport is fake.
   if failure == "recovery_status":
@@ -1924,13 +1828,17 @@ def test_run_keeps_real_drain_authorization_owned_until_recovery(tmp_path, monke
     assert host.run() == 1
   transaction = host.read_transaction()
   assert transaction is not None
+  assert preflight[:3] == ["gate", ("target", "sha256:target"),
+                           ("rollback", "sha256:previous")]
   if failure != "recovery_status":
     assert host.read_json(host.STATUS)["state"] == "needs_recovery"
   assert transaction["request_nonce"] == nonce
   assert transaction["expected_sha"] == expected
   assert transaction["previous_image"] == "sha256:previous"
   assert transaction["target_image"] == "sha256:target"
-  assert "phase" not in transaction  # draining is not replacement or rollback
+  assert transaction.get("phase") == (
+    "replacement_started" if failure in {"replacing_status", "recovery_status"} else None
+  )  # Only a completed drain may advance replacement.
   assert "outcome" not in transaction
   assert host.read_json(host.IMAGES)["sha_refs"] == [f"{host.IMAGE}:sha-{expected}"]
   assert not request.exists()
@@ -1958,7 +1866,7 @@ def test_run_keeps_real_drain_authorization_owned_until_recovery(tmp_path, monke
     assert host.reconcile() == 0
     assert host.read_transaction()["operation_id"] == transaction["operation_id"]
     assert "outcome" not in host.read_transaction()
-    assert host.read_json(host.STATUS)["code"] == "handoff_boot_unconfirmed"
+    assert host.read_json(host.STATUS)["code"] == "rollback_failed"
     assert host.read_json(host.STATUS)["state"] == "needs_recovery"
     assert ledger.ACCEPTED_PATH.exists() == accepted
     if accepted:
@@ -1979,8 +1887,8 @@ def _real_cutover(tmp_path, monkeypatch, *, consume=True):
   ledger_root.mkdir()
   config["data_dir"] = ledger_root
   _bind(ledger, ledger_root, monkeypatch)
-  monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op:
-                      proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid()))
+  monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op, **kwargs:
+                      proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid(), **kwargs))
   now = time.time()
   operation, expected, nonce = "1" * 32, "a" * 40, "2" * 32
   source_boot, target_boot = "source-boot-1234", "target-boot-1234"
@@ -2233,3 +2141,29 @@ def test_consumed_proof_rechecks_pending_authorization_after_snapshot(tmp_path, 
   monkeypatch.setattr(host.os, "stat", appearing)
   assert not host.cutover_boot_consumed(config, transaction["operation_id"])
   assert checks[0] == 2
+
+
+@pytest.mark.parametrize("revision", ["1", "0", "", "invalid"])
+def test_incompatible_launcher_leaves_trial_and_request_unconsumed(monkeypatch, capsys, revision):
+  monkeypatch.setenv("MOBIUS_REBUILD_LAUNCHER", revision)
+  monkeypatch.setattr(host, "config", lambda: pytest.fail("must not inspect or mutate before admission"))
+  assert host.run() == 0
+  assert "launcher revision 2 is required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("revision", [None, "2", "3"])
+def test_fixed_helper_and_compatible_launcher_reach_normal_admission(monkeypatch, revision):
+  if revision is None:
+    monkeypatch.delenv("MOBIUS_REBUILD_LAUNCHER", raising=False)
+  else:
+    monkeypatch.setenv("MOBIUS_REBUILD_LAUNCHER", revision)
+  class Admitted(Exception):
+    pass
+  # Admission reaches config only after checking the pinned revision-5 gate.
+  monkeypatch.setattr(host, "ADMISSION_CODE", SCRIPT.with_name("mobius-boot-admission.py"))
+  monkeypatch.setattr(host, "ADMISSION_ROOT", SCRIPT.parent)
+  def config():
+    raise Admitted
+  monkeypatch.setattr(host, "config", config)
+  with pytest.raises(Admitted):
+    host.run()

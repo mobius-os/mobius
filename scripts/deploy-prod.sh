@@ -6,7 +6,8 @@
 # don't have to be reconstructed from memory.
 #
 # Usage:
-#   scripts/deploy-prod.sh                  # full deploy (build, recreate, rebuild frontend, verify)
+#   sudo /absolute/path/to/trusted-checkout/scripts/deploy-prod.sh
+#                                           # full helper-managed prod deploy (build, recreate, verify)
 #   scripts/deploy-prod.sh --skip-build     # skip docker compose build (useful when image is already current)
 #   scripts/deploy-prod.sh --yes            # don't prompt before `docker compose build`
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
@@ -157,6 +158,14 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_SUPPORT="$REPO_ROOT/scripts/deploy_support.py"
+MANUAL_CONTROLLER=/usr/local/libexec/mobius-manual-cutover.py
+HELPER_MANAGED=0
+MANUAL_TOPOLOGY=""
+if [ "$TARGET" = prod ] && { [ -e /var/lib/mobius-rebuild ] ||
+    [ -L /var/lib/mobius-rebuild ] || [ -e /etc/mobius-rebuild ] ||
+    [ -L /etc/mobius-rebuild ]; }; then
+  HELPER_MANAGED=1
+fi
 cd "$REPO_ROOT"
 
 # ── ANSI colors (kept simple, matches sync-test-shell.sh's restraint) ──
@@ -189,6 +198,7 @@ cleanup_preflight_container() {
 on_exit() {
   cleanup_local_source_context
   cleanup_preflight_container
+  if [ -n "$MANUAL_TOPOLOGY" ]; then rm -f -- "$MANUAL_TOPOLOGY"; fi
 }
 on_err() {
   local rc=$?
@@ -985,6 +995,36 @@ container_restart_count() {
   docker inspect -f '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo "-1"
 }
 
+# The installed controller owns the physical app identity after admission:
+# per-attempt names intentionally are not `mobius`. Discovery is read-only and
+# verified against the root-owned worker index; never import a checkout worker.
+manual_controller_id() {
+  python3 -c '
+import json,re,sys
+try:
+    value=json.load(sys.stdin)
+    cid=value["container_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}",cid)
+    assert value["state"] == sys.argv[1]
+    print(cid)
+except Exception:
+    raise SystemExit("installed controller returned no verified container identity")
+' "$1"
+}
+if [ "$HELPER_MANAGED" = 1 ]; then
+  if [ "$EUID" -ne 0 ] || [ ! -f "$MANUAL_CONTROLLER" ] ||
+     [ -L "$MANUAL_CONTROLLER" ]; then
+    fail "the installed controller requires a privileged deploy and a root-pinned manual-cutover adapter"
+    exit 1
+  fi
+  if ! _discovery=$(python3 -I -S "$MANUAL_CONTROLLER" discover); then
+    fail "the installed controller cannot verify the active app; refusing direct Compose"
+    exit 1
+  fi
+  if ! CONTAINER=$(printf '%s' "$_discovery" | manual_controller_id active); then exit 1; fi
+  unset _discovery
+fi
+
 # ── --check shortcut: verification-only, no deploy ─────────────────────
 if [ "$CHECK_ONLY" = "1" ]; then
   step "[check] verifying ${CONTAINER}"
@@ -1010,15 +1050,64 @@ fi
 # container at once race (recreate clobbers, half-built frontend dist). Take
 # a non-blocking per-target flock; the fd stays open for the script's life
 # and releases on exit. (--check above skips this — it doesn't deploy.)
-# Lock in a user-private 0700 dir, not world-writable /tmp — a local
-# symlink in /tmp could otherwise redirect the open (fd 9 is opened for
-# write). `install -d` guarantees the dir is ours, so dropping the old
-# `|| true` is safe: a failed open is now fatal (via set -e), not a
-# silently-unbound fd 9 that would make the lock a no-op.
-DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
-install -d -m 0700 "$DEPLOY_LOCK_DIR"
-DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
-exec 9>"$DEPLOY_LOCK"
+# A privileged invocation must never resolve HOME/XDG_CACHE_HOME: sudo can
+# retain either, and `install -d` does not repair an existing user-owned dir.
+# Keep its lock below a fixed root-owned parent instead. The parent is not
+# writable by unprivileged users, so validation and open cannot be raced by
+# one. Open read/write without truncating an existing inode.
+initialize_deploy_lock() {
+  if [ "$EUID" -eq 0 ]; then
+    DEPLOY_LOCK_PARENT=/run
+    local parent_mode
+    parent_mode=$(stat -c '%a' -- "$DEPLOY_LOCK_PARENT")
+    if [ -L "$DEPLOY_LOCK_PARENT" ] || [ ! -d "$DEPLOY_LOCK_PARENT" ] ||
+       [ "$(stat -c '%u' -- "$DEPLOY_LOCK_PARENT")" != 0 ] ||
+       (( (8#$parent_mode & 0022) != 0 )); then
+      fail "deploy lock parent must be root-owned and not writable by users: $DEPLOY_LOCK_PARENT"
+      return 1
+    fi
+    DEPLOY_LOCK_DIR="$DEPLOY_LOCK_PARENT/mobius-deploy"
+    if [ -L "$DEPLOY_LOCK_DIR" ]; then
+      fail "deploy lock directory is a symlink: $DEPLOY_LOCK_DIR"
+      return 1
+    fi
+    if [ ! -e "$DEPLOY_LOCK_DIR" ]; then
+      mkdir -m 0700 -- "$DEPLOY_LOCK_DIR"
+    fi
+    if [ -L "$DEPLOY_LOCK_DIR" ] || [ ! -d "$DEPLOY_LOCK_DIR" ] ||
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK_DIR")" != '0:700' ]; then
+      fail "deploy lock directory must be root-owned mode 0700: $DEPLOY_LOCK_DIR"
+      return 1
+    fi
+    DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+    if [ -L "$DEPLOY_LOCK" ] || { [ -e "$DEPLOY_LOCK" ] && [ ! -f "$DEPLOY_LOCK" ]; }; then
+      fail "deploy lock must be a regular file, not a symlink: $DEPLOY_LOCK"
+      return 1
+    fi
+    if [ -e "$DEPLOY_LOCK" ] &&
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK")" != '0:600' ]; then
+      fail "deploy lock must be root-owned mode 0600: $DEPLOY_LOCK"
+      return 1
+    fi
+    local previous_umask
+    previous_umask=$(umask)
+    umask 077
+    exec 9<>"$DEPLOY_LOCK"
+    umask "$previous_umask"
+    if [ ! -f "$DEPLOY_LOCK" ] ||
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK")" != '0:600' ]; then
+      fail "deploy lock changed during open: $DEPLOY_LOCK"
+      return 1
+    fi
+  else
+    # Preserve the ordinary per-user lock contract for non-root/test deploys.
+    DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
+    install -d -m 0700 "$DEPLOY_LOCK_DIR"
+    DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+    exec 9<>"$DEPLOY_LOCK"
+  fi
+}
+initialize_deploy_lock
 if command -v flock >/dev/null 2>&1; then
   if ! flock -n 9; then
     fail "another ${TARGET} deploy is already running (lock: ${DEPLOY_LOCK})."
@@ -1059,6 +1148,7 @@ info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 # the Compose tag everywhere is load-bearing: otherwise preflight can boot the
 # old image and rollback can re-tag a reference Compose never recreates.
 PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
+RUNNING_CID=$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null || echo "")
 RUNNING_IMAGE_REF=$(
   docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo ""
 )
@@ -1067,6 +1157,84 @@ RUNNING_CONFIG_HASH=$(
     '{{ index .Config.Labels "com.docker.compose.config-hash" }}' \
     "$CONTAINER" 2>/dev/null || echo ""
 )
+if [ -z "$RUNNING_CID" ] || [ -z "$PREV_IMAGE" ]; then
+  fail "could not snapshot the running container identity; refusing to deploy"
+  exit 1
+fi
+
+# The per-user deploy lock does not serialize the root replacement helper.
+# Refuse an unprivileged helper-managed production deploy before an expensive
+# build. Do not elevate automatically or alter the helper's private lock.
+preflight_helper_deploy_privilege() {
+  local state=/var/lib/mobius-rebuild config=/etc/mobius-rebuild
+  [ "$TARGET" = "prod" ] || return 0
+  if [ -e "$state" ] || [ -L "$state" ] || \
+     [ -e "$config" ] || [ -L "$config" ]; then
+    if [ "$EUID" -ne 0 ]; then
+      fail "the root replacement helper is installed; run this production deployment with sudo from a trusted checkout, or use the Settings helper"
+      return 1
+    fi
+  fi
+}
+
+# Take its *existing* private lock only after build/preflight, immediately
+# before touching the live app or cutover ledger. FD 8 stays open through
+# health verification, receipt finalization, and any rollback. Never create
+# or chmod the helper's lock from this unprivileged deployment script.
+acquire_helper_replacement_fence() {
+  local state=/var/lib/mobius-rebuild config=/etc/mobius-rebuild
+  local lock="$state/replace.lock" journal="$state/transaction.json"
+  local owner mode
+  [ "$TARGET" = "prod" ] || return 0
+  if [ ! -e "$state" ] && [ ! -L "$state" ] && \
+     [ ! -e "$config" ] && [ ! -L "$config" ]; then
+    return 0  # no root helper installed on this host
+  fi
+  if [ ! -d "$state" ] || [ -L "$state" ] || \
+     [ ! -f "$lock" ] || [ -L "$lock" ]; then
+    fail "the root replacement helper is present but its private lock is unavailable; ask the host administrator to inspect $lock"
+    return 1
+  fi
+  if ! read -r owner mode < <(stat -c '%u %a' "$state" 2>/dev/null) || \
+     [ "$owner" != 0 ] || (( (8#$mode & 077) != 0 )); then
+    fail "the root replacement helper state is not root-private; refusing to cut over"
+    return 1
+  fi
+  if ! read -r owner mode < <(stat -c '%u %a' "$lock" 2>/dev/null) || \
+     [ "$owner" != 0 ] || (( (8#$mode & 077) != 0 )); then
+    fail "the root replacement lock is not root-private; refusing to cut over"
+    return 1
+  fi
+  if ! exec 8<>"$lock"; then
+    fail "cannot open $lock; run this deployment with the host privileges needed for the root helper, or ask the host administrator"
+    return 1
+  fi
+  if ! flock -n 8; then
+    fail "the root replacement helper owns $lock; wait for it to settle, then retry the deployment"
+    return 1
+  fi
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fail "the root replacement helper has a pending transaction at $journal; reconcile it before deploying"
+    return 1
+  fi
+}
+
+revalidate_live_snapshot() {
+  local cid image ref config_hash
+  cid=$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null) || cid=""
+  image=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null) || image=""
+  ref=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null) || ref=""
+  config_hash=$(docker inspect -f \
+    '{{ index .Config.Labels "com.docker.compose.config-hash" }}' \
+    "$CONTAINER" 2>/dev/null) || config_hash=""
+  if [ -z "$cid" ] || [ "$cid" != "$RUNNING_CID" ] || \
+     [ "$image" != "$PREV_IMAGE" ] || \
+     [ "$ref" != "$RUNNING_IMAGE_REF" ] || \
+     [ "$config_hash" != "$RUNNING_CONFIG_HASH" ]; then
+    fail "the live ${CONTAINER} changed during build/preflight; no cutover was attempted. Re-run deploy from a fresh snapshot"
+    return 1
+  fi
+}
 # Ask Compose once instead of duplicating the prod and test defaults here. This
 # also honors an image configured in .env before we freeze the result for the
 # preflight, cutover, and rollback paths.
@@ -1346,6 +1514,8 @@ if [ "$TARGET" = "prod" ]; then
   fi
 fi
 
+preflight_helper_deploy_privilege
+
 # ── step 1: build (with cache-prune guard) ─────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then
   step "[1/4] SKIPPED docker compose build (--skip-build)"
@@ -1536,6 +1706,9 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
     fail "the preflighted image has no verifiable source revision"
     exit 1
   fi
+  presence_gate "cutover (recreate ${CONTAINER})"
+  acquire_helper_replacement_fence
+  revalidate_live_snapshot
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     step "install the image's reviewed source before container replacement"
     source_bundle=$(mktemp)
@@ -1574,9 +1747,47 @@ fi
 
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
-presence_gate "cutover (recreate ${CONTAINER})"
+if [ "$BUILT_THIS_RUN" != "1" ]; then
+  presence_gate "cutover (recreate ${CONTAINER})"
+  acquire_helper_replacement_fence
+  revalidate_live_snapshot
+fi
 TARGET_IMAGE=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)
 FORCE_APP_RECREATE=0
+if [ "$HELPER_MANAGED" = 1 ]; then
+  # Freeze the exact rendered topology, including the selected edge overlay,
+  # before the installed worker journals and drains. It will validate /data,
+  # networks, project and both immutable image identities under replace.lock.
+  if ! [[ "$TARGET_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    fail "the manual controller requires an immutable target image ID"
+    exit 1
+  fi
+  MANUAL_EXPECTED_SHA="${BUILD_SHA:-}"
+  if [ "$BUILT_THIS_RUN" != 1 ]; then MANUAL_EXPECTED_SHA=$(served_sha); fi
+  if ! [[ "$MANUAL_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    fail "the manual controller requires an exact 40-hex source revision"
+    exit 1
+  fi
+  MANUAL_TOPOLOGY=$(umask 077; mktemp /var/lib/mobius-rebuild/manual-topology.XXXXXXXX.json)
+  if ! docker compose "${COMPOSE_ARGS[@]}" config --format json >"$MANUAL_TOPOLOGY"; then
+    fail "could not freeze the rendered manual deployment topology"
+    exit 1
+  fi
+  # The adapter takes replace.lock itself and revalidates the source. Close
+  # our descriptor first: taking a second flock while holding it can deadlock.
+  exec 8>&-
+  if ! _manual_result=$(python3 -I -S "$MANUAL_CONTROLLER" cutover \
+      --source-cid "$RUNNING_CID" --source-image "$PREV_IMAGE" \
+      --target-image "$TARGET_IMAGE" --expected-sha "$MANUAL_EXPECTED_SHA" \
+      --resolved-compose "$MANUAL_TOPOLOGY"); then
+    fail "installed controller could not settle the manual replacement; inspect its root journal/status, never retry direct Compose"
+    exit 1
+  fi
+  if ! CONTAINER=$(printf '%s' "$_manual_result" | manual_controller_id succeeded); then exit 1; fi
+  unset _manual_result
+  rm -f -- "$MANUAL_TOPOLOGY"; MANUAL_TOPOLOGY=""
+  ok "controller verified the exact admitted container ${CONTAINER:0:12}"
+else
 if [ "$TARGET" = "prod" ] && [ -n "$TARGET_IMAGE" ] && \
    compose_recreation_needed "$TARGET_IMAGE"; then
   if cutover_supported; then
@@ -1631,6 +1842,7 @@ wait_for_cutover "ready_code" "serviceable" \
 # Retire the root receipt now; it remains available only through this point so
 # an unhealthy first boot can explicitly authorize one rollback boot.
 finalize_chat_cutover || true
+fi  # helper-managed production is owned by the installed controller above
 
 run_deploy_canary
 

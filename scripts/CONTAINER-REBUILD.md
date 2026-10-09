@@ -110,11 +110,30 @@ to resolve the root-owned frozen model. This preserves both the bundled-Caddy
 and shared `edge-caddy` topologies. Rerun the installer after an intentional
 topology or configuration change.
 
-If an earlier helper already recreated the container, its Compose labels point
-to the frozen root-owned topology rather than the original checkout. The
-installer recognizes only that exact helper-owned pair, preserves the frozen
-topology, and upgrades the reviewed controller/override from the trusted
-checkout. Other out-of-checkout Compose labels still fail closed.
+Each admission attempt uses a unique Compose project and `container_name`,
+while `io.mobius.admission.project` records the fixed original deployment
+project. Shared named networks and volumes remain external resources with their
+original names; app aliases and the persistent data mount are preserved.
+No-start creation has no service dependencies to start or another attempt to
+scale down. Each attempt reads an immutable root-owned
+`/etc/mobius-rebuild/attempts/<token>.json`, not a changing shared override.
+
+On reinstall, discovery unions running containers with that fixed owner label
+and legacy containers with the original Compose project plus app-service labels.
+Exactly one full CID must remain after deduplication; two containers are an
+ambiguity, not permission to prefer one. Labels alone grant no trust: the
+installer verifies the root-frozen original project, exact current override,
+immutable attempt file derived from the validated token, image/startup argv,
+read-only code mount, private state mount, and original data source. It rechecks
+live identity under the installation locks.
+
+For helper-owned containers, the installer copies only the unwrapped root-owned
+`compose.yml` as the reusable base. It **preserves** a validated wrapped current
+`image.override.yml` as the worker's live-identity pointer, without merging it
+into that base. Legacy helper-created containers remain recognized by their
+exact original frozen Compose-file pair. A base already containing admission
+mounts, wrapper, or attempt labels is refused rather than freezing stale
+authority. Other out-of-checkout Compose identities still fail closed.
 
 The host must use systemd and Docker on amd64. Official Möbius images are not
 currently published as a multi-architecture manifest, so other architectures
@@ -122,8 +141,28 @@ fail during installation rather than during a rebuild.
 
 For an owner-controlled image built from a trusted local checkout, run
 `scripts/deploy-prod.sh` on that Docker host through whatever operator access is
-already available. Connect is one optional way to reach the host, not a product
-dependency. That path scratch-boots the exact locally built image before
+already available. When the root replacement helper is installed, its lock is
+root-owned in a private directory, so the **entire production deploy** must run
+with host privileges, not just the final Compose command. From the trusted,
+current host checkout, use an absolute script path, for example:
+
+```sh
+sudo /absolute/path/to/trusted-checkout/scripts/deploy-prod.sh
+```
+
+The script refuses an unprivileged helper-managed production deploy before its
+expensive build. It does not elevate itself or relax the lock permissions.
+Privileged invocations use `/run/mobius-deploy` for their deployment lock,
+ignoring caller-controlled cache paths and refusing symlink lock files.
+`--check` remains verification-only and `--target=test` does not require the
+production helper lock. `sudo` can change `HOME`, Git identity/configuration,
+safe-directory trust, and credential access, which matter to this script's Git
+fetch and release checks. Verify the privileged invocation can read the trusted
+checkout and configured release remote before deploying; use narrowly scoped
+Git configuration if needed, **not** broad environment preservation such as
+`sudo -E`. Alternatively, use the reviewed Settings update through the installed
+helper rather than a manual deploy. Connect is one optional way to reach the
+host, not a product dependency. The manual path scratch-boots the exact locally built image before
 cutover and uses the same authenticated chat handoff and rollback contract.
 It can carry image-definition and protected-runtime changes. A release that
 changes Python packages stops before source installation when the running image
@@ -193,38 +232,173 @@ it) above every revision offered or installed so far. That high-water mark
 never drops, so neither a dropped candidate nor an older official image's
 worker is ever offered again.
 
-The launcher removes the candidate from its record before trying it on the
-next replacement, so a trial that the host interrupts is never repeated. The
-candidate becomes active only when that replacement succeeds, and only if no
-newer worker was installed while it ran. Otherwise the proven worker handles
-the retry, and `reconcile` always runs the proven worker. A faulty worker change
-therefore costs one update attempt, never the ability to update. Worker files
-are small and never deleted.
+The launcher moves a candidate into a durable recovery-owner pin before its
+one trial. Only that exact, hash-verified worker reconciles its unfinished
+transaction; the old active worker cannot interpret a new worker's preboot
+stages. All worker selection and execution share one dispatch lock, inherited
+by active, candidate and recovery children. It survives launcher death,
+including the window before the worker creates its journal, so a stale active
+selection cannot bypass a newly pinned owner. Neither recovery
+nor an interrupted launcher replays the candidate's original `run`.
 
-Worker changes reach installed hosts through ordinary updates, taking effect
-from the replacement after the release that ships them, so keep each change
-compatible with its predecessor for one release. CI requires a higher
-`WORKER_REVISION` whenever the worker changes, and a post-publish job proves
-that each published worker reaches a host installed from the previous release
-and performs a real replacement there.
+A fresh successful outcome promotes the candidate only when its recorded
+predecessor remains active. The pin retains the baseline operation/status so
+recovery can finish promotion after a crash without trusting stale success.
+A rollback or failed trial keeps the previous active worker. Worker files are
+small and never deleted while the index can still name them.
 
-Before it drains the running app, a worker records the replacement in
-`/var/lib/mobius-rebuild/transaction.json`: operation, nonce, and previous
-image ID. Compose starts the verified image through a helper-owned tag pointed
-at its ID (`mobius-rebuild-target`). The worker currently on `main` attempts to
-restore the recorded previous image after an interrupted replacement; that
-attempt can fail and leave the journal and `needs_recovery` status in place.
-The separately reviewed controller migration (#1745) is intended to first
-observe whether the journaled target actually completed, retain an ambiguous
-journal even if a container is healthy, and report a durable but handoff-degraded
-service outcome without reversing it. Those newer behaviors apply only after
-that controller is integrated and installed; this document does not claim they
-run on the current helper. In either case, the app must preserve unresolved
-status and binding, refuse retry and cancellation, and not mask it with an
-unrelated queued inbox file. A new request waits until the journal is settled.
-Failure handling, rollback and settlement run under the replacement lock that
-the installer and `reconcile` also take. The record's schema is shared by every
-worker revision.
+Worker changes normally reach installed hosts through ordinary updates. Changes
+to the frozen launcher, admission wrapper, or systemd units instead require an
+explicit helper migration. Revision **5** retains launcher revision **2** and
+installs the reviewed boot-admission wrapper. An image update alone does not
+install these host prerequisites. Reinstall from the reviewed checkout only
+during separately authorized host maintenance.
+
+The installer refuses **any existing transaction**, including an unwrapped
+legacy rollback whose Start may already have been issued, before changing
+controller code or units; it checks again while holding the dispatch and
+replacement locks in launcher order. Before publication it stops only the path
+watcher and reconciliation timer, then requires both run and reconciliation
+services to be inactive (or failed) with no queued systemd job. An already selected
+launcher-1 child paused before acquiring the replacement lock still makes its
+oneshot service active/activating: installation refuses without stopping or
+killing it. Lock ordering alone cannot fence that older launcher. Failed
+installation restores each dispatch source's previous running/stopped state;
+restoration errors require manual inspection. Each lock acquisition has a
+30-second budget: a busy controller makes installation refuse, not terminate
+active recovery or wait indefinitely.
+
+This migration fence covers the installed systemd dispatch paths and cooperating
+launcher-2 callers. Concurrent direct invocation of a legacy worker/launcher,
+manual `systemctl start` of controller services, or another installer is unsupported:
+the operator must exclude those during separately authorized maintenance. There
+is no process-name scan that proves an independently paused legacy process cannot
+resume; the installer does not claim to discover or fence such callers.
+Keep the transaction and handoff evidence intact and settle the incident through
+its existing recovery owner or explicitly authorized manual maintenance first.
+Installation cannot retroactively enroll an old consumer or grant a second boot.
+It does not restart the healthy app, clear the restart ledger, or invoke recovery;
+it only publishes helper capabilities. Normal request/timer processing resumes
+after installation and may dispatch independently queued approved requests.
+
+### Explicit boot-admission migration
+
+The installer atomically pins reviewed, tracked, clean
+`scripts/mobius-boot-admission.py` at
+`/usr/local/libexec/mobius-boot-admission.py`, owned by root. It also pins the
+reviewed `scripts/mobius-manual-cutover.py` adapter at
+`/usr/local/libexec/mobius-manual-cutover.py`, so manual deployment enters the
+same installed worker protocol rather than issuing an independent replacement.
+Both helpers must be tracked and clean; installation validates both before
+publishing either. Its root-owned
+`/var/lib/mobius-rebuild/admission` directory is mode **0700**, outside `/data`
+and the legacy entrypoint's recursive ownership repair. Reinstallation preserves
+admission records and lock identities; it never clears consumed slots.
+
+For each newly created target **and rollback**, the worker mounts that code
+read-only at `/run/mobius-boot-admission.py` and state read-write at
+`/run/mobius-admission`. It preserves the original image ENTRYPOINT/CMD and opens
+admission only after verifying the exact container, image, and effective wrapper
+configuration. The wrapper runs before the untouched original entrypoint.
+Thus the recorded **exact legacy last-good image** can remain a rollback option
+without claiming its frozen ledger implements the new shared lock. This is an
+explicit reviewed host deployment change, not replacement of legacy runtime
+bytes or an implicit capability gained by an image update.
+
+One rollback slot has monotonic attempt generations. The wrapper durably admits
+at most one host-authorized handoff for that slot. Once admitted, the host never
+starts, rearms, cancels, or recreates that rollback. Ordinary autonomous Docker
+restarts may still boot service with a fresh boot ID, without renewing this
+cutover's authority, even before transaction settlement. A later service-only
+boot must retire leftover matching acceptance from a crash between admission
+and the legacy ledger's consumption; unrelated fresh restart authority is not
+silently erased. This is not a promise of only one physical Docker process start.
+
+The preexisting **unwrapped source** does not acquire a gate merely because the
+helper was installed. After its exact CID is removed, continuation eligibility
+must be established from the still-unconsumed original acceptance and original
+source boot ID, not the root receipt alone. Source consumption, partial evidence,
+or an unexpected source restart permanently disables continuation for this
+operation; wrapped target/rollback containers may restore service without
+reissuing that handoff. This degraded outcome retains honest `needs_recovery`
+evidence. An already-issued unwrapped recovery incident still requires its
+existing recovery owner or explicit manual settlement before installation.
+
+An ambiguous Start is never retried on the same CID. Only a provably unadmitted
+attempt may be durably CLOSED under the admission lock, then removed by its
+exact full CID. The old attempt stays denied across host death. A new generation
+may be created only after removal is confirmed and explicit unconsumed
+cancellation lineage survives. An admitted, unexplained missing, changed, or
+previously attempted rollback does not become recreateable from Docker metadata
+or a v1 acceptance witness. Missing proof remains `needs_recovery`.
+
+A crash during a legacy entrypoint's recursive ownership repair can leave the
+restart ledger untrusted. The wrapper journals a permanent service-only reset
+before detaching that namespace, then creates a fresh trusted ledger; it never
+makes old bytes authoritative by changing their ownership. Interrupted resets
+resume before legacy bootstrap. Only independently trusted, fresh ordinary
+restart acceptance may survive this reset; the old cutover cannot regain
+continuation. Missing initial receipt evidence likewise permits service-only
+preparation only after the host proves a completed drain or an exact down/missing
+source. A healthy undrained source is not removed merely because its receipt is
+missing. Existing gate state remains authoritative on replay.
+
+Cleanup of the detached ledger is bounded and nonrecursive. Unknown or nested
+contents remain inert for manual cleanup under `.restart-ledger-quarantine-*`;
+they are never read back as authority. Legacy ownership repair may change their
+ownership, so retained directories are not promised to remain root-private.
+Storage and synchronization errors remain explicit failures, not permission to
+invent continuation.
+
+A new worker refuses a replacement trial under launcher revision 1 without
+changing status or claiming the request, allowing that launcher to put the
+candidate back for the installer. The app's unclaimed-request status makes
+that queued condition actionable without changing the root trial outcome.
+An interrupted legacy launcher can still
+lose that pending candidate; its revision high-water protection is not bypassed.
+A fixed helper without a launcher remains supported and reconciles its own work.
+
+### Recovery transitions
+
+Every worker transition below holds `replace.lock`. A transaction is removed
+only after publishing its durable outcome. Reconciliation repeats observations,
+not an already-consumed chat handoff.
+
+| Durable state | Evidence required | Permitted next action |
+| --- | --- | --- |
+| Prepared replacement | Exact previous image, source CID and durable drain receipt | Journal replacement intent before removing the exact source |
+| Replacement started | Gate-owned source identity and fresh whole-container observation | Observe an exact bound target; after source quiescence, restore only the recorded previous image if needed |
+| Attempt allocated | Unconsumed slot, frozen configuration and fenced predecessor | Create without starting, verify and bind the exact container |
+| Attempt open | Bound wrapped container and quiesced source/target | Persist `issued` before one Start; only the wrapper may prepare acceptance and admit a boot |
+| Start issued | Authoritative admission slot under its shared lock | If admitted, observe only; otherwise durably CLOSE and fence the exact CID before a new generation, never retry ambiguous Start |
+| Attempt closed and fenced | Durable revocation plus confirmed exact-CID removal | Allocate the next generation of the same unconsumed slot |
+| Rollback running/restarting | Exact previous image | Observe readiness; never recreate a boot that is making progress |
+| Healthy with missing handoff proof | No exact consumed receipt | Keep service running and retain `needs_recovery`; do not manufacture an ACK |
+| Durable outcome | Exact outcome already recorded | Republish status and clear the journal, without another boot |
+
+A failed container observation retries discovery and inspection together.
+Multiple containers are ambiguous, not a reason to pick the first ID. The
+recurring systemd timer continues reconciliation after transient Docker errors
+or a lost immediate recovery attempt. Budgets are separate from individual
+query timeouts. Each remove/create/start mutation has a 300-second ceiling;
+target and rollback readiness each have 600 seconds. One full cutover/recovery
+pass allows six mutations (source removal, target create/start, target fencing,
+rollback create/start), both readiness windows, and 600 seconds of bounded
+observation/settlement overhead: **3600 seconds**. Both the main service's
+`TimeoutStopSec` and the boot reconciler's `TimeoutStartSec` use that allowance.
+The main service's explicit `TimeoutStartSec=9000` adds the 3600-second image-pull
+budget and 1800 seconds for preflight, provenance, adoption, and cleanup. A
+transient failure or interrupted pass retains its journal for the periodic
+reconciler; these budgets never authorize another consumed boot.
+
+The wrapper's admission lock and durable slot serialize consumer admission with
+host revocation; the outer replacement lock alone cannot do so. The legacy
+supervisor still consumes its ledger independently, but the host never refreshes
+or rearms that rollback after wrapper admission. Docker's `created` state or zero
+`StartedAt` cannot prove that authorization is unconsumed. The original receipt
+expires after one hour; refreshing acceptance does not extend it. Expiry can
+leave a serviceable rollback with manual chat recovery still required. Never
+clear that transaction merely because health is green.
 
 The root status records `worker_revision`, `launcher_revision` and the last
 `worker_adoption` outcome for operators. Fixed helpers keep working: the app does not require the launcher, and
