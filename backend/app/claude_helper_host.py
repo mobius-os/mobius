@@ -39,7 +39,6 @@ from typing import Any
 
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
-from app.usage_metrics import HELPER_TASK_COUNTERS, normalize_claude_helper_task_usage, reported_counter
 
 log = logging.getLogger(__name__)
 
@@ -259,10 +258,7 @@ class HelperTurn:
   summary: str | None = None
   # Provider report, distinct from task lifecycle summaries and closing text.
   report: HelperReport = dataclasses.field(default_factory=HelperReport)
-  # Claude's task counters seen while this turn was live: the latest
-  # cumulative progress snapshot and the terminal notification's, if any.
-  progress_usage: dict | None = None
-  final_usage: dict | None = None
+  usage: dict | None = None
   dispatch_error: str | None = None
   dispatch_consumed: bool = False
   dispatch_cancelled: bool = False
@@ -276,10 +272,10 @@ class HelperTurn:
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
 
-  def finish(self, status: str, summary: str | None = None) -> None:
+  def finish(self, status: str, summary: str | None = None, usage=None) -> None:
     if self.done.is_set():
       return
-    self.status, self.summary = status, summary
+    self.status, self.summary, self.usage = status, summary, usage
     self.started.set()
     self.done.set()
 
@@ -589,7 +585,6 @@ class ClaudeHelperHost(Host):
       AssistantMessage,
       ResultMessage,
       TaskNotificationMessage,
-      TaskProgressMessage,
       TaskStartedMessage,
       TaskUpdatedMessage,
       ToolResultBlock,
@@ -601,9 +596,6 @@ class ClaudeHelperHost(Host):
       async for message in self._client.receive_messages():
         if isinstance(message, TaskStartedMessage):
           self._on_task_started(message)
-          continue
-        if isinstance(message, TaskProgressMessage):
-          self._on_task_progress(message.task_id, message.usage)
           continue
         if isinstance(message, TaskNotificationMessage):
           self._on_task_end(message.task_id, message.status, message.summary, message.usage)
@@ -715,20 +707,6 @@ class ClaudeHelperHost(Host):
     if identity is not None and not identity.done():
       identity.set_result(turn)
 
-  def _on_task_progress(self, task_id, usage) -> None:
-    turn = self._turn_by_agent.get(task_id)
-    # The same liveness rule as a task end: progress of a previous run, or
-    # after this turn settled, never counts toward it. Keep each latest valid
-    # counter: sparse/malformed snapshots cannot erase earlier evidence.
-    # Counters are cumulative, so replace rather than sum (even on a reset).
-    if (turn is None or turn.done.is_set() or not turn.started.is_set()
-        or not isinstance(usage, dict)):
-      return
-    reported = {key: reported_counter(usage.get(key)) for key in HELPER_TASK_COUNTERS}
-    valid = {key: value for key, value in reported.items() if value is not None}
-    if valid:
-      turn.progress_usage = {**(turn.progress_usage or {}), **valid}
-
   def _on_task_end(self, task_id, status, summary, usage) -> None:
     turn = self._turn_by_agent.get(task_id)
     # A follow-up turn is mapped to its agent before the agent resumes, and
@@ -740,12 +718,7 @@ class ClaudeHelperHost(Host):
     report = turn.report.final()
     if report is not None:
       turn.sink.publish({"type": "assistant_result", "content": report})
-    # The first terminal event settles the turn. Counters on a later one are
-    # dropped: the turn's result may already be persisted, and waiting for an
-    # event Claude may never send would hold the turn open.
-    if isinstance(usage, dict):
-      turn.final_usage = dict(usage)
-    turn.finish(normalized, summary)
+    turn.finish(normalized, summary, dict(usage) if usage else None)
 
   # ------------------------------------------------------------------ work
 
@@ -1225,15 +1198,12 @@ async def run_claude_host_turn(
         )
         if kind == "rate_limit":
           result["api_error_status"] = 429
-      # A follow-up resumes the same Claude task, whose counters may include
-      # earlier turns; only a freshly spawned task's counters are this turn's.
-      usage = normalize_claude_helper_task_usage(
-        final=turn.final_usage, progress=turn.progress_usage,
-        attributable=turn.kind == "spawn",
-        turn_duration_ms=int((time.monotonic() - started_at) * 1000),
-      )
-      if usage is not None:
-        result["usage_metrics"] = usage
+      if turn.usage:
+        result["usage_metrics"] = {
+          "total_tokens": turn.usage.get("total_tokens"),
+          "duration_ms": turn.usage.get("duration_ms")
+          or int((time.monotonic() - started_at) * 1000),
+        }
       return result
   finally:
     if handle is not None:
