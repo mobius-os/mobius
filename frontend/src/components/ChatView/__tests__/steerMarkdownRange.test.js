@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { Marked } from 'marked'
 import {
-  splitSteerMarkdown, markdownRangeTokens, sliceMarkdownRange,
+  splitSteerMarkdown, markdownRangeTokens, markdownRangeSource, sliceMarkdownRange,
 } from '../markdown/steerMarkdownRange.js'
 
 function visible(tokens) {
@@ -26,6 +27,49 @@ test('a steer inside strong keeps formatting and every visible character exactly
   assert.equal(markdownRangeTokens(split.before)[0].tokens[0].type, 'strong')
   assert.equal(markdownRangeTokens(split.after)[0].tokens[0].type, 'strong')
   assert.notEqual(markdownRangeTokens(split.before)[0].raw, markdownRangeTokens(split.after)[0].raw)
+})
+
+test('whole range copy retains original image/link atoms and balances nested formatting', () => {
+  const atom = '![diagram](/api/chats/fixture/media/diagram.png "Source title") [docs](https://example.com/docs)'
+  const source = `${atom}\n\n## A **bold *nested* ~~ending~~** tail`
+  const split = splitSteerMarkdown(source, source.indexOf('nested') + 3)
+  const md = new Marked()
+  for (const range of [split.before, split.after]) {
+    const copied = markdownRangeSource(range)
+    assert.equal(md.parse(copied), md.parser(markdownRangeTokens(range)),
+      'normal paste must preserve the projected formatting, not unmatched raw delimiters')
+  }
+  assert.ok(markdownRangeSource(split.before).startsWith(atom))
+  assert.equal(markdownRangeSource(split.after), '## ***ted* ~~ending~~** tail\n')
+})
+
+test('clipped setext headings copy as equivalent standalone headings', () => {
+  const source = 'A **nested heading**\n===================='
+  const split = splitSteerMarkdown(source, source.indexOf('heading') + 3)
+  const md = new Marked()
+  for (const range of [split.before, split.after]) {
+    assert.equal(md.parse(markdownRangeSource(range)), md.parser(markdownRangeTokens(range)))
+  }
+})
+
+test('copy moves boundary whitespace outside clipped emphasis without losing characters', () => {
+  const source = '__Start middle end__'
+  const split = splitSteerMarkdown(source, source.indexOf('middle'))
+  assert.equal(markdownRangeSource(split.before), '__Start__ ')
+  assert.equal(markdownRangeSource(split.after), '__middle end__')
+  const middle = sliceMarkdownRange(split.after, 'middle'.length, 'middle end'.length)
+  assert.equal(markdownRangeSource(middle), ' __end__')
+  assert.equal(new Marked().parse(markdownRangeSource(middle)), '<p> <strong>end</strong></p>\n')
+})
+
+test('clipping adjacent nested emphasis does not turn it into bold on paste', () => {
+  const source = 'A **escape \\*literal* and `code` end** tail'
+  const split = splitSteerMarkdown(source, source.indexOf('escape') + 3)
+  const md = new Marked()
+  assert.equal(md.parse(markdownRangeSource(split.before)), md.parser(markdownRangeTokens(split.before)))
+  assert.equal(markdownRangeSource(split.before), 'A _*esc*_')
+  const suffix = splitSteerMarkdown(source, source.length - '* tail'.length).after
+  assert.equal(md.parse(markdownRangeSource(suffix)), '<p>* tail</p>\n')
 })
 
 test('nested emphasis and deletion survive projection; unrelated whole blocks stay intact', () => {

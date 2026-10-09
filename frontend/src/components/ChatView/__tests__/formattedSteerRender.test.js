@@ -10,7 +10,12 @@ globalThis.window = { location, innerWidth: 900 }
 globalThis.location = location
 const vite = await createServer({ appType: 'custom', logLevel: 'error',
   server: { middlewareMode: true, hmr: false, ws: false },
-  ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
+  ssr: { noExternal: ['@openai/apps-sdk-ui', 'dompurify'] },
+  // SSR has no DOM; image fixtures use safe source URLs, not sanitizer behavior.
+  plugins: [{ name: 'dompurify-ssr-stub', enforce: 'pre',
+    resolveId: id => id === 'dompurify' ? '\0dompurify-stub' : null,
+    load: id => id === '\0dompurify-stub'
+      ? 'export default { sanitize: value => String(value) }' : null }] })
 after(() => vite.close())
 const { default: Message } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
@@ -145,7 +150,12 @@ function copyWholeFragment(msg, visibleText) {
   const html = render(Capture, {})
   const text = { nodeType: 3, nodeValue: visibleText, textContent: visibleText }
   const strong = { nodeType: 1, tagName: 'STRONG', childNodes: [text] }
-  const paragraph = { nodeType: 1, tagName: 'P', childNodes: [strong] }
+  // Rendered image wrappers contain an authorized URL, unlike their source.
+  const image = { nodeType: 1, tagName: 'BUTTON', childNodes: [{ nodeType: 1,
+    tagName: 'IMG', childNodes: [], getAttribute: name => name === 'src'
+      ? '/api/media/authorized-preview?test-authorization=do-not-copy' : 'diagram' }] }
+  const paragraph = { nodeType: 1, tagName: 'P', childNodes:
+    msg.content.includes('![diagram]') ? [image, strong] : [strong] }
   const fragment = { nodeType: 11, childNodes: [paragraph] }
   const block = { dataset: { assistantMarkdownBlock: '0' }, contains: () => true }
   const range = {
@@ -181,6 +191,24 @@ for (const legacy of [false, true]) test(`whole formatted fragments copy balance
     const { html, clipboardData } = copyWholeFragment(msg, visibleText)
     assert.ok(html.includes(`<strong>${visibleText}</strong>`))
     assert.equal(assistantClipboardText(clipboardData), markdown)
+    assert.equal(assistantClipboardText(clipboardData, true), visibleText)
+  }
+})
+
+for (const legacy of [false, true]) test(`range copy preserves source images alongside split emphasis (legacy=${legacy})`, () => {
+  const image = '![diagram](https://example.com/diagram.png)'
+  const prefix = `${image} **Plan`
+  const rows = [assistant(prefix), steer, assistant(`${prefix}ned** ${image}`, 'run:assistant:1')]
+  if (legacy) rows.forEach(row => { delete row.blocks })
+  const shown = projectSettledSteerContinuations(rows)
+  for (const [msg, visibleText, expected] of [
+    [shown[0], 'Plan', `${image} **Plan**`],
+    [shown[2], 'ned', `**ned** ${image}`],
+  ]) {
+    const { html, clipboardData } = copyWholeFragment(msg, visibleText)
+    assert.ok(html.includes('aria-label="Open diagram preview"'), 'the selected block includes the rendered source image')
+    assert.equal(assistantClipboardText(clipboardData), expected)
+    assert.ok(!assistantClipboardText(clipboardData).includes('test-authorization'))
     assert.equal(assistantClipboardText(clipboardData, true), visibleText)
   }
 })

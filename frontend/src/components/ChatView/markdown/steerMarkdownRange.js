@@ -60,7 +60,9 @@ function inlineProjection(tokens, source, base, start, end) {
         if (!children?.length) return null
         result.push({ ...token, raw: source.slice(lo, hi),
           text: source.slice(Math.max(lo, innerStart), Math.min(hi, innerEnd)),
-          tokens: children })
+          tokens: children, rangeMarkup: {
+            opening: raw.slice(0, opening), closing: raw.slice(opening + innerRaw.length),
+          } })
       } else {
         return null
       }
@@ -99,7 +101,11 @@ function project(tokens, source, start, end) {
           Math.max(lo, contentStart), Math.min(hi, contentEnd))
         if (!children?.length) return null
         out.push({ ...token, raw: source.slice(lo, hi), text: source.slice(lo, hi),
-          tokens: children, rangeStart: lo, rangeEnd: hi, rangeContext: raw })
+          tokens: children, rangeStart: lo, rangeEnd: hi, rangeContext: raw,
+          rangeMarkup: token.type === 'heading'
+            ? { opening: '#'.repeat(token.depth) + ' ', closing: '\n' }
+            : { opening: raw.slice(0, offset),
+              closing: hi === next ? raw.slice(offset + content.length) : '' } })
       } else {
         return null
       }
@@ -125,6 +131,32 @@ export function splitSteerMarkdown(text, cut) {
 /** Tokens are derived from the full replay, never a standalone suffix parse. */
 export function markdownRangeTokens(range) {
   return range?.tokens ?? []
+}
+
+/** Whole-fragment copy keeps source atoms (especially private image hrefs),
+ * while balancing only the formatting that the range clipped. DOM media URLs
+ * may be authorized URLs; they must never become clipboard source. */
+export function markdownRangeSource(range) {
+  function source(token) {
+    // Literal text can gain Markdown meaning at a new fragment boundary (for
+    // example "* tail" becomes a list). Escape text, not complete source atoms.
+    if (token.type === 'text' && !token.tokens) return token.raw
+      .replace(/\\/g, '\\\\').replace(/([`*_[\]~<>#+\-!|])/g, '\\$1')
+      .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')
+    if (!token.rangeMarkup) return token.raw
+    const content = token.tokens.map(source).join('')
+    const { opening, closing } = token.rangeMarkup
+    if (!containers.has(token.type)) return opening + content + closing
+    // Markdown emphasis cannot open/close beside whitespace. Keep that space
+    // outside the wrapper without changing any selected characters.
+    const [, leading, body, trailing] = /^(\s*)([\s\S]*?)(\s*)$/.exec(content)
+    // Clipping nested *emphasis* may bring its stars together as **bold**.
+    // Alternate the outer emphasis marker when the child touches that edge.
+    const marker = token.type === 'em' && (body.startsWith(opening) || body.endsWith(closing))
+      ? (opening === '*' ? '_' : '*') : null
+    return leading + (body ? (marker || opening) + body + (marker || closing) : '') + trailing
+  }
+  return markdownRangeTokens(range).map(source).join('')
 }
 
 /** Slice using offsets relative to this descriptor's currently displayed raw span. */

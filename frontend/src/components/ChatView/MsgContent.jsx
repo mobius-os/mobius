@@ -34,6 +34,7 @@ import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
+import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
@@ -76,9 +77,7 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
     // and cold-rendered blocks intentionally omit source until the whole block
     // is visible; falling back to msg.content here would copy the hidden tail.
     if (markdownByIndex) return markdownByIndex.get(index) ?? ''
-    // A range's raw text may contain only one side of a Markdown delimiter.
-    // Let the existing fragment serializer copy the rendered formatting.
-    return msg.markdown_range ? '' : msg.content ?? ''
+    return msg.markdown_range ? markdownRangeSource(msg.markdown_range) : msg.content ?? ''
   }
 
   return (
@@ -301,12 +300,13 @@ function MsgContentInner({
     ))
     const assistantMarkdownByIndex = new Map(
       msg.role !== 'assistant' ? [] : finalEntries.flatMap(({ item, idx }) => {
-        if (item.type !== 'text' || !item.content || item.markdown_range) return []
+        if (item.type !== 'text' || !item.content) return []
         const coldFraction = Number(item._coldRenderFraction)
         const fullyRendered = !(
           Number.isFinite(coldFraction) && coldFraction > 0 && coldFraction < 1
         )
-        return fullyRendered ? [[String(idx), item.content]] : []
+        return fullyRendered ? [[String(idx), item.markdown_range
+          ? markdownRangeSource(item.markdown_range) : item.content]] : []
       }),
     )
 
