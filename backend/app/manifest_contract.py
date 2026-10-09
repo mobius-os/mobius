@@ -538,6 +538,14 @@ def validate_manifest_contract(manifest) -> None:
       secret_name = model_provider["secret_name"]
       if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
         _fail("Manifest `model_provider.secret_name` must name one app secret.")
+    # A declared effort must survive every launch path on the protocol's
+    # engine: Responses-only values cannot be sent to Claude or dropped by
+    # its helper/compaction dispatchers.
+    allowed_efforts = (
+      {"low", "medium", "high", "xhigh", "max"}
+      if model_provider.get("protocol") == "anthropic_messages"
+      else {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+    )
     entries = model_provider["models"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
       _fail("Manifest `model_provider.models` must contain 1–32 models.")
@@ -553,7 +561,7 @@ def validate_manifest_contract(manifest) -> None:
         _fail("Manifest model labels must be 1–100 characters.")
       efforts = entry.get("effort_levels")
       if efforts is not None and (not isinstance(efforts, list) or not efforts or len(efforts) > 8
-          or not all(isinstance(value, str) and value in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} for value in efforts)
+          or not all(isinstance(value, str) and value in allowed_efforts for value in efforts)
           or len(set(efforts)) != len(efforts)):
         _fail("Manifest model effort_levels contains unsupported or duplicate values.")
       window = entry.get("context_window")

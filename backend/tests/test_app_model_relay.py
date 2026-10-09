@@ -676,3 +676,123 @@ def test_responses_sdk_child_scrubs_inherited_credentials_but_preserves_control_
   assert captured["AGENT_TOKEN"] == "synthetic-control-token"
   assert captured["API_BASE_URL"] == "http://127.0.0.1:9"
   assert captured["MOBIUS_RUN_TOKEN"] == "synthetic-run"
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "ultra"])
+def test_messages_effort_protocol_rejects_responses_only_values(effort):
+  manifest = _manifest(models=[{
+    "id": "example/flash", "label": "Flash", "effort_levels": [effort],
+  }])
+  with pytest.raises(ManifestContractError, match="effort_levels"):
+    validate_manifest_contract(manifest)
+
+
+@pytest.mark.parametrize("transport", ["default", "responses", "identity_broker"])
+def test_responses_effort_protocol_preserves_its_complete_vocabulary(transport):
+  manifest = _manifest(models=[{
+    "id": "example/flash", "label": "Flash",
+    "effort_levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+  }])
+  declaration = manifest["model_provider"]
+  declaration.pop("protocol")
+  if transport == "responses":
+    declaration["protocol"] = transport
+  elif transport == "identity_broker":
+    declaration.pop("secret_name")
+    declaration.update(transport=transport, base_url="http://127.0.0.1:8765/v1")
+    manifest.update(id="identity", permissions={"identity_manage": True})
+  validate_manifest_contract(manifest)
+
+
+@pytest.mark.parametrize("protocol", ["responses", "anthropic_messages"])
+@pytest.mark.parametrize("efforts", [[], ["high", "high"], "high", [42]])
+def test_effort_protocol_keeps_nonempty_unique_string_list_guard(protocol, efforts):
+  manifest = _manifest(protocol=protocol, models=[{
+    "id": "example/flash", "label": "Flash", "effort_levels": efforts,
+  }])
+  with pytest.raises(ManifestContractError, match="effort_levels"):
+    validate_manifest_contract(manifest)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+async def test_messages_declared_effort_survives_switch_turn_helper_and_compaction(
+  monkeypatch, tmp_path, effort,
+):
+  from contextlib import ExitStack, asynccontextmanager
+  from types import SimpleNamespace
+  import claude_agent_sdk
+  from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+  from app import claude_helper_host, claude_sdk_runner, compaction, helper_hosts, schemas
+  from tests.test_claude_sdk_runner import _ChatBus
+
+  model = "example/flash"
+  provider_id = "app-4242"
+  manifest = _manifest(models=[{"id": model, "label": "Flash", "effort_levels": [effort]}])
+  validate_manifest_contract(manifest)
+  adapter = providers.AppModelProvider(4242, contract_from_manifest(manifest)["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, provider_id, adapter)
+  selected = schemas.ChatProviderSwitch(
+    provider=provider_id, switch_id="synthetic-switch",
+    agent_settings_json={"model": model, "effort": effort},
+  ).agent_settings_json.model_dump(exclude_none=True)
+  commands = []
+
+  class Client:
+    def __init__(self, options):
+      # Build the pinned SDK's real argv, but never connect to a CLI/provider.
+      transport = SubprocessCLITransport(prompt="synthetic", options=options)
+      commands.append(transport._build_command())
+
+    async def connect(self):
+      raise RuntimeError("synthetic stop before provider execution")
+
+    async def disconnect(self):
+      pass
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", Client)
+  monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
+  await claude_sdk_runner.run_claude_sdk_turn(
+    user_message="hi", session_id=None, base_env={}, cwd=str(tmp_path),
+    chat_id="effort-contract", skill_text="system", bc=_ChatBus(),
+    agent_settings=selected, provider_id=provider_id,
+  )
+  with pytest.raises(RuntimeError, match="synthetic stop"):
+    await compaction._run_provider_summarize_turn(
+      "summarize", data_dir=str(tmp_path), provider_id=provider_id,
+      model=selected["model"], effort=selected["effort"],
+    )
+  assert len(commands) == 2
+  for command in commands:
+    assert command[command.index("--effort") + 1] == effort
+
+  hosted_efforts = []
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    host = factory()
+    with ExitStack() as stack:
+      options = host._options_factory(host, None, stack)
+
+    class Host:
+      session_id = "synthetic-host"
+
+      async def run_turn(self, turn, on_started):
+        hosted_efforts.append(options.agents[turn.spec["subagent_type"]].effort)
+        turn.finish("completed")
+
+    yield Host()
+
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr("app.process_groups.terminate_run_processes", lambda *_a, **_kw: None)
+  result = await claude_helper_host.run_claude_host_turn(
+    user_message="inspect", session_id=None, base_env={"TMPDIR": str(tmp_path)},
+    chat_id="effort-contract-helper", skill_text="system", bc=None,
+    agent_settings=selected, skills_enabled=False,
+    run_policy=SimpleNamespace(model=model, effort=effort, scope="write"),
+    connector_plan=None,
+    helper_host_key=helper_hosts.HostKey("parent", provider_id, str(tmp_path), "setup"),
+    data_dir=str(tmp_path),
+  )
+  assert result["error"] is None
+  assert hosted_efforts == [effort]
