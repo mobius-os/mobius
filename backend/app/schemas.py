@@ -171,6 +171,8 @@ class AppOut(BaseModel):
   # opened. The shell renders the same quiet activity dot used for chats.
   has_unseen_activity: bool = False
   unseen_activity_version: int | None = None
+  # Unread count the app itself reports for its sidebar row; 0 shows nothing.
+  badge_count: int = 0
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False

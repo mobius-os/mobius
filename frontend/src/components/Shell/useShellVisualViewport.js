@@ -13,6 +13,7 @@ function clearShellFrame(root) {
   root.style.removeProperty('top')
   root.style.removeProperty('bottom')
   root.style.removeProperty('height')
+  root.style.removeProperty('--chat-foot-bottom-inset')
 }
 
 /**
@@ -39,6 +40,11 @@ export function fitShellToVisualViewport(root, viewport) {
   root.style.setProperty('top', `${visibleTop}px`)
   root.style.setProperty('bottom', 'auto')
   root.style.setProperty('height', `${visibleHeight}px`)
+  // The keyboard covers the Home indicator, so the chat composer rests directly
+  // on it (UIKit's keyboardLayoutGuide behaves the same). Only this fitted,
+  // keyboard-open frame zeroes the inset; otherwise the chat falls back to the
+  // device's bottom safe area.
+  root.style.setProperty('--chat-foot-bottom-inset', '0px')
   return true
 }
 

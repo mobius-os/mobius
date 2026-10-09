@@ -3,8 +3,9 @@
 // A sandboxed mini-app iframe cannot read the device's notch / home-indicator
 // insets: env(safe-area-inset-*) resolves to 0 inside the iframe because only
 // the TOP-LEVEL document participates in viewport-fit=cover inset resolution.
-// So an immersive (full-bleed, under-the-notch) app has no way to pad its own
-// UI away from the notch — its content slides under the cutout.
+// So an immersive app has no way to pad its own UI away from a cutout on
+// hosts that paint beneath one. The opaque iOS shell status bar instead stays
+// outside the app viewport.
 //
 // The shell DOES see the real insets. This module is the pure core of the
 // passthrough: it reads the four env(safe-area-inset-*) values off a probe

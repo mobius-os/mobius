@@ -171,3 +171,26 @@ def live_app_or_404(
   if app is None:
     raise HTTPException(status_code=404, detail="App not found.")
   return app
+
+
+def recheck_app_identity(db: Session, app_id: int, expected_nonce) -> None:
+  """Re-verify, UNDER the per-app lock, that app_id is still the SAME app it
+  was at authorization time.
+
+  A plain existence check isn't enough: SQLite reuses a freed integer id, so
+  between a slow request's authorization and its locked mutation, the app can
+  be uninstalled (or its data wiped) and a DIFFERENT app can reuse the id — the
+  old request would then write into the replacement's state. The
+  per-app `token_nonce` rotates with the row, so a mismatch (or a missing row)
+  means the original app is gone and we must not touch its state.
+  `populate_existing()` forces a fresh DB read past the session's identity map
+  so a concurrent uninstall's committed delete/recreate is seen.
+  """
+  row = (
+    db.query(models.App)
+    .populate_existing()
+    .filter(models.App.id == app_id)
+    .first()
+  )
+  if row is None or row.token_nonce != expected_nonce:
+    raise HTTPException(status_code=404, detail="App not found.")

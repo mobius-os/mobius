@@ -38,6 +38,9 @@ test('a keyboard overlay fits the shell to the visible viewport', () => {
   assert.equal(root.property('top'), '44px')
   assert.equal(root.property('bottom'), 'auto')
   assert.equal(root.property('height'), '492px')
+
+  assert.equal(root.property('--chat-foot-bottom-inset'), '0px',
+    'the keyboard covers the Home indicator, so the composer drops its inset')
 })
 
 test('desktop author zoom is not mistaken for a software keyboard', () => {
@@ -90,4 +93,14 @@ test('ordinary layout resizing and small browser chrome keep the CSS frame', () 
   const chromeRoot = fakeShell(860)
   assert.equal(fitShellToVisualViewport(chromeRoot, { height: 781 }), false)
   assert.equal(chromeRoot.property('height'), undefined)
+})
+
+test('closing the keyboard or panning above it never leaves a stale composer inset', () => {
+  const root = fakeShell(860)
+  // iOS can pan the visual viewport by the whole keyboard height.
+  fitShellToVisualViewport(root, { height: 492, offsetTop: 368 })
+  assert.equal(root.property('--chat-foot-bottom-inset'), '0px')
+  assert.equal(fitShellToVisualViewport(root, { height: 860 }), false)
+  assert.equal(root.property('--chat-foot-bottom-inset'), undefined,
+    'a closed keyboard falls back to the CSS safe-area value')
 })

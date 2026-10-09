@@ -6,7 +6,8 @@
    ║   pass quietly violates one, regression-hunt these first.  ║
    ║                                                            ║
    ║   1. `.chat__foot` is `position: absolute`, offset above   ║
-   ║      env(safe-area-inset-bottom),                           ║
+   ║      `--chat-foot-safe-bottom` (bottom safe area; 0 above  ║
+   ║      the keyboard; a quarter of it on installed iOS),      ║
    ║      with `pointer-events: none` — chat content scrolls    ║
    ║      *behind* the composer. Visible footer controls must   ║
    ║      opt back in through the allow-list beside the foot;   ║
@@ -14,8 +15,8 @@
    ║                                                            ║
    ║   2. `--composer-h` is published by the scroll controller's║
    ║      ResizeObserver on `.chat__foot`. `.chat__list`        ║
-   ║      reserves --composer-h + the same full safe-area       ║
-   ║      expression + 16px so the last message clears the      ║
+   ║      reserves --composer-h + the same safe-area value      ║
+   ║      + 16px so the last message clears the                  ║
    ║      pill and gesture area as it grows                     ║
    ║      (chips, queue tray, multi-line input).                ║
    ║                                                            ║
@@ -103,6 +104,14 @@
      keeps a pending attachment and a sent one the same square. */
   --attach-card: 96px;
   --chat-status-font-size: 12px;
+  /* The composer's gap above the bottom edge, shared by the foot, the
+     transcript clearance and the fade. The shell sets --chat-foot-bottom-inset
+     to 0 while fitted above a keyboard (chat-only for now); otherwise this is
+     the platform's share of the device bottom safe area. */
+  --chat-foot-safe-bottom: var(
+    --chat-foot-bottom-inset,
+    calc(env(safe-area-inset-bottom, 0px) * var(--chat-foot-inset-reserve, 1))
+  );
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -185,12 +194,12 @@
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
      var (written by the scroll controller's ResizeObserver), the
-     full device safe-area gap below the foot (the SAME env()
-     expression as `.chat__foot`'s `bottom` — keep them in sync),
+     safe-area gap below the foot (the SAME `--chat-foot-safe-bottom`
+     as `.chat__foot`'s `bottom`),
      plus a small breathing-room margin so chips/queue tray growing
      the foot keeps the last message clear of the pill. Fallback
      80px is for the first paint before the RO fires. */
-  padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
+  padding: 8px 6px calc(var(--composer-h, 80px) + var(--chat-foot-safe-bottom) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -2298,12 +2307,14 @@
   --chat-foot-card-gap: 6px;
   --chat-foot-pad-block: 8px;
   position: absolute;
-  /* Interactive controls must stay wholly inside the device safe rectangle.
-     Android Chrome paints the shell's gesture backdrop in the unsafe band;
-     dipping the composer into that band makes the backdrop clip the pill.
-     Keep the same full inset in `.chat__list`'s bottom padding so composer
+  /* Android Chrome paints the shell's gesture backdrop in the unsafe band;
+     dipping the composer into that band makes the backdrop clip the pill, so
+     the full inset applies there. Installed iOS keeps only a quarter of its
+     Home-indicator area clear (see the rule below `.chat__foot::before`).
+     The keyboard covers the indicator, so the shell zeroes the gap while
+     fitted above it. `.chat__list` reserves the same value, so composer
      placement and transcript clearance remain one geometry contract. */
-  bottom: env(safe-area-inset-bottom, 0px);
+  bottom: var(--chat-foot-safe-bottom);
   left: 0;
   right: 0;
   padding: var(--chat-foot-pad-block) 12px;
@@ -2336,7 +2347,7 @@
   left: 0;
   right: 0;
   top: -100px;
-  bottom: calc(0px - env(safe-area-inset-bottom, 0px));
+  bottom: calc(0px - var(--chat-foot-safe-bottom));
   background: linear-gradient(
     to bottom,
     transparent 0%,
@@ -2347,6 +2358,24 @@
   );
   pointer-events: none;
   z-index: -1;
+}
+
+/* Installed iOS: a deliberate product decision, not a tuning leftover. The
+   closed-keyboard composer matches the Android Möbius position (pill ~17 pt
+   above the edge on a portrait iPhone) rather than UIKit's native rest on the
+   full 34 pt safe area. It was chosen on a physical iPhone next to Android:
+   the full inset and 0.5 both read as too high. It was kept after review
+   (PR #1632), which asked for the native position. The Home indicator
+   occupies only the lowest few points, so a quarter of the inset keeps the
+   pill clear of it. Do not change this value or restore the full inset
+   without the product owner's sign-off. Android and browser tabs keep the
+   full inset; while the keyboard is up, the shell zeroes the gap entirely. */
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
+    .chat {
+      --chat-foot-inset-reserve: 0.25;
+    }
+  }
 }
 
 /* In the embedded composer the app sheet owns the safe area, so there is no

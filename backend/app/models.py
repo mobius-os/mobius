@@ -1691,6 +1691,23 @@ class AppActivityState(Base):
   unseen = Column(Boolean, nullable=False, default=True, server_default=true())
 
 
+class AppBadgeState(Base):
+  """The unread count an installed app reports for its sidebar row.
+
+  The app owns this number (like the web Badging API): it knows what is
+  actually unread, so the shell never derives it from notifications. Kept
+  outside ``apps`` so a count change never advances ``App.updated_at``, the
+  executable-bundle cache key. Contract and serialization: ``app_badge``.
+  """
+
+  __tablename__ = "app_badge_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  count = Column(Integer, nullable=False)
+  # The app's state revision for this count; NULL after an unrevisioned report.
+  revision = Column(Integer, nullable=True)
+
+
 class AppRecencyState(Base):
   """Durable last-opened timestamp for one installed app.
 
