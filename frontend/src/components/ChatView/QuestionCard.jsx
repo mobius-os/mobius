@@ -184,13 +184,10 @@ export default function QuestionCard({
   const preparedSubmissionRef = useRef(null)
   const fileInputRef = useRef(null)
   const initialFilesRef = useRef(null)
-  // Each answer keeps its own files, tagged with its question. A draft saved
-  // before that had one card-level set; it belongs to the last answer, where
-  // its paperclip used to sit.
+  // Tagged files belong to their answer. Older untagged draft files were
+  // card-level; the old paperclip's position did not establish ownership.
   if (initialFilesRef.current === null) {
-    const lastQuestion = questions[questions.length - 1]?.question
     initialFilesRef.current = readQuestionDraft(draftKey).files
-      .map(file => ({ ...file, group: file.group ?? lastQuestion }))
   }
   const attachTargetRef = useRef(null)
   const { files, addFiles, removeFile, clearFiles, discardFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
@@ -329,7 +326,7 @@ export default function QuestionCard({
       return `- ${q.question}: ${val.replace(/\n/g, '\n  ')}${filesLine}`
     })
     const answerAttachments = readyFiles.map(({ name, size, mime_type, group }) => ({
-      name, size, mime_type, question: group,
+      name, size, mime_type, ...(group != null ? { question: group } : {}),
     }))
     setSubmitError('')
     setSubmitting(true)
@@ -376,18 +373,19 @@ export default function QuestionCard({
   if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'
     ? 'Confirming answer…' : 'Queued on this device'
 
-  // Files sit inside their own answer box, as the message composer shows its
-  // files. Answers saved before files were per answer carry no question; they
-  // show in the last box, beside that card's single paperclip.
+  // Files sit inside their answer box. Older untagged files stay in a shared
+  // lane rather than being presented as a particular answer's evidence.
   const sentAttachments = attachments || localAnswer?.body?.attachments || submitted?.attachments || []
-  const lastQuestion = questions[questions.length - 1]?.question
   const answerFiles = question => platformAction ? null : (
     <div className="qcard__answer-files" role="group" aria-label="Files for this answer">
       {selectionLocked
-        ? <Attachments attachments={sentAttachments.filter(file => (file.question ?? lastQuestion) === question)} chatId={chatId} />
+        ? <Attachments attachments={sentAttachments.filter(file => file.question === question)} chatId={chatId} />
         : <FileChips files={files.filter(file => file.group === question)} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
     </div>
   )
+  const sharedFiles = selectionLocked
+    ? sentAttachments.filter(file => file.question == null)
+    : files.filter(file => file.group == null)
 
   return (
     <div
@@ -585,6 +583,14 @@ export default function QuestionCard({
         )
         })}
       </div>
+      {!platformAction && sharedFiles.length > 0 && (
+        <div className="qcard__shared-files" role="group" aria-label="Shared card files">
+          <div className="qcard__shared-files-label">Shared files · not assigned to a question</div>
+          {selectionLocked
+            ? <Attachments attachments={sharedFiles} chatId={chatId} />
+            : <FileChips files={sharedFiles} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
+        </div>
+      )}
       {!platformAction && (answered || !disabled) && (
         <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
           disabled={attachLocked}

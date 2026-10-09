@@ -321,7 +321,7 @@ def _canonical_question_attachments(
   card_questions = (
     {q.get("question") for q in card.get("questions") or []} if card else None
   )
-  canonical: dict[str, dict] = {}
+  canonical: dict[tuple[str, str | None], dict] = {}
   for attachment in attachments:
     name = attachment.get("name") if isinstance(attachment, dict) else None
     question = attachment.get("question") if isinstance(attachment, dict) else None
@@ -339,8 +339,10 @@ def _canonical_question_attachments(
         status_code=409,
         detail=f"{name if isinstance(name, str) and name else 'An attached file'} is no longer available. Remove it and attach it again.",
       )
-    # Same shape as composer attachments: the file is addressed by name.
-    canonical.setdefault(name, {
+    # The upload is addressed by name, but each question association is a
+    # distinct answer reference. Repeated references to one association can
+    # still be collapsed without dropping the file from another answer.
+    canonical.setdefault((name, question), {
       "name": name,
       "size": entry.get("size", 0),
       "mime_type": entry.get("mime_type", "application/octet-stream"),

@@ -274,6 +274,18 @@
 .qcard__answer-files .chat__attachments {
   max-width: 100%;
 }
+.qcard__shared-files {
+  margin: 0 16px 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, rgba(128,128,128,.1));
+}
+.qcard__shared-files-label {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .qcard__input {
   display: block;
   width: 100%;

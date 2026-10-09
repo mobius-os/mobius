@@ -50,6 +50,30 @@ def test_question_attachments_keep_the_answer_they_belong_to(tmp_path, monkeypat
   assert exc.value.status_code == 422
 
 
+def test_same_upload_keeps_distinct_question_associations(tmp_path, monkeypatch):
+  monkeypatch.setattr(chats_stream, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
+  upload = tmp_path / "same.txt"
+  upload.write_text("x")
+  chat = SimpleNamespace(uploads=[{"name": "same.txt", "path": str(upload),
+                                   "size": 1, "mime_type": "text/plain"}])
+  card = {"questions": [{"question": "First?"}, {"question": "Second?"}]}
+  resolved = chats_stream._canonical_question_attachments(chat, [
+    {"name": "same.txt", "question": "First?"},
+    {"name": "same.txt", "question": "Second?"},
+    {"name": "same.txt", "question": "First?"},
+    {"name": "same.txt"},
+  ], card)
+  assert [(file["name"], file.get("question")) for file in resolved] == [
+    ("same.txt", "First?"), ("same.txt", "Second?"), ("same.txt", None),
+  ]
+  with pytest.raises(HTTPException) as exc:
+    chats_stream._canonical_question_attachments(chat, [
+      {"name": "same.txt", "question": "First?"},
+      {"name": "same.txt", "question": "Not asked"},
+    ], card)
+  assert exc.value.status_code == 422
+
+
 def test_question_attachments_are_bounded(tmp_path, monkeypatch):
   monkeypatch.setattr(chats_stream, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
   too_many = [{"name": f"f{i}.txt"} for i in range(chats_stream.MAX_QUESTION_ATTACHMENTS + 1)]
@@ -104,8 +128,9 @@ def test_answered_card_keeps_attachment_for_reopen(db):
 
 @pytest.mark.parametrize("mode", ["idle", "running", "native"])
 @pytest.mark.parametrize("valid", [False, True])
+@pytest.mark.parametrize("association", ["shared", "both_answers"])
 def test_saved_card_route_canonical_attachments(
-  client, auth, chat, monkeypatch, tmp_path, mode, valid,
+  client, auth, chat, monkeypatch, tmp_path, mode, valid, association,
 ):
   """Saved-card producer → route → writer → next turn and cross-tab event."""
   import asyncio
@@ -133,8 +158,12 @@ def test_saved_card_route_canonical_attachments(
   )).result(timeout=5)
   upload = tmp_path / "photo.png"
   upload.write_bytes(b"image")
-  canonical = {"name": "photo.png", "size": 5, "mime_type": "image/png"}
-  stored = {**canonical, "path": str(upload)}
+  upload_info = {"name": "photo.png", "size": 5, "mime_type": "image/png"}
+  canonical = ([upload_info] if association == "shared" else [
+    {**upload_info, "question": "Pick one"},
+    {**upload_info, "question": "Add details"},
+  ])
+  stored = {**upload_info, "path": str(upload)}
   with SessionLocal() as db:
     row = db.get(models.Chat, chat.id)
     row.uploads = [{**stored, "claimed": False}] if valid else []
@@ -158,7 +187,8 @@ def test_saved_card_route_canonical_attachments(
   res = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
     "content": "- Pick one: a", "hidden": True,
     "answers": {"Pick one": "a", "Add details": "Attached 1 file"}, "question_id": "saved-files",
-    "attachments": [{"name": "photo.png", "size": 999, "mime_type": "text/html", "path": "/forged"}],
+    "attachments": [{**item, "size": 999, "mime_type": "text/html", "path": "/forged"}
+                    for item in canonical],
   })
   if mode == "native":
     resolved = future.done()
@@ -179,14 +209,16 @@ def test_saved_card_route_canonical_attachments(
       assert not scheduled
       return
     assert card["answers"] == {"Pick one": "a", "Add details": "Attached 1 file"}
-    assert card["attachments"] == [canonical]
+    assert card["attachments"] == canonical
     assert row.uploads == [{**stored, "claimed": True}]
     message = row.pending_messages[0] if running else scheduled[0]["next_user"]
-    assert message["attachments"] == [canonical]
+    # Promotion combines provider-facing pending rows by upload identity;
+    # the card's durable answer receipt above retains each association.
+    assert message["attachments"] == (canonical if running else canonical[:1])
     assert str(upload) in message["content"]
     assert "/forged" not in message["content"]
   applied = next(event for event in events if event["type"] == "answers_applied")
-  assert applied["attachments"] == [canonical]
+  assert applied["attachments"] == canonical
   assert applied["answers"] == {"Pick one": "a", "Add details": "Attached 1 file"}
 
 
