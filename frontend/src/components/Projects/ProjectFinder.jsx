@@ -53,6 +53,7 @@ import {
 } from '../../lib/projectFinderNav.js'
 import {
   PROJECT_CHANGES_ACTIVE_MS,
+  createProjectChangePollTimer,
   nextProjectChangesDelay,
 } from '../../lib/projectChangeCadence.js'
 import ProjectPdfPreview from './ProjectPdfPreview.jsx'
@@ -493,7 +494,6 @@ export default function ProjectFinder({
     let active = true
     let cursor = null
     let controller = null
-    let timer = null
     let delay = PROJECT_CHANGES_ACTIVE_MS
     const handleChanges = async (changes, truncated = false) => {
       if (!active || (!truncated && (!changes || changes.length === 0))) return false
@@ -518,14 +518,14 @@ export default function ProjectFinder({
       }
       return true
     }
-    const schedule = (wait = delay) => {
-      if (!active) return
-      window.clearTimeout(timer)
-      timer = window.setTimeout(() => { void poll() }, wait)
-    }
+    const pollTimer = createProjectChangePollTimer({
+      now: () => performance.now(),
+      setTimeout: (callback, wait) => window.setTimeout(callback, wait),
+      clearTimeout: id => window.clearTimeout(id),
+    }, () => { void poll() })
+    const schedule = (wait = delay) => { if (active) pollTimer.schedule(wait) }
     const poll = async () => {
-      if (!active) return
-      if (document.hidden) return
+      if (!active || document.hidden || controller) return
       controller = new AbortController()
       try {
         const establishingBaseline = cursor === null
@@ -560,7 +560,7 @@ export default function ProjectFinder({
     }
     const onVisibility = () => {
       if (document.hidden) {
-        window.clearTimeout(timer)
+        pollTimer.cancel()
         controller?.abort()
       } else {
         schedule(0)
@@ -572,7 +572,7 @@ export default function ProjectFinder({
     return () => {
       active = false
       controller?.abort()
-      window.clearTimeout(timer)
+      pollTimer.cancel()
       window.removeEventListener('mobius:project-change', onLiveChange)
       document.removeEventListener('visibilitychange', onVisibility)
     }

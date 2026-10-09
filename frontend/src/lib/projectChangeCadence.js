@@ -16,3 +16,28 @@ export function nextProjectChangesDelay(previous, outcome) {
   }
   return Math.min(Math.round(previous * 1.5), PROJECT_CHANGES_IDLE_MAX_MS)
 }
+
+// A push can wake an idle poll sooner, but must not move an already pending
+// poll later. Otherwise a steady stream of pushes can starve cursor-only facts.
+export function createProjectChangePollTimer(clock, poll) {
+  let timer = null
+  let deadline = null
+  return {
+    schedule(wait) {
+      const nextDeadline = clock.now() + wait
+      if (timer !== null && deadline <= nextDeadline) return
+      if (timer !== null) clock.clearTimeout(timer)
+      deadline = nextDeadline
+      timer = clock.setTimeout(() => {
+        timer = null
+        deadline = null
+        poll()
+      }, wait)
+    },
+    cancel() {
+      if (timer !== null) clock.clearTimeout(timer)
+      timer = null
+      deadline = null
+    },
+  }
+}
