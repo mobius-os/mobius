@@ -97,7 +97,7 @@ class RailwayCreate(BaseModel):
   region: Literal[
     "us-west2", "us-east4-eqdc4a", "europe-west4-drams3a", "asia-southeast1-eqsg3a"
   ] | None = None
-  workspace_id: str | None = None
+  workspace_id: str
 
 
 class RailwayCompute(BaseModel):
@@ -120,10 +120,6 @@ class RailwayUpdates(BaseModel):
 class RailwayConfirmAbsent(BaseModel):
   model_config = {"extra": "forbid"}
   confirmed_absent: bool
-
-
-class RailwaySelectWorkspace(BaseModel):
-  workspace_id: str
 
 
 class RailwayConnectStart(BaseModel):
@@ -991,29 +987,6 @@ async def _railway_mutation(
   return {"instance": instance}
 
 
-def _railway_workspaces_contract(payload: object) -> dict:
-  if not isinstance(payload, dict) or set(payload) != {"workspaces", "current"}:
-    raise HTTPException(502, "The Möbius account service returned invalid workspaces.")
-  workspaces = payload.get("workspaces")
-  current = payload.get("current")
-  if (
-    not isinstance(workspaces, list)
-    or len(workspaces) > 100
-    or any(
-      not isinstance(item, dict)
-      or set(item) != {"id", "name"}
-      or not isinstance(item.get("id"), str)
-      or not isinstance(item.get("name"), str)
-      or len(item["id"]) > 128
-      or len(item["name"]) > 128
-      for item in workspaces
-    )
-    or (current is not None and (not isinstance(current, str) or len(current) > 128))
-  ):
-    raise HTTPException(502, "The Möbius account service returned invalid workspaces.")
-  return payload
-
-
 _RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "enterprise", "unknown"}
 _RAILWAY_PLAN_LIMIT_LISTS = ("cpu_choices", "memory_options_mb", "volume_options_mb")
 _RAILWAY_PLAN_LIMIT_INTS = (
@@ -1072,15 +1045,10 @@ def _railway_workspace_plan_projection(item: object) -> dict | None:
 
 def _railway_workspace_plans_contract(payload: object) -> dict:
   invalid = HTTPException(502, "The Möbius account service returned invalid workspace plans.")
-  if not isinstance(payload, dict) or not {"workspaces", "current"} <= set(payload):
+  if not isinstance(payload, dict) or "workspaces" not in payload:
     raise invalid
   raw_workspaces = payload["workspaces"]
-  current = payload["current"]
-  if (
-    not isinstance(raw_workspaces, list)
-    or len(raw_workspaces) > 100
-    or (current is not None and (not isinstance(current, str) or not 0 < len(current) <= 128))
-  ):
+  if not isinstance(raw_workspaces, list) or len(raw_workspaces) > 100:
     raise invalid
   workspaces = [_railway_workspace_plan_projection(item) for item in raw_workspaces]
   if (
@@ -1088,7 +1056,7 @@ def _railway_workspace_plans_contract(payload: object) -> dict:
     or len({item["id"] for item in workspaces}) != len(workspaces)
   ):
     raise invalid
-  return {"workspaces": workspaces, "current": current}
+  return {"workspaces": workspaces}
 
 
 def _railway_metrics_contract(payload: object) -> dict:
@@ -1238,13 +1206,10 @@ async def create_railway_deployment(
   # hosts still receive the original request when the app omits this field.
   if body.region is not None:
     settings["region"] = body.region
-  # A create names its Railway workspace. Omitting it keeps the original
-  # request: the account service then uses the workspace last chosen.
-  if body.workspace_id is not None:
-    workspace_id = body.workspace_id.strip()
-    if not workspace_id or len(workspace_id) > 128:
-      raise HTTPException(422, "Choose a Railway workspace.")
-    settings["workspace_id"] = workspace_id
+  workspace_id = body.workspace_id.strip()
+  if not workspace_id or len(workspace_id) > 128:
+    raise HTTPException(422, "Choose a Railway workspace.")
+  settings["workspace_id"] = workspace_id
   return await _railway_mutation(
     db,
     owner.id,
@@ -1268,16 +1233,6 @@ async def start_railway_connection(
   )
 
 
-@router.get("/railway/workspaces")
-async def read_railway_workspaces(
-  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
-):
-  return _railway_workspaces_contract(
-    await _railway_proxy(db, owner.id, "GET", "/workspaces")
-  )
-
-
 @router.get("/railway/workspace-plans")
 async def read_railway_workspace_plans(
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -1286,24 +1241,6 @@ async def read_railway_workspace_plans(
   return _railway_workspace_plans_contract(
     await _railway_proxy(db, owner.id, "GET", "/workspace-plans")
   )
-
-
-@router.post(
-  "/railway/workspace",
-  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
-)
-async def select_railway_workspace(
-  body: RailwaySelectWorkspace,
-  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
-):
-  workspace_id = body.workspace_id.strip()
-  if not workspace_id or len(workspace_id) > 128:
-    raise HTTPException(422, "Choose a Railway workspace.")
-  await _railway_proxy(
-    db, owner.id, "POST", "/workspace", json={"workspace_id": workspace_id}
-  )
-  return {"ok": True}
 
 
 @router.post(

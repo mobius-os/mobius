@@ -716,6 +716,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "volume_mb": None,
       "update_policy": "manual",
       "region": "europe-west4-drams3a",
+      "workspace_id": "ws_personal",
     },
     headers=granted,
   )
@@ -739,17 +740,17 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
   )
   invalid_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "Wrong region", "region": "unknown"},
+    json={"name": "Wrong region", "region": "unknown", "workspace_id": "ws_personal"},
     headers=granted,
   )
   without_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "Legacy request"},
+    json={"name": "Legacy request", "workspace_id": "ws_personal"},
     headers=granted,
   )
   null_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "No preference", "region": None},
+    json={"name": "No preference", "region": None, "workspace_id": "ws_personal"},
     headers=granted,
   )
 
@@ -775,6 +776,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
         "volume_mb": None,
         "update_policy": "manual",
         "region": "europe-west4-drams3a",
+        "workspace_id": "ws_personal",
       },
     ),
     (
@@ -801,13 +803,13 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "POST",
       "https://www.mobius.you/api/account/v1/railway/instances",
       {"name": "Legacy request", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None},
+       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
     (
       "POST",
       "https://www.mobius.you/api/account/v1/railway/instances",
       {"name": "No preference", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None},
+       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
   ]
 
@@ -860,42 +862,43 @@ class _Upstream:
     return self._payload
 
 
-def test_railway_create_names_its_workspace_only_when_the_app_sends_one(
-  client, auth, monkeypatch,
+def test_railway_create_forwards_its_stripped_workspace(client, auth, monkeypatch):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
+  )
+  response = client.post(
+    "/api/identity/railway/deployments",
+    json={"name": "Team box", "workspace_id": "  ws_team  "},
+    headers=granted,
+  )
+
+  assert response.status_code == 202
+  assert [call[2] for call in calls] == [
+    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
+     "volume_mb": None, "workspace_id": "ws_team"},
+  ]
+
+
+@pytest.mark.parametrize("body", [
+  {"name": "Missing"},
+  {"name": "Null", "workspace_id": None},
+  {"name": "Blank", "workspace_id": "   "},
+  {"name": "Long", "workspace_id": "w" * 129},
+])
+def test_railway_create_without_a_valid_workspace_is_refused_before_the_bridge(
+  client, auth, monkeypatch, body,
 ):
   granted, calls = _linked_railway_bridge(
     client, auth, monkeypatch,
     lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
   )
-  named = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Team box", "workspace_id": "  ws_team  "},
-    headers=granted,
-  )
-  unnamed = client.post(
-    "/api/identity/railway/deployments", json={"name": "Old app"}, headers=granted,
-  )
-  blank = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Blank", "workspace_id": "   "},
-    headers=granted,
-  )
-  oversize = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Long", "workspace_id": "w" * 129},
-    headers=granted,
+  response = client.post(
+    "/api/identity/railway/deployments", json=body, headers=granted,
   )
 
-  assert (named.status_code, unnamed.status_code) == (202, 202)
-  assert (blank.status_code, oversize.status_code) == (422, 422)
-  # Only the accepted requests reached the account service; an older app's
-  # request is forwarded without the extension.
-  assert [call[2] for call in calls] == [
-    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
-     "volume_mb": None, "workspace_id": "ws_team"},
-    {"name": "Old app", "managed_auth": True, "cpu": None, "memory_mb": None,
-     "volume_mb": None},
-  ]
+  assert response.status_code == 422
+  assert calls == []
 
 
 def _workspace_plans(**changes):
@@ -910,7 +913,7 @@ def _workspace_plans(**changes):
     "deploy_blocked": "", "plan_limits": limits,
   }
   workspace.update(changes)
-  return {"workspaces": [workspace], "current": "ws_personal"}
+  return {"workspaces": [workspace]}
 
 
 def test_railway_workspace_plans_are_proxied_after_the_contract_check(
@@ -947,11 +950,9 @@ def _bad_limits(**changes):
 
 
 @pytest.mark.parametrize("payload", [
-  {"workspaces": _workspace_plans()["workspaces"]},
+  {"current": "ws_personal"},
   {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 2},
-  {**_workspace_plans(), "current": ""},
   {**_workspace_plans(), "workspaces": "nope"},
-  {**_workspace_plans(), "current": 7},
   {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 101},
   _workspace_plans(id=""),
   _workspace_plans(id="w" * 129),
@@ -987,6 +988,15 @@ def test_railway_workspace_plans_contract_drops_fields_a_newer_account_service_a
   assert _railway_workspace_plans_contract(payload) == _workspace_plans()
 
 
+@pytest.mark.parametrize("current", ["ws_personal", None, "", 7])
+def test_railway_workspace_plans_contract_ignores_a_legacy_current_key(current):
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  payload = {**_workspace_plans(), "current": current}
+
+  assert _railway_workspace_plans_contract(payload) == _workspace_plans()
+
+
 def test_railway_workspace_plans_contract_counts_characters_not_bytes():
   from app.routes.identity import _railway_workspace_plans_contract
 
@@ -1000,7 +1010,7 @@ def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspac
 
   unknown = _workspace_plans(plan="unknown", **_bad_limits(included_usd=None))
   enterprise = _workspace_plans(plan="enterprise", **_bad_limits(included_usd=None))
-  empty = {"workspaces": [], "current": None}
+  empty = {"workspaces": []}
 
   assert _railway_workspace_plans_contract(unknown) == unknown
   assert _railway_workspace_plans_contract(enterprise) == enterprise
