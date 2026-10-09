@@ -4117,7 +4117,21 @@ class ChatWriterActor:
       return StartContinuationBlocked(blocker)
     goal_id = delegation_goal_id(db, trigger)
     goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+    if goal_id is not None and goal is None:
+      db.rollback()
+      return StartContinuationBlocked("goal_missing")
     goal_objective = goal.objective if goal is not None else None
+    if goal is not None and goal.chat_id != cmd.chat_id:
+      from app.goal_plans import goal_assignment
+      assignment = goal_assignment(db, cmd.chat_id)
+      if assignment is None or assignment.goal.id != goal.id:
+        db.rollback()
+        return StartContinuationBlocked("foreign_goal_not_assigned")
+      # A nested helper works in its coordinator's Goal, but this physical
+      # run belongs to the helper chat. Keep the shared Goal in the activity
+      # source and resolve its scoped brief through the assignment chain.
+      goal_id = None
+      goal_objective = None
 
     existing = transcript_rows.read_all(db, chat)
     try:

@@ -44,8 +44,6 @@ log = logging.getLogger(__name__)
 
 SESSION_PREFIX = "claude-host:"
 DISPATCH_MODEL = "haiku"
-DISPATCH_START_TIMEOUT = 90.0
-DISPATCH_ATTEMPTS = 3
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 BUILTIN_HELPER_TOOLS = ("Agent", "Task", "Workflow")
 DISPATCHER_PROMPT = (
@@ -53,12 +51,16 @@ DISPATCHER_PROMPT = (
   "never write prose. Möbius sends you command lines:\n"
   '- "SPAWN <id>": call Agent with description "<id>", prompt "<id>", '
   'subagent_type "general-purpose", run_in_background true.\n'
-  '- "MESSAGE <id>": call SendMessage with to "<id>", summary "<id>", '
+  '- "MESSAGE <id>": call the built-in SendMessage tool with to "<id>" and '
   'message "<id>".\n'
+  "Use only those two built-in tools, never an MCP tool such as "
+  "send_agent_message. SendMessage is deferred: until it is loaded in this "
+  'session, first call ToolSearch with query "select:SendMessage".\n'
   "Use the id exactly as given in every field; Möbius fills in the real "
   "values. Whenever your input contains command lines, make every matching "
-  "call in ONE assistant message, even when the same input also holds task "
-  "notifications or other text, then reply with exactly: OK\n"
+  "call in ONE assistant message (after loading SendMessage, if needed), "
+  "even when the same input also holds task notifications or other text, "
+  "then reply with exactly: OK\n"
   "Input without command lines, such as a task notification alone, needs no "
   "call: reply with exactly: OK"
 )
@@ -118,6 +120,130 @@ def parse_session(
   return parts[0] or None, parts[1] or None, parts[2] or None
 
 
+HANDBACK_TOOL = "SubagentHandback"
+
+
+@dataclasses.dataclass
+class HelperReport:
+  """Choose one helper turn's report from Claude's child stream and hooks.
+
+  Report content is never proof of success: task status stays with the
+  task-end notification. New helper definitions exclude native handback;
+  resumed agents keep their original launch definitions, so selection must
+  still preserve reports from existing provider sessions.
+
+  Contract (https://code.claude.com/docs/en/hooks#subagentstop): without a
+  handback, SubagentStop's ``last_assistant_message`` is the final response;
+  after a ``SubagentHandback`` it is only closing text and the report is the
+  call's ``message``. A handback is classifier-reviewed and can be rejected, so
+  it wins only until the helper visibly continues: its own tool result is an
+  error, or it makes another tool call. A rejected handback with no later
+  report still delivers its message.
+
+  Ordering (claude_agent_sdk Query: one stdout reader buffers messages and
+  spawns hook handlers; the CLI blocks on each PreToolUse answer): a hook may
+  run before the stream drains messages emitted earlier, never before one
+  emitted after it. The forwarded stream is therefore ordered truth, and
+  PreToolUse order is exact among tool calls. A stream tool call whose hook ran
+  before a handback's hook is earlier work; one whose hook has not run yet can
+  only come after it. A handback seen only by its hook is placed at the first
+  later work, or treated as the latest event when none follows.
+
+  Why not hooks alone: hooks order tool calls, not text. Text is only in the
+  stream, and both "a handback without a message keeps the text written before
+  it" and "a rejected handback with no later answer still delivers its
+  message" (over SubagentStop text, which can be empty or pre-handback
+  narration, and which can arrive after the task end) need text ordered against
+  the handback. Snapshotting stream text when the hook runs is racy, because the
+  hook can run before earlier text drains.
+  """
+  # Latest report-bearing content, in stream order.
+  candidate: str | None = None
+  candidate_is_handback: bool = False
+  # A live handback owns the report; text-only content after it is closing text.
+  closing: bool = False
+  handback_id: str | None = None
+  stream_handback_ids: set = dataclasses.field(default_factory=set)
+  # PreToolUse order of this turn's tool calls, by tool-use id.
+  hook_order: dict = dataclasses.field(default_factory=dict)
+  # Latest handback seen by PreToolUse: (tool_use_id, message, hook position).
+  hook_handback: tuple | None = None
+  hook_handback_continued: bool = False
+  # SubagentStop's last_assistant_message.
+  stop_message: str | None = None
+
+  def observe_hook_tool(self, tool_use_id, name: str, tool_input) -> None:
+    position = len(self.hook_order)
+    if tool_use_id is not None:
+      self.hook_order[tool_use_id] = position
+    if name == HANDBACK_TOOL:
+      self.hook_handback = (tool_use_id, (tool_input or {}).get("message"), position)
+      self.hook_handback_continued = False
+    elif self.hook_handback is not None:
+      self.hook_handback_continued = True
+
+  def observe_assistant(self, text: str, tool_uses: list) -> None:
+    later_work = [block for block in tool_uses if block.name != HANDBACK_TOOL]
+    if any(self._is_after_hook_handback(block.id) for block in later_work):
+      self._place_hook_handback()
+    if later_work:
+      self.closing = False
+    if text.strip() and not self.closing:
+      self.candidate, self.candidate_is_handback = text, False
+    for block in tool_uses:
+      if block.name == HANDBACK_TOOL:
+        self.stream_handback_ids.add(block.id)
+        self._handback(block.id, (block.input or {}).get("message"))
+
+  def observe_tool_result(self, tool_use_id: str | None, is_error: bool) -> None:
+    if not is_error or tool_use_id is None:
+      return
+    if self._hook_only() and tool_use_id == self.hook_handback[0]:
+      self._place_hook_handback()
+    if tool_use_id == self.handback_id:
+      self.closing = False  # Rejected: what the helper writes next is its answer.
+
+  def _hook_only(self) -> bool:
+    return (self.hook_handback is not None
+            and self.hook_handback[0] not in self.stream_handback_ids)
+
+  def _is_after_hook_handback(self, tool_use_id) -> bool:
+    if not self._hook_only():
+      return False
+    position = self.hook_order.get(tool_use_id)
+    return position is None or position > self.hook_handback[2]
+
+  def _place_hook_handback(self) -> None:
+    hook_id, message, _ = self.hook_handback
+    self.stream_handback_ids.add(hook_id)
+    self._handback(hook_id, message)
+
+  def _handback(self, tool_use_id, message) -> None:
+    self.handback_id = tool_use_id
+    # A handback without a message delivered no report: the latest text the
+    # helper wrote before it stands, never the closing text after it.
+    if isinstance(message, str):
+      self.candidate, self.candidate_is_handback = message, True
+    self.closing = True
+
+  def final(self) -> str | None:
+    """The report to publish; ``""`` is a deliberate empty report, None is none."""
+    if self._hook_only():
+      if self.hook_handback_continued:
+        # Later work happened that the stream never showed: the stop hook's
+        # final response is the newest evidence, the handback the fallback.
+        message = self.hook_handback[1]
+        return (self.stop_message if self.stop_message
+                else message if isinstance(message, str) else self.candidate)
+      settled = dataclasses.replace(self, stream_handback_ids=set(self.stream_handback_ids))
+      settled._place_hook_handback()
+      return settled.final()
+    if self.closing:
+      return self.candidate or ""
+    if self.candidate_is_handback:
+      return self.candidate
+    return self.stop_message if self.stop_message else self.candidate
+
 @dataclasses.dataclass
 class HelperTurn:
   """One helper turn dispatched into the host."""
@@ -130,12 +256,17 @@ class HelperTurn:
   launch_tool_use_id: str | None = None
   status: str | None = None
   summary: str | None = None
+  # Provider report, distinct from task lifecycle summaries and closing text.
+  report: HelperReport = dataclasses.field(default_factory=HelperReport)
   usage: dict | None = None
   dispatch_error: str | None = None
+  dispatch_consumed: bool = False
+  dispatch_cancelled: bool = False
   # The helper's last API error from its provider, as (kind, message text).
   api_error: tuple[str, str] | None = None
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
+  # goals.CompactionBriefRefresh for a helper with a Goal assignment.
   goal_brief_refresh: Any | None = None
   started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
@@ -164,9 +295,18 @@ class ClaudeHelperHost(Host):
     self._turn_by_tool_use: dict[str, HelperTurn] = {}
     self._agent_of_tool_use: dict[str, str] = {}
     self._turn_by_agent: dict[str, HelperTurn] = {}
+    # A first tool can precede its task-start event. Identity has no deadline:
+    # only accepted/rejected task start or host shutdown settles it.
+    self._agent_identity: dict[str, asyncio.Future] = {}
+    self._identity_closed = False
+    self._rejected_agents: set[str] = set()
     self._query_lock = asyncio.Lock()
-    # Resolved when the dispatcher finishes its next reply.
-    self._dispatcher_replies: list[asyncio.Future] = []
+    # One serialized dispatcher request/reply cycle at a time, independent of
+    # helper lifetimes. The host owns draining a cancelled admission's reply,
+    # so it cannot be mistaken for the next helper's dispatcher response.
+    self._dispatcher_reply: asyncio.Future | None = None
+    self._dispatcher_failed = False
+    self._host_tasks: set[asyncio.Task] = set()
     # The CLI's last stderr lines, logged if the host process ends.
     self.stderr_tail: list[str] = []
     # The dispatcher's last reply (or provider error), logged when a dispatch
@@ -179,7 +319,8 @@ class ClaudeHelperHost(Host):
 
   @property
   def alive(self) -> bool:
-    if self._closed or self._client is None:
+    if (self._closed or self._client is None
+        or (self._dispatcher_failed and self._leases == 0)):
       return False
     if self._reader is not None and self._reader.done():
       return False
@@ -230,6 +371,10 @@ class ClaudeHelperHost(Host):
 
   async def close(self) -> None:
     self._closed = True
+    self._cancel_pending_identity()
+    dispatches = list(self._host_tasks)
+    for dispatch in dispatches:
+      dispatch.cancel()
     for turn in list(self._turn_by_dispatch.values()):
       turn.finish("failed", "The helper host shut down.")
     if self._reader is not None:
@@ -245,6 +390,9 @@ class ClaudeHelperHost(Host):
         logger=log, label="Claude helper host",
       )
       self.process_group_id = None
+    # Disconnect/terminate first so provider I/O cannot keep a cancelled host
+    # task shielded from its shutdown signal.
+    await asyncio.gather(*dispatches, return_exceptions=True)
     self._stack.close()
 
   # ------------------------------------------------------------------ hooks
@@ -256,13 +404,17 @@ class ClaudeHelperHost(Host):
     if not agent:
       return self._dispatcher_call(name, tool_input, tool_use_id)
     turn = await self._turn_for_agent(agent)
+    if turn is None or not turn.started.is_set() or turn.done.is_set():
+      return _deny("This helper has no active turn identity.")
+    # Exact tool-call order for report selection, including denied calls.
+    # Möbius owns delivery of a handback report independently of the native
+    # handback; HelperReport decides whether later work supersedes it.
+    turn.report.observe_hook_tool(tool_use_id, name, tool_input)
     if name in BUILTIN_HELPER_TOOLS:
       return _deny(
         "Delegate with the Möbius spawn_agent tool instead; built-in helper "
         "tools are not available.",
       )
-    if turn is None:
-      return {}
     if name == "Bash" and isinstance(tool_input.get("command"), str):
       command = f". {shlex.quote(str(turn.env_file.path))} && {tool_input['command']}"
       return _allow({**tool_input, "command": command})
@@ -278,63 +430,153 @@ class ClaudeHelperHost(Host):
     if name == "ToolSearch":
       # SendMessage is a deferred tool: the dispatcher must load it first.
       return {}
+    if name not in ("Agent", "SendMessage"):
+      # The host also serves helpers' MCP tools; a small dispatcher model
+      # reaches for look-alikes (send_agent_message) instead of loading the
+      # deferred SendMessage. Say what to call so it corrects in this turn.
+      return _deny(
+        f"{name} cannot dispatch helpers. For SPAWN call the built-in Agent "
+        "tool; for MESSAGE call the built-in SendMessage tool, loading it "
+        'first with ToolSearch query "select:SendMessage" if needed. Make '
+        "those calls now.",
+      )
     key = (
       tool_input.get("description") if name == "Agent"
-      else tool_input.get("summary") if name == "SendMessage"
+      # SendMessage.summary is optional display text, not dispatch identity.
+      # Both required fields carry the placeholder; only the registered spec
+      # below supplies the real recipient and answer.
+      else tool_input.get("to") if name == "SendMessage"
       else None
     )
     # Each dispatch is used once: a late call and a repeated command must never
     # launch or message a helper twice.
-    spec = self._specs.pop(key, None) if isinstance(key, str) else None
     turn = self._turn_by_dispatch.get(key) if isinstance(key, str) else None
-    if spec is None or turn is None:
+    if turn is None or turn.done.is_set() or name != ("Agent" if turn.kind == "spawn" else "SendMessage"):
       return _deny("Only dispatches registered by Möbius are allowed.")
+    spec = self._specs.pop(key, None)
+    if spec is None:
+      return _deny("Only dispatches registered by Möbius are allowed.")
+    turn.dispatch_consumed = True
     if tool_use_id:
       self._turn_by_tool_use[tool_use_id] = turn
     return _allow(spec)
 
   async def pre_compact(self, input_data, tool_use_id, context) -> dict:
-    del tool_use_id, context
+    """Mark the Goal brief stale for every helper this compaction may be.
+
+    The pinned CLI builds PreCompact input without the compacting agent's
+    tool context, so it never names the helper (or tells it from the
+    dispatcher). Every live helper turn is marked; each then receives the
+    brief once, at its own attributed PostToolUse. An uncompacted helper pays
+    one redundant brief, never a missing one. An agent_id, if a later CLI
+    sends one, narrows this to that helper.
+    """
     agent = input_data.get("agent_id")
-    turns = ([self._turn_by_agent.get(agent)] if agent
-             else list(self._turn_by_dispatch.values()))
+    turns = (
+      [self._turn_by_agent.get(agent)] if agent
+      else list(self._turn_by_dispatch.values())
+    )
     for turn in turns:
-      if turn is not None and turn.goal_brief_refresh is not None and turn.started.is_set() and not turn.done.is_set():
+      if (turn is not None and turn.goal_brief_refresh is not None
+          and turn.started.is_set() and not turn.done.is_set()):
         turn.goal_brief_refresh.mark_compacted()
+    log.info(
+      "Claude helper host compacted key=%s trigger=%s agent=%s",
+      self.key.digest, input_data.get("trigger"), agent or "unattributed",
+    )
     return {}
 
   async def post_tool_use(self, input_data, tool_use_id, context) -> dict:
-    """A SendMessage the host could not deliver fails its turn at once."""
+    """End a helper at its recorded question; refresh a compacted helper's
+    Goal brief; fail undelivered SendMessage.
+
+    PostToolUse reaches the agent whose tool ran, the same supported in-turn
+    boundary the private Claude runner uses. ``continue_: False`` there ends
+    only that helper's task, as completed and still resumable by a later
+    SendMessage (unlike ``stop_task``, which makes it unresumable).
+    """
     agent = input_data.get("agent_id")
     if agent:
       turn = self._turn_by_agent.get(agent)
       if turn is None or not turn.started.is_set() or turn.done.is_set():
         return {}
       if _records_own_question(input_data, turn.sink):
-        return {"continue_": False, "stopReason": "The helper's question is recorded; its parent's answer resumes it."}
+        return {
+          "continue_": False,
+          "stopReason": "The helper's question is recorded; its parent's answer resumes it.",
+        }
       if turn.goal_brief_refresh is None:
         return {}
       brief = await turn.goal_brief_refresh.take()
-      return ({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": brief}}
-              if brief else {})
-    if input_data.get("tool_name") != "SendMessage":
+      if not brief:
+        return {}
+      return {"hookSpecificOutput": {
+        "hookEventName": "PostToolUse", "additionalContext": brief,
+      }}
+    if input_data.get("tool_name") not in ("Agent", "SendMessage"):
       return {}
-    turn = self._turn_by_tool_use.get(tool_use_id or "")
     response = input_data.get("tool_response")
-    text = json.dumps(response) if not isinstance(response, str) else response
-    if turn is not None and '"success": false' in text.replace('":false', '": false'):
-      turn.dispatch_error = "unreachable"
-      turn.started.set()
+    if isinstance(response, str):
+      try:
+        response = json.loads(response)
+      except (ValueError, RecursionError):
+        response = None
+    if (input_data.get("hook_event_name") == "PostToolUseFailure"
+        or isinstance(response, dict) and (
+          response.get("success") is False or response.get("isError") is True
+          or response.get("is_error") is True)):
+      self._fail_dispatch(tool_use_id, input_data.get("tool_name"))
+    return {}
+
+  def _fail_dispatch(self, tool_use_id, tool_name: str) -> None:
+    turn = self._turn_by_tool_use.get(tool_use_id or "")
+    if turn is not None and not turn.started.is_set():
+      turn.dispatch_error = "unreachable" if tool_name == "SendMessage" else "launch_failed"
+      log.warning("helper dispatch failed kind=%s id=%s", turn.kind, turn.dispatch_id)
+      turn.finish("failed", "The provider could not dispatch this helper turn.")
+
+  async def subagent_stop(self, input_data, tool_use_id, context) -> dict:
+    """Capture the documented final response, never a task notification summary.
+
+    https://code.claude.com/docs/en/hooks#subagentstop: with SubagentHandback,
+    last_assistant_message is only closing text; HelperReport ranks it last.
+    """
+    turn = self._turn_by_agent.get(input_data.get("agent_id"))
+    report = input_data.get("last_assistant_message")
+    if (turn is not None and turn.started.is_set() and not turn.done.is_set()
+        and isinstance(report, str)):
+      turn.report.stop_message = report
     return {}
 
   async def _turn_for_agent(self, agent_id: str) -> HelperTurn | None:
-    # The helper's first tool call can race the host's task_started message.
-    for _ in range(40):
-      turn = self._turn_by_agent.get(agent_id)
-      if turn is not None:
-        return turn
-      await asyncio.sleep(0.05)
-    return None
+    if self._identity_closed or agent_id in self._rejected_agents:
+      return None
+    turn = self._turn_by_agent.get(agent_id)
+    if turn is not None and turn.started.is_set():
+      return turn
+    identity = self._agent_identity.get(agent_id)
+    if identity is None:
+      identity = self._agent_identity[agent_id] = asyncio.get_running_loop().create_future()
+    try:
+      # Cancelling one hook must not cancel other hooks awaiting this identity.
+      return await asyncio.shield(identity)
+    except asyncio.CancelledError:
+      if identity.cancelled():
+        return None
+      raise
+
+  def _reject_identity(self, agent_id: str) -> None:
+    """A rejected start settles this agent negatively, not its siblings."""
+    self._rejected_agents.add(agent_id)
+    identity = self._agent_identity.pop(agent_id, None)
+    if identity is not None and not identity.done():
+      identity.set_result(None)
+
+  def _cancel_pending_identity(self) -> None:
+    self._identity_closed = True
+    for identity in self._agent_identity.values():
+      identity.cancel()
+    self._agent_identity.clear()
 
   # ------------------------------------------------------------------ stream
 
@@ -345,6 +587,9 @@ class ClaudeHelperHost(Host):
       TaskNotificationMessage,
       TaskStartedMessage,
       TaskUpdatedMessage,
+      ToolResultBlock,
+      ToolUseBlock,
+      UserMessage,
     )
     from app.claude_events import dispatch_sdk_message
     try:
@@ -363,11 +608,17 @@ class ClaudeHelperHost(Host):
           continue
         if isinstance(message, ResultMessage):
           self._save_session(getattr(message, "session_id", None))
-          self._dispatcher_replied()
+          self._dispatcher_replied(message)
           continue
         parent = getattr(message, "parent_tool_use_id", None)
         error = getattr(message, "error", None)
         if not parent:
+          if isinstance(message, UserMessage) and isinstance(message.content, list):
+            for block in message.content:
+              if isinstance(block, ToolResultBlock) and block.is_error:
+                turn = self._turn_by_tool_use.get(block.tool_use_id)
+                if turn is not None:
+                  self._fail_dispatch(block.tool_use_id, "Agent" if turn.kind == "spawn" else "SendMessage")
           session = getattr(message, "session_id", None)
           if session:
             self._save_session(session)
@@ -378,8 +629,20 @@ class ClaudeHelperHost(Host):
         turn = self._turn_for_parent(parent)
         if turn is None or turn.done.is_set():
           continue
-        if isinstance(message, AssistantMessage) and error:
-          turn.api_error = (str(error), _message_text(message))
+        if isinstance(message, AssistantMessage):
+          if error:
+            turn.api_error = (str(error), _message_text(message))
+          else:
+            # The ordered child stream is complete before its task-end event,
+            # even when an SDK hook callback reaches us later. Never use the
+            # dispatcher's prose.
+            turn.report.observe_assistant(_message_text(message), [
+              block for block in message.content if isinstance(block, ToolUseBlock)
+            ])
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+          for block in message.content:
+            if isinstance(block, ToolResultBlock):
+              turn.report.observe_tool_result(block.tool_use_id, bool(block.is_error))
         try:
           rooted = dataclasses.replace(message, parent_tool_use_id=None)
           turn.session_state["sid"], _ = dispatch_sdk_message(
@@ -401,6 +664,9 @@ class ClaudeHelperHost(Host):
 
   def _fail_open_turns(self) -> None:
     """The host process is gone: fail its open turns, whose agents died with it."""
+    self._cancel_pending_identity()
+    for dispatch in self._host_tasks:
+      dispatch.cancel()
     for turn in list(self._turn_by_dispatch.values()):
       if not turn.done.is_set():
         turn.host_lost = True
@@ -414,16 +680,22 @@ class ClaudeHelperHost(Host):
 
   def _on_task_started(self, message) -> None:
     if getattr(message, "task_type", None) not in (None, "local_agent"):
+      self._reject_identity(message.task_id)
       return
     # A resumed helper reports under its original launch id, so its current
     # (follow-up) turn wins over whatever turn first used that id.
     current = self._turn_by_agent.get(message.task_id)
-    if current is not None and not current.done.is_set():
+    if current is not None:
       turn = current
     else:
       turn = self._turn_by_tool_use.get(message.tool_use_id or "")
-    if turn is None:
+    if turn is None or turn.done.is_set() or self._identity_closed:
+      self._reject_identity(message.task_id)
+      if (turn is not None and turn.dispatch_consumed and not self._identity_closed
+          and (turn.dispatch_cancelled or turn.dispatch_error)):
+        self._own_task(self._stop_agent(message.task_id))
       return
+    self._rejected_agents.discard(message.task_id)
     turn.agent_id = message.task_id
     self._turn_by_agent[message.task_id] = turn
     if message.tool_use_id:
@@ -431,6 +703,9 @@ class ClaudeHelperHost(Host):
       if turn.launch_tool_use_id is None:
         turn.launch_tool_use_id = message.tool_use_id
     turn.started.set()
+    identity = self._agent_identity.pop(message.task_id, None)
+    if identity is not None and not identity.done():
+      identity.set_result(turn)
 
   def _on_task_end(self, task_id, status, summary, usage) -> None:
     turn = self._turn_by_agent.get(task_id)
@@ -440,6 +715,9 @@ class ClaudeHelperHost(Host):
     if turn is None or turn.done.is_set() or not turn.started.is_set():
       return
     normalized = {"completed": "completed", "failed": "failed"}.get(status, "stopped")
+    report = turn.report.final()
+    if report is not None:
+      turn.sink.publish({"type": "assistant_result", "content": report})
     turn.finish(normalized, summary, dict(usage) if usage else None)
 
   # ------------------------------------------------------------------ work
@@ -450,6 +728,13 @@ class ClaudeHelperHost(Host):
     ``on_started`` is awaited once the turn's agent exists, before the turn
     settles.
     """
+    if self._dispatcher_failed:
+      self._fail_unsubmitted(turn)
+      return turn
+    if self._identity_closed:
+      turn.host_lost = True
+      turn.finish("failed", "The helper host is no longer available.")
+      return turn
     self._specs[turn.dispatch_id] = turn.spec
     self._turn_by_dispatch[turn.dispatch_id] = turn
     if turn.kind == "message" and turn.agent_id:
@@ -458,88 +743,125 @@ class ClaudeHelperHost(Host):
       self._turn_by_agent[turn.agent_id] = turn
       if turn.launch_tool_use_id:
         self._agent_of_tool_use[turn.launch_tool_use_id] = turn.agent_id
+    self._own_task(self._dispatch(turn))
     try:
-      verb = "SPAWN" if turn.kind == "spawn" else "MESSAGE"
-      loop = asyncio.get_running_loop()
-      deadline = loop.time() + DISPATCH_START_TIMEOUT
-      # The dispatcher is a model and sometimes answers a command without
-      # making its call (seen after helpers finish or a host resumes); it
-      # usually makes it when asked again.
-      for attempt in range(1, DISPATCH_ATTEMPTS + 1):
-        replied = self._next_dispatcher_reply()
-        async with self._query_lock:
-          await self._client.query(f"{verb} {turn.dispatch_id}")
-        if await self._await_dispatch(turn, replied, deadline):
-          break
-        log.info(
-          "helper dispatch %s %s: dispatcher replied without the call "
-          "(attempt %d) key=%s dispatcher_last=%r",
-          turn.kind, turn.dispatch_id, attempt, self.key.digest,
-          self.dispatcher_last,
-        )
-      if not turn.started.is_set():
-        turn.dispatch_error = turn.dispatch_error or "timeout"
-        log.warning(
-          "helper dispatch %s %s never started its helper key=%s "
-          "tool_call_seen=%s alive=%s dispatcher_last=%r stderr=%s",
-          turn.kind, turn.dispatch_id, self.key.digest,
-          any(seen is turn for seen in self._turn_by_tool_use.values()),
-          self.alive,
-          self.dispatcher_last, " | ".join(self.stderr_tail[-8:]),
-        )
-      if turn.dispatch_error and not turn.done.is_set():
+      # Start/failure, explicit turn cancellation and host closure settle this
+      # admission even while query() or the dispatcher's response is pending.
+      await turn.started.wait()
+      if turn.dispatch_error:
         return turn
       if on_started is not None and turn.agent_id:
         await on_started(turn)
       await turn.done.wait()
       return turn
+    except BaseException:
+      self._specs.pop(turn.dispatch_id, None)
+      await self.stop(turn)
+      turn.finish("failed", "The helper dispatch was interrupted.")
+      raise
     finally:
       self._specs.pop(turn.dispatch_id, None)
       self._turn_by_dispatch.pop(turn.dispatch_id, None)
 
-  def _next_dispatcher_reply(self) -> asyncio.Future:
-    reply = asyncio.get_running_loop().create_future()
-    self._dispatcher_replies.append(reply)
-    return reply
+  def _fail_unsubmitted(self, turn: HelperTurn) -> None:
+    self._specs.pop(turn.dispatch_id, None)
+    turn.dispatch_error = "launch_failed"
+    turn.finish("failed", "Claude could not start this helper request. "
+                "Its dispatcher is unavailable; no work was launched or message sent.")
 
-  def _dispatcher_replied(self) -> None:
-    replies, self._dispatcher_replies = self._dispatcher_replies, []
-    for reply in replies:
-      if not reply.done():
-        reply.set_result(None)
+  def _retire_dispatcher(self) -> None:
+    """An ambiguous stream may drain, but never admit another request.
 
-  async def _await_dispatch(self, turn: HelperTurn, replied, deadline: float) -> bool:
-    """Wait for the helper to start; False means ask the dispatcher again.
-
-    That is when the dispatcher finished a reply and this dispatch's call is
-    still unmade. Once the call is made, only the helper's start (or the
-    deadline) ends the wait.
+    Existing helpers keep running. Queued requests fail visibly and release
+    their leases, so the normal host lifecycle can replace this host once its
+    active helpers settle, even when no reply to the failed query will arrive.
     """
-    if turn.started.is_set():
-      return True
-    loop = asyncio.get_running_loop()
-    started = asyncio.ensure_future(turn.started.wait())
-    try:
-      while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-          return True
-        await asyncio.wait(
-          {started, replied}, timeout=remaining,
-          return_when=asyncio.FIRST_COMPLETED,
-        )
-        if turn.started.is_set() or not replied.done():
-          return True
-        if turn.dispatch_id in self._specs:
-          return False
-        replied = self._next_dispatcher_reply()
-    finally:
-      started.cancel()
+    self._dispatcher_failed = True
+    for queued in list(self._turn_by_dispatch.values()):
+      if not queued.done.is_set() and not queued.dispatch_consumed:
+        self._fail_unsubmitted(queued)
+
+  def _own_task(self, work) -> None:
+    task = asyncio.create_task(work)
+    self._host_tasks.add(task)
+    task.add_done_callback(self._host_tasks.discard)
+
+  async def _stop_agent(self, agent_id: str) -> None:
+    if self._client is not None:
+      try:
+        await self._client.stop_task(agent_id)
+      except Exception:
+        log.warning("helper task stop failed agent=%s", agent_id, exc_info=True)
+
+  async def _dispatch(self, turn: HelperTurn) -> None:
+    """One request and its exact reply; no model retries or guessed deadlines.
+
+    A stopped turn returns locally. The host still drains a submitted query's
+    reply before accepting the next request; close() cancels that drain.
+    """
+    async with self._query_lock:
+      if turn.done.is_set() or self._identity_closed or self._dispatcher_failed:
+        return
+      replied = asyncio.get_running_loop().create_future()
+      self._dispatcher_reply = replied
+      try:
+        verb = "SPAWN" if turn.kind == "spawn" else "MESSAGE"
+        await self._client.query(f"{verb} {turn.dispatch_id}")
+        response = await replied
+        if turn.done.is_set():
+          return
+        if getattr(response, "is_error", False) and not turn.started.is_set():
+          self._specs.pop(turn.dispatch_id, None)
+          turn.dispatch_error = "launch_failed"
+          turn.finish("failed", "Claude failed to dispatch this helper request. "
+                      "Möbius will not replay it automatically.")
+        elif turn.dispatch_id in self._specs:
+          self._specs.pop(turn.dispatch_id, None)
+          turn.dispatch_error = "not_called"
+          log.warning(
+            "helper dispatch %s %s completed without its tool call key=%s "
+            "tool_call_seen=False dispatcher_last=%r",
+            turn.kind, turn.dispatch_id, self.key.digest, self.dispatcher_last,
+          )
+          turn.finish("failed", "Claude finished without starting this helper or "
+                      "sending its message. No work was launched or message sent.")
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        log.warning("helper dispatch query failed id=%s", turn.dispatch_id, exc_info=True)
+        if not turn.done.is_set():
+          turn.dispatch_error = turn.dispatch_error or "launch_failed"
+          turn.finish("failed", "Claude could not confirm this helper request. "
+                      "Some work may have started; Möbius will not replay it automatically.")
+          if turn.agent_id and turn.dispatch_consumed:
+            self._own_task(self._stop_agent(turn.agent_id))
+        # Submission may have reached Claude, or failed before producing any
+        # reply at all. Retire admissions rather than wait on an undrainable
+        # response or attribute a late result to a future request.
+        self._retire_dispatcher()
+      finally:
+        if not replied.done():
+          replied.cancel()
+        self._dispatcher_reply = None
+
+  def _dispatcher_replied(self, response=None) -> None:
+    reply = self._dispatcher_reply
+    if reply is not None and not reply.done():
+      reply.set_result(response)
 
   async def stop(self, turn: HelperTurn) -> None:
-    if turn.agent_id and self._client is not None:
-      with contextlib.suppress(Exception):
-        await self._client.stop_task(turn.agent_id)
+    turn.dispatch_cancelled = True
+    if not turn.started.is_set():
+      self._specs.pop(turn.dispatch_id, None)
+      turn.finish("stopped", "Stopped.")
+      # Consumption is irreversible even before task-start supplies identity.
+      # A known resumed agent can be stopped now; a newly spawned task is
+      # stopped when its late task-start supplies the provider id.
+      if turn.agent_id and turn.dispatch_consumed:
+        await self._stop_agent(turn.agent_id)
+      return
+    if turn.agent_id:
+      await self._stop_agent(turn.agent_id)
 
 
 def _records_own_question(input_data: dict, sink) -> bool:
@@ -661,6 +983,10 @@ def _host_options(
   from app.platform_tools import claude_control_servers
 
   blocked = [
+    # Supported AgentDefinition restriction: reports belong to Möbius, not
+    # Claude's classifier-reviewed native handback. Resumed agents keep their
+    # original definitions, so HelperReport still owns legacy handback ordering.
+    HANDBACK_TOOL,
     *BUILTIN_HELPER_TOOLS,
     *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
     *_CLAUDE_NATIVE_OWNER_INPUT_TOOLS,
@@ -716,7 +1042,9 @@ def _host_options(
       hooks={
         "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
+        "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
+        "SubagentStop": [HookMatcher(hooks=[host.subagent_stop])],
       },
       extra_args={"settings": json.dumps({"disableWorkflows": True})},
     )
@@ -828,11 +1156,17 @@ async def run_claude_host_turn(
       await host.run_turn(turn, on_started)
       if turn.kind == "message" and turn.dispatch_error:
         from app.delegations import REVIEW_REQUIRED_MARKER
+        failure = (
+          "Claude could not deliver the message to this helper's session."
+          if turn.dispatch_error == "unreachable" else
+          "Claude's dispatcher did not start this helper's follow-up. "
+          "This does not establish that its session was lost."
+        )
         return {
           "session_id": session_id, "cost_usd": None,
           "error": (
-            f"{REVIEW_REQUIRED_MARKER}: This helper's session could not be "
-            "reached. Its durable history is intact, but Möbius will not "
+            f"{REVIEW_REQUIRED_MARKER}: {failure} "
+            "Its durable history is intact, but Möbius will not "
             "replay work automatically; start a new helper if another pass "
             "is needed."
           ),
@@ -844,7 +1178,7 @@ async def run_claude_host_turn(
       if turn.dispatch_error:
         return {
           "session_id": session_id, "cost_usd": None,
-          "error": "The helper host could not start this helper.",
+          "error": turn.summary or "The helper host could not start this helper.",
         }
       result: dict[str, Any] = {
         "session_id": resume_reference(host.session_id, turn),
