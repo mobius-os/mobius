@@ -52,13 +52,32 @@ test('clipped setext headings copy as equivalent standalone headings', () => {
   }
 })
 
+test('numeric and named entities retain their rendered meaning in copied ranges', () => {
+  const md = new Marked()
+  for (const entity of ['&#42;', '&#x2A;', '&#35;', '&#128512;', '&amp;']) {
+    const source = `**Number ${entity}** then **Planned**`
+    const split = splitSteerMarkdown(source, source.indexOf('Planned') + 4)
+    for (const range of [split.before, split.after]) {
+      assert.equal(md.parse(markdownRangeSource(range)), md.parser(markdownRangeTokens(range)))
+    }
+  }
+})
+
+test('outer italics retain their source delimiter around nested bold', () => {
+  const split = splitSteerMarkdown('_ab **cd**ef_', 2)
+  const md = new Marked()
+  for (const range of [split.before, split.after]) {
+    assert.equal(md.parse(markdownRangeSource(range)), md.parser(markdownRangeTokens(range)))
+  }
+})
+
 test('copy moves boundary whitespace outside clipped emphasis without losing characters', () => {
   const source = '__Start middle end__'
   const split = splitSteerMarkdown(source, source.indexOf('middle'))
-  assert.equal(markdownRangeSource(split.before), '**Start** ')
-  assert.equal(markdownRangeSource(split.after), '**middle end**')
+  assert.equal(markdownRangeSource(split.before), '__Start__ ')
+  assert.equal(markdownRangeSource(split.after), '__middle end__')
   const middle = sliceMarkdownRange(split.after, 'middle'.length, 'middle end'.length)
-  assert.equal(markdownRangeSource(middle), ' **end**')
+  assert.equal(markdownRangeSource(middle), ' __end__')
   assert.equal(new Marked().parse(markdownRangeSource(middle)), '<p> <strong>end</strong></p>\n')
 })
 
@@ -100,6 +119,7 @@ test('every accepted fixture cut copies the same effective formatting and source
   for (const source of [
     '**ab **cde**fg**', '~~ab ~~cde~~fg~~', '*ab *cde*fg*', '***bold and italic***',
     '**ab *cd **ef** gh* ij**', '~~ab **cd ~~ef~~ gh** ij~~',
+    '_ab **cd**ef_', '*ab __cd__ ef*', 'x*a**bc**d*y', '__ab *cd*ef__',
     '![diagram](/api/media/source.png) **Plan *nested* ~~ending~~ tail**',
     'A **escape \\*literal* and `code` end** tail',
     '## A **bold *nested* ~~ending~~** tail', 'A **heading**\n=============',

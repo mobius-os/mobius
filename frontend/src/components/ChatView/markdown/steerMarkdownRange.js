@@ -7,6 +7,7 @@ md.use(mathTokens())
 const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null
 const reference = /^&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/
+const referenceParts = new RegExp(`(${reference.source.slice(1)})`, 'g')
 const containers = new Set(['strong', 'em', 'del'])
 const unsafeInline = tokens => tokens.some(token => token.type === 'html'
   || (Array.isArray(token.tokens) && unsafeInline(token.tokens)))
@@ -67,6 +68,7 @@ function inlineProjection(tokens, source, base, start, end) {
           Math.max(lo, innerStart), Math.min(hi, innerEnd))
         if (!children?.length) return null
         result.push({ ...token, raw: source.slice(lo, hi),
+          rangeDelimiter: raw.slice(0, token.type === 'em' ? 1 : 2),
           text: source.slice(Math.max(lo, innerStart), Math.min(hi, innerEnd)),
           tokens: children })
       } else {
@@ -165,9 +167,10 @@ export function markdownRangeSource(range) {
     if (token.type === 'def') return ''
     // Literal text can gain Markdown meaning at a new fragment boundary (for
     // example "* tail" becomes a list). Escape text, not complete source atoms.
-    if (token.type === 'text' && !token.tokens) return token.raw
-      .replace(/\\/g, '\\\\').replace(/([`*_[\]~<>#+\-!|])/g, '\\$1')
-      .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')
+    if (token.type === 'text' && !token.tokens) return token.raw.split(referenceParts)
+      .map(part => reference.test(part) ? part : part
+        .replace(/\\/g, '\\\\').replace(/([`*_[\]~<>#+\-!|])/g, '\\$1')
+        .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')).join('')
     if (!containers.has(token.type)) {
       if (!token.rangeMarkup) return token.raw
       const { opening, closing } = token.rangeMarkup
@@ -182,7 +185,9 @@ export function markdownRangeSource(range) {
     // Markdown emphasis cannot open/close beside whitespace. Keep that space
     // outside the wrapper without changing any selected characters.
     const [, leading, body, trailing] = /^(\s*)([\s\S]*?)(\s*)$/.exec(content)
-    const marker = token.type === 'strong' ? '**' : token.type === 'em' ? '*' : '~~'
+    // Preserve the source's choice of stars vs underscores: replacing it can
+    // make mixed strong/emphasis runs ambiguous or break intraword emphasis.
+    const marker = token.rangeDelimiter ?? token.raw.slice(0, token.type === 'em' ? 1 : 2)
     return leading + (body ? marker + body + marker : '') + trailing
   }
   const content = markdownRangeTokens(range).map(token => source(token)).join('')

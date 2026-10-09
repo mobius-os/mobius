@@ -253,6 +253,25 @@ test('ordinary whole-block copy retains the original Markdown source', () => {
 })
 
 for (const legacy of [false, true]) {
+  for (const [prefix, replay] of [
+    ['**Number &#42;** then **Plan', '**Number &#42;** then **Planned**'],
+    ['_a', '_ab **cd**ef_'],
+  ]) {
+    test(`whole-fragment copying retains entity and mixed-style meaning (legacy=${legacy}, prefix=${prefix})`, () => {
+      const rows = [assistant(prefix), steer, assistant(replay, 'run:assistant:1')]
+      if (legacy) rows.forEach(row => { delete row.blocks })
+      const shown = projectSettledSteerContinuations(rows)
+      const md = new Marked()
+      for (const msg of [shown[0], shown[2]]) {
+        const range = msg.blocks?.[0].markdown_range ?? msg.markdown_range
+        const { clipboardData } = copyWholeFragment(msg, 'Selected text')
+        assert.equal(md.parse(assistantClipboardText(clipboardData)), md.parser(range.tokens))
+      }
+    })
+  }
+}
+
+for (const legacy of [false, true]) {
   for (const use of ['[ref][foo]', '[foo][]', '[foo]', '![diagram][foo]', '![foo][]', '![foo]']) {
     test(`reference atoms retain source targets on both sides of copy (legacy=${legacy}, use=${use})`, () => {
       const definition = '[foo]: /api/media/source.png "Source title"'
