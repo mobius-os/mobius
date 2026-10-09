@@ -439,6 +439,32 @@ def test_proxy_cache_separates_bearer_identities_and_accounts_for_upstream_age()
   })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
 
 
+def test_proxy_cache_preserves_origin_vary_and_revalidation_limits():
+  from app.routes.proxy import private_browser_cache_headers
+
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=300", "vary": "*",
+  })) == {"cache-control": "private, max-age=300", "vary": "*"}
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=300", "vary": "Accept-Language, AUTHORIZATION",
+  })) == {
+    "cache-control": "private, max-age=300",
+    "vary": "Accept-Language, AUTHORIZATION",
+  }
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=300, must-revalidate",
+  })) == {
+    "cache-control": "private, max-age=300, must-revalidate",
+    "vary": "Authorization",
+  }
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=0, max-age=86400",
+  })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=86400, max-age=0",
+  })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
+
+
 def test_truncated_proxy_body_never_carries_upstream_freshness_or_validators():
   from app.routes.proxy import (
     _MAX_BYTES, forward_upstream_cache_headers, private_browser_cache_headers,

@@ -77,7 +77,10 @@ def _cache_directives(value: str) -> dict[str, str]:
   for part in value.split(","):
     name, _, argument = part.strip().partition("=")
     if name:
-      directives[name.strip().lower()] = argument.strip().strip('"')
+      name = name.strip().lower()
+      # RFC 9111 allows treating repeated freshness directives as stale.
+      # Never let a later max-age override an earlier restrictive one.
+      directives[name] = "" if name in directives else argument.strip().strip('"')
   return directives
 
 
@@ -101,9 +104,18 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
     for name in ("etag", "last-modified")
     if name in upstream.headers
   }
-  # A private cache can still be shared by different bearer identities in one
-  # browser profile. Partition its entries by the request's Authorization.
-  headers["vary"] = "Authorization"
+  # Preserve the origin's selection dimensions. In particular, Vary: * can
+  # never match a stored response; replacing it with Authorization would make
+  # an intentionally unmatchable representation reusable.
+  vary = upstream.headers.get("vary", "")
+  vary_names = [name.strip() for name in vary.split(",") if name.strip()]
+  if "*" in vary_names:
+    headers["vary"] = "*"
+  elif any(name.lower() == "authorization" for name in vary_names):
+    headers["vary"] = vary
+  else:
+    # A private cache can still be shared by bearer identities in one browser.
+    headers["vary"] = f"{vary}, Authorization" if vary_names else "Authorization"
   try:
     max_age = int(directives.get("max-age", ""))
   except ValueError:
@@ -128,10 +140,12 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
     max_age -= max(0, age)
   if "no-cache" in directives or max_age is None or max_age <= 0:
     headers["cache-control"] = "private, no-cache"
-    return headers
-  headers["cache-control"] = (
-    f"private, max-age={min(max_age, _PROXY_MAX_BROWSER_AGE)}"
-  )
+  else:
+    headers["cache-control"] = (
+      f"private, max-age={min(max_age, _PROXY_MAX_BROWSER_AGE)}"
+    )
+  if "must-revalidate" in directives:
+    headers["cache-control"] += ", must-revalidate"
   return headers
 
 
