@@ -687,11 +687,25 @@ sleep 0.3
 # at the FINAL capture boundary, after the initial paint above. The token is
 # read inside the page and never appears in argv or output.
 BROWSER_PHASE="authentication verification"
-AUTH_OK="$(browser_eval_retry \
+AUTH_RESULT_RAW="$(browser_eval_retry \
   "(async () => { const token = localStorage.getItem('token'); const login = () => document.querySelector('[data-auth-surface=login]'); if (!token || login()) return 'rejected'; try { const res = await fetch('/api/owner/timezone?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); if (res.status === 401 || res.status === 403) return 'rejected'; if (!res.ok) return 'unavailable'; return !!localStorage.getItem('token') && !login() ? 'ok' : 'rejected'; } catch { return 'unavailable'; } })()" \
   || true)"
 if [ -s "$BROWSER_TIMEOUT_FILE" ]; then
   AUTH_OK="unavailable"
+else
+  # agent-browser eval prints JSON, including quotes around JavaScript strings.
+  # Only the three probe outcomes are valid; malformed/non-string output is
+  # an unavailable probe, never an authentication denial or a successful check.
+  AUTH_OK="$(printf '%s' "$AUTH_RESULT_RAW" | python3 -c '
+import json
+import sys
+
+try:
+    result = json.load(sys.stdin)
+except json.JSONDecodeError:
+    result = None
+print(result if isinstance(result, str) and result in ("ok", "rejected", "unavailable") else "unavailable")
+')"
 fi
 case "$AUTH_OK" in
   ok) ;;

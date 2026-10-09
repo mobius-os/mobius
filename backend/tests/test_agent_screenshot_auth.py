@@ -88,6 +88,9 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "if [ \"$1\" = eval ] && [ \"${2:-}\" != --stdin ]; then\n"
     "  case \"${FAKE_TIMEOUT_EVAL_MODE:-}\" in\n"
     "    always) exit 124 ;;\n"
+    "    auth-always)\n"
+    "      case \"$2\" in */api/owner/timezone*) exit 124 ;; esac\n"
+    "      ;;\n"
     "    once)\n"
     "      if [ ! -e \"$FAKE_TIMEOUT_EVAL_MARKER\" ]; then\n"
     "        : > \"$FAKE_TIMEOUT_EVAL_MARKER\"\n"
@@ -134,8 +137,8 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "    if [ \"$2\" = \"--stdin\" ]; then cat > \"$FAKE_BROWSER_STDIN_LOG\"; exit 0; fi\n"
     "    case \"$2\" in\n"
     "      *body\\ \\>\\ iframe#app*) printf '%s\\n' \"${FAKE_PUBLIC_APP:-false}\" ;;\n"
-    "      */api/owner/timezone*) printf '%s\\n' \"${FAKE_AUTH_OK:-rejected}\" ;;\n"
-    "      *src.split*) printf '%s\\n' \"${FAKE_LOADED_ASSET:-none}\" ;;\n"
+    "      */api/owner/timezone*) printf '%s\\n' \"$FAKE_AUTH_OUTPUT\" ;;\n"
+    "      *src.split*) python3 -c 'import json,os; print(json.dumps(os.environ[\"FAKE_LOADED_ASSET\"]))' ;;\n"
     "      *serviceWorker*) printf '%s\\n' true ;;\n"
     "      *) printf '%s\\n' true ;;\n"
     "    esac\n"
@@ -204,6 +207,7 @@ def _run_helper(
   record_resets: bool = False,
   timeout_eval_mode: str = "",
   auth_result: str | None = None,
+  auth_output: str | None = None,
   bootstrap_intercept_once: bool = False,
   public_app: bool = False,
   existing_output: bytes | None = None,
@@ -256,7 +260,12 @@ def _run_helper(
     "AGENT_BROWSER_PROFILE": str(browser_profile),
     "AGENT_BROWSER_ARGS": "--test-daemon-identity",
     "AGENT_BROWSER_DEFAULT_TIMEOUT": "",
-    "FAKE_AUTH_OK": auth_result or ("ok" if auth_ok else "rejected"),
+    "FAKE_AUTH_OUTPUT": (
+      auth_output if auth_output is not None
+      else json.dumps(
+        auth_result if auth_result is not None else ("ok" if auth_ok else "rejected")
+      )
+    ),
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_BROWSER_IDENTITY_LOG": str(tmp_path / "browser-identity.log"),
@@ -460,6 +469,36 @@ def test_probe_failure_is_not_reported_as_token_rejection(tmp_path: Path, auth_r
   assert "token was rejected" not in result.stderr
   assert "/api/owner/timezone" in browser_log.read_text()
   assert not output.exists() and not marker.exists()
+
+
+@pytest.mark.parametrize("auth_output", [
+  "not-json", '"ok" trailing', "null", "true", "42", '{"status":"ok"}', '["ok"]',
+])
+def test_malformed_or_nonstring_auth_output_never_authorizes_capture(tmp_path: Path, auth_output):
+  result, output, marker, _ = _run_helper(
+    tmp_path, auth_ok=True, auth_output=auth_output,
+    existing_output=b"previous good capture",
+  )
+
+  assert result.returncode != 0
+  assert "authentication probe unavailable" in result.stderr
+  assert "token was rejected" not in result.stderr
+  assert output.read_bytes() == b"previous good capture"
+  assert not marker.exists()
+
+
+def test_auth_probe_timeout_remains_unavailable_after_one_profile_reset(tmp_path: Path):
+  result, output, marker, _ = _run_helper(
+    tmp_path, auth_ok=True, timeout_eval_mode="auth-always",
+    record_resets=True, existing_output=b"previous good capture",
+    subprocess_timeout=10,
+  )
+
+  assert result.returncode != 0
+  assert "authentication verification timed out again" in result.stderr
+  assert (tmp_path / "browser-profile.resets").read_text().count("\n") == 2
+  assert output.read_bytes() == b"previous good capture"
+  assert not marker.exists()
 
 
 def test_browser_bootstrap_is_inert_same_origin_html(client):
