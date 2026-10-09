@@ -2093,18 +2093,27 @@ class ContributionReviewRun(Base):
   """
   __tablename__ = "contribution_review_runs"
   id = Column(String(64), primary_key=True)
-  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=True, index=True)
   owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
   request_id = Column(String(64), nullable=False)
   mode = Column(String(24), nullable=False)
   github_actor_id = Column(String(64), nullable=False)
-  app_nonce = Column(String(64), nullable=False)
+  app_nonce = Column(String(64), nullable=True)
+  options_json = Column(JSON, nullable=True)
   targets_json = Column(JSON, nullable=False)
   outcomes_json = Column(JSON, nullable=False, default=dict)
   chat_id = Column(String(64), ForeignKey("chats.id"), nullable=False)
   revision = Column(Integer, nullable=False, default=0)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
-  __table_args__ = (UniqueConstraint("app_id", "request_id"),)
+  __table_args__ = (
+    UniqueConstraint("app_id", "request_id"),
+    Index(
+      "uq_contribution_review_runs_core_request",
+      "owner_id", "request_id", unique=True,
+      sqlite_where=text("app_id IS NULL"),
+      postgresql_where=text("app_id IS NULL"),
+    ),
+  )
 
 
 class ProjectSourceCopy(Base):
