@@ -882,6 +882,10 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # can suppress transport without guessing from tool names or output.
       if isinstance(event.get("owner_card_question_id"), str):
         blk["owner_card_question_id"] = event["owner_card_question_id"]
+      # A screenshot step names its saved chat-media picture (stamped by the
+      # sink from the full result; see screenshot_steps).
+      if isinstance(event.get("saved_image"), str):
+        blk["saved_image"] = event["saved_image"]
       return True
     return False
 
