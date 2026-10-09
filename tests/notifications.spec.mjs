@@ -156,6 +156,25 @@ test('bell acknowledges new arrivals without marking notifications read', async 
   await expect(bell).toHaveAttribute('aria-expanded', 'false')
 })
 
+for (const [mode, textColor] of [['dark', 'rgb(245, 245, 245)'], ['light', 'rgb(25, 25, 25)']]) {
+  test(`mark all as read uses neutral ${mode} text while unread dots retain accent`, async ({ page }) => {
+    await mockNotifications(page)
+    await setup(page)
+    await openPreview(page)
+    const panel = page.locator('.notifications')
+    const accentColor = 'rgb(120, 80, 220)'
+    await panel.evaluate((element, { textColor, accentColor }) => {
+      element.style.setProperty('--text', textColor)
+      element.style.setProperty('--accent', accentColor)
+    }, { textColor, accentColor })
+
+    const action = page.getByRole('button', { name: 'Mark all as read' })
+    await expect(action).toBeEnabled()
+    await expect(action).toHaveCSS('color', textColor)
+    await expect(page.locator('.notifications__unread-dot').first()).toHaveCSS('background-color', accentColor)
+  })
+}
+
 test('clear all immediately removes the preview rows and badge', async ({ page }) => {
   const state = await mockNotifications(page)
   await setup(page)

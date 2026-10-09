@@ -15,6 +15,12 @@ const RESTART_CONFIRM_MIN_MS = 500
 
 export default function PlatformUpdates({ active, refreshToken, onOpenChat, inertBoundaryRef }) {
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
+  return <PlatformUpdatesView update={update} onOpenChat={onOpenChat} inertBoundaryRef={inertBoundaryRef} />
+}
+
+// Rendered with the real controller hook in Settings; an injected snapshot lets
+// isolated tests exercise recovery presentation without mutating owner state.
+export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
   const { platform, cachedPlatform, rebuild, version, phase, busy } = update
   const [review, setReview] = useState(null)
   const [confirmRestart, setConfirmRestart] = useState(null)
@@ -34,11 +40,14 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
+  const recoveryRequired = rebuild?.state === 'needs_recovery'
   const versionPlatform = platform || cachedPlatform
   const mobiusVersion = platformVersionIdentity(versionPlatform, version)
   const containerVersion = containerVersionIdentity(version)
   const missingVersionLabel = versionPlatform ? 'Unavailable' : 'Checking…'
-  const repairReason = !conflict && platformUpdateRepairReason({ platform, rebuild, error: update.error, errorCode: update.errorCode })
+  const repairReason = recoveryRequired
+    ? 'The previous replacement still needs recovery in your deployment. Another update cannot start until it is resolved.'
+    : !conflict && platformUpdateRepairReason({ platform, rebuild, error: update.error, errorCode: update.errorCode })
 
   useEffect(() => {
     if (!confirmRestart || busy) return
@@ -96,7 +105,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
         : restartNeeded
           ? { label: confirmRestart === 'primary' ? 'Confirm restart' : 'Restart to finish', act: () => pressRestart('primary') }
           : { label: phase === 'checking' ? 'Checking…' : 'Check for updates', act: check }
-  const status = activeRebuild ? rebuildStatusLine(rebuild)
+  const status = recoveryRequired || activeRebuild ? rebuildStatusLine(rebuild)
     : settling ? 'Confirming the new container…'
     : update.reconnecting ? (update.observingKind === 'apply' ? 'Checking the update…' : 'Restarting Möbius…')
       : !platform ? 'Checking update status…' : platformUpdateStatusLabel(platform)
@@ -112,11 +121,17 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
             disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
         ) : (
-          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
+          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || recoveryRequired || (conflict && !onOpenChat)} onClick={primary.act}>
             {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : phase === 'cancelling' ? 'Cancelling…' : 'Updating…') : primary.label}
           </button>
         )}
-        {platform?.unfinished_update?.cancellable && !busy && (
+        {recoveryRequired && (
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline"
+            disabled={busy} onClick={update.check}>
+            {phase === 'checking' ? 'Checking recovery status…' : 'Check recovery status'}
+          </button>
+        )}
+        {platform?.unfinished_update?.cancellable && !busy && !recoveryRequired && (
           <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={update.cancel}>Cancel update</button>
         )}
       </div>
@@ -136,7 +151,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
         </button>
       </div>
       {confirmRestart && <p className="platform-updates__description" role="status">Restarting briefly pauses active chats. This page will reconnect automatically. Confirm within 4 seconds, or let this prompt expire.</p>}
-      {settling && !busy && !activeRebuild && (
+      {settling && !busy && !activeRebuild && !recoveryRequired && (
         <div className="platform-updates__description">
           <p>The new container is running this update. Möbius keeps the previous version ready until the replacement is confirmed; other updates wait until then.</p>
           {rebuild && rebuild.state !== 'succeeded' && (
@@ -144,7 +159,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
           )}
         </div>
       )}
-      {!busy && !unavailable && !conflict && restartNeeded && (
+      {!busy && !unavailable && !conflict && !recoveryRequired && restartNeeded && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
       {activeRebuild && rebuild.status_unavailable && (

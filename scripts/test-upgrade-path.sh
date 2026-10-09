@@ -13,11 +13,13 @@
 #    Like an agent customizing its instance, commit local edits to image-owned
 #    files (Dockerfile, Python package list). They must never block the update,
 #    and must still be in the source afterwards.
-# 3. Stand in for a current self-hosted host helper. This checks the old
+# 3. Stand in for an available self-hosted host helper. This checks the old
 #    updater and the new image's boot against the helper's contract; the
 #    helper's own code (scripts/mobius-rebuild-host.py) is not exercised.
 # 4. Press Update through the same HTTP calls Settings makes. Any refusal
-#    fails the check: that is how a release strands existing instances.
+#    fails the check: that is how a release strands existing instances. A helper
+#    migration may install source with an explicit manual maintenance handoff;
+#    that obligation must survive restart, not disappear because the app is healthy.
 # 5. Image updates: take the queued request as the helper would, recreate the
 #    container on the candidate image with the same volume, report success,
 #    and require the candidate to serve its own tree and settle the update.
@@ -87,6 +89,20 @@ field() {  # <json> <python expression over d>; JSON on stdin (a preview can exc
   python3 -c 'import json, sys; d = json.load(sys.stdin); print(eval(sys.argv[1]))' "$2" <<<"$1"
 }
 
+# A helper migration is a successful source install plus an explicit operator
+# handoff, not proof of a completed host upgrade. Other external work is not
+# covered by this fixture and must remain a failing, actionable result.
+helper_maintenance_pending() {
+  [ "$(field "$1" 'd.get("activation", {}).get("required_actions") == ["host_maintenance"] and len(d.get("activation", {}).get("reasons", [])) == 1 and any(r.get("code") == "host_helper_migration" and r.get("paths") == ["deployment/self-hosted-helper.required"] for r in d.get("activation", {}).get("reasons", []))')" = True ]
+}
+
+# Before activation, the same migration may also need an ordinary server
+# restart. That restart must disappear after boot; only the exact helper work
+# may remain. Do not treat proxy, topology, or image work as this handoff.
+reviewed_helper_preview() {
+  [ "$(field "$1" 'set((d.get("activation") or {}).get("required_actions") or []) in ({"host_maintenance"}, {"server_restart", "host_maintenance"}) and any(r.get("code") == "host_helper_migration" and r.get("paths") == ["deployment/self-hosted-helper.required"] for r in (d.get("activation") or {}).get("reasons", []))')" = True ]
+}
+
 previous=$(image_sha "$PREVIOUS")
 candidate=$(image_sha "$CANDIDATE")
 [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
@@ -134,7 +150,7 @@ if as_mobius grep -q "def local_image_changes" /data/platform/backend/app/platfo
     || fail "could not commit the local image-owned customization"
 fi
 
-echo "3. a current host helper is installed"
+echo "3. an available host helper supports the replacement handshake"
 docker exec "$name" sh -c '
   set -e
   mkdir -p /data/mobius-rebuild/inbox
@@ -156,6 +172,14 @@ conflicts=$(field "$preview" 'len(d.get("conflict_paths") or []) + len(d.get("bl
   || fail "the previous release does not offer the candidate as an actionable update: $preview"
 plan=$(field "$preview" 'json.dumps({k: d.get(k) for k in ("plan_id", "current_sha", "target_sha", "image_digest")})')
 needs_image=$(field "$preview" '"image_rebuild" in ((d.get("activation") or {}).get("required_actions") or [])')
+needs_helper=false
+if reviewed_helper_preview "$preview"; then
+  needs_helper=true
+fi
+if [ "$(field "$preview" '"host_maintenance" in ((d.get("activation") or {}).get("required_actions") or [])')" = True ] \
+    && [ "$needs_helper" != true ]; then
+  fail "the review includes host work outside the supported helper-only handoff: $preview"
+fi
 if [ "$local_edits" = true ] && [ "$needs_image" = True ]; then
   [ "$(field "$preview" '"Dockerfile" in (d.get("local_image_paths") or [])')" = True ] \
     || fail "the review does not report the local Dockerfile customization: $preview"
@@ -205,10 +229,15 @@ else
   # Every applied outcome is fine (updated, up_to_date for live-only changes,
   # restart_needed); conflict, rolled_back or an error is a refusal.
   applied_state=$([ "$(code "$reply")" = 200 ] && field "$(body "$reply")" 'd.get("state")')
-  case "$applied_state" in
-    updated|up_to_date|restart_needed) ;;
-    *) fail "the previous release refused to apply the candidate ($(code "$reply")): $(body "$reply")" ;;
-  esac
+  if [ "$needs_helper" = true ]; then
+    [ "$applied_state" = activation_needed ] && reviewed_helper_preview "$(body "$reply")" \
+      || fail "the installed candidate lost its reviewed helper-maintenance handoff: $(body "$reply")"
+  else
+    case "$applied_state" in
+      updated|up_to_date|restart_needed) ;;
+      *) fail "the previous release refused to apply the candidate ($(code "$reply")): $(body "$reply")" ;;
+    esac
+  fi
   echo "5. the owner restarts to load the candidate"
   docker restart "$name" >/dev/null
   for _ in $(seq 1 240); do
@@ -233,5 +262,11 @@ if [ "$needs_image" = True ]; then
     sleep 2
   done
   as_mobius test ! -e "$record" || fail "the update never settled: $(as_mobius cat "$record")"
+fi
+if [ "$needs_helper" = true ]; then
+  reply=$(api GET /api/platform/status)
+  [ "$(code "$reply")" = 200 ] && helper_maintenance_pending "$(body "$reply")" \
+    || fail "a healthy restart incorrectly discharged host maintenance: $(body "$reply")"
+  echo "upgrade path: candidate source installed; exact helper migration remains an operator handoff"
 fi
 echo "upgrade path: ${previous:0:12} installs ${candidate:0:12}"
