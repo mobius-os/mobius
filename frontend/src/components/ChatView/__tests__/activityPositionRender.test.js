@@ -338,7 +338,6 @@ test('a later standalone Restart request owns the card before legacy activity', 
   assert.doesNotMatch(html, /standalone-success/)
 })
 
-
 for (const isStreaming of [true, false]) {
   test(`hidden replay uses one Markdown paragraph in the shared reply surface (${isStreaming})`, () => {
     const prefix = 'This sentence continues;'
