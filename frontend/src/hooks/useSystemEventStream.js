@@ -39,12 +39,6 @@ export const SYSTEM_QUICK_WAKE_MS = 10_000
  * from its opening event, and `null` once that connection is retired. State
  * reported against the id (useVisibleAppPresence) lives exactly as long as
  * the connection on the server.
- *
- * `onOpen({ signal, reconnect })` is the barrier that runs before buffered
- * events are applied. `reconnect` is false only for this hook's very first
- * connection attempt, whose mount-time reads share its page load; every later
- * attempt follows a drop, a failed attempt, or a wake, during which events
- * may have been lost.
  */
 export default function useSystemEventStream(
   onEvent,
@@ -59,8 +53,6 @@ export default function useSystemEventStream(
   useEffect(() => { onOpenRef.current = onOpen }, [onOpen])
   const onSubscriptionRef = useRef(onSubscription)
   useEffect(() => { onSubscriptionRef.current = onSubscription }, [onSubscription])
-  // Outlives effect re-runs: re-enabling the stream is a reconnect.
-  const attemptedConnectionRef = useRef(false)
 
   useEffect(() => {
     if (!enabled) return undefined
@@ -115,14 +107,13 @@ export default function useSystemEventStream(
 
     async function reconcile(attempt) {
       const { signal } = attempt.controller
-      const { reconnect } = attempt
       let onAbort
       const aborted = new Promise((_, reject) => {
         onAbort = () => reject(signal.reason)
         signal.addEventListener('abort', onAbort, { once: true })
       })
       try {
-        await Promise.race([onOpenRef.current?.({ signal, reconnect }), aborted])
+        await Promise.race([onOpenRef.current?.({ signal }), aborted])
       } finally {
         signal.removeEventListener('abort', onAbort)
       }
@@ -141,9 +132,7 @@ export default function useSystemEventStream(
         lastReadAt: null,
         deadline: null,
         subscriptionId: null,
-        reconnect: attemptedConnectionRef.current,
       }
-      attemptedConnectionRef.current = true
       active = attempt
       armDeadline(attempt)
       let reader

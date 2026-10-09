@@ -346,18 +346,16 @@ test('focus and restored-page signals repair expired health even without visibil
   assert.equal(h.connections[0].signal.aborted, true)
 })
 
-test('the first open is the page-load baseline; every later open is a reconnect', async t => {
-  const h = await connectionHarness(t)
-  assert.deepEqual(h.opens.map(open => open.reconnect), [false])
-  h.connections[0].end(); await h.flush(); await h.tick(1000)
-  assert.equal(h.connections.length, 2)
-  assert.deepEqual(h.opens.map(open => open.reconnect), [false, true],
-    'a reopen after a drop must reconcile caches that may have missed events')
-})
-
-test('a failed first open makes the next successful open a reconnect', async t => {
-  let count = 0
-  const h = await connectionHarness(t, { onOpen: () => { if (++count === 1) throw new Error('fresh list unavailable') } })
-  await h.tick(1000)
-  assert.deepEqual(h.opens.map(open => open.reconnect), [false, true])
+test('a remounted stream runs its open reconciliation again', async t => {
+  let opens = 0
+  const h = await connectionHarness(t, { onOpen: () => { opens += 1 } })
+  assert.equal(opens, 1)
+  h.hook.unmount()
+  const { default: useSystemEventStream } = await import('../../../hooks/useSystemEventStream.js')
+  const remount = renderHook(useSystemEventStream, () => {}, {
+    onOpen: () => { opens += 1 },
+  })
+  await h.flush()
+  assert.equal(opens, 2)
+  remount.unmount()
 })

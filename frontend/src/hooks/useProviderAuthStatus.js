@@ -22,8 +22,9 @@ import {
  *   2. **Not free.** The endpoint is not a local-only read: for the Möbius
  *      provider it can reach the remote broker (identity check and trial
  *      balance), which may cost hundreds of milliseconds. Avoid redundant
- *      refetches; beyond wake, the Shell invalidates it only on
- *      `model_providers_changed` and after a system stream reconnect.
+ *      refetches; beyond wake, the Shell invalidates it on
+ *      `model_providers_changed` and every system stream open. The opening
+ *      read closes the gap between the mount-time fetch and SSE subscription.
  *
  * Returns:
  *   {
