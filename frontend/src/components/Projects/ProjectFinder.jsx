@@ -52,9 +52,7 @@ import {
   parentPath,
 } from '../../lib/projectFinderNav.js'
 import {
-  PROJECT_CHANGES_ACTIVE_MS,
-  createProjectChangePollTimer,
-  nextProjectChangesDelay,
+  startProjectChangesPoll,
 } from '../../lib/projectChangeCadence.js'
 import ProjectPdfPreview from './ProjectPdfPreview.jsx'
 import ImageLightbox from '../ChatView/markdown/ImageLightbox.jsx'
@@ -492,12 +490,10 @@ export default function ProjectFinder({
   useEffect(() => {
     if (!source.liveSync || !source.changes) return undefined
     let active = true
-    let cursor = null
-    let controller = null
-    let delay = PROJECT_CHANGES_ACTIVE_MS
     const handleChanges = async (changes, truncated = false) => {
       if (!active || (!truncated && (!changes || changes.length === 0))) return false
       await source.invalidate(queryClient)
+      if (!active) return false
       const selectedNow = liveFileRef.current?.selected
       if (
         selectedNow
@@ -518,63 +514,24 @@ export default function ProjectFinder({
       }
       return true
     }
-    const pollTimer = createProjectChangePollTimer({
-      now: () => performance.now(),
-      setTimeout: (callback, wait) => window.setTimeout(callback, wait),
-      clearTimeout: id => window.clearTimeout(id),
-    }, () => { void poll() })
-    const schedule = (wait = delay) => { if (active) pollTimer.schedule(wait) }
-    const poll = async () => {
-      if (!active || document.hidden || controller) return
-      controller = new AbortController()
-      try {
-        const establishingBaseline = cursor === null
-        const payload = await jsonOrThrow(
-          await source.changes(cursor, { signal: controller.signal }),
-          'Project refresh failed:',
-        )
-        if (!active) return
-        cursor = Number(payload.cursor || cursor || 0)
-        // Reconcile once after the baseline arrives. This closes the gap where
-        // a save lands between the first file read and the first cursor read.
-        const changed = await handleChanges(
-          payload.changes || [],
-          !!payload.truncated || establishingBaseline,
-        )
-        delay = nextProjectChangesDelay(delay, changed ? 'changed' : 'unchanged')
-      } catch (cause) {
-        if (cause?.name !== 'AbortError') delay = nextProjectChangesDelay(delay, 'failed')
-      } finally {
-        controller = null
-        if (!document.hidden) schedule()
-      }
-    }
-    const onLiveChange = event => {
-      const detail = event?.detail
-      if (String(detail?.projectId ?? '') !== String(projectId)) return
-      void handleChanges(detail?.change ? [detail.change] : [], false)
-      // Pushed edits usually come in bursts that end with an unpublished
-      // agent-run completion, so resume the active cadence for the cursor.
-      delay = nextProjectChangesDelay(delay, 'changed')
-      if (!document.hidden && !controller) schedule()
-    }
-    const onVisibility = () => {
-      if (document.hidden) {
-        pollTimer.cancel()
-        controller?.abort()
-      } else {
-        schedule(0)
-      }
-    }
-    window.addEventListener('mobius:project-change', onLiveChange)
-    document.addEventListener('visibilitychange', onVisibility)
-    void poll()
+    const stop = startProjectChangesPoll({
+      projectId,
+      readChanges: async (after, options) => jsonOrThrow(
+        await source.changes(after, options),
+        'Project refresh failed:',
+      ),
+      handleChanges,
+      events: window,
+      visibility: document,
+      clock: {
+        now: () => performance.now(),
+        setTimeout: (callback, wait) => window.setTimeout(callback, wait),
+        clearTimeout: id => window.clearTimeout(id),
+      },
+    })
     return () => {
       active = false
-      controller?.abort()
-      pollTimer.cancel()
-      window.removeEventListener('mobius:project-change', onLiveChange)
-      document.removeEventListener('visibilitychange', onVisibility)
+      stop()
     }
   }, [projectId, queryClient, refreshSelectedFromRemote, source])
 

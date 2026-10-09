@@ -41,3 +41,72 @@ export function createProjectChangePollTimer(clock, poll) {
     },
   }
 }
+
+// Own the cursor request, timer, and event listeners as one lifecycle so a
+// hidden tab or replaced project cannot leave a stale poll behind.
+export function startProjectChangesPoll({
+  projectId, readChanges, handleChanges, events, visibility, clock,
+}) {
+  let active = true
+  let cursor = null
+  let controller = null
+  let delay = PROJECT_CHANGES_ACTIVE_MS
+  let pushedDuringPoll = false
+  let resumeWhenSettled = false
+  const pollTimer = createProjectChangePollTimer(clock, () => { void poll() })
+  const schedule = (wait = delay) => { if (active) pollTimer.schedule(wait) }
+  const poll = async () => {
+    if (!active || visibility.hidden || controller) return
+    const requestController = new AbortController()
+    controller = requestController
+    pushedDuringPoll = false
+    try {
+      const establishingBaseline = cursor === null
+      const payload = await readChanges(cursor, { signal: requestController.signal })
+      if (!active || requestController.signal.aborted) return
+      cursor = Number(payload.cursor || cursor || 0)
+      // Reconcile once after the baseline arrives. This closes the gap where
+      // a save lands between the first file read and the first cursor read.
+      const changed = await handleChanges(
+        payload.changes || [],
+        !!payload.truncated || establishingBaseline,
+      )
+      delay = nextProjectChangesDelay(delay, changed || pushedDuringPoll ? 'changed' : 'unchanged')
+    } catch (cause) {
+      if (cause?.name !== 'AbortError') delay = nextProjectChangesDelay(delay, 'failed')
+    } finally {
+      controller = null
+      if (!visibility.hidden) schedule(resumeWhenSettled ? 0 : delay)
+      resumeWhenSettled = false
+    }
+  }
+  const onLiveChange = event => {
+    const detail = event?.detail
+    if (String(detail?.projectId ?? '') !== String(projectId)) return
+    void handleChanges(detail?.change ? [detail.change] : [], false)
+    // Pushes may end with an unpublished agent-run completion. Resume the
+    // active cadence, but never postpone an already pending cursor deadline.
+    delay = nextProjectChangesDelay(delay, 'changed')
+    if (controller) pushedDuringPoll = true
+    if (!visibility.hidden && !controller) schedule()
+  }
+  const onVisibility = () => {
+    if (visibility.hidden) {
+      pollTimer.cancel()
+      controller?.abort()
+    } else {
+      if (controller) resumeWhenSettled = true
+      else schedule(0)
+    }
+  }
+  events.addEventListener('mobius:project-change', onLiveChange)
+  visibility.addEventListener('visibilitychange', onVisibility)
+  void poll()
+  return () => {
+    active = false
+    controller?.abort()
+    pollTimer.cancel()
+    events.removeEventListener('mobius:project-change', onLiveChange)
+    visibility.removeEventListener('visibilitychange', onVisibility)
+  }
+}
