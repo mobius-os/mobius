@@ -4,8 +4,8 @@
 No production unit, image, registry write, or daemon is touched. Docker and Compose
 are real. This exercises reconcile/rollback rather than the download/drain
 half of run(); served-generation probing and worker adoption are omitted.
-The timeout happens on a real Compose call after a separate real no-start
-creation. It does not prove delayed daemon API acceptance of that same call.
+The timeout is on the same real Compose mutation whose source-container DELETE
+the daemon has already accepted. It does not prove every delayed daemon race.
 """
 from __future__ import annotations
 
@@ -13,9 +13,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import select
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -42,6 +46,109 @@ def eventually(predicate, seconds=30):
             return
         time.sleep(.25)
     raise AssertionError("condition did not become true")
+
+
+class DockerDeleteBarrier:
+    """Forward one disposable Docker API endpoint, withholding one DELETE reply.
+
+    The daemon completes the exact source-container DELETE before we signal
+    `deleted`. Only its response is withheld, so the *same* Compose up call
+    times out after the destructive daemon boundary. No Docker API is faked.
+    """
+
+    def __init__(self, path: Path, source_cid: str):
+        self.path = path
+        self.source_cid = source_cid.encode()
+        self.deleted = threading.Event()
+        self.release = threading.Event()
+        self.stop = threading.Event()
+        self.threads = []
+        self.sockets = []
+        self.listener = None
+
+    def __enter__(self):
+        if not Path("/var/run/docker.sock").is_socket():
+            raise RuntimeError("hosted Docker Unix socket is unavailable")
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(self.path))
+        self.listener.listen(32)
+        self.listener.settimeout(.2)
+        thread = threading.Thread(target=self._accept, name="docker-delete-barrier")
+        self.threads.append(thread)
+        thread.start()
+        return self
+
+    def _accept(self):
+        while not self.stop.is_set():
+            try:
+                client, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self.sockets.append(client)
+            thread = threading.Thread(target=self._forward, args=(client,),
+                                      name="docker-delete-forward")
+            self.threads.append(thread)
+            thread.start()
+
+    def _forward(self, client):
+        daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sockets.append(daemon)
+        try:
+            daemon.connect("/var/run/docker.sock")
+            watched = False
+            scan = b""
+            held = b""
+            deadline = time.monotonic() + 45
+            pattern = rb"DELETE /(?:v[0-9.]+/)?containers/" + re.escape(self.source_cid) + rb"(?:[? /]|\r|\n)"
+            while not self.stop.is_set() and time.monotonic() < deadline:
+                if held and self.release.is_set():
+                    client.sendall(held)
+                    held = b""
+                readable, _, _ = select.select([client, daemon], [], [], .2)
+                if client in readable:
+                    data = client.recv(65536)
+                    if not data:
+                        break
+                    scan = (scan + data)[-8192:]
+                    if not watched and re.search(pattern, scan):
+                        watched = True
+                    daemon.sendall(data)
+                if daemon in readable:
+                    data = daemon.recv(65536)
+                    if not data:
+                        break
+                    if watched and not self.deleted.is_set():
+                        held += data
+                        if len(held) > 65536:
+                            raise AssertionError("oversized Docker DELETE response")
+                        if b"\r\n\r\n" in held:
+                            status = held.split(b"\r\n", 1)[0]
+                            if not re.match(rb"HTTP/1\.[01] 2[0-9][0-9]", status):
+                                raise AssertionError(f"Docker DELETE failed: {status!r}")
+                            self.deleted.set()
+                    elif held:
+                        held += data
+                    else:
+                        client.sendall(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # Compose was killed at its bounded caller deadline.
+        finally:
+            daemon.close()
+            client.close()
+
+    def __exit__(self, *_):
+        self.release.set()
+        self.stop.set()
+        self.listener.close()
+        self.threads[0].join(timeout=2)  # no new forwarding threads after this
+        for connection in self.sockets:
+            connection.close()
+        for thread in self.threads[1:]:
+            thread.join(timeout=2)
+        self.path.unlink(missing_ok=True)
+        assert all(not thread.is_alive() for thread in self.threads), "Docker proxy thread leaked"
 
 
 def main():
@@ -88,6 +195,7 @@ def main():
 ARG ROLE
 LABEL recovery-proof-role=${ROLE}
 COPY restart_ledger.py /app/runtime/restart_ledger.py
+STOPSIGNAL SIGKILL
 ENTRYPOINT ["/bin/sh", "-c", "[ ${RESTART_BEFORE_BOOT:-0} != 1 ] || exit 2; python3 /app/runtime/restart_ledger.py begin-boot boot-$(cat /proc/sys/kernel/random/uuid) && exec sleep 3600"]
 HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
 ''')
@@ -172,21 +280,27 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
                 transaction["phase"] = "replacement_started"
                 host.write_transaction(transaction)
                 if fault:
-                    # First let real Compose delete the source and create the target.
-                    # Then issue a *real* Compose mutation with a tiny caller deadline.
-                    # This deterministically tests recovery from a timed-out command
-                    # after the destructive boundary, not daemon API acceptance timing.
-                    host.compose(config, "up", "--no-start", "--no-build", "--no-deps",
-                                 "--force-recreate", "app", image=target, timeout=30)
+                    # Pause exactly the daemon's successful DELETE response
+                    # to this source CID. Compose has one real up -d request:
+                    # it may create the target, delete the source, then its
+                    # caller deadline kills the CLI before rename/start.
+                    with DockerDeleteBarrier(base / "docker.sock", cid) as barrier:
+                        with patch.context() as envpatch:
+                            envpatch.setenv("DOCKER_HOST", f"unix://{barrier.path}")
+                            try:
+                                host.compose(config, "up", "-d", "--no-build", "--no-deps",
+                                             "--force-recreate", "app", image=target,
+                                             timeout=20)
+                            except subprocess.TimeoutExpired:
+                                assert barrier.deleted.is_set(), (
+                                    "Compose timed out before daemon accepted source DELETE")
+                            else:
+                                raise AssertionError("Compose did not time out after source DELETE")
+                        barrier.release.set()
+                    assert subprocess.run(["docker", "inspect", cid],
+                                          capture_output=True, timeout=10).returncode != 0
                     _, observed, health = host.container_health(config)
-                    assert observed == target and health == "created"
-                    try:
-                        host.compose(config, "up", "--no-start", "--no-build", "--no-deps",
-                                     "app", image=target, timeout=.000001)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    else:
-                        raise AssertionError("real Compose call did not time out")
+                    assert observed == target and health == "created", (observed, health)
                 else:
                     if restarting:
                         with patch.context() as envpatch:

@@ -6,7 +6,8 @@
 # don't have to be reconstructed from memory.
 #
 # Usage:
-#   scripts/deploy-prod.sh                  # full deploy (build, recreate, rebuild frontend, verify)
+#   sudo /absolute/path/to/trusted-checkout/scripts/deploy-prod.sh
+#                                           # full helper-managed prod deploy (build, recreate, verify)
 #   scripts/deploy-prod.sh --skip-build     # skip docker compose build (useful when image is already current)
 #   scripts/deploy-prod.sh --yes            # don't prompt before `docker compose build`
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
@@ -1074,6 +1075,20 @@ if [ -z "$RUNNING_CID" ] || [ -z "$PREV_IMAGE" ]; then
 fi
 
 # The per-user deploy lock does not serialize the root replacement helper.
+# Refuse an unprivileged helper-managed production deploy before an expensive
+# build. Do not elevate automatically or alter the helper's private lock.
+preflight_helper_deploy_privilege() {
+  local state=/var/lib/mobius-rebuild config=/etc/mobius-rebuild
+  [ "$TARGET" = "prod" ] || return 0
+  if [ -e "$state" ] || [ -L "$state" ] || \
+     [ -e "$config" ] || [ -L "$config" ]; then
+    if [ "$EUID" -ne 0 ]; then
+      fail "the root replacement helper is installed; run this production deployment with sudo from a trusted checkout, or use the Settings helper"
+      return 1
+    fi
+  fi
+}
+
 # Take its *existing* private lock only after build/preflight, immediately
 # before touching the live app or cutover ledger. FD 8 stays open through
 # health verification, receipt finalization, and any rollback. Never create
@@ -1410,6 +1425,8 @@ if [ "$TARGET" = "prod" ]; then
     fi
   fi
 fi
+
+preflight_helper_deploy_privilege
 
 # ── step 1: build (with cache-prune guard) ─────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then

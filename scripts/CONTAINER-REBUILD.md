@@ -122,8 +122,26 @@ fail during installation rather than during a rebuild.
 
 For an owner-controlled image built from a trusted local checkout, run
 `scripts/deploy-prod.sh` on that Docker host through whatever operator access is
-already available. Connect is one optional way to reach the host, not a product
-dependency. That path scratch-boots the exact locally built image before
+already available. When the root replacement helper is installed, its lock is
+root-owned in a private directory, so the **entire production deploy** must run
+with host privileges, not just the final Compose command. From the trusted,
+current host checkout, use an absolute script path, for example:
+
+```sh
+sudo /absolute/path/to/trusted-checkout/scripts/deploy-prod.sh
+```
+
+The script refuses an unprivileged helper-managed production deploy before its
+expensive build. It does not elevate itself or relax the lock permissions.
+`--check` remains verification-only and `--target=test` does not require the
+production helper lock. `sudo` can change `HOME`, Git identity/configuration,
+safe-directory trust, and credential access, which matter to this script's Git
+fetch and release checks. Verify the privileged invocation can read the trusted
+checkout and configured release remote before deploying; use narrowly scoped
+Git configuration if needed, **not** broad environment preservation such as
+`sudo -E`. Alternatively, use the reviewed Settings update through the installed
+helper rather than a manual deploy. Connect is one optional way to reach the
+host, not a product dependency. The manual path scratch-boots the exact locally built image before
 cutover and uses the same authenticated chat handoff and rollback contract.
 It can carry image-definition and protected-runtime changes. A release that
 changes Python packages stops before source installation when the running image
