@@ -73,7 +73,7 @@ def _service_app(db: Session, service_id: str) -> models.App | None:
 
 async def _envelope(
   request: Request, path: str, *, public: bool, actor: dict,
-  max_bytes: int, admission: app_services.RequestAdmission,
+  max_bytes: int, admission: app_services.ServiceExchangeAdmission,
 ) -> dict:
   # `tools/` belongs to the platform's agent-tool lane (app_tools.call_app_tool),
   # whose `call` a service trusts as the moment an agent called it. An HTTP
@@ -129,7 +129,7 @@ async def authenticated_app_service(
   if principal.app_id is not None and principal.app_id != app.id:
     raise HTTPException(403, "An app can invoke only its own service.")
   service = app_services.service_contract(app, access="self")
-  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
     envelope = await _envelope(
       request, path, public=False,
       max_bytes=app_services.service_max_bytes(service), admission=admission,
@@ -168,7 +168,7 @@ async def shared_app_service(
     raise HTTPException(403, "Calling app is unavailable.")
   required = "self" if principal.app_id in {None, target.id} else "apps"
   service = app_services.service_contract(target, access=required)
-  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
     envelope = await _envelope(
       request, path, public=False,
       max_bytes=app_services.service_max_bytes(service), admission=admission,
@@ -201,7 +201,7 @@ async def public_app_service(
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
-  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
     envelope = await _envelope(
       request, path, public=True, actor={"scope": "public"},
       max_bytes=app_services.service_max_bytes(service), admission=admission,

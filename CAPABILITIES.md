@@ -168,28 +168,37 @@ metadata), before any binary response is decoded. Requests exceeding the
 accepted limit are rejected while streaming, before the whole body is buffered;
 the platform's independent 64 MiB HTTP request backstop remains in force.
 
-Request admission also bounds decoded resources independently of serialized
-bytes: at most 262,144 structural marks (string openings, container openings,
-commas and colons outside strings), nesting depth 64, and a conservative
-320 MiB decoded-resource estimate. The estimate includes Unicode text, string
-storage and 256 bytes per structural mark. A bounded lexical scan checks these
-limits before the standard-library JSON parser materializes the HTTP body;
-punctuation inside strings does not consume structural marks. The complete
-request envelope, including tool and policy requests, has the same depth and
-decoded-cost ceilings and at most 262,144 visited values/keys. Large base64
-scalars, a 20 MiB original, and galleries fitting the reviewed 60 MiB serialized
-grant remain supported.
+Service exchange admission also bounds decoded resources independently of
+serialized bytes, in both directions: at most 262,144 structural marks (string
+openings, container openings, commas and colons outside strings), nesting
+depth 64, and a conservative 320 MiB decoded-resource estimate per direction.
+The estimate includes Unicode text, string storage and 256 bytes per
+structural mark. A bounded lexical scan checks these limits before the
+standard-library JSON parser materializes either the HTTP request or service
+stdout; punctuation inside strings does not consume structural marks. The
+complete request envelope, including tool and policy requests, also has the
+same depth and decoded-cost ceilings and at most 262,144 visited values/keys.
+Large base64 scalars, 20 MiB originals/downloads, and galleries fitting the
+reviewed 60 MiB serialized grant remain supported.
 
-One process-wide 512 MiB estimated request budget covers body reading,
-decoding, serialization, and retained execution backlog across all lanes.
-Each request reserves three times its accepted serialized ceiling before body
-reading, plus its decoded-resource estimate before materialization; the larger
-reservation remains held until invocation/HTTP response construction ends.
-Budget exhaustion rejects immediately rather than retaining another queued
-body. Serialized, structural, decoded-cost, and admission-budget violations
-return HTTP 413; malformed JSON within these resource bounds still returns
-400. These are conservative admission estimates, not an operating-system RSS
-limit or a reduction of the reviewed serialized media allowance.
+One process-wide 512 MiB estimated exchange budget covers body/stdio reading,
+decoding, serialization, retained execution backlog and response handoff
+across all lanes. Each exchange reserves three times its accepted serialized
+ceiling for simultaneous raw, pipe/buffer and encoder copies, plus decoded
+cost before materialization. Once request decoding is complete, its freed
+transient Unicode copy is replaced by the retained envelope estimate; the
+response estimate is added to that request cost, never substituted for it.
+The combined reservation stays held through HTTP response construction or the
+tool/policy result handoff. Budget exhaustion rejects immediately rather than
+retaining another queued body. Request resource/admission violations return
+HTTP 413; malformed requests within the resource bounds still return 400.
+Service response structural, decoded-cost or combined-budget violations
+return 502, as do malformed service responses. The existing serialized-output
+execution limits are unchanged. These are conservative admission estimates,
+not an operating-system RSS limit or a reduction of the reviewed serialized
+media allowance; both directions share the exchange budget. Outbound ASGI
+sending after Response construction and downstream consumers retaining a
+handed-off tool/policy result are outside this exchange reservation.
 
 Starting a fresh interpreter costs most services far more than their work
 (roughly a second for a FastAPI entry). An entry can declare a top-level

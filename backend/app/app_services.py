@@ -66,14 +66,14 @@ _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
 )
 
 
-# This is an allocation budget, not another serialized transfer grant. It is
-# shared by every lane and held through the execution queue. Admission never
-# queues an already-buffered/decoded payload when the budget is exhausted.
-MAX_REQUEST_STRUCTURE = 262_144
-MAX_REQUEST_DEPTH = 64
-MAX_REQUEST_DECODE_COST = 320 * 1024 * 1024
-MAX_ADMITTED_REQUEST_COST = 512 * 1024 * 1024
-_admitted_request_cost = 0
+# This is an exchange allocation budget, not another transfer grant. It is
+# shared by every lane and held through the execution queue and response
+# handoff. Exhaustion never queues an already-buffered/decoded payload.
+MAX_JSON_STRUCTURE = 262_144
+MAX_JSON_DEPTH = 64
+MAX_JSON_DECODE_COST = 320 * 1024 * 1024
+MAX_ADMITTED_EXCHANGE_COST = 512 * 1024 * 1024
+_admitted_exchange_cost = 0
 _JSON_RESOURCE_MARKS = re.compile(r'["\\{}\[\],:]')
 _JSON_STRING_MARKS = re.compile(r'["\\]')
 _JSON_WIDE_TEXT = re.compile(r'[^\x00-\xff]')
@@ -88,46 +88,66 @@ def _json_text_width(text: str, start: int = 0, end: int | None = None) -> int:
   )
 
 
-class RequestAdmission:
-  """Own body materialization and retained request memory before execution.
+class ServiceExchangeAdmission:
+  """Own request/response materialization, retained backlog and response handoff.
 
   The lexical scan measures resources only; stdlib JSON remains the sole
   syntax/value parser. Incremental stdlib text decoding and fixed-size scan
   chunks avoid constructing either the JSON tree or a full Unicode copy first.
   Estimates deliberately overcount duplicate keys, escapes and shared values.
-  Three transfer ceilings reserve raw/buffer/encoder copies; a separate cost
-  accounts for Unicode text and decoded objects, including queued requests.
+  Three transfer ceilings cover simultaneous raw, pipe/buffer and encoder
+  copies. Request and response decoded costs are added, never substituted.
+  After request materialization its transient Unicode decode copy is gone;
+  retain() charges the surviving envelope before execution. The response's
+  decode/encode estimate stays held through HTTP rendering or tool handoff.
   """
 
   def __init__(self, max_bytes: int):
     self.max_bytes = max_bytes
     self.cost = 0
+    self.request_cost = 0
+    self.response_cost = 0
 
   def __enter__(self):
     self._reserve(3 * self.max_bytes)
     return self
 
   def __exit__(self, *_):
-    global _admitted_request_cost
-    _admitted_request_cost -= self.cost
+    global _admitted_exchange_cost
+    _admitted_exchange_cost -= self.cost
     self.cost = 0
+    self.request_cost = 0
+    self.response_cost = 0
 
-  def _reserve(self, cost: int):
-    global _admitted_request_cost
+  def _reserve(self, cost: int, *, direction: str = "request"):
+    global _admitted_exchange_cost
     # No await between checking and reserving: all callers run on the owning
     # event loop, including HTTP, policy and agent-tool invocations.
-    if _admitted_request_cost - self.cost + cost > MAX_ADMITTED_REQUEST_COST:
-      raise HTTPException(413, "App service request admission budget is exhausted.")
-    _admitted_request_cost += cost - self.cost
+    if _admitted_exchange_cost - self.cost + cost > MAX_ADMITTED_EXCHANGE_COST:
+      self._reject(direction, "admission budget is exhausted")
+    _admitted_exchange_cost += cost - self.cost
     self.cost = cost
 
-  def _decoded_cost(self, cost: int):
-    if cost > MAX_REQUEST_DECODE_COST:
-      raise HTTPException(413, "App service request decoded resource limit exceeded.")
-    self._reserve(max(self.cost, 3 * self.max_bytes + cost))
+  def _reject(self, direction: str, detail: str):
+    raise HTTPException(502 if direction == "response" else 413, f"App service {direction} {detail}.")
+
+  def _decoded_cost(self, cost: int, *, direction: str = "request"):
+    if cost > MAX_JSON_DECODE_COST:
+      self._reject(direction, "decoded resource limit exceeded")
+    request_cost = cost if direction == "request" else self.request_cost
+    response_cost = cost if direction == "response" else self.response_cost
+    self._reserve(3 * self.max_bytes + request_cost + response_cost, direction=direction)
+    self.request_cost = request_cost
+    self.response_cost = response_cost
 
   def decode(self, raw: bytes):
-    if not raw:
+    return self._decode(raw, direction="request")
+
+  def decode_response(self, raw: bytes):
+    return self._decode(raw, direction="response")
+
+  def _decode(self, raw: bytes, *, direction: str):
+    if not raw and direction == "request":
       return None
     decoder = codecs.getincrementaldecoder(json.detect_encoding(raw))("surrogatepass")
     in_string = False
@@ -140,6 +160,7 @@ class RequestAdmission:
     depth = 0
     decoded_cost = 0
     offset = 0
+    cost = 64
     for start in range(0, len(raw), 64 * 1024):
       chunk = decoder.decode(raw[start:start + 64 * 1024], final=start + 64 * 1024 >= len(raw))
       text_length += len(chunk)
@@ -181,8 +202,8 @@ class RequestAdmission:
           depth -= 1
         elif char in ",:":
           structures += 1
-        if structures > MAX_REQUEST_STRUCTURE or depth > MAX_REQUEST_DEPTH:
-          raise HTTPException(413, "App service request structural resource limit exceeded.")
+        if structures > MAX_JSON_STRUCTURE or depth > MAX_JSON_DEPTH:
+          self._reject(direction, "structural resource limit exceeded")
         last = index + 1
       if in_string:
         string_length += len(chunk) - last
@@ -193,9 +214,9 @@ class RequestAdmission:
       cost = decoded_cost + structures * 256 + text_length * text_width + 64
       if in_string:
         cost += 64 + string_length * string_width
-      if cost > MAX_REQUEST_DECODE_COST:
-        raise HTTPException(413, "App service request decoded resource limit exceeded.")
-    self._decoded_cost(cost)
+      if cost > MAX_JSON_DECODE_COST:
+        self._reject(direction, "decoded resource limit exceeded")
+    self._decoded_cost(cost, direction=direction)
     return json.loads(raw, parse_constant=_reject_json_constant)
 
   def retain(self, value):
@@ -206,10 +227,10 @@ class RequestAdmission:
     def visit(item, depth):
       nonlocal nodes, cost
       nodes += 1
-      if nodes > MAX_REQUEST_STRUCTURE or depth > MAX_REQUEST_DEPTH:
+      if nodes > MAX_JSON_STRUCTURE or depth > MAX_JSON_DEPTH:
         raise HTTPException(413, "App service request structural resource limit exceeded.")
       cost += 256 + sys.getsizeof(item)
-      if cost > MAX_REQUEST_DECODE_COST:
+      if cost > MAX_JSON_DECODE_COST:
         raise HTTPException(413, "App service request decoded resource limit exceeded.")
       if isinstance(item, dict):
         for key, child in item.items():
@@ -523,12 +544,12 @@ async def invoke_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
   lane: str | None = None,
-  admission: RequestAdmission | None = None,
+  admission: ServiceExchangeAdmission | None = None,
 ) -> tuple[int, object, dict[str, str], str | None]:
   service = service_contract(app, access="public" if request_envelope.get("public") is True else "self")
   boundary = (
     contextlib.nullcontext(admission) if admission is not None
-    else RequestAdmission(service_max_bytes(service))
+    else ServiceExchangeAdmission(service_max_bytes(service))
   )
   with boundary as admitted:
     # HTTP admission already covers decoding. Also account for the envelope
@@ -536,6 +557,7 @@ async def invoke_service(
     admitted.retain(request_envelope)
     return await _invoke_admitted_service(
       app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
+      admission=admitted,
     )
 
 
@@ -543,6 +565,7 @@ async def _invoke_admitted_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
   lane: str | None = None,
+  admission: ServiceExchangeAdmission,
 ) -> tuple[int, object, dict[str, str], str | None]:
   public = request_envelope.get("public") is True
   service = service_contract(app, access="public" if public else "self")
@@ -640,7 +663,7 @@ async def _invoke_admitted_service(
         if not calls:
           _browser_calls.pop(grant_id, None)
   try:
-    response = json.loads(stdout, parse_constant=_reject_json_constant)
+    response = admission.decode_response(stdout)
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
     raise HTTPException(502, "App service returned invalid JSON.") from exc
   if not isinstance(response, dict) or set(response) - {
