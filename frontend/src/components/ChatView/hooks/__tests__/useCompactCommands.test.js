@@ -108,6 +108,16 @@ test('failed compact restores the submitted slash command without losing a newer
   assert.equal(hook.result.current.compactProgressRecord.progress.recovery_id, 'saved')
 })
 
+test('failed compaction restores a literal draft through the persistence owner', async t => {
+  const { hook, posts, drafts } = setup(t)
+  const submitted = '/compact Preserve key decisions'
+  const action = hook.result.current.runCompactCommand('Preserve key decisions', submitted)
+  posts[0].reject(new Error('POST failed'))
+  await action
+  assert.deepEqual(drafts, ['', submitted], 'restoration passes the literal draft, not a state updater')
+  assert.equal(hook.result.current.compactingChat, false)
+})
+
 test('chat switch cancels status GET and fences late GET/POST errors, draft restoration, and readback', async t => {
   const { hook, props, reads, posts, drafts, failures, messages } = setup(t)
   const action = hook.result.current.runCompactCommand()
