@@ -389,9 +389,40 @@ def test_live_trial_without_journal_cannot_lose_recovery_pin(state, monkeypatch)
   assert _index(state)["recovery"] is None  # trial itself settled without a journal
 
 
-def test_killed_launcher_child_keeps_trial_lock_until_journal(state, monkeypatch):
-  """The worker can outlive its launcher between Popen and journaling."""
+def test_active_reconcile_cannot_run_after_a_new_candidate_pin(state, monkeypatch):
+  _with_candidate(state)
+  nested = []
+
+  def while_active_selected():
+    nested.append(_run_launcher(monkeypatch, {2: (0, None, None)}, "run"))
+    assert _index(state).get("recovery") is None
+
+  result, calls = _run_launcher(monkeypatch, {1: (0, None, while_active_selected)},
+                                "reconcile")
+  assert (result, calls) == (0, [(1, "reconcile")])
+  assert nested == [(1, [])]
+  assert _index(state)["candidate"]["revision"] == 2
+
+
+def test_active_run_blocks_a_new_trial_until_it_finishes(state, monkeypatch):
   host.seed_worker(worker(1))
+  nested = []
+
+  def while_active_running():
+    assert host.offer_worker(worker(2), IMAGE_ID).startswith("offered")
+    nested.append(_run_launcher(monkeypatch, {2: (0, None, None)}, "run"))
+    assert _index(state).get("recovery") is None
+
+  result, calls = _run_launcher(monkeypatch, {1: (0, None, while_active_running)})
+  assert (result, calls) == (0, [(1, "run")])
+  assert nested == [(1, [])]
+  assert _index(state)["candidate"]["revision"] == 2
+  assert _run_launcher(monkeypatch, {2: (0, None, None)})[1] == [(2, "run")]
+
+
+@pytest.mark.parametrize("trial", [False, True])
+def test_killed_launcher_child_keeps_trial_lock_until_journal(state, monkeypatch, trial):
+  """The worker can outlive its launcher between Popen and journaling."""
   body = f"""import os, sys, time
 from pathlib import Path
 base = Path({str(state)!r})
@@ -404,7 +435,12 @@ if sys.argv[1] == 'run':
 elif sys.argv[1] == 'reconcile':
     (base / 'transaction.json').unlink(missing_ok=True)
 """
-  assert host.offer_worker(worker(2, body), IMAGE_ID).startswith("offered")
+  if trial:
+    host.seed_worker(worker(1))
+    assert host.offer_worker(worker(2, body), IMAGE_ID).startswith("offered")
+  else:
+    # An active worker must inherit the same fence at the prejournal boundary.
+    host.seed_worker(worker(1, body))
   monkeypatch.setattr(launcher.os, "geteuid", lambda: 0)
   monkeypatch.setattr(launcher, "PYTHON", sys.executable)
   # Start a fresh interpreter: forking the threaded pytest process can itself
@@ -446,16 +482,19 @@ raise SystemExit(module.main(['launcher', 'run']))
     assert process.poll() is not None
     assert not launcher.TRANSACTION.exists()
     assert launcher.main(["launcher", "reconcile"]) == 0
-    assert _index(state)["recovery"]["revision"] == 2
+    if trial:
+      assert _index(state)["recovery"]["revision"] == 2
+    else:
+      assert _index(state).get("recovery") is None
     (state / "release-child").touch()
     while not (state / "child-done").exists() and time.monotonic() < deadline:
       time.sleep(0.01)
     assert (state / "child-done").exists()
     assert launcher.TRANSACTION.exists()
-    while _index(state)["recovery"] is not None and time.monotonic() < deadline:
+    while (launcher.TRANSACTION.exists() or _index(state).get("recovery") is not None) and time.monotonic() < deadline:
       launcher.main(["launcher", "reconcile"])
       time.sleep(0.01)
-    assert _index(state)["recovery"] is None
+    assert _index(state).get("recovery") is None
     assert _index(state)["active"]["revision"] == 1
     assert not launcher.TRANSACTION.exists()
   finally:
@@ -847,7 +886,9 @@ def test_a_candidate_taken_by_someone_else_is_not_run(state, monkeypatch):
   host.offer_worker(worker(3), IMAGE_ID)  # the record changes before the trial
   calls = []
   monkeypatch.setattr(launcher, "execute", lambda entry, cmd: calls.append(entry) or 0)
-  assert launcher.try_candidate(loaded["candidate"], loaded["active"]["sha256"]) == 1
+  with launcher.TRIAL_LOCK.open("a+") as dispatch:
+    assert launcher.try_candidate(loaded["candidate"], loaded["active"]["sha256"],
+                                  dispatch.fileno()) == 1
   assert not calls and _index(state)["candidate"]["revision"] == 3
 
 

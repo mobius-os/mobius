@@ -133,6 +133,8 @@ sudo /absolute/path/to/trusted-checkout/scripts/deploy-prod.sh
 
 The script refuses an unprivileged helper-managed production deploy before its
 expensive build. It does not elevate itself or relax the lock permissions.
+Privileged invocations use `/run/mobius-deploy` for their deployment lock,
+ignoring caller-controlled cache paths and refusing symlink lock files.
 `--check` remains verification-only and `--target=test` does not require the
 production helper lock. `sudo` can change `HOME`, Git identity/configuration,
 safe-directory trust, and credential access, which matter to this script's Git
@@ -214,8 +216,10 @@ worker is ever offered again.
 The launcher moves a candidate into a durable recovery-owner pin before its
 one trial. Only that exact, hash-verified worker reconciles its unfinished
 transaction; the old active worker cannot interpret a new worker's preboot
-stages. A separate trial lock survives launcher death in the child process,
-including the window before the worker creates its journal. Neither recovery
+stages. All worker selection and execution share one dispatch lock, inherited
+by active, candidate and recovery children. It survives launcher death,
+including the window before the worker creates its journal, so a stale active
+selection cannot bypass a newly pinned owner. Neither recovery
 nor an interrupted launcher replays the candidate's original `run`.
 
 A fresh successful outcome promotes the candidate only when its recorded

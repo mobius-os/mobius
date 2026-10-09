@@ -193,31 +193,26 @@ def _clear_recovery(recovery: dict) -> None:
     _update(clear)
 
 
-def recover_pinned(recovery: dict) -> tuple[int, bool]:
+def recover_pinned(recovery: dict, dispatch_fd: int) -> tuple[int, bool]:
     """Resume only the pinned worker; never replay its original run."""
-    with TRIAL_LOCK.open("a+") as trial:
-        try:
-            fcntl.flock(trial, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0, True  # original trial may still be before journaling
-        pending = []
-        promoted = []
+    pending = []
+    promoted = []
 
-        def inspect(stored):
-            if not _same_worker(stored.get("recovery"), recovery):
-                return
-            if _pending_transaction():
-                pending.append(True)
-            else:
-                if _settle_recovery(stored, recovery):
-                    promoted.append(True)
+    def inspect(stored):
+        if not _same_worker(stored.get("recovery"), recovery):
+            return
+        if _pending_transaction():
+            pending.append(True)
+        else:
+            if _settle_recovery(stored, recovery):
+                promoted.append(True)
 
-        _update(inspect)
-        if not pending:
-            return 0, bool(promoted)
-        result = execute(recovery, "reconcile", trial_fd=trial.fileno())
-        _clear_recovery(recovery)
-        return result, True
+    _update(inspect)
+    if not pending:
+        return 0, bool(promoted)
+    result = execute(recovery, "reconcile", trial_fd=dispatch_fd)
+    _clear_recovery(recovery)
+    return result, True
 
 
 def execute(worker: dict, command: str, *, trial_fd: int | None = None) -> int:
@@ -228,60 +223,55 @@ def execute(worker: dict, command: str, *, trial_fd: int | None = None) -> int:
     ).returncode
 
 
-def try_candidate(candidate: dict, replaced: str) -> int:
+def try_candidate(candidate: dict, replaced: str, dispatch_fd: int) -> int:
     """Run one replacement with the candidate, taken out of the record first."""
-    with TRIAL_LOCK.open("a+") as trial:
-        try:
-            fcntl.flock(trial, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 1
-        taken = []
-        pinned = []
-        before = []
+    taken = []
+    pinned = []
+    before = []
 
-        def take(stored):
-            if (_same_worker(stored.get("candidate"), candidate)
-                    and not stored.get("recovery")
-                    and (stored.get("active") or {}).get("sha256") == replaced):
-                stored["candidate"] = None
-                baseline = _status()
-                try:
-                    prior_operation = json.loads(baseline).get("operation_id")
-                except (ValueError, AttributeError):
-                    prior_operation = None
-                recovery = {**_record(candidate),
-                            "trial_replaced_sha": replaced,
-                            "trial_status_sha256": hashlib.sha256(baseline).hexdigest(),
-                            "trial_operation_id": prior_operation}
-                stored["recovery"] = recovery
-                pinned.append(recovery)
-                before.append(baseline)
-                taken.append(True)
+    def take(stored):
+        if (_same_worker(stored.get("candidate"), candidate)
+                and not stored.get("recovery")
+                and (stored.get("active") or {}).get("sha256") == replaced):
+            stored["candidate"] = None
+            baseline = _status()
+            try:
+                prior_operation = json.loads(baseline).get("operation_id")
+            except (ValueError, AttributeError):
+                prior_operation = None
+            recovery = {**_record(candidate),
+                        "trial_replaced_sha": replaced,
+                        "trial_status_sha256": hashlib.sha256(baseline).hexdigest(),
+                        "trial_operation_id": prior_operation}
+            stored["recovery"] = recovery
+            pinned.append(recovery)
+            before.append(baseline)
+            taken.append(True)
 
-        _update(take)
-        if not taken:
-            return 1  # the record changed first; the next run reads it afresh
-        # The child keeps the trial lock if the launcher is killed after
-        # Popen but before the worker acquires replace.lock or journals.
-        result = execute(candidate, "run", trial_fd=trial.fileno())
-        after = _status()
-        def settle(stored):
-            if not _same_worker(stored.get("recovery"), pinned[0]):
-                return
-            if _pending_transaction():
-                return  # only this worker may finish its journal
-            stored["recovery"] = None
-            if (stored.get("active") or {}).get("sha256") != replaced:
-                return  # a newer worker was installed while it ran
-            if after == before[0] and result == 0:
-                # Nothing was queued: the candidate has not been tried.
-                if stored.get("high_water") == candidate["revision"] and not stored.get("candidate"):
-                    stored["candidate"] = _record(candidate)
-            elif _attributable_success(pinned[0], after):
-                stored["active"] = _record(candidate)
+    _update(take)
+    if not taken:
+        return 1  # the record changed first; the next run reads it afresh
+    # The child keeps the dispatch lock if the launcher is killed after
+    # Popen but before the worker acquires replace.lock or journals.
+    result = execute(candidate, "run", trial_fd=dispatch_fd)
+    after = _status()
+    def settle(stored):
+        if not _same_worker(stored.get("recovery"), pinned[0]):
+            return
+        if _pending_transaction():
+            return  # only this worker may finish its journal
+        stored["recovery"] = None
+        if (stored.get("active") or {}).get("sha256") != replaced:
+            return  # a newer worker was installed while it ran
+        if after == before[0] and result == 0:
+            # Nothing was queued: the candidate has not been tried.
+            if stored.get("high_water") == candidate["revision"] and not stored.get("candidate"):
+                stored["candidate"] = _record(candidate)
+        elif _attributable_success(pinned[0], after):
+            stored["active"] = _record(candidate)
 
-        _update(settle)
-        return result
+    _update(settle)
+    return result
 
 
 def main(argv: list[str]) -> int:
@@ -290,21 +280,33 @@ def main(argv: list[str]) -> int:
             or argv[1] not in {"run", "reconcile"}):
         print("invalid invocation", file=sys.stderr)
         return 2
+    # Selection, pinning and execution share one lifetime fence. The worker
+    # inherits it so a killed launcher cannot admit a conflicting dispatch
+    # before its child has reached (or finished) the transaction journal.
+    with TRIAL_LOCK.open("a+") as dispatch:
+        try:
+            fcntl.flock(dispatch, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0 if argv[1] == "reconcile" else 1
+        return _dispatch(argv[1], dispatch.fileno())
+
+
+def _dispatch(command: str, dispatch_fd: int) -> int:
     index = load_index()
     if index is None:
         print("no verified replacement worker is installed; rerun "
               "scripts/install-rebuild-helper.sh", file=sys.stderr)
         return 1
     if index["recovery"]:
-        result, reconciled = recover_pinned(index["recovery"])
+        result, reconciled = recover_pinned(index["recovery"], dispatch_fd)
         if result != 0 or reconciled:
             return result
         index = load_index()
         if index is None or index["recovery"]:
             return 0 if index is not None else 1
-    if argv[1] == "run" and index["candidate"]:
-        return try_candidate(index["candidate"], index["active"]["sha256"])
-    return execute(index["active"], argv[1])
+    if command == "run" and index["candidate"]:
+        return try_candidate(index["candidate"], index["active"]["sha256"], dispatch_fd)
+    return execute(index["active"], command, trial_fd=dispatch_fd)
 
 
 if __name__ == "__main__":

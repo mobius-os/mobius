@@ -168,6 +168,7 @@ def main():
     projects = []
     patch = pytest.MonkeyPatch()
     original_command = host.docker_command
+    original_wait_healthy = host.wait_healthy
     def cleanup():
         for project in reversed(projects):
             found = subprocess.run(["docker", "ps", "-aq", "--filter",
@@ -210,6 +211,7 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
             def scenario(name, *, fault=False, readiness_delay=0, expired=False,
                          duplicates=False, missing=False, interrupt=False,
                          stale=False, restarting=False):
+                print(f"recovery scenario: {name}", flush=True)
                 project = f"recovery-{token}-{name}"
                 projects.append(project)
                 base = root / name
@@ -247,7 +249,10 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
                 ledger = _load_supervisor()
                 _bind(ledger, data, patch)
                 patch.setattr(host, "ROLLBACK_HEALTH_SECONDS", 12)
-                patch.setattr(host, "TARGET_HEALTH_SECONDS", 12)
+                # The production function's default was bound at import time;
+                # changing its constant alone leaves a ten-minute test wait.
+                patch.setattr(host, "wait_healthy", lambda c, timeout=12:
+                              original_wait_healthy(c, timeout))
                 patch.setattr(host, "COMPOSE_MUTATION_SECONDS", 12)
                 patch.setattr(host, "verify_served_generation", lambda *_: None)
                 patch.setattr(host, "retain_images", lambda *_: None)

@@ -1011,15 +1011,64 @@ fi
 # container at once race (recreate clobbers, half-built frontend dist). Take
 # a non-blocking per-target flock; the fd stays open for the script's life
 # and releases on exit. (--check above skips this — it doesn't deploy.)
-# Lock in a user-private 0700 dir, not world-writable /tmp — a local
-# symlink in /tmp could otherwise redirect the open (fd 9 is opened for
-# write). `install -d` guarantees the dir is ours, so dropping the old
-# `|| true` is safe: a failed open is now fatal (via set -e), not a
-# silently-unbound fd 9 that would make the lock a no-op.
-DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
-install -d -m 0700 "$DEPLOY_LOCK_DIR"
-DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
-exec 9>"$DEPLOY_LOCK"
+# A privileged invocation must never resolve HOME/XDG_CACHE_HOME: sudo can
+# retain either, and `install -d` does not repair an existing user-owned dir.
+# Keep its lock below a fixed root-owned parent instead. The parent is not
+# writable by unprivileged users, so validation and open cannot be raced by
+# one. Open read/write without truncating an existing inode.
+initialize_deploy_lock() {
+  if [ "$EUID" -eq 0 ]; then
+    DEPLOY_LOCK_PARENT=/run
+    local parent_mode
+    parent_mode=$(stat -c '%a' -- "$DEPLOY_LOCK_PARENT")
+    if [ -L "$DEPLOY_LOCK_PARENT" ] || [ ! -d "$DEPLOY_LOCK_PARENT" ] ||
+       [ "$(stat -c '%u' -- "$DEPLOY_LOCK_PARENT")" != 0 ] ||
+       (( (8#$parent_mode & 0022) != 0 )); then
+      fail "deploy lock parent must be root-owned and not writable by users: $DEPLOY_LOCK_PARENT"
+      return 1
+    fi
+    DEPLOY_LOCK_DIR="$DEPLOY_LOCK_PARENT/mobius-deploy"
+    if [ -L "$DEPLOY_LOCK_DIR" ]; then
+      fail "deploy lock directory is a symlink: $DEPLOY_LOCK_DIR"
+      return 1
+    fi
+    if [ ! -e "$DEPLOY_LOCK_DIR" ]; then
+      mkdir -m 0700 -- "$DEPLOY_LOCK_DIR"
+    fi
+    if [ -L "$DEPLOY_LOCK_DIR" ] || [ ! -d "$DEPLOY_LOCK_DIR" ] ||
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK_DIR")" != '0:700' ]; then
+      fail "deploy lock directory must be root-owned mode 0700: $DEPLOY_LOCK_DIR"
+      return 1
+    fi
+    DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+    if [ -L "$DEPLOY_LOCK" ] || { [ -e "$DEPLOY_LOCK" ] && [ ! -f "$DEPLOY_LOCK" ]; }; then
+      fail "deploy lock must be a regular file, not a symlink: $DEPLOY_LOCK"
+      return 1
+    fi
+    if [ -e "$DEPLOY_LOCK" ] &&
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK")" != '0:600' ]; then
+      fail "deploy lock must be root-owned mode 0600: $DEPLOY_LOCK"
+      return 1
+    fi
+    local previous_umask
+    previous_umask=$(umask)
+    umask 077
+    exec 9<>"$DEPLOY_LOCK"
+    umask "$previous_umask"
+    if [ ! -f "$DEPLOY_LOCK" ] ||
+       [ "$(stat -c '%u:%a' -- "$DEPLOY_LOCK")" != '0:600' ]; then
+      fail "deploy lock changed during open: $DEPLOY_LOCK"
+      return 1
+    fi
+  else
+    # Preserve the ordinary per-user lock contract for non-root/test deploys.
+    DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
+    install -d -m 0700 "$DEPLOY_LOCK_DIR"
+    DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+    exec 9<>"$DEPLOY_LOCK"
+  fi
+}
+initialize_deploy_lock
 if command -v flock >/dev/null 2>&1; then
   if ! flock -n 9; then
     fail "another ${TARGET} deploy is already running (lock: ${DEPLOY_LOCK})."

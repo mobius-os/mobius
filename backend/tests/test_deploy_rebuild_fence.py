@@ -194,3 +194,96 @@ echo CUTOVER_ALLOWED
   finally:
     subprocess.run(["sudo", "-n", "rm", "-rf", "--", str(state), str(config)],
                    check=True)
+
+
+@pytest.mark.parametrize("target", ["prod", "test"])
+def test_privileged_deploy_lock_ignores_retained_user_cache_and_never_truncates(
+    tmp_path, target,
+):
+  """Real root open against a disposable root-owned target, not /run or Docker."""
+  if os.geteuid() == 0 or shutil.which("sudo") is None or subprocess.run(
+    ["sudo", "-n", "true"], capture_output=True, check=False,
+  ).returncode != 0:
+    pytest.skip("requires non-root runner with passwordless sudo")
+
+  cache = tmp_path / "attacker-cache"
+  cache.mkdir(mode=0o700)
+  (cache / "mobius").mkdir(mode=0o700)
+  root_parent = tmp_path / "root-parent"
+  root_dir = root_parent / "mobius-deploy"
+  victim = tmp_path / "root-owned-victim"
+  subprocess.run(["sudo", "-n", "install", "-d", "-m", "0755", str(root_parent)],
+                 check=True)
+  subprocess.run(["sudo", "-n", "install", "-m", "0600", "/dev/null",
+                  str(victim)], check=True)
+  subprocess.run(["sudo", "-n", "bash", "-c",
+                  'printf "DO_NOT_TRUNCATE" > "$1"', "fixture", str(victim)],
+                 check=True)
+  (cache / "mobius" / f"deploy-{target}.lock").symlink_to(victim)
+  function = _function("initialize_deploy_lock").replace(
+    "DEPLOY_LOCK_PARENT=/run", f"DEPLOY_LOCK_PARENT={root_parent}",
+  )
+  script = f'''set -euo pipefail
+fail() {{ echo "$*" >&2; }}
+TARGET={target}
+{function}
+initialize_deploy_lock
+flock -n 9
+echo LOCKED
+'''
+  try:
+    result = subprocess.run(
+      ["sudo", "-n", "env", f"HOME={cache}", f"XDG_CACHE_HOME={cache}",
+       "bash", "-c", script],
+      text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "LOCKED" in result.stdout
+    assert subprocess.check_output(
+      ["sudo", "-n", "cat", str(victim)], text=True,
+    ) == "DO_NOT_TRUNCATE"
+    assert subprocess.run(["sudo", "-n", "test", "-f",
+                           str(root_dir / f"deploy-{target}.lock")],
+                          check=False).returncode == 0
+    assert (cache / "mobius" / f"deploy-{target}.lock").is_symlink()
+    subprocess.run(["sudo", "-n", "rm", "--",
+                    str(root_dir / f"deploy-{target}.lock")], check=True)
+    subprocess.run(["sudo", "-n", "ln", "-s", str(victim),
+                    str(root_dir / f"deploy-{target}.lock")], check=True)
+    rejected = subprocess.run(
+      ["sudo", "-n", "env", f"HOME={cache}", f"XDG_CACHE_HOME={cache}",
+       "bash", "-c", script], text=True, capture_output=True, check=False,
+    )
+    assert rejected.returncode != 0
+    assert "symlink" in rejected.stderr
+    assert subprocess.check_output(
+      ["sudo", "-n", "cat", str(victim)], text=True,
+    ) == "DO_NOT_TRUNCATE"
+  finally:
+    subprocess.run(["sudo", "-n", "rm", "-rf", "--", str(root_parent),
+                    str(victim)], check=True)
+
+
+def test_nonprivileged_deploy_lock_still_serializes(tmp_path):
+  if os.geteuid() == 0:
+    pytest.skip("ordinary-user lock contract")
+  function = _function("initialize_deploy_lock")
+  script = f'''set -euo pipefail
+fail() {{ echo "$*" >&2; }}
+TARGET=test
+{function}
+initialize_deploy_lock
+flock -n 9
+echo LOCKED
+'''
+  env = {**os.environ, "XDG_CACHE_HOME": str(tmp_path)}
+  first = subprocess.run(["bash", "-c", script], env=env, text=True,
+                         capture_output=True, check=False)
+  assert first.returncode == 0, first.stderr
+  lock = tmp_path / "mobius" / "deploy-test.lock"
+  with lock.open("r+") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    blocked = subprocess.run(["bash", "-c", script], env=env, text=True,
+                             capture_output=True, check=False)
+  assert blocked.returncode != 0
+  assert "LOCKED" not in blocked.stdout
