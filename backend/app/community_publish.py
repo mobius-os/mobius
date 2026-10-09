@@ -29,12 +29,25 @@ MAX_PATH_BYTES = 512
 MAX_JOURNAL_BYTES = 16 * 1024
 MAX_STORE_SCREENSHOTS = 5
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
-# Git, GitHub and install accept any other file name, including spaces,
-# brackets, tildes and non-ASCII letters. Refuse only names that cannot be
-# shown or handled faithfully: control, format, and separator characters
-# plus blank-lookalike fillers disguise a name. ASCII spaces remain allowed.
-_UNSAFE_PATH_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Zs"}
-_BLANK_PATH_CHARACTERS = {"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"}
+# Unicode UCD categories plus Default_Ignorable_Code_Point extras from
+# DerivedCoreProperties.txt (Hangul/Khmer/Mongolian fillers and selectors),
+# and U+2800 BRAILLE PATTERN BLANK; ASCII spaces are allowed inside names.
+_UNSAFE_PATH_CATEGORIES = {"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp", "Zs"}
+_INVISIBLE_PATH_EXTRAS = frozenset(
+  "\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f"
+  "\u2800\u3164\uffa0"
+)
+
+
+def _is_unsafe_path_character(char: str) -> bool:
+  return char != " " and (
+    unicodedata.category(char) in _UNSAFE_PATH_CATEGORIES
+    or char in _INVISIBLE_PATH_EXTRAS
+    or "\ufe00" <= char <= "\ufe0f"
+    or "\U000e0100" <= char <= "\U000e01ef"
+  )
+
+
 # Path segments refused anywhere in a published tree, each with the reason the
 # author sees. Private folder names remain a guard beyond the content scan.
 _UNPUBLISHED_SEGMENTS = {
@@ -312,20 +325,17 @@ def _validate_path(path: str) -> None:
     not path
     or path.startswith("/")
     or "\\" in path
-    or len(path.encode("utf-8")) > MAX_PATH_BYTES
     or str(pure) != path
     or any(part in {"", ".", ".."} for part in parts)
-    or any(
-      char != " " and (
-        unicodedata.category(char) in _UNSAFE_PATH_CATEGORIES
-        or char in _BLANK_PATH_CHARACTERS
-      ) for char in path
-    )
+    or any(part != part.strip(" ") for part in parts)
+    or any(_is_unsafe_path_character(char) for char in path)
+    or len(path.encode("utf-8")) > MAX_PATH_BYTES
   ):
     raise CommunityPublicationError(
       f"The path {path!r} cannot be published. Use a relative path of at most "
       f"{MAX_PATH_BYTES} bytes with '/' separators (no backslashes), no '.' "
-      "or '..' segments, and no control, text-direction or blank-lookalike characters.",
+      "or '..' segments, no leading or trailing spaces in a name, and no "
+      "control, text-direction, invisible or blank-lookalike characters.",
       "invalid_path",
     )
   folded = [part.casefold() for part in parts]

@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -7,6 +9,19 @@ from PIL import Image, PngImagePlugin
 import app.routes.media as media_routes
 from app.config import agent_scratch_root, get_settings
 from app.image_previews import display_image_preview, preview_cache_path
+
+
+@pytest.mark.parametrize("icons_first", [False, True])
+def test_preview_pixel_limit_does_not_depend_on_icon_import_order(icons_first):
+  code = "from PIL import Image; "
+  if icons_first:
+    code += "import app.icon_assets; "
+  code += (
+    "Image.MAX_IMAGE_PIXELS = None; "
+    "import app.image_previews; "
+    "assert Image.MAX_IMAGE_PIXELS == 32_000_000"
+  )
+  subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
 
 def test_decompression_bomb_preview_is_refused_before_decode(tmp_path, monkeypatch):

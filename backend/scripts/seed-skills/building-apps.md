@@ -619,7 +619,9 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 ```
 
 The proxy is GET-only, requires the bearer in the header (never a query
-parameter), and truncates bodies at 2,097,152 bytes. Request small renditions,
+parameter), and truncates bodies at 2,097,152 bytes. GET follows up to five
+redirect hops, validating each destination against SSRF rules rather than
+returning upstream 3xx responses as-is. Request small renditions,
 not full-resolution media. A cross-origin `<img src>` cannot attach the bearer,
 so fetch through the proxy and convert the result to a `data:` URL before
 rendering it; the bundled CSP allows `data:` images but not blob object URLs.

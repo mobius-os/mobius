@@ -497,6 +497,35 @@ def test_snapshot_refuses_invisible_filename_characters(tmp_path, character):
   assert raised.value.code == "invalid_path"
 
 
+@pytest.mark.parametrize("character", [
+  "\u00ad", "\u034f", "\u0378", "\ue000", "\ud800",
+  "\u17b4", "\u17b5", "\u180b", "\u180c", "\u180d", "\u180f",
+  "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",
+])
+def test_publication_path_refuses_ignorable_and_nonpublic_code_points(character):
+  from app.community_publish import _validate_path
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    _validate_path(f"look{character}alike.js")
+  assert raised.value.code == "invalid_path"
+
+
+@pytest.mark.parametrize("path", [" leading.js", "trailing.js ", "dir /file", "dir/ file"])
+def test_publication_path_refuses_space_padded_segments(path):
+  from app.community_publish import _validate_path
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    _validate_path(path)
+  assert raised.value.code == "invalid_path"
+  assert "leading or trailing spaces" in raised.value.detail
+
+
+def test_publication_path_accepts_visible_unicode_and_internal_spaces():
+  from app.community_publish import _validate_path
+
+  _validate_path("café folder/日本語 [1] e\u0301.js")
+
+
 def test_snapshot_allows_slack_placeholder(tmp_path):
   repo, app, _ = _app_repo(tmp_path)
   _commit_files(repo, app, {"README.md": b"Set xoxb-your-token-here in the example."})
