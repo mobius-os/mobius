@@ -1017,6 +1017,34 @@ def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspac
   assert _railway_workspace_plans_contract(empty) == empty
 
 
+def test_railway_workspace_plans_contract_accepts_the_largest_listing_with_emoji_names():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  base = _workspace_plans()["workspaces"][0]
+  largest = {"workspaces": [
+    {**base, "id": f"ws_{index}", "name": "\N{GRINNING FACE}" * 128,
+     "deploy_blocked": "x" * 1000}
+    for index in range(100)
+  ]}
+
+  assert _railway_workspace_plans_contract(largest) == largest
+
+
+@pytest.mark.parametrize("method,path", [
+  ("GET", "/api/identity/railway/workspaces"),
+  ("PUT", "/api/identity/railway/workspace"),
+  ("POST", "/api/identity/railway/workspace"),
+])
+def test_the_saved_workspace_routes_are_gone(client, auth, monkeypatch, method, path):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch, lambda *_: _Upstream(200, {}),
+  )
+  response = client.request(method, path, json={"workspace_id": "ws"}, headers=granted)
+
+  assert response.status_code in (404, 405)
+  assert calls == []
+
+
 @pytest.mark.parametrize("name", ["   ", "x" * 81])
 def test_railway_rename_rejects_invalid_names_before_bridge_call(
   client, auth, monkeypatch, name,
