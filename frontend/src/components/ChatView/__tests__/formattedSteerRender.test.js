@@ -24,6 +24,8 @@ const { assistantReplyGroups, presentAssistantReply } = await vite.ssrLoadModule
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { assistantClipboardText } = await vite.ssrLoadModule('/src/components/ChatView/markdownClipboard.js')
 const { Marked } = await vite.ssrLoadModule('marked')
+const { MemoBlock } = await vite.ssrLoadModule('/src/components/ChatView/markdown/blocks.jsx')
+const { sliceMarkdownRange } = await vite.ssrLoadModule('/src/components/ChatView/markdown/steerMarkdownRange.js')
 const assistant = (content, id = 'run') => ({ role: 'assistant', id, content, blocks: [{ type: 'text', content }] })
 const prefix = 'Earlier explanation.\n\n**3. Don'
 const full = 'Earlier explanation.\n\n**3. Don’t confuse uncertainty with failure—or success.**\n\nLater explanation.'
@@ -50,6 +52,37 @@ test('reload renders the incident as two formatted ranges around the same owner 
   assertPair(shown.map(message).join(''))
   assert.equal(JSON.stringify(saved), original, 'presentation must never rewrite saved transcript')
 })
+
+for (const use of ['[ref][foo]', '![diagram][foo]']) {
+  for (const whole of [false, true]) {
+    test(`projected memo blocks update for late references, not unrelated prose (use=${use}, whole=${whole})`, () => {
+      const prefix = `${use}${whole ? '\n\n' : ' '}**Pla`
+      const replay = prefix + 'nned**'
+      function range(source) {
+        return projectSettledSteerContinuations([assistant(prefix), steer,
+          assistant(source, 'run:assistant:1')])[0].blocks[0].markdown_range
+      }
+      const unresolved = range(replay)
+      const resolved = range(replay + '\n\n[foo]: https://example.com/target "Title"')
+      const changed = range(replay + '\n\n[foo]: https://example.com/new "New title"')
+      const extended = range(replay + '\n\n[foo]: https://example.com/target "Title"\n\nLater prose.')
+      const first = value => ({ token: value.tokens[0] })
+      assert.equal(first(unresolved).token.raw, first(resolved).token.raw)
+      assert.equal(MemoBlock.compare(first(unresolved), first(resolved)), false,
+        'a late definition must replace literal text with its parsed link/image')
+      assert.equal(MemoBlock.compare(first(resolved), first(changed)), false,
+        'source target and title updates must reach mounted content')
+      assert.equal(MemoBlock.compare(first(resolved), first(unresolved)), false,
+        'removing a definition must not retain stale linked content')
+      assert.equal(MemoBlock.compare(first(resolved), first(extended)), true,
+        'unrelated streamed prose must not rerender the unchanged prefix')
+      const sliceEnd = whole ? use.length : prefix.length - 1
+      assert.equal(MemoBlock.compare(first(sliceMarkdownRange(unresolved, 0, sliceEnd)),
+        first(sliceMarkdownRange(resolved, 0, sliceEnd))), false,
+      'positioned activity slices retain reference-dependent render context')
+    })
+  }
+}
 
 test('active text_final and saved reload render the same content without a repeated prefix', () => {
   const projected = projectSteerContinuationMessage(saved[0], saved[2], { active: true })

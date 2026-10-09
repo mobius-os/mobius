@@ -118,7 +118,12 @@ function project(tokens, source, start, end) {
     }
     cursor = next
   }
-  return cursor === source.length ? out : null
+  if (cursor !== source.length) return null
+  // Whole and clipped blocks share document-wide reference resolution. Raw
+  // block text can stay identical while a later definition changes its links.
+  // Keep this semantic context stable when only unrelated prose is appended.
+  const rangeReferences = JSON.stringify(tokens.links)
+  return out.map(token => ({ ...token, rangeReferences }))
 }
 
 /** Return null rather than guess if source positions or token shapes are unsafe. */
