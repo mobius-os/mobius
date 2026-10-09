@@ -32,7 +32,8 @@
 # 3. The app requests <target>: the installed worker replaces the container
 #    and offers <target>'s worker when its revision is higher.
 # 4. When the target advances the frozen helper requirement, explicitly install
-#    that migration and prove the old launcher preserves the queued request.
+#    that migration and prove the old launcher/helper preserves the queued request.
+#    Revision 5 adds root-pinned admission, including for exact legacy images.
 #    The offered/installed worker then performs the real replacement to <previous>.
 
 set -euo pipefail
@@ -62,8 +63,27 @@ fail() {
   systemctl --no-pager status mobius-rebuild.service mobius-rebuild.path >&2 || true
   journalctl --no-pager -u mobius-rebuild.service -n 80 >&2 || true
   cat "$STATUS" >&2 2>/dev/null || true
-  docker logs mobius --tail 60 >&2 2>&1 || true
+  local cid
+  if cid=$(app_container); then docker logs "$cid" --tail 60 >&2 2>&1 || true; fi
   exit 1
+}
+
+# The original project is stable; admission containers have an isolated Compose
+# project per attempt. Never select by the historical physical name or take the
+# first match: two running owners is an error, including across both queries.
+app_container() {
+  local legacy admitted ids
+  legacy=$(docker ps --no-trunc -q \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+    --filter label=com.docker.compose.service=app) || return 1
+  admitted=$(docker ps --no-trunc -q \
+    --filter "label=io.mobius.admission.project=$COMPOSE_PROJECT_NAME") || return 1
+  ids=$(printf '%s\n%s\n' "$legacy" "$admitted" | sed '/^$/d' | sort -u)
+  if [[ ! $ids =~ ^[0-9a-f]{64}$ ]]; then
+    echo "host helper: expected exactly one running app identity, found: $ids" >&2
+    return 1
+  fi
+  printf '%s\n' "$ids"
 }
 
 field() {  # <json-file> <python expression over d>
@@ -93,7 +113,7 @@ wait_status() {  # <nonce> <state>: wait until the root status names this reques
 
 queue() {  # <sha>: write the request exactly as the app does; prints its nonce
   local nonce; nonce=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
-  docker exec -u mobius mobius sh -c "
+  docker exec -u mobius "$(app_container)" sh -c "
     printf '%s' '{\"version\":2,\"expected_sha\":\"$1\",\"nonce\":\"$nonce\"}' \
       > /data/mobius-rebuild/inbox/.request.tmp &&
     mv /data/mobius-rebuild/inbox/.request.tmp /data/mobius-rebuild/inbox/request.json" \
@@ -102,15 +122,15 @@ queue() {  # <sha>: write the request exactly as the app does; prints its nonce
 }
 
 replaced_with() {  # <sha>: the container runs that image (not necessarily its source)
-  [[ $(docker inspect -f '{{.Image}}' mobius) == $(docker image inspect -f '{{.Id}}' "$IMAGE:sha-$1") ]] \
+  [[ $(docker inspect -f '{{.Image}}' "$(app_container)") == $(docker image inspect -f '{{.Id}}' "$IMAGE:sha-$1") ]] \
     || fail "the running container is not sha-$1"
-  [[ $(docker exec mobius curl -fsS http://127.0.0.1:8000/api/version \
+  [[ $(docker exec "$(app_container)" curl -fsS http://127.0.0.1:8000/api/version \
         | python3 -c 'import json, sys; print(json.load(sys.stdin).get("sha"))') == "$1" ]] \
     || fail "the container's image does not report sha-$1"
 }
 
 served() {  # prints "<source> <sha>": what the entrypoint selected for uvicorn
-  docker exec mobius sh -c 'printf "%s %s\n" "$(cat /tmp/serving-source)" "$(cat /tmp/serving-sha)"'
+  docker exec "$(app_container)" sh -c 'printf "%s %s\n" "$(cat /tmp/serving-source)" "$(cat /tmp/serving-sha)"'
 }
 
 serves_source() {  # <source> <sha>: the served tree is that source and contains that release
@@ -121,7 +141,7 @@ serves_source() {  # <source> <sha>: the served tree is that source and contains
     [[ $sha == "$2" ]] || fail "the baked floor is $sha, not $2"
   else
     # A prepared update may be a local merge commit, so ask the served clone.
-    docker exec -u mobius mobius git -C /data/platform merge-base --is-ancestor "$2" "$sha" \
+    docker exec -u mobius "$(app_container)" git -C /data/platform merge-base --is-ancestor "$2" "$sha" \
       || fail "the served /data/platform at $sha does not contain $2"
   fi
 }
@@ -129,13 +149,18 @@ serves_source() {  # <source> <sha>: the served tree is that source and contains
 docker info >/dev/null || fail "Docker is unavailable"
 # This test uses production unit/container names; never attach it to existing data.
 if docker container inspect mobius >/dev/null 2>&1 \
-   || docker volume inspect mobius_app_data >/dev/null 2>&1; then
+   || docker volume inspect mobius_app_data >/dev/null 2>&1 \
+   || [[ -n $(docker ps -aq --filter "label=io.mobius.admission.project=$COMPOSE_PROJECT_NAME") ]] \
+   || [[ -n $(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+       --filter label=com.docker.compose.service=app) ]]; then
   echo "host helper: use a fresh disposable host, not an existing installation" >&2
   exit 2
 fi
 for path in /etc/mobius-rebuild /var/lib/mobius-rebuild \
-  /usr/local/libexec/mobius-rebuild-host /etc/systemd/system/mobius-rebuild.service \
-  /etc/systemd/system/mobius-rebuild.path /etc/systemd/system/mobius-rebuild-reconcile.service; do
+  /usr/local/libexec/mobius-rebuild-host /usr/local/libexec/mobius-boot-admission.py \
+  /usr/local/libexec/mobius-manual-cutover.py /etc/systemd/system/mobius-rebuild.service \
+  /etc/systemd/system/mobius-rebuild.path /etc/systemd/system/mobius-rebuild-reconcile.service \
+  /etc/systemd/system/mobius-rebuild-reconcile.timer; do
   if [[ -e $path || -L $path ]]; then
     echo "host helper: existing helper path $path; use a fresh disposable host" >&2
     exit 2
@@ -169,17 +194,18 @@ chmod 0600 "$ENV_FILE"
 # Transcript proof helpers (MOBIUS_TRANSCRIPT_PROOF=1). The probe runs the
 # serving release's own code; waits poll observable state only.
 TPROOF=$(mktemp -d /tmp/mobius-transcript-proof.XXXXXX)
-served_backend() {  # the serving uvicorn process's working directory
+served_backend() {  # <exact CID>: the serving uvicorn process's working directory
   # As the server's own user: the container has no CAP_SYS_PTRACE, so root
   # cannot read another user's /proc/<pid>/cwd.
-  docker exec -u mobius mobius sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
+  docker exec -u mobius "$1" sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
 }
 tprobe() {  # <command>: runs in the code the server runs; any error fails at once
-  local backend output
-  backend=$(served_backend) && [[ -n $backend ]] || fail "cannot locate the serving uvicorn process"
-  docker cp "$ROOT/scripts/transcript_rollback_probe.py" mobius:/tmp/probe.py
+  local backend output cid
+  cid=$(app_container) || fail "cannot identify the active app"
+  backend=$(served_backend "$cid") && [[ -n $backend ]] || fail "cannot locate the serving uvicorn process"
+  docker cp "$ROOT/scripts/transcript_rollback_probe.py" "$cid:/tmp/probe.py"
   if ! output=$(docker exec -u mobius -w "$backend" -e PYTHONPATH="$backend" \
-      mobius python3 /tmp/probe.py "$1" 2>"$TPROOF/probe.err"); then
+      "$cid" python3 /tmp/probe.py "$1" 2>"$TPROOF/probe.err"); then
     cat "$TPROOF/probe.err" >&2
     fail "transcript probe '$1' failed in $backend"
   fi
@@ -223,20 +249,20 @@ cd "$SEED"
 MOBIUS_IMAGE="$IMAGE:sha-$PREVIOUS" docker compose --env-file "$ENV_FILE" \
   up -d --no-build --no-deps app
 for _ in $(seq 1 60); do
-  [[ $(docker inspect -f '{{.State.Health.Status}}' mobius 2>/dev/null) == healthy ]] && break
+  [[ $(docker inspect -f '{{.State.Health.Status}}' "$(app_container)" 2>/dev/null) == healthy ]] && break
   sleep 5
 done
-[[ $(docker inspect -f '{{.State.Health.Status}}' mobius) == healthy ]] \
+[[ $(docker inspect -f '{{.State.Health.Status}}' "$(app_container)") == healthy ]] \
   || fail "the previous release did not become healthy"
 # The worker's chat drain authenticates with the owner's service token.
-docker exec mobius curl -fsS -o /dev/null -X POST -H 'Content-Type: application/json' \
+docker exec "$(app_container)" curl -fsS -o /dev/null -X POST -H 'Content-Type: application/json' \
   -d '{"username":"owner","password":"host-helper-owner-password"}' \
   http://127.0.0.1:8000/api/auth/setup || fail "owner setup failed"
 for _ in $(seq 1 30); do
-  docker exec mobius test -s /data/service-token.txt && break
+  docker exec "$(app_container)" test -s /data/service-token.txt && break
   sleep 2
 done
-docker exec mobius test -s /data/service-token.txt || fail "the instance has no service token"
+docker exec "$(app_container)" test -s /data/service-token.txt || fail "the instance has no service token"
 if [[ $TRANSCRIPTS == 1 ]]; then
   tprobe seed >/dev/null
   tprobe dump >"$TPROOF/seeded.json"
@@ -252,18 +278,18 @@ seed_launcher=$(git -C "$ROOT" show "$PREVIOUS:scripts/mobius-rebuild-launcher.p
 
 if [[ $REPLAY == 1 ]]; then
   echo "   prepare accepted declarations and the reviewed source update"
-  docker exec -u mobius mobius mkdir -p /data/customizations
-  docker cp "$ROOT/scripts/fixtures/release-replay/." mobius:/data/customizations/
-  docker exec -u root mobius chown -R mobius:mobius /data/customizations
+  docker exec -u mobius "$(app_container)" mkdir -p /data/customizations
+  docker cp "$ROOT/scripts/fixtures/release-replay/." "$(app_container):/data/customizations/"
+  docker exec -u root "$(app_container)" chown -R mobius:mobius /data/customizations
   # Install only in the disposable OLD container, never in its image. The new
   # container must restore them automatically from the persistent declaration.
-  docker exec -u mobius mobius sudo -n apt-get update --error-on=any
-  docker exec -u mobius mobius sudo -n apt-get install --yes --no-remove figlet
-  docker exec -u mobius mobius sh /data/customizations/restore-python.sh apply
-  docker exec -u mobius mobius sh /data/customizations/restore-python.sh check
-  docker exec -u mobius mobius figlet replay >/dev/null
-  docker exec -u mobius mobius git -C /data/platform fetch origin "$TARGET"
-  docker exec -i -u mobius -w /data/platform/backend mobius python3 - "$TARGET" <<'SOURCE'
+  docker exec -u mobius "$(app_container)" sudo -n apt-get update --error-on=any
+  docker exec -u mobius "$(app_container)" sudo -n apt-get install --yes --no-remove figlet
+  docker exec -u mobius "$(app_container)" sh /data/customizations/restore-python.sh apply
+  docker exec -u mobius "$(app_container)" sh /data/customizations/restore-python.sh check
+  docker exec -u mobius "$(app_container)" figlet replay >/dev/null
+  docker exec -u mobius "$(app_container)" git -C /data/platform fetch origin "$TARGET"
+  docker exec -i -u mobius -w /data/platform/backend "$(app_container)" python3 - "$TARGET" <<'SOURCE'
 import sys
 from app import platform_update as pu
 preview = pu.platform_update_preview(target_sha=sys.argv[1])
@@ -283,11 +309,11 @@ if [[ $TRANSCRIPTS == 1 ]]; then
   git -C "$ROOT" bundle create "$TPROOF/target.bundle" "$bundle_ref" >/dev/null 2>&1 \
     || fail "could not bundle the target"
   git -C "$ROOT" update-ref -d "$bundle_ref"
-  docker cp "$TPROOF/target.bundle" mobius:/tmp/target.bundle
-  docker exec mobius chmod 0644 /tmp/target.bundle
-  docker exec -u mobius mobius git -C /data/platform fetch -q /tmp/target.bundle "$bundle_ref" \
+  docker cp "$TPROOF/target.bundle" "$(app_container):/tmp/target.bundle"
+  docker exec "$(app_container)" chmod 0644 /tmp/target.bundle
+  docker exec -u mobius "$(app_container)" git -C /data/platform fetch -q /tmp/target.bundle "$bundle_ref" \
     || fail "the previous release could not fetch the target"
-  docker exec -i -u mobius -w /data/platform/backend mobius python3 - "$TARGET" <<'SOURCE' \
+  docker exec -i -u mobius -w /data/platform/backend "$(app_container)" python3 - "$TARGET" <<'SOURCE' \
     || fail "the previous release's updater did not prepare the target"
 import sys
 from app import platform_update as pu
@@ -298,12 +324,12 @@ prepared = pu.prepare_reviewed_update(**plan)
 assert isinstance(prepared, dict) and prepared["state"] == "prepared", prepared
 SOURCE
 fi
-before=$(docker inspect -f '{{.Id}}' mobius)
+before=$(docker inspect -f '{{.Id}}' "$(app_container)")
 echo "3. the app requests the target release"
 nonce=$(queue "$TARGET")
 wait_status "$nonce" succeeded
 replaced_with "$TARGET"
-[[ $(docker inspect -f '{{.Id}}' mobius) != "$before" ]] || fail "container was not replaced"
+[[ $(docker inspect -f '{{.Id}}' "$(app_container)") != "$before" ]] || fail "container was not replaced"
 if [[ $TRANSCRIPTS == 1 ]]; then
   serves_source platform "$TARGET"
   tconverge
@@ -317,7 +343,7 @@ fi
 if [[ $REPLAY == 1 ]]; then
   # Never call setup/rerun here: startup alone must restore the declarations.
   for _ in $(seq 1 120); do
-    if docker exec mobius python3 -c '
+    if docker exec "$(app_container)" python3 -c '
 import json
 from pathlib import Path
 p = Path("/data/setup-status.json")
@@ -327,10 +353,10 @@ raise SystemExit(0 if all(s.get(k, {}).get("state") == "ready" for k in keys) el
 '; then break; fi
     sleep 5
   done
-  docker exec -u mobius mobius sh /data/customizations/restore-python.sh check \
+  docker exec -u mobius "$(app_container)" sh /data/customizations/restore-python.sh check \
     || fail "Python dependency was not automatically restored"
-  docker exec -u mobius mobius figlet replay >/dev/null || fail "apt dependency was not restored"
-  docker exec -i mobius python3 - "$TARGET" <<'VERIFY'
+  docker exec -u mobius "$(app_container)" figlet replay >/dev/null || fail "apt dependency was not restored"
+  docker exec -i "$(app_container)" python3 - "$TARGET" <<'VERIFY'
 import json, subprocess, sys, urllib.request
 from pathlib import Path
 with urllib.request.urlopen("http://127.0.0.1:8000/api/version") as response:
@@ -370,12 +396,19 @@ if (( target_helper > previous_helper )); then
   done
   systemctl is-active --quiet mobius-rebuild.service && fail "previous replacement still running"
   nonce=$(queue "$PREVIOUS")
-  if (( seed_launcher == 1 && target_helper >= 4 )); then
+  if (( (seed_launcher == 1 && target_helper >= 4) ||
+        (previous_helper < 5 && target_helper >= 5) )); then
+    (( target_revision > seeded )) || fail "migration guard requires an offered newer worker"
+    if (( previous_helper < 5 && target_helper >= 5 )); then
+      [[ ! -e /usr/local/libexec/mobius-boot-admission.py &&
+         ! -e /var/lib/mobius-rebuild/admission ]] || fail "legacy seed already has admission"
+    fi
     prior_status=$(sha256sum "$STATUS")
-    prior_container=$(docker inspect -f '{{.Id}}' mobius)
+    prior_request=$(docker exec "$(app_container)" sha256sum /data/mobius-rebuild/inbox/request.json)
+    prior_container=$(docker inspect -f '{{.Id}}' "$(app_container)")
     /usr/local/libexec/mobius-rebuild-host run || fail "legacy launcher admission failed"
     [[ $(sha256sum "$STATUS") == "$prior_status" ]] || fail "legacy trial changed status"
-    [[ $(docker inspect -f '{{.Id}}' mobius) == "$prior_container" ]] || fail "legacy trial replaced app"
+    [[ $(docker inspect -f '{{.Id}}' "$(app_container)") == "$prior_container" ]] || fail "legacy trial replaced app"
     python3 - "$target_revision" <<'PENDING'
 import json, sys
 from pathlib import Path
@@ -383,12 +416,64 @@ index = json.loads(Path("/var/lib/mobius-rebuild/workers.json").read_text())
 assert index["candidate"]["revision"] == int(sys.argv[1]), "candidate was consumed"
 assert not Path("/var/lib/mobius-rebuild/transaction.json").exists(), "legacy trial journaled"
 PENDING
-    docker exec mobius test -f /data/mobius-rebuild/inbox/request.json \
+    docker exec "$(app_container)" test -f /data/mobius-rebuild/inbox/request.json \
       || fail "legacy trial claimed the queued request"
+    [[ $(docker exec "$(app_container)" sha256sum /data/mobius-rebuild/inbox/request.json) == "$prior_request" ]] \
+      || fail "legacy trial changed the queued request"
   fi
+  # Keep the exact guarded request but withhold dispatch until installed bytes
+  # are verified. The installer enables its watcher/timer; neither should find
+  # a request and race the migration assertions below.
+  migration_cid=$(app_container) || fail "cannot identify app before migration"
+  migration_started=$(docker inspect -f '{{.State.StartedAt}}' "$migration_cid")
+  migration_request=$(docker exec "$migration_cid" sh -c 'sha256sum < /data/mobius-rebuild/inbox/request.json')
+  docker exec -u mobius "$migration_cid" mv /data/mobius-rebuild/inbox/request.json \
+    /data/mobius-rebuild/inbox/.migration-held.json || fail "cannot hold migration request"
   echo "   install the target's explicitly required host-helper migration"
   git -C "$SEED" checkout -q "$TARGET"
   "$SEED/scripts/install-rebuild-helper.sh" || fail "target helper migration failed"
+  [[ $(app_container) == "$migration_cid" ]] || fail "installation replaced the healthy app"
+  [[ $(docker inspect -f '{{.State.StartedAt}}' "$migration_cid") == "$migration_started" ]] \
+    || fail "installation restarted the healthy app"
+  if (( target_helper >= 5 )); then
+    (( target_revision >= 12 )) || fail "admission requires worker revision 12 or newer"
+    [[ $(cat "$SEED/deployment/self-hosted-helper.required") == "$target_helper" ]] \
+      || fail "installed source helper marker differs"
+    [[ $(field "$STATUS" 'd.get("launcher_revision")') == 2 ]] || fail "launcher2 not published"
+    [[ $(active_revision) == "$target_revision" &&
+       $(field "$STATUS" 'd.get("worker_revision")') == "$target_revision" ]] \
+      || fail "target admission worker not installed"
+    python3 - "$SEED" "$target_revision" <<'MIGRATION_VERIFY'
+import hashlib, json, os, stat, sys
+from pathlib import Path
+source = Path(sys.argv[1])
+for src, dst in (
+    ("mobius-rebuild-launcher.py", "mobius-rebuild-host"),
+    ("mobius-boot-admission.py", "mobius-boot-admission.py"),
+    ("mobius-manual-cutover.py", "mobius-manual-cutover.py"),
+):
+    installed = Path("/usr/local/libexec") / dst
+    st = installed.lstat()
+    assert stat.S_ISREG(st.st_mode) and st.st_uid == st.st_gid == 0, installed
+    assert stat.S_IMODE(st.st_mode) == 0o755, installed
+    assert installed.read_bytes() == (source / "scripts" / src).read_bytes(), installed
+state = Path("/var/lib/mobius-rebuild/admission")
+st = state.lstat()
+assert stat.S_ISDIR(st.st_mode) and st.st_uid == st.st_gid == 0
+assert stat.S_IMODE(st.st_mode) == 0o700
+root = state.parent
+assert not os.path.lexists(root / "transaction.json"), "installation began a cutover"
+active = json.loads((root / "workers.json").read_text())["active"]
+assert active["revision"] == int(sys.argv[2])
+expected = (source / "scripts/mobius-rebuild-host.py").read_bytes()
+assert active["sha256"] == hashlib.sha256(expected).hexdigest()
+assert (root / "workers" / active["file"]).read_bytes() == expected
+MIGRATION_VERIFY
+  fi
+  [[ $(docker exec "$migration_cid" sh -c 'sha256sum < /data/mobius-rebuild/inbox/.migration-held.json') == "$migration_request" ]] \
+    || fail "installation changed the held request"
+  docker exec -u mobius "$migration_cid" mv /data/mobius-rebuild/inbox/.migration-held.json \
+    /data/mobius-rebuild/inbox/request.json || fail "cannot resume preserved request"
 fi
 
 echo "4. the app requests the previous release again"
@@ -434,17 +519,17 @@ if [[ $TRANSCRIPTS == 1 ]]; then
   [[ $(tprobe mirror-exact) == '{"differ": []}' ]] || fail "a mirror is not byte-exact on the previous image"
 
   echo "5. a broken served tree falls back to the previous image's baked code"
-  repaired=$(docker exec -u mobius mobius git -C /data/platform rev-parse HEAD)
+  repaired=$(docker exec -u mobius "$(app_container)" git -C /data/platform rev-parse HEAD)
   # A committed edit that fails the import probe, as a broken agent edit would.
-  docker exec -u mobius mobius sh -c '
+  docker exec -u mobius "$(app_container)" sh -c '
     cd /data/platform &&
     printf "\nraise ImportError(\"transcript proof: broken served tree\")\n" >> backend/app/main.py &&
     git -c user.name=transcript-proof -c user.email=transcript-proof@localhost \
       commit -q -m "Break the served tree" -- backend/app/main.py' \
     || fail "could not commit the broken served tree"
-  docker restart mobius >/dev/null
-  until docker exec mobius curl -fsS -o /dev/null http://127.0.0.1:8000/api/ready 2>/dev/null; do
-    [[ $(docker inspect -f '{{.State.Running}}' mobius) == true ]] \
+  docker restart "$(app_container)" >/dev/null
+  until docker exec "$(app_container)" curl -fsS -o /dev/null http://127.0.0.1:8000/api/ready 2>/dev/null; do
+    [[ $(docker inspect -f '{{.State.Running}}' "$(app_container)") == true ]] \
       || fail "the previous image stopped instead of serving its baked floor"
     sleep 2
   done
@@ -458,7 +543,7 @@ if [[ $TRANSCRIPTS == 1 ]]; then
   tmarks "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["expect_unconverted"]))' "$wrote")"
 
   echo "6. the source is repaired and the target release returns"
-  docker exec -u mobius mobius git -C /data/platform reset -q --hard "$repaired" \
+  docker exec -u mobius "$(app_container)" git -C /data/platform reset -q --hard "$repaired" \
     || fail "could not repair the served tree"
   nonce=$(queue "$TARGET")
   wait_status "$nonce" succeeded

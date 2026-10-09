@@ -110,11 +110,30 @@ to resolve the root-owned frozen model. This preserves both the bundled-Caddy
 and shared `edge-caddy` topologies. Rerun the installer after an intentional
 topology or configuration change.
 
-If an earlier helper already recreated the container, its Compose labels point
-to the frozen root-owned topology rather than the original checkout. The
-installer recognizes only that exact helper-owned pair, preserves the frozen
-topology, and upgrades the reviewed controller/override from the trusted
-checkout. Other out-of-checkout Compose labels still fail closed.
+Each admission attempt uses a unique Compose project and `container_name`,
+while `io.mobius.admission.project` records the fixed original deployment
+project. Shared named networks and volumes remain external resources with their
+original names; app aliases and the persistent data mount are preserved.
+No-start creation has no service dependencies to start or another attempt to
+scale down. Each attempt reads an immutable root-owned
+`/etc/mobius-rebuild/attempts/<token>.json`, not a changing shared override.
+
+On reinstall, discovery unions running containers with that fixed owner label
+and legacy containers with the original Compose project plus app-service labels.
+Exactly one full CID must remain after deduplication; two containers are an
+ambiguity, not permission to prefer one. Labels alone grant no trust: the
+installer verifies the root-frozen original project, exact current override,
+immutable attempt file derived from the validated token, image/startup argv,
+read-only code mount, private state mount, and original data source. It rechecks
+live identity under the installation locks.
+
+For helper-owned containers, the installer copies only the unwrapped root-owned
+`compose.yml` as the reusable base. It **preserves** a validated wrapped current
+`image.override.yml` as the worker's live-identity pointer, without merging it
+into that base. Legacy helper-created containers remain recognized by their
+exact original frozen Compose-file pair. A base already containing admission
+mounts, wrapper, or attempt labels is refused rather than freezing stale
+authority. Other out-of-checkout Compose identities still fail closed.
 
 The host must use systemd and Docker on amd64. Official Möbius images are not
 currently published as a multi-architecture manifest, so other architectures
@@ -229,12 +248,77 @@ A rollback or failed trial keeps the previous active worker. Worker files are
 small and never deleted while the index can still name them.
 
 Worker changes normally reach installed hosts through ordinary updates. Changes
-to the frozen launcher or systemd units instead require the explicit helper
-migration. Revision **4** installs launcher revision **2**, including pinned
-recovery ownership; an image update alone does not replace that launcher.
-Reinstall from the reviewed checkout only during separately authorized host
-maintenance. The installer preserves an unresolved transaction; installation
-is not permission to discard handoff evidence or perform another cutover.
+to the frozen launcher, admission wrapper, or systemd units instead require an
+explicit helper migration. Revision **5** retains launcher revision **2** and
+installs the reviewed boot-admission wrapper. An image update alone does not
+install these host prerequisites. Reinstall from the reviewed checkout only
+during separately authorized host maintenance.
+
+The installer refuses **any existing transaction**, including an unwrapped
+legacy rollback whose Start may already have been issued, before changing
+controller code or units; it checks again while holding the dispatch and
+replacement locks in launcher order. This also prevents the timer from selecting
+a stale worker to run immediately after installation. Each lock acquisition has
+a 30-second budget: a busy controller makes installation refuse, not terminate
+active recovery or wait indefinitely.
+Keep the transaction and handoff evidence intact and settle the incident through
+its existing recovery owner or explicitly authorized manual maintenance first.
+Installation cannot retroactively enroll an old consumer or grant a second boot.
+It does not restart the healthy app, clear the restart ledger, or invoke recovery;
+it only publishes helper capabilities. Normal request/timer processing resumes
+after installation and may dispatch independently queued approved requests.
+
+### Explicit boot-admission migration
+
+The installer atomically pins reviewed, tracked, clean
+`scripts/mobius-boot-admission.py` at
+`/usr/local/libexec/mobius-boot-admission.py`, owned by root. It also pins the
+reviewed `scripts/mobius-manual-cutover.py` adapter at
+`/usr/local/libexec/mobius-manual-cutover.py`, so manual deployment enters the
+same installed worker protocol rather than issuing an independent replacement.
+Both helpers must be tracked and clean; installation validates both before
+publishing either. Its root-owned
+`/var/lib/mobius-rebuild/admission` directory is mode **0700**, outside `/data`
+and the legacy entrypoint's recursive ownership repair. Reinstallation preserves
+admission records and lock identities; it never clears consumed slots.
+
+For each newly created target **and rollback**, the worker mounts that code
+read-only at `/run/mobius-boot-admission.py` and state read-write at
+`/run/mobius-admission`. It preserves the original image ENTRYPOINT/CMD and opens
+admission only after verifying the exact container, image, and effective wrapper
+configuration. The wrapper runs before the untouched original entrypoint.
+Thus the recorded **exact legacy last-good image** can remain a rollback option
+without claiming its frozen ledger implements the new shared lock. This is an
+explicit reviewed host deployment change, not replacement of legacy runtime
+bytes or an implicit capability gained by an image update.
+
+One rollback slot has monotonic attempt generations. The wrapper durably admits
+at most one host-authorized handoff for that slot. Once admitted, the host never
+starts, rearms, cancels, or recreates that rollback. Ordinary autonomous Docker
+restarts may still boot service with a fresh boot ID, without renewing this
+cutover's authority, even before transaction settlement. A later service-only
+boot must retire leftover matching acceptance from a crash between admission
+and the legacy ledger's consumption; unrelated fresh restart authority is not
+silently erased. This is not a promise of only one physical Docker process start.
+
+The preexisting **unwrapped source** does not acquire a gate merely because the
+helper was installed. After its exact CID is removed, continuation eligibility
+must be established from the still-unconsumed original acceptance and original
+source boot ID, not the root receipt alone. Source consumption, partial evidence,
+or an unexpected source restart permanently disables continuation for this
+operation; wrapped target/rollback containers may restore service without
+reissuing that handoff. This degraded outcome retains honest `needs_recovery`
+evidence. An already-issued unwrapped recovery incident still requires its
+existing recovery owner or explicit manual settlement before installation.
+
+An ambiguous Start is never retried on the same CID. Only a provably unadmitted
+attempt may be durably CLOSED under the admission lock, then removed by its
+exact full CID. The old attempt stays denied across host death. A new generation
+may be created only after removal is confirmed and explicit unconsumed
+cancellation lineage survives. An admitted, unexplained missing, changed, or
+previously attempted rollback does not become recreateable from Docker metadata
+or a v1 acceptance witness. Missing proof remains `needs_recovery`.
+
 A new worker refuses a replacement trial under launcher revision 1 without
 changing status or claiming the request, allowing that launcher to put the
 candidate back for the installer. The app's unclaimed-request status makes
@@ -254,8 +338,8 @@ not an already-consumed chat handoff.
 | Prepared replacement | Exact previous image and accepted cutover | Journal replacement intent before Compose mutates the app |
 | Replacement started | Fresh whole-container observation | Observe the target; retain an old source still running; restore only the recorded previous image |
 | Rollback creating | Recognized target/previous image, no prior rollback boot | Compose creates without starting; journal exact rollback container |
-| Rollback prepared | Exact container has never started | Refresh acceptance only within the original receipt lifetime; persist start intent before starting |
-| Rollback starting | Exact never-started container **and** unchanged trusted unconsumed acceptance | Persist a preboot transition before refreshing expired acceptance; never retry from Docker metadata alone |
+| Rollback prepared | Exact verified wrapped container and open, unconsumed admission slot | Persist start intent before one Start; refresh handoff only within the original receipt lifetime |
+| Rollback starting | Authoritative admission slot under its shared lock | If admitted, observe only; otherwise durably CLOSE and fence the exact CID before a new generation, never retry ambiguous Start |
 | Rollback running/restarting | Exact previous image | Observe readiness; never recreate a boot that is making progress |
 | Healthy with missing handoff proof | No exact consumed receipt | Keep service running and retain `needs_recovery`; do not manufacture an ACK |
 | Durable outcome | Exact outcome already recorded | Republish status and clear the journal, without another boot |
@@ -263,16 +347,26 @@ not an already-consumed chat handoff.
 A failed container observation retries discovery and inspection together.
 Multiple containers are ambiguous, not a reason to pick the first ID. The
 recurring systemd timer continues reconciliation after transient Docker errors
-or a lost immediate recovery attempt. Boot budgets include slow readiness plus
-rollback work and observation overhead; these are bounded independently of
-query timeouts.
+or a lost immediate recovery attempt. Budgets are separate from individual
+query timeouts. Each remove/create/start mutation has a 300-second ceiling;
+target and rollback readiness each have 600 seconds. One full cutover/recovery
+pass allows six mutations (source removal, target create/start, target fencing,
+rollback create/start), both readiness windows, and 600 seconds of bounded
+observation/settlement overhead: **3600 seconds**. Both the main service's
+`TimeoutStopSec` and the boot reconciler's `TimeoutStartSec` use that allowance.
+The main service's explicit `TimeoutStartSec=9000` adds the 3600-second image-pull
+budget and 1800 seconds for preflight, provenance, adoption, and cleanup. A
+transient failure or interrupted pass retains its journal for the periodic
+reconciler; these budgets never authorize another consumed boot.
 
-The supervisor consumes acceptance outside the host replacement lock. Its
-root-owned ledger is therefore separate authority: Docker's `created` state
-or zero `StartedAt` cannot establish that handoff authorization is unconsumed.
-The original receipt expires after one hour; refreshed preboot acceptance does
-not extend it. Expiry can leave a serviceable rollback with manual chat recovery
-still required. Never clear that transaction merely because health is green.
+The wrapper's admission lock and durable slot serialize consumer admission with
+host revocation; the outer replacement lock alone cannot do so. The legacy
+supervisor still consumes its ledger independently, but the host never refreshes
+or rearms that rollback after wrapper admission. Docker's `created` state or zero
+`StartedAt` cannot prove that authorization is unconsumed. The original receipt
+expires after one hour; refreshing acceptance does not extend it. Expiry can
+leave a serviceable rollback with manual chat recovery still required. Never
+clear that transaction merely because health is green.
 
 The root status records `worker_revision`, `launcher_revision` and the last
 `worker_adoption` outcome for operators. Fixed helpers keep working: the app does not require the launcher, and

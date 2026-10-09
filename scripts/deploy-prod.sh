@@ -158,6 +158,14 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_SUPPORT="$REPO_ROOT/scripts/deploy_support.py"
+MANUAL_CONTROLLER=/usr/local/libexec/mobius-manual-cutover.py
+HELPER_MANAGED=0
+MANUAL_TOPOLOGY=""
+if [ "$TARGET" = prod ] && { [ -e /var/lib/mobius-rebuild ] ||
+    [ -L /var/lib/mobius-rebuild ] || [ -e /etc/mobius-rebuild ] ||
+    [ -L /etc/mobius-rebuild ]; }; then
+  HELPER_MANAGED=1
+fi
 cd "$REPO_ROOT"
 
 # ── ANSI colors (kept simple, matches sync-test-shell.sh's restraint) ──
@@ -190,6 +198,7 @@ cleanup_preflight_container() {
 on_exit() {
   cleanup_local_source_context
   cleanup_preflight_container
+  if [ -n "$MANUAL_TOPOLOGY" ]; then rm -f -- "$MANUAL_TOPOLOGY"; fi
 }
 on_err() {
   local rc=$?
@@ -986,6 +995,36 @@ container_restart_count() {
   docker inspect -f '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo "-1"
 }
 
+# The installed controller owns the physical app identity after admission:
+# per-attempt names intentionally are not `mobius`. Discovery is read-only and
+# verified against the root-owned worker index; never import a checkout worker.
+manual_controller_id() {
+  python3 -c '
+import json,re,sys
+try:
+    value=json.load(sys.stdin)
+    cid=value["container_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}",cid)
+    assert value["state"] == sys.argv[1]
+    print(cid)
+except Exception:
+    raise SystemExit("installed controller returned no verified container identity")
+' "$1"
+}
+if [ "$HELPER_MANAGED" = 1 ]; then
+  if [ "$EUID" -ne 0 ] || [ ! -f "$MANUAL_CONTROLLER" ] ||
+     [ -L "$MANUAL_CONTROLLER" ]; then
+    fail "the installed controller requires a privileged deploy and a root-pinned manual-cutover adapter"
+    exit 1
+  fi
+  if ! _discovery=$(python3 -I -S "$MANUAL_CONTROLLER" discover); then
+    fail "the installed controller cannot verify the active app; refusing direct Compose"
+    exit 1
+  fi
+  if ! CONTAINER=$(printf '%s' "$_discovery" | manual_controller_id active); then exit 1; fi
+  unset _discovery
+fi
+
 # ── --check shortcut: verification-only, no deploy ─────────────────────
 if [ "$CHECK_ONLY" = "1" ]; then
   step "[check] verifying ${CONTAINER}"
@@ -1715,6 +1754,40 @@ if [ "$BUILT_THIS_RUN" != "1" ]; then
 fi
 TARGET_IMAGE=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)
 FORCE_APP_RECREATE=0
+if [ "$HELPER_MANAGED" = 1 ]; then
+  # Freeze the exact rendered topology, including the selected edge overlay,
+  # before the installed worker journals and drains. It will validate /data,
+  # networks, project and both immutable image identities under replace.lock.
+  if ! [[ "$TARGET_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    fail "the manual controller requires an immutable target image ID"
+    exit 1
+  fi
+  MANUAL_EXPECTED_SHA="${BUILD_SHA:-}"
+  if [ "$BUILT_THIS_RUN" != 1 ]; then MANUAL_EXPECTED_SHA=$(served_sha); fi
+  if ! [[ "$MANUAL_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    fail "the manual controller requires an exact 40-hex source revision"
+    exit 1
+  fi
+  MANUAL_TOPOLOGY=$(umask 077; mktemp /var/lib/mobius-rebuild/manual-topology.XXXXXXXX.json)
+  if ! docker compose "${COMPOSE_ARGS[@]}" config --format json >"$MANUAL_TOPOLOGY"; then
+    fail "could not freeze the rendered manual deployment topology"
+    exit 1
+  fi
+  # The adapter takes replace.lock itself and revalidates the source. Close
+  # our descriptor first: taking a second flock while holding it can deadlock.
+  exec 8>&-
+  if ! _manual_result=$(python3 -I -S "$MANUAL_CONTROLLER" cutover \
+      --source-cid "$RUNNING_CID" --source-image "$PREV_IMAGE" \
+      --target-image "$TARGET_IMAGE" --expected-sha "$MANUAL_EXPECTED_SHA" \
+      --resolved-compose "$MANUAL_TOPOLOGY"); then
+    fail "installed controller could not settle the manual replacement; inspect its root journal/status, never retry direct Compose"
+    exit 1
+  fi
+  if ! CONTAINER=$(printf '%s' "$_manual_result" | manual_controller_id succeeded); then exit 1; fi
+  unset _manual_result
+  rm -f -- "$MANUAL_TOPOLOGY"; MANUAL_TOPOLOGY=""
+  ok "controller verified the exact admitted container ${CONTAINER:0:12}"
+else
 if [ "$TARGET" = "prod" ] && [ -n "$TARGET_IMAGE" ] && \
    compose_recreation_needed "$TARGET_IMAGE"; then
   if cutover_supported; then
@@ -1769,6 +1842,7 @@ wait_for_cutover "ready_code" "serviceable" \
 # Retire the root receipt now; it remains available only through this point so
 # an unhealthy first boot can explicitly authorize one rollback boot.
 finalize_chat_cutover || true
+fi  # helper-managed production is owned by the installed controller above
 
 run_deploy_canary
 

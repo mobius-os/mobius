@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Real Docker/Compose and frozen ledger recovery proof, hosted runner only.
+"""Disposable hosted proof: real Compose, Docker, boot gate, and frozen ledger.
 
-No production unit, image, registry write, or daemon is touched. Docker and Compose
-are real. This exercises reconcile/rollback rather than the download/drain
-half of run(); served-generation probing and worker adoption are omitted.
-The timeout is on the same real Compose mutation whose source-container DELETE
-the daemon has already accepted. It does not prove every delayed daemon race.
+Only source-only provenance/adoption work is stubbed. This runs no Docker on a
+production Host and makes no registry writes. The proxy forwards real daemon
+requests and withholds one exact response; it does not emulate Docker state.
 """
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import os
@@ -27,8 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 
-def command(*args, timeout=90, **kwargs):
-    return subprocess.run(args, check=True, text=True, capture_output=True, timeout=timeout, **kwargs)
+def command(*args, timeout=60, **kwargs):
+    return subprocess.run(args, check=True, capture_output=True, text=True,
+                          timeout=timeout, **kwargs)
 
 
 def load(path, name):
@@ -39,41 +39,38 @@ def load(path, name):
     return module
 
 
-def eventually(predicate, seconds=30):
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
+def eventually(predicate, seconds=20):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
         if predicate():
             return
-        time.sleep(.25)
-    raise AssertionError("condition did not become true")
+        time.sleep(.2)
+    raise AssertionError("disposable Docker condition did not become true")
 
 
-class DockerDeleteBarrier:
-    """Forward one disposable Docker API endpoint, withholding one DELETE reply.
+class ResponseBarrier:
+    """Withhold the successful response to one exact Docker API operation."""
 
-    The daemon completes the exact source-container DELETE before we signal
-    `deleted`. Only its response is withheld, so the *same* Compose up call
-    times out after the destructive daemon boundary. No Docker API is faked.
-    """
-
-    def __init__(self, path: Path, source_cid: str):
+    def __init__(self, path, method, cid, action=""):
         self.path = path
-        self.source_cid = source_cid.encode()
-        self.deleted = threading.Event()
+        self.pattern = (method.encode() + rb" /(?:v[0-9.]+/)?containers/" +
+                        re.escape(cid.encode()) +
+                        (rb"/" + action.encode() if action else b"") + rb"(?:[? /]|\r|\n)")
+        self.accepted = threading.Event()
         self.release = threading.Event()
         self.stop = threading.Event()
-        self.threads = []
-        self.sockets = []
         self.listener = None
+        self.threads = []
+        self.connections = []
 
     def __enter__(self):
         if not Path("/var/run/docker.sock").is_socket():
-            raise RuntimeError("hosted Docker Unix socket is unavailable")
+            raise RuntimeError("disposable runner lacks the local Docker Unix socket")
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(self.path))
         self.listener.listen(32)
         self.listener.settimeout(.2)
-        thread = threading.Thread(target=self._accept, name="docker-delete-barrier")
+        thread = threading.Thread(target=self._accept, name="docker-response-barrier")
         self.threads.append(thread)
         thread.start()
         return self
@@ -86,23 +83,20 @@ class DockerDeleteBarrier:
                 continue
             except OSError:
                 break
-            self.sockets.append(client)
+            self.connections.append(client)
             thread = threading.Thread(target=self._forward, args=(client,),
-                                      name="docker-delete-forward")
+                                      name="docker-response-forward")
             self.threads.append(thread)
             thread.start()
 
     def _forward(self, client):
         daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sockets.append(daemon)
+        self.connections.append(daemon)
         try:
             daemon.connect("/var/run/docker.sock")
-            watched = False
-            scan = b""
-            held = b""
-            deadline = time.monotonic() + 45
-            pattern = rb"DELETE /(?:v[0-9.]+/)?containers/" + re.escape(self.source_cid) + rb"(?:[? /]|\r|\n)"
-            while not self.stop.is_set() and time.monotonic() < deadline:
+            watched, scan, held = False, b"", b""
+            until = time.monotonic() + 45
+            while not self.stop.is_set() and time.monotonic() < until:
                 if held and self.release.is_set():
                     client.sendall(held)
                     held = b""
@@ -112,28 +106,28 @@ class DockerDeleteBarrier:
                     if not data:
                         break
                     scan = (scan + data)[-8192:]
-                    if not watched and re.search(pattern, scan):
+                    if re.search(self.pattern, scan):
                         watched = True
                     daemon.sendall(data)
                 if daemon in readable:
                     data = daemon.recv(65536)
                     if not data:
                         break
-                    if watched and not self.deleted.is_set():
+                    if watched and not self.accepted.is_set():
                         held += data
                         if len(held) > 65536:
-                            raise AssertionError("oversized Docker DELETE response")
+                            raise AssertionError("Docker response unexpectedly large")
                         if b"\r\n\r\n" in held:
                             status = held.split(b"\r\n", 1)[0]
                             if not re.match(rb"HTTP/1\.[01] 2[0-9][0-9]", status):
-                                raise AssertionError(f"Docker DELETE failed: {status!r}")
-                            self.deleted.set()
+                                raise AssertionError(f"Docker operation failed: {status!r}")
+                            self.accepted.set()
                     elif held:
                         held += data
                     else:
                         client.sendall(data)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pass  # Compose was killed at its bounded caller deadline.
+            pass  # bounded Docker caller killed its CLI after the held reply
         finally:
             daemon.close()
             client.close()
@@ -142,13 +136,13 @@ class DockerDeleteBarrier:
         self.release.set()
         self.stop.set()
         self.listener.close()
-        self.threads[0].join(timeout=2)  # no new forwarding threads after this
-        for connection in self.sockets:
+        self.threads[0].join(timeout=2)
+        for connection in self.connections:
             connection.close()
         for thread in self.threads[1:]:
             thread.join(timeout=2)
         self.path.unlink(missing_ok=True)
-        assert all(not thread.is_alive() for thread in self.threads), "Docker proxy thread leaked"
+        assert all(not thread.is_alive() for thread in self.threads), "proxy thread leaked"
 
 
 def main():
@@ -156,7 +150,7 @@ def main():
             or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
             or os.geteuid() != 0):
-        raise SystemExit("refusing outside explicitly opted-in disposable GitHub-hosted runner")
+        raise SystemExit("refusing outside explicitly opted-in root disposable hosted runner")
     command("docker", "info", timeout=15)
     import pytest
     from app import restart_ledger as platform_ledger
@@ -165,290 +159,232 @@ def main():
     host = load(ROOT / "scripts/mobius-rebuild-host.py", "recovery_docker_host")
     token = uuid.uuid4().hex[:10]
     image_base = f"mobius-recovery-proof-{token}"
-    projects = []
+    scenarios = []
     patch = pytest.MonkeyPatch()
-    original_command = host.docker_command
-    original_wait_healthy = host.wait_healthy
+    original_docker = host.docker_command
+    original_wait = host.wait_healthy
+
     def cleanup():
-        for project in reversed(projects):
-            found = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                    f"label=com.docker.compose.project={project}"],
-                                   capture_output=True, text=True, timeout=15).stdout.split()
+        for project in reversed(scenarios):
+            found = set()
+            for label in (f"com.docker.compose.project={project}",
+                          f"io.mobius.admission.project={project}"):
+                found.update(subprocess.run(["docker", "ps", "-aq", "--filter",
+                                             f"label={label}"], capture_output=True,
+                                            text=True, timeout=15).stdout.split())
             if found:
-                subprocess.run(["docker", "rm", "-f", "-v", *found],
+                subprocess.run(["docker", "rm", "-f", "-v", *sorted(found)],
                                capture_output=True, timeout=30)
             subprocess.run(["docker", "network", "rm", f"{project}_default"],
                            capture_output=True, timeout=15)
-        roles = ("source", "target", *(f"rollback-{name}" for name in
-                 ("created-timeout", "slow-ready", "expired", "duplicates",
-                  "missing", "journal", "stale-discovery", "restarting")),
-                 *(f"target-{name}" for name in
-                   ("created-timeout", "slow-ready", "expired", "duplicates",
-                    "missing", "journal", "stale-discovery", "restarting")))
-        for role in roles:
+        for role in ("source", "target"):
             subprocess.run(["docker", "image", "rm", "-f", f"{image_base}:{role}"],
                            capture_output=True, timeout=15)
+
     try:
         with tempfile.TemporaryDirectory(prefix=f"recovery-docker-{token}-") as temporary:
             root = Path(temporary)
-            dockerfile = root / "Dockerfile"
-            dockerfile.write_text('''FROM python:3.12-alpine
+            (root / "Dockerfile").write_text('''FROM python:3.12-alpine
 ARG ROLE
 LABEL recovery-proof-role=${ROLE}
 COPY restart_ledger.py /app/runtime/restart_ledger.py
 STOPSIGNAL SIGKILL
-ENTRYPOINT ["/bin/sh", "-c", "[ ${RESTART_BEFORE_BOOT:-0} != 1 ] || exit 2; python3 /app/runtime/restart_ledger.py begin-boot boot-$(cat /proc/sys/kernel/random/uuid) && exec sleep 3600"]
+ENTRYPOINT ["/bin/sh", "-c", "[ ${RESTART_BEFORE_BOOT:-0} != 1 ] || exit 2; python3 /app/runtime/restart_ledger.py begin-boot ${MOBIUS_BOOT_ID:-boot-$(cat /proc/sys/kernel/random/uuid)} && exec sleep 3600"]
 HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
 ''')
-            (root / "restart_ledger.py").write_bytes((ROOT / "backend/runtime/restart_ledger.py").read_bytes())
+            (root / "restart_ledger.py").write_bytes(
+                (ROOT / "backend/runtime/restart_ledger.py").read_bytes())
             for role in ("source", "target"):
                 command("docker", "build", "-q", "--build-arg", f"ROLE={role}",
                         "-t", f"{image_base}:{role}", str(root), timeout=300)
-            source = command("docker", "image", "inspect", "-f", "{{.Id}}", f"{image_base}:source").stdout.strip()
-            target = command("docker", "image", "inspect", "-f", "{{.Id}}", f"{image_base}:target").stdout.strip()
+            source, target = (command("docker", "image", "inspect", "-f", "{{.Id}}",
+                                      f"{image_base}:{role}").stdout.strip()
+                              for role in ("source", "target"))
             assert source != target
+            gate_code = root / "mobius-boot-admission.py"
+            gate_code.write_bytes((ROOT / "scripts/mobius-boot-admission.py").read_bytes())
+            gate_code.chmod(0o644)
 
-            def scenario(name, *, fault=False, readiness_delay=0, expired=False,
-                         duplicates=False, missing=False, interrupt=False,
-                         stale=False, restarting=False):
-                print(f"recovery scenario: {name}", flush=True)
+            def scenario(name, kind):
+                print(f"recovery Docker scenario: {name}", flush=True)
                 project = f"recovery-{token}-{name}"
-                projects.append(project)
+                scenarios.append(project)
                 base = root / name
                 base.mkdir()
-                data = base / "data"
+                data, state = base / "data", base / "state"
                 data.mkdir()
-                state = base / "state"
                 state.mkdir()
-                control = data / "mobius-rebuild"
-                (control / "inbox").mkdir(parents=True)
-                compose_file = base / "compose.yml"
+                (data / "mobius-rebuild" / "inbox").mkdir(parents=True)
+                admission_root = state / "admission"
+                admission_root.mkdir(mode=0o700)
+                compose_file, override = base / "compose.yml", base / "override.json"
                 compose_file.write_text('''services:
   app:
     image: ${MOBIUS_IMAGE}
-    restart: "${RESTART_POLICY:-no}"
-    environment:
-      RESTART_BEFORE_BOOT: "${RESTART_BEFORE_BOOT:-0}"
     volumes:
       - ./data:/data
 ''')
-                override = base / "override.yml"
-                override.write_text('services: {}\n')
+                override.write_text('{}\n')
+                patch.setattr(host, "CONFIG", base / "config.json")
                 patch.setattr(host, "COMPOSE", compose_file)
                 patch.setattr(host, "OVERRIDE", override)
-                patch.setattr(host, "CONFIG", base / "config.json")
                 patch.setattr(host, "STATE_DIR", state)
-                patch.setattr(host, "LOCK", state / "replace.lock")
                 patch.setattr(host, "STATUS", state / "status.json")
+                patch.setattr(host, "LOCK", state / "replace.lock")
                 patch.setattr(host, "TRANSACTION", state / "transaction.json")
                 patch.setattr(host, "FAILED_TARGET_LOG", state / "failed-target.json")
-                patch.setattr(host, "ROLLBACK_TAG", f"{image_base}:rollback-{name}")
-                patch.setattr(host, "TARGET_TAG", f"{image_base}:target-{name}")
-                config = {"project": project, "data_dir": data, "control_dir": control}
-                patch.setattr(host, "config", lambda: config)
-                ledger = _load_supervisor()
-                _bind(ledger, data, patch)
+                patch.setattr(host, "ADMISSION_CODE", gate_code)
+                patch.setattr(host, "ADMISSION_ROOT", admission_root)
+                patch.setattr(host, "COMPOSE_MUTATION_SECONDS", 4)
                 patch.setattr(host, "ROLLBACK_HEALTH_SECONDS", 12)
-                # The production function's default was bound at import time;
-                # changing its constant alone leaves a ten-minute test wait.
-                patch.setattr(host, "wait_healthy", lambda c, timeout=12:
-                              original_wait_healthy(c, timeout))
-                patch.setattr(host, "COMPOSE_MUTATION_SECONDS", 12)
+                patch.setattr(host, "wait_healthy", lambda c, timeout=12: original_wait(c, timeout))
                 patch.setattr(host, "verify_served_generation", lambda *_: None)
                 patch.setattr(host, "retain_images", lambda *_: None)
                 patch.setattr(host, "adopt_from_image", lambda *_: "not part of proof")
-                patch.setattr(host, "docker_command", original_command)
+                patch.setattr(host, "docker_command", original_docker)
+                config = {"project": project, "data_dir": data,
+                          "control_dir": data / "mobius-rebuild"}
+                patch.setattr(host, "config", lambda: config)
                 host.compose(config, "up", "-d", "--no-build", "app", image=source, timeout=30)
-                cid, observed, _ = host.container_health(config)
-                assert observed == source
+                source_cid, source_image, _ = host.container_health(config)
+                assert source_image == source
+                ledger = _load_supervisor()
+                _bind(ledger, data, patch)
                 eventually(lambda: ledger.BOOT_PATH.exists())
                 source_boot = ledger.BOOT_PATH.read_text().strip()
-                operation, expected, nonce = uuid.uuid4().hex, "a" * 40, uuid.uuid4().hex
+                operation, nonce = uuid.uuid4().hex, uuid.uuid4().hex
                 now = time.time()
                 assert ledger.open_cutover(operation, now=now)
                 platform_ledger.publish_cutover_intent(boot_id=source_boot, nonce=nonce,
                     cutover_id=operation, runs=[], now=now)
                 assert ledger.accept_cutover(operation, now=now)
-                if expired:
-                    for path in (ledger.CUTOVER_RECEIPT_PATH, ledger.ACCEPTED_PATH):
-                        receipt = json.loads(path.read_text())
-                        receipt["accepted_at"] = now - 3601
-                        path.write_text(json.dumps(receipt))
-                if interrupt:
-                    # An aged but unexpired original acceptance must be
-                    # refreshed before the journaled rollback boot starts.
-                    for path in (ledger.CUTOVER_RECEIPT_PATH, ledger.ACCEPTED_PATH):
-                        accepted = json.loads(path.read_text())
-                        accepted["accepted_at"] = now - 601
-                        path.write_text(json.dumps(accepted))
-                transaction = host.transaction_record(operation, expected, nonce, source, target)
-                transaction["phase"] = "replacement_started"
-                host.write_transaction(transaction)
-                if fault:
-                    # Pause exactly the daemon's successful DELETE response
-                    # to this source CID. Compose has one real up -d request:
-                    # it may create the target, delete the source, then its
-                    # caller deadline kills the CLI before rename/start.
-                    with DockerDeleteBarrier(base / "docker.sock", cid) as barrier:
+                tx = host.transaction_record(operation, "a" * 40, nonce, source, target)
+                tx.update(phase="replacement_started", source_container=source_cid)
+                if kind != "legacy":
+                    tx["admission_version"] = 1
+                host.write_transaction(tx)
+                accepted = ledger.ACCEPTED_PATH.read_bytes()
+                (data / "ready").touch()
+
+                if kind == "legacy":
+                    # The old incident is still observable, but an unwrapped
+                    # transaction now refuses automatic adoption/restart.
+                    with ResponseBarrier(base / "proxy.sock", "DELETE", source_cid) as barrier:
                         with patch.context() as envpatch:
                             envpatch.setenv("DOCKER_HOST", f"unix://{barrier.path}")
                             try:
                                 host.compose(config, "up", "-d", "--no-build", "--no-deps",
-                                             "--force-recreate", "app", image=target,
-                                             timeout=20)
+                                             "--force-recreate", "app", image=target, timeout=20)
                             except subprocess.TimeoutExpired:
-                                assert barrier.deleted.is_set(), (
-                                    "Compose timed out before daemon accepted source DELETE")
+                                assert barrier.accepted.is_set(), "DELETE was not accepted"
                             else:
-                                raise AssertionError("Compose did not time out after source DELETE")
-                        barrier.release.set()
-                    assert subprocess.run(["docker", "inspect", cid],
+                                raise AssertionError("same Compose call did not time out")
+                    assert subprocess.run(["docker", "inspect", source_cid],
                                           capture_output=True, timeout=10).returncode != 0
-                    _, observed, health = host.container_health(config)
-                    assert observed == target and health == "created", (observed, health)
-                else:
-                    if restarting:
-                        with patch.context() as envpatch:
-                            envpatch.setenv("RESTART_POLICY", "always")
-                            envpatch.setenv("RESTART_BEFORE_BOOT", "1")
-                            host.compose(config, "up", "--no-start", "--no-build", "--no-deps",
-                                         "--force-recreate", "app", image=target, timeout=30)
-                    else:
-                        host.compose(config, "up", "--no-start", "--no-build", "--no-deps",
-                                     "--force-recreate", "app", image=target, timeout=30)
-                if restarting:
-                    target_cid, _, _ = host.container_health(config)
-                    command("docker", "start", target_cid)
-                    eventually(lambda: host.container_health(config)[2] == "restarting")
-                    assert ledger.ACCEPTED_PATH.exists(), "crash-before-boot consumed handoff"
-                if duplicates:
-                    # A second Compose-labelled app is an actual daemon object,
-                    # not a fabricated `ps` response. Never choose arbitrarily.
-                    target_cid, _, _ = host.container_health(config)
-                    labels = json.loads(command("docker", "inspect", "-f",
-                                                "{{json .Config.Labels}}", target_cid).stdout)
-                    copied = [part for key, value in labels.items()
-                              if key.startswith("com.docker.compose.")
-                              for part in ("--label", f"{key}={value}")]
-                    command("docker", "create", "--name", f"{project}-duplicate",
-                            *copied, f"{image_base}:target")
-                    ids = host.compose(config, "ps", "-a", "-q", "app").stdout.split()
-                    assert len(ids) > 1, "Compose did not expose real duplicate labels"
-                    before = ledger.ACCEPTED_PATH.read_bytes()
+                    _, image, health = host.container_health(config)
+                    assert (image, health) == (target, "created")
                     host.reconcile()
-                    assert host.TRANSACTION.exists() and ledger.ACCEPTED_PATH.read_bytes() == before
-                    command("docker", "rm", "-f", f"{project}-duplicate")
-                if missing:
-                    target_cid, _, _ = host.container_health(config)
-                    command("docker", "rm", "-f", target_cid)
-                # Compose really deleted the source. The separate stale
-                # scenario below also races the worker's own ps/inspect pair.
-                old = cid
-                assert subprocess.run(["docker", "inspect", old], capture_output=True).returncode != 0
-                if readiness_delay:
-                    import threading
-                    timer = threading.Timer(readiness_delay, lambda: (data / "ready").touch())
-                    timer.start()
-                else:
-                    timer = None
-                    (data / "ready").touch()
-                try:
-                    raced = {"removed": 0, "stale_inspect": 0, "ps": 0}
-                    if stale:
-                        def race(args, **kwargs):
-                            if args[1] == "compose" and "ps" in args and "app" in args:
-                                result = original_command(args, **kwargs)
-                                raced["ps"] += 1
-                                if not raced["removed"]:
-                                    stale_id = result.stdout.strip()
-                                    assert stale_id and "\n" not in stale_id
-                                    command("docker", "rm", "-f", stale_id)
-                                    create = ["docker", "compose", "-p", project,
-                                              "-f", str(compose_file), "-f", str(override),
-                                              "up", "--no-start", "--no-build", "--no-deps",
-                                              "--force-recreate", "app"]
-                                    original_command(create, cwd=base,
-                                                     env={**os.environ, "MOBIUS_IMAGE": target},
-                                                     timeout=30)
-                                    fresh = original_command(args, **kwargs).stdout.strip()
-                                    assert fresh and fresh != stale_id
-                                    raced["removed"] = 1
-                                return result
-                            if args[1:3] == ["container", "inspect"]:
-                                try:
-                                    return original_command(args, **kwargs)
-                                except subprocess.CalledProcessError:
-                                    raced["stale_inspect"] += 1
-                                    raise
-                            return original_command(args, **kwargs)
-                        patch.setattr(host, "docker_command", race)
-                    if interrupt:
-                        persist = host.write_transaction
-                        crashed = [False]
-                        def interrupted_write(value):
-                            persist(value)
-                            if value.get("rollback_stage") == "starting" and not crashed[0]:
-                                crashed[0] = True
-                                raise KeyboardInterrupt("journal persisted before Docker start")
-                        patch.setattr(host, "write_transaction", interrupted_write)
-                        wall_time = time.time
+                    assert host.read_json(host.STATUS)["code"] == "legacy_admission_unconfirmed"
+                    assert host.TRANSACTION.exists()
+                    assert ledger.ACCEPTED_PATH.read_bytes() == accepted
+                    return
+
+                if kind == "remove-timeout":
+                    with ResponseBarrier(base / "proxy.sock", "DELETE", source_cid) as barrier:
+                        def timeout_remove(args, **kwargs):
+                            if args[1:3] == ["container", "rm"] and args[-1] == source_cid:
+                                kwargs["env"] = {**os.environ, "DOCKER_HOST": f"unix://{barrier.path}"}
+                            return original_docker(args, **kwargs)
+                        patch.setattr(host, "docker_command", timeout_remove)
                         try:
-                            # Persist start intent at the earlier wall clock, then
-                            # resume 601 seconds later without sleeping ten minutes.
-                            # Docker has not started the rollback at this boundary;
-                            # its next real boot uses the restored real wall clock.
-                            with patch.context() as clock_patch:
-                                clock_patch.setattr(host.time, "time", lambda: wall_time() - 601)
-                                host.reconcile()
-                        except KeyboardInterrupt:
-                            assert crashed[0] and host.TRANSACTION.exists()
-                            receipt = json.loads(ledger.CUTOVER_RECEIPT_PATH.read_text())
-                            accepted = json.loads(ledger.ACCEPTED_PATH.read_text())
-                            assert wall_time() - receipt["accepted_at"] >= 600
-                            assert wall_time() - accepted["accepted_at"] >= 600
-                            assert host.read_transaction()["rollback_authorization"] == host.rearm_rollback(
-                                config, operation, witness_only=True)
+                            host.prepare_admission(config, tx)
+                        except subprocess.TimeoutExpired:
+                            assert barrier.accepted.is_set(), "exact source remove not accepted"
                         else:
-                            raise AssertionError("journal interruption boundary was not reached")
-                        patch.setattr(host, "write_transaction", persist)
-                    host.reconcile()
-                    if stale:
-                        assert raced["removed"] == raced["stale_inspect"] == 1
-                        assert raced["ps"] >= 2, "worker did not rediscover after stale inspect"
-                        patch.setattr(host, "docker_command", original_command)
-                    status = host.read_json(host.STATUS)
-                    assert status["state"] in {"rolled_back", "needs_recovery"}, status
-                    if expired:
-                        assert status["state"] == "needs_recovery"
-                        assert ledger.CUTOVER_RECEIPT_PATH.exists()
-                        assert not ledger.ACK_PATH.exists()
+                            raise AssertionError("source remove response did not time out")
+                        patch.setattr(host, "docker_command", original_docker)
+                    assert subprocess.run(["docker", "inspect", source_cid],
+                                          capture_output=True, timeout=10).returncode != 0
+                    assert ledger.ACCEPTED_PATH.read_bytes() == accepted
+                elif kind in {"start-timeout", "delayed-entry"}:
+                    gate = host.prepare_admission(config, tx)
+                    attempt = gate.allocate("target", uuid.uuid4().hex, target)
+                    expected = host.wrapped_configuration(config, tx, "target",
+                                                          attempt["token"], target)
+                    target_cid = host.create_attempt(config, expected)
+                    gate.bind("target", attempt["token"], target_cid)
+                    lock = None
+                    with ResponseBarrier(base / "proxy.sock", "POST", target_cid, "start") as barrier:
+                        def timeout_start(args, **kwargs):
+                            nonlocal lock
+                            if args[1] == "start" and args[-1] == target_cid:
+                                if kind == "delayed-entry":
+                                    lock = (admission_root / operation / "lock").open("r+b")
+                                    fcntl.flock(lock, fcntl.LOCK_EX)
+                                kwargs["env"] = {**os.environ, "DOCKER_HOST": f"unix://{barrier.path}"}
+                                try:
+                                    return original_docker(args, **kwargs)
+                                finally:
+                                    if lock is not None:
+                                        # Docker accepted Start while the wrapper
+                                        # was blocked on its real gate lock. Fence
+                                        # the exact old CID before it can enter.
+                                        assert barrier.accepted.is_set()
+                                        command("docker", "rm", "-f", target_cid, timeout=15)
+                                        fcntl.flock(lock, fcntl.LOCK_UN)
+                                        lock.close()
+                                        lock = None
+                            return original_docker(args, **kwargs)
+                        patch.setattr(host, "docker_command", timeout_start)
+                        try:
+                            host.prepare_attempt(config, tx, "target")
+                        except subprocess.TimeoutExpired:
+                            assert barrier.accepted.is_set(), "Docker Start was not accepted"
+                        else:
+                            raise AssertionError("accepted Docker Start did not time out")
+                        finally:
+                            patch.setattr(host, "docker_command", original_docker)
+                    if kind == "delayed-entry":
+                        assert gate.observe()["slots"]["target"]["consumed"] is None
+                        assert ledger.ACCEPTED_PATH.read_bytes() == accepted
+                        host.prepare_attempt(config, tx, "target")
+                        eventually(lambda: gate.observe()["slots"]["target"]["consumed"] is not None)
+                        assert ledger.ACK_PATH.exists()
                     else:
-                        assert status["state"] == "rolled_back", status
-                        assert ledger.ACK_PATH.exists() and not ledger.ACCEPTED_PATH.exists()
-                        assert not host.TRANSACTION.exists()
-                    boot = ledger.BOOT_PATH.read_bytes()
-                    host.reconcile()
-                    assert ledger.BOOT_PATH.read_bytes() == boot, "reconcile repeated a boot"
-                finally:
-                    if timer:
-                        timer.cancel()
-                        timer.join(timeout=2)
+                        eventually(lambda: gate.observe()["slots"]["target"]["consumed"] is not None)
+                        assert ledger.ACK_PATH.exists()
+                else:
+                    raise AssertionError(kind)
+
+                host.reconcile()
+                status = host.read_json(host.STATUS)
+                if kind in {"start-timeout", "delayed-entry"}:
+                    assert status["state"] == "succeeded", status
+                    assert ledger.ACK_PATH.exists()
+                else:
+                    assert status["state"] == "rolled_back", status
+                    assert ledger.ACK_PATH.exists()
+                assert not host.TRANSACTION.exists()
+                first_boot = ledger.BOOT_PATH.read_bytes()
+                host.reconcile()
+                assert ledger.BOOT_PATH.read_bytes() == first_boot, "reconcile replayed a boot"
+                if kind == "delayed-entry":
+                    history = gate.observe()["slots"]["target"]["attempts"]
+                    assert len(history) >= 2 and history[0]["fenced"]
+                    assert history[0]["cid"] != history[-1]["cid"]
+                    assert history[0]["token"] != history[-1]["token"]
 
             try:
-                scenario("created-timeout", fault=True)
-                scenario("slow-ready", readiness_delay=4)
-                scenario("expired", expired=True)
-                scenario("duplicates", duplicates=True)
-                scenario("missing", missing=True)
-                scenario("journal", interrupt=True)
-                scenario("stale-discovery", stale=True)
-                scenario("restarting", restarting=True)
-                print("real Docker/Compose and real ledger recovery proof passed")
+                scenario("legacy-incident", "legacy")
+                scenario("remove-ambiguity", "remove-timeout")
+                scenario("accepted-start", "start-timeout")
+                scenario("delayed-entry", "delayed-entry")
+                print("real Docker/Compose, admission, and frozen ledger proof passed")
             finally:
-                cleanup()  # stop containers before deleting bind-mounted data
+                cleanup()  # stop mounted containers before deleting scratch data
     finally:
         patch.undo()
-        cleanup()  # also covers image-build failure before scenario setup
+        cleanup()  # also covers interrupted image build
 
 
 if __name__ == "__main__":
