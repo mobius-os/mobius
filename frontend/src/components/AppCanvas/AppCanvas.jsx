@@ -13,6 +13,7 @@ import {
   liveAppToken, resolveLatchedToken,
 } from '../../lib/appToken.js'
 import { createAppStorageHost } from '../../lib/appStorageHost.js'
+import { acquireAudioSession } from '../../lib/audioSession.js'
 import {
   cacheAppToken, readAppFrameStorage, readCachedAppToken,
   isSharedVirtualStorageKey,
@@ -349,6 +350,11 @@ const AppCanvas = forwardRef(function AppCanvas({
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
   onMediaSession, onShellShortcut,
 }, hostRef) {
+  // Configure the page-wide session in the trusted host, before app code can
+  // play. Both workspace and installed app launches use this canvas. This
+  // changes routing only: app mute, autoplay and visibility still belong to apps.
+  useLayoutEffect(() => acquireAudioSession('playback'), [])
+
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
   const [cameraPreview, setCameraPreview] = useState(null)
