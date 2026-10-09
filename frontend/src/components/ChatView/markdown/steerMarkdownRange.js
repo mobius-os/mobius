@@ -165,6 +165,9 @@ export function markdownRangeSource(range) {
   })
   function source(token, formats = []) {
     if (token.type === 'def') return ''
+    // Both source spellings mean the same hard break. Use whitespace syntax
+    // so a boundary break cannot escape the synthetic closing style marker.
+    if (token.type === 'br') return '  \n'
     // Literal text can gain Markdown meaning at a new fragment boundary (for
     // example "* tail" becomes a list). Escape text, not complete source atoms.
     if (token.type === 'text' && !token.tokens) return token.raw.split(referenceParts)

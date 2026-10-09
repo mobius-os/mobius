@@ -275,6 +275,26 @@ test('ordinary whole-block copy retains the original Markdown source', () => {
   assert.equal(assistantClipboardText(clipboardData), '__ordinary__')
 })
 
+for (const legacy of [false, true]) test(`hard breaks do not corrupt whole-fragment paste formatting (legacy=${legacy})`, () => {
+  const md = new Marked()
+  for (const breakSource of ['\\\n', '  \n']) {
+    const replay = `**foo${breakSource}bar baz**`
+    for (const cut of [replay.indexOf('bar'), replay.indexOf('bar') + 2]) {
+      const rows = [assistant(replay.slice(0, cut)), steer, assistant(replay, 'run:assistant:1')]
+      if (legacy) rows.forEach(row => { delete row.blocks })
+      const shown = projectSettledSteerContinuations(rows)
+      for (const msg of [shown[0], shown[2]]) {
+        const range = msg.blocks?.[0].markdown_range ?? msg.markdown_range
+        const { html, clipboardData } = copyWholeFragment(msg, 'Selected text')
+        assert.ok(html.includes('<strong>'))
+        const expected = md.parser(range.tokens).replace(/<br>(?=<\/strong>)/g, '')
+        assert.equal(md.parse(assistantClipboardText(clipboardData)), expected,
+          'terminal whitespace follows ordinary copy semantics; bold and internal breaks survive')
+      }
+    }
+  }
+})
+
 for (const legacy of [false, true]) {
   for (const [prefix, replay] of [
     ['**Number &#42;** then **Plan', '**Number &#42;** then **Planned**'],

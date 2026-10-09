@@ -71,6 +71,21 @@ test('outer italics retain their source delimiter around nested bold', () => {
   }
 })
 
+test('hard-break atoms cannot escape a synthetic closing emphasis marker', () => {
+  const md = new Marked()
+  for (const breakSource of ['\\\n', '  \n']) {
+    const source = `**foo${breakSource}bar baz**`
+    const boundary = splitSteerMarkdown(source, source.indexOf('bar'))
+    assert.equal(md.parse(markdownRangeSource(boundary.before).trim()), '<p><strong>foo</strong></p>\n',
+      'whole-block clipboard trimming may remove a terminal break, never the formatting')
+    const interior = splitSteerMarkdown(source, source.indexOf('bar') + 2)
+    for (const range of [interior.before, interior.after]) {
+      assert.equal(md.parse(markdownRangeSource(range)), md.parser(range.tokens),
+        'line breaks inside copied text keep their rendered meaning')
+    }
+  }
+})
+
 test('copy moves boundary whitespace outside clipped emphasis without losing characters', () => {
   const source = '__Start middle end__'
   const split = splitSteerMarkdown(source, source.indexOf('middle'))
