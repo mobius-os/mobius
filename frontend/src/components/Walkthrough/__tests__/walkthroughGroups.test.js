@@ -12,3 +12,9 @@ test('app_screens_cover_the_five_groups_with_unique_apps_and_complete_copy', () 
     for (const app of group.apps) assert.ok(app.name && app.blurb, `${app.id} has a name and blurb`)
   }
 })
+
+test('the_collaboration_screen_offers_social_kanban_and_contribute', () => {
+  const system = APP_GROUPS.find(group => group.id === 'system')
+  assert.deepEqual(system.apps.map(app => app.id), ['social', 'kanban', 'contribute'])
+  assert.match(system.lead, /GitHub/, 'it explains that GitHub connects contributions to Möbius and other apps')
+})

@@ -203,3 +203,38 @@ test('one explicit update writes the latest workspace and navigates exactly once
     globalThis.history = previousHistory
   }
 })
+
+test('a same-document reload skips the service-worker update check', async () => {
+  const previousHistory = globalThis.history
+  globalThis.history = { state: null, replaceState() {} }
+  const waiting = { messages: [], postMessage(message) { this.messages.push(message) } }
+  let updateChecks = 0
+  const registration = {
+    active: { id: 'active' },
+    waiting,
+    installing: null,
+    async update() { updateChecks += 1 },
+    addEventListener() {},
+    removeEventListener() {},
+  }
+  try {
+    const harness = controllerHarness({ registration })
+    let registrationLookups = 0
+    harness.serviceWorker.getRegistration = async () => {
+      registrationLookups += 1
+      return registration
+    }
+    const { result } = renderHook(useShellUpdateController, harness.inputs)
+
+    assert.equal(await result.current.reloadShell(), true)
+
+    assert.deepEqual(harness.replacements, ['/shell/'])
+    assert.equal(harness.persisted(), 1)
+    assert.ok(harness.stored.has('shell-reload'), 'workspace is restored after the reload')
+    assert.equal(registrationLookups, 0, 'no service-worker inspection delays the reload')
+    assert.equal(updateChecks, 0)
+    assert.deepEqual(waiting.messages, [], 'a theme reload never activates a waiting shell')
+  } finally {
+    globalThis.history = previousHistory
+  }
+})

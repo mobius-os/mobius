@@ -77,6 +77,7 @@ import {
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import { drawerNameMaxLength, saveDrawerRename } from './drawerRename.js'
+import { drawerRowUnread } from './appBadge.js'
 import './Drawer.css'
 
 const LIST_TABS = ['recents', 'archived']
@@ -1696,6 +1697,7 @@ const DrawerRow = memo(function DrawerRow({
   const label = kind === 'chat' ? item.title : item.name
   const projectChip = recentsProjectChip(kind, item)
   const pinned = !!item.pinned_at
+  const { badgeLabel, attentionDot } = drawerRowUnread(kind, item, attention)
   const waiting = kind === 'chat' && item.handoff?.kind === 'automatic'
   const recovery = kind === 'chat' && item.handoff?.kind === 'recovery'
   const onHold = kind === 'chat' && item.handoff?.kind === 'on_hold'
@@ -2358,7 +2360,7 @@ const DrawerRow = memo(function DrawerRow({
             aria-label="Building"
             title="Building…"
           />
-        ) : attention ? (
+        ) : attentionDot ? (
           <span
             className="drawer__attention-dot"
             role="img"
@@ -2366,7 +2368,13 @@ const DrawerRow = memo(function DrawerRow({
             title="New activity"
           />
         ) : null}
-        <span className="drawer__item-text">{label}</span>
+        <span className={`drawer__item-text${badgeLabel ? ' drawer__item-text--unread' : ''}`}>{label}</span>
+        {badgeLabel && (
+          // The app's own unread count (see appBadge.js).
+          <span className="drawer__badge" role="img" aria-label={`${badgeLabel} unread`}>
+            {badgeLabel}
+          </span>
+        )}
       </button>
       {projectChip && (
         // A sibling of the row button (never nested — a button inside a button is

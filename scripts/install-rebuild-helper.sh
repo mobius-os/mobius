@@ -6,7 +6,7 @@ set -euo pipefail
 # This installs the frozen launcher and seeds it with this checkout's worker;
 # later worker changes arrive with verified official images, so this runs once.
 #
-# Helper protocol revision: 1 (request version 2 echoes the app's nonce).
+# Helper protocol revision: 2 (bounded, phase-owned replacement recovery).
 # Keep in step with deployment/self-hosted-helper.required; never decrement.
 
 if [[ $EUID -ne 0 ]]; then
@@ -139,8 +139,10 @@ systemctl stop mobius-rebuild.path 2>/dev/null || true
 trap 'rm -f "$RESOLVED"; systemctl start mobius-rebuild.path 2>/dev/null || true' EXIT
 exec 9>>/var/lib/mobius-rebuild/replace.lock
 flock 9
-# Seed the launcher's worker from this checkout. It never lowers a revision
-# already adopted from a newer official image.
+# Seed the active worker, including an exact still-pending image candidate.
+# Refusal exits before publishing new units/capabilities; high-water alone
+# does not mean the required worker is active. A genuinely newer active worker
+# and any newer offered candidate are preserved.
 MOBIUS_REBUILD_LOCK_HELD=1 \
   /usr/bin/python3 -I -S "$ROOT/scripts/mobius-rebuild-host.py" adopt-self
 install -D -m 0755 "$ROOT/scripts/mobius-rebuild-launcher.py" \
@@ -193,6 +195,8 @@ Requires=docker.service
 Type=oneshot
 ExecStart=/usr/local/libexec/mobius-rebuild-host run
 ExecStopPost=/usr/local/libexec/mobius-rebuild-host reconcile
+# Reconcile may observe the target, then one 300s rollback boot, plus bounded Docker commands.
+TimeoutStopSec=900
 EOF
 cat >/etc/systemd/system/mobius-rebuild.path <<EOF
 [Unit]
@@ -215,6 +219,7 @@ Before=mobius-rebuild.path
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile
+TimeoutStartSec=900
 
 [Install]
 WantedBy=multi-user.target

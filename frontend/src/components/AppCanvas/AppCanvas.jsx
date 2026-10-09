@@ -149,8 +149,8 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //
 //   5. {type: 'moebius:frame-insets', insets}              parent → frame
 //      The device safe-area insets ({top,right,bottom,left} px strings),
-//      forwarded so an immersive (full-bleed, under-the-notch) app can pad
-//      away from the notch/home-indicator. env(safe-area-inset-*) reads 0
+//      forwarded so an immersive app can pad away from a cutout/gesture area
+//      when the host paints beneath one. env(safe-area-inset-*) reads 0
 //      inside the sandboxed iframe (only the top-level document resolves
 //      viewport-fit insets), so the shell reads the REAL values off a probe
 //      element and posts them; the frame applies them as

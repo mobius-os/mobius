@@ -33,6 +33,7 @@ import {
   providerAllowanceSummary,
 } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
+import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
@@ -278,6 +279,7 @@ export default function SettingsView({
   active = true,
   refreshToken = 0,
   onLeaveSharedAccess = null,
+  onStatusBarThemeReload = null,
 }) {
   const settingsBoundaryRef = useRef(null)
   const queryClient = useQueryClient()
@@ -878,8 +880,14 @@ export default function SettingsView({
     // catch-rollback. themeService.toggleTheme invalidates both
     // theme queries; AppCanvas's useEffect picks that up and
     // postMessages `moebius:frame-theme` to live iframes.
+    // An installed iPhone app re-reads its status-bar colour only on load, so
+    // after the save the helper runs the shell's controlled reload there. A
+    // reload failure never reaches this catch or the theme rollback.
     try {
-      await themeService.toggleTheme(queryClient, currentMode, api)
+      await saveThemeThenRefreshStatusBar({
+        save: () => themeService.toggleTheme(queryClient, currentMode, api),
+        reload: onStatusBarThemeReload,
+      })
     } catch {
       setThemeMode(currentMode)
       setThemeError(
