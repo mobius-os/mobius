@@ -96,6 +96,7 @@
     "0085_app_shell_shortcuts": "7a48e55ad4e1e00dcd643847f489ee4fde6557be968414f13336917d5495db19",
     "0083_swap_chat_note_sections": "f50b007bb8f34729e6f42d3f7ad915ef59aef8664aacbf4872d8291941455320",
     "0086_drop_chat_note_backup": "15897c2fe0885b337962f28abd0c6711a6ad1a2000440284d309ef5ecf36b49d",
-    "0087_transcript_rows": "1eb049545de536d42713bfbaaffe282700fb3a1c131ff2811404ba31c7841fec"
+    "0087_transcript_rows": "1eb049545de536d42713bfbaaffe282700fb3a1c131ff2811404ba31c7841fec",
+    "0088_chat_compaction_drafts": "19c32b7c6cb3a5b7e3892b84c636ca3f1b8f6d292feda19befb821b72ace037e"
   }
 }

@@ -1,0 +1,37 @@
+/* Compact, calm recovery controls in the existing chat-foot vocabulary. */
+.chat__compaction-progress {
+  pointer-events: auto;
+  max-width: 720px;
+  margin: 0 auto 8px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--chat-status-font-size);
+  line-height: 1.4;
+}
+.chat__compaction-progress-copy { display: grid; gap: 2px; min-width: 0; }
+.chat__compaction-progress-copy span { color: var(--muted); }
+.chat__compaction-progress-copy [role="alert"] { color: var(--danger); }
+.chat__compaction-progress-actions { flex: none; }
+.chat__compaction-progress-actions button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.chat__compaction-progress-actions button:hover { background: var(--surface-hover, var(--bg)); }
+.chat__compaction-progress-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat__compaction-progress-actions button:disabled { opacity: .55; cursor: default; }
+@media (max-width: 520px) {
+  .chat__compaction-progress { align-items: stretch; flex-direction: column; }
+  .chat__compaction-progress-actions button { width: 100%; }
+}

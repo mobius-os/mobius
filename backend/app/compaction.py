@@ -23,6 +23,7 @@ import shutil
 import signal
 import tempfile
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
 from app.chat_notes import extract_full_digest
@@ -166,15 +167,16 @@ def _validated_briefing(value: str | None) -> str:
   return briefing
 
 
-def _utf8_chunks(text: str, max_bytes: int) -> list[str]:
+def _utf8_chunks(text: str, max_bytes: int) -> Iterator[str]:
   """Split text without dropping Unicode while bounding tokenizer input.
 
   Provider tokenizers use byte-backed vocabularies, so UTF-8 bytes are a
   conservative, model-independent upper bound on token count. Character caps
   are not: emoji or adversarial code points can encode to several bytes each.
   """
+  if max_bytes <= 0:
+    raise ValueError("UTF-8 chunk limit must be positive")
   encoded = text.encode("utf-8")
-  chunks: list[str] = []
   start = 0
   while start < len(encoded):
     end = min(start + max_bytes, len(encoded))
@@ -185,9 +187,42 @@ def _utf8_chunks(text: str, max_bytes: int) -> list[str]:
       raise CompactionError(
         "The chat contains text that cannot be compacted safely."
       )
-    chunks.append(encoded[start:end].decode("utf-8"))
+    yield encoded[start:end].decode("utf-8")
     start = end
-  return chunks
+
+
+def build_synthesis_source(
+  messages: list[dict], source_digest: str | None = None,
+) -> str:
+  """Render the same complete source and markers used by provider handoffs."""
+  source = (source_digest or "").strip()
+  transcript = build_transcript_text(messages, max_chars=None).strip()
+  if source:
+    material = f"--- FULL CHAT DIGEST ---\n{source}"
+    if transcript:
+      material += "\n\n--- CURRENT CHAT TRANSCRIPT ---\n" + transcript
+    return material
+  if not transcript:
+    raise CompactionError("Nothing to compact — the chat has no content yet.")
+  return f"--- LEGACY CHAT TRANSCRIPT ---\n{transcript}"
+
+
+def _synthesis_prompt(
+  chunk: str, index: int, total: int, briefing: str | None,
+  guidance: str,
+) -> str:
+  if briefing is None:
+    prompt = _SUMMARIZE_PROMPT + guidance + chunk
+  else:
+    prompt = (
+      _UPDATE_BRIEFING_PROMPT + guidance
+      + "--- CURRENT PORTABLE BRIEFING ---\n" + briefing
+      + "\n\n--- NEXT SOURCE SEGMENT "
+      + f"({index + 1} OF {total}) ---\n" + chunk
+    )
+  if len(prompt.encode("utf-8")) > _MAX_SYNTHESIS_PROMPT_BYTES:
+    raise CompactionError("The provider briefing is too large to compact safely.")
+  return prompt
 
 
 async def summarize_chat(
@@ -212,25 +247,12 @@ async def summarize_chat(
   This is the one seam tests monkeypatch: the compaction endpoint awaits it,
   so a stub returning canned text makes the route hermetic.
   """
-  source = (source_digest or "").strip()
   instructions = (custom_instructions or "").strip()
   guidance = (
     _CUSTOM_GUIDANCE_PROMPT.format(instructions=instructions)
     if instructions else ""
   )
-  transcript = build_transcript_text(messages, max_chars=None).strip()
-  if source:
-    source_material = f"--- FULL CHAT DIGEST ---\n{source}"
-    if transcript:
-      # Include every supplied interval; coverage selection belongs to the
-      # caller, never to this bounded synthesis engine.
-      source_material += (
-        "\n\n--- CURRENT CHAT TRANSCRIPT ---\n" + transcript
-      )
-  else:
-    source_material = f"--- LEGACY CHAT TRANSCRIPT ---\n{transcript}"
-  if not source and not transcript:
-    raise CompactionError("Nothing to compact — the chat has no content yet.")
+  source_material = build_synthesis_source(messages, source_digest)
 
   from app.providers import get_provider
 
@@ -251,27 +273,16 @@ async def summarize_chat(
       "This chat is too large to compact safely; no provider was switched."
     )
 
-  chunks = _utf8_chunks(source_material, _SYNTHESIS_CHUNK_BYTES)
+  total_chunks = sum(1 for _ in _utf8_chunks(source_material, _SYNTHESIS_CHUNK_BYTES))
+  if total_chunks > _MAX_SYNTHESIS_CALLS:
+    raise CompactionError(
+      "This chat is too large to compact safely; no provider was switched."
+    )
   briefing: str | None = None
   try:
     async with asyncio.timeout(_SYNTHESIS_TOTAL_TIMEOUT_SECS):
-      for index, chunk in enumerate(chunks):
-        if briefing is None:
-          prompt = _SUMMARIZE_PROMPT + guidance + chunk
-        else:
-          prompt = (
-            _UPDATE_BRIEFING_PROMPT
-            + guidance
-            + "--- CURRENT PORTABLE BRIEFING ---\n"
-            + briefing
-            + "\n\n--- NEXT SOURCE SEGMENT "
-            + f"({index + 1} OF {len(chunks)}) ---\n"
-            + chunk
-          )
-        if len(prompt.encode("utf-8")) > _MAX_SYNTHESIS_PROMPT_BYTES:
-          raise CompactionError(
-            "The provider briefing is too large to compact safely."
-          )
+      for index, chunk in enumerate(_utf8_chunks(source_material, _SYNTHESIS_CHUNK_BYTES)):
+        prompt = _synthesis_prompt(chunk, index, total_chunks, briefing, guidance)
         briefing = _validated_briefing(await _run_provider_summarize_turn(
           prompt,
           data_dir=data_dir,
@@ -286,6 +297,76 @@ async def summarize_chat(
   if briefing is None:
     raise CompactionError("The provider produced no portable briefing.")
   return briefing
+
+
+async def summarize_batch(
+  source_material: str,
+  *,
+  start_chunk: int = 0,
+  briefing: str | None = None,
+  data_dir: str,
+  provider_id: str,
+  model: str | None = None,
+  effort: str | None = None,
+  custom_instructions: str | None = None,
+  checkpoint: Callable[[int, str], Awaitable[None]],
+) -> dict:
+  """Synthesize at most eight segments, durably checking each result first.
+
+  The caller owns source snapshotting, checkpoint persistence and any later
+  invocation. This function never schedules continuation or skips an interval.
+  """
+  source_bytes = len(source_material.encode("utf-8"))
+  if not source_bytes:
+    raise CompactionError("Nothing to compact — the chat has no content yet.")
+  total_chunks = sum(1 for _ in _utf8_chunks(source_material, _SYNTHESIS_CHUNK_BYTES))
+  if type(start_chunk) is not int or not 0 <= start_chunk < total_chunks:
+    raise CompactionError("Invalid synthesis cursor for this source.")
+  if (start_chunk == 0 and briefing is not None) or (
+    start_chunk > 0 and briefing is None
+  ):
+    raise CompactionError("The synthesis cursor and briefing do not match.")
+  if briefing is not None:
+    briefing = _validated_briefing(briefing)
+  instructions = (custom_instructions or "").strip()
+  guidance = (
+    _CUSTOM_GUIDANCE_PROMPT.format(instructions=instructions)
+    if instructions else ""
+  )
+  from app.providers import get_provider
+
+  try:
+    async with asyncio.timeout(_SYNTHESIS_TOTAL_TIMEOUT_SECS):
+      provider = get_provider(provider_id)
+      auth_error = provider.check_auth(data_dir)
+      if auth_error is not None:
+        raise CompactionError(auth_error)
+      await provider.ensure_auth(data_dir)
+      next_chunk = start_chunk
+      for index, chunk in enumerate(_utf8_chunks(source_material, _SYNTHESIS_CHUNK_BYTES)):
+        if index < start_chunk:
+          continue
+        prompt = _synthesis_prompt(chunk, index, total_chunks, briefing, guidance)
+        revised = _validated_briefing(await _run_provider_summarize_turn(
+          prompt, data_dir=data_dir, provider_id=provider_id,
+          model=model, effort=effort,
+        ))
+        await checkpoint(index + 1, revised)
+        briefing = revised
+        next_chunk = index + 1
+        if next_chunk - start_chunk >= _MAX_SYNTHESIS_CALLS:
+          break
+  except TimeoutError as exc:
+    raise CompactionError(
+      "Provider handoff synthesis exceeded its overall time limit."
+    ) from exc
+  return {
+    "next_chunk": next_chunk,
+    "briefing": briefing,
+    "complete": next_chunk == total_chunks,
+    "total_chunks": total_chunks,
+    "source_bytes": source_bytes,
+  }
 
 
 async def _run_provider_summarize_turn(

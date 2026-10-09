@@ -648,6 +648,10 @@ class ChatCompactRequest(BaseModel):
   """Optional owner guidance for one manual chat compaction."""
 
   instructions: str | None = Field(default=None, max_length=4000)
+  # An explicit request identity opts into manual, resumable batches. Old
+  # bodyless clients retain their bounded one-request compaction contract.
+  batch_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+  recovery_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
   @field_validator("instructions")
   @classmethod

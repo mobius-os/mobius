@@ -180,6 +180,17 @@ class ChatLiveAssistant(Base):
   snapshot = Column(JSON, nullable=True)
 
 
+class ChatCompactionDraft(Base):
+  """Source-bound manual compaction progress, never an automatic work queue."""
+
+  __tablename__ = "chat_compaction_drafts"
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+  state = Column(JSON, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+  updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 

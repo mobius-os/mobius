@@ -950,13 +950,21 @@ export const api = {
     }),
     // In-place compaction: optional owner guidance shapes the fresh briefing;
     // omitting it preserves the bodyless route used by older clients.
-    compact: (chatId, { instructions = '', ...options } = {}) => apiFetch(
+    compact: (chatId, { instructions = '', batch_id, recovery_id, ...options } = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/compact`,
       {
         ...options,
         method: 'POST',
-        ...(instructions ? { body: JSON.stringify({ instructions }) } : {}),
+        ...(instructions || batch_id || recovery_id
+          ? { body: JSON.stringify({ ...(instructions ? { instructions } : {}), batch_id, recovery_id }) }
+          : {}),
       },
+    ),
+    compactProgress: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/compact-progress`, options,
+    ),
+    compactStop: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/compact-stop`, { ...options, method: 'POST' },
     ),
     runtime: (chatId, options = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/runtime`,

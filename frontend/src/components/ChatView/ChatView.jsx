@@ -77,7 +77,9 @@ import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
-import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
+import CompactionProgress from './CompactionProgress.jsx'
+import useCompactCommands from './hooks/useCompactCommands.js'
+import { mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -705,10 +707,6 @@ export default function ChatView({
   )
   const [fileDropActive, setFileDropActive] = useState(false)
   const fileDragDepthRef = useRef(0)
-  // A "/compact" submission is a chat action, not a turn: it rewrites the live
-  // context instead of asking the model anything.
-  const [compactingChat, setCompactingChat] = useState(false)
-  const compactingChatRef = useRef(false)
   // The server's view of the same window, shared by every pane and device.
   const serverCompactingKind = useSyncExternalStore(
     subscribeChatCompaction,
@@ -4168,33 +4166,10 @@ export default function ChatView({
     patchQuestionAnswers,
   ])
 
-  // "/compact" never becomes a message. It asks the backend to replace this
-  // chat's live context with a fresh briefing and reset the provider session;
-  // the visible transcript is untouched and the platform renders the stored
-  // compaction as its own "Context compacted" card.
-  async function runCompactCommand(instructions = '', submittedInput = '/compact') {
-    if (!activationSettledRef.current) return
-    if (!chatId || provisionalNewChat) {
-      setSendFailure('There’s no chat context to compact yet.')
-      return
-    }
-    if (compactingChatRef.current) return
-    if (isProviderSwitchBlocking(chatId)) return
-    compactingChatRef.current = true
-    setCompactingChat(true)
-    setComposerInput('')
-    setSendFailure(null)
-    try {
-      await api.chats.compact(chatId, { instructions })
-      await fetchMessages({ force: true })
-    } catch (err) {
-      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
-      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-    } finally {
-      compactingChatRef.current = false
-      setCompactingChat(false)
-    }
-  }
+  const { compactingChat, compactingChatTargetRef, compactProgressRecord, runCompactCommand, stopCompactCommand } = useCompactCommands({
+    chatId, provisionalNewChat, hidden, serverCompactingKind,
+    activationSettledRef, inputValueRef, setComposerInput, setSendFailure, fetchMessages,
+  })
 
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)
@@ -6435,6 +6410,20 @@ export default function ChatView({
             restarting={restartPending}
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
+        <CompactionProgress
+          progress={(compactProgressRecord?.chatId === chatId && compactProgressRecord.progress)
+            || ((compactingChat && compactingChatTargetRef.current === chatId)
+              || serverCompactingKind === 'compact' ? { state: 'running' } : null)}
+          busy={(compactingChat && compactingChatTargetRef.current === chatId)
+            || serverCompactingKind === 'compact'}
+          onContinue={() => {
+            const recoveryId = compactProgressRecord?.chatId === chatId
+              ? compactProgressRecord.progress?.recovery_id : null
+            if (recoveryId) void runCompactCommand('', null, recoveryId)
+          }}
+          onStartOver={() => runCompactCommand('', null)}
+          onStop={stopCompactCommand}
+        />
         <ChatInputBar
           chatId={chatId}
           input={input}
