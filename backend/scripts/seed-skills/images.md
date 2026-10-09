@@ -13,7 +13,7 @@ Codex includes a built-in image generator covered by the plan, with no separate 
 Call the injected `imagegen` tool according to its current contract. Return the
 tool's generated-image result directly. Möbius captures the native completion
 bytes automatically as a durable image attachment, shown directly in the conversation as soon as capture completes.
-Do not duplicate it with a Markdown image or copy the provider's backing file:
+Do not duplicate it with a Markdown image. Do not inspect, locate, or republish a backing file:
 provider storage is an implementation detail inside the protected credentials
 tree. No credential access or recovery approval is needed for normal delivery.
 If delivery fails, report the failure rather than claiming the image is visible
