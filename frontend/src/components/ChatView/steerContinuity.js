@@ -27,17 +27,21 @@ export function isHiddenReplyCarrier(message, root) {
 }
 
 
-/** Return the sealed assistant immediately before one or more steered rows. */
-export function sealedAssistantBeforeSteer(messages, continuationIndex) {
-  if (!Array.isArray(messages) || !Number.isInteger(continuationIndex)) return null
+function sealedAssistantIndexBeforeSteer(messages, continuationIndex) {
+  if (!Array.isArray(messages) || !Number.isInteger(continuationIndex)) return -1
   let index = continuationIndex - 1
   let sawSteer = false
   while (index >= 0 && isSteeredUserMessage(messages[index])) {
     sawSteer = true
     index -= 1
   }
-  if (!sawSteer || messages[index]?.role !== 'assistant') return null
-  return messages[index]
+  return sawSteer && messages[index]?.role === 'assistant' ? index : -1
+}
+
+/** Return the sealed assistant immediately before one or more steered rows. */
+export function sealedAssistantBeforeSteer(messages, continuationIndex) {
+  const index = sealedAssistantIndexBeforeSteer(messages, continuationIndex)
+  return index >= 0 ? messages[index] : null
 }
 
 
@@ -150,6 +154,8 @@ export function projectSteerPrefixMessage(sealed, continuation) {
   if (block?.type !== 'text') return sealed
   const replay = sealed.steer_replay?.textIndex === index ? sealed.steer_replay : null
   const start = replay ? replay.text.length - block.content.length : 0
+  // A newer parse may supply formatting, never a different row's prose.
+  if (range.source.slice(range.start + start, range.start + start + block.content.length) !== block.content) return sealed
   const markdownRange = sliceMarkdownRange(range, start, start + block.content.length)
   if (!markdownRange) return sealed
   // Carry the final parse backward only through this same exact text section.
@@ -166,7 +172,8 @@ export function projectSteerPrefixMessage(sealed, continuation) {
 /** Update only the active replay chain; unrelated settled rows stay cached. */
 export function projectActiveSteerPrefix(messages, activePrefix) {
   if (!activePrefix?.continuation?.steer_replay?.prefixRange) return messages
-  let index = messages.findIndex(message => message?.id === activePrefix.id)
+  // Transcript position binds the actual predecessor even in ID-less history.
+  let index = sealedAssistantIndexBeforeSteer(messages, activePrefix.continuationIndex)
   if (index < 0) return messages
   const presented = messages.slice()
   let continuation = activePrefix.continuation

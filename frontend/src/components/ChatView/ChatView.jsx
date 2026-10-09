@@ -5783,8 +5783,8 @@ export default function ChatView({
           ...streamItemsToAssistantPayload(streamItems, { finalize: false }) }
       : null
     const continuation = projectSteerContinuationMessage(sealedSteerAssistant, source, { active: activeAssistantIsStreaming })
-    return continuation?.steer_replay?.prefixRange ? { id: sealedSteerAssistant.id, continuation } : null
-  }, [showActiveAssistantSurface, sealedSteerAssistant, useDbActivePayload, activeMirrorMsg,
+    return continuation?.steer_replay?.prefixRange ? { continuationIndex: activeSteerContinuationIndex, continuation } : null
+  }, [showActiveAssistantSurface, sealedSteerAssistant, activeSteerContinuationIndex, useDbActivePayload, activeMirrorMsg,
     hasLiveAssistantPayload, streamAssistantMessageId, activeAssistantMessageId, streamItems, activeAssistantIsStreaming])
   useLayoutEffect(() => {
     const sourceId = activeMirrorMsg?.id || streamAssistantMessageId || activeAssistantMessageId

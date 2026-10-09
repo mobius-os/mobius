@@ -21,7 +21,7 @@ test('active formatting updates preserve unrelated settled reply identities', ()
   for (const text of ['**3. Don’t continue**', '**3. Don’t continue further**']) {
     const continuation = projectSteerContinuationMessage(current[2],
       assistant(text, { id: 'run:assistant:2' }), { active: true })
-    const updated = projectActiveSteerPrefix(settled, { id: current[2].id, continuation })
+    const updated = projectActiveSteerPrefix(settled, { continuationIndex: settled.length, continuation })
     for (let index = 0; index < unrelated.length; index++) {
       assert.equal(updated[index], settled[index])
       assert.equal(updated[index], prior[index])
@@ -32,6 +32,16 @@ test('active formatting updates preserve unrelated settled reply identities', ()
   }
   assert.equal(JSON.stringify(settled), original)
   assert.equal(projectActiveSteerPrefix(settled, null), settled)
+})
+
+test('a stale active parse cannot replace different predecessor prose', () => {
+  const sealed = assistant('**Old')
+  const rows = [sealed, steer()]
+  const continuation = projectSteerContinuationMessage(assistant('**Plan'), assistant('**Planned**'), { active: true })
+  const shown = projectActiveSteerPrefix(rows, { continuationIndex: rows.length, continuation })
+  assert.equal(shown[0], sealed)
+  assert.equal(shown[0].blocks[0].content, '**Old')
+  assert.equal(shown[0].blocks[0].markdown_range, undefined)
 })
 
 

@@ -47,7 +47,7 @@ test('reload renders the incident as two formatted ranges around the same owner 
 
 test('active text_final and saved reload render the same content without a repeated prefix', () => {
   const projected = projectSteerContinuationMessage(saved[0], saved[2], { active: true })
-  const groups = assistantReplyGroups(projectActiveSteerPrefix(projectSettledSteerContinuations(saved), { id: saved[0].id, continuation: projected }))
+  const groups = assistantReplyGroups(projectActiveSteerPrefix(projectSettledSteerContinuations(saved), { continuationIndex: 2, continuation: projected }))
   const before = render(Reply, { replyGroup: groups.get(0), activeRowIndex: -1,
     activeMirrorMsg: groups.get(0).rows[0].message, useDbActivePayload: true, chatId: 'fixture' })
   for (const useDbActivePayload of [false, true]) {
@@ -100,7 +100,7 @@ for (const legacy of [false, true]) test(`final live parse reaches every earlier
   if (legacy) rows.forEach(row => { delete row.blocks })
   const original = JSON.stringify(rows)
   const continuation = projectSteerContinuationMessage(rows[2], assistant('**3. Don’t continue**', 'run:assistant:2'), { active: true })
-  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { id: rows[2].id, continuation })
+  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { continuationIndex: 4, continuation })
   const html = [...shown, continuation].map(message).join('')
   assert.match(html, /<strong>3\. Don<\/strong>/)
   assert.match(html, /<strong>’t<\/strong>/)
@@ -126,7 +126,7 @@ test('live completed formatting wins over a lagging saved active mirror', () => 
   const rows = [assistant('**3. Don'), steer, assistant('**3. Don’t', 'run:assistant:1'),
     { ...steer, content: 'Second steer' }, assistant('**3. Don’t continue', 'run:assistant:2')]
   const continuation = projectSteerContinuationMessage(rows[2], assistant('**3. Don’t continue**', 'run:assistant:2'), { active: true })
-  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { id: rows[2].id, continuation })
+  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { continuationIndex: 4, continuation })
   const html = shown.slice(0, 4).map(message).join('')
   assert.match(html, /<strong>3\. Don<\/strong>/)
   assert.match(html, /<strong>’t<\/strong>/)
@@ -188,4 +188,36 @@ for (const legacy of [false, true]) test(`whole formatted fragments copy balance
 test('ordinary whole-block copy retains the original Markdown source', () => {
   const { clipboardData } = copyWholeFragment(assistant('__ordinary__'), 'ordinary')
   assert.equal(assistantClipboardText(clipboardData), '__ordinary__')
+})
+
+for (const earlierAssistant of [false, true]) test(`ID-less active formatting targets the sealed predecessor, never an earlier row (earlierAssistant=${earlierAssistant})`, () => {
+  const earlier = earlierAssistant ? assistant('**Old') : { role: 'user', content: 'Initial prompt' }
+  const rows = [earlier, { role: 'user', content: 'Next prompt' }, assistant('**Plan'), steer]
+  const next = assistant('**Planned** maintenance')
+  rows.forEach(row => { delete row.id })
+  delete next.id
+  const original = JSON.stringify(rows)
+  const continuation = projectSteerContinuationMessage(rows[2], next, { active: true })
+  const settled = projectSettledSteerContinuations(rows)
+  const shown = projectActiveSteerPrefix(settled, { continuationIndex: rows.length, continuation })
+  assert.equal(shown[0], settled[0], 'unrelated history must keep its identity and content')
+  assert.equal(shown[0].markdown_range, undefined)
+  assert.equal(shown[0].blocks?.[0].markdown_range, undefined)
+  assert.match(message(shown[2]), /<strong>Plan<\/strong>/)
+  assert.match(message(continuation), /<strong>ned<\/strong> maintenance/)
+  assert.equal(JSON.stringify(rows), original)
+})
+
+test('repeated ID-less active steers format every predecessor through its position', () => {
+  const rows = [assistant('**3. Don'), steer, assistant('**3. Don’t'), steer]
+  const next = assistant('**3. Don’t continue**')
+  rows.forEach(row => { delete row.id })
+  delete next.id
+  const continuation = projectSteerContinuationMessage(rows[2], next, { active: true })
+  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { continuationIndex: rows.length, continuation })
+  const html = [...shown, continuation].map(message).join('')
+  assert.match(html, /<strong>3\. Don<\/strong>/)
+  assert.match(html, /<strong>’t<\/strong>/)
+  assert.match(html, /<strong> continue<\/strong>/)
+  assert.doesNotMatch(html, /\*\*/)
 })
