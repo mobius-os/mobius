@@ -163,9 +163,28 @@ export function projectSteerPrefixMessage(sealed, continuation) {
   return { ...sealed, ...context, blocks }
 }
 
+/** Update only the active replay chain; unrelated settled rows stay cached. */
+export function projectActiveSteerPrefix(messages, activePrefix) {
+  if (!activePrefix?.continuation?.steer_replay?.prefixRange) return messages
+  let index = messages.findIndex(message => message?.id === activePrefix.id)
+  if (index < 0) return messages
+  const presented = messages.slice()
+  let continuation = activePrefix.continuation
+  while (index >= 0) {
+    const message = projectSteerPrefixMessage(presented[index], continuation)
+    if (message === presented[index]) break
+    presented[index] = message
+    if (!message.steer_replay?.prefixRange) break
+    continuation = message
+    index -= 1
+    while (isSteeredUserMessage(messages[index])) index -= 1
+  }
+  return presented
+}
+
 
 /** Apply the exact replay projection to settled transcript rows. */
-export function projectSettledSteerContinuations(messages, { preserveHidden = false, activePrefix = null } = {}) {
+export function projectSettledSteerContinuations(messages, { preserveHidden = false } = {}) {
   if (!Array.isArray(messages)) return []
   const presented = messages.map((message, index) => {
     if (message?.role !== 'assistant') return message
@@ -183,11 +202,6 @@ export function projectSettledSteerContinuations(messages, { preserveHidden = fa
   })
   // Latest complete formatting wins all the way back through replay chains.
   for (let index = presented.length - 1; index >= 0; index -= 1) {
-    // The stream can be ahead of its DB mirror; apply its parse after the
-    // settled successor, so an older mirror cannot restore unfinished markup.
-    if (activePrefix && presented[index]?.id === activePrefix.id) {
-      presented[index] = projectSteerPrefixMessage(presented[index], activePrefix.continuation)
-    }
     const message = presented[index]
     if (!message?.steer_replay?.prefixRange) continue
     let before = index - 1

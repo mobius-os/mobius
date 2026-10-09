@@ -202,6 +202,7 @@ import {
   assistantReplyRoot,
   projectSettledSteerContinuations,
   projectSteerContinuationMessage,
+  projectActiveSteerPrefix,
   sealedAssistantBeforeSteer,
 } from './steerContinuity.js'
 import {
@@ -5935,12 +5936,17 @@ export default function ChatView({
   // A `/goal ` composer draft keeps the goal visual open while the objective is
   // still being typed (null once the draft is no longer a goal command).
   const draftGoal = draftGoalObjective(input)
-  const displayedMessages = useMemo(
+  const settledMessages = useMemo(
     () => projectSettledSteerContinuations(
       recoveryMessages,
-      { preserveHidden: true, activePrefix: activeSteerPrefix },
+      { preserveHidden: true },
     ),
-    [recoveryMessages, activeSteerPrefix],
+    [recoveryMessages],
+  )
+  const displayedMessages = useMemo(
+    // The stream may lead its DB mirror; apply its newer parse after history.
+    () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
+    [settledMessages, activeSteerPrefix],
   )
   const peerTimeline = usePeerTimeline(
     chatId,

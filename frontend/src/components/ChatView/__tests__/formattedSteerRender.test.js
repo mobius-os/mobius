@@ -14,9 +14,10 @@ const vite = await createServer({ appType: 'custom', logLevel: 'error',
 after(() => vite.close())
 const { default: Message } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { projectSteerContinuationMessage, projectSettledSteerContinuations } = await vite.ssrLoadModule('/src/components/ChatView/steerContinuity.js')
+const { projectSteerContinuationMessage, projectSettledSteerContinuations, projectActiveSteerPrefix } = await vite.ssrLoadModule('/src/components/ChatView/steerContinuity.js')
 const { assistantReplyGroups, presentAssistantReply } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
+const { assistantClipboardText } = await vite.ssrLoadModule('/src/components/ChatView/markdownClipboard.js')
 const assistant = (content, id = 'run') => ({ role: 'assistant', id, content, blocks: [{ type: 'text', content }] })
 const prefix = 'Earlier explanation.\n\n**3. Don'
 const full = 'Earlier explanation.\n\n**3. Don’t confuse uncertainty with failure—or success.**\n\nLater explanation.'
@@ -46,7 +47,7 @@ test('reload renders the incident as two formatted ranges around the same owner 
 
 test('active text_final and saved reload render the same content without a repeated prefix', () => {
   const projected = projectSteerContinuationMessage(saved[0], saved[2], { active: true })
-  const groups = assistantReplyGroups(projectSettledSteerContinuations(saved, { activePrefix: { id: saved[0].id, continuation: projected } }))
+  const groups = assistantReplyGroups(projectActiveSteerPrefix(projectSettledSteerContinuations(saved), { id: saved[0].id, continuation: projected }))
   const before = render(Reply, { replyGroup: groups.get(0), activeRowIndex: -1,
     activeMirrorMsg: groups.get(0).rows[0].message, useDbActivePayload: true, chatId: 'fixture' })
   for (const useDbActivePayload of [false, true]) {
@@ -99,7 +100,7 @@ for (const legacy of [false, true]) test(`final live parse reaches every earlier
   if (legacy) rows.forEach(row => { delete row.blocks })
   const original = JSON.stringify(rows)
   const continuation = projectSteerContinuationMessage(rows[2], assistant('**3. Don’t continue**', 'run:assistant:2'), { active: true })
-  const shown = projectSettledSteerContinuations(rows, { activePrefix: { id: rows[2].id, continuation } })
+  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { id: rows[2].id, continuation })
   const html = [...shown, continuation].map(message).join('')
   assert.match(html, /<strong>3\. Don<\/strong>/)
   assert.match(html, /<strong>’t<\/strong>/)
@@ -125,9 +126,66 @@ test('live completed formatting wins over a lagging saved active mirror', () => 
   const rows = [assistant('**3. Don'), steer, assistant('**3. Don’t', 'run:assistant:1'),
     { ...steer, content: 'Second steer' }, assistant('**3. Don’t continue', 'run:assistant:2')]
   const continuation = projectSteerContinuationMessage(rows[2], assistant('**3. Don’t continue**', 'run:assistant:2'), { active: true })
-  const shown = projectSettledSteerContinuations(rows, { activePrefix: { id: rows[2].id, continuation } })
+  const shown = projectActiveSteerPrefix(projectSettledSteerContinuations(rows), { id: rows[2].id, continuation })
   const html = shown.slice(0, 4).map(message).join('')
   assert.match(html, /<strong>3\. Don<\/strong>/)
   assert.match(html, /<strong>’t<\/strong>/)
   assert.doesNotMatch(html, /\*\*/)
+})
+
+// Exercise the rendered component's actual copy handler and source map. The
+// selection covers the whole displayed block, where raw-source copy wins.
+function copyWholeFragment(msg, visibleText) {
+  let onCopy
+  function Capture() {
+    const surface = Message.type({ msg, chatId: 'fixture', messageKey: msg.id })
+    onCopy = surface.type(surface.props).props.onCopy
+    return surface
+  }
+  const html = render(Capture, {})
+  const text = { nodeType: 3, nodeValue: visibleText, textContent: visibleText }
+  const strong = { nodeType: 1, tagName: 'STRONG', childNodes: [text] }
+  const paragraph = { nodeType: 1, tagName: 'P', childNodes: [strong] }
+  const fragment = { nodeType: 11, childNodes: [paragraph] }
+  const block = { dataset: { assistantMarkdownBlock: '0' }, contains: () => true }
+  const range = {
+    startContainer: block, endContainer: block, commonAncestorContainer: block,
+    startOffset: 0, endOffset: 1, collapsed: false,
+    intersectsNode: node => node === block,
+    selectNodeContents() {}, setStart() {}, setEnd() {},
+    toString: () => visibleText, cloneContents: () => fragment,
+    cloneRange() { return { ...this } },
+  }
+  const ownerDocument = {
+    createRange: () => ({ ...range }),
+    getSelection: () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range }),
+  }
+  block.ownerDocument = ownerDocument
+  const payload = new Map()
+  const clipboardData = { setData: (type, value) => payload.set(type, value), getData: type => payload.get(type) || '' }
+  let prevented = false
+  onCopy({ currentTarget: { ownerDocument, querySelectorAll: () => [block] }, clipboardData,
+    preventDefault: () => { prevented = true } })
+  assert.equal(prevented, true)
+  return { html, clipboardData }
+}
+
+for (const legacy of [false, true]) test(`whole formatted fragments copy balanced Markdown for normal paste (legacy=${legacy})`, () => {
+  const rows = [assistant('**3. Don'), steer, assistant('**3. Don’t continue**', 'run:assistant:1')]
+  if (legacy) rows.forEach(row => { delete row.blocks })
+  const shown = projectSettledSteerContinuations(rows)
+  for (const [msg, visibleText, markdown] of [
+    [shown[0], '3. Don', '**3\\. Don**'],
+    [shown[2], '’t continue', '**’t continue**'],
+  ]) {
+    const { html, clipboardData } = copyWholeFragment(msg, visibleText)
+    assert.ok(html.includes(`<strong>${visibleText}</strong>`))
+    assert.equal(assistantClipboardText(clipboardData), markdown)
+    assert.equal(assistantClipboardText(clipboardData, true), visibleText)
+  }
+})
+
+test('ordinary whole-block copy retains the original Markdown source', () => {
+  const { clipboardData } = copyWholeFragment(assistant('__ordinary__'), 'ordinary')
+  assert.equal(assistantClipboardText(clipboardData), '__ordinary__')
 })

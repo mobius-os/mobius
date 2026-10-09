@@ -5,9 +5,34 @@ import assert from 'node:assert/strict'
 import {
   projectSettledSteerContinuations,
   projectSteerContinuationMessage,
+  projectActiveSteerPrefix,
   sealedAssistantBeforeSteer,
 } from '../steerContinuity.js'
 import { safeSteerMarkdownCut } from '../markdown/steerContinuation.js'
+
+test('active formatting updates preserve unrelated settled reply identities', () => {
+  const unrelated = [assistant('**Old pre', { id: 'old' }), steer(),
+    assistant('**Old previous answer**', { id: 'old:assistant:1' })]
+  const current = [assistant('**3. Don', { id: 'run' }), steer(),
+    assistant('**3. Don’t', { id: 'run:assistant:1' }), steer()]
+  const settled = projectSettledSteerContinuations([...unrelated, ...current])
+  const original = JSON.stringify(settled)
+  let prior = settled
+  for (const text of ['**3. Don’t continue**', '**3. Don’t continue further**']) {
+    const continuation = projectSteerContinuationMessage(current[2],
+      assistant(text, { id: 'run:assistant:2' }), { active: true })
+    const updated = projectActiveSteerPrefix(settled, { id: current[2].id, continuation })
+    for (let index = 0; index < unrelated.length; index++) {
+      assert.equal(updated[index], settled[index])
+      assert.equal(updated[index], prior[index])
+    }
+    assert.equal(updated[3].blocks[0].markdown_range.source, text)
+    assert.equal(updated[5].blocks[0].markdown_range.source, text)
+    prior = updated
+  }
+  assert.equal(JSON.stringify(settled), original)
+  assert.equal(projectActiveSteerPrefix(settled, null), settled)
+})
 
 
 function assistant(text, extras = {}) {
