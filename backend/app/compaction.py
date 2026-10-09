@@ -301,7 +301,7 @@ async def _run_provider_summarize_turn(
 
   if provider_runtime_kind(provider_id) == "claude_sdk":
     return await _run_claude_summarize_turn(
-      prompt, data_dir=data_dir, model=model, effort=effort,
+      prompt, data_dir=data_dir, provider_id=provider_id, model=model, effort=effort,
     )
   # Every Codex-runtime provider (the Möbius subscription and any future
   # adapter on that CLI) synthesizes through the same Codex turn,
@@ -323,6 +323,7 @@ async def _run_claude_summarize_turn(
   prompt: str,
   *,
   data_dir: str,
+  provider_id: str,
   model: str | None,
   effort: str | None,
 ) -> str:
@@ -338,7 +339,9 @@ async def _run_claude_summarize_turn(
 
   from app.providers import get_provider
 
-  env = get_provider("claude").build_env(base_env={}, data_dir=data_dir)
+  # The chat's own provider owns credentials: an app connection on the Claude
+  # engine must summarize through its relay, never the owner's Claude login.
+  env = get_provider(provider_id).build_env(base_env={}, data_dir=data_dir)
   claude_effort = "xhigh" if effort == "ultracode" else effort
   options = ClaudeAgentOptions(
     env=env,

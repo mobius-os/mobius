@@ -4230,7 +4230,7 @@ async def _complete_turn(
   chat_id: str,
   run_gen: int | None,
   provider_id: str | None,
-  cost_usd: float | int,
+  cost_usd: float | int | None,
   close_browser: bool,
   parked: bool = False,
   parked_until: datetime | None = None,
@@ -6094,12 +6094,14 @@ async def _run_chat_impl_with_db(
           delivered_through=coordination_message_through,
           wait_results=wait_results,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (
@@ -6156,7 +6158,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,
@@ -6277,6 +6279,7 @@ async def _run_chat_impl_with_db(
           run_policy=run_policy,
           connector_plan=connector_turn_plan,
           coordination_enabled=coordination_tools_enabled,
+          provider_id=provider_id,
         )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -6287,12 +6290,14 @@ async def _run_chat_impl_with_db(
           delivered_through=coordination_message_through,
           wait_results=wait_results,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or claude_session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (
@@ -6339,7 +6344,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,
