@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import codecs
 import contextlib
 import io
 import json
@@ -21,6 +22,7 @@ import logging
 import os
 import re
 import signal
+import sys
 import weakref
 from datetime import timedelta
 from pathlib import Path
@@ -62,6 +64,163 @@ _global_slots = {
 _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
   weakref.WeakValueDictionary()
 )
+
+
+# This is an allocation budget, not another serialized transfer grant. It is
+# shared by every lane and held through the execution queue. Admission never
+# queues an already-buffered/decoded payload when the budget is exhausted.
+MAX_REQUEST_STRUCTURE = 262_144
+MAX_REQUEST_DEPTH = 64
+MAX_REQUEST_DECODE_COST = 320 * 1024 * 1024
+MAX_ADMITTED_REQUEST_COST = 512 * 1024 * 1024
+_admitted_request_cost = 0
+_JSON_RESOURCE_MARKS = re.compile(r'["\\{}\[\],:]')
+_JSON_STRING_MARKS = re.compile(r'["\\]')
+_JSON_WIDE_TEXT = re.compile(r'[^\x00-\xff]')
+_JSON_ASTRAL_TEXT = re.compile(r'[^\x00-\uffff]')
+
+
+def _json_text_width(text: str, start: int = 0, end: int | None = None) -> int:
+  end = len(text) if end is None else end
+  return (
+    4 if _JSON_ASTRAL_TEXT.search(text, start, end) else
+    2 if _JSON_WIDE_TEXT.search(text, start, end) else 1
+  )
+
+
+class RequestAdmission:
+  """Own body materialization and retained request memory before execution.
+
+  The lexical scan measures resources only; stdlib JSON remains the sole
+  syntax/value parser. Incremental stdlib text decoding and fixed-size scan
+  chunks avoid constructing either the JSON tree or a full Unicode copy first.
+  Estimates deliberately overcount duplicate keys, escapes and shared values.
+  Three transfer ceilings reserve raw/buffer/encoder copies; a separate cost
+  accounts for Unicode text and decoded objects, including queued requests.
+  """
+
+  def __init__(self, max_bytes: int):
+    self.max_bytes = max_bytes
+    self.cost = 0
+
+  def __enter__(self):
+    self._reserve(3 * self.max_bytes)
+    return self
+
+  def __exit__(self, *_):
+    global _admitted_request_cost
+    _admitted_request_cost -= self.cost
+    self.cost = 0
+
+  def _reserve(self, cost: int):
+    global _admitted_request_cost
+    # No await between checking and reserving: all callers run on the owning
+    # event loop, including HTTP, policy and agent-tool invocations.
+    if _admitted_request_cost - self.cost + cost > MAX_ADMITTED_REQUEST_COST:
+      raise HTTPException(413, "App service request admission budget is exhausted.")
+    _admitted_request_cost += cost - self.cost
+    self.cost = cost
+
+  def _decoded_cost(self, cost: int):
+    if cost > MAX_REQUEST_DECODE_COST:
+      raise HTTPException(413, "App service request decoded resource limit exceeded.")
+    self._reserve(max(self.cost, 3 * self.max_bytes + cost))
+
+  def decode(self, raw: bytes):
+    if not raw:
+      return None
+    decoder = codecs.getincrementaldecoder(json.detect_encoding(raw))("surrogatepass")
+    in_string = False
+    escaped_at = -1
+    string_length = 0
+    string_width = 1
+    text_length = 0
+    text_width = 1
+    structures = 0
+    depth = 0
+    decoded_cost = 0
+    offset = 0
+    for start in range(0, len(raw), 64 * 1024):
+      chunk = decoder.decode(raw[start:start + 64 * 1024], final=start + 64 * 1024 >= len(raw))
+      text_length += len(chunk)
+      # Measure Unicode width in C over bounded spans, not one Python
+      # iteration per scalar character. A Unicode caption must not inflate
+      # the separate ASCII base64 string sharing its final scan chunk.
+      text_width = max(text_width, _json_text_width(chunk))
+      last = 0
+      while last < len(chunk):
+        marks = _JSON_STRING_MARKS if in_string else _JSON_RESOURCE_MARKS
+        mark = marks.search(chunk, last)
+        if mark is None:
+          break
+        index = mark.start()
+        char = mark.group()
+        if in_string:
+          string_length += index - last
+          if index > last:
+            string_width = max(string_width, _json_text_width(chunk, last, index))
+          if char == '"' and offset + index != escaped_at:
+            in_string = False
+            decoded_cost += 64 + string_length * string_width
+          else:
+            string_length += 1
+            if char == "\\" and offset + index != escaped_at:
+              escaped_at = offset + index + 1
+              # Escapes can decode to non-BMP characters. Counting their raw
+              # characters at four bytes each is conservative, not rewriting.
+              string_width = 4
+        elif char == '"':
+          in_string = True
+          string_length = 0
+          string_width = 1
+          structures += 1
+        elif char in "{[":
+          depth += 1
+          structures += 1
+        elif char in "}]":
+          depth -= 1
+        elif char in ",:":
+          structures += 1
+        if structures > MAX_REQUEST_STRUCTURE or depth > MAX_REQUEST_DEPTH:
+          raise HTTPException(413, "App service request structural resource limit exceeded.")
+        last = index + 1
+      if in_string:
+        string_length += len(chunk) - last
+        string_width = max(string_width, _json_text_width(chunk, last))
+      offset += len(chunk)
+      # 256 bytes per structural mark covers container entries, scalar
+      # objects and allocator overhead even for densely nested empty objects.
+      cost = decoded_cost + structures * 256 + text_length * text_width + 64
+      if in_string:
+        cost += 64 + string_length * string_width
+      if cost > MAX_REQUEST_DECODE_COST:
+        raise HTTPException(413, "App service request decoded resource limit exceeded.")
+    self._decoded_cost(cost)
+    return json.loads(raw, parse_constant=_reject_json_constant)
+
+  def retain(self, value):
+    """Apply the same resource boundary to already-materialized tool/policy JSON."""
+    nodes = 0
+    cost = 0
+
+    def visit(item, depth):
+      nonlocal nodes, cost
+      nodes += 1
+      if nodes > MAX_REQUEST_STRUCTURE or depth > MAX_REQUEST_DEPTH:
+        raise HTTPException(413, "App service request structural resource limit exceeded.")
+      cost += 256 + sys.getsizeof(item)
+      if cost > MAX_REQUEST_DECODE_COST:
+        raise HTTPException(413, "App service request decoded resource limit exceeded.")
+      if isinstance(item, dict):
+        for key, child in item.items():
+          visit(key, depth + 1)
+          visit(child, depth + 1)
+      elif isinstance(item, (list, tuple)):
+        for child in item:
+          visit(child, depth + 1)
+
+    visit(value, 0)
+    self._decoded_cost(cost)
 
 
 def _reject_json_constant(value: str):
@@ -361,6 +520,26 @@ async def cancel_browser_grant_calls(grant_id: str) -> None:
 
 
 async def invoke_service(
+  app, owner, request_envelope: dict, *,
+  timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
+  lane: str | None = None,
+  admission: RequestAdmission | None = None,
+) -> tuple[int, object, dict[str, str], str | None]:
+  service = service_contract(app, access="public" if request_envelope.get("public") is True else "self")
+  boundary = (
+    contextlib.nullcontext(admission) if admission is not None
+    else RequestAdmission(service_max_bytes(service))
+  )
+  with boundary as admitted:
+    # HTTP admission already covers decoding. Also account for the envelope
+    # metadata and impose the same structural boundary on non-HTTP callers.
+    admitted.retain(request_envelope)
+    return await _invoke_admitted_service(
+      app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
+    )
+
+
+async def _invoke_admitted_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
   lane: str | None = None,

@@ -21,10 +21,6 @@ router = APIRouter(tags=["app-services"])
 _limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
 
 
-def _reject_json_constant(value: str):
-  raise ValueError(f"invalid JSON constant: {value}")
-
-
 def _response(status: int, body, headers: dict[str, str], media_type: str | None):
   if media_type is not None:
     return Response(body, status_code=status, headers=headers, media_type=media_type)
@@ -75,7 +71,10 @@ def _service_app(db: Session, service_id: str) -> models.App | None:
   )
 
 
-async def _envelope(request: Request, path: str, *, public: bool, actor: dict, max_bytes: int) -> dict:
+async def _envelope(
+  request: Request, path: str, *, public: bool, actor: dict,
+  max_bytes: int, admission: app_services.RequestAdmission,
+) -> dict:
   # `tools/` belongs to the platform's agent-tool lane (app_tools.call_app_tool),
   # whose `call` a service trusts as the moment an agent called it. An HTTP
   # caller never reaches it, so a frame cannot forge a tool call.
@@ -93,7 +92,7 @@ async def _envelope(request: Request, path: str, *, public: bool, actor: dict, m
   body = None
   if raw:
     try:
-      body = json.loads(raw, parse_constant=_reject_json_constant)
+      body = admission.decode(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
       raise HTTPException(400, "App service requests must contain JSON.") from exc
   return {
@@ -130,20 +129,21 @@ async def authenticated_app_service(
   if principal.app_id is not None and principal.app_id != app.id:
     raise HTTPException(403, "An app can invoke only its own service.")
   service = app_services.service_contract(app, access="self")
-  envelope = await _envelope(
-    request, path, public=False,
-    max_bytes=app_services.service_max_bytes(service),
-    actor=app_services.request_actor(
-      db, principal, app if principal.app_id is not None else None,
-    ),
-  )
-  db.expunge(app)
-  db.expunge(principal.owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    app, principal.owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+    envelope = await _envelope(
+      request, path, public=False,
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+      actor=app_services.request_actor(
+        db, principal, app if principal.app_id is not None else None,
+      ),
+    )
+    db.expunge(app)
+    db.expunge(principal.owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      app, principal.owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)
 
 
 @router.api_route(
@@ -168,18 +168,19 @@ async def shared_app_service(
     raise HTTPException(403, "Calling app is unavailable.")
   required = "self" if principal.app_id in {None, target.id} else "apps"
   service = app_services.service_contract(target, access=required)
-  envelope = await _envelope(
-    request, path, public=False,
-    max_bytes=app_services.service_max_bytes(service),
-    actor=app_services.request_actor(db, principal, caller),
-  )
-  db.expunge(target)
-  db.expunge(principal.owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    target, principal.owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+    envelope = await _envelope(
+      request, path, public=False,
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+      actor=app_services.request_actor(db, principal, caller),
+    )
+    db.expunge(target)
+    db.expunge(principal.owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      target, principal.owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)
 
 
 @router.api_route(
@@ -200,14 +201,15 @@ async def public_app_service(
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
-  envelope = await _envelope(
-    request, path, public=True, actor={"scope": "public"},
-    max_bytes=app_services.service_max_bytes(service),
-  )
-  db.expunge(app)
-  db.expunge(owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    app, owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  with app_services.RequestAdmission(app_services.service_max_bytes(service)) as admission:
+    envelope = await _envelope(
+      request, path, public=True, actor={"scope": "public"},
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+    )
+    db.expunge(app)
+    db.expunge(owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      app, owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)

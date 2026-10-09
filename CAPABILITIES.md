@@ -168,6 +168,29 @@ metadata), before any binary response is decoded. Requests exceeding the
 accepted limit are rejected while streaming, before the whole body is buffered;
 the platform's independent 64 MiB HTTP request backstop remains in force.
 
+Request admission also bounds decoded resources independently of serialized
+bytes: at most 262,144 structural marks (string openings, container openings,
+commas and colons outside strings), nesting depth 64, and a conservative
+320 MiB decoded-resource estimate. The estimate includes Unicode text, string
+storage and 256 bytes per structural mark. A bounded lexical scan checks these
+limits before the standard-library JSON parser materializes the HTTP body;
+punctuation inside strings does not consume structural marks. The complete
+request envelope, including tool and policy requests, has the same depth and
+decoded-cost ceilings and at most 262,144 visited values/keys. Large base64
+scalars, a 20 MiB original, and galleries fitting the reviewed 60 MiB serialized
+grant remain supported.
+
+One process-wide 512 MiB estimated request budget covers body reading,
+decoding, serialization, and retained execution backlog across all lanes.
+Each request reserves three times its accepted serialized ceiling before body
+reading, plus its decoded-resource estimate before materialization; the larger
+reservation remains held until invocation/HTTP response construction ends.
+Budget exhaustion rejects immediately rather than retaining another queued
+body. Serialized, structural, decoded-cost, and admission-budget violations
+return HTTP 413; malformed JSON within these resource bounds still returns
+400. These are conservative admission estimates, not an operating-system RSS
+limit or a reduction of the reviewed serialized media allowance.
+
 Starting a fresh interpreter costs most services far more than their work
 (roughly a second for a FastAPI entry). An entry can declare a top-level
 `MOBIUS_PRELOAD = True` and end with its `if __name__ == "__main__":` block.
