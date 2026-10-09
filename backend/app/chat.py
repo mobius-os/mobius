@@ -5411,9 +5411,9 @@ async def _run_chat_impl_with_db(
   codex_native_skills_ready = False
   if provider.name == "Codex":
     try:
-      from app.codex_skills import sync_codex_skills_for_prompt
+      from app.codex_skills import codex_native_skills_ready as _skills_ready
       from app.providers import skills_enabled as _skills_enabled
-      codex_native_skills_ready = sync_codex_skills_for_prompt(
+      codex_native_skills_ready = await _skills_ready(
         settings.data_dir,
         _skills_enabled(settings.data_dir),
       )

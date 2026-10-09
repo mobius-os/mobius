@@ -24,6 +24,7 @@ drops the manifest name. Unmanaged project-local skills and Codex's built-in
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import hashlib
 import json
@@ -402,3 +403,8 @@ def sync_codex_skills_for_prompt(data_dir: str | Path, enabled: bool) -> bool:
     return False
   materialized = sync_codex_skills(data_dir, enabled)
   return enabled and len(materialized) == expected
+
+
+async def codex_native_skills_ready(data_dir: str | Path, enabled: bool) -> bool:
+  """Sync the locked filesystem cache without blocking the server event loop."""
+  return await asyncio.to_thread(sync_codex_skills_for_prompt, data_dir, enabled)
