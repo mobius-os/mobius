@@ -394,11 +394,51 @@ def test_turn_terminal_status_and_message_phase_contracts_are_pinned():
     "completed", "interrupted", "failed", "inProgress",
   }
   assert {item.value for item in v2_all.MessagePhase} == {
-    "commentary", "final_answer",
+    "commentary", "partial_answer", "final_answer",
   }
   assert v2_all.Turn.model_fields["status"].annotation is v2_all.TurnStatus
   phase_annotation = v2_all.AgentMessageThreadItem.model_fields["phase"].annotation
   assert v2_all.MessagePhase in getattr(phase_annotation, "__args__", ())
+
+
+@pytest.mark.parametrize(
+  "phases, succeeds",
+  [
+    (["partial_answer"], False),
+    (["final_answer", "partial_answer"], False),
+    (["partial_answer", "final_answer"], True),
+  ],
+)
+def test_native_partial_answer_never_substitutes_for_a_final_answer(phases, succeeds):
+  """Accept the SDK's new phase without weakening last-message completion."""
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+  from app.codex_events import _codex_terminal_error
+
+  sdk = codex_sdk_runner._sdk_imports()
+  turn = v2_all.Turn.model_validate({
+    "id": "turn-partial",
+    "status": "completed",
+    "items": [
+      {
+        "id": f"message-{index}",
+        "type": "agentMessage",
+        "text": "An answer fragment.",
+        "phase": phase,
+      }
+      for index, phase in enumerate(phases)
+    ],
+  })
+  error, status, last_phase = _codex_terminal_error(
+    turn, sdk,
+    interrupt_requested=False,
+    completed_message_phases=["final_answer"],
+  )
+  assert (error is None) is succeeds
+  assert status == "completed"
+  assert last_phase == phases[-1]
+  with pytest.raises(ValueError):
+    v2_all.MessagePhase("unknown-future-phase")
 
 
 def test_reasoning_effort_enum_tolerates_unknown_efforts():
