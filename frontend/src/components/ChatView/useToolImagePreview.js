@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
+import { sameImageReference } from './toolImageResult.js'
 
 const EMPTY_PREVIEW = {
   reference: null,
@@ -61,6 +62,16 @@ async function decodeImage(src, assignImage) {
     width: image.naturalWidth,
     height: image.naturalHeight,
   }
+}
+
+/** Keep one reference object per picture. Preview state below is keyed by
+ * identity, and transcript re-renders rebuild equal references; treating each
+ * rebuild as a new image hid the open disclosure, re-decoded it, and re-pinned
+ * the reader's scroll. */
+export function useStableImageReference(reference) {
+  const stableRef = useRef(reference)
+  if (!sameImageReference(stableRef.current, reference)) stableRef.current = reference
+  return stableRef.current
 }
 
 /** Prepare only the image the owner is interacting with. */

@@ -72,6 +72,7 @@ from app.owner_card_receipts import (
   owner_card_receipt_id as _owner_card_receipt_id,
 )
 from app.runtime_types import ChatEvent
+from app.screenshot_steps import SAVED_IMAGE_FIELD, saved_screenshot_file
 from app.secure_inputs import redact_reveal_markers
 from app.tool_edit_preview import edit_diff_sidecar_id
 
@@ -727,6 +728,21 @@ class ChatEventSink:
         return pm if isinstance(pm, dict) else None
     return None
 
+  def _stamp_saved_screenshot(self, event: ChatEvent) -> None:
+    """Name the chat-media file a screenshot step saved (screenshot_steps).
+
+    Read from the full result before reduction, so the step can render its
+    picture without the chat downloading that result again.
+    """
+    blk = _tool_block_for_event(self.assistant_blocks, event.get("tool_use_id"))
+    name = saved_screenshot_file(
+      blk.get("tool") if blk is not None else None,
+      event.get("content"),
+      self.chat_id,
+    )
+    if name is not None:
+      event[SAVED_IMAGE_FIELD] = name
+
   def _stamp_peer_message(self, event: ChatEvent) -> None:
     """Name a Möbius peer-network exchange on the event, in two phases.
 
@@ -1139,6 +1155,7 @@ class ChatEventSink:
       # Settle a peer-network exchange from the FULL result JSON before it can be
       # carved by reduction (the envelope is one object, not a tail-safe line).
       self._stamp_peer_message(event)
+      self._stamp_saved_screenshot(event)
       if (
         event.get("output_complete") is True
         and event.get("output_exit_code") in (None, 0)

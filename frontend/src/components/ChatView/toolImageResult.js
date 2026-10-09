@@ -94,13 +94,30 @@ export function scratchImageReference(input, chatId) {
   return { kind: 'scratch', chatId, filename: match[2] }
 }
 
+const SAVED_IMAGE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** A screenshot step's input is a route or app id, never a path. The server
+ * records the picture it saved in this chat's media as the step's
+ * `saved_image` (backend/app/screenshot_steps.py), so the step renders from
+ * chat media instead of downloading its much larger stored result. */
+export function savedStepImageReference(savedImage, chatId) {
+  if (!chatId || typeof savedImage !== 'string' || !SAVED_IMAGE_NAME.test(savedImage)) {
+    return null
+  }
+  return { kind: 'chat', chatId, collection: 'media', filename: savedImage }
+}
+
 /** References that can render through an existing protected route without
- * loading the image tool's much larger base64 sidecar. */
-export function servedImageReference(input, chatId, generated = {}) {
-  return chatImageReference(input)
+ * loading the image tool's much larger base64 sidecar. `step` carries what
+ * the transcript records about this step's picture: a screenshot's
+ * `savedImage`, and a viewed deliverable's `files`, `viewedDigest`, and
+ * `completed` (see generatedImageReference). */
+export function servedImageReference(input, chatId, step = {}) {
+  return savedStepImageReference(step.savedImage, chatId)
+    || chatImageReference(input)
     || temporaryImageReference(input, chatId)
     || scratchImageReference(input, chatId)
-    || generatedImageReference(input, chatId, generated)
+    || generatedImageReference(input, chatId, step)
 }
 
 /** Fallback for image tools that viewed a path outside chat media. This work
@@ -130,6 +147,16 @@ export function inlineImageReference(output) {
   }
 }
 
-export function toolImageReference(input, output, chatId, generated = {}) {
-  return servedImageReference(input, chatId, generated) || inlineImageReference(output)
+const IMAGE_REFERENCE_FIELDS = ['kind', 'chatId', 'collection', 'filename', 'expectedSha256', 'src']
+
+/** Two references name the same picture when every identifying field matches. */
+export function sameImageReference(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  return IMAGE_REFERENCE_FIELDS.every(field => a[field] === b[field])
+}
+
+export function toolImageReference(input, output, chatId, step = {}) {
+  return servedImageReference(input, chatId, step)
+    || inlineImageReference(output)
 }

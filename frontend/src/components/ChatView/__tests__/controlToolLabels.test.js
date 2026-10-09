@@ -89,6 +89,13 @@ test('app and screenshot tools name their target', () => {
   assert.equal(toolActivityIcon(effectiveToolName(tool('mcp__mobius_control__screenshot', ''))), 'image')
 })
 
+test('a screenshot taken by app id names the app instead of ending at "of"', () => {
+  assert.equal(toolCallLabel(tool('mcp__mobius_control__screenshot', 'app_id=9')), 'Took a screenshot of app 9')
+  assert.equal(toolCallLabel(tool('mobius_control:screenshot', JSON.stringify({ app_id: 15 }))), 'Took a screenshot of app 15')
+  assert.equal(toolCallLabel(tool('mcp__mobius_control__screenshot', 'app_id=9', 'running')), 'Taking a screenshot of app 9')
+  assert.equal(toolCallLabel(tool('mcp__mobius_control__screenshot', '')), 'Took a screenshot')
+})
+
 test("an installed app's own tool reads as app work, not an identifier", () => {
   const row = tool('mcp__mobius_control__memory_search', 'prompt=launch plans, limit=5')
   assert.equal(toolCallLabel(row), 'Memory search: launch plans')

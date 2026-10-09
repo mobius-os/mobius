@@ -264,7 +264,8 @@ function summaryValue(input, key) {
 }
 
 function withDetail(verb, detail) {
-  return detail ? `${verb} ${detail}` : verb.replace(/:$/, '')
+  // Without a detail, drop the connective that introduced it (":" or " of").
+  return detail ? `${verb} ${detail}` : verb.replace(/(?::| of)$/, '')
 }
 
 function goalCallLabel(tool) {
@@ -299,6 +300,11 @@ function controlCallLabel(tool) {
   if (call) {
     let detail = summaryValue(input, call[2])
     if (bare === 'apply_app') detail = detail.split('/').filter(Boolean).pop() || detail
+    // A screenshot targets either a route or an app id; name whichever it used.
+    if (bare === 'screenshot' && !detail) {
+      const appId = controlInputValue(input, 'app_id')
+      if (appId != null && String(appId).trim()) detail = `app ${String(appId).trim()}`
+    }
     return withDetail(running ? call[0] : call[1], detail)
   }
   if (CONTROL_TOOLS.has(bare)) return null

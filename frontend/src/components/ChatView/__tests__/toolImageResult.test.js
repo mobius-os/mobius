@@ -7,6 +7,8 @@ import {
   imagePathFromInput,
   inlineImageReference,
   scratchImageReference,
+  sameImageReference,
+  savedStepImageReference,
   servedImageReference,
   temporaryImageReference,
   toolImageReference,
@@ -200,4 +202,44 @@ test('image-load failures settle without fetching unrelated app metadata', () =>
   assert.match(result, /current\.status !== 'ready'/)
   assert.doesNotMatch(result, /useEffect|useState/)
   assert.match(trigger, /onError=\{onError\}/)
+})
+
+test('a screenshot step renders its recorded chat-media file without its stored result', () => {
+  const saved = {
+    kind: 'chat',
+    chatId: 'chat-123',
+    collection: 'media',
+    filename: 'shot-1791457803253833437.png',
+  }
+  const step = { savedImage: 'shot-1791457803253833437.png' }
+  // Served means ToolBlock skips the stored-result download entirely.
+  assert.deepEqual(servedImageReference('app_id=9', 'chat-123', step), saved)
+  assert.deepEqual(toolImageReference('route=/shell/?app=9', undefined, 'chat-123', step), saved)
+})
+
+test('a recorded screenshot name never escapes this chat\'s media', () => {
+  assert.equal(savedStepImageReference('../uploads/secret.png', 'chat-123'), null)
+  assert.equal(savedStepImageReference('nested/shot.png', 'chat-123'), null)
+  assert.equal(savedStepImageReference('', 'chat-123'), null)
+  assert.equal(savedStepImageReference(undefined, 'chat-123'), null)
+  assert.equal(savedStepImageReference('shot.png', ''), null)
+  assert.equal(servedImageReference('app_id=9', 'chat-123'), null,
+    'an unrecorded screenshot step is not served')
+})
+
+test('a rebuilt reference to the same picture counts as the same image', () => {
+  const chat = { kind: 'chat', chatId: 'c1', collection: 'media', filename: 'shot.png' }
+  assert.equal(sameImageReference(chat, { ...chat }), true)
+  assert.equal(sameImageReference(chat, { ...chat, filename: 'other.png' }), false)
+  assert.equal(
+    sameImageReference(
+      { kind: 'generated', chatId: 'c1', collection: 'generated-files', filename: 'a.png', expectedSha256: 'x' },
+      { kind: 'generated', chatId: 'c1', collection: 'generated-files', filename: 'a.png', expectedSha256: 'y' },
+    ),
+    false,
+    'a different fingerprint is a different picture',
+  )
+  assert.equal(sameImageReference({ kind: 'inline', src: 'data:a' }, { kind: 'inline', src: 'data:b' }), false)
+  assert.equal(sameImageReference(null, chat), false)
+  assert.equal(sameImageReference(null, null), true)
 })
