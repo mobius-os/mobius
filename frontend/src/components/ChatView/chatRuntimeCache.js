@@ -62,6 +62,7 @@ function runtimeFieldMatches(current, field, value) {
   if (
     field === 'goal'
     || field === 'handoff'
+    || field === 'stranded_helper_followup'
     || field === 'chatInfo'
     || field === 'background_helpers'
   ) {

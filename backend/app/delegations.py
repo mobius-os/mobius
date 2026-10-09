@@ -2522,6 +2522,8 @@ def parent_wake_blocker(
   parent_helper = db.query(models.Delegation).filter(
     models.Delegation.child_chat_id == parent_chat_id,
   ).first()
+  if parent_helper is not None and parent_helper.cancelled_at is not None:
+    return "parent_cancelled", None
   if parent_helper is not None and (
     parent_helper.scope != "write"
     or parent_helper.interrupted_at is not None
@@ -2650,6 +2652,56 @@ def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
     row.parent_chat_id
     for row, _status in _self_resuming_helper_rows(db, requested)
   }
+
+
+def stranded_followups(db: Session, parent_chat_ids) -> dict[str, str]:
+  """Undelivered failed follow-ups started after their original Goal settled.
+
+  This is read-side attention, never wake eligibility. Earlier failures may
+  have been intentionally superseded by the Goal's later completion.
+  Recovery covers explicit, directly owned Goals; inherited or legacy Goal
+  links are not sufficient evidence for this historical-failure projection.
+  """
+  requested = {str(chat_id) for chat_id in parent_chat_ids if chat_id}
+  if not requested:
+    return {}
+  parent_run = aliased(models.ChatRun)
+  held_goal = aliased(models.ChatGoal)
+  ranked = (db.query(
+    models.Delegation.parent_chat_id.label("parent_chat_id"),
+    models.Delegation.id.label("helper_id"),
+    func.row_number().over(
+      partition_by=models.Delegation.parent_chat_id,
+      order_by=(models.ChatRun.started_at.desc(), models.Delegation.id.desc()),
+    ).label("rank"),
+  )
+    .join(models.ChatGoal, models.ChatGoal.id == models.Delegation.goal_id)
+    .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id.in_(requested),
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.source_work_id.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+      current_result_undelivered(),
+      models.ChatGoal.chat_id == models.Delegation.parent_chat_id,
+      models.ChatGoal.status == "completed",
+      models.ChatGoal.completed_at.is_not(None),
+      models.ChatRun.started_at > models.ChatGoal.completed_at,
+      models.ChatRun.status == "failed",
+      ~select(1).where(
+        held_goal.chat_id == models.Delegation.parent_chat_id,
+        held_goal.status == "stopped",
+      ).exists(),
+      ~select(1).where(
+        parent_run.chat_id == models.Delegation.parent_chat_id,
+        parent_run.status == "stopped",
+        # Stop of the original parent run may begin before the follow-up.
+        # Its durable end, not its start, is the owner's later decision.
+        parent_run.ended_at >= models.ChatRun.started_at,
+      ).exists(),
+    ).subquery())
+  return dict(db.query(ranked.c.parent_chat_id, ranked.c.helper_id)
+              .filter(ranked.c.rank == 1).all())
 
 
 def serialize_background_helpers(db: Session, parent_chat_id: str) -> dict:
