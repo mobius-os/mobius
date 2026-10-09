@@ -385,27 +385,80 @@ def test_proxy_cache_headers_never_let_a_shared_cache_store_owner_reads():
     "cache-control": "private, max-age=86400",
     "etag": '"tile-1"',
     "last-modified": "Wed, 07 Oct 2026 10:00:00 GMT",
+    "vary": "Authorization",
   }
   assert private_headers(_upstream(200, {
     "cache-control": "private, max-age=60",
-  })) == {"cache-control": "private, max-age=60"}
+  })) == {"cache-control": "private, max-age=60", "vary": "Authorization"}
   assert private_headers(_upstream(200, {
     "cache-control": "no-store", "etag": '"x"',
   })) == {"cache-control": "no-store"}
   assert private_headers(_upstream(200, {
     "cache-control": "no-cache", "etag": '"x"',
-  })) == {"cache-control": "private, no-cache", "etag": '"x"'}
+  })) == {"cache-control": "private, no-cache", "etag": '"x"', "vary": "Authorization"}
   # Without explicit freshness nothing is promised beyond revalidation.
   assert private_headers(_upstream(200, {"etag": '"x"'})) == {
-    "cache-control": "private, no-cache", "etag": '"x"',
+    "cache-control": "private, no-cache", "etag": '"x"', "vary": "Authorization",
   }
-  assert private_headers(_upstream(200, {"cache-control": "max-age=junk"})) == {}
+  assert private_headers(_upstream(200, {"cache-control": "max-age=junk"})) == {
+    "cache-control": "private, no-cache", "vary": "Authorization",
+  }
   assert private_headers(_upstream(304, {
     "cache-control": "max-age=300", "etag": '"x"',
-  })) == {"cache-control": "private, max-age=300", "etag": '"x"'}
+  })) == {"cache-control": "private, max-age=300", "etag": '"x"', "vary": "Authorization"}
   assert private_headers(_upstream(500, {
     "cache-control": "max-age=300", "etag": '"x"',
   })) == {}
+
+
+def test_proxy_cache_separates_bearer_identities_and_accounts_for_upstream_age():
+  from datetime import UTC, datetime, timedelta
+  from email.utils import format_datetime
+  from app.routes.proxy import private_browser_cache_headers
+
+  fresh = private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=300", "etag": '"x"', "age": "180",
+  }))
+  assert fresh == {
+    "cache-control": "private, max-age=120", "etag": '"x"',
+    "vary": "Authorization",
+  }
+  old_date = format_datetime(datetime.now(UTC) - timedelta(seconds=280), usegmt=True)
+  dated = private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=300", "date": old_date,
+  }))
+  assert dated["vary"] == "Authorization"
+  assert dated["cache-control"].startswith("private, max-age=")
+  assert 0 < int(dated["cache-control"].split("=")[1]) <= 20
+  expired = private_browser_cache_headers(_upstream(200, {
+    "cache-control": "max-age=60", "age": "120",
+  }))
+  assert expired == {"cache-control": "private, no-cache", "vary": "Authorization"}
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": "no-cache",
+  })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
+
+
+def test_truncated_proxy_body_never_carries_upstream_freshness_or_validators():
+  from app.routes.proxy import (
+    _MAX_BYTES, forward_upstream_cache_headers, private_browser_cache_headers,
+  )
+
+  class _Client:
+    async def send(self, req, stream=True):
+      return httpx.Response(200, headers={
+        "cache-control": "max-age=3600", "etag": '"complete"',
+        "last-modified": "Wed, 07 Oct 2026 10:00:00 GMT",
+      }, content=b"x" * (_MAX_BYTES + 1))
+
+  for policy in (private_browser_cache_headers, forward_upstream_cache_headers):
+    response = asyncio.run(_capped_response(
+      _Client(), object(), cache_headers=policy,
+    ))
+    assert len(response.body) == _MAX_BYTES
+    assert response.headers["cache-control"] == "no-store"
+    assert "etag" not in response.headers
+    assert "last-modified" not in response.headers
 
 
 def test_proxy_revalidation_returns_an_empty_not_modified_response():
@@ -424,6 +477,7 @@ def test_proxy_revalidation_returns_an_empty_not_modified_response():
   assert response.body == b""
   assert response.headers["cache-control"] == "private, max-age=60"
   assert response.headers["etag"] == '"v1"'
+  assert response.headers["vary"] == "Authorization"
 
 
 def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(

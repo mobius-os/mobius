@@ -10,7 +10,10 @@ owner or an app-scoped token.
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from math import ceil
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -98,13 +101,33 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
     for name in ("etag", "last-modified")
     if name in upstream.headers
   }
+  # A private cache can still be shared by different bearer identities in one
+  # browser profile. Partition its entries by the request's Authorization.
+  headers["vary"] = "Authorization"
   try:
     max_age = int(directives.get("max-age", ""))
   except ValueError:
     max_age = None
+  if max_age is not None and max_age > 0:
+    # The upstream's Date and Age describe time already spent in prior caches.
+    # Dropping them while resetting Date at this proxy would grant that time
+    # again, potentially serving stale bytes as fresh.
+    age = 0
+    try:
+      age = max(0, int(upstream.headers.get("age", "0")))
+    except ValueError:
+      age = max_age
+    if "date" in upstream.headers:
+      try:
+        upstream_date = parsedate_to_datetime(upstream.headers["date"])
+        if upstream_date.tzinfo is None:
+          upstream_date = upstream_date.replace(tzinfo=UTC)
+        age = max(age, ceil((datetime.now(UTC) - upstream_date).total_seconds()))
+      except (TypeError, ValueError, OverflowError):
+        age = max_age
+    max_age -= max(0, age)
   if "no-cache" in directives or max_age is None or max_age <= 0:
-    if headers:
-      headers["cache-control"] = "private, no-cache"
+    headers["cache-control"] = "private, no-cache"
     return headers
   headers["cache-control"] = (
     f"private, max-age={min(max_age, _PROXY_MAX_BROWSER_AGE)}"
@@ -332,6 +355,7 @@ async def _capped_response(
         raise HTTPException(status_code=502, detail=str(exc))
       try:
         buf = bytearray()
+        capped = False
         async for chunk in r.aiter_bytes():
           # Append only up to the cap so the buffer is STRICTLY bounded by
           # _MAX_BYTES (extending the whole chunk first could overshoot by a
@@ -339,6 +363,7 @@ async def _capped_response(
           room = _MAX_BYTES - len(buf)
           buf.extend(chunk[:room])
           if len(buf) >= _MAX_BYTES:
+            capped = True
             break
       finally:
         await r.aclose()
@@ -354,6 +379,12 @@ async def _capped_response(
   }
   if cache_headers is not None:
     headers.update(cache_headers(r))
+    if capped and r.status_code == 200:
+      # The body may be only a prefix of the upstream representation. Never
+      # attach its full-body validators or freshness to those bytes.
+      for name in ("etag", "last-modified", "expires"):
+        headers.pop(name, None)
+      headers["cache-control"] = "no-store"
   return Response(
     content=bytes(buf),
     status_code=r.status_code,
