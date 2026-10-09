@@ -515,7 +515,7 @@ def _run_view(db, row, *, context_app_id=None):
   value["stop_semantics"] = "revokes_future_actions; an already-admitted public action may finish"
   frozen = row.options_json or {}
   actual = coerce_agent_settings(chat.agent_settings_json) if chat else {}
-  if frozen.get("model") and (not chat or chat.provider != frozen["provider"] or actual.get("model") != frozen["model"] or actual.get("effort") != frozen.get("reasoning_effort")):
+  if value["state"] != "complete" and frozen.get("model") and (not chat or chat.provider != frozen["provider"] or actual.get("model") != frozen["model"] or actual.get("effort") != frozen.get("reasoning_effort")):
     value.update(state="needs_you", summary="The owning chat model choice no longer matches this frozen workflow.")
   last = db.query(models.ChatRun).filter_by(chat_id=row.chat_id).order_by(
     models.ChatRun.started_at.desc()).first()
@@ -575,6 +575,28 @@ def _assert_independent_reviewer(row, child, target):
     raise HTTPException(409, "This child does not match the run-frozen independent review prompt and model.")
 
 
+def _reviewer_root_allows_evidence(db, child):
+  """A durable reviewer belongs to its spawning work, not today's parent turn."""
+  root_id = child.parent_root_run_id
+  goal = db.query(models.ChatGoal).populate_existing().filter_by(id=root_id).first()
+  if goal is not None:
+    return (goal.chat_id == child.parent_chat_id and goal.status == "open"
+      and db.query(models.ChatRun.id).filter_by(
+        chat_id=child.parent_chat_id, goal_id=root_id).first() is not None)
+  root = db.query(models.ChatRun).populate_existing().filter_by(
+    id=root_id, chat_id=child.parent_chat_id).first()
+  if root is None:
+    return False
+  # A successful parent turn may finish while its child is still working.
+  # Stop, including a stopped physical continuation of this root, revokes it.
+  stopped = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == child.parent_chat_id,
+    or_(models.ChatRun.id == root_id, models.ChatRun.root_run_id == root_id),
+    models.ChatRun.status == "stopped",
+  ).first()
+  return stopped is None
+
+
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/independent-reviews",
              dependencies=[Depends(reject_cross_site)])
 async def independent_review(app_id: int | None, run_id: str, body: ReviewOutcome,
@@ -596,36 +618,38 @@ async def independent_review(app_id: int | None, run_id: str, body: ReviewOutcom
     cwd = Path(get_settings().data_dir) / "platform"
     await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
     await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
-    _assert_app_current(db, row.app_id, row.app_nonce)
-    db.refresh(child)
-    if child.cancelled_at is not None:
-      raise HTTPException(409, "This independent reviewer was cancelled during preflight.")
-    if child.child_chat_id != principal.chat_id:
-      raise HTTPException(409, "The independent reviewer conversation changed during preflight.")
-    db.refresh(row)
-    _assert_independent_reviewer(row, child, _target(row, body))
-    active = db.query(models.ChatRun).filter_by(id=principal.run_id,
-      chat_id=principal.chat_id, status="running").first()
-    parent_live = db.query(models.ChatRun.id).filter_by(chat_id=row.chat_id, status="running").first()
-    if not active or not parent_live:
-      raise HTTPException(409, "Review execution stopped. No new evidence admitted.")
-    previous = row.outcomes_json.get(reviews.key(target), {})
-    receipts = list(previous.get("independent_reviews", []))
-    # Retries of one child execution cannot manufacture fresh review rounds.
-    existing = next((r for r in receipts if r["review_run_id"] == principal.run_id), None)
-    receipt = {"id": str(uuid.uuid4()), "head_sha": body.head_sha,
-      "base_sha": body.reviewed_base_sha, "state": body.state, "summary": body.summary,
-      "scope": body.scope, "tests": body.tests, "tests_passed": body.tests_passed,
-      "review_chat_id": principal.chat_id, "review_run_id": principal.run_id,
-      "delegation_id": child.id}
-    if existing:
-      if any(existing[k] != receipt[k] for k in receipt if k != "id"):
-        raise HTTPException(409, "This independent review execution already recorded different evidence.")
-      return {"independent_receipt_id": existing["id"], "run": _run_view(db, row)}
-    receipts.append(receipt)
-    reviews.save_outcome(db, row, reviews.key(target), {**previous,
-      "state": previous.get("state", "reviewing"), "independent_reviews": receipts})
-    return {"independent_receipt_id": receipt["id"], "run": _run_view(db, row)}
+    # Serialize the final admission with Stop, not the remote preflight. A
+    # reviewer can finish after a successful parent turn, but not after Stop.
+    async with chat_queue.get_transition_lock(row.chat_id):
+      _assert_app_current(db, row.app_id, row.app_nonce)
+      db.refresh(child)
+      if child.cancelled_at is not None:
+        raise HTTPException(409, "This independent reviewer was cancelled during preflight.")
+      if child.child_chat_id != principal.chat_id:
+        raise HTTPException(409, "The independent reviewer conversation changed during preflight.")
+      db.refresh(row)
+      _assert_independent_reviewer(row, child, _target(row, body))
+      active = db.query(models.ChatRun.id).filter_by(id=principal.run_id,
+        chat_id=principal.chat_id, status="running").first()
+      if not active or not _reviewer_root_allows_evidence(db, child):
+        raise HTTPException(409, "Review execution stopped. No new evidence admitted.")
+      previous = row.outcomes_json.get(reviews.key(target), {})
+      receipts = list(previous.get("independent_reviews", []))
+      # Retries of one child execution cannot manufacture fresh review rounds.
+      existing = next((r for r in receipts if r["review_run_id"] == principal.run_id), None)
+      receipt = {"id": str(uuid.uuid4()), "head_sha": body.head_sha,
+        "base_sha": body.reviewed_base_sha, "state": body.state, "summary": body.summary,
+        "scope": body.scope, "tests": body.tests, "tests_passed": body.tests_passed,
+        "review_chat_id": principal.chat_id, "review_run_id": principal.run_id,
+        "delegation_id": child.id}
+      if existing:
+        if any(existing[k] != receipt[k] for k in receipt if k != "id"):
+          raise HTTPException(409, "This independent review execution already recorded different evidence.")
+        return {"independent_receipt_id": existing["id"], "run": _run_view(db, row)}
+      receipts.append(receipt)
+      reviews.save_outcome(db, row, reviews.key(target), {**previous,
+        "state": previous.get("state", "reviewing"), "independent_reviews": receipts})
+      return {"independent_receipt_id": receipt["id"], "run": _run_view(db, row)}
 
 
 class RepairCheckout(PullIdentity):
@@ -849,6 +873,11 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
            else "agent" if principal.run_id is not None else "unknown")
   stopped, _ = await stop_chat_for(row.chat_id, db=db, actor=actor,
                                    actor_id=principal.run_id or principal.chat_id)
+  if stopped:
+    # Review Stop is the same explicit owner Stop as /api/chat/stop: child
+    # work (including Goal-owned reviewers) must not outlive its owner.
+    from app.routes.delegations import cancel_active_for_parent
+    await cancel_active_for_parent(db, row.chat_id)
   db.refresh(row)
   return {"stopped": stopped, "run": _run_view(db, row)}
 

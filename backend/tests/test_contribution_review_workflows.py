@@ -573,6 +573,96 @@ def reviewer_context(setup, monkeypatch):
   return db, row, parent, child, reviewer, body
 
 
+def test_durable_reviewer_reports_after_spawning_turn_completes(setup, monkeypatch):
+  db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.commit()
+  assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+
+
+def test_unrelated_live_turn_cannot_revive_stopped_reviewer_root(setup, monkeypatch):
+  db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, parent.run_id).status = "stopped"
+  db.add(models.ChatRun(id="unrelated-parent-run", chat_id=row.chat_id,
+    root_run_id="unrelated-parent-run", status="running"))
+  db.commit()
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert error.value.status_code == 409
+
+
+def test_stopped_continuation_revokes_its_original_reviewer_root(setup, monkeypatch):
+  db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.add(models.ChatRun(id="stopped-continuation", chat_id=row.chat_id,
+    root_run_id=parent.run_id, status="stopped"))
+  db.add(models.ChatRun(id="unrelated-parent-run", chat_id=row.chat_id,
+    root_run_id="unrelated-parent-run", status="running"))
+  db.commit()
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("goal_status, admitted", [("open", True), ("stopped", False)])
+def test_goal_owned_reviewer_follows_goal_lifecycle(setup, monkeypatch, goal_status, admitted):
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.add(models.ChatGoal(id="review-goal", chat_id=row.chat_id,
+    objective="Review", status=goal_status))
+  root = db.get(models.ChatRun, parent.run_id)
+  root.goal_id = "review-goal"
+  root.status = "completed"
+  child.parent_root_run_id = "review-goal"
+  db.add(models.ChatRun(id="unrelated-parent-run", chat_id=row.chat_id,
+    root_run_id="unrelated-parent-run", status="running"))
+  db.commit()
+  if admitted:
+    assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+  else:
+    with pytest.raises(HTTPException) as error:
+      asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+    assert error.value.status_code == 409
+
+
+def test_spawning_root_stop_during_preflight_blocks_evidence(setup, monkeypatch):
+  from app.database import SessionLocal
+  db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
+  def preflight(*args):
+    with SessionLocal() as other:
+      other.get(models.ChatRun, parent.run_id).status = "stopped"
+      other.add(models.ChatRun(id="unrelated-parent-run", chat_id=row.chat_id,
+        root_run_id="unrelated-parent-run", status="running"))
+      other.commit()
+    return REPO, PULL
+  monkeypatch.setattr(domain, "current_pull", preflight)
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert error.value.status_code == 409
+  db.refresh(row)
+  assert not row.outcomes_json[domain.key(ITEM)].get("independent_reviews")
+
+
+def test_goal_hold_during_preflight_blocks_evidence(setup, monkeypatch):
+  from app.database import SessionLocal
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.add(models.ChatGoal(id="review-goal", chat_id=row.chat_id,
+    objective="Review", status="open"))
+  db.get(models.ChatRun, parent.run_id).goal_id = "review-goal"
+  child.parent_root_run_id = "review-goal"
+  db.commit()
+  def preflight(*args):
+    with SessionLocal() as other:
+      other.get(models.ChatGoal, "review-goal").status = "stopped"
+      other.commit()
+    return REPO, PULL
+  monkeypatch.setattr(domain, "current_pull", preflight)
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert error.value.status_code == 409
+  db.refresh(row)
+  assert not row.outcomes_json[domain.key(ITEM)].get("independent_reviews")
+
+
 @pytest.mark.parametrize("block", ["legacy_read", "unregistered", "wrong_head", "wrong_base", "step_hash", "step_model", "step_effort"])
 def test_independent_evidence_requires_current_server_registered_exact_step(setup, monkeypatch, block):
   db, row, _, child, reviewer, body = reviewer_context(setup, monkeypatch)
@@ -831,6 +921,59 @@ def test_review_stop_records_a_goal_hold_naming_who_stopped_it(setup, monkeypatc
   goal = SimpleNamespace(status="open", hold_json=None, revision=0)
   stage_goal_hold(goal, cause="stop", actor=kwargs["actor"], source_id="stop", actor_id=kwargs["actor_id"])
   assert (goal_hold(goal) or {}).get("actor") == expected
+
+
+@pytest.mark.parametrize("goal_owned", [False, True])
+def test_review_stop_cascades_to_running_reviewer(setup, monkeypatch, goal_owned):
+  import app.chat
+  from app.database import SessionLocal
+  from app.routes import delegations as delegation_routes
+  from datetime import UTC, datetime
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  previous = row.outcomes_json[domain.key(ITEM)]
+  domain.save_outcome(db, row, domain.key(ITEM), {**previous, "state": "reviewing"})
+  if goal_owned:
+    db.add(models.ChatGoal(id="review-goal", chat_id=row.chat_id,
+      objective="Review", status="open"))
+    db.get(models.ChatRun, parent.run_id).goal_id = "review-goal"
+    child.parent_root_run_id = "review-goal"
+    db.commit()
+  async def stopped(chat_id, **kwargs):
+    assert chat_id == row.chat_id
+    return True, []
+  cancelled = []
+  async def cancel_child(delegation_id):
+    cancelled.append(delegation_id)
+    with SessionLocal() as other:
+      other.get(models.Delegation, delegation_id).cancelled_at = datetime.now(UTC)
+      other.commit()
+    return True
+  monkeypatch.setattr(app.chat, "stop_chat_for", stopped)
+  monkeypatch.setattr(delegation_routes, "cancel_delegation_execution", cancel_child)
+  result = asyncio.run(routes.stop_review(1, row.id, db,
+    Principal(owner=parent.owner, app_id=None)))
+  assert result["stopped"] is True
+  assert cancelled == [child.id]
+  db.refresh(child)
+  assert child.cancelled_at is not None
+
+
+@pytest.mark.parametrize("terminal", [True, False])
+def test_model_drift_preserves_terminal_history_but_gates_unfinished_run(setup, monkeypatch, terminal):
+  db, row, _ = takeover(setup, monkeypatch)
+  target = row.targets_json[0]
+  if terminal:
+    domain.save_outcome(db, row, domain.key(target), {
+      "state": "merged", "head_sha": target["head_sha"], "merge_sha": "landed"})
+  chat = db.get(models.Chat, row.chat_id)
+  chat.agent_settings_json = {"model": "different", "effort": "high"}
+  db.commit()
+  view = routes._run_view(db, row)
+  assert view["state"] == ("complete" if terminal else "needs_you")
+  if terminal:
+    assert view["items"][0]["state"] == "merged"
+  else:
+    assert "model choice" in view["summary"]
 
 
 def test_app_read_projection_stays_owner_scoped_and_excludes_other_app_grants(setup):
