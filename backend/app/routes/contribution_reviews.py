@@ -29,6 +29,7 @@ router = APIRouter(tags=["contribution-reviews"])
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
 REVIEW_CAPABILITIES = {"post_review": True}
+REVIEW_STOP_KEY = "_review_stop"
 
 
 class PullIdentity(BaseModel):
@@ -107,6 +108,9 @@ def _row(db, app_id, run_id, principal):
 def _assert_execution_live(db, row, principal):
   # Recheck after awaited remote preflight; Stop, uninstall and permission
   # revocation must still win before this exact public attempt is armed.
+  db.refresh(row)
+  if _review_stop_requested(row):
+    raise HTTPException(409, "This review was stopped. No new action was started.")
   active = db.query(models.ChatRun.id).filter_by(
     id=principal.run_id, chat_id=row.chat_id, status="running",
   ).first()
@@ -531,7 +535,14 @@ def _run_view(db, row, *, context_app_id=None):
       else "The review conversation stopped. Open it to continue the remaining work."))
   elif last:
     value["execution_state"] = last.status
+  if value["state"] != "complete" and _review_stop_requested(row):
+    value.update(state="needs_you", execution_state="stopped",
+                 summary="This review was stopped. No new evidence or public action is admitted.")
   return value
+
+
+def _review_stop_requested(row):
+  return (row.outcomes_json or {}).get(REVIEW_STOP_KEY, {}).get("state") == "requested"
 
 
 def _parent(db, row, principal):
@@ -609,6 +620,8 @@ async def independent_review(app_id: int | None, run_id: str, body: ReviewOutcom
     raise HTTPException(403, "A separate server-created independent reviewer must record this evidence.")
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
     db.refresh(row)
+    if _review_stop_requested(row):
+      raise HTTPException(409, "This review was stopped. No new evidence admitted.")
     target = _target(row, body)
     _assert_independent_reviewer(row, child, target)
     if body.reviewed_base_sha != target["base_sha"]:
@@ -628,6 +641,8 @@ async def independent_review(app_id: int | None, run_id: str, body: ReviewOutcom
       if child.child_chat_id != principal.chat_id:
         raise HTTPException(409, "The independent reviewer conversation changed during preflight.")
       db.refresh(row)
+      if _review_stop_requested(row):
+        raise HTTPException(409, "This review was stopped during preflight. No new evidence admitted.")
       _assert_independent_reviewer(row, child, _target(row, body))
       active = db.query(models.ChatRun.id).filter_by(id=principal.run_id,
         chat_id=principal.chat_id, status="running").first()
@@ -871,15 +886,26 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
   # Goal holds accept only these actors; anything else reads as an unexplained interruption.
   actor = ("owner" if is_owner_input_principal(principal)
            else "agent" if principal.run_id is not None else "unknown")
-  stopped, _ = await stop_chat_for(row.chat_id, db=db, actor=actor,
-                                   actor_id=principal.run_id or principal.chat_id)
-  if stopped:
-    # Review Stop is the same explicit owner Stop as /api/chat/stop: child
-    # work (including Goal-owned reviewers) must not outlive its owner.
-    from app.routes.delegations import cancel_active_for_parent
-    await cancel_active_for_parent(db, row.chat_id)
+  # Persist the run-level revocation before awaiting either the parent Stop or
+  # child cancellation. A completed parent has no running root to mark stopped,
+  # and child cancellation may wait or time out without latching cancelled_at.
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    db.refresh(row)
+    if not _review_stop_requested(row):
+      reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": actor})
+  parent_stopped, _ = await stop_chat_for(row.chat_id, db=db, actor=actor,
+                                          actor_id=principal.run_id or principal.chat_id)
+  from app.delegations import ACTIVE_DELEGATION_STATUSES, derived_status
+  from app.routes.delegations import cancel_active_for_parent
+  await cancel_active_for_parent(db, row.chat_id)
+  remaining = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == row.chat_id,
+    models.Delegation.cancelled_at.is_(None),
+  ).all()
+  children_stopped = not any(derived_status(db, child, load_result=False)[0]
+                             in ACTIVE_DELEGATION_STATUSES for child in remaining)
   db.refresh(row)
-  return {"stopped": stopped, "run": _run_view(db, row)}
+  return {"stopped": parent_stopped and children_stopped, "run": _run_view(db, row)}
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",

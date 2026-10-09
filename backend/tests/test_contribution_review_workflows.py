@@ -580,6 +580,20 @@ def test_durable_reviewer_reports_after_spawning_turn_completes(setup, monkeypat
   assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
 
 
+def test_durable_wait_does_not_revoke_completed_parent_reviewer(setup, monkeypatch):
+  from datetime import timedelta
+  from app.timeutil import now_naive_utc
+  db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.add(models.ChatWait(id="review-wait", chat_id=row.chat_id,
+    created_by_run_id=parent.run_id, root_run_id=parent.run_id,
+    description="Await independent review", condition_owner="Independent reviewer",
+    kind="timer", deadline_at=now_naive_utc() + timedelta(hours=1),
+    next_check_at=now_naive_utc() + timedelta(minutes=5), status="armed"))
+  db.commit()
+  assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+
+
 def test_unrelated_live_turn_cannot_revive_stopped_reviewer_root(setup, monkeypatch):
   db, row, parent, _, reviewer, body = reviewer_context(setup, monkeypatch)
   db.get(models.ChatRun, parent.run_id).status = "stopped"
@@ -956,6 +970,93 @@ def test_review_stop_cascades_to_running_reviewer(setup, monkeypatch, goal_owned
   assert cancelled == [child.id]
   db.refresh(child)
   assert child.cancelled_at is not None
+
+
+def test_review_stop_fences_completed_parent_before_child_cancel_wait(setup, monkeypatch):
+  from app import chat_queue
+  from app.database import SessionLocal
+  from app.routes import delegations as delegation_routes
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  previous = row.outcomes_json[domain.key(ITEM)]
+  domain.save_outcome(db, row, domain.key(ITEM), {**previous, "state": "reviewing"})
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.commit()
+  real_cascade = delegation_routes.cancel_active_for_parent
+  cascade_started = asyncio.Event()
+
+  async def cascade(*args):
+    cascade_started.set()
+    return await real_cascade(*args)
+
+  monkeypatch.setattr(delegation_routes, "cancel_active_for_parent", cascade)
+
+  async def exercise():
+    async with chat_queue.get_transition_lock(child.child_chat_id):
+      stopping = asyncio.create_task(routes.stop_review(1, row.id, db,
+        Principal(owner=parent.owner, app_id=None)))
+      await asyncio.wait_for(cascade_started.wait(), 10)
+      assert not stopping.done()  # The child cancellation still awaits its lock.
+      with SessionLocal() as evidence_db:
+        with pytest.raises(HTTPException) as error:
+          await routes.independent_review(1, row.id, body, evidence_db, reviewer)
+        assert error.value.status_code == 409
+    assert (await asyncio.wait_for(stopping, 10))["stopped"] is True
+
+  asyncio.run(exercise())
+
+
+def test_review_stop_reports_child_timeout_and_keeps_evidence_revoked(setup, monkeypatch):
+  import app.chat
+  from app.database import SessionLocal
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  previous = row.outcomes_json[domain.key(ITEM)]
+  domain.save_outcome(db, row, domain.key(ITEM), {**previous, "state": "reviewing"})
+  db.get(models.ChatRun, parent.run_id).status = "completed"
+  db.commit()
+  real_stop_locked = app.chat._stop_chat_for_locked
+
+  async def stop_locked(chat_id, *args, **kwargs):
+    if chat_id == child.child_chat_id:
+      return False, []  # Child provider is still draining.
+    return await real_stop_locked(chat_id, *args, **kwargs)
+
+  monkeypatch.setattr(app.chat, "_stop_chat_for_locked", stop_locked)
+  monkeypatch.setattr(app.chat, "is_chat_running", lambda chat_id: chat_id == child.child_chat_id)
+
+  async def exercise():
+    result = await routes.stop_review(1, row.id, db,
+      Principal(owner=parent.owner, app_id=None))
+    assert result["stopped"] is False
+    db.refresh(child)
+    assert child.cancelled_at is None
+    assert db.get(models.ChatRun, reviewer.run_id).status == "running"
+    with SessionLocal() as evidence_db:
+      with pytest.raises(HTTPException) as error:
+        await routes.independent_review(1, row.id, body, evidence_db, reviewer)
+      assert error.value.status_code == 409
+
+  asyncio.run(exercise())
+
+
+def test_review_stop_revokes_later_parent_public_actions(setup, monkeypatch):
+  import app.chat
+  db, row, parent = takeover(setup, monkeypatch)
+  async def stopped(*args, **kwargs):
+    return True, []
+  monkeypatch.setattr(app.chat, "stop_chat_for", stopped)
+  assert asyncio.run(routes.stop_review(1, row.id, db,
+    Principal(owner=parent.owner, app_id=None)))["stopped"] is True
+  db.add(models.ChatRun(id="later-owner-run", chat_id=row.chat_id,
+    root_run_id="later-owner-run", status="running"))
+  db.commit()
+  later = Principal(owner=parent.owner, app_id=None, chat_id=row.chat_id,
+    run_id="later-owner-run")
+  monkeypatch.setattr(domain, "current_pull", lambda *args: pytest.fail("stopped grant reached GitHub"))
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.report_outcome(1, row.id, routes.ReviewOutcome(**ITEM,
+      state="all_clear", summary="Clear", scope=sorted(routes.SCOPE),
+      tests="Passing", tests_passed=True), db, later))
+  assert error.value.status_code == 409
 
 
 @pytest.mark.parametrize("terminal", [True, False])
