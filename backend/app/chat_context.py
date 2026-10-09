@@ -499,6 +499,12 @@ def _latest_compaction_brief(chat_row) -> str | None:
       continue
     content = msg.get("content")
     if isinstance(content, str) and content.strip():
+      evidence = msg.get("source_evidence")
+      if (isinstance(evidence, dict) and evidence.get("chat_id") == chat_row.id
+          and type(evidence.get("message_count")) is int
+          and evidence["message_count"] >= 0):
+        from app.manual_compaction import evidence_reference
+        return content.strip() + "\n\n" + evidence_reference(chat_row.id, evidence["message_count"])
       return content.strip()
   return None
 

@@ -117,10 +117,11 @@ def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatc
   eng = create_engine(f"sqlite:///{db_path}")
   models.Base.metadata.create_all(bind=eng)
   versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
-  assert versions[-3:] == [
+  transcript_migration = versions.index("0087_transcript_rows")
+  assert versions[transcript_migration - 2:transcript_migration + 1] == [
     "0083_swap_chat_note_sections", "0086_drop_chat_note_backup", "0087_transcript_rows",
   ]
-  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:transcript_migration])
   run_migrations(eng)  # The previous release's ledger.
   monkeypatch.undo()
   monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -1851,6 +1852,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0083_swap_chat_note_sections",
     "0086_drop_chat_note_backup",
     "0087_transcript_rows",
+    "0088_chat_compaction_drafts",
   ]
   assert second == first
 

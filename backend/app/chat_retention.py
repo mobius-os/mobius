@@ -131,6 +131,7 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   )).delete(synchronize_session=False)
 
   dependent_models = (
+    models.ChatCompactionDraft,
     models.ChatActivityPosition,
     models.ChatLiveAssistant,
     models.ChatEmbedGrant,
