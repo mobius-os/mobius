@@ -97,6 +97,7 @@ class RailwayCreate(BaseModel):
   region: Literal[
     "us-west2", "us-east4-eqdc4a", "europe-west4-drams3a", "asia-southeast1-eqsg3a"
   ] | None = None
+  workspace_id: str | None = None
 
 
 class RailwayCompute(BaseModel):
@@ -988,6 +989,64 @@ def _railway_workspaces_contract(payload: object) -> dict:
   return payload
 
 
+_RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "unknown"}
+_RAILWAY_PLAN_LIMIT_LISTS = {"cpu_choices", "memory_options_mb", "volume_options_mb"}
+_RAILWAY_PLAN_LIMIT_INTS = {
+  "max_cpu", "default_cpu", "max_memory_mb", "default_memory_mb", "default_volume_mb",
+}
+
+
+def _is_positive_int(value: object) -> bool:
+  return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _railway_plan_limits_valid(limits: object) -> bool:
+  if not isinstance(limits, dict) or set(limits) != (
+    _RAILWAY_PLAN_LIMIT_LISTS | _RAILWAY_PLAN_LIMIT_INTS | {"included_usd"}
+  ):
+    return False
+  included = limits["included_usd"]
+  return (
+    all(
+      isinstance(limits[key], list)
+      and len(limits[key]) <= 50
+      and all(_is_positive_int(item) for item in limits[key])
+      for key in _RAILWAY_PLAN_LIMIT_LISTS
+    )
+    and all(_is_positive_int(limits[key]) for key in _RAILWAY_PLAN_LIMIT_INTS)
+    and (
+      included is None
+      or (isinstance(included, (int, float)) and not isinstance(included, bool)
+          and 0 <= included <= 100000)
+    )
+  )
+
+
+def _railway_workspace_plans_contract(payload: object) -> dict:
+  invalid = HTTPException(502, "The Möbius account service returned invalid workspace plans.")
+  if not isinstance(payload, dict) or set(payload) != {"workspaces", "current"}:
+    raise invalid
+  workspaces = payload["workspaces"]
+  current = payload["current"]
+  if (
+    not isinstance(workspaces, list)
+    or len(workspaces) > 100
+    or (current is not None and (not isinstance(current, str) or len(current) > 128))
+    or any(
+      not isinstance(item, dict)
+      or set(item) != {"id", "name", "plan", "deploy_blocked", "plan_limits"}
+      or not isinstance(item["id"], str) or not 0 < len(item["id"]) <= 128
+      or not isinstance(item["name"], str) or not 0 < len(item["name"]) <= 128
+      or item["plan"] not in _RAILWAY_PLANS
+      or not isinstance(item["deploy_blocked"], str) or len(item["deploy_blocked"]) > 1000
+      or not _railway_plan_limits_valid(item["plan_limits"])
+      for item in workspaces
+    )
+  ):
+    raise invalid
+  return payload
+
+
 def _railway_metrics_contract(payload: object) -> dict:
   invalid = HTTPException(502, "The Möbius account service returned invalid Railway metrics.")
   if not isinstance(payload, dict) or set(payload) != {
@@ -1135,6 +1194,13 @@ async def create_railway_deployment(
   # hosts still receive the original request when the app omits this field.
   if body.region is not None:
     settings["region"] = body.region
+  # A create names its Railway workspace. Omitting it keeps the original
+  # request: the account service then uses the workspace last chosen.
+  if body.workspace_id is not None:
+    workspace_id = body.workspace_id.strip()
+    if not workspace_id or len(workspace_id) > 128:
+      raise HTTPException(422, "Choose a Railway workspace.")
+    settings["workspace_id"] = workspace_id
   return await _railway_mutation(
     db,
     owner.id,
@@ -1165,6 +1231,16 @@ async def read_railway_workspaces(
 ):
   return _railway_workspaces_contract(
     await _railway_proxy(db, owner.id, "GET", "/workspaces")
+  )
+
+
+@router.get("/railway/workspace-plans")
+async def read_railway_workspace_plans(
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  return _railway_workspace_plans_contract(
+    await _railway_proxy(db, owner.id, "GET", "/workspace-plans")
   )
 
 

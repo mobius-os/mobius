@@ -774,6 +774,179 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
   ]
 
 
+def _linked_railway_bridge(client, auth, monkeypatch, respond):
+  """Grant Railway access with a linked account; return the bridge call log."""
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True, railway_granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("railway-token-" + "x" * 40),
+      scopes_json=[
+        "deployments:delete", "deployments:read", "identity:read",
+        "identity:write", "railway:read", "railway:write",
+      ],
+    ))
+    session.commit()
+  calls = []
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      calls.append((method, url, kwargs.get("json")))
+      return respond(method, url)
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  return granted, calls
+
+
+class _Upstream:
+  def __init__(self, status_code, payload):
+    self.status_code = status_code
+    self._payload = payload
+
+  def json(self):
+    return self._payload
+
+
+def test_railway_create_names_its_workspace_only_when_the_app_sends_one(
+  client, auth, monkeypatch,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
+  )
+  named = client.post(
+    "/api/identity/railway/deployments",
+    json={"name": "Team box", "workspace_id": "  ws_team  "},
+    headers=granted,
+  )
+  unnamed = client.post(
+    "/api/identity/railway/deployments", json={"name": "Old app"}, headers=granted,
+  )
+  blank = client.post(
+    "/api/identity/railway/deployments",
+    json={"name": "Blank", "workspace_id": "   "},
+    headers=granted,
+  )
+  oversize = client.post(
+    "/api/identity/railway/deployments",
+    json={"name": "Long", "workspace_id": "w" * 129},
+    headers=granted,
+  )
+
+  assert (named.status_code, unnamed.status_code) == (202, 202)
+  assert (blank.status_code, oversize.status_code) == (422, 422)
+  # Only the accepted requests reached the account service; an older app's
+  # request is forwarded without the extension.
+  assert [call[2] for call in calls] == [
+    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
+     "volume_mb": None, "workspace_id": "ws_team"},
+    {"name": "Old app", "managed_auth": True, "cpu": None, "memory_mb": None,
+     "volume_mb": None},
+  ]
+
+
+def _workspace_plans(**changes):
+  limits = {
+    "cpu_choices": [1, 2, 4], "max_cpu": 8, "default_cpu": 2,
+    "memory_options_mb": [1024, 4096], "max_memory_mb": 8192,
+    "default_memory_mb": 4096, "volume_options_mb": [5000, 10000],
+    "default_volume_mb": 5000, "included_usd": 5.0,
+  }
+  workspace = {
+    "id": "ws_personal", "name": "Personal", "plan": "hobby",
+    "deploy_blocked": "", "plan_limits": limits,
+  }
+  workspace.update(changes)
+  return {"workspaces": [workspace], "current": "ws_personal"}
+
+
+def test_railway_workspace_plans_are_proxied_after_the_contract_check(
+  client, auth, monkeypatch,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch, lambda *_: _Upstream(200, _workspace_plans()),
+  )
+  response = client.get("/api/identity/railway/workspace-plans", headers=granted)
+
+  assert response.status_code == 200
+  assert response.json() == _workspace_plans()
+  assert calls == [(
+    "GET", "https://www.mobius.you/api/account/v1/railway/workspace-plans", None,
+  )]
+
+
+def test_older_account_service_without_workspace_plans_is_reported_as_missing(
+  client, auth, monkeypatch,
+):
+  granted, _ = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(404, {"detail": "Not Found"}),
+  )
+  response = client.get("/api/identity/railway/workspace-plans", headers=granted)
+
+  assert response.status_code == 404
+
+
+def _bad_limits(**changes):
+  limits = dict(_workspace_plans()["workspaces"][0]["plan_limits"])
+  limits.update(changes)
+  return {"plan_limits": limits}
+
+
+@pytest.mark.parametrize("payload", [
+  {**_workspace_plans(), "extra": 1},
+  {"workspaces": _workspace_plans()["workspaces"]},
+  {**_workspace_plans(), "workspaces": "nope"},
+  {**_workspace_plans(), "current": 7},
+  {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 101},
+  _workspace_plans(extra="x"),
+  _workspace_plans(id=""),
+  _workspace_plans(id="w" * 129),
+  _workspace_plans(name=3),
+  _workspace_plans(name=""),
+  _workspace_plans(plan="enterprise"),
+  _workspace_plans(deploy_blocked="x" * 1001),
+  _workspace_plans(deploy_blocked=None),
+  _workspace_plans(plan_limits=None),
+  _workspace_plans(**_bad_limits(max_cpu=True)),
+  _workspace_plans(**_bad_limits(max_cpu=-1)),
+  _workspace_plans(**_bad_limits(default_volume_mb=0)),
+  _workspace_plans(**_bad_limits(included_usd="5")),
+  _workspace_plans(**_bad_limits(included_usd=True)),
+  _workspace_plans(**_bad_limits(memory_options_mb=["1024"])),
+  _workspace_plans(**_bad_limits(cpu_choices=list(range(51)))),
+  _workspace_plans(**_bad_limits(extra=1)),
+])
+def test_railway_workspace_plans_contract_rejects_unbounded_or_malformed_state(payload):
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  with pytest.raises(HTTPException) as refused:
+    _railway_workspace_plans_contract(payload)
+  assert refused.value.status_code == 502
+
+
+def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspaces():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  unknown = _workspace_plans(plan="unknown", **_bad_limits(included_usd=None))
+  empty = {"workspaces": [], "current": None}
+
+  assert _railway_workspace_plans_contract(unknown) == unknown
+  assert _railway_workspace_plans_contract(empty) == empty
+
+
 @pytest.mark.parametrize("name", ["   ", "x" * 81])
 def test_railway_rename_rejects_invalid_names_before_bridge_call(
   client, auth, monkeypatch, name,
