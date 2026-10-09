@@ -13,6 +13,72 @@
   margin: 0 auto;
 }
 
+.settings__account-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings__account-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 62px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.settings__account-link:hover { background: var(--surface-2); }
+.settings__account-link-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.settings__account-link-copy strong { font-weight: 500; font-size: 14px; }
+.settings__account-link-copy small { color: var(--muted); font-size: 13px; }
+.settings__account-link-status { color: var(--muted); font-size: 12px; }
+.settings__account-link-arrow { color: var(--muted); font-size: 23px; line-height: 1; }
+.settings__account-link[aria-expanded="true"] .settings__account-link-arrow { transform: rotate(90deg); }
+.settings__account-detail {
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+.settings-account-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.settings-account-detail-row span { color: var(--muted); }
+.settings-account-detail-row strong { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.settings-github-detail__actions { padding-top: 15px; }
+
+.settings__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.settings__header .settings__title {
+  flex: 1;
+  margin: 0;
+}
+.settings__back {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.settings__back:hover { background: var(--surface-2); }
+.settings__back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .settings__title {
   font-size: 25px;
   font-weight: 600;
@@ -291,8 +357,9 @@
 .settings-bg-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   position: relative;
+  margin-top: 14px;
 }
 
 .settings-bg-row {
@@ -302,9 +369,9 @@
   align-items: center;
   min-height: 50px;
   padding: 0;
-  border: 0;
+  border: 1px solid var(--border);
   border-radius: 9px;
-  background: transparent;
+  background: var(--surface);
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -345,15 +412,16 @@
   opacity: 0.78;
 }
 
-.settings-bg-row--disconnected .settings-bg-row__drag-handle,
+.settings-bg-row--disconnected:not(.settings-bg-row--detail) { opacity: 0.7; }
+
 .settings-bg-row--disconnected .model-trigger {
   cursor: not-allowed;
 }
 
 .settings-bg-row__drag-handle {
-  align-self: stretch;
+  align-self: start;
   min-width: 44px;
-  min-height: 44px;
+  height: 62px;
   display: grid;
   place-items: center;
   border: 0;
@@ -368,6 +436,8 @@
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
 }
+
+.settings-bg-row__drag-spacer { width: 44px; height: 62px; }
 
 .settings-bg-row__drag-handle:active,
 .settings-bg-row--dragging .settings-bg-row__drag-handle {
@@ -395,6 +465,192 @@
 /* The body holds the full-width model trigger. */
 .settings-bg-row__body {
   min-width: 0;
+}
+
+.settings-provider-summary {
+  width: 100%;
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px 9px 3px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-provider-summary__icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.settings-provider-summary__copy {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.settings-provider-summary__copy small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-provider-summary__rank {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-provider-summary__arrow { color: var(--muted); font-size: 23px; line-height: 1; }
+
+.settings-provider-summary:focus-visible,
+.settings-provider-details__models:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-provider-details {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px 14px 3px;
+}
+
+.settings-provider-details__models {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.settings-provider-details .provider-row {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-provider-details .provider-row__name {
+  display: none;
+}
+
+.settings-provider-details__model {
+  margin-top: 10px;
+}
+
+.settings-provider-details__model > span {
+  display: block;
+  margin: 0 0 5px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-provider-details__pricing {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-provider-details__pricing a {
+  flex: none;
+  color: var(--accent);
+}
+
+@container settings (max-width: 400px) {
+  .settings-provider-details__pricing {
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
+/* The account rows are one list, not cards inside another card. The AI
+   heading sits above its controls so the provider list reads as one unit. */
+.settings__section--accounts { padding: 0; overflow: hidden; }
+.settings__section--accounts .settings__section-title { margin: 0; padding: 14px 16px 7px; }
+.settings__section--accounts .settings__providers { gap: 0; }
+.settings__section--accounts .settings__account-link {
+  min-height: 62px;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 16px;
+}
+.settings__section--accounts .settings-github { border-top: 1px solid var(--border); }
+.settings__section--ai { padding: 0; border: 0; background: transparent; }
+[data-theme="light"] .settings__section--ai { box-shadow: none; }
+.settings__section--ai > .settings__section-title { margin: 0 0 5px; }
+.settings__section--ai > .settings__subtext { margin: 0; }
+.settings__section--ai .settings-bg-list {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.settings__section--ai .settings-bg-row {
+  border: 0;
+  border-radius: 0;
+}
+.settings__section--ai .settings-bg-row + .settings-bg-row { border-top: 1px solid var(--border); }
+.settings__section--ai .settings-bg-list--detail { border: 0; background: transparent; }
+.settings__section--ai .settings-bg-row--detail { background: transparent; opacity: 1; user-select: auto; -webkit-user-select: auto; }
+.settings__section--ai .settings-bg-row--detail .settings-provider-details {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.settings__account-icon {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.settings__account-icon--profile {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.settings__account-icon--profile img { width: 100%; height: 100%; object-fit: cover; }
+
+.settings__account-icon--github {
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+}
+
+.settings__account-icon--github svg {
+  width: 20px;
+  height: 20px;
 }
 
 /* Quiet, read-only effort preview inside the model button. The actual shared
@@ -514,3 +770,10 @@
 }
 
 .settings-github__check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+
+.settings-github__permission-guide {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}

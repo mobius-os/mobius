@@ -8,6 +8,83 @@ import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook
 
 const json = body => new Response(JSON.stringify(body), { status: 200 })
 const attempt = { attempt_id: 'a1', user_code: 'TEST-CODE', verification_uri: 'https://github.com/login/device' }
+const noop = () => {}
+
+function findNode(node, matches) {
+  if (Array.isArray(node)) return node.map(child => findNode(child, matches)).find(Boolean)
+  if (!node || typeof node !== 'object') return null
+  if (matches(node)) return node
+  return findNode(node.props?.children, matches)
+}
+
+const findButton = (node, label) => findNode(node, child =>
+  child.type === 'button' && child.props?.children === label)
+const findSignIn = node => findNode(node, child => child.props?.attempt?.attemptId)
+const renderConnection = () => renderHook(() => GithubConnection({
+  active: true,
+  expanded: true,
+  onToggle: noop,
+  onExpand: noop,
+}))
+
+test('private-access removal guides GitHub revocation and reconnects with public scopes', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let scopes = ['repo', 'workflow']
+  let requestedPrivate = null
+  api.github = {
+    status: async () => json({ connected: true, login: 'owner', scopes, device_flow_available: true }),
+    connectStart: async privateRepos => { requestedPrivate = privateRepos; return json(attempt) },
+    connectPoll: async () => { scopes = ['public_repo', 'workflow']; return json({ status: 'complete' }) },
+  }
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  await tick(20)
+  assert.ok(findButton(view.result.current, 'Remove private access…'))
+  findButton(view.result.current, 'Remove private access…').props.onClick()
+  assert.ok(findButton(view.result.current, 'I revoked it — reconnect public only'))
+  assert.match(JSON.stringify(view.result.current), /github.com\/settings\/applications/)
+  await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
+  assert.equal(requestedPrivate, false)
+  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  assert.ok(!findButton(view.result.current, 'Remove private access…'))
+})
+
+test('private-access removal does not claim success if GitHub grants private scope again', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  api.github = {
+    status: async () => json({ connected: true, login: 'owner', scopes: ['repo', 'workflow'], device_flow_available: true }),
+    connectStart: async () => json(attempt),
+    connectPoll: async () => json({ status: 'complete' }),
+  }
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  await tick(20)
+  findButton(view.result.current, 'Remove private access…').props.onClick()
+  await findButton(view.result.current, 'I revoked it — reconnect public only').props.onClick()
+  assert.match(JSON.stringify(view.result.current), /GitHub still granted private-repository access/)
+  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+})
+
+test('public-only connection can request private access and shows the granted result', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let scopes = ['public_repo', 'workflow']
+  let requestedPrivate = null
+  api.github = {
+    status: async () => json({ connected: true, login: 'owner', scopes, device_flow_available: true }),
+    connectStart: async privateRepos => { requestedPrivate = privateRepos; return json(attempt) },
+    connectPoll: async () => { scopes = ['repo', 'workflow']; return json({ status: 'complete' }) },
+  }
+  const view = renderConnection()
+  t.after(() => view.unmount())
+  await tick(20)
+  assert.match(JSON.stringify(view.result.current), /Public repositories only/)
+  await findButton(view.result.current, 'Enable private repositories').props.onClick()
+  assert.equal(requestedPrivate, true)
+  assert.match(JSON.stringify(view.result.current), /Public and private repositories/)
+})
 
 for (const connected of [false, true]) {
   test(`cancel a resumed ${connected ? 'private-access upgrade' : 'sign-in'} without restarting its wait`, async t => {
@@ -26,10 +103,10 @@ for (const connected of [false, true]) {
         return json({ status: 'cancelled' })
       },
     }
-    const view = renderHook(() => GithubConnection({ active: true }))
+    const view = renderConnection()
     t.after(() => view.unmount())
     await tick(20)
-    const panel = view.result.current.props.children.props.children
+    const panel = findSignIn(view.result.current)
     assert.equal(panel.props.attempt.attemptId, 'a1')
     assert.equal(polls, 1)
     const cancellation = panel.props.onCancel()
@@ -39,7 +116,7 @@ for (const connected of [false, true]) {
     await cancellation
     await tick(20)
     assert.equal(polls, 1)
-    assert.equal(view.result.current.props.children.props.children.props.attempt, undefined)
+    assert.ok(!findSignIn(view.result.current))
   })
 }
 
@@ -52,12 +129,12 @@ test('a failed cancellation keeps the server-owned attempt visible and resumes i
     connectPoll: async () => { polls++; return json({ status: 'pending', retry_after: 100 }) },
     connectCancel: async () => { throw new Error('Cancellation service unavailable') },
   }
-  const view = renderHook(() => GithubConnection({ active: true }))
+  const view = renderConnection()
   t.after(() => view.unmount())
   await tick(20)
-  await view.result.current.props.children.props.children.props.onCancel()
+  await findSignIn(view.result.current).props.onCancel()
   await tick(20)
-  const panel = view.result.current.props.children.props.children
+  const panel = findSignIn(view.result.current)
   assert.equal(panel.props.attempt?.attemptId, 'a1')
   assert.equal(panel.props.message, 'Cancellation service unavailable')
   assert.equal(polls, 2, 'the still-active server attempt is observed again')
@@ -75,11 +152,11 @@ test('unconfirmed cancellation never hides the device code when status also fail
     connectPoll: async () => json({ status: 'pending', retry_after: 100 }),
     connectCancel: async () => { unavailable = true; throw new Error('offline') },
   }
-  const view = renderHook(() => GithubConnection({ active: true }))
+  const view = renderConnection()
   t.after(() => view.unmount())
   await tick(20)
-  await view.result.current.props.children.props.children.props.onCancel()
-  const panel = view.result.current.props.children.props.children
+  await findSignIn(view.result.current).props.onCancel()
+  const panel = findSignIn(view.result.current)
   assert.equal(panel.props.attempt?.attemptId, 'a1')
   assert.equal(panel.props.message, 'offline')
   assert.equal(panel.props.cancelling, false)
@@ -99,11 +176,9 @@ test('unmount during start aborts its request and cannot create a later orphan p
     },
     connectPoll: async () => { polls++; return json({ status: 'complete' }) },
   }
-  const view = renderHook(() => GithubConnection({ active: true }))
+  const view = renderConnection()
   await tick(20)
-  const panel = view.result.current.props.children.props.children
-  const connect = panel.props.children[2].props.children
-  const starting = connect.props.onClick()
+  const starting = findButton(view.result.current, 'Connect GitHub').props.onClick()
   view.unmount()
   releaseStart()
   await starting
@@ -125,9 +200,9 @@ test('unmount during cancellation owns reconciliation and cannot resume a hidden
       throw new Error('offline')
     },
   }
-  const view = renderHook(() => GithubConnection({ active: true }))
+  const view = renderConnection()
   await tick(20)
-  const cancelling = view.result.current.props.children.props.children.props.onCancel()
+  const cancelling = findSignIn(view.result.current).props.onCancel()
   view.unmount()
   releaseCancel()
   await cancelling

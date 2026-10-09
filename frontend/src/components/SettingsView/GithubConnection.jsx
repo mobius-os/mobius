@@ -1,7 +1,5 @@
 /* The instance's GitHub account row in the Settings Accounts card: connect with a device code, add private-repo access, or disconnect. */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
-import StatusDot from '../ui/StatusDot.jsx'
 import {
   cancelGithubSignIn,
   disconnectGithub,
@@ -38,17 +36,18 @@ function SignInCode({ attempt, retrying, cancelling, unconfirmed, message, onCan
   )
 }
 
-export default function GithubConnection({ active = true, focusRef, attention = false }) {
+export default function GithubConnection({ active = true, focusRef, attention = false, expanded, onToggle, onExpand }) {
   const [conn, setConn] = useState({ state: 'checking' })
-  const [expanded, setExpanded] = useState(false)
   // null, 'starting', or the attempt being waited on.
   const [signIn, setSignIn] = useState(null)
   const [retrying, setRetrying] = useState(false)
   const [message, setMessage] = useState('')
   const [includePrivate, setIncludePrivate] = useState(false)
+  const [removePrivateOpen, setRemovePrivateOpen] = useState(false)
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const [busy, setBusy] = useState(false)
   const waitRef = useRef(null)
+  const permissionIntentRef = useRef(null)
 
   const refresh = useCallback(async (options = {}) => {
     const next = await fetchGithubStatus(options)
@@ -63,21 +62,32 @@ export default function GithubConnection({ active = true, focusRef, attention = 
     if (waitRef.current !== controller) waitRef.current?.abort()
     waitRef.current = controller
     setSignIn(attempt)
-    setExpanded(true)
+    onExpand()
     const result = await waitForGithubSignIn(attempt.attemptId, { signal: controller.signal, onRetrying: setRetrying })
     if (controller.signal.aborted) return
     waitRef.current = null
     setSignIn(null)
     setRetrying(false)
-    if (result.status === 'complete') setIncludePrivate(false)
-    else setMessage(result.message || '')
-    await refresh()
-  }, [refresh])
+    const next = await refresh()
+    if (result.status === 'complete') {
+      setIncludePrivate(false)
+      const intent = permissionIntentRef.current
+      if (intent === 'remove-private' && hasPrivateRepoAccess(next.scopes)) {
+        setMessage('GitHub still granted private-repository access. Revoke this app on GitHub before reconnecting with public access only.')
+      } else if (intent === 'remove-private' && next.state === 'connected') {
+        setRemovePrivateOpen(false)
+      } else if (intent === 'add-private' && !hasPrivateRepoAccess(next.scopes)) {
+        setMessage('GitHub did not grant private-repository access. Check the permissions you approved on GitHub.')
+      }
+    } else setMessage(result.message || '')
+    permissionIntentRef.current = null
+  }, [refresh, onExpand])
 
-  const start = useCallback(async (privateRepos) => {
+  const start = useCallback(async (privateRepos, intent = null) => {
     waitRef.current?.abort()
     const controller = new AbortController()
     waitRef.current = controller
+    permissionIntentRef.current = intent
     setMessage('')
     setSignIn('starting')
     try {
@@ -87,6 +97,7 @@ export default function GithubConnection({ active = true, focusRef, attention = 
       if (controller.signal.aborted) return
       waitRef.current = null
       setSignIn(null)
+      permissionIntentRef.current = null
       setMessage(error.message)
     }
   }, [waitFor])
@@ -144,15 +155,6 @@ export default function GithubConnection({ active = true, focusRef, attention = 
   const privateAccess = connected && hasPrivateRepoAccess(conn.scopes)
   const needsReconnect = connected && !hasFullPrAccess(conn.scopes)
 
-  const statusNode = {
-    checking: <StatusDot color="--muted">Checking…</StatusDot>,
-    unknown: <StatusDot color="--danger">Status unavailable</StatusDot>,
-    disconnected: undefined,
-    connected: needsReconnect
-      ? <StatusDot color="--danger">Reconnect needed</StatusDot>
-      : <StatusDot color="--green">{conn.login}{privateAccess ? ' · private repos' : ''}</StatusDot>,
-  }[conn.state]
-
   const note = message ? <p className="pa__error" role="status">{message}</p> : null
   const button = (label, onClick, extra = '') => (
     <button type="button" className={`pa__btn pa__btn--sm${extra}`} disabled={busy} onClick={onClick}>{label}</button>
@@ -200,17 +202,27 @@ export default function GithubConnection({ active = true, focusRef, attention = 
         {needsReconnect ? (
           <p className="pa__muted">This older connection lacks access Möbius now needs to send changes. Disconnect, then connect again.</p>
         ) : null}
+        {!needsReconnect && !privateAccess ? <p className="pa__muted">Private access applies to all private repositories your GitHub account can access, not just one Project.</p> : null}
         <div className="provider-connection__actions">
-          {!needsReconnect && !privateAccess ? button('Add private repositories', () => start(true)) : null}
+          {!needsReconnect && !privateAccess ? button('Enable private repositories', () => start(true, 'add-private')) : null}
+          {privateAccess && !removePrivateOpen ? button('Remove private access…', () => setRemovePrivateOpen(true)) : null}
           {button('Disconnect…', () => setConfirmDisconnect(true))}
         </div>
+        {privateAccess && removePrivateOpen ? <div className="settings-github__permission-guide">
+          <p className="pa__muted">Removing the saved connection here does not revoke GitHub’s permission. First revoke this app under GitHub’s Authorized OAuth Apps, then reconnect with public repositories only. GitHub actions in Möbius will pause until you reconnect.</p>
+          <div className="provider-connection__actions">
+            <a className="pa__btn pa__btn--sm" href="https://github.com/settings/applications" target="_blank" rel="noopener noreferrer">Open GitHub authorizations</a>
+            {button('I revoked it — reconnect public only', () => start(false, 'remove-private'))}
+            {button('Cancel', () => setRemovePrivateOpen(false))}
+          </div>
+        </div> : null}
         {note}
       </div>
     )
   }
 
-  // A row inside the Settings Accounts card; the wrapper is the focus target
-  // apps reach with moebius:open-settings section 'github'.
+  const icon = <span className="settings__account-icon settings__account-icon--github" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.3 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3Z" /></svg></span>
+
   return (
     <div
       className={`settings-github${attention ? ' settings-setup-target' : ''}`}
@@ -218,21 +230,17 @@ export default function GithubConnection({ active = true, focusRef, attention = 
       ref={focusRef}
       tabIndex={-1}
     >
-      <ProviderRow
-        name="GitHub"
-        connected={connected}
-        statusNode={statusNode}
-        actionLabel={connected ? 'Manage' : 'Connect'}
-        disabled={conn.state === 'checking'}
-        expanded={expanded}
-        onToggleExpand={() => {
-          // Closing never cancels a sign-in; the server keeps it and it resumes.
-          setConfirmDisconnect(false)
-          setExpanded(value => !value)
-        }}
-      >
-        {panel}
-      </ProviderRow>
+      <button type="button" className="settings__account-link" aria-expanded={expanded} aria-controls="settings-github-detail" onClick={onToggle}>
+        {icon}
+        <span className="settings__account-link-copy"><strong>GitHub</strong><small>{connected ? `${conn.login}${privateAccess ? ' · private repos' : ''}` : conn.state === 'checking' ? 'Checking…' : conn.state === 'unknown' ? 'Status unavailable' : 'Not connected'}</small></span>
+        <span className="settings__account-link-arrow" aria-hidden="true">›</span>
+      </button>
+      {expanded && <section className="settings__account-detail" id="settings-github-detail" aria-label="GitHub connection">
+        <div className="settings-account-detail-row"><span>Account</span><strong>{connected ? conn.login : 'Not connected'}</strong></div>
+        <div className="settings-account-detail-row"><span>Status</span><strong>{connected ? needsReconnect ? 'Reconnect needed' : 'Connected' : conn.state === 'unknown' ? 'Unavailable' : 'Not connected'}</strong></div>
+        {connected && <div className="settings-account-detail-row"><span>Repository access</span><strong>{privateAccess ? 'Public and private repositories' : 'Public repositories only'}</strong></div>}
+        <div className="settings-github-detail__actions">{panel}</div>
+      </section>}
     </div>
   )
 }
