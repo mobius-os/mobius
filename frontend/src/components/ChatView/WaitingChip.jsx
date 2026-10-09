@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import WaitingCard from './WaitingCard.jsx'
+import HelperConversation from './HelperConversation.jsx'
 import {
   helperPresentation,
   resourcePausePresentation,
@@ -85,21 +86,62 @@ function ResourceCard({ resourcePause, handoff, expanded, onToggle, onRevealReco
   )
 }
 
+export function StrandedFollowupCard({ expanded, onToggle, onView }) {
+  return (
+    <WaitingCard
+      expanded={expanded}
+      onToggle={onToggle}
+      ariaLabel="helper follow-up recovery details"
+      text="Helper follow-up needs review"
+      meta="will not resume automatically"
+      stateLabel="Needs you"
+      action={{ label: 'View helper', onClick: onView }}
+      rows={[
+        { label: 'What happened', value: 'A helper follow-up failed after its original work was completed.' },
+        { label: 'Next step', value: 'View the helper conversation, then decide whether to send a new message.' },
+        { label: 'Boundary', value: 'This does not reopen the completed work or start another turn automatically.' },
+      ]}
+    />
+  )
+}
+
 export default function WaitingChip({
+  chatId,
   waits = [],
   backgroundHelpers,
+  strandedFollowup,
   resourcePause,
   handoff = null,
   onCancel,
   onRevealRecovery,
+  onInternalNav,
 }) {
   const helperCount = Number(backgroundHelpers?.count) || 0
+  const showStrandedFollowup = !!strandedFollowup?.helper_id
   const [expandedKey, setExpandedKey] = useState(null)
-  if (!waits.length && helperCount === 0 && !resourcePause) return null
+  const [viewStrandedHelper, setViewStrandedHelper] = useState(false)
+  if (!waits.length && helperCount === 0 && !resourcePause && !showStrandedFollowup) return null
 
   const toggle = key => setExpandedKey(current => current === key ? null : key)
   return (
     <section className="chat__waits" aria-label="Handoffs">
+      {showStrandedFollowup && (
+        <StrandedFollowupCard
+          expanded={expandedKey === 'stranded-followup'}
+          onToggle={() => toggle('stranded-followup')}
+          onView={() => setViewStrandedHelper(true)}
+        />
+      )}
+      {viewStrandedHelper && showStrandedFollowup && chatId && (
+        <HelperConversation
+          chatId={chatId}
+          taskId={strandedFollowup.helper_id}
+          name="Helper follow-up"
+          status="failed"
+          onClose={() => setViewStrandedHelper(false)}
+          onInternalNav={onInternalNav}
+        />
+      )}
       {resourcePause && (
         <ResourceCard
           resourcePause={resourcePause}

@@ -1699,10 +1699,12 @@ const DrawerRow = memo(function DrawerRow({
   const pinned = !!item.pinned_at
   const { badgeLabel, attentionDot } = drawerRowUnread(kind, item, attention)
   const waiting = kind === 'chat' && item.handoff?.kind === 'automatic'
-  const recovery = kind === 'chat' && item.handoff?.kind === 'recovery'
+  const recovery = kind === 'chat' && (item.handoff?.kind === 'recovery' || !!item.stranded_helper_followup?.helper_id)
   const onHold = kind === 'chat' && item.handoff?.kind === 'on_hold'
   const ownerRequired = needsOwnerInput || (kind === 'chat' && item.handoff?.kind === 'owner_input')
-  const recoveryLabel = item.handoff?.reason === 'restart_required'
+  const recoveryLabel = item.stranded_helper_followup?.helper_id
+    ? 'Helper follow-up failed; review manually — this follow-up will not resume automatically'
+    : item.handoff?.reason === 'restart_required'
     ? 'Server restart needed to load restored work'
     : item.handoff?.reason === 'restart_manual'
     ? 'Restart recovery needs Resume'
@@ -2325,6 +2327,9 @@ const DrawerRow = memo(function DrawerRow({
             aria-label="Currently streaming"
             title="Currently streaming"
           />
+        ) : item.stranded_helper_followup?.helper_id ? (
+          <span className="drawer__recovery-icon" role="img" aria-label={recoveryLabel}
+            title={recoveryLabel}><Pause width={8} height={8} aria-hidden="true" /></span>
         ) : waiting ? (
           <span
             className="drawer__waiting-icon"

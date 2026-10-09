@@ -210,6 +210,10 @@ def test_follow_up_restarts_a_settled_helper_and_owes_its_next_result(
   )
   row = db.get(models.Delegation, delegation_id)
   row.delivered_run_id = "child-run-follow-up"
+  db.add(models.ChatRun(
+    id=row.parent_root_run_id, root_run_id=row.parent_root_run_id,
+    chat_id=parent_id, status="completed", provider="claude",
+  ))
   db.commit()
   started = []
 

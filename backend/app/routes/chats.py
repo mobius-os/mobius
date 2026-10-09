@@ -73,7 +73,9 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
-from app.delegations import background_helper_chat_ids, serialize_background_helpers
+from app.delegations import (
+  background_helper_chat_ids, serialize_background_helpers, stranded_followups,
+)
 from app.goal_plans import presented_goal, presented_deferred_goals
 from app.helper_transcripts import read_helper_conversation
 from app.memory_observability import record_memory_checkpoint_once
@@ -815,6 +817,8 @@ def _chat_detail_response(
       if expose_session else {"count": 0, "items": []}
     ),
   }
+  stranded_helper_id = stranded_followups(db, [chat.id]).get(chat.id) if expose_session else None
+  response["stranded_helper_followup"] = {"helper_id": stranded_helper_id} if stranded_helper_id else None
   response["handoff"] = project_handoff(
     owner_input=bool(response["pending_question_id"]) or chat.id in secure_inputs.pending_chat_ids(),
     running=running,
@@ -822,6 +826,7 @@ def _chat_detail_response(
     helper_count=response["background_helpers"]["count"],
     park=continuation_handoff_for_chat(db, chat.id),
     goal=response["goal"],
+    stranded_followup=stranded_helper_id,
   )
   if requested_anchor_found is not None:
     response["requested_anchor_found"] = requested_anchor_found
@@ -922,6 +927,7 @@ def list_chats(
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
   wait_chat_ids = outstanding_wait_chat_ids(db)
   helper_chat_ids = background_helper_chat_ids(db, (chat.id for chat in chats))
+  stranded_chat_ids = stranded_followups(db, (chat.id for chat in chats))
   park_candidates = {
     row[0] for row in db.query(models.ChatRun.chat_id).filter(
       models.ChatRun.chat_id.in_([chat.id for chat in chats]),
@@ -954,8 +960,9 @@ def list_chats(
       helper_count=1 if chat.id in helper_chat_ids else 0,
       park=park,
       goal=deferred_goals.get(chat.id),
+      stranded_followup=stranded_chat_ids.get(chat.id),
     )
-    result.append(_owner_chat_summary(
+    summary = _owner_chat_summary(
       chat,
       durable_running=chat.id in durable_running,
       handoff=handoff,
@@ -970,7 +977,10 @@ def list_chats(
         }
         if chat.project_ref_id is not None else None
       ),
-    ))
+    )
+    helper_id = stranded_chat_ids.get(chat.id)
+    summary["stranded_helper_followup"] = {"helper_id": helper_id} if helper_id else None
+    result.append(summary)
   return result
 
 
@@ -1874,12 +1884,16 @@ def get_chat_runtime(
       if principal.scope != "chat_embed" else {"count": 0, "items": []}
     ),
   }
+  stranded_helper_id = stranded_followups(db, [chat.id]).get(chat.id) \
+    if principal.scope != "chat_embed" else None
+  response["stranded_helper_followup"] = {"helper_id": stranded_helper_id} if stranded_helper_id else None
   response["handoff"] = project_handoff(
     owner_input=bool(response["pending_question_id"]) or chat.id in secure_inputs.pending_chat_ids(),
     running=running, waits=response["waits"],
     helper_count=response["background_helpers"]["count"],
     park=continuation_handoff_for_chat(db, chat.id),
     goal=response["goal"],
+    stranded_followup=stranded_helper_id,
   )
   return response
 

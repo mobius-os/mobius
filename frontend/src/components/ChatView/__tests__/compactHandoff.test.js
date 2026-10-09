@@ -152,6 +152,37 @@ test('helper, condition and resource handoffs all use the established bordered W
   assert.doesNotMatch(unowned, /resumes automatically/)
 })
 
+test('stranded helper follow-up renders manual recovery without a waiting promise', async () => {
+  const { default: WaitingChip, StrandedFollowupCard } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  let viewed = false
+  StrandedFollowupCard({ expanded: false, onToggle: () => {}, onView: () => { viewed = true } }).props.action.onClick()
+  assert.equal(viewed, true)
+  const html = render(h(WaitingChip, {
+    chatId: 'parent-chat',
+    backgroundHelpers: { count: 0, items: [] },
+    handoff: { kind: 'recovery', reason: 'stranded_helper_followup', helper_id: 'failed-helper' },
+    strandedFollowup: { helper_id: 'failed-helper' },
+  }))
+  assert.match(html, /Helper follow-up needs review/)
+  assert.match(html, /will not resume automatically/)
+  assert.match(html, /Needs you/)
+  assert.match(html, /<button[^>]*>View helper<\/button>/)
+  assert.doesNotMatch(html, /Resume chat|Continue this work/)
+  assert.doesNotMatch(html, /Waiting on|resumes automatically/)
+
+  const mixed = render(h(WaitingChip, {
+    chatId: 'parent-chat',
+    backgroundHelpers: { count: 1, items: [{ title: 'Other active work' }] },
+    waits: [{ id: 'timer', kind: 'timer', description: 'External check' }],
+    handoff: { kind: 'automatic' },
+    strandedFollowup: { helper_id: 'failed-helper' },
+  }))
+  assert.match(mixed, /Helper follow-up needs review/)
+  assert.match(mixed, /Waiting on 1 helper/)
+  assert.match(mixed, /External check/)
+  assert.match(mixed, /View helper/)
+})
+
 test('Waiting panel preserves expanded evidence, action errors and disabled state', () => {
   const html = render(h(WaitingCard, { expanded: true, text: 'Deployment ready', meta: 'checks every minute',
     ariaLabel: 'handoff details', onToggle: () => {}, rows: [{ label: 'Handled by', value: 'Deployment service' }],

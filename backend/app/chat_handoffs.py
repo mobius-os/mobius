@@ -1,7 +1,8 @@
 """Read-only handoff vocabulary; lifecycle owners retain admission authority."""
 
 def project_handoff(*, owner_input: bool, running: bool, waits: list[dict],
-                             helper_count: int, park: dict, goal: dict | None = None) -> dict:
+                             helper_count: int, park: dict, goal: dict | None = None,
+                             stranded_followup: str | None = None) -> dict:
   """One read-side handoff vocabulary for chat and exact-Goal surfaces."""
   if owner_input:
     return {"kind": "owner_input", "reason": "saved_card"}
@@ -26,4 +27,7 @@ def project_handoff(*, owner_input: bool, running: bool, waits: list[dict],
   if goal and goal.get("pause_reason") == "deferred":
     return {"kind": "on_hold", "reason": "deferred", "goal_id": goal["id"],
             "hold_reason": goal["hold_reason"]}
+  if stranded_followup:
+    return {"kind": "recovery", "reason": "stranded_helper_followup",
+            "helper_id": stranded_followup}
   return {"kind": "none", "reason": None}

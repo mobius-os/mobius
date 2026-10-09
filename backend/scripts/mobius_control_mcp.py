@@ -1042,7 +1042,7 @@ def _call_message_agent(arguments: dict[str, Any]) -> dict:
       else "Answer delivered; the helper resumes and its result arrives in this chat by itself."
     )
   else:
-    view["note"] = "Follow-up started; its result arrives in this chat by itself."
+    view["note"] = "Follow-up accepted; its result or failure returns to this chat automatically unless the work is stopped or held."
   return view
 
 
@@ -1352,7 +1352,9 @@ _TOOL_DEFINITIONS = {
     "description": (
       "Give a finished helper a follow-up task, or answer a needs_input "
       "helper's question with its question_id. It keeps its full history and bounded task scope, "
-      "and its new result arrives in this chat by itself. A helper that is "
+      "and its new result arrives in this chat by itself. Closed or held work "
+      "cannot receive new follow-ups: use spawn_agent for a new task or Goal, "
+      "rather than reusing its helper. A helper that is "
       "still working cannot receive a follow-up here; wait for its result. "
       "Repeating an answer never starts a second turn. "
       "For a decision-changing note to a live helper, use "
