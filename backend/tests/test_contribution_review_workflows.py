@@ -1059,6 +1059,148 @@ def test_review_stop_revokes_later_parent_public_actions(setup, monkeypatch):
   assert error.value.status_code == 409
 
 
+@pytest.mark.parametrize("pause_at", ["current_pull", "pull_checks"])
+def test_stop_fences_unadmitted_merge_during_remote_preflight(setup, monkeypatch, pause_at):
+  from threading import Event
+  from app.database import SessionLocal
+  from tests.test_contribution_review_runs import REPO, PULL, CHECKS
+  db, row, parent = takeover(setup, monkeypatch)
+  domain.save_outcome(db, row, domain.key(ITEM), {"state": "reviewing",
+    "independent_reviews": [{"id": "clear", "head_sha": SHA, "base_sha": BASE,
+      "state": "all_clear", "tests_passed": True}]})
+  entered, release = Event(), Event()
+  public_calls = []
+
+  def remote(*args):
+    entered.set()
+    assert release.wait(10)
+    return (REPO, PULL) if pause_at == "current_pull" else CHECKS
+
+  monkeypatch.setattr(domain, pause_at, remote)
+  monkeypatch.setattr(domain, "perform_merge", lambda *args:
+    public_calls.append("merge") or {"merged": True, "sha": "landed"})
+  real_save = domain.save_outcome
+
+  async def exercise():
+    fenced = asyncio.Event()
+    def save(db_arg, review_row, item_key, outcome):
+      result = real_save(db_arg, review_row, item_key, outcome)
+      if item_key == routes.REVIEW_STOP_KEY:
+        fenced.set()
+      return result
+    monkeypatch.setattr(domain, "save_outcome", save)
+    with SessionLocal() as report_db, SessionLocal() as stop_db:
+      body = routes.ReviewOutcome(**ITEM, state="all_clear", summary="Clear",
+        scope=sorted(routes.SCOPE), tests="Passing", tests_passed=True,
+        reviewed_base_sha=BASE, independent_receipt_id="clear")
+      reporting = asyncio.create_task(routes.report_outcome(1, row.id, body, report_db, parent))
+      assert await asyncio.to_thread(entered.wait, 10)
+      stopping = asyncio.create_task(routes.stop_review(1, row.id, stop_db,
+        Principal(owner=parent.owner, app_id=None)))
+      try:
+        await asyncio.wait_for(fenced.wait(), 2)
+        with SessionLocal() as check_db:
+          saved = check_db.get(models.ContributionReviewRun, row.id)
+          assert routes._review_stop_requested(saved)
+          assert not saved.outcomes_json[domain.key(ITEM)].get("merge_attempted")
+        assert not public_calls
+      finally:
+        release.set()
+        report_result, stop_result = await asyncio.wait_for(asyncio.gather(
+          reporting, stopping, return_exceptions=True), 10)
+      assert not public_calls
+      assert isinstance(report_result, HTTPException) and report_result.status_code == 409
+      assert not isinstance(stop_result, Exception) and stop_result["stopped"] is True
+
+  asyncio.run(exercise())
+
+
+def test_stop_after_durable_merge_admission_only_reconciles_that_attempt(setup, monkeypatch):
+  from threading import Event
+  from app.database import SessionLocal
+  from tests.test_contribution_review_runs import REPO, PULL
+  db, row, parent = setup
+  entered, release = Event(), Event()
+  public_calls = []
+
+  def admitted_merge(*args):
+    public_calls.append("merge")
+    entered.set()
+    assert release.wait(10)
+    return {"merged": True, "sha": "landed"}
+
+  monkeypatch.setattr(domain, "perform_merge", admitted_merge)
+  real_save = domain.save_outcome
+
+  async def exercise():
+    fenced = asyncio.Event()
+    def save(db_arg, review_row, item_key, outcome):
+      result = real_save(db_arg, review_row, item_key, outcome)
+      if item_key == routes.REVIEW_STOP_KEY:
+        fenced.set()
+      return result
+    monkeypatch.setattr(domain, "save_outcome", save)
+    with SessionLocal() as report_db, SessionLocal() as stop_db:
+      body = routes.ReviewOutcome(**ITEM, state="all_clear", summary="Clear",
+        scope=sorted(routes.SCOPE), tests="Passing")
+      reporting = asyncio.create_task(routes.report_outcome(1, row.id, body, report_db, parent))
+      assert await asyncio.to_thread(entered.wait, 10)
+      stopping = asyncio.create_task(routes.stop_review(1, row.id, stop_db,
+        Principal(owner=parent.owner, app_id=None)))
+      try:
+        await asyncio.wait_for(fenced.wait(), 2)
+        with SessionLocal() as check_db:
+          saved = check_db.get(models.ContributionReviewRun, row.id)
+          assert saved.outcomes_json[domain.key(ITEM)]["merge_attempted"] is True
+          assert routes._review_stop_requested(saved)
+      finally:
+        release.set()
+        report_result, stop_result = await asyncio.wait_for(asyncio.gather(
+          reporting, stopping, return_exceptions=True), 10)
+    assert public_calls == ["merge"]
+    assert not isinstance(report_result, Exception)
+    assert report_result["run"]["items"][0]["merge_attempted"] is True
+    assert not isinstance(stop_result, Exception) and stop_result["stopped"] is True
+    with SessionLocal() as observed_db:
+      saved = observed_db.get(models.ContributionReviewRun, row.id)
+      assert saved.outcomes_json[domain.key(ITEM)]["merge_attempted"] is True
+      monkeypatch.setattr(domain, "current_pull", lambda *args:
+        (REPO, {**PULL, "merged": True, "merge_commit_sha": "landed"}))
+      viewed = await routes.observe_review(1, row.id, observed_db,
+        Principal(owner=parent.owner, app_id=None))
+      assert viewed["run"]["items"][0]["state"] == "merged"
+      assert public_calls == ["merge"]
+
+  asyncio.run(exercise())
+
+
+def test_stop_allows_read_only_observation_of_prior_merge_attempt(setup, monkeypatch):
+  from app.database import SessionLocal
+  from tests.test_contribution_review_runs import REPO, PULL
+  db, row, parent = setup
+  domain.save_outcome(db, row, domain.key(ITEM), {"state": "merge_unknown",
+    "head_sha": SHA, "merge_attempted": True})
+  owner = Principal(owner=parent.owner, app_id=None)
+  assert asyncio.run(routes.stop_review(1, row.id, db, owner))["stopped"] is True
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: pytest.fail("observation retried merge"))
+  monkeypatch.setattr(domain, "current_pull", lambda *args:
+    (REPO, {**PULL, "merged": True, "merge_commit_sha": "landed"}))
+  with SessionLocal() as observed_db:
+    view = asyncio.run(routes.observe_review(1, row.id, observed_db, owner))["run"]
+    assert view["state"] == "complete"
+    assert view["items"][0]["merge_sha"] == "landed"
+    saved = observed_db.get(models.ContributionReviewRun, row.id)
+    assert routes._review_stop_requested(saved)
+    assert routes.get_review(1, row.id, observed_db, owner)["run"]["state"] == "complete"
+    observed_db.add(models.ChatRun(id="later-observation-run", chat_id=row.chat_id,
+      root_run_id="later-observation-run", status="running"))
+    observed_db.commit()
+    with pytest.raises(HTTPException) as error:
+      routes._parent(observed_db, saved, Principal(owner=parent.owner, app_id=None,
+        chat_id=row.chat_id, run_id="later-observation-run"))
+    assert error.value.status_code == 409
+
+
 @pytest.mark.parametrize("terminal", [True, False])
 def test_model_drift_preserves_terminal_history_but_gates_unfinished_run(setup, monkeypatch, terminal):
   db, row, _ = takeover(setup, monkeypatch)

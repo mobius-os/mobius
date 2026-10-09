@@ -408,16 +408,19 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
             outcome.update(state="needs_you", summary="The connected GitHub account changed. Approve a new review selection.")
           else:
             await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
-            _parent(db, row, principal)
-            # Persist before network I/O. A crash or lost response cannot
-            # authorize replay. CAS also fences other server processes.
-            owned_elsewhere = reviews.arm_merge(db, row, target, outcome, principal)
-            if owned_elsewhere:
-              if owned_elsewhere.get("review_selection_id") != row.id:
-                reviews.save_outcome(db, row, item_key, owned_elsewhere)
-              else:
-                db.refresh(row)
-              return {"run": _run_view(db, row)}
+            # Stop and public admission share only this short boundary. Neither
+            # remote preflight nor an already-armed public request holds it.
+            async with chat_queue.get_transition_lock(f"review-admission:{run_id}"):
+              _parent(db, row, principal)
+              # Persist before network I/O. A crash or lost response cannot
+              # authorize replay. CAS also fences other server processes.
+              owned_elsewhere = reviews.arm_merge(db, row, target, outcome, principal)
+              if owned_elsewhere:
+                if owned_elsewhere.get("review_selection_id") != row.id:
+                  reviews.save_outcome(db, row, item_key, owned_elsewhere)
+                else:
+                  db.refresh(row)
+                return {"run": _run_view(db, row)}
             db.refresh(row)
             outcome = dict(row.outcomes_json[item_key])
             try:
@@ -458,8 +461,9 @@ async def _post_public_review(db, row, item_key, target, outcome, principal, cwd
     if str(actor.get("id") or "") != row.github_actor_id:
       return {**outcome, "public_review": {"state": "skipped",
         "summary": "The connected GitHub account changed, so the review was not posted."}}
-    _parent(db, row, principal)
-    reviews.save_outcome(db, row, item_key, {**outcome, "public_review": {"state": "posting"}})
+    async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
+      _parent(db, row, principal)
+      reviews.save_outcome(db, row, item_key, {**outcome, "public_review": {"state": "posting"}})
     try:
       receipt = await asyncio.to_thread(reviews.post_review, _gh, cwd, target, reviews.review_comment_body(outcome))
       return {**outcome, "public_review": {"state": "posted", **receipt}}
@@ -781,13 +785,14 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
       if await asyncio.to_thread(reviews.base_head, _gh, cwd, target["repo"], target["base_ref"]) != current_base:
         raise HTTPException(409, "The target base moved during repair validation. Test the new combined result first.")
       validation["base_sha"] = current_base
-      _parent(db, row, principal)
       receipt = {**validation, "id": str(uuid.uuid4()), "state": "pushing",
         "from_sha": target["head_sha"], "summary": body.summary, "tests": body.tests,
         "tests_passed": True, "author_chat_id": principal.chat_id, "author_run_id": principal.run_id}
-      owned = reviews.arm_repair(db, row, target, previous, receipt, principal)
-      if owned:
-        return {"run": _run_view(db, row), "blocked": owned}
+      async with chat_queue.get_transition_lock(f"review-admission:{run_id}"):
+        _parent(db, row, principal)
+        owned = reviews.arm_repair(db, row, target, previous, receipt, principal)
+        if owned:
+          return {"run": _run_view(db, row), "blocked": owned}
       db.refresh(row)
       previous = row.outcomes_json[reviews.key(target)]
       attempts = list(previous["repair_attempts"])
@@ -889,7 +894,7 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
   # Persist the run-level revocation before awaiting either the parent Stop or
   # child cancellation. A completed parent has no running root to mark stopped,
   # and child cancellation may wait or time out without latching cancelled_at.
-  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+  async with chat_queue.get_transition_lock(f"review-admission:{run_id}"):
     db.refresh(row)
     if not _review_stop_requested(row):
       reviews.save_outcome(db, row, REVIEW_STOP_KEY, {"state": "requested", "actor": actor})
