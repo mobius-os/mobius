@@ -3260,7 +3260,8 @@ def _apply_schedule_choice(
   """Record who chose the schedule, then register it.
 
   Provenance is written first so a failed or interrupted registration can
-  never leave a declaration whose origin a later update must guess.
+  never leave a declaration whose origin a later update must guess. Accepted
+  installs keep that intent on live-write failure for startup to retry.
   """
   from app import cron_tz
 
@@ -3291,6 +3292,14 @@ async def converge_manifest_schedule_zones(
   their own zone; a default already in the right zone is left alone, so
   repeated reports are no-ops. A failure leaves that app for the next report.
   """
+  async with fs_locks.install_uninstall_lock():
+    db.rollback()
+    await _converge_manifest_schedule_zones_unlocked(db, owner_zone)
+
+
+async def _converge_manifest_schedule_zones_unlocked(
+  db: Session, owner_zone: str | None,
+) -> None:
   scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
   if not scaffold.exists():
     return
@@ -3304,16 +3313,19 @@ async def converge_manifest_schedule_zones(
         zone = _manifest_default_timezone(choice.cron, owner_zone)
         if zone == choice.timezone:
           continue
-        try:
-          await asyncio.to_thread(
-            _apply_schedule_choice,
-            app, dataclasses.replace(choice, timezone=zone), scaffold,
-          )
-        except Exception:
-          app_cron.record_schedule_choice(app.id, choice)
-          raise
+        await app_cron.run_schedule_mutation(
+          _move_manifest_schedule_zone, app,
+          dataclasses.replace(choice, timezone=zone), scaffold,
+        )
     except Exception:
       log.exception("schedule zone: app %s could not be moved", app.id)
+
+
+def _move_manifest_schedule_zone(
+  app: models.App, choice: app_cron.ScheduleChoice, scaffold: Path,
+) -> None:
+  with app_cron.schedule_choice_rollback(app.id):
+    _apply_schedule_choice(app, choice, scaffold)
 
 
 async def _sync_manifest_cron_unlocked(
@@ -3336,6 +3348,16 @@ async def _sync_manifest_cron_unlocked(
   contract (``app_cron.owner_schedule_to_keep``); otherwise the manifest
   default is registered, in ``owner_zone`` when it is a fixed wall time.
   """
+  await app_cron.run_schedule_mutation(
+    _sync_manifest_cron, app, manifest, drop_prior_cron,
+    bundled_job, warnings, owner_zone,
+  )
+
+
+def _sync_manifest_cron(
+  app: models.App, manifest: dict, drop_prior_cron: bool, bundled_job: bool,
+  warnings: list[str], owner_zone: str | None,
+) -> None:
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if schedule else None
   cron_job_name = job_name or "job.sh"
@@ -3350,7 +3372,7 @@ async def _sync_manifest_cron_unlocked(
     if has_cron else None
   )
   if drop_prior_cron and kept is None:
-    await asyncio.to_thread(_drop_app_cron, app_data_dir)
+    _drop_app_cron(app_data_dir)
     (app_cron.schedule_state_dir(app.id) / "init-cron.sh").unlink(missing_ok=True)
     app_cron.clear_schedule_choice(app.id)
   active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
@@ -3366,9 +3388,7 @@ async def _sync_manifest_cron_unlocked(
         timezone=_manifest_default_timezone(default, owner_zone),
         manifest_default=default,
       )
-    await asyncio.to_thread(
-      _apply_schedule_choice, app, choice, active_cron_scaffold,
-    )
+    _apply_schedule_choice(app, choice, active_cron_scaffold)
   elif has_cron:
     sentinel = app_data_dir / ".cron-pending.json"
     sentinel.write_text(
@@ -3505,7 +3525,9 @@ async def _prepare_app_row(
             except HTTPException:
               target_taken = True
             if not target_taken and not Path(target_source_dir).exists():
-              _unregister_cron(Path(old_source_dir))
+              await app_cron.run_schedule_mutation(
+                _unregister_cron, Path(old_source_dir),
+              )
               os.rename(old_source_dir, target_source_dir)
               converged = True
               journal.rollback_actions.append(
