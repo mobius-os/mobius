@@ -115,6 +115,37 @@ test('every accepted fixture cut copies the same effective formatting and source
   }
 })
 
+test('reference atoms copy as self-contained source targets without unrelated definitions', () => {
+  const md = new Marked()
+  for (const use of ['[ref][foo]', '[foo][]', '[foo]', '![diagram][foo]', '![foo][]', '![foo]']) {
+    const source = `A ${use} **bold end**\n\n[foo]: https://example.com/source "Title"\n[unrelated]: https://example.com/hidden`
+    const split = splitSteerMarkdown(source, source.indexOf('bold') + 2)
+    const copied = markdownRangeSource(split.before)
+    assert.equal(md.parse(copied), md.parser(markdownRangeTokens(split.before)), use)
+    assert.ok(!copied.includes('example.com/hidden'), 'do not copy definitions for unselected atoms')
+    assert.ok(copied.includes('[foo]: https://example.com/source "Title"'))
+  }
+})
+
+test('whole earlier blocks and relative slices retain only their needed source references', () => {
+  const md = new Marked()
+  for (const [use, definition] of [
+    ['[ref][ Foo   Bar ]', '[foo bar]: <https://example.com/a b> "Source \\"title\\""'],
+    ['[ß]', '[SS]: https://example.com/unicode'],
+    ['![diagram][fo\\[o]', '[fo\\[o]: /api/media/source.png'],
+  ]) {
+    const source = `${use}\n\n**abcdef**\n\n${definition}\n[unrelated]: https://example.com/hidden`
+    const split = splitSteerMarkdown(source, source.indexOf('abcdef') + 3)
+    const copied = markdownRangeSource(split.before)
+    assert.equal(md.parse(copied), md.parser(markdownRangeTokens(split.before)))
+    assert.ok(copied.includes(definition), 'copy uses the exact original definition')
+    assert.ok(!copied.includes('example.com/hidden'))
+    const sliced = sliceMarkdownRange(split.before, 0, use.length)
+    assert.equal(md.parse(markdownRangeSource(sliced)), md.parse(`${use}\n\n${definition}`))
+    assert.ok(!markdownRangeSource(split.after).includes('example.com/hidden'))
+  }
+})
+
 test('nested emphasis and deletion survive projection; unrelated whole blocks stay intact', () => {
   const source = 'Prelude\n\n## A **bold *nested* ~~ending~~** tail'
   const cut = source.indexOf('nested') + 3

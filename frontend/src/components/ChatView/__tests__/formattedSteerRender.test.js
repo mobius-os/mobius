@@ -23,6 +23,7 @@ const { projectSteerContinuationMessage, projectSettledSteerContinuations, proje
 const { assistantReplyGroups, presentAssistantReply } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { assistantClipboardText } = await vite.ssrLoadModule('/src/components/ChatView/markdownClipboard.js')
+const { Marked } = await vite.ssrLoadModule('marked')
 const assistant = (content, id = 'run') => ({ role: 'assistant', id, content, blocks: [{ type: 'text', content }] })
 const prefix = 'Earlier explanation.\n\n**3. Don'
 const full = 'Earlier explanation.\n\n**3. Don’t confuse uncertainty with failure—or success.**\n\nLater explanation.'
@@ -217,6 +218,30 @@ test('ordinary whole-block copy retains the original Markdown source', () => {
   const { clipboardData } = copyWholeFragment(assistant('__ordinary__'), 'ordinary')
   assert.equal(assistantClipboardText(clipboardData), '__ordinary__')
 })
+
+for (const legacy of [false, true]) {
+  for (const use of ['[ref][foo]', '[foo][]', '[foo]', '![diagram][foo]', '![foo][]', '![foo]']) {
+    test(`reference atoms retain source targets on both sides of copy (legacy=${legacy}, use=${use})`, () => {
+      const definition = '[foo]: /api/media/source.png "Source title"'
+      const prefix = `${use} **bo`
+      const rows = [assistant(prefix), steer,
+        assistant(`${use} **bold end** ${use}\n\n${definition}\n[unrelated]: https://example.com/hidden`, 'run:assistant:1')]
+      if (legacy) rows.forEach(row => { delete row.blocks })
+      const shown = projectSettledSteerContinuations(rows)
+      for (const [msg, visibleText, expected] of [
+        [shown[0], 'bo', `${use} **bo**\n\n${definition}`],
+        [shown[2], 'ld end', `**ld end** ${use}\n\n${definition}`],
+      ]) {
+        const { clipboardData } = copyWholeFragment(msg, visibleText)
+        const copied = assistantClipboardText(clipboardData)
+        assert.equal(copied, expected)
+        assert.ok(new Marked().parse(copied).includes('/api/media/source.png'))
+        assert.ok(!copied.includes('example.com/hidden'))
+        assert.ok(!copied.includes('test-authorization'))
+      }
+    })
+  }
+}
 
 for (const legacy of [false, true]) {
   for (const [source, marker, tag] of [['**ab **cde**fg**', '**', 'strong'], ['~~ab ~~cde~~fg~~', '~~', 'del']]) {

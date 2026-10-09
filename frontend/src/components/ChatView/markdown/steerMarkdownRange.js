@@ -11,6 +11,14 @@ const containers = new Set(['strong', 'em', 'del'])
 const unsafeInline = tokens => tokens.some(token => token.type === 'html'
   || (Array.isArray(token.tokens) && unsafeInline(token.tokens)))
 
+function sourceDefinitions(tokens) {
+  const definitions = new Map()
+  md.walkTokens(tokens, token => {
+    if (token.type === 'def') definitions.set(token.tag, token.raw)
+  })
+  return definitions
+}
+
 function boundary(source, offset) {
   if (!segmenter || !Number.isInteger(offset) || offset < 0 || offset > source.length) return false
   if (offset !== 0 && offset !== source.length) {
@@ -120,9 +128,10 @@ export function splitSteerMarkdown(text, cut) {
   const beforeTokens = project(tokens, text, 0, cut)
   const afterTokens = project(tokens, text, cut, text.length)
   if (!beforeTokens || !afterTokens) return null
+  const definitions = sourceDefinitions(tokens)
   return {
-    before: { source: text, start: 0, end: cut, tokens: beforeTokens },
-    after: { source: text, start: cut, end: text.length, tokens: afterTokens },
+    before: { source: text, start: 0, end: cut, tokens: beforeTokens, definitions },
+    after: { source: text, start: cut, end: text.length, tokens: afterTokens, definitions },
   }
 }
 
@@ -135,7 +144,20 @@ export function markdownRangeTokens(range) {
  * with standalone formatting at clipped boundaries. DOM media URLs
  * may be authorized URLs; they must never become clipboard source. */
 export function markdownRangeSource(range) {
+  const neededDefinitions = new Set()
+  // Reference grammar comes from the same lexer as the source parse. Labels
+  // use Marked's whitespace normalization and Unicode caseless matching.
+  const rules = md.Lexer.rules.inline.gfm
+  md.walkTokens(markdownRangeTokens(range), token => {
+    if (token.type !== 'link' && token.type !== 'image') return
+    const match = rules.reflink.exec(token.raw) || rules.nolink.exec(token.raw)
+    if (!match || match[0] !== token.raw) return
+    const tag = (match[2] || match[1]).replace(/\s+/g, ' ')
+      .trim().toLowerCase().toUpperCase().toLowerCase()
+    if (range.definitions?.has(tag)) neededDefinitions.add(tag)
+  })
   function source(token, formats = []) {
+    if (token.type === 'def') return ''
     // Literal text can gain Markdown meaning at a new fragment boundary (for
     // example "* tail" becomes a list). Escape text, not complete source atoms.
     if (token.type === 'text' && !token.tokens) return token.raw
@@ -158,7 +180,11 @@ export function markdownRangeSource(range) {
     const marker = token.type === 'strong' ? '**' : token.type === 'em' ? '*' : '~~'
     return leading + (body ? marker + body + marker : '') + trailing
   }
-  return markdownRangeTokens(range).map(token => source(token)).join('')
+  const content = markdownRangeTokens(range).map(token => source(token)).join('')
+  // Only selected atoms bring their source definitions. Never append the
+  // entire document's hidden targets or replace them with authorized DOM URLs.
+  return neededDefinitions.size ? content.trimEnd() + '\n\n'
+    + [...neededDefinitions].map(tag => range.definitions.get(tag)).join('\n') : content
 }
 
 /** Slice using offsets relative to this descriptor's currently displayed raw span. */
@@ -172,5 +198,6 @@ export function sliceMarkdownRange(range, start, end) {
   if (!boundary(range.source, absoluteStart) || !boundary(range.source, absoluteEnd)) return null
   if (absoluteStart === absoluteEnd) return { ...range, start: absoluteStart, end: absoluteEnd, tokens: [] }
   const tokens = project(md.lexer(range.source), range.source, absoluteStart, absoluteEnd)
-  return tokens ? { source: range.source, start: absoluteStart, end: absoluteEnd, tokens } : null
+  return tokens ? { source: range.source, start: absoluteStart, end: absoluteEnd,
+    tokens, definitions: range.definitions } : null
 }
