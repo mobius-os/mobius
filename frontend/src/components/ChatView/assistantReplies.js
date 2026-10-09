@@ -6,12 +6,18 @@ import { assistantReplyRoot, isHiddenReplyCarrier, projectSteerContinuationMessa
 
 /** Groups retain every source row/index, including the invisible delivery carriers.
  * Only a committed hidden steer can connect two explicit same-run identities. */
-export function assistantReplyGroups(messages, { offset = 0, slots = new Map(), activeIndex = -1, activeKey, displayKeys = new Map() } = {}) {
+const EMPTY_NOTES = Object.freeze([])
+
+export function assistantReplyGroups(messages, { offset = 0, slots = new Map(), activeIndex = -1, activeKey, displayKeys = new Map(), previousGroups = null } = {}) {
   const groups = new Map()
+  const previousByKey = new Map()
+  if (previousGroups) {
+    for (const old of previousGroups.values()) previousByKey.set(old.rows[0].key, old)
+  }
   for (let start = 0; start < messages.length; start += 1) {
     const first = messages[start]
     if (first?.role !== 'assistant' || first.hidden) continue
-    const rows = [{ message: first, index: start, notes: [] }]
+    const rows = [{ message: first, index: start, notes: EMPTY_NOTES }]
     const root = assistantReplyRoot(first)
     let end = start
     while (root) {
@@ -28,16 +34,30 @@ export function assistantReplyGroups(messages, { offset = 0, slots = new Map(), 
       const candidate = messages[next]
       if (!sawCarrier || assistantReplyRoot(candidate) !== root) break
       notes.push(...(slots.get(next) || []))
-      rows.push({ message: candidate, index: next, notes })
+      rows.push({ message: candidate, index: next, notes: notes.length ? notes : EMPTY_NOTES })
       end = next
     }
     const lastVisibleIndex = rows.findLast(row => !row.message.hidden)?.index ?? -1
-    const group = { start, end, lastVisibleIndex, rows: rows.map(row => ({
+    const keyedRows = rows.map(row => ({
       ...row,
       key: row.index === activeIndex && activeKey ? activeKey
         : displayKeys.get(row.message.id) || messageKey(row.message, offset + row.index),
       anchorKey: assistantAnchorKey(offset + row.index),
-    })) }
+    }))
+    // Physical indices shift on prepend, but the persisted message and its
+    // absolute keys do not. Keep the expensive reply projection's inputs by
+    // identity while still publishing current indices for active-row lookup.
+    const priorRows = previousByKey.get(keyedRows[0].key)?.presentationRows
+    const samePresentation = priorRows?.length === keyedRows.length
+      && keyedRows.every((row, index) => {
+        const prior = priorRows[index]
+        return prior.message === row.message && prior.key === row.key
+          && prior.anchorKey === row.anchorKey && prior.notes === row.notes
+      })
+    const presentationRows = samePresentation ? priorRows : keyedRows.map(
+      ({ message, key, anchorKey, notes }) => ({ message, key, anchorKey, notes }),
+    )
+    const group = { start, end, lastVisibleIndex, rows: keyedRows, presentationRows }
     for (let index = start; index <= end; index += 1) groups.set(index, group)
     start = end
   }

@@ -36,7 +36,7 @@ test('hidden final segment leaves a visible recovery control and stable source o
 const note = { id: 'incoming', sender_chat_id: 'peer', sender_name: 'Colleague', body: 'New information', created_at: 2000, display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 } }
 const context = { tools: new Map([['peer-incoming', [note]]]), positions: new Map([['answer', [note]]]) }
 const message = { id: 'answer', role: 'assistant', blocks: [{ type: 'text', content: 'Earlier\n\nLater response' }] }
-const replyGroup = { rows: [{ message, key: 'answer', anchorKey: 'answer', notes: [] }] }
+const replyGroup = assistantReplyGroups([message]).get(0)
 function render(Component, props, value = context) {
   return renderWithModels(React.createElement(PeerTimelineContext.Provider, { value }, React.createElement(Component, props)))
 }
@@ -338,6 +338,7 @@ test('a later standalone Restart request owns the card before legacy activity', 
   assert.doesNotMatch(html, /standalone-success/)
 })
 
+
 for (const isStreaming of [true, false]) {
   test(`hidden replay uses one Markdown paragraph in the shared reply surface (${isStreaming})`, () => {
     const prefix = 'This sentence continues;'
@@ -393,7 +394,7 @@ test('grouped replies carry authoritative manual recovery to their existing acti
       { type: 'error', resumable: true, pause: { kind } },
     ] }
     const props = {
-      replyGroup: { rows: [{ message: msg, key: msg.id, anchorKey: msg.id, notes: [] }] },
+      replyGroup: assistantReplyGroups([msg]).get(0),
       activeMirrorMsg: msg, useDbActivePayload: true, onResume() {}, isLastMsg: true,
     }
     const manual = render(Active, { ...props, handoff: { kind: 'recovery' } })

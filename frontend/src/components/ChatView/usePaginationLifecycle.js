@@ -1,5 +1,27 @@
 import { useLayoutEffect, useRef } from 'react'
 
+/** Retire either a fetched page or its delayed paint/quiet retry atomically. */
+export function cancelOlderPageWork({ pageRef, loadingOlderRef, followupRafRef, retryRef }) {
+  const page = pageRef.current
+  if (page) {
+    page.cancelled = true
+    if (page.frame) cancelAnimationFrame(page.frame)
+  }
+  pageRef.current = null
+  if (followupRafRef.current) cancelAnimationFrame(followupRafRef.current)
+  followupRafRef.current = 0
+  if (retryRef.current.timer) clearTimeout(retryRef.current.timer)
+  retryRef.current.timer = 0
+  loadingOlderRef.current = false
+}
+
+export function olderPageIsCurrent({ page, pageRef, lifecycle, lifecycleRef, chatStale }) {
+  return lifecycleRef.current === lifecycle
+    && pageRef.current === page
+    && !page.cancelled
+    && !chatStale
+}
+
 
 /**
  * Fence asynchronous history work at the commit boundary that replaces its
@@ -14,6 +36,7 @@ export default function usePaginationLifecycle({
   searchAnchorKey,
   searchRevealId,
   loadingOlderRef,
+  pageRef,
   followupRafRef,
   retryRef,
 }) {
@@ -25,12 +48,8 @@ export default function usePaginationLifecycle({
       // Layout cleanup runs inside the commit that retires this activation, so
       // an old response cannot enter the new transcript before passive cleanup.
       lifecycleRef.current += 1
-      const followupRaf = followupRafRef.current
-      if (followupRaf) cancelAnimationFrame(followupRaf)
-      followupRafRef.current = 0
-      clearTimeout(retryRef.current.timer)
+      cancelOlderPageWork({ pageRef, loadingOlderRef, followupRafRef, retryRef })
       retryRef.current = { timer: 0, attempts: 0 }
-      loadingOlderRef.current = false
     }
   }, [
     chatId,
@@ -40,6 +59,7 @@ export default function usePaginationLifecycle({
     searchAnchorKey,
     searchRevealId,
     loadingOlderRef,
+    pageRef,
     followupRafRef,
     retryRef,
   ])
