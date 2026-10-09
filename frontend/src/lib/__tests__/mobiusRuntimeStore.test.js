@@ -54,6 +54,7 @@ test('runtime publishes additive feature markers for version-skew-safe app fallb
   const { runtimeFeatures } = await runtimeExports()
   assert.equal(runtimeFeatures.authoritativeVersionedReads, true)
   assert.equal(runtimeFeatures.idleDocument, true)
+  assert.equal(runtimeFeatures.frameVisibility, true)
   assert.equal(Object.isFrozen(runtimeFeatures), true)
 })
 

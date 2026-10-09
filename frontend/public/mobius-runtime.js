@@ -4430,6 +4430,50 @@ function makeProjects() {
 }
 
 //#endregion
+//#region src/runtime/visibility.js
+function makeVisibility({ win, doc } = {}) {
+	let frameVisible = true;
+	let visible = !doc?.hidden;
+	const listeners = /* @__PURE__ */ new Set();
+	function recompute() {
+		const next = frameVisible && !doc?.hidden;
+		if (next === visible) return;
+		visible = next;
+		for (const cb of [...listeners]) try {
+			cb(next);
+		} catch (e) {}
+	}
+	function setFrameVisible(next) {
+		if (typeof next !== "boolean") return;
+		frameVisible = next;
+		recompute();
+	}
+	if (win && win.parent && win.parent !== win) win.addEventListener("message", (e) => {
+		if (e.source !== win.parent) return;
+		const msg = e.data;
+		if (!msg || msg.type !== "moebius:frame-visibility") return;
+		setFrameVisible(msg.visible);
+	});
+	doc?.addEventListener?.("visibilitychange", recompute);
+	return {
+		get visible() {
+			return visible;
+		},
+		setFrameVisible,
+		onVisibilityChange(cb) {
+			if (typeof cb !== "function") return () => {};
+			listeners.add(cb);
+			try {
+				cb(visible);
+			} catch (e) {}
+			return () => {
+				listeners.delete(cb);
+			};
+		}
+	};
+}
+
+//#endregion
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
@@ -4447,7 +4491,7 @@ function _seedOnline(next) {
 }
 if (typeof window !== "undefined") {
 	window.addEventListener("message", (e) => {
-		if (e.origin !== window.location.origin) return;
+		if (e.source !== window.parent) return;
 		const msg = e.data;
 		if (!msg || typeof msg !== "object") return;
 		if (msg.type === "moebius:online-status" && typeof msg.online === "boolean") {
@@ -4458,13 +4502,19 @@ if (typeof window !== "undefined") {
 	window.addEventListener("online", () => _seedOnline(true));
 	window.addEventListener("offline", () => _seedOnline(false));
 }
+const _visibility = typeof window !== "undefined" ? makeVisibility({
+	win: window,
+	doc: typeof document !== "undefined" ? document : null
+}) : makeVisibility();
 let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({
 	authoritativeVersionedReads: true,
+	frameVisibility: true,
 	idleDocument: true,
 	projects: true
 });
-function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+function init({ appId, appInstanceId = null, getToken, capabilityContract = null, frameVisible }) {
+	_visibility.setFrameVisible(frameVisible);
 	const identityKey = `${String(appId)}:${appInstanceId || "legacy"}`;
 	if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
 		_runtimeContext.tokenRef.current = getToken;
@@ -4512,6 +4562,10 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 				_onlineListeners.delete(cb);
 			};
 		},
+		get visible() {
+			return _visibility.visible;
+		},
+		onVisibilityChange: _visibility.onVisibilityChange,
 		storage,
 		DurableWriteError,
 		durableWrite: storage.durableWrite,
@@ -4548,4 +4602,4 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 }
 
 //#endregion
-export { CapabilityError, DurableWriteError, appChatMetadataBody, conflictContextItems, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
+export { CapabilityError, DurableWriteError, appChatMetadataBody, conflictContextItems, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, makeVisibility, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };

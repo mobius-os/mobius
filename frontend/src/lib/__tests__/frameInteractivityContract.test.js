@@ -197,3 +197,54 @@ test('the app frame relays a child frame\'s shell action only while that frame h
   frameDoc.message(frameDoc.child, action)
   assert.deepEqual(frameDoc.shellPosts.at(-1).message, action, 'relayed from the focused child frame')
 })
+
+function bootFrameVisibilityHost() {
+  // The real bootstrap listener and runtime config literal from app-frame.html,
+  // run without fetching or mounting an app.
+  const listener = frame.match(
+    /window\.addEventListener\('message', \(e\) => \{\n\s*if \(e\.source !== window\.parent \|\| e\.origin !== window\.location\.origin\) return;[\s\S]*?\n {4}\}\);/,
+  )?.[0]
+  const config = frame.match(/globalThis\.__mobiusRuntimeConfig = \{[\s\S]*?\n {8}\};/)?.[0]
+  assert.ok(listener, 'frame bootstrap message listener exists')
+  assert.ok(config, 'frame runtime config literal exists')
+  const listeners = []
+  const parent = {}
+  const window = {
+    parent,
+    location: { origin: 'https://mobius.test' },
+    addEventListener(type, cb) { if (type === 'message') listeners.push(cb) },
+  }
+  const context = {
+    window,
+    _FRAME_APP_ID: 7,
+    currentToken: 'token',
+    currentCapabilityContract: null,
+    tokenAppInstanceId: () => null,
+    runtimeToken: async () => 'token',
+  }
+  runInNewContext(
+    `let frameVisible = null;\n${listener}\nglobalThis.startModuleLoad = () => { ${config} return globalThis.__mobiusRuntimeConfig; };`,
+    context,
+  )
+  return {
+    parent,
+    startModuleLoad: context.startModuleLoad,
+    deliver(data, source = parent) {
+      for (const cb of listeners) cb({ data, source, origin: window.location.origin })
+    },
+  }
+}
+
+test('the frame keeps an early visibility verdict for the app runtime', () => {
+  const host = bootFrameVisibilityHost()
+  // AppCanvas posts this at frame load, before the app runtime listens.
+  host.deliver({ type: 'moebius:frame-visibility', visible: false })
+  host.deliver({ type: 'moebius:frame-visibility', visible: true }, {})
+  host.deliver({ type: 'moebius:frame-visibility', visible: 'true' })
+  const config = host.startModuleLoad()
+  assert.equal(config.frameVisible, false)
+  // A verdict that arrives while the module is still loading also counts,
+  // because the runtime reads the config when it initializes.
+  host.deliver({ type: 'moebius:frame-visibility', visible: true })
+  assert.equal(config.frameVisible, true)
+})

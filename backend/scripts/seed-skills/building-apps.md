@@ -831,6 +831,39 @@ useEffect(() => {
 
 ---
 
+## Pausing work while the app is hidden
+
+The shell keeps recently used apps loaded but hidden so switching back is
+instant. A hidden app frame's `document.hidden` stays `false` unless the whole
+browser tab is hidden, so a timer gated only on `document.hidden` keeps
+polling, animating, or playing audio for an app nobody can see. Gate that work
+on the runtime's combined signal instead:
+
+```jsx
+useEffect(() => {
+  let timer = null
+  let run = 0 // bumped on every pause/resume so a stale loop stops itself
+  const loop = async (mine) => {
+    await refresh()
+    if (mine === run) timer = setTimeout(() => loop(mine), 5000)
+  }
+  const stop = window.mobius.onVisibilityChange((visible) => {
+    clearTimeout(timer)
+    run += 1
+    if (visible) loop(run) // refresh at once on return, then resume the cadence
+  })
+  return () => { run += 1; clearTimeout(timer); stop() }
+}, [])
+```
+
+`window.mobius.visible` is `true` only while the shell shows this frame and the
+tab is visible. `onVisibilityChange(cb)` calls `cb(visible)` immediately and on
+every change, and returns an unsubscribe function. A Store app that may run on
+an older Möbius checks `window.mobius.runtimeFeatures?.frameVisibility` and
+otherwise falls back to `document.hidden` with `visibilitychange`.
+
+---
+
 ## Communicating with the shell
 
 ```jsx

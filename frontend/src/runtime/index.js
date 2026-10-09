@@ -18,6 +18,8 @@
 // of the wrong type for a path throws a clear error rather than corrupting:
 //   window.mobius.appId
 //   window.mobius.online                          -> probed reachability verdict (the shell's /api/health probe forwarded by AppCanvas; navigator.onLine is only the initial seed)
+//   window.mobius.visible                         -> true only while the shell shows this frame AND the document is not hidden
+//   window.mobius.onVisibilityChange(cb)          -> unsubscribe fn; cb(boolean) now and on every change (pause polling while false)
 //   window.mobius.storage.get(path)               -> JSON value | null  (offline-capable, SWR)
 //   window.mobius.storage.set(path, data)         -> {synced} | {queued}
 //   window.mobius.storage.getText(path)           -> string | null      (offline-capable, SWR)
@@ -95,6 +97,7 @@ import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
 import { makeProjects } from './projects.js'
+import { makeVisibility } from './visibility.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -104,6 +107,7 @@ export * from './navigation.js'
 export * from './capabilities.js'
 export * from './immersive.js'
 export * from './projects.js'
+export * from './visibility.js'
 
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
@@ -142,7 +146,9 @@ function _seedOnline(next) {
 // Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
-    if (e.origin !== window.location.origin) return
+    // Only the hosting shell window may set the verdict, the same sender rule
+    // visibility.js, immersive.js and navigation.js use.
+    if (e.source !== window.parent) return
     const msg = e.data
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
@@ -155,6 +161,12 @@ if (typeof window !== 'undefined') {
   window.addEventListener('offline', () => _seedOnline(false))
 }
 // ─────────────────────────────────────────────────────────────────────────────
+
+// One per document: frame visibility belongs to the iframe, not to an init()
+// identity, so a re-init keeps the same verdict and subscribers.
+const _visibility = typeof window !== 'undefined'
+  ? makeVisibility({ win: window, doc: typeof document !== 'undefined' ? document : null })
+  : makeVisibility()
 
 // ── Host capability sessions ────────────────────────────────────────────────
 // Opaque app frames cannot use every origin-bound browser API directly. This
@@ -175,11 +187,16 @@ let _runtimeContext = null
 // should keep its legacy fallback.
 export const runtimeFeatures = Object.freeze({
   authoritativeVersionedReads: true,
+  frameVisibility: true,
   idleDocument: true,
   projects: true,
 })
 
-export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+export function init({
+  appId, appInstanceId = null, getToken, capabilityContract = null, frameVisible,
+}) {
+  // The frame host's latest verdict, which may predate this module's listener.
+  _visibility.setFrameVisible(frameVisible)
   const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
   if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
     // Hosts may replace their token broker after a refresh. Keep one runtime and
@@ -225,6 +242,10 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
       try { cb(_online) } catch (e) {}
       return () => { _onlineListeners.delete(cb) }
     },
+    // False while the shell keeps this frame mounted but out of sight, or while
+    // the browser tab itself is hidden. Pause polling and animation when false.
+    get visible() { return _visibility.visible },
+    onVisibilityChange: _visibility.onVisibilityChange,
     storage,
     DurableWriteError,
     durableWrite: storage.durableWrite,
