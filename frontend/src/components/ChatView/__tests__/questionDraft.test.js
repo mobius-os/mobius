@@ -31,20 +31,19 @@ test('question drafts restore selections and custom text by chat and question', 
   const storage = new MemoryStorage()
   const key = questionDraftKey('chat-1', 'question-7', questions)
 
-  writeQuestionDraft(
-    key,
-    { 'Which direction?': ['Polish', '__other__'] },
-    { 'Which direction?': 'Keep the current shape' },
-    storage,
-  )
+  writeQuestionDraft(key, {
+    answers: { 'Which direction?': ['Polish', '__other__'] },
+    otherTexts: { 'Which direction?': 'Keep the current shape' },
+  }, storage)
 
   assert.deepEqual(readQuestionDraft(key, storage), {
     answers: { 'Which direction?': ['Polish', '__other__'] },
     otherTexts: { 'Which direction?': 'Keep the current shape' },
+    files: [],
   })
   assert.deepEqual(
     readQuestionDraft(questionDraftKey('chat-2', 'question-7', questions), storage),
-    { answers: {}, otherTexts: {} },
+    { answers: {}, otherTexts: {}, files: [] },
     'another chat must not inherit the selection',
   )
 })
@@ -58,13 +57,29 @@ test('legacy questions without an id get a stable content-derived draft key', ()
 })
 
 
+test('question drafts retain only completed file metadata and clear file-only drafts', () => {
+  const storage = new MemoryStorage()
+  const key = questionDraftKey('chat-1', 'files', questions)
+  writeQuestionDraft(key, { answers: {}, otherTexts: {}, files: [
+    { name: 'photo.png', size: 12, mime_type: 'image/png', status: 'done', objectUrl: 'blob:secret' },
+    { name: 'pending.pdf', status: 'uploading' },
+  ] }, storage)
+  assert.deepEqual(readQuestionDraft(key, storage).files, [
+    { name: 'photo.png', size: 12, mime_type: 'image/png', status: 'done' },
+  ])
+  assert.doesNotMatch(storage.getItem(key), /blob:secret|pending.pdf/)
+  writeQuestionDraft(key, { answers: {}, otherTexts: {}, files: [] }, storage)
+  assert.equal(storage.getItem(key), null)
+})
+
+
 test('question drafts clear on submit and with the owning chat', () => {
   const storage = new MemoryStorage()
   const first = questionDraftKey('chat-1', 'q1', questions)
   const second = questionDraftKey('chat-1', 'q2', questions)
   const otherChat = questionDraftKey('chat-2', 'q1', questions)
   for (const key of [first, second, otherChat]) {
-    writeQuestionDraft(key, { 'Which direction?': 'Polish' }, {}, storage)
+    writeQuestionDraft(key, { answers: { 'Which direction?': 'Polish' }, otherTexts: {} }, storage)
   }
 
   clearQuestionDraft(first, storage)
@@ -94,7 +109,7 @@ test('durable browser storage falls back when localStorage rejects writes', () =
   })
   try {
     const key = questionDraftKey('chat-1', 'fallback', questions)
-    writeQuestionDraft(key, { 'Which direction?': 'Simplify' }, {})
+    writeQuestionDraft(key, { answers: { 'Which direction?': 'Simplify' }, otherTexts: {} })
     assert.equal(JSON.parse(session.getItem(key)).answers['Which direction?'], 'Simplify')
   } finally {
     if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
@@ -118,7 +133,7 @@ test('a durable write removes a stale session fallback', () => {
       answers: { 'Which direction?': 'Polish' }, otherTexts: {},
     }))
 
-    writeQuestionDraft(key, { 'Which direction?': 'Simplify' }, {})
+    writeQuestionDraft(key, { answers: { 'Which direction?': 'Simplify' }, otherTexts: {} })
 
     assert.equal(session.getItem(key), null)
     assert.equal(readQuestionDraft(key).answers['Which direction?'], 'Simplify')
@@ -144,11 +159,11 @@ test('clearing a draft removes every fallback copy', () => {
     local.setItem(key, value)
     session.setItem(key, value)
 
-    writeQuestionDraft(key, {}, {})
+    writeQuestionDraft(key, { answers: {}, otherTexts: {} })
 
     assert.equal(local.getItem(key), null)
     assert.equal(session.getItem(key), null)
-    assert.deepEqual(readQuestionDraft(key), { answers: {}, otherTexts: {} })
+    assert.deepEqual(readQuestionDraft(key), { answers: {}, otherTexts: {}, files: [] })
   } finally {
     if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
     else delete globalThis.localStorage

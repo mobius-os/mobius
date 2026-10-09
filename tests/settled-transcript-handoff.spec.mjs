@@ -217,22 +217,38 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
   await page.evaluate(() => {
     window.__handoffFrames = []
     window.__handoffSampling = true
+    // A transcript commit (or media load) can run in a task between a frame's
+    // paint and this sample. Reading then forces layout before the next
+    // frame's ResizeObserver repair (for example a stale reservation clamping
+    // the pin): geometry that never paints. Such a sample is skipped; the next
+    // frame's sample still shows whatever that change actually painted.
+    let committedSinceFrame = false
+    const markCommitted = () => { committedSinceFrame = true }
+    const scrollEl = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    new MutationObserver(markCommitted)
+      .observe(scrollEl, { childList: true, characterData: true, subtree: true })
+    scrollEl.addEventListener('load', markCommitted, true)
     const sample = () => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
       const scroll = surface?.querySelector('.chat__scroll')
       const users = surface?.querySelectorAll('.chat__msg--user') || []
       const row = users[users.length - 1]
-      const sr = scroll?.getBoundingClientRect()
-      const rr = row?.getBoundingClientRect()
-      window.__handoffFrames.push({
-        users: users.length,
-        top: sr && rr ? rr.top - sr.top : null,
-      })
+      if (!committedSinceFrame) {
+        const sr = scroll?.getBoundingClientRect()
+        const rr = row?.getBoundingClientRect()
+        window.__handoffFrames.push({
+          users: users.length,
+          top: sr && rr ? rr.top - sr.top : null,
+        })
+      }
       if (window.__handoffSampling) schedule()
     }
     // Sample after each frame has painted. A read inside rAF forces layout
     // before the frame's ResizeObserver repair and sees geometry that never paints.
-    const schedule = () => requestAnimationFrame(() => setTimeout(sample, 0))
+    const schedule = () => requestAnimationFrame(() => {
+      committedSinceFrame = false
+      setTimeout(sample, 0)
+    })
     schedule()
   })
 

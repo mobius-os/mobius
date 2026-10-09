@@ -19,6 +19,8 @@
   on one chat can't stall the loop and starve other chats' SSE because it
   never runs on the loop.
 """
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 import asyncio
 import json
@@ -83,7 +85,7 @@ class _OrderedBroadcast(ChatBroadcast):
           .one_or_none()
         )
         blocks = (
-          row.messages[-1].get("blocks") if row and row.messages else []
+          list(transcript_rows.history(row))[-1].get("blocks") if row and list(transcript_rows.history(row)) else []
         ) or []
         self.question_block_persisted_at_publish = any(
           b.get("type") == "question" for b in blocks
@@ -223,7 +225,7 @@ def test_question_event_is_saved_before_broadcast(db, chat):
   in chat.messages BEFORE the broadcast reaches a frontend that might
   POST an answer. C2 enforces this in publish_question via QuestionCommit
   (commit-before-ack); the card is broadcast only after the ack."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "hi", "ts": 1}])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
@@ -247,7 +249,7 @@ def test_question_event_is_saved_before_broadcast(db, chat):
     s = SessionLocal()
     try:
       row = s.query(models.Chat).filter(models.Chat.id == chat.id).one()
-      blocks = row.messages[-1].get("blocks") or []
+      blocks = list(transcript_rows.history(row))[-1].get("blocks") or []
       assert any(b.get("type") == "question" for b in blocks), (
         "question block must be persisted before the broadcast"
       )
@@ -272,7 +274,7 @@ def test_question_event_is_saved_before_broadcast(db, chat):
 def test_publish_rejects_question_events(db, chat):
   """publish() must REJECT question events so a runner can't bypass the
   save-before-broadcast barrier — they MUST go through publish_question."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "hi", "ts": 1}])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
@@ -285,7 +287,7 @@ def test_non_question_save_routes_to_actor_off_loop(db, chat):
   to the writer actor (off the event loop). publish() submits a
   fire-and-forget PersistTranscript; the block is durable once the actor
   drains."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "hi", "ts": 1}])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
@@ -312,7 +314,7 @@ def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
   'chat-writer'; the publish call on the loop only enqueues."""
   import threading
 
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "hi", "ts": 1}])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
@@ -344,7 +346,7 @@ def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
 def test_finalize_awaits_actor_and_persists(db, chat):
   """finalize() submits a Finalize and AWAITS its ack: the terminal
   message is durable the instant finalize() returns (commit-before-ack)."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "hi", "ts": 1}])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-f")
@@ -354,18 +356,18 @@ def test_finalize_awaits_actor_and_persists(db, chat):
 
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  assert row.messages[-1].get("role") == "assistant"
-  assert row.messages[-1]["blocks"][-1]["content"] == "done"
+  assert list(transcript_rows.history(row))[-1].get("role") == "assistant"
+  assert list(transcript_rows.history(row))[-1]["blocks"][-1]["content"] == "done"
 
 
 def test_error_event_routes_to_persist_error(db, chat):
   """An `error` event routes to a PersistError (non-coalescing) so it
   can't be collapsed away by a later text snapshot; it lands durably."""
-  chat.messages = [
+  transcript_rows.replace_all(object_session(chat), chat, [
     {"role": "user", "content": "hi", "ts": 1},
     {"role": "assistant", "content": "", "ts": 2,
      "blocks": [{"type": "text", "content": "partial"}]},
-  ]
+  ])
   db.commit()
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-e")

@@ -3,6 +3,7 @@
 Locks in the contract that the agent gets a clock every turn (issue: the
 agent only ever saw an IANA timezone NAME, and only on turn 1).
 """
+from app.chat_writer import create_chat
 
 import re
 import time
@@ -86,7 +87,7 @@ def test_elapsed_ignores_automatic_continuation_marker(monkeypatch):
   cid = f"time-context-{uuid.uuid4()}"
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=cid,
       title="time context",
       messages=[

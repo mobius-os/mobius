@@ -98,3 +98,12 @@ export function drawerRowSpacerHeights(window, total) {
 export function sameDrawerRowWindow(left, right) {
   return left?.start === right?.start && left?.end === right?.end
 }
+
+/** Minimum height for the lists section that keeps the viewport bottom
+ * reachable after the list shrinks: the section's current `height` less the
+ * content still `belowViewport`. Used when switching lists, and again on scroll
+ * where it only shrinks; it resolves to 0 once the floor is no longer needed. */
+export function drawerListMinHeight(height, belowViewport) {
+  const floor = (Number(height) || 0) - (Number(belowViewport) || 0)
+  return floor > 0 ? Math.ceil(floor) : 0
+}

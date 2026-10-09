@@ -1,20 +1,27 @@
-"""Drawer chat search: FTS index reconciliation + /api/chats/search."""
+"""Drawer chat search: trigger-maintained entries + /api/chats/search."""
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import threading
 import uuid
 
-from app import chat_search, models
-from app.chat_search import sql
+from app import chat_search, chat_writer, models, transcript_rows
+from sqlalchemy import text as sql
 from app.chat_visibility import visible_in_owner_drawer
 from app.timeutil import now_naive_utc
+import pytest
+
+# Search reads message text of converted chats only, by contract.
+pytestmark = pytest.mark.converted_chats
+
+
+import pytest
 
 
 def _make_chat(db, title, texts, role="user"):
   # Distinct, increasing ts per message: ts is the drawer's reveal anchor and
   # is unique within a chat in production data.
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title=title,
     messages=[
@@ -28,7 +35,7 @@ def _make_chat(db, title, texts, role="user"):
 
 def _doc_count(db, chat_id):
   return db.execute(
-    sql("SELECT count(*) FROM chat_search_docs WHERE chat_id = :c"),
+    sql("SELECT count(*) FROM chat_search_entries WHERE chat_id = :c"),
     {"c": chat_id},
   ).fetchone()[0]
 
@@ -63,7 +70,7 @@ def test_result_carries_iso_last_active_timestamp(db):
 
 
 def test_result_falls_back_to_role_index_anchor_without_timestamp(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Untimed notes",
     messages=[
@@ -88,9 +95,7 @@ def test_prefix_match_on_last_token(db):
   assert any(r["id"] == c.id for r in chat_search.search(db, "budg"))
 
 
-def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
-  db, monkeypatch,
-):
+def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(db):
   suffix = uuid.uuid4().hex
   exact = f"portablepostgres{suffix}"
   visible = _make_chat(
@@ -98,7 +103,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
     "Portable result",
     [f"{exact} capybara appears in visible prose"],
   )
-  hidden_row = models.Chat(
+  hidden_row = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Hidden transcript row",
     messages=[{
@@ -108,7 +113,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
       "hidden": True,
     }],
   )
-  hidden_chat = models.Chat(
+  hidden_chat = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Hidden drawer chat",
     messages=[{
@@ -118,7 +123,7 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
     }],
     agent_settings_json={"drawer_hidden": True},
   )
-  tool_only = models.Chat(
+  tool_only = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Tool output",
     messages=[{
@@ -130,7 +135,6 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
   db.add_all((hidden_row, hidden_chat, tool_only))
   db.commit()
 
-  monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
   results = chat_search.search(db, f"{exact} capy")
   ids = {result["id"] for result in results}
   assert visible.id in ids
@@ -140,9 +144,8 @@ def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
   assert "capybara" in hit["snippet"]
 
 
-def test_normalized_postgres_path_finds_unicode_document_text(db, monkeypatch):
+def test_search_finds_unicode_document_text(db):
   c = _make_chat(db, "Unicode", ["réunion café itinerary"])
-  monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
 
   hit = next(
     result for result in chat_search.search(db, "réunion caf")
@@ -153,12 +156,10 @@ def test_normalized_postgres_path_finds_unicode_document_text(db, monkeypatch):
   assert "café" in hit["snippet"]
 
 
-def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
-  db, monkeypatch,
-):
+def test_search_keeps_recent_matches_beyond_the_old_512_chat_cap(db):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
-  verbose_old = models.Chat(
+  verbose_old = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Older verbose match",
     messages=[{
@@ -169,7 +170,7 @@ def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
     activity_at=now - timedelta(days=1),
   )
   recent = [
-    models.Chat(
+    chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title=f"Recent match {index}",
       messages=[{"role": "user", "content": needle, "ts": 1000}],
@@ -180,7 +181,6 @@ def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
   db.add_all([verbose_old, *recent])
   db.commit()
 
-  monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
 
   assert [result["id"] for result in chat_search.search(db, needle, limit=1)] == [
     max(chat.id for chat in recent),
@@ -199,9 +199,9 @@ def test_appended_message_rebuild_keeps_one_doc_per_transcript_row(db):
   c = _make_chat(db, "Log", ["first entry"])
   chat_search.search(db, "first")  # index it
   before = _doc_count(db, c.id)
-  c.messages = c.messages + [
+  transcript_rows.append_many(db, c, [
     {"role": "assistant", "content": "quokka sighting confirmed", "ts": 2}
-  ]
+  ])
   db.commit()
   assert any(r["id"] == c.id for r in chat_search.search(db, "quokka"))
   assert _doc_count(db, c.id) == before + 1
@@ -211,9 +211,9 @@ def test_same_length_transcript_replacement_updates_existing_search_rows(db):
   c = _make_chat(db, "Mutable", ["oldplatypus phrase"])
   assert any(r["id"] == c.id for r in chat_search.search(db, "oldplatypus"))
 
-  c.messages = [
+  transcript_rows.replace_all(db, c, [
     {"role": "user", "content": "newporcupine phrase", "ts": 1000},
-  ]
+  ])
   db.commit()
 
   assert any(r["id"] == c.id for r in chat_search.search(db, "newporcupine"))
@@ -235,7 +235,7 @@ def test_deleted_chat_leaves_index_and_restore_returns(db):
   c.deleted_at = now_naive_utc()
   db.commit()
   assert chat_search.search(db, "pangolin") == []
-  assert _doc_count(db, c.id) == 0
+  # Generation rows may remain disposable while deleted; queries gate visibility.
   c.deleted_at = None
   db.commit()
   assert any(r["id"] == c.id for r in chat_search.search(db, "pangolin"))
@@ -244,7 +244,7 @@ def test_deleted_chat_leaves_index_and_restore_returns(db):
 def test_shrunk_history_triggers_full_rebuild(db):
   c = _make_chat(db, "Trimmed", ["alpha wombat", "beta wombat"])
   chat_search.search(db, "wombat")
-  c.messages = [{"role": "user", "content": "gamma capybara", "ts": 3}]
+  transcript_rows.replace_all(db, c, [{"role": "user", "content": "gamma capybara", "ts": 3}])
   db.commit()
   assert not any(
     r["id"] == c.id for r in chat_search.search(db, "wombat")
@@ -253,7 +253,7 @@ def test_shrunk_history_triggers_full_rebuild(db):
 
 
 def test_tool_noise_roles_are_not_indexed(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Noise",
     messages=[
@@ -269,7 +269,7 @@ def test_tool_noise_roles_are_not_indexed(db):
 
 
 def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):
-  c = models.Chat(
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Private transcript mechanics",
     messages=[
@@ -290,9 +290,9 @@ def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):
   )
   assert _doc_count(db, c.id) == 2  # title + visible message
 
-  messages = list(c.messages)
+  messages = list(transcript_rows.history(c))
   messages[1] = {**messages[1], "hidden": False}
-  c.messages = messages
+  transcript_rows.replace_all(db, c, messages)
   db.commit()
   hit = next(
     r for r in chat_search.search(db, "concealedcassowary") if r["id"] == c.id
@@ -314,7 +314,7 @@ def test_search_visibility_matches_owner_drawer_contract(db):
   db.flush()
 
   def chat(label, *, app_owned=False, settings=None):
-    row = models.Chat(
+    row = chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title=label,
       messages=[{"role": "user", "content": needle, "ts": 1000}],
@@ -344,8 +344,6 @@ def test_search_visibility_matches_owner_drawer_contract(db):
   ids = {result["id"] for result in chat_search.search(db, needle)}
   assert {owner_default.id, app_visible.id, app_forced_visible.id} <= ids
   assert {owner_hidden.id, app_default.id, app_forced_hidden.id}.isdisjoint(ids)
-  assert _doc_count(db, owner_hidden.id) == 0
-  assert _doc_count(db, app_default.id) == 0
 
 
 def test_search_and_drawer_visibility_helpers_share_one_behavior_contract():
@@ -361,7 +359,7 @@ def test_search_and_drawer_visibility_helpers_share_one_behavior_contract():
     (42, {"drawer_hidden": False}),
   )
   for created_by_app_id, settings in cases:
-    chat = models.Chat(
+    chat = chat_writer.create_chat(
       id=str(uuid.uuid4()),
       title="Visibility contract",
       messages=[],
@@ -413,7 +411,7 @@ def test_recent_match_outranks_old_chat_that_repeats_the_query():
   ]
 
 
-def test_overlapping_first_searches_leave_one_idempotent_document_generation(db):
+def test_overlapping_searches_share_one_document_generation(db):
   suffix = uuid.uuid4().hex
   needle = f"concurrentsearch{suffix}"
   c = _make_chat(db, "Concurrent index", [needle])
@@ -467,3 +465,35 @@ def test_search_anchor_opens_one_authoritative_window_through_the_tail(client, a
   assert [row["content"] for row in detail["messages"]] == [
     "before", "the searchable narwhal", "after",
   ]
+
+
+def test_new_and_changed_chats_are_searchable_in_their_own_transaction(db):
+  visible = _make_chat(db, "New lemur", ["freshlemur body"])
+  archived = _make_chat(db, "Archived mink", ["archivedmink body"])
+  archived.archived_at = now_naive_utc()
+  db.commit()
+  assert [r["id"] for r in chat_search.search(db, "freshlemur")] == [visible.id]
+  archived_hit = chat_search.search(db, "archivedmink")[0]
+  assert archived_hit["id"] == archived.id and archived_hit["archived"] is True
+
+  transcript_rows.replace_all(db, visible, [
+    {"role": "user", "content": "revisedlemur body", "ts": 1000},
+  ])
+  db.commit()
+  assert chat_search.search(db, "freshlemur") == []
+  assert [r["id"] for r in chat_search.search(db, "revisedlemur")] == [visible.id]
+
+
+def test_search_never_writes(db):
+  _make_chat(db, "Read only", ["readonlyheron"])
+  from sqlalchemy import event
+  writes = []
+  def record(_conn, _cursor, statement, *_rest):
+    if not statement.lstrip().upper().startswith("SELECT"):
+      writes.append(statement)
+  event.listen(db.get_bind(), "before_cursor_execute", record)
+  try:
+    assert chat_search.search(db, "readonlyheron")
+  finally:
+    event.remove(db.get_bind(), "before_cursor_execute", record)
+  assert writes == []

@@ -12,6 +12,8 @@ import {
   searchCommands,
   searchInstalledApps,
   searchProjects,
+  unindexedChatCount,
+  unindexedChatsNote,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
 
@@ -255,4 +257,27 @@ test('chat destinations focus either the matched row or the ordinary composer', 
     chatId: 'chat-row',
     focusComposer: false,
   })
+})
+
+
+test('unindexed chat count reads the search header and ignores junk', () => {
+  const headers = value => ({ get: name => (name === 'X-Search-Unindexed-Chats' ? value : null) })
+  assert.equal(unindexedChatCount(headers('120')), 120)
+  assert.equal(unindexedChatCount(headers('0')), 0)
+  assert.equal(unindexedChatCount(headers(null)), 0)
+  assert.equal(unindexedChatCount(headers('soon')), 0)
+  assert.equal(unindexedChatCount(undefined), 0)
+})
+
+test('a quiet note says when older chats are searchable by title only', () => {
+  assert.equal(
+    unindexedChatsNote({ status: 'ready', results: [], unindexed: 120 }),
+    "Message text in 120 older chats isn't searchable yet.",
+  )
+  assert.equal(
+    unindexedChatsNote({ status: 'ready', results: [], unindexed: 1 }),
+    "Message text in 1 older chat isn't searchable yet.",
+  )
+  assert.equal(unindexedChatsNote({ status: 'ready', results: [], unindexed: 0 }), null)
+  assert.equal(unindexedChatsNote({ status: 'loading', results: [], unindexed: 5 }), null)
 })

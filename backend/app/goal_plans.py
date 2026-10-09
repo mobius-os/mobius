@@ -15,6 +15,11 @@ from app import models
 from app.chat_message_identity import assistant_message_run_id
 
 
+# The Goal tool's names across providers. A transcript row carrying one is
+# flagged so Goal placement reads only those bodies (transcript_rows).
+UPDATE_GOAL_TOOLS = frozenset({
+  "mobius_control:update_goal", "mcp__mobius_control__update_goal",
+})
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TASK_STATUSES = frozenset({
   "pending", "running", "completed", "blocked", "failed", "cancelled",
@@ -712,9 +717,8 @@ def _goal_completion_anchor(messages, run_ids, result, status="completed"):
       continue
     for block in reversed(message.get("blocks") or []):
       if (not isinstance(block, dict) or block.get("type") != "tool"
-          or block.get("tool") not in {
-            "mobius_control:update_goal", "mcp__mobius_control__update_goal",
-          } or block.get("status") != "done"
+          or block.get("tool") not in UPDATE_GOAL_TOOLS
+          or block.get("status") != "done"
           or block.get("output_exit_code") != 0 or not block.get("tool_use_id")):
         continue
       raw = block.get("input")

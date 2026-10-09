@@ -748,6 +748,10 @@ test.describe('Q&A atomic write', () => {
       })
     })
     pendingQuestion = await mockPendingQuestionState(page, 'q-pick-atomic')
+    // Every chat read above is mocked, so activation can settle before the
+    // real /api/ready probe answers; a send then queues locally instead of
+    // starting the mocked turn. Report readiness from the same boundary.
+    await mockDeliveryReady(page)
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -850,6 +854,7 @@ test.describe('Q&A atomic write', () => {
       route.fulfill({ status: 200, body: '{}' })
     )
     pendingQuestion = await mockPendingQuestionState(page, 'q-viewport-anchor')
+    await mockDeliveryReady(page)
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
@@ -945,6 +950,7 @@ test.describe('Error block: persists across chat return', () => {
       })
     )
 
+    await mockDeliveryReady(page)
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
@@ -1015,6 +1021,7 @@ test.describe('Error block: persists across chat return', () => {
       })
     )
 
+    await mockDeliveryReady(page)
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')

@@ -7,6 +7,9 @@ reap ONLY a definitively-finished turn — never a live turn, and never the
 is_alive-false terminal window where `_complete_turn` is still finalizing (that
 window is distinguished by a still-running broadcast).
 """
+from sqlalchemy.orm import object_session
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -34,7 +37,7 @@ def _seed(chat_id, *, age_secs=200, pending=None,
     started = datetime.now(UTC).replace(tzinfo=None) - timedelta(
       seconds=age_secs
     )
-    c = models.Chat(
+    c = create_chat(
       id=chat_id, title="t", messages=messages or [],
       live_assistant=live_assistant, pending_messages=pending or [],
       session_id="sess", provider="claude",
@@ -70,7 +73,7 @@ def _state(chat_id):
         else None
       ),
       list(c.pending_messages or []),
-      list(c.messages or []),
+      list(transcript_rows.history(c)),
       c.live_assistant,
     )
   finally:
@@ -198,7 +201,7 @@ def test_wedged_candidate_query_does_not_load_transcripts():
   db = SessionLocal()
   try:
     chat = db.get(models.Chat, "wedged-projection")
-    chat.messages = [{"role": "assistant", "content": "x" * 1_000_000}]
+    transcript_rows.replace_all(object_session(chat), chat, [{"role": "assistant", "content": "x" * 1_000_000}])
     db.commit()
   finally:
     db.close()

@@ -28,6 +28,8 @@ These tests pin the provider-gated branch in
 The steering primitive itself (the SDK `TurnHandle.steer()` wrapper) is
 covered by `test_codex_sdk_runner.py`; here we only exercise the wiring.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 from concurrent.futures import Future
@@ -141,7 +143,7 @@ def _make_codex_chat(chat_id: str, *, steer_enabled: bool) -> None:
     settings["steer_enabled"] = True
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id,
       title="Codex chat",
       provider="codex",
@@ -161,7 +163,7 @@ def _make_claude_chat(chat_id: str, *, steer_enabled: bool) -> None:
   """Persist a Claude chat with one assistant partial mid-turn."""
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id,
       title="Claude chat",
       provider="claude",
@@ -181,11 +183,13 @@ def _make_claude_chat(chat_id: str, *, steer_enabled: bool) -> None:
 
 
 def _read_chat(chat_id: str) -> models.Chat:
-  db = SessionLocal()
-  try:
-    return db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  finally:
-    db.close()
+  with SessionLocal() as db:
+    return db.get(models.Chat, chat_id)
+
+
+def _read_messages(chat_id: str) -> list[dict]:
+  with SessionLocal() as db:
+    return transcript_rows.read_all(db, chat_id)
 
 
 def test_steers_into_live_codex_turn_when_flag_on(
@@ -223,16 +227,16 @@ def test_steers_into_live_codex_turn_when_flag_on(
   # END (no live sink in this wiring test → the fallback append-at-end path).
   chat = _read_chat(chat_id)
   assert chat.pending_messages in (None, [])
-  roles = [m["role"] for m in chat.messages]
+  roles = [m["role"] for m in _read_messages(chat.id)]
   # The steered user row lands at the END (start-user, assistant-partial,
   # steered-user). The split that seals A1 and re-orders to Q1/A1/Q2/A2 is
   # driven by the live sink — exercised in
   # test_steer_splits_assistant_turn_for_reload_order; here no sink is
   # registered, so the fallback simply appends the user row.
   assert roles == ["user", "assistant", "user"]
-  assert chat.messages[-1]["content"] == "actually use blue"
-  assert chat.messages[-1]["role"] == "user"
-  assert chat.messages[-1]["steered"] is True
+  assert _read_messages(chat.id)[-1]["content"] == "actually use blue"
+  assert _read_messages(chat.id)[-1]["role"] == "user"
+  assert _read_messages(chat.id)[-1]["steered"] is True
 
   # A `steered_into_turn` event was broadcast for the inline render.
   bc = get_broadcast(chat_id)
@@ -244,8 +248,8 @@ def test_steers_into_live_codex_turn_when_flag_on(
   assert steered_events[0]["messages"] == [
     {
       "role": "user",
-      "ts": chat.messages[-1]["ts"],
-      "cid": cid_of(chat.messages[-1]),
+      "ts": _read_messages(chat.id)[-1]["ts"],
+      "cid": cid_of(_read_messages(chat.id)[-1]),
       "content": "actually use blue",
       "steered": True,
     }
@@ -319,8 +323,8 @@ def test_direct_steer_reserves_and_converts_new_codex_message_in_one_request(
   assert steered_calls == [(chat_id, "change course now")]
   chat = _read_chat(chat_id)
   assert chat.pending_messages in (None, [])
-  assert [cid_of(row) for row in chat.messages].count(message_cid) == 1
-  assert chat.messages[-1]["content"] == "change course now"
+  assert [cid_of(row) for row in _read_messages(chat.id)].count(message_cid) == 1
+  assert _read_messages(chat.id)[-1]["content"] == "change course now"
 
 
 def test_direct_steer_failure_reveals_single_reserved_queue_fallback(
@@ -357,7 +361,7 @@ def test_direct_steer_failure_reveals_single_reserved_queue_fallback(
   assert cid_of(body["pending_message"]) == message_cid
   chat = _read_chat(chat_id)
   assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
-  assert not [row for row in chat.messages if cid_of(row) == message_cid]
+  assert not [row for row in _read_messages(chat.id) if cid_of(row) == message_cid]
 
 
 def test_direct_claude_steer_keeps_reserve_until_deferred_cut(
@@ -411,7 +415,8 @@ def test_pending_question_refuses_force_steer_without_holding_queue(
   db = SessionLocal()
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    chat.messages[-1]["blocks"] = [{
+    message = dict(transcript_rows.at(db, chat, -1))
+    message["blocks"] = [{
       "type": "question",
       "question_id": question_id,
       "questions": [{"question": "Keep going?", "options": [{"label": "Yes"}]}],
@@ -422,8 +427,7 @@ def test_pending_question_refuses_force_steer_without_holding_queue(
       "ts": 10,
       "cid": "question-steer-cid",
     }]
-    from sqlalchemy.orm.attributes import flag_modified
-    flag_modified(chat, "messages")
+    transcript_rows.update_at(db, chat, transcript_rows.count(db, chat) - 1, message)
     db.commit()
   finally:
     db.close()
@@ -467,7 +471,7 @@ def test_pending_question_refuses_force_steer_without_holding_queue(
   assert [m["content"] for m in chat.pending_messages] == [
     "Skip that and use the default",
   ]
-  assert chat.messages[-1]["role"] == "assistant"
+  assert _read_messages(chat.id)[-1]["role"] == "assistant"
   questions.cancel(chat_id)
 
 
@@ -550,7 +554,7 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   chat_id = "emptysteer"
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="Codex chat",
       provider="codex",
@@ -594,7 +598,7 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
 
   # No stray empty assistant row was sealed between Q1 and Q2.
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
     ("user", "Q2"),
   ]
@@ -608,7 +612,7 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   asyncio.run(_stream_a2())
 
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
     ("user", "Q2"),
     ("assistant", "A2"),
@@ -633,7 +637,7 @@ def test_steer_splits_assistant_turn_for_reload_order(
   # partial (A1). The sink, not the seed, owns A1's blocks.
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="Codex chat",
       provider="codex",
@@ -668,7 +672,7 @@ def test_steer_splits_assistant_turn_for_reload_order(
   # After the split the transcript is Q1, A1, Q2 — A1 sealed as its own
   # assistant message, Q2 appended at the END (not inserted before A1).
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
     ("assistant", "A1"),
     ("user", "Q2"),
@@ -684,7 +688,7 @@ def test_steer_splits_assistant_turn_for_reload_order(
   asyncio.run(_stream_a2())
 
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
     ("assistant", "A1"),
     ("user", "Q2"),
@@ -711,7 +715,7 @@ def test_steer_enabled_honors_global_flag():
   shared = Path(os.environ["DATA_DIR"]) / "shared"
   shared.mkdir(parents=True, exist_ok=True)
   gf = shared / "agent-settings.json"
-  chat = models.Chat(
+  chat = create_chat(
     id="gsteer", provider="claude",
     agent_settings_json={"model": "claude-opus-4-8"},
   )
@@ -885,7 +889,7 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   chat_id = "claudeforce"
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id, title="Claude", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={
@@ -918,7 +922,7 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   # The route did NOT split: the transcript is still Q1 and the row is still in
   # pending (durable) — the runner owns the append + consume.
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
   ]
   assert [m["content"] for m in (chat.pending_messages or [])] == ["use blue"]
@@ -937,7 +941,7 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
 
   # Reload order Q1, A1, Q2, A2 — and the queued row is consumed from pending.
   chat = _read_chat(chat_id)
-  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat.id)] == [
     ("user", "Q1"),
     ("assistant", "A1 pre-replay"),
     ("user", "use blue"),
@@ -1062,7 +1066,7 @@ def test_force_steer_consumes_queue_past_deferred_restart_monitor(
   # No live sink in this wiring test → the steered row is appended at the END.
   # Each consumed queued row is stored SEPARATELY (rebuilt from the
   # server-owned pending rows), not one combined \n\n message.
-  assert [m["content"] for m in chat.messages[-2:]] == ["use blue", "also square"]
+  assert [m["content"] for m in _read_messages(chat.id)[-2:]] == ["use blue", "also square"]
   bc = get_broadcast(chat_id)
   steered_events = [
     e for e in bc.event_log if e.get("type") == "steered_into_turn"
@@ -1120,8 +1124,8 @@ def test_api_send_without_cid_can_be_force_steered(
   assert steered_calls == [(chat_id, "use the queued instruction")]
   chat = _read_chat(chat_id)
   assert chat.pending_messages in (None, [])
-  assert chat.messages[-1]["cid"] == server_cid
-  assert chat.messages[-1]["content"] == "use the queued instruction"
+  assert _read_messages(chat.id)[-1]["cid"] == server_cid
+  assert _read_messages(chat.id)[-1]["content"] == "use the queued instruction"
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(
@@ -1303,7 +1307,7 @@ def test_steers_into_live_claude_turn_reserves_durable_pending(
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["actually use blue"]
   reserved_cid = cid_of(chat.pending_messages[0])
-  assert [m["role"] for m in chat.messages] == ["user", "assistant"]
+  assert [m["role"] for m in _read_messages(chat.id)] == ["user", "assistant"]
 
   assert [
     m["content"] for a in _claude_attempts(handle) for m in a.user_msgs
@@ -1365,7 +1369,7 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
   # Seed only Q1: the assistant turn is in progress and A1 has NOT streamed.
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id, title="Claude chat", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={
@@ -1389,7 +1393,7 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
   # The route sealed no empty A1 and appended no row — transcript is still Q1.
-  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat_id)] == [
     ("user", "Q1"),
   ]
 
@@ -1418,7 +1422,7 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
 
   # Q1, A1, Q2, A2 — A1 and A2 are SEPARATE messages with the steered row
   # between them, NOT Q1, Q2, A1\\n\\nA2.
-  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat_id)] == [
     ("user", "Q1"),
     ("assistant", "A1 pre-replay"),
     ("user", "Q2"),
@@ -1448,7 +1452,7 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
   chat_id = "claudecutorder"
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id, title="Claude chat", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={
@@ -1522,7 +1526,7 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
     "type": "text", "content": "A1 first A1 rest",
   }]
   assert cut["items"] == []
-  steered_row = [m for m in _read_chat(chat_id).messages if m["role"] == "user"][-1]
+  steered_row = [m for m in _read_messages(chat_id) if m["role"] == "user"][-1]
   assert cut["messages"] == [{
     "role": "user",
     "ts": steered_row["ts"],
@@ -1532,12 +1536,12 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
   }]
   assert steered_row["steered"] is True
   # And A1 really was sealed at the boundary the cut names.
-  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat_id)] == [
     ("user", "Q1"),
     ("assistant", "A1 first A1 rest"),
     ("user", "Q2"),
   ]
-  assert _read_chat(chat_id).messages[1]["id"] == "run-cut-order"
+  assert _read_messages(chat_id)[1]["id"] == "run-cut-order"
 
 
 def test_codex_steer_publishes_cut_from_handle_owned_settlement(
@@ -1547,7 +1551,7 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
   chat_id = "codexcutroute"
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id, title="Codex chat", provider="codex",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={"model": "gpt-5.6-sol", "steer_enabled": True},
@@ -1587,12 +1591,12 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
   assert [m["content"] for m in cut["messages"]] == ["Q2"]
   assert [m["steered"] for m in cut["messages"]] == [True]
   # The owning sink sealed A1 and appended Q2 before publishing.
-  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+  assert [(m["role"], m.get("content")) for m in _read_messages(chat_id)] == [
     ("user", "Q1"),
     ("assistant", "A1"),
     ("user", "Q2"),
   ]
-  assert _read_chat(chat_id).messages[-1]["steered"] is True
+  assert _read_messages(chat_id)[-1]["steered"] is True
   assert sink.assistant_blocks == []
 
 
@@ -1664,7 +1668,7 @@ def test_claude_reserved_row_survives_process_loss_and_sweep(
   chat = _read_chat(chat_id)
   assert chat.pending_messages in (None, [])
   assert len([
-    row for row in chat.messages if cid_of(row) == message_cid
+    row for row in _read_messages(chat.id) if cid_of(row) == message_cid
   ]) == 1
   assert len(scheduled) == 1
 
@@ -1831,7 +1835,7 @@ def test_codex_deferred_admission_keeps_one_reserved_row(
   chat = _read_chat(chat_id)
   assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
   assert not [
-    row for row in chat.messages if cid_of(row) == message_cid
+    row for row in _read_messages(chat.id) if cid_of(row) == message_cid
   ]
 
 
@@ -1980,7 +1984,7 @@ def test_request_cancellation_after_reserve_keeps_pending(
   asyncio.run(_run())
   chat = _read_chat(chat_id)
   assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
-  assert not [row for row in chat.messages if cid_of(row) == message_cid]
+  assert not [row for row in _read_messages(chat.id) if cid_of(row) == message_cid]
 
 
 def test_stop_wins_steer_race_send_rechecks_idle(
@@ -2041,11 +2045,11 @@ def test_stop_wins_steer_race_send_rechecks_idle(
   asyncio.run(_run())
   chat = _read_chat(chat_id)
   durable = [
-    row for row in list(chat.messages or []) + list(chat.pending_messages or [])
+    row for row in list(_read_messages(chat.id) or []) + list(chat.pending_messages or [])
     if cid_of(row) == message_cid
   ]
   assert len(durable) == 1
-  assert durable[0] in chat.messages
+  assert durable[0] in _read_messages(chat.id)
 
 
 def test_steer_cut_preserves_hidden_carrier_and_owner_row_metadata():

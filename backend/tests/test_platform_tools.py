@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import platform_tools
+from app import app_tools, platform_tools
 
 
 def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
@@ -25,6 +25,22 @@ def test_goal_copy_guidance_separates_owner_text_from_verification_evidence():
   assert complete['type'] == 'boolean'
   assert complete['enum'] == [True]
   assert 'maxLength' not in complete
+
+
+def test_checkpoint_chat_saves_a_short_summary_and_a_cumulative_digest_uncapped():
+  control = _control_module()
+  definition = control._TOOL_DEFINITIONS["checkpoint_chat"]
+  description = definition["description"]
+  properties = definition["inputSchema"]["properties"]
+
+  assert "chat_summary replaces its short Summary" in description
+  assert "digest_entry appends one entry to its cumulative Digest" in description
+  assert set(properties) == {"title", "chat_summary", "digest_entry"}
+  assert "maxLength" not in properties["chat_summary"]
+  assert "maxLength" not in properties["digest_entry"]
+  # A save written for the old plain field names is refused, not misfiled.
+  with pytest.raises(ValueError, match="chat_summary, digest_entry"):
+    control._call_checkpoint_chat({"summary": "Facts written for the old meaning."})
 
 
 def test_notify_owner_leaves_owner_input_cards_to_their_own_notification():

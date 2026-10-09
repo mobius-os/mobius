@@ -1,5 +1,7 @@
 """Programmatic chat starts share one durable lifecycle protocol."""
 
+from app import transcript_rows
+from app.chat_writer import create_chat
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -52,7 +54,7 @@ async def test_orphan_cleanup_preserves_planned_restart_but_fails_ambiguous_cras
   chat_id, run_id = "restart-parent", "restart-physical"
   messages = [{"role": "user", "content": "Finish the saved work."}]
   pending = [{"role": "user", "content": "Keep this queued.", "ts": 1}]
-  db.add(models.Chat(
+  db.add(create_chat(
     id=chat_id, title="Restart parent", provider="codex",
     auto_resume_on_restart=True, messages=messages, pending_messages=pending,
     live_assistant={
@@ -90,7 +92,7 @@ async def test_orphan_cleanup_preserves_planned_restart_but_fails_ambiguous_cras
   physical = db.get(models.ChatRun, run_id)
   assert physical.status == ("running" if draining else "failed")
   assert physical.restart_nonce == ("accepted-planned-restart" if draining else None)
-  assert db.get(models.Chat, chat_id).messages == messages
+  assert transcript_rows.read_all(db, chat_id) == messages
   assert db.get(models.Chat, chat_id).pending_messages == pending
 
   if draining:

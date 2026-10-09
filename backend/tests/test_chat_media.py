@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import shutil
 import uuid
@@ -16,6 +17,20 @@ from app.config import get_settings
 from app.schema_migrations import _move_chat_media_out_of_generated
 
 
+def _write_legacy(chat, messages) -> None:
+  """The previous release's stored value: 0084 rewrites this legacy column."""
+  from sqlalchemy.orm import object_session
+  object_session(chat).execute(text("UPDATE chats SET messages = :m WHERE id = :id"),
+                               {"m": json.dumps(messages), "id": chat.id})
+
+
+def _legacy_of(chat):
+  from sqlalchemy.orm import object_session
+  object_session(chat).expire(chat)
+  return json.loads(object_session(chat).execute(
+    text("SELECT messages FROM chats WHERE id = :id"), {"id": chat.id}).scalar())
+
+
 def _chat_root(chat_id: str) -> Path:
   return Path(get_settings().data_dir) / "chats" / chat_id
 
@@ -23,7 +38,7 @@ def _chat_root(chat_id: str) -> Path:
 def test_moves_files_and_rewrites_urls(db, chat):
   old_url = f"/api/chats/{chat.id}/generated/old.png"
   new_url = f"/api/chats/{chat.id}/media/old.png"
-  chat.messages = [{"role": "assistant", "content": f"![image]({old_url})"}]
+  _write_legacy(chat, [{"role": "assistant", "content": f"![image]({old_url})"}])
   chat.pending_messages = [{"content": {"preview": old_url}}]
   db.commit()
 
@@ -36,17 +51,17 @@ def test_moves_files_and_rewrites_urls(db, chat):
 
   assert not old_dir.exists()
   assert (_chat_root(chat.id) / "media" / "old.png").read_bytes() == b"old-image"
-  assert chat.messages[0]["content"] == f"![image]({new_url})"
+  assert _legacy_of(chat)[0]["content"] == f"![image]({new_url})"
   assert chat.pending_messages[0]["content"]["preview"] == new_url
 
 
 def test_symlinks_in_the_legacy_folder_are_never_copied(db, chat, tmp_path):
   outside = tmp_path / "outside-secret.txt"
   outside.write_bytes(b"secret")
-  chat.messages = [{"role": "assistant", "content": (
+  _write_legacy(chat, [{"role": "assistant", "content": (
     f"/api/chats/{chat.id}/generated/real.png "
     f"/api/chats/{chat.id}/generated/link.png"
-  )}]
+  )}])
   db.commit()
   old_dir = _chat_root(chat.id) / "generated"
   old_dir.mkdir(parents=True)
@@ -65,9 +80,9 @@ def test_a_symlinked_legacy_folder_is_not_followed(db, chat, tmp_path):
   outside = tmp_path / "outside"
   outside.mkdir()
   (outside / "secret.png").write_bytes(b"secret")
-  chat.messages = [{"role": "assistant", "content": (
+  _write_legacy(chat, [{"role": "assistant", "content": (
     f"/api/chats/{chat.id}/generated/secret.png"
-  )}]
+  )}])
   db.commit()
   root = _chat_root(chat.id)
   root.mkdir(parents=True, exist_ok=True)
@@ -81,32 +96,32 @@ def test_a_symlinked_legacy_folder_is_not_followed(db, chat, tmp_path):
 
 def test_leaves_links_to_other_chats_untouched(db, chat):
   foreign = "/api/chats/someone-else/generated/example.png"
-  chat.messages = [{"role": "assistant", "content": f"Discussing {foreign}"}]
+  _write_legacy(chat, [{"role": "assistant", "content": f"Discussing {foreign}"}])
   db.commit()
 
   _move_chat_media_out_of_generated(db.get_bind())
   db.refresh(chat)
 
-  assert chat.messages[0]["content"] == f"Discussing {foreign}"
+  assert _legacy_of(chat)[0]["content"] == f"Discussing {foreign}"
   assert not (_chat_root(chat.id) / "media").exists()
 
 
 def test_rewrites_legacy_url_without_old_directory(db, chat):
   old_url = f"/api/chats/{chat.id}/generated/already-moved.png"
   new_url = f"/api/chats/{chat.id}/media/already-moved.png"
-  chat.messages = [{"role": "assistant", "content": old_url}]
+  _write_legacy(chat, [{"role": "assistant", "content": old_url}])
   db.commit()
 
   _move_chat_media_out_of_generated(db.get_bind())
   db.refresh(chat)
 
-  assert chat.messages[0]["content"] == new_url
+  assert _legacy_of(chat)[0]["content"] == new_url
 
 
 def test_retry_after_interrupted_cleanup_finishes_the_move(db, chat):
   """A crash after the link commit leaves both copies; a retry settles it."""
   new_url = f"/api/chats/{chat.id}/media/old.png"
-  chat.messages = [{"role": "assistant", "content": new_url}]
+  _write_legacy(chat, [{"role": "assistant", "content": new_url}])
   db.commit()
   for name in ("generated", "media"):
     directory = _chat_root(chat.id) / name
@@ -118,7 +133,7 @@ def test_retry_after_interrupted_cleanup_finishes_the_move(db, chat):
 
   assert not (_chat_root(chat.id) / "generated").exists()
   assert (_chat_root(chat.id) / "media" / "old.png").read_bytes() == b"old-image"
-  assert chat.messages[0]["content"] == new_url
+  assert _legacy_of(chat)[0]["content"] == new_url
 
 
 def _legacy_chat(session, data_dir: Path, image: bytes, media: bytes | None):
@@ -127,7 +142,7 @@ def _legacy_chat(session, data_dir: Path, image: bytes, media: bytes | None):
   session.add(models.Chat(
     id=chat_id,
     title="Legacy",
-    messages=[{
+    legacy_messages=[{
       "role": "assistant",
       "content": f"/api/chats/{chat_id}/generated/img.png",
     }],
@@ -154,7 +169,7 @@ def test_collision_leaves_that_chat_as_is_and_migrates_the_others(
   db.expire_all()
 
   stuck = db.get(models.Chat, colliding)
-  assert stuck.messages[0]["content"] == (
+  assert _legacy_of(stuck)[0]["content"] == (
     f"/api/chats/{colliding}/generated/img.png"
   )
   assert (_chat_root(colliding) / "generated" / "img.png").read_bytes() == b"old"
@@ -166,7 +181,7 @@ def test_collision_leaves_that_chat_as_is_and_migrates_the_others(
   assert colliding in warnings[0] and "img.png" in warnings[0]
 
   moved = db.get(models.Chat, clean)
-  assert moved.messages[0]["content"] == f"/api/chats/{clean}/media/img.png"
+  assert _legacy_of(moved)[0]["content"] == f"/api/chats/{clean}/media/img.png"
   assert not (_chat_root(clean) / "generated").exists()
   assert (_chat_root(clean) / "media" / "img.png").read_bytes() == b"clean"
 
@@ -191,10 +206,10 @@ def test_collision_does_not_block_database_startup(tmp_path, monkeypatch):
     row["version"] for row in migrations.schema_migration_history(eng)
   }
   with Session(eng) as session:
-    assert session.get(models.Chat, colliding).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, colliding))[0]["content"] == (
       f"/api/chats/{colliding}/generated/img.png"
     )
-    assert session.get(models.Chat, clean).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, clean))[0]["content"] == (
       f"/api/chats/{clean}/media/img.png"
     )
   assert (data_dir / "chats" / colliding / "generated" / "img.png").exists()
@@ -231,10 +246,10 @@ def test_unreadable_legacy_file_does_not_block_database_startup(
     row["version"] for row in migrations.schema_migration_history(eng)
   }
   with Session(eng) as session:
-    assert session.get(models.Chat, unreadable).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, unreadable))[0]["content"] == (
       f"/api/chats/{unreadable}/generated/img.png"
     )
-    assert session.get(models.Chat, clean).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, clean))[0]["content"] == (
       f"/api/chats/{clean}/media/img.png"
     )
   stuck_root = data_dir / "chats" / unreadable
@@ -277,10 +292,10 @@ def test_unenterable_chat_folder_does_not_block_database_startup(
     row["version"] for row in migrations.schema_migration_history(eng)
   }
   with Session(eng) as session:
-    assert session.get(models.Chat, locked).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, locked))[0]["content"] == (
       f"/api/chats/{locked}/generated/img.png"
     )
-    assert session.get(models.Chat, clean).messages[0]["content"] == (
+    assert _legacy_of(session.get(models.Chat, clean))[0]["content"] == (
       f"/api/chats/{clean}/media/img.png"
     )
   assert (locked_root / "generated" / "img.png").read_bytes() == b"locked"
@@ -299,7 +314,7 @@ def test_rewrite_bumps_updated_at_only_for_rewritten_chats(db):
   db.add(models.Chat(
     id=current,
     title="Current",
-    messages=[{"content": f"/api/chats/{current}/media/img.png"}],
+    legacy_messages=[{"content": f"/api/chats/{current}/media/img.png"}],
   ))
   db.commit()
   # Leftover generated/ copy puts the current chat on the work list too.
@@ -314,7 +329,7 @@ def test_rewrite_bumps_updated_at_only_for_rewritten_chats(db):
   db.expire_all()
 
   moved = db.get(models.Chat, legacy)
-  assert moved.messages[0]["content"] == f"/api/chats/{legacy}/media/img.png"
+  assert _legacy_of(moved)[0]["content"] == f"/api/chats/{legacy}/media/img.png"
   assert moved.updated_at.replace(tzinfo=None) > stale
   untouched = db.get(models.Chat, current)
   assert untouched.updated_at.replace(tzinfo=None) == stale
@@ -338,7 +353,7 @@ def test_interrupted_copy_is_not_a_collision_on_retry(db, monkeypatch):
   _move_chat_media_out_of_generated(db.get_bind())
   db.expire_all()
 
-  assert db.get(models.Chat, chat_id).messages[0]["content"] == (
+  assert _legacy_of(db.get(models.Chat, chat_id))[0]["content"] == (
     f"/api/chats/{chat_id}/media/img.png"
   )
   assert (_chat_root(chat_id) / "media" / "img.png").read_bytes() == (
@@ -366,7 +381,7 @@ def test_upgrade_runs_the_move_once_and_later_boots_skip_the_scan(
     session.add(models.Chat(
       id=chat_id,
       title="Legacy",
-      messages=[{"role": "assistant", "content": old_url}],
+      legacy_messages=[{"role": "assistant", "content": old_url}],
     ))
     session.commit()
   old_dir = data_dir / "chats" / chat_id / "generated"
@@ -377,7 +392,7 @@ def test_upgrade_runs_the_move_once_and_later_boots_skip_the_scan(
 
   def stored_content() -> str:
     with Session(eng) as session:
-      return session.get(models.Chat, chat_id).messages[0]["content"]
+      return _legacy_of(session.get(models.Chat, chat_id))[0]["content"]
 
   assert stored_content() == f"/api/chats/{chat_id}/media/old.png"
   assert (data_dir / "chats" / chat_id / "media" / "old.png").exists()

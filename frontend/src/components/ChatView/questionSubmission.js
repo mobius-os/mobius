@@ -1,3 +1,26 @@
+/** Resolve typed/selected input identically for single and multi-select cards. */
+export function resolveQuestionAnswer(answer, otherText) {
+  if (Array.isArray(answer)) {
+    return answer.map(value => value === '__other__' ? otherText?.trim() || '' : value)
+      .filter(Boolean).join(', ')
+  }
+  if (answer === '__other__') return otherText?.trim() || ''
+  return answer || ''
+}
+
+/**
+ * Card-level files can stand in for the answer only on a single-question card.
+ * On a grouped card every question needs its own answer, so a file never
+ * claims to have answered questions it says nothing about.
+ */
+export function questionAnswersReady(questions, answers, otherTexts, files) {
+  const filesAnswer = questions.length === 1 && files.length > 0
+  return questions.every(question => (
+    Boolean(resolveQuestionAnswer(answers[question.question], otherTexts[question.question]))
+    || filesAnswer
+  ))
+}
+
 /** Derive explicit saved-option choices without interpreting custom answer text. */
 export function questionOptionSubmission(questions, answers) {
   const selected_options = {}
@@ -27,7 +50,7 @@ export function questionOptionSubmission(questions, answers) {
 export function questionAnswerPatch(answers, disposition = {}) {
   return {
     answers,
-    ...Object.fromEntries(['answer_turn', 'selected_options', 'platform_action']
+    ...Object.fromEntries(['answer_turn', 'selected_options', 'platform_action', 'attachments']
       .filter(key => disposition?.[key] !== undefined)
       .map(key => [key, disposition[key]])),
   }

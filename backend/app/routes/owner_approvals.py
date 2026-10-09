@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import chat_queue, models, questions, secure_inputs
 from app.chat_event_sink import get_active_sink
 from app.database import get_db
@@ -253,7 +254,7 @@ async def save_owner_question(
         activation_wait["created_by_run_id"] = run.id
         activation_wait["root_run_id"] = run.root_run_id or run.id
         activation_wait["goal_id"] = run.goal_id
-      for message in reversed(chat.messages or []):
+      for message in reversed(transcript_rows.history(chat)):
         for block in message.get("blocks") or []:
           if block.get("type") == "question" and block.get("question_id") == question_id:
             if block.get("answers"):

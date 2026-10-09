@@ -2,7 +2,7 @@
 
 import pytest
 
-from app import models
+from app import models, transcript_rows
 from app import chat_writer
 from app.chat_writer import (
   AdmitProviderExecution, PromotePending, StartTurn, get_writer,
@@ -36,7 +36,7 @@ def test_pending_handoff_commits_queue_transcript_and_run_together(chat, db):
   run = db.get(models.ChatRun, result["promoted"]["_run_token"])
   assert result["history"][-1].content == "First follow-up"
   assert run.status == "running" and run.root_run_id == run.id
-  assert saved.messages[-1]["content"] == "First follow-up"
+  assert list(transcript_rows.history(saved))[-1]["content"] == "First follow-up"
   assert saved.pending_messages == []
   assert saved.active_assistant_message_id == run.id
   assert saved.live_assistant["id"] == run.id
@@ -67,7 +67,7 @@ def test_failed_admission_commit_preserves_prior_owner_and_pending_work(chat, db
   queued = [{"role": "user", "content": "Follow-up", "cid": "pending", "ts": 20}]
   row.pending_messages = queued
   db.commit()
-  before_messages = list(row.messages)
+  before_messages = list(transcript_rows.history(row))
 
   def reject_commit(session):
     session.rollback()
@@ -82,7 +82,7 @@ def test_failed_admission_commit_preserves_prior_owner_and_pending_work(chat, db
   db.expire_all()
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_messages == queued
-  assert saved.messages == before_messages
+  assert list(transcript_rows.history(saved)) == before_messages
   assert saved.active_assistant_message_id == owner["run_token"]
   assert db.get(models.ChatRun, owner["run_token"]).status == "running"
   assert db.query(models.ChatRun).count() == 1

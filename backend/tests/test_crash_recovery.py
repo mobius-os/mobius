@@ -9,6 +9,8 @@ strand queued messages. These tests pin that contract; they exercise
 the pure reconciliation function directly (the lifespan wiring is a
 thin wrapped call around it).
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from datetime import UTC, datetime
 
@@ -20,7 +22,7 @@ from app.runner_registry import RunnerKind, registry
 def _make_chat(db, chat_id, **kwargs):
   running = kwargs.pop("running", False)
   started_at = kwargs.pop("started_at", datetime.now(UTC))
-  c = models.Chat(id=chat_id, title="t", messages=kwargs.pop("messages", []))
+  c = create_chat(id=chat_id, title="t", messages=kwargs.pop("messages", []))
   for k, v in kwargs.items():
     setattr(c, k, v)
   db.add(c)
@@ -75,8 +77,8 @@ def test_startup_reconciles_stale_running_chats(db):
   ], "queued messages must survive a restart (not be dropped)"
   # The interrupted turn is surfaced as an assistant message so the
   # user's send isn't left unanswered.
-  assert row.messages[-1]["role"] == "assistant"
-  err_blocks = [b for b in row.messages[-1]["blocks"] if b["type"] == "error"]
+  assert list(transcript_rows.history(row))[-1]["role"] == "assistant"
+  err_blocks = [b for b in list(transcript_rows.history(row))[-1]["blocks"] if b["type"] == "error"]
   assert err_blocks, "an interrupted-turn error block must be appended"
   # `message` is the field MsgContent.jsx + events.process_event read.
   assert "paused" in err_blocks[0]["message"].lower()
@@ -111,7 +113,7 @@ def test_reconcile_finalizes_running_tool_block(db):
 
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == "midtool").first()
-  blocks = row.messages[-1]["blocks"]
+  blocks = list(transcript_rows.history(row))[-1]["blocks"]
   tool_blocks = [b for b in blocks if b["type"] == "tool"]
   assert all(b["status"] != "running" for b in tool_blocks), (
     "no tool block may remain 'running' after reconciliation"
@@ -137,9 +139,9 @@ def test_reconcile_merges_bounded_live_snapshot_before_restart_note(db):
   db.expire_all()
   row = db.get(models.Chat, "live-snapshot")
   assert row.live_assistant is None
-  assert row.messages[-1]["ts"] == 2
-  assert row.messages[-1]["blocks"][0]["content"] == "partial survives"
-  assert row.messages[-1]["blocks"][-1]["type"] == "error"
+  assert list(transcript_rows.history(row))[-1]["ts"] == 2
+  assert list(transcript_rows.history(row))[-1]["blocks"][0]["content"] == "partial survives"
+  assert list(transcript_rows.history(row))[-1]["blocks"][-1]["type"] == "error"
 
 
 def test_reconcile_never_rewrites_a_different_identified_assistant(db):
@@ -169,11 +171,11 @@ def test_reconcile_never_rewrites_a_different_identified_assistant(db):
 
   db.expire_all()
   row = db.get(models.Chat, "identity-recovery")
-  assert len(row.messages) == 3
-  assert row.messages[1]["id"] == "assistant-older"
-  assert row.messages[1]["content"] == "older answer"
-  assert row.messages[2]["id"] == "rt-identity-recovery"
-  assert row.messages[2]["blocks"][-1]["type"] == "error"
+  assert len(list(transcript_rows.history(row))) == 3
+  assert list(transcript_rows.history(row))[1]["id"] == "assistant-older"
+  assert list(transcript_rows.history(row))[1]["content"] == "older answer"
+  assert list(transcript_rows.history(row))[2]["id"] == "rt-identity-recovery"
+  assert list(transcript_rows.history(row))[2]["blocks"][-1]["type"] == "error"
 
 
 def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
@@ -217,7 +219,7 @@ def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
 
   db.expire_all()
   row = db.get(models.Chat, "question-recovery")
-  blocks = row.messages[-1]["blocks"]
+  blocks = list(transcript_rows.history(row))[-1]["blocks"]
   assert [block["type"] for block in blocks[-2:]] == ["error", "question"]
   assert blocks[-1]["question_id"] == "owner-decision"
   assert blocks[-1].get("answers") is None
@@ -240,10 +242,10 @@ def test_reconcile_appends_turn_when_no_assistant_message(db):
 
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == "early").first()
-  assert len(row.messages) == 2
-  assert row.messages[0]["role"] == "user"
-  assert row.messages[1]["role"] == "assistant"
-  assert any(b["type"] == "error" for b in row.messages[1]["blocks"])
+  assert len(list(transcript_rows.history(row))) == 2
+  assert list(transcript_rows.history(row))[0]["role"] == "user"
+  assert list(transcript_rows.history(row))[1]["role"] == "assistant"
+  assert any(b["type"] == "error" for b in list(transcript_rows.history(row))[1]["blocks"])
 
 
 def test_reconcile_leaves_idle_chats_untouched(db):
@@ -260,7 +262,7 @@ def test_reconcile_leaves_idle_chats_untouched(db):
   assert "idle" not in reconciled
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == "idle").first()
-  assert len(row.messages) == 1, "idle chat transcript must be untouched"
+  assert len(list(transcript_rows.history(row))) == 1, "idle chat transcript must be untouched"
 
 
 def test_reconcile_skips_soft_deleted_chats(db):
@@ -306,7 +308,7 @@ def test_reconcile_skips_chat_with_live_registry_entry(db):
     models.ChatRun.chat_id == "live",
     models.ChatRun.status == "running",
   ).one()
-  assert len(row.messages) == 1
+  assert len(list(transcript_rows.history(row))) == 1
 
 
 def test_finish_run_closes_the_durable_run(db, chat):
@@ -356,13 +358,13 @@ def test_reconcile_assigns_ts_to_interrupted_messages(db):
   db.expire_all()
 
   a = db.query(models.Chat).filter(models.Chat.id == "had-assistant").first()
-  assert a.messages[-1]["role"] == "assistant"
-  assert a.messages[-1].get("ts") == 2, "existing assistant ts must be preserved"
+  assert list(transcript_rows.history(a))[-1]["role"] == "assistant"
+  assert list(transcript_rows.history(a))[-1].get("ts") == 2, "existing assistant ts must be preserved"
 
   b = db.query(models.Chat).filter(models.Chat.id == "no-assistant").first()
-  assert b.messages[-1]["role"] == "assistant"
-  assert b.messages[-1].get("ts") is not None, "standalone reconciled msg needs a ts"
-  assert b.messages[-1]["ts"] > 5, "fresh ts must follow existing messages"
+  assert list(transcript_rows.history(b))[-1]["role"] == "assistant"
+  assert list(transcript_rows.history(b))[-1].get("ts") is not None, "standalone reconciled msg needs a ts"
+  assert list(transcript_rows.history(b))[-1]["ts"] > 5, "fresh ts must follow existing messages"
 
 
 def test_reconcile_warns_on_markerless_pending_queue_but_leaves_it(db, caplog):

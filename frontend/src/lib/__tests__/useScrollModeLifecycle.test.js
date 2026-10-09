@@ -203,6 +203,33 @@ test('transcript changes keep one scroll owner after the first row mounts', () =
   }
 })
 
+test('a pin landed before the transcript mounts is published on the mounted scroller', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, scroll, args } = mountTailController('empty-chat-first-send', {
+      scrollRef: { current: null },
+      messages: [],
+      messagesRef: { current: [] },
+    })
+    // The empty chat renders no scroller: the first send lands its pin first.
+    const intent = hook.result.current.captureSendIntent({ isFirstUserMsg: true })
+    const pin = hook.result.current.commitSendIntent({ cid: 'user-1', intent })
+    assert.equal(pin.kind, 'PIN_USER_MSG')
+    assert.equal(scroll.dataset.scrollMode, undefined)
+
+    // The same commit then mounts the transcript with its first row.
+    const messages = [{ role: 'user', cid: 'user-1', content: 'Question' }]
+    args.scrollRef.current = scroll
+    args.messagesRef.current = messages
+    hook.rerender({ ...args, messages })
+    assert.equal(scroll.dataset.scrollMode, 'PIN_USER_MSG',
+      'no later send commit is needed to publish the mode the chat already owns')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('nested controls own their input until native edge handoff reaches the transcript', () => {
   const restoreBrowser = installBrowserEnvironment()
   try {

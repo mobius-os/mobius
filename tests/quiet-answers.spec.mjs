@@ -83,9 +83,9 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
       return route.fulfill({ status: 200, json: { status: closesWithoutReply ? 'answered' : 'started', answer_turn: block.answer_turn, running: !closesWithoutReply, answers: block.answers, selected_options: body.selected_options, ...(restart ? { platform_action: block.platform_action } : {}) } })
     }
     if (!['GET', 'HEAD'].includes(req.method())) {
-      if (url.pathname.includes('upload')) return route.fulfill({ json: {
+      if (url.pathname.includes('upload')) return route.fulfill({ json: [{
         name: 'draft-note.txt', filename: 'draft-note.txt', size: 16,
-        mime_type: 'text/plain', url: `${path}/uploads/draft-note.txt` } })
+        mime_type: 'text/plain', url: `${path}/uploads/draft-note.txt` }] })
       return route.fulfill({ json: {} }) // No fixture mutation reaches live data.
     }
     if (url.pathname === path || url.pathname === `${path}/runtime`) return route.fulfill({ json: detail() })
@@ -106,7 +106,8 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
   await expect(card.getByText(question, { exact: true })).toBeVisible({ timeout: 15000 })
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)
-  await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
+  // The composer's picker, not the question card's own answer picker.
+  await surface.locator('form.chat__form input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
   const attachment = surface.getByRole('button', { name: 'Remove draft-note.txt' })
   await expect(attachment).toBeVisible()
   return { surface, card, composer, attachment, attempts, mutations, answerWrites: () => answerWrites, releaseMessage: () => releaseMessage?.(), streams: () => streams }

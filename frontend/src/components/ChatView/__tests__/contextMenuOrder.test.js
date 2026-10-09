@@ -67,6 +67,15 @@ test('agent context inspector keeps continuity and active turn context visible',
 })
 
 
+test('chat summary window shows each note layer under its own name', () => {
+  const viewer = readFileSync(new URL('../ChatSummaryViewer.jsx', import.meta.url), 'utf8')
+
+  assert.match(viewer, /summary: data\.chat_summary \|\| ''/)
+  assert.match(viewer, /digest: data\.chat_digest \|\| ''/)
+  assert.match(viewer, /<h3>Summary<\/h3>[\s\S]*?state\.layers\.summary[\s\S]*?<h3>Digest<\/h3>[\s\S]*?state\.layers\.digest/)
+})
+
+
 test('agent context inspector is centered inside its owning chat', () => {
   const overlayCss = inspectorSource.match(/\.aci__overlay\s*\{([^}]+)\}/)?.[1] || ''
   const chatCss = chatViewCss.match(/\.chat\s*\{([^}]+)\}/)?.[1] || ''

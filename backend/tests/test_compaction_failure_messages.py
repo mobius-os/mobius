@@ -1,5 +1,6 @@
 """Known handoff refusals are actionable without exposing provider data."""
 
+from app import transcript_rows
 import json
 
 import pytest
@@ -87,7 +88,7 @@ def test_known_refusal_reaches_switch_response_without_changing_chat(
   row.provider = "claude"
   row.session_id = "original-session"
   row.agent_settings_json = {"model": "claude-sonnet-4-6"}
-  before = list(row.messages)
+  before = transcript_rows.read_all(db, row)
   db.commit()
 
   response = client.post(
@@ -103,7 +104,7 @@ def test_known_refusal_reaches_switch_response_without_changing_chat(
   assert row.provider == "claude"
   assert row.session_id == "original-session"
   assert row.agent_settings_json == {"model": "claude-sonnet-4-6"}
-  assert row.messages == before
+  assert transcript_rows.read_all(db, row) == before
 
 
 CLAUDE_TEXT_CASES = [

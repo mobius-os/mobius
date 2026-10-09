@@ -1,177 +1,30 @@
-"""Search chat titles and conversation prose through normalized documents.
+"""Search chat titles and conversation prose through derived entries.
 
-``chat_search_docs`` is the one search source on SQLite and PostgreSQL: one
-title row and one row per visible owner/assistant message. Search never scans
-serialized transcript JSON. SQLite uses an external-content FTS5 table to find
-candidate document rows; PostgreSQL filters the same ordinary rows with a
-portable text predicate. Both paths apply the same word/prefix matcher,
-snippet builder, grouping, and ranking after candidate selection.
+``chat_search_entries`` holds one row per non-empty title (seq -1) and one
+per prose transcript row, with an external-content FTS5 index. Schema
+triggers keep it current for every writer in the same transaction as the
+change (schema_migrations._add_transcript_rows); search itself never writes.
+Which rows are prose is decided by transcript_rows.attributes. Drawer
+visibility is applied here, at query time, from the chat's current columns.
 
-The documents are disposable derived data. A search lazily reconciles chats
-whose exact ``updated_at`` representation changed, while the numbered schema
-migration owns tables, indexes, and SQLite triggers. Transcript persistence
-remains exclusively behind ``chat_writer.py``.
+The previous release's own ``chat_search_docs`` tables are left for that
+release, which reconciles them from ``updated_at`` after a rollback.
 """
 
 import heapq
+import json
 import re
-import threading
+from types import SimpleNamespace
 
 from sqlalchemy import text as sql
 from sqlalchemy.orm import Session
 
-from app import chat_visibility, models
+from app import chat_visibility
 
 # Private-use sentinels around snippet matches. The API converts them to a
 # JSON-friendly form; they can never collide with real transcript text.
 _MARK_OPEN = "\ue000"
 _MARK_CLOSE = "\ue001"
-
-# Message roles whose `content` strings are conversation prose.
-_PROSE_ROLES = ("user", "assistant")
-_RECONCILE_LOCK = threading.Lock()
-
-
-def _prose_docs(
-  title: str,
-  messages: list,
-) -> list[tuple[int, int | None, str | None, str]]:
-  """(msg_idx, ts, role, text) rows: title at -1 (ts/role None), then prose.
-
-  `ts` and `role` are stored so a search result can point the drawer at the
-  exact transcript row to reveal — the chat UI keys each message row as
-  ``<role>-<ts>``. `ts` is unique within a chat, so it needs no message index.
-  """
-  docs: list[tuple[int, int | None, str | None, str]] = []
-  if title and title.strip():
-    docs.append((-1, None, None, title.strip()))
-  for idx, message in enumerate(messages):
-    if not isinstance(message, dict):
-      continue
-    # Hidden rows carry internal reminders and silent question answers. They
-    # are deliberately absent from the transcript, so returning their text in
-    # drawer snippets would both disclose UI-private content and produce an
-    # anchor that can never render.
-    if message.get("hidden"):
-      continue
-    role = message.get("role")
-    if role not in _PROSE_ROLES:
-      continue
-    content = message.get("content")
-    if isinstance(content, str) and content.strip():
-      ts = message.get("ts")
-      docs.append((idx, ts if isinstance(ts, int) else None, role, content))
-  return docs
-
-
-def _delete_chat_docs(db: Session, chat_id: str) -> None:
-  db.execute(
-    sql("DELETE FROM chat_search_docs WHERE chat_id = :cid"), {"cid": chat_id}
-  )
-  db.execute(
-    sql("DELETE FROM chat_search_state WHERE chat_id = :cid"), {"cid": chat_id}
-  )
-
-
-def _write_docs(
-  db: Session,
-  chat_id: str,
-  docs: list[tuple[int, int | None, str | None, str]],
-) -> None:
-  if not docs:
-    return
-  db.execute(
-    sql(
-      "INSERT INTO chat_search_docs (chat_id, msg_idx, ts, role, text)"
-      " VALUES (:cid, :idx, :ts, :role, :txt)"
-    ),
-    [
-      {"cid": chat_id, "idx": idx, "ts": ts, "role": role, "txt": text}
-      for idx, ts, role, text in docs
-    ],
-  )
-
-
-def _upsert_state(
-  db: Session,
-  *,
-  chat_id: str,
-  updated_text: str,
-) -> None:
-  db.execute(
-    sql(
-      "INSERT INTO chat_search_state"
-      " (chat_id, indexed_updated_at)"
-      " VALUES (:cid, :updated)"
-      " ON CONFLICT(chat_id) DO UPDATE SET"
-      "  indexed_updated_at = excluded.indexed_updated_at"
-    ),
-    {
-      "cid": chat_id,
-      "updated": updated_text,
-    },
-  )
-
-
-def reconcile(db: Session) -> None:
-  """Bring the derived index in line with chats, one reconciler at a time."""
-  # FastAPI runs this synchronous route in a worker pool. Aborting an older
-  # browser fetch does not stop its worker, so successive debounced queries can
-  # overlap on first-use backfill. Serialize the derived writer in-process;
-  # the unique `(chat_id, msg_idx)` index is the database-level idempotency net.
-  with _RECONCILE_LOCK:
-    _reconcile_locked(db)
-
-
-def _reconcile_locked(db: Session) -> None:
-  # Index rows whose chat is gone or tombstoned. A restored chat re-enters
-  # through the stale scan below (restore bumps updated_at; no state row
-  # remains, so it reindexes from scratch).
-  orphans = db.execute(
-    sql(
-      "SELECT s.chat_id FROM chat_search_state s"
-      " WHERE NOT EXISTS (SELECT 1 FROM chats c"
-      "   WHERE c.id = s.chat_id AND c.deleted_at IS NULL)"
-    )
-  ).fetchall()
-  for (chat_id,) in orphans:
-    _delete_chat_docs(db, chat_id)
-
-  # Live chats whose row changed since we last indexed them. Compared as the
-  # exact stored text (equality, not ordering) so timestamp formatting can
-  # never produce a false "fresh".
-  stale = db.execute(sql(
-    "SELECT c.id, COALESCE(CAST(c.updated_at AS TEXT), '') FROM chats c"
-    " LEFT JOIN chat_search_state s ON s.chat_id = c.id"
-    " WHERE c.deleted_at IS NULL"
-    " AND (s.chat_id IS NULL OR s.indexed_updated_at <>"
-    "      COALESCE(CAST(c.updated_at AS TEXT), ''))"
-  )).fetchall()
-
-  for chat_id, updated_text in stale:
-    # Hydrates messages JSON for THIS chat only.
-    chat = db.get(models.Chat, chat_id)
-    if chat is None or chat.deleted_at is not None:
-      continue
-    messages = chat.messages or []
-    title = chat.title or ""
-    # The index is disposable: replace this chat's derived rows at its durable
-    # revision boundary instead of maintaining a second row-diff algorithm.
-    # Non-drawer chats retain only a tiny state row so an unchanged hidden
-    # app/autopilot chat is not re-hydrated on every query.
-    _delete_chat_docs(db, chat_id)
-    if chat_visibility.visible_in_owner_drawer(chat):
-      _write_docs(db, chat_id, _prose_docs(title, messages))
-    _upsert_state(
-      db,
-      chat_id=chat_id,
-      updated_text=updated_text,
-    )
-    # Release the hydrated transcript before the next stale chat.
-    db.expire(chat)
-
-  if orphans or stale:
-    db.commit()
 
 
 def _fts_query(tokens: list[str]) -> str:
@@ -240,47 +93,49 @@ def _snippet(
   return "".join(pieces)
 
 
-def _database_dialect(db: Session) -> str:
-  return db.get_bind().dialect.name
-
-
 def _candidate_rows(db: Session, tokens: list[str]):
-  """Return candidate normalized documents through the dialect's light seam."""
-  columns = (
-    "d.chat_id, d.msg_idx, d.ts, d.role, d.text, chat.title, "
-    "CAST(COALESCE(chat.activity_at, chat.updated_at) AS TEXT), "
-    "chat.archived_at IS NOT NULL"
-  )
-  if _database_dialect(db) == "sqlite":
-    return db.execute(
-      sql(
-        f"SELECT {columns} FROM chat_search_fts "
-        "JOIN chat_search_docs d ON d.id = chat_search_fts.rowid "
-        "JOIN chats chat ON chat.id = d.chat_id "
-        "WHERE chat.deleted_at IS NULL AND chat_search_fts MATCH :query "
-        "ORDER BY d.chat_id, d.msg_idx"
-      ).execution_options(stream_results=True, max_row_buffer=256),
-      {"query": _fts_query(tokens)},
-    )
+  """Stream FTS candidates of live chats, grouped by chat and position.
 
-  # Query tokens cannot contain ``%``. An underscore can broaden LIKE by one
-  # character, but the shared matcher below removes that false positive; the
-  # database predicate therefore cannot discard a true document hit.
-  clauses = []
-  parameters = {}
-  for index, token in enumerate(tokens):
-    key = f"token_{index}"
-    clauses.append(f"LOWER(d.text) LIKE :{key}")
-    parameters[key] = f"%{token.lower()}%"
+  While the previous release's column exists, a chat's prose entries count
+  only once it is converted: the previous release may have replaced its
+  transcript since they were derived. Titles always count.
+  """
+  from app import transcript_rows
+
   return db.execute(
     sql(
-      f"SELECT {columns} FROM chat_search_docs d "
-      "JOIN chats chat ON chat.id = d.chat_id "
-      "WHERE chat.deleted_at IS NULL AND " + " AND ".join(clauses)
-      + " ORDER BY d.chat_id, d.msg_idx"
+      # Raw bytes: json_extract renders an escaped lone surrogate as bytes
+      # that are not UTF-8, which the driver would refuse to decode.
+      "SELECT e.chat_id, e.seq, e.ts, e.role, CAST(e.text AS BLOB), chat.title, "
+      "CAST(COALESCE(chat.activity_at, chat.updated_at) AS TEXT), "
+      "chat.archived_at IS NOT NULL, chat.agent_settings_json, chat.created_by_app_id "
+      "FROM chat_search_entries_fts "
+      "JOIN chat_search_entries e ON e.id = chat_search_entries_fts.rowid "
+      "JOIN chats chat ON chat.id = e.chat_id "
+      "WHERE chat.deleted_at IS NULL AND chat_search_entries_fts MATCH :query "
+      "AND (e.seq < 0 OR :rows_authoritative OR EXISTS "
+      "(SELECT 1 FROM chat_transcript_state s WHERE s.chat_id = e.chat_id)) "
+      "ORDER BY e.chat_id, e.seq"
     ).execution_options(stream_results=True, max_row_buffer=256),
-    parameters,
+    {"query": _fts_query(tokens),
+     "rows_authoritative": transcript_rows.rows_are_authority(db)},
   )
+
+
+def _visible_rows(rows):
+  """Only chats in the owner's drawer; hidden app and helper chats never match."""
+  visible = {}
+  for row in rows:
+    chat_id, *_rest, settings, app_id = row
+    if chat_id not in visible:
+      # Raw JSON-column text, decoded as the ORM's JSON type would.
+      visible[chat_id] = chat_visibility.visible_in_owner_drawer(SimpleNamespace(
+        agent_settings_json=None if settings is None else json.loads(settings),
+        created_by_app_id=app_id,
+      ))
+    if visible[chat_id]:
+      chat_id, seq, ts, role, raw, *rest = row[:8]
+      yield (chat_id, seq, ts, role, bytes(raw).decode("utf-8", "replace"), *rest)
 
 
 def _iso_timestamp(stored: str) -> str | None:
@@ -369,23 +224,9 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
   return output
 
 
-def purge_chat_docs(db: Session, chat_ids: list[str]) -> None:
-  """Remove derived rows inside the source chat's hard-purge transaction."""
-  parameters = [{"chat_id": chat_id} for chat_id in chat_ids]
-  if not parameters:
-    return
-  db.execute(
-    sql("DELETE FROM chat_search_docs WHERE chat_id = :chat_id"), parameters,
-  )
-  db.execute(
-    sql("DELETE FROM chat_search_state WHERE chat_id = :chat_id"), parameters,
-  )
-
-
 def search(db: Session, raw_query: str, limit: int = 20) -> list[dict]:
   """Return ranked chat hits with only the fields consumed by the shell."""
   tokens = _query_tokens(raw_query)
   if not tokens or limit <= 0:
     return []
-  reconcile(db)
-  return _rank_results(_candidate_rows(db, tokens), tokens, limit)
+  return _rank_results(_visible_rows(_candidate_rows(db, tokens)), tokens, limit)

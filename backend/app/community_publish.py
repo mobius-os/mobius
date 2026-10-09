@@ -17,6 +17,7 @@ from app.manifest_contract import (
   PACKAGE_MAX_BYTES,
   ManifestContractError,
   package_bytes,
+  package_limit_message,
   validate_manifest_contract,
 )
 from app.storage_io import atomic_write
@@ -597,9 +598,6 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
   declared = package_bytes(manifest, lambda rel: sizes.get(rel, 0))
   if declared > PACKAGE_MAX_BYTES:
     raise CommunityPublicationError(
-      f"This app declares {declared} bytes of files, more than the "
-      f"{PACKAGE_MAX_BYTES // (1024 * 1024)} MiB app package limit.",
-      "payload_too_large",
-      413,
+      package_limit_message(declared), "payload_too_large", 413,
     )
   return commit, files

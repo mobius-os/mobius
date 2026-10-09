@@ -5,6 +5,7 @@ import {
   DRAWER_ROW_HEIGHT,
   DRAWER_ROW_OVERSCAN,
   clampDrawerRowWindow,
+  drawerListMinHeight,
   drawerRowSpacerHeights,
   drawerRowWindow,
   drawerRowWindowContaining,
@@ -111,4 +112,21 @@ test('desktop active-chat reveal moves the window only for an unmounted Recent r
   assert.notEqual(moved, current)
   assert.ok(moved.start <= 620 && moved.end > 620)
   assert.equal(moved.end - moved.start, DRAWER_INITIAL_WINDOW_ROWS)
+})
+
+test('a list switch floors the section at the height that keeps the viewport bottom reachable', () => {
+  // 2000px of lists with 500px still below the viewport.
+  assert.equal(drawerListMinHeight(2000, 500), 1500)
+  assert.equal(drawerListMinHeight(1800.2, 500), 1301)
+})
+
+test('the list floor shrinks as content moves below the viewport and releases at zero', () => {
+  assert.equal(drawerListMinHeight(1500, 400), 1100)
+  assert.equal(drawerListMinHeight(1100, 1100), 0)
+  assert.equal(drawerListMinHeight(1100, 1500), 0)
+})
+
+test('the list floor tolerates missing or non-finite metrics', () => {
+  assert.equal(drawerListMinHeight(NaN, 10), 0)
+  assert.equal(drawerListMinHeight(500, undefined), 500)
 })

@@ -67,7 +67,7 @@ from typing import Callable, Literal, NotRequired, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app import app_git, platform_activation, runtime_provenance
+from app import app_git, local_change_tests, platform_activation, runtime_provenance
 from app.platform_activation import PlatformActivationImpact
 from app.restart_util import run_candidate_startup_check
 
@@ -441,6 +441,8 @@ class PlatformUpdatePreview(TypedDict):
   # (:func:`local_image_changes`). They stay in the checkout; the update
   # reports them and never waits on them.
   local_image_paths: list[str]
+  # Evidence from preparation, not a claim about later replayed edits.
+  local_tests: NotRequired[dict]
 
 
 @dataclass(frozen=True)
@@ -475,6 +477,7 @@ class ReconcileResult:
   # The net local tree carried by an updated release, or the parked conflict
   # worktree and its unresolved paths.
   overlay: dict | None = None
+  local_tests: dict | None = None
 
   @classmethod
   def unchanged(
@@ -903,6 +906,19 @@ def _commit_tree_oid(repo: Path, commit: str) -> str | None:
   return oid if re.fullmatch(r"[0-9a-f]{40}", oid) else None
 
 
+def _target_working_tree_oid(repo: Path, target: str) -> str:
+  """Snapshot target-tracked bytes, without admitting independent owner files.
+
+  Capture includes untracked work for preservation; checkout proof must not.
+  In particular, Git retains a removed gitlink's directory on disk.
+  """
+  with tempfile.TemporaryDirectory(prefix="mobius-checkout-proof-") as tmp:
+    index = Path(tmp) / "index"
+    app_git._run_with_index(repo, index, "-c", "core.sparseCheckout=false", "read-tree", target)
+    app_git._run_with_index(repo, index, "-c", "core.sparseCheckout=false", "add", "-u", ".")
+    return app_git._run_with_index(repo, index, "write-tree").stdout.strip()
+
+
 def _checkout_matches_transition_target(repo: Path, target: str, other: str) -> bool:
   """Prove index and worktree agree with target on the transition's paths.
 
@@ -918,7 +934,7 @@ def _checkout_matches_transition_target(repo: Path, target: str, other: str) -> 
   index = _git("write-tree", repo=repo, check=False)
   if index.returncode:
     return False  # An unmerged index cannot prove a coherent checkout.
-  working = _working_tree_oid(repo, target)
+  working = _target_working_tree_oid(repo, target)
   if paths & (changed_paths(target, index.stdout.strip()) | changed_paths(target, working)):
     return False
   present = set(_git("ls-tree", "-r", "--name-only", "-z", target, repo=repo).stdout.split("\0"))
@@ -2779,6 +2795,13 @@ def _finalize_update(
   frontend_changed = any(path in _FRONTEND_DEPENDENCY_INPUTS for path in changed)
   touched_frontend = any(path.startswith("frontend/") for path in changed)
 
+  backend_probe = platform_activation.backend_import_probe_required(changed)
+  local_report = _check_local_tests(
+    repo, snapshot=pre, prepared=tip, target=target,
+    requires_image=(platform_activation.ActivationLevel.IMAGE_REBUILD.value
+                    in _owed_activation(repo, pre, tip, release=target)["required_actions"]),
+  )
+
   if (overlay or {}).get("mode") == "net" and tip != pre:
     # The new linear commit replaces the old local commit chain. Keep the
     # latest replaced chain reachable for undo; main's reflog has older ones.
@@ -2789,7 +2812,7 @@ def _finalize_update(
   # A text-clean merge can fail at import or the candidate startup smoke. Roll it
   # back before accepting the update. Skip the probe when no served backend
   # code changed: that tree is byte-identical to the already-running version.
-  if platform_activation.backend_import_probe_required(changed):
+  if backend_probe:
     if progress:
       progress(PlatformUpdatePhase.VALIDATING)
     ok, err = _import_probe(repo)
@@ -2797,12 +2820,15 @@ def _finalize_update(
       return _roll_back_update(
         repo, local, pre, tip, target, err, err,
       )
+  if local_report["regressions"]:
+    message = local_change_tests.describe(local_report["regressions"])
+    return _roll_back_update(repo, local, pre, tip, target, message, message)
 
   previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
   result = ReconcileResult(
     "updated", pre, tip, target, error=None,
     reconciliation=reconciliation,
-    overlay=overlay,
+    overlay=overlay, local_tests=local_report,
   )
   if touched_frontend:
     # Source moved without a watcher event. Dropping the build stamp makes the
@@ -3070,6 +3096,7 @@ class PreparedUpdate(TypedDict):
   target: str  # the reviewed release it contains
   image_digest: str | None
   requires_image: bool
+  local_tests: dict | None  # best-effort evidence, not complete local coverage
   late: str | None  # live state saved at the swap, in-progress edits on top
   late_committed: str | None  # its committed part
   # The late edits merged back before the server imported anything; the
@@ -3108,6 +3135,7 @@ def read_prepared_update() -> PreparedUpdate | None:
     target=str(record.get("target") or ""),
     image_digest=record.get("image_digest") or None,
     requires_image=bool(record.get("requires_image")),
+    local_tests=record.get("local_tests"),
     late=record.get("late") or None,
     late_committed=record.get("late_committed") or None,
     replayed=record.get("replayed") or None,
@@ -3137,6 +3165,40 @@ def _clear_prepared_update(repo: Path) -> None:
   PREPARED_UPDATE_PATH.unlink(missing_ok=True)
   for ref in (_PREPARED_REF, _LATE_REF):
     _git("update-ref", "-d", ref, repo=repo, check=False)
+
+
+def _check_local_tests(
+  repo: Path, *, snapshot: str, prepared: str, target: str,
+  requires_image: bool = False,
+) -> dict:
+  """Own the same frozen comparison for prepared and legacy updates.
+
+  Neither test run may dirty the served checkout or the validated candidate.
+  Worktrees share installed dependencies, not working files or runtime data.
+  Another image's tests must not be judged against this image's dependencies.
+  """
+  tests = local_change_tests.select(repo, target, prepared)
+  unavailable = (
+    "target image test runtime is not available before activation" if requires_image
+    else "no local tests selected by filename convention" if not tests else None
+  )
+  if unavailable:
+    result = local_change_tests.LocalTestRun(unavailable=unavailable)
+    runs = [result, result]
+  else:
+    runs = []
+    with tempfile.TemporaryDirectory(prefix="mobius-update-tests-") as tmp:
+      for label, revision in (("baseline", snapshot), ("candidate", prepared)):
+        checkout = Path(tmp) / label
+        try:
+          _git("worktree", "add", "--detach", "-q", str(checkout), revision, repo=repo)
+          runs.append(local_change_tests.run(checkout, tests))
+        finally:
+          app_git.remove_overlay_worktree(repo, checkout)
+  return {
+    **local_change_tests.compare(tests, *runs),
+    "baseline_sha": snapshot, "candidate_sha": prepared, "target_sha": target,
+  }
 
 
 def _prepare(
@@ -3173,10 +3235,17 @@ def _prepare(
       validate_restart_source(checkout)
     except RestartSourceInvalid as exc:
       raise PlatformUpdateError(str(exc)) from exc
+  local_report = _check_local_tests(
+    repo, snapshot=snapshot, prepared=prepared, target=target,
+    requires_image=requires_image,
+  )
+  if local_report["regressions"]:
+    raise PlatformUpdateError(local_change_tests.describe(local_report["regressions"]))
   _git("update-ref", _PREPARED_REF, prepared, repo=repo)
   record = PreparedUpdate(
     state="prepared", snapshot=snapshot, prepared=prepared, target=target,
     image_digest=image_digest, requires_image=requires_image, late=None,
+    local_tests=local_report,
     late_committed=None, replayed=None, operation=None,
     protocol=BOOT_PROTOCOL, restore=None, booted_tree=None,
   )
@@ -4720,6 +4789,9 @@ def prepared_update_preview(
     operation="finish", activation=activation, incoming_activation=activation,
     plan_id=_update_plan_id(current, record["target"], record["image_digest"]),
   )
+  local_report = record["local_tests"]
+  if local_report is not None:
+    preview["local_tests"] = local_report
   return preview
 
 
@@ -5278,6 +5350,7 @@ async def spawn_platform_conflict_chat(
 
   from app import models, providers
   from app.chat_start import start_programmatic_chat_turn
+  from app.chat_writer import create_chat
   from app.config import get_settings
   from app.push import notify_owner
   from app.run_state import running_chat_ids
@@ -5318,7 +5391,7 @@ async def spawn_platform_conflict_chat(
   )
 
   chat_id = str(uuid.uuid4())
-  chat = models.Chat(
+  chat = create_chat(
     id=chat_id, title=title, messages=[], pending_messages=[],
     provider=provider, agent_settings_json=agent_settings,
     created_by_app_id=None,

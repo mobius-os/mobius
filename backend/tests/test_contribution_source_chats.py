@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from app import auth as tokens, models
+from app import auth as tokens, chat_writer, models
 from app.chat_writer import ReplaceTranscript, get_writer
 from app.config import get_settings
 from app.database import engine
@@ -17,7 +17,7 @@ def patch(path, body="+secret source contents"):
 
 def chat(db, chat_id, paths=(), stamp=1770000000000, **extra):
   deleted_at = extra.pop("deleted_at", None)
-  row = models.Chat(id=chat_id, title=f"Title {chat_id}", **extra)
+  row = chat_writer.create_chat(id=chat_id, title=f"Title {chat_id}", **extra)
   db.add(row)
   db.commit()
   blocks = [{"type": "tool", "tool": "Edit", "tool_use_id": f"{chat_id}-{i}",
@@ -139,16 +139,24 @@ def test_discovery_does_not_hydrate_unrelated_chat_payloads(client, db, setup):
   chat(db, "plain")
   selected = []
   def capture(conn, cursor, statement, parameters, context, executemany):
-    if statement.lstrip().startswith("SELECT") and "chats.messages" in statement:
+    projection = statement.split("FROM", 1)[0]
+    if statement.lstrip().startswith("SELECT") and any(
+      payload in projection for payload in (
+        "chat_messages.body", "chat_live_assistants.snapshot",
+      )
+    ):
       selected.append(statement)
   event.listen(engine, "before_cursor_execute", capture)
   try:
+    # A real normalized body read must trip the guard; a retired-column
+    # predicate would silently accept every request after the storage change.
+    db.query(models.ChatMessage.body).filter_by(chat_id="plain").all()
+    assert selected
+    selected.clear()
     assert read(client, setup()).json() == {"chats": []}
   finally:
     event.remove(engine, "before_cursor_execute", capture)
-  assert len(selected) == 1
-  assert "LIKE" in selected[0] and "chat_live_assistants.snapshot" in selected[0]
-  assert "chats.pending_messages" not in selected[0]
+  assert len(selected) == 0
 
 
 def test_discovery_includes_live_edit_without_historical_preview(client, db, setup):

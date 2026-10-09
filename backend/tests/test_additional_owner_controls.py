@@ -1,6 +1,7 @@
 """Regression coverage for owner controls omitted from the lifecycle inventory."""
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 import hashlib
 from pathlib import Path
@@ -34,7 +35,7 @@ def controls(db, owner_token, tmp_path):
   publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
 
   chats = {
-    name: models.Chat(
+    name: create_chat(
       id=f"owner-controls-{name}", title=name, messages=[],
       created_by_app_id=app.id if name == "child" else None,
     )

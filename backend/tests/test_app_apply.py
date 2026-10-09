@@ -1,4 +1,5 @@
 """Explicit mini-app source application."""
+from app.chat_writer import create_chat
 
 import io
 import json
@@ -125,7 +126,7 @@ def test_new_app_compile_does_not_hold_sqlite_write_lock(
       # five-second busy timeout. WAL permits this write while the apply owns
       # only its preflight read transaction; an early App INSERT does not.
       concurrent.connection().exec_driver_sql("PRAGMA busy_timeout=50")
-      concurrent.add(models.Chat(
+      concurrent.add(create_chat(
         id=concurrent_chat_id,
         title="Concurrent chat",
         messages=[],
@@ -175,7 +176,7 @@ def test_apply_holds_no_sqlite_write_lock_across_its_awaits(
     try:
       # Fail promptly instead of waiting out the live five-second timeout.
       concurrent.connection().exec_driver_sql("PRAGMA busy_timeout=50")
-      concurrent.add(models.Chat(
+      concurrent.add(create_chat(
         id=concurrent_chat_id,
         title="Concurrent chat",
         messages=[],
@@ -378,10 +379,16 @@ def test_local_apply_refuses_an_oversized_package_before_reading_it(
     app_apply, "PACKAGE_MAX_BYTES", package_bytes_on_disk(source, manifest) - 1,
   )
 
+  def read_assets(*_args):
+    raise AssertionError("static assets were read before the size check")
+
+  monkeypatch.setattr(app_apply, "_snapshot_static_assets", read_assets)
+
   rejected = _apply(client, auth, source)
 
   assert rejected.status_code == 422, rejected.text
   assert rejected.json()["detail"]["code"] == "package_too_large"
+  assert "MiB app package limit" in rejected.json()["detail"]["message"]
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
   assert not (source / "static" / "data.bin").exists()
 

@@ -109,7 +109,7 @@ test('first-use device installation has labeled help and status feedback', () =>
 
 test('chat image preview actions use labeled buttons', () => {
   const attachments = read('../Attachments.jsx')
-  const composer = read('../ChatInputBar.jsx')
+  const composer = read('../FileChips.jsx')
   const preview = read('../ImagePreviewButton.jsx')
   const markdown = read('../markdown/InlineContent.jsx')
   assert.match(attachments, /<ImagePreviewButton/)
@@ -119,7 +119,7 @@ test('chat image preview actions use labeled buttons', () => {
 })
 
 test('a restored image with no media token stops spinning and exposes its failure', () => {
-  const composer = read('../ChatInputBar.jsx')
+  const composer = read('../FileChips.jsx')
   assert.match(composer, /setTokenState\(\{ chatId, param, failed: !param \}\)/)
   assert.match(composer, /className="chat__attach-card-preview-error" role="status"/)
   assert.match(composer, /Preview unavailable/)

@@ -12,6 +12,7 @@ import { test, expect } from '@playwright/test'
 import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 import { mockAcceptedMessages, releaseMockRoutesAfterEach } from './_mockAcceptedMessages.mjs'
+import { mockDeliveryReady } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -30,6 +31,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
 
   // Intercept agent-related routes — prevents real agent runs and SSE hangs.
+  // Every send here expects a started turn and its pin. Before the shell is
+  // delivery-ready a send is queued locally and later lands unpinned.
+  await mockDeliveryReady(page)
   await mockAcceptedMessages(page)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
     route.fulfill({ status: 204, body: '' })
@@ -166,6 +170,7 @@ async function simulateLazyResize(page, extraHeight) {
 async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
 
+  await mockDeliveryReady(page)
   const acceptedMessages = await mockAcceptedMessages(page)
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })

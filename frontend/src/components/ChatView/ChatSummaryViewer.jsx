@@ -1,4 +1,4 @@
-/* ChatSummaryViewer shows the chat's name, Digest, and cumulative Summary. */
+/* ChatSummaryViewer shows the chat's name, Summary, and cumulative Digest. */
 
 import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
@@ -8,7 +8,7 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 export default function ChatSummaryViewer({ chatId, onClose }) {
   const [state, setState] = useState({
     status: 'loading',
-    layers: { description: '', digest: '', summary: '' },
+    layers: { description: '', summary: '', digest: '' },
     error: '',
   })
   const dialogRef = useRef(null)
@@ -33,8 +33,8 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
           status: 'ready',
           layers: {
             description: data.chat_description || '',
-            digest: data.chat_digest || '',
             summary: data.chat_summary || '',
+            digest: data.chat_digest || '',
           },
           error: '',
         })
@@ -42,7 +42,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
         if (error?.name === 'AbortError') return
         setState({
           status: 'error',
-          layers: { description: '', digest: '', summary: '' },
+          layers: { description: '', summary: '', digest: '' },
           error: error?.message || 'Could not load the chat summary.',
         })
       }
@@ -96,24 +96,24 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
               </section>
               <section className="chat-summary__layer">
                 <div className="chat-summary__layer-head">
-                  <h3>Digest</h3>
-                  <p>Bounded context available to recent conversations.</p>
-                </div>
-                <div className="chat-summary__layer-body">
-                  {state.layers.digest
-                    ? <StandardMarkdown text={state.layers.digest} />
-                    : <p className="chat-summary__empty">No digest has been saved for this chat yet.</p>}
-                </div>
-              </section>
-              <section className="chat-summary__layer">
-                <div className="chat-summary__layer-head">
-                  <h3>Full summary</h3>
-                  <p>Cumulative handoff retained for continuing this conversation.</p>
+                  <h3>Summary</h3>
+                  <p>Short context available to recent conversations.</p>
                 </div>
                 <div className="chat-summary__layer-body">
                   {state.layers.summary
                     ? <StandardMarkdown text={state.layers.summary} />
-                    : <p className="chat-summary__empty">No summary entries have been saved for this chat yet.</p>}
+                    : <p className="chat-summary__empty">No summary has been saved for this chat yet.</p>}
+                </div>
+              </section>
+              <section className="chat-summary__layer">
+                <div className="chat-summary__layer-head">
+                  <h3>Digest</h3>
+                  <p>Cumulative handoff retained for continuing this conversation.</p>
+                </div>
+                <div className="chat-summary__layer-body">
+                  {state.layers.digest
+                    ? <StandardMarkdown text={state.layers.digest} />
+                    : <p className="chat-summary__empty">No digest entries have been saved for this chat yet.</p>}
                 </div>
               </section>
             </div>

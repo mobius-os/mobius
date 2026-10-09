@@ -403,6 +403,13 @@
 
 .global-search__status--error { color: var(--danger); }
 
+.global-search__note {
+  margin: 0;
+  padding: 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 @media (min-width: 700px) {
   .global-search__overlay {
     align-items: flex-start;

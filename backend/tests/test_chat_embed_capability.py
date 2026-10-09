@@ -1,4 +1,5 @@
 """Authorization contract for the opaque three-frame chat embed."""
+from app.chat_writer import create_chat
 
 import hashlib
 from datetime import timedelta
@@ -102,7 +103,7 @@ def test_exact_chat_embed_never_receives_the_global_peer_roster(
   _, _, chat_id, _, session = _session(
     client, owner_token, name="coordination-embed",
   )
-  outsider = models.Chat(
+  outsider = create_chat(
     id="coordination-outsider", title="Private outside peer", messages=[],
     provider="claude",
   )

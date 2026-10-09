@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
+from app import chat_writer
 from app import (
   auth, chat_queue, drawer_pins, fs_locks, github_auth, models,
   project_builders, schemas,
@@ -1096,7 +1097,7 @@ def _new_chat(
     provider,
     fallback_model=providers.DEFAULT_MODELS.get(provider),
   )
-  return models.Chat(
+  return chat_writer.create_chat(
     id=chat_id,
     title=title,
     messages=[],

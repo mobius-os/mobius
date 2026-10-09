@@ -1,4 +1,5 @@
 """Core helpers retain the same bounded task ownership without an App row."""
+from app.chat_writer import create_chat
 import asyncio
 import hashlib
 from datetime import timedelta
@@ -10,8 +11,8 @@ from tests.goal_fixtures import goal_run
 
 
 def core_task(db, *, status="parked", reason="usage_limit"):
-  parent=models.Chat(id="core-parent",title="Parent",messages=[])
-  child=models.Chat(id="core-child",title="Child",messages=[],created_by_app_id=None,
+  parent=create_chat(id="core-parent",title="Parent",messages=[])
+  child=create_chat(id="core-child",title="Child",messages=[],created_by_app_id=None,
                     auto_resume_on_restart=True,auto_resume_on_limit=False)
   row=models.Delegation(
     id="core-task",app_id=None,parent_chat_id=parent.id,parent_root_run_id="parent-run",

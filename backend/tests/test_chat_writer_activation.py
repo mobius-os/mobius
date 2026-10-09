@@ -19,9 +19,9 @@ import time
 import pytest
 
 from app import chat as chat_mod
-from app import chat_queue, models, questions, schemas
+from app import chat_queue, models, questions, schemas, transcript_rows
 from app.broadcast import ChatBroadcast
-from app.chat_writer import Barrier, PersistTranscript, get_writer
+from app.chat_writer import Barrier, PersistTranscript, create_chat, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
 from app.pending_questions import PendingQuestion
@@ -31,7 +31,7 @@ def _seed_chat(chat_id, messages=None, pending=None, session_id="sess"):
   db = SessionLocal()
   try:
     db.add(
-      models.Chat(
+      create_chat(
         id=chat_id,
         title="t",
         messages=messages if messages is not None else [],
@@ -54,7 +54,7 @@ def _load(chat_id):
       chat_id=chat_id, status="running",
     ).first() is not None
     return None if chat is None else {
-      "messages": list(chat.messages or []),
+      "messages": transcript_rows.read_all(db, chat),
       "pending_messages": list(chat.pending_messages or []),
       "running": running,
     }
@@ -101,13 +101,13 @@ def test_wired_answer_survives_concurrent_stream_snapshot(client, auth, chat):
   db = SessionLocal()
   try:
     c = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-    c.messages = [
+    transcript_rows.replace_all(db, c, [
       {"role": "user", "content": "go", "ts": 1},
       {"role": "assistant", "content": "", "ts": 2, "blocks": [
         {"type": "question", "question_id": "qX",
          "questions": [{"id": "q1", "question": "Color?"}]},
       ]},
-    ]
+    ])
     db.commit()
   finally:
     db.close()
@@ -246,7 +246,7 @@ def test_put_replace_transcript_broad_fences_stream_snapshot(client, auth, chat)
   db = SessionLocal()
   try:
     c = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-    c.messages = [{"role": "user", "content": "hi", "ts": 1}]
+    transcript_rows.replace_all(db, c, [{"role": "user", "content": "hi", "ts": 1}])
     db.commit()
   finally:
     db.close()
@@ -592,13 +592,13 @@ def test_stop_races_answer_real_lock_contention_returns_410(chat, owner_token):
   db_seed = SessionLocal()
   try:
     c = db_seed.query(models.Chat).filter(models.Chat.id == chat.id).one()
-    c.messages = [
+    transcript_rows.replace_all(db_seed, c, [
       {"role": "user", "content": "go", "ts": 1},
       {"role": "assistant", "content": "", "ts": 2, "blocks": [
         {"type": "question", "question_id": "qS",
          "questions": [{"id": "q1", "question": "Color?"}]},
       ]},
-    ]
+    ])
     db_seed.commit()
   finally:
     db_seed.close()

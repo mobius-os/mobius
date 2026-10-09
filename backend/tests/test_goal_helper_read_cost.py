@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+from app.chat_writer import create_chat
 import pytest
 from sqlalchemy import event
 
@@ -28,7 +29,7 @@ def _selects(db):
 
 def _helper(db, parent_id, key, *, status=None, root_id="goal-root", **flags):
   child_id = f"child-{key}"
-  db.add(models.Chat(id=child_id, title=key, messages=[]))
+  db.add(create_chat(id=child_id, title=key, messages=[]))
   db.flush()
   row = models.Delegation(
     id=f"helper-{key}", parent_chat_id=parent_id, parent_root_run_id=root_id,

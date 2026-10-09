@@ -31,6 +31,8 @@ import {
   searchInstalledApps,
   searchProjects,
   visibleChatSearchState,
+  unindexedChatCount,
+  unindexedChatsNote,
 } from './globalSearchModel.js'
 import {
   clearRecentSelections,
@@ -250,6 +252,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
         if (!response.ok) throw new Error(`CHAT_SEARCH_${response.status}`)
         const payload = await response.json()
         if (controller.signal.aborted || chatSearchControllerRef.current !== controller) return
+        const unindexed = unindexedChatCount(response.headers)
         const results = (Array.isArray(payload) ? payload : []).map(result => {
           const snippet = searchSnippetPresentation(result.snippet)
           return {
@@ -259,7 +262,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
             snippetParts: snippet.parts,
           }
         })
-        setChatState({ query: normalizedQuery, status: 'ready', results })
+        setChatState({ query: normalizedQuery, status: 'ready', results, unindexed })
       } catch (error) {
         if (
           error?.name !== 'AbortError'
@@ -429,6 +432,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
       ?.scrollIntoView({ block: 'nearest' })
   }, [activeResultIndex])
 
+  const coverageNote = normalizedQuery ? unindexedChatsNote(visibleChats) : null
   const noResults = normalizedQuery
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
@@ -577,6 +581,9 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
                   <h3>No matches</h3>
                   <p>Try a shorter phrase or an app detail such as “offline”, “schedule”, or a skill name.</p>
                 </div>
+              )}
+              {coverageNote && (
+                <p className="global-search__note" role="note">{coverageNote}</p>
               )}
             </div>
           )}

@@ -278,7 +278,6 @@ test('quota recovery sacrifices only transient cache and keeps every owner draft
   }
 })
 
-
 test('only one stored-handoff consumer may deliver the same queued Send', () => {
   const storage = storageStub()
   stageComposerHandoff('chat-a', 'One send', { autoSend: true, storage })

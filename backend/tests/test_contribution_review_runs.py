@@ -1,4 +1,5 @@
 """Exact selected heads, private reviews and guarded public merge receipts."""
+from app.chat_writer import create_chat
 import asyncio
 import json
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ def setup(fresh_db, monkeypatch):
   owner = models.Owner(username="review-owner", hashed_password="unused")
   db.add(owner)
   db.flush()
-  chat = models.Chat(id="review-chat", title="Review")
+  chat = create_chat(id="review-chat", title="Review")
   db.add(chat)
   db.add(models.App(id=1, name="Contribute", slug="contribute", source_dir="test-contribute", github_access=True, token_nonce="nonce"))
   db.add(models.ChatRun(id="physical-run", chat_id=chat.id, status="running"))
@@ -447,7 +448,7 @@ def test_http_admission_accepts_explicit_chat_consent_but_not_an_unapproved_agen
 
 def test_chat_cannot_rebind_an_existing_other_conversations_selection(setup):
   db, row, principal = setup
-  db.add(models.Chat(id="other-chat", title="Other"))
+  db.add(create_chat(id="other-chat", title="Other"))
   db.add(models.ChatRun(id="other-run", chat_id="other-chat", status="running"))
   db.commit()
   principal.chat_id, principal.run_id = "other-chat", "other-run"
@@ -484,7 +485,7 @@ def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monke
 def test_peer_owns_exact_merge_so_review_links_to_it_without_public_action(setup, monkeypatch):
   from app import agent_work_claims
   db, _, principal = setup
-  db.add(models.Chat(id="peer-chat", title="Existing owner"))
+  db.add(create_chat(id="peer-chat", title="Existing owner"))
   db.add(models.ChatRun(id="peer-run", chat_id="peer-chat", status="running"))
   db.commit()
   agent_work_claims.claim_work(db, owner_id=principal.owner.id,

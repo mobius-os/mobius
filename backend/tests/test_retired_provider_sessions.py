@@ -6,6 +6,7 @@ resumed sessions which had received it kept emitting frames nothing reads,
 which showed up as raw text and silently lost the save.
 """
 
+from app.chat_writer import create_chat
 import hashlib
 
 import pytest
@@ -42,7 +43,7 @@ async def _run_turn(
   chat_id = f"retired-{provider_id}-{retired}-{delegated}"
   with SessionLocal() as setup:
     setup.add(models.Owner(username="owner", hashed_password="unused", provider=provider_id))
-    setup.add(models.Chat(
+    setup.add(create_chat(
       id=chat_id, title="retired session", provider=provider_id,
       session_id=session_id,
       messages=[
@@ -76,7 +77,7 @@ async def _run_turn(
   refusals = []
   if delegated:
     with SessionLocal() as setup:
-      setup.add(models.Chat(id=f"parent-{chat_id}", title="parent", provider=provider_id))
+      setup.add(create_chat(id=f"parent-{chat_id}", title="parent", provider=provider_id))
       setup.add(models.Delegation(
         id=f"d-{chat_id}", app_id=None, parent_chat_id=f"parent-{chat_id}",
         parent_root_run_id=f"parent-run-{chat_id}", task_key="retired",
@@ -266,18 +267,19 @@ def test_migration_is_a_no_op_on_a_database_without_session_links(tmp_path):
     assert conn.execute(text("SELECT count(*) FROM sqlite_master")).scalar_one() == 0
 
 
-def test_reseed_drops_leaked_write_frames_from_replies_only():
+def test_reseed_drops_leaked_write_frames_from_replies_only(db):
   """A reseeded session must not see itself writing the retired frames."""
-  from types import SimpleNamespace
   from app.chat_context import _build_resumed_context
 
   frame = '<MOBIUS_WRITE n1>\n{"id":"n1.write-1","tool":"checkpoint_chat","arguments":{}}\n</MOBIUS_WRITE>'
-  chat = SimpleNamespace(messages=[
+  chat = create_chat(id="reseed-frames", title="reseed", messages=[
     {"role": "user", "content": "Why do replies show <MOBIUS_WRITE ... />?", "ts": 1},
     {"role": "assistant", "content": f"Fixed the broker.\n{frame}\nDone.", "ts": 2},
     {"role": "assistant", "content": '<MOBIUS_WRITE n2>\n{"id":"n2.write-1",\n "tool":"x"}\n\nNext.', "ts": 3},
     {"role": "assistant", "content": 'Saved. <MOBIUS_WRITE tool="checkpoint_chat" /> Then ok.', "ts": 4},
   ])
+  db.add(chat)
+  db.commit()
   block = _build_resumed_context(chat)
   replies = block.split("Why do replies show <MOBIUS_WRITE ... />?", 1)[1]
   assert "MOBIUS_WRITE" not in replies and "write-1" not in replies

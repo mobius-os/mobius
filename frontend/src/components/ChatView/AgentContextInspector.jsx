@@ -208,7 +208,7 @@ const CSS = `
   line-height: 1.4;
 }
 
-.aci-recent__digest {
+.aci-recent__summary {
   margin: 5px 0 0;
   color: var(--text);
   font-size: 13px;
@@ -282,7 +282,7 @@ function RecentChats({ entries }) {
       {entries.map(entry => (
         <article className="aci-recent__item" key={entry.location}>
           <h3 className="aci-recent__name">{entry.name}</h3>
-          <p className="aci-recent__digest">{entry.digest}</p>
+          <p className="aci-recent__summary">{entry.summary}</p>
           <code className="aci-recent__location">{entry.location}</code>
         </article>
       ))}
@@ -352,7 +352,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
       {
         key: 'recent_chats',
         title: 'Recent chat summaries',
-        description: 'Names and digests from your latest conversations.',
+        description: 'Names and summaries from your latest conversations.',
         value: Array.isArray(data.recent_chat_entries)
           ? data.recent_chat_entries
           : [],

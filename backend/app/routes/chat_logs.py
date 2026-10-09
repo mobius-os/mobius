@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app import activity, chat_log_redaction as redact, models
+from app import activity, chat_log_redaction as redact, models, transcript_rows
 from app.chat_transcript import materialized_messages
 from app.database import get_db
 from app.deps import Principal, get_principal, require_app_permission
@@ -137,6 +137,7 @@ def list_chat_logs(
   rows = base.limit(limit + 1).all()
   has_more = len(rows) > limit
   rows = rows[:limit]
+  transcript_rows.pin_read_snapshot(db)
 
   items = []
   for c in rows:
@@ -207,6 +208,7 @@ def get_chat_log(
   readable only during their recovery window.
   """
   _gate_summary(principal, db, include_deleted=include_deleted)
+  transcript_rows.pin_read_snapshot(db)
 
   if include_deleted:
     cutoff = now_naive_utc() - SOFT_DELETE_TTL

@@ -11,6 +11,7 @@ from appearing in ?token= query params on image-serving routes:
  5. Expired media tokens are rejected.
  6. App-scoped tokens are rejected on both paths.
 """
+from app.chat_writer import create_chat
 import io
 from datetime import UTC, datetime, timedelta
 
@@ -145,7 +146,7 @@ def test_serve_upload_rejects_media_token_for_wrong_chat(client, auth, chat, db)
   import uuid
   from app import models
   # Create a second chat.
-  chat_b = models.Chat(id=str(uuid.uuid4()), title="Chat B", messages=[])
+  chat_b = create_chat(id=str(uuid.uuid4()), title="Chat B", messages=[])
   db.add(chat_b)
   db.commit()
 
@@ -278,7 +279,7 @@ def test_serve_media_rejects_media_token_for_wrong_chat(client, auth, chat, db):
   """A media token for the wrong chat is rejected."""
   import uuid
   from app import models
-  chat_b = models.Chat(id=str(uuid.uuid4()), title="Chat B", messages=[])
+  chat_b = create_chat(id=str(uuid.uuid4()), title="Chat B", messages=[])
   db.add(chat_b)
   db.commit()
 

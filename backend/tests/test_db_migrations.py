@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+from app.chat_writer import create_chat
 import app.schema_migrations as migrations
 from app.config import get_settings
 from app.schema_migrations import (
@@ -96,6 +97,61 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
   ]
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatch, start):
+  """The previous release ledgers 0083_swap_chat_note_sections and
+  0086_drop_chat_note_backup; 0087_transcript_rows then runs alone, after
+  them, and converts what that release wrote."""
+  from app import transcript_rows
+
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  note = tmp_path / "shared" / "memory" / "chats" / "kept" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text("# Kept\n\n## Digest\nshort\n\n## Summary\nfull\n", encoding="utf-8")
+  db_path = tmp_path / "upgrade.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
+  assert versions[-3:] == [
+    "0083_swap_chat_note_sections", "0086_drop_chat_note_backup", "0087_transcript_rows",
+  ]
+  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+  run_migrations(eng)  # The previous release's ledger.
+  monkeypatch.undo()
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  assert "## Summary\nshort" in note.read_text(encoding="utf-8")
+  assert not (tmp_path / "backups" / "chat-notes-before-0083").exists()
+  with Session(eng) as db:
+    db.add(create_chat(id="kept", title="Kept", messages=[{"role": "user", "content": "old"}]))
+    db.commit()
+  with eng.begin() as conn:  # The previous release writes only the legacy value.
+    conn.execute(text("UPDATE chats SET messages = :m WHERE id = 'kept'"),
+                 {"m": json.dumps([{"role": "user", "content": "previous"}])})
+  transcript_tables = [models.ChatMessage.__table__, models.ChatTranscriptState.__table__,
+                       models.ChatTranscriptDamage.__table__]
+  models.Base.metadata.drop_all(bind=eng, tables=transcript_tables)  # Unknown to that release.
+
+  models.Base.metadata.create_all(bind=eng)  # This release's boot order.
+  run_migrations(eng)
+
+  history = [row["version"] for row in schema_migration_history(eng)]
+  assert history == versions
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.connect() as conn:
+    triggers = {name for (name,) in conn.execute(text(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger'"))}
+  assert set(migrations.TRANSCRIPT_TRIGGERS) <= triggers
+  with Session(eng) as db:
+    assert transcript_rows.unconverted_count(db) == 1
+    assert transcript_rows.convert(db, "kept")
+    db.commit()
+    assert transcript_rows.read_all(db, "kept") == [{"role": "user", "content": "previous"}]
+  eng.dispose()
 
 
 def test_git_app_source_migration_captures_files_and_attaches_catalog_origin(
@@ -448,7 +504,7 @@ def test_chat_app_artifact_migration_preserves_prior_preview_acknowledgement(
   models.Base.metadata.create_all(eng)
   touched_at = datetime(2026, 8, 29, 12, 0, 0)
   with Session(eng) as session:
-    session.add(models.Chat(id="chat-a", title="Chat A"))
+    session.add(create_chat(id="chat-a", title="Chat A"))
     session.flush()
     session.add(models.App(
       id=7,
@@ -1142,7 +1198,7 @@ def test_run_migrations_moves_legacy_running_marker_into_chat_runs(tmp_path):
   models.Base.metadata.create_all(eng)
   started = datetime(2026, 7, 30, 23, 45, 12)
   with Session(eng) as session:
-    session.add(models.Chat(
+    session.add(create_chat(
       id="legacy-running",
       title="Interrupted turn",
       provider="codex",
@@ -1792,6 +1848,9 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0083_retire_quiet_write_sessions",
     "0084_chat_media_directory",
     "0085_app_shell_shortcuts",
+    "0083_swap_chat_note_sections",
+    "0086_drop_chat_note_backup",
+    "0087_transcript_rows",
   ]
   assert second == first
 
@@ -1851,17 +1910,19 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
   app = models.App(
     name="Repair", slug="repair", source_dir=str(source_dir),
   )
+  # A previous-release retention fixture: a chats row only, with no rows or
+  # conversion marker, as that release wrote it.
   controller = models.Chat(
-    id=controller_id, title="Controller", messages=[], provider="codex",
+    id=controller_id, title="Controller", legacy_messages=[], provider="codex",
   )
   child = models.Chat(
-    id=child_id, title="Child", messages=[], provider="codex",
+    id=child_id, title="Child", legacy_messages=[], provider="codex",
   )
   nested = models.Chat(
-    id=nested_id, title="Nested", messages=[], provider="codex",
+    id=nested_id, title="Nested", legacy_messages=[], provider="codex",
   )
   survivor = models.Chat(
-    id=survivor_id, title="Survivor", messages=[], provider="codex",
+    id=survivor_id, title="Survivor", legacy_messages=[], provider="codex",
   )
   missing_run = models.ChatRun(
     id="missing-run", root_run_id="missing-run", chat_id=survivor_id,
@@ -2183,7 +2244,7 @@ def test_legacy_project_cutover_materializes_roots_and_drops_runtime_marker(
       source_dir=str(data_dir / "apps" / "webstudio-source"),
       project_templates_json=[template],
     )
-    chat = models.Chat(id="legacy-project-chat", title="Portfolio", messages=[])
+    chat = create_chat(id="legacy-project-chat", title="Portfolio", messages=[])
     db.add_all([app, chat])
     db.commit()
     db.refresh(app)
@@ -2607,48 +2668,48 @@ def test_legacy_chat_models_pin_only_established_unselected_chats(
       id=99, name="Test app", slug="test-app", source_dir="test-app",
     ))
     rows = [
-      models.Chat(
+      create_chat(
         id="claude-source-old", title="Old Claude choice", provider="claude",
         messages=[], agent_settings_json={"model": "claude-sonnet-4-6"},
         activity_at=datetime(2026, 8, 20),
       ),
-      models.Chat(
+      create_chat(
         id="claude-source-current", title="Current Claude choice",
         provider="claude", messages=[],
         agent_settings_json={"model": "claude-opus-4-8"},
         activity_at=datetime(2026, 8, 22),
       ),
       # A newer app-owned model is not evidence of the owner's picker choice.
-      models.Chat(
+      create_chat(
         id="claude-app-source", title="App model", provider="claude",
         messages=[], agent_settings_json={"model": "claude-fable-5"},
         created_by_app_id=99, activity_at=datetime(2026, 8, 23),
       ),
-      models.Chat(
+      create_chat(
         id="legacy-claude", title="Legacy Claude", provider="claude",
         messages=established, agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="legacy-codex", title="Legacy Codex", provider="codex",
         messages=established,
         agent_settings_json={"effort": "high", "project_id": "alpha"},
       ),
-      models.Chat(
+      create_chat(
         id="legacy-app", title="Legacy app", provider="claude",
         messages=established, created_by_app_id=99,
         agent_settings_json={"report_kind": "reflection"},
       ),
-      models.Chat(
+      create_chat(
         id="empty-chat", title="First run", provider="codex",
         messages=[{"role": "user", "content": "not completed"}],
         agent_settings_json={"effort": "medium"},
       ),
-      models.Chat(
+      create_chat(
         id="deleted-chat", title="Deleted", provider="codex",
         messages=established, agent_settings_json=None,
         deleted_at=datetime(2026, 8, 22),
       ),
-      models.Chat(
+      create_chat(
         id="explicit-chat", title="Explicit", provider="codex",
         messages=established,
         agent_settings_json={"model": "gpt-5.5", "effort": "low"},
@@ -2731,11 +2792,11 @@ def test_legacy_chat_models_never_invent_a_provider_default(
       provider="codex",
     ))
     session.add_all([
-      models.Chat(
+      create_chat(
         id="known-provider-choice", title="Codex", provider="codex",
         messages=transcript, agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="no-provider-choice", title="Claude", provider="claude",
         messages=transcript, agent_settings_json=None,
       ),
@@ -2770,7 +2831,7 @@ def test_legacy_chat_models_preserve_malformed_settings(tmp_path, monkeypatch):
       hashed_password="hash",
       provider="codex",
     ))
-    session.add(models.Chat(
+    session.add(create_chat(
       id="malformed-settings",
       title="Malformed settings",
       provider="codex",
@@ -3261,7 +3322,7 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
   started_at = datetime(2026, 7, 31, 12, 0, 0)
   started_ms = int(started_at.replace(tzinfo=UTC).timestamp() * 1000)
   with Session(eng) as session:
-    session.add(models.Chat(
+    session.add(create_chat(
       id="goal-chat",
       title="Goal",
       messages=[
@@ -3337,7 +3398,7 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-identity.db'}")
   models.Base.metadata.create_all(eng)
   with Session(eng) as session:
-    session.add(models.Chat(id="goal-chat", title="Goal", messages=[]))
+    session.add(create_chat(id="goal-chat", title="Goal", messages=[]))
     session.add_all([
       models.ChatRun(
         id="planned", root_run_id="planned", chat_id="goal-chat",
@@ -3380,7 +3441,7 @@ def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-index-repair.db'}")
   models.Base.metadata.create_all(eng)
   with Session(eng) as session:
-    session.add(models.Chat(id="goal-chat", title="Goal", messages=[]))
+    session.add(create_chat(id="goal-chat", title="Goal", messages=[]))
     session.add(models.ChatRun(
       id="historical", root_run_id="historical", chat_id="goal-chat",
       status="completed", provider="codex", goal_objective="Ship",
@@ -3427,8 +3488,8 @@ def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
       root_path="projects/project-1", template_snapshot_json={},
     ))
     session.add_all([
-      models.Chat(id="sender", title="Sender", messages=[], project_id="project-1"),
-      models.Chat(id="receiver", title="Receiver", messages=[], project_id="project-1"),
+      create_chat(id="sender", title="Sender", messages=[], project_id="project-1"),
+      create_chat(id="receiver", title="Receiver", messages=[], project_id="project-1"),
     ])
     session.flush()
     session.add(models.ProjectAgentMessage(
@@ -3563,61 +3624,61 @@ def test_active_chat_model_migrations_pin_lazy_drafts_and_scoped_rows(
       username="owner", hashed_password="hash", provider="codex",
     ))
     session.add_all([
-      models.Chat(
+      create_chat(
         id="actual-claude", title="Autopilot", provider="claude",
         messages=transcript, agent_settings_json={"drawer_hidden": False},
       ),
-      models.Chat(
+      create_chat(
         id="pristine-owner-a", title="New chat", provider="claude",
         messages=[], agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="pristine-owner-b", title="New chat", provider="claude",
         messages=[], agent_settings_json={"effort": "high"},
       ),
-      models.Chat(
+      create_chat(
         id="empty-app", title="Panel", provider="claude", messages=[],
         created_by_app_id=7, agent_settings_json={"system_prompt": "Panel"},
       ),
-      models.Chat(
+      create_chat(
         id="hidden-internal", title="New chat", provider="claude", messages=[],
         agent_settings_json={"drawer_hidden": True},
       ),
-      models.Chat(
+      create_chat(
         id="live-owner", title="New chat", provider="claude", messages=[],
         live_assistant={"role": "assistant", "content": "working"},
         active_assistant_message_id="assistant-live",
         agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="question-owner", title="New chat", provider="claude", messages=[],
         pending_question_id="question-1", agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="linked-owner", title="New chat", provider="claude", messages=[],
         agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="snapshotted-owner", title="New chat", provider="claude", messages=[],
         system_prompt_snapshot_id="prompt-snapshot", agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="project-chat", title="New chat", provider="claude", messages=[],
         project_id="project-1", agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="legacy-codex", title="Old", provider="codex",
         messages=transcript, agent_settings_json={"effort": "high"},
       ),
-      models.Chat(
+      create_chat(
         id="explicit", title="Pinned", provider="codex", messages=transcript,
         agent_settings_json={"model": "gpt-5.5"},
       ),
-      models.Chat(
+      create_chat(
         id="deleted", title="Deleted", provider="codex", messages=transcript,
         agent_settings_json=None, deleted_at=datetime(2026, 8, 29),
       ),
-      models.Chat(
+      create_chat(
         id="malformed-settings", title="Broken", provider="claude",
         messages=transcript, agent_settings_json="{not-json",
       ),
@@ -3744,7 +3805,7 @@ def test_active_chat_model_migration_never_reassigns_queued_provider_state(
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="codex",
     ))
-    session.add(models.Chat(
+    session.add(create_chat(
       id="queued-claude", title="New chat", provider="claude", messages=[],
       pending_messages=[{"role": "user", "content": "queued"}],
       session_id="claude-session", agent_settings_json=None,
@@ -3796,7 +3857,7 @@ def test_active_chat_model_migration_honors_unknown_picker_model_provider_pair(
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="claude",
     ))
-    session.add(models.Chat(
+    session.add(create_chat(
       id="codex-app-chat", title="Panel", provider="codex", messages=[],
       created_by_app_id=7, agent_settings_json=None,
     ))
@@ -3835,33 +3896,33 @@ def test_post_explicit_model_repair_pins_all_later_gaps_without_provider_handoff
       username="owner", hashed_password="hash", provider="codex",
     ))
     session.add_all([
-      models.Chat(
+      create_chat(
         id="lazy-claude-a", title="New chat", provider="claude",
         messages=[], agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="lazy-claude-b", title="New chat", provider="claude",
         messages=[], agent_settings_json={"effort": "high"},
       ),
-      models.Chat(
+      create_chat(
         id="queued-claude", title="New chat", provider="claude", messages=[],
         pending_messages=[{"role": "user", "content": "queued"}],
         session_id="claude-session", agent_settings_json=None,
       ),
-      models.Chat(
+      create_chat(
         id="actual-claude", title="Used", provider="claude",
         messages=[{"role": "user", "content": "review"}],
         agent_settings_json={"drawer_hidden": False},
       ),
-      models.Chat(
+      create_chat(
         id="codex-app", title="Panel", provider="codex", messages=[],
         created_by_app_id=7, agent_settings_json={"system_prompt": "Panel"},
       ),
-      models.Chat(
+      create_chat(
         id="explicit", title="Pinned", provider="codex", messages=[],
         agent_settings_json={"model": "gpt-5.5"},
       ),
-      models.Chat(
+      create_chat(
         id="deleted", title="Deleted", provider="codex", messages=[],
         agent_settings_json=None, deleted_at=datetime(2026, 8, 29),
       ),
@@ -3949,7 +4010,7 @@ def test_post_explicit_model_repair_preserves_only_genuine_first_install_chat(
     session.add(models.Owner(
       username="owner", hashed_password="hash", provider="claude",
     ))
-    session.add(models.Chat(
+    session.add(create_chat(
       id="first-chat", title="New chat", provider="claude",
       messages=[], agent_settings_json=None,
     ))
@@ -4008,8 +4069,8 @@ def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
     session.add(app)
     session.flush()
     session.add_all([
-      models.Chat(id="incorporation-parent", messages=[]),
-      models.Chat(
+      create_chat(id="incorporation-parent", messages=[]),
+      create_chat(
         id="incorporation-child", messages=[], created_by_app_id=app.id,
       ),
     ])
@@ -4078,9 +4139,9 @@ def test_result_identity_migration_marks_the_delivered_result_by_child_run(
     )
     session.add(app)
     session.flush()
-    session.add(models.Chat(id="identity-parent", messages=[]))
+    session.add(create_chat(id="identity-parent", messages=[]))
     for name in ("delivered", "incorporated", "owed", "prestart"):
-      session.add(models.Chat(
+      session.add(create_chat(
         id=f"identity-{name}", messages=[], created_by_app_id=app.id,
       ))
       session.flush()
@@ -4391,24 +4452,24 @@ def test_model_selection_id_migration_updates_active_choices_only(
         "keep": {"sibling": True},
       },
     )
-    parent = models.Chat(
+    parent = create_chat(
       id="model-parent", title="Parent", messages=[],
       agent_settings_json={
         "model": "claude-opus-4-5-20251001", "effort": "medium",
       },
     )
-    child = models.Chat(
+    child = create_chat(
       id="model-child", title="Child", messages=[],
       agent_settings_json={"model": "claude-future-9"},
     )
-    deleted = models.Chat(
+    deleted = create_chat(
       id="model-deleted", title="Deleted", messages=[],
       deleted_at=datetime(2026, 9, 1),
       agent_settings_json={
         "model": "claude-sonnet-4-7-20251215", "keep": "history",
       },
     )
-    malformed = models.Chat(
+    malformed = create_chat(
       id="model-malformed", title="Malformed", messages=[],
       agent_settings_json=["not", "a", "mapping"],
     )
@@ -4481,7 +4542,7 @@ def test_legacy_project_cutover_never_links_chat_to_deleted_project(
       name="Web Studio", description="", jsx_source="", slug="webstudio",
       source_dir=str(data_dir / "apps" / "webstudio"),
     )
-    chat = models.Chat(id="legacy-live-chat", title="Live", messages=[])
+    chat = create_chat(id="legacy-live-chat", title="Live", messages=[])
     db.add_all([app, chat])
     db.commit()
     db.refresh(app)

@@ -1,7 +1,11 @@
+from app import transcript_rows
+from sqlalchemy.orm import object_session
+from app.chat_writer import create_chat
 # backend/tests/test_lifecycle.py
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import uuid
+import pytest
 
 from app import browser_profiles, chat_retention, chat_search, models
 from app.chat_retention import purge_expired_chat_tombstones
@@ -113,7 +117,7 @@ def test_hard_purge_removes_durable_waits(db, chat):
 
 def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
   """A deleted peer cannot leave dangling incoming or outgoing mail."""
-  peer = models.Chat(id="retained-peer", title="Peer", messages=[])
+  peer = create_chat(id="retained-peer", title="Peer", messages=[])
   db.add(peer)
   db.flush()
   db.add_all([
@@ -146,14 +150,15 @@ def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
   assert db.query(models.ChatActivityPosition).count() == 0
 
 
+@pytest.mark.converted_chats  # Search finds a converted chat's prose.
 def test_hard_purge_removes_derived_search_transcript_without_later_search(
   db, chat,
 ):
-  chat.messages = [{
+  transcript_rows.replace_all(object_session(chat), chat, [{
     "role": "user",
     "content": "retentioncassowary searchable transcript",
     "ts": 1000,
-  }]
+  }])
   db.commit()
   assert any(
     result["id"] == chat.id
@@ -165,18 +170,12 @@ def test_hard_purge_removes_derived_search_transcript_without_later_search(
   db.commit()
   purge_expired_chat_tombstones(db)
 
-  assert db.execute(
-    chat_search.sql(
-      "SELECT count(*) FROM chat_search_docs WHERE chat_id = :chat_id"
-    ),
-    {"chat_id": chat_id},
-  ).scalar_one() == 0
-  assert db.execute(
-    chat_search.sql(
-      "SELECT count(*) FROM chat_search_state WHERE chat_id = :chat_id"
-    ),
-    {"chat_id": chat_id},
-  ).scalar_one() == 0
+  from sqlalchemy import text
+  for table in ("chat_search_entries", "chat_messages"):
+    assert db.execute(
+      text(f"SELECT count(*) FROM {table} WHERE chat_id = :chat_id"),
+      {"chat_id": chat_id},
+    ).scalar_one() == 0
 
 
 def test_expired_tombstone_purge_does_not_hydrate_transcript_json(
@@ -184,7 +183,7 @@ def test_expired_tombstone_purge_does_not_hydrate_transcript_json(
 ):
   """The retention sweep selects tombstone ids, not complete Chat entities."""
   chat_id = chat.id
-  chat.messages = [{"role": "user", "content": "large transcript sentinel"}]
+  transcript_rows.replace_all(object_session(chat), chat, [{"role": "user", "content": "large transcript sentinel"}])
   chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
   # Remove the fixture entity from this session so an accidental
@@ -223,7 +222,7 @@ def test_new_delete_reclaims_older_expired_tombstones(
 ):
   """An explicit delete is the runtime lifecycle boundary for old tombstones."""
   expired_id = str(uuid.uuid4())
-  db.add(models.Chat(
+  db.add(create_chat(
     id=expired_id,
     title="Expired tombstone",
     messages=[],
@@ -242,7 +241,7 @@ def test_new_delete_reclaims_older_expired_tombstones(
 def test_old_empty_chat_survives_drawer_reads(client, db, auth):
   """Age and empty content do not imply owner intent to delete a chat."""
   chat_id = str(uuid.uuid4())
-  db.add(models.Chat(
+  db.add(create_chat(
     id=chat_id,
     title="Old empty chat",
     messages=[],

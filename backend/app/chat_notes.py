@@ -1,16 +1,17 @@
 """Canonical readers for platform-owned per-chat continuity notes.
 
-Chat summaries are Markdown, so the cumulative ``## Summary`` may legitimately
-contain its own level-two headings (notably when a provider-free fallback
-preserves assistant prose).  The platform sections, not arbitrary Markdown
-headings, define the note boundary.  Keep that rule in one place so context
-inspection and provider handoff cannot disagree about what the summary is.
+A note holds the short, replaceable ``## Summary`` and the append-only full
+``## Digest``. The digest is Markdown and may legitimately contain its own
+level-two headings (notably when a provider-free fallback preserved assistant
+prose), so the platform sections, not arbitrary Markdown headings, define its
+boundary. Keep that rule in one place so context inspection and provider
+handoff cannot disagree about what the digest is.
 """
 
 from __future__ import annotations
 
 
-_SUMMARY_TERMINATORS = frozenset({"facts & intent", "related"})
+_DIGEST_TERMINATORS = frozenset({"facts & intent", "related"})
 
 
 def extract_section(
@@ -42,6 +43,20 @@ def extract_section(
   return value or None
 
 
-def extract_cumulative_summary(text: str) -> str | None:
-  """Read Summary through the next platform-owned peer section."""
-  return extract_section(text, "Summary", terminators=_SUMMARY_TERMINATORS)
+def extract_chat_summary(text: str) -> str | None:
+  """Read the short, replaceable chat summary.
+
+  The note keeps it above ``## Digest``, whose Markdown may contain its own
+  ``## Summary`` headings, so only the part above the digest is read.
+  """
+  lines = text.splitlines()
+  digest_at = next(
+    (index for index, line in enumerate(lines) if line.strip().lower() == "## digest"),
+    len(lines),
+  )
+  return extract_section("\n".join(lines[:digest_at]), "Summary")
+
+
+def extract_full_digest(text: str) -> str | None:
+  """Read the full digest through the next platform-owned peer section."""
+  return extract_section(text, "Digest", terminators=_DIGEST_TERMINATORS)

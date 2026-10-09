@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
-const SCREEN_COUNT = 11
+const SCREEN_COUNT = 12
 
 // Keep the browser's first-run requests inside this isolated test case.
 test.use({ serviceWorkers: 'block' })
@@ -178,4 +178,58 @@ test('an access check that returns after the owner moved on does not open a revi
   release()
   await expect(guide.getByRole('heading', { name: /Build useful/ })).toBeVisible()
   await expect(page.getByRole('alertdialog')).toHaveCount(0)
+})
+
+async function stubIdentity(page, identity) {
+  let current = identity
+  await page.route(/\/api\/identity$/, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(current) }))
+  await page.route(/\/api\/identity\/profile$/, route => {
+    current = { ...current, profile: { ...current.profile, handle: route.request().postDataJSON().handle } }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(current) })
+  })
+}
+
+const linked = handle => ({ account_mode: 'linked', profile: { handle, display_name: 'Ada', avatar_url: null } })
+
+test('an owner who arrives with a handle is welcomed back and can skip to agent setup', async ({ page }) => {
+  await stubIdentity(page, linked('ada'))
+  const { guide } = await openGuide(page)
+  await expect(guide.getByRole('note')).toContainText('Welcome back, @ada.')
+  // While the handle form is open, the note and the skip step aside together.
+  await guide.getByRole('button', { name: 'Change', exact: true }).click()
+  await expect(guide.getByRole('note')).toHaveCount(0)
+  await expect(guide.getByRole('button', { name: 'Skip to agent setup' })).toHaveCount(0)
+  await guide.getByRole('button', { name: 'Cancel' }).click()
+  await expect(guide.getByRole('note')).toContainText('Welcome back, @ada.')
+  await guide.getByRole('button', { name: 'Skip to agent setup' }).click()
+  await expect(guide.getByRole('heading', { name: /Bring your/ })).toBeFocused()
+})
+
+test('claiming a handle in the guide does not turn a new owner into a returning one', async ({ page }) => {
+  await stubIdentity(page, linked(null))
+  const { guide } = await openGuide(page)
+  await expect(guide.getByRole('note')).toHaveCount(0)
+  await guide.getByLabel('Choose your handle').fill('ada')
+  await guide.getByRole('button', { name: 'Claim handle' }).click()
+  await expect(guide.getByText('@ada')).toBeVisible()
+  await expect(guide.getByRole('note')).toHaveCount(0)
+  await expect(guide.getByRole('button', { name: 'Skip to agent setup' })).toHaveCount(0)
+  // Leaving the screen and coming back keeps it that way.
+  await guide.getByRole('button', { name: 'Continue' }).click()
+  await guide.getByRole('button', { name: 'Back' }).click()
+  await expect(guide.getByRole('note')).toHaveCount(0)
+})
+
+test('a short desktop window keeps the chat preview reachable instead of squashing it', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 640 })
+  const { guide } = await openGuide(page)
+  await goToScreen(guide, 'Meet your agent')
+  const preview = guide.locator('.wt-chatmock')
+  // Layout pixels: the shell zooms the page on desktop, which would skew an on-screen measurement.
+  expect(await preview.evaluate(element => element.offsetHeight)).toBeGreaterThanOrEqual(334)
+  const composer = guide.locator('.wt-chatmock__composer')
+  await composer.scrollIntoViewIfNeeded()
+  await expect(composer).toBeInViewport()
+  const [inner, outer] = [await composer.boundingBox(), await preview.boundingBox()]
+  expect(inner.y + inner.height).toBeLessThanOrEqual(outer.y + outer.height + 1)
 })

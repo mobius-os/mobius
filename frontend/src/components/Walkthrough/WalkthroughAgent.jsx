@@ -4,7 +4,7 @@
    one agent handles different requests. */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import BrainUsageIcon from '../ChatView/BrainUsageIcon.jsx'
-import { ChevronDown, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, FileDocument, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
 import { PROVIDER_INFO } from '../ChatView/providerRegistry.jsx'
 import EffortStepper from '../ui/EffortStepper.jsx'
 import ActivityLineHeader from '../ChatView/ActivityLineHeader.jsx'
@@ -16,12 +16,14 @@ import '../ChatView/ChatView.css'
 import '../ChatView/QuestionCard.css'
 import { Typewriter, useLoopingTimeline, usePrefersReducedMotion } from './WalkthroughMotion.jsx'
 import { Touch, fingerPath } from './WalkthroughTouch.jsx'
+import { ComposerAction } from './WalkthroughChrome.jsx'
 
-const CHAT_PROMPT = 'Build me an app to track my expenses'
-// blank · tap the brain · picker opens (the finger waits) · finger glides to the row · tap the row · chosen · typing · thinking · building · done (ms each).
-// One finger runs through phases 1 to 5: it arrives at the brain and presses, waits while the picker opens, glides to the row, presses, and fades.
-const CHAT_PHASES = [400, 1100, 450, 450, 450, 500, 2400, 1500, 2000, 4200]
-const PHASE = { blank: 0, tapBrain: 1, open: 2, aim: 3, tapRow: 4, chosen: 5, typing: 6, thinking: 7, building: 8, done: 9 }
+const CHAT_PROMPT = 'Build an expense tracker app and load in my latest receipts'
+const CHAT_FILE = 'receipts.pdf'
+// blank · tap the brain · picker opens · finger glides to the model row · tap · chosen · glides up to Attach files ·
+// tap · file attached · typing · thinking · building · done (ms each). One finger runs through phases 1 to 7.
+const CHAT_PHASES = [400, 1100, 450, 450, 450, 500, 800, 450, 1100, 2400, 1500, 2000, 4200]
+const PHASE = { blank: 0, tapBrain: 1, open: 2, aim: 3, tapRow: 4, chosen: 5, aimAttach: 6, tapAttach: 7, attached: 8, typing: 9, thinking: 10, building: 11, done: 12 }
 // Rows as the real picker lists them (connected providers in order, Codex then Claude); Opus 4.8 gets chosen.
 const PICKER_MODELS = [
   { name: 'GPT-5.6-Sol', provider: 'codex' },
@@ -45,12 +47,15 @@ function ExpensesApp() {
 export function AgentChatDemo() {
   const phase = useLoopingTimeline(CHAT_PHASES)
   const modelChosen = phase >= PHASE.chosen
-  const pickerOpen = phase >= PHASE.open && phase <= PHASE.chosen
+  const pickerOpen = phase >= PHASE.open && phase <= PHASE.tapAttach
+  const tray = phase >= PHASE.attached && phase < PHASE.thinking
   const chatRef = useRef(null)
   const brainRef = useRef(null)
   const rowRef = useRef(null)
+  const attachRef = useRef(null)
   const [brainPos, setBrainPos] = useState(null)
   const [rowPos, setRowPos] = useState(null)
+  const [attachPos, setAttachPos] = useState(null)
 
   // The brain is measured before the finger appears, and the row once the picker is open, so the
   // finger never starts from a stale or default position.
@@ -59,25 +64,35 @@ export function AgentChatDemo() {
     if (!chat) return
     if (phase === PHASE.blank && brainRef.current) setBrainPos(fingerPath(brainRef.current, chat))
     else if (phase === PHASE.open && rowRef.current) setRowPos(fingerPath(rowRef.current, chat))
+    // The picker grows upward once the model's effort stepper appears, which moves Attach files, so
+    // it is measured only now, when the finger is about to go there.
+    else if (phase === PHASE.aimAttach && attachRef.current) setAttachPos(fingerPath(attachRef.current, chat))
   }, [phase])
   // The finger glides to the row as soon as the picker is open, lands, and only then presses (tapRow);
   // the row is selected after that press (chosen).
-  const finger = phase >= PHASE.aim ? rowPos || brainPos : brainPos
+  const finger = phase >= PHASE.aimAttach ? attachPos || rowPos : phase >= PHASE.aim ? rowPos || brainPos : brainPos
 
-  return <div className="wt-chatmock" role="img" aria-label="Looping demo of the Möbius chat. You pick a model from the brain button, ask for an expense tracker, the agent builds it, and the finished app opens beside the conversation.">
+  return <div className="wt-chatmock" role="img" aria-label="Looping demo of the Möbius chat. You pick a model from the brain button, attach a receipts PDF with Attach files, and ask for an expense tracker. The agent reads the file and builds it, and the finished app opens beside the conversation.">
     <div className="wt-chatmock__chat" ref={chatRef} aria-hidden="true">
       <div className="wt-chatmock__log">
-        {phase >= PHASE.thinking && <div className="wt-user">{CHAT_PROMPT}</div>}
+        {phase >= PHASE.thinking && <div className="wt-sent">
+          <div className="chat__attachments chat__attachments--documents"><div className="chat__attach-files wt-sent__files"><span className="chat__attach-file"><FileDocument width={12} height={12} aria-hidden="true" /><span className="chat__attach-file-name">{CHAT_FILE}</span><span className="chat__attach-file-size">86KB</span></span></div></div>
+          <div className="wt-user">{CHAT_PROMPT}</div>
+        </div>}
         {phase >= PHASE.thinking && <div className="chat__tools wt-steps">
           {phase === PHASE.thinking && <div className="chat__activity chat__activity--running"><ActivityLineHeader text="Thinking" displayState="running" iconKind="reasoning" /></div>}
           {phase >= PHASE.building && <div className="chat__activity"><ActivityLineHeader text="Thought for 2 seconds" displayState="done" iconKind="reasoning" /></div>}
+          {phase >= PHASE.building && <div className="chat__activity"><ActivityLineHeader text={`Read ${CHAT_FILE}`} displayState="done" iconKind="files" /></div>}
           {phase === PHASE.building && <div className="chat__activity chat__activity--running"><ActivityLineHeader text="Building Expenses" displayState="running" iconKind="terminal" /></div>}
         </div>}
-        {phase >= PHASE.done && <div className="chat__text chat__text--assistant wt-native">I built Expenses and opened it beside our chat. Log your spending and see where it goes.</div>}
-        {!modelChosen && !pickerOpen && <p className="wt-chatmock__hint">Pick a model to start chatting.</p>}
+        {phase >= PHASE.done && <div className="chat__text chat__text--assistant wt-native">Done! Expenses is open beside our chat, with your latest receipts already added.</div>}
+        {phase < PHASE.thinking && <div className="wt-landing">
+          <img className="chat__empty-glyph" src="/moebius.png" alt="" width="52" height="52" draggable={false} />
+          <p className="chat__empty-title">What&apos;s on your mind?</p>
+        </div>}
       </div>
       {pickerOpen && <div className="wt-picker">
-        <div className="wt-picker__attach">
+        <div ref={attachRef} className={`wt-picker__attach${phase >= PHASE.tapAttach ? ' is-aimed' : ''}`}>
           <span className="wt-picker__logo"><Paperclip width={18} height={18} /></span>
           <span className="wt-picker__text"><strong>Attach files</strong><small>Images, PDFs, code</small></span>
         </div>
@@ -100,12 +115,20 @@ export function AgentChatDemo() {
       </div>}
       <div className="wt-chatmock__composer">
         <span ref={brainRef} className={`wt-brainbtn${pickerOpen ? ' is-open' : ''}`}><BrainUsageIcon leftPercent={modelChosen ? 14 : null} rightPercent={modelChosen ? 6 : null} width={34} height={34} /></span>
-        <span className={`wt-pill${phase === PHASE.typing ? ' is-focused' : ''}`}>
-          <span className="wt-pill__text">{phase === PHASE.typing ? <Typewriter key="type" text={CHAT_PROMPT} speed={42} startDelay={120} /> : <span className="wt-pill__placeholder">{modelChosen ? 'Message Möbius…' : 'Choose a model to start…'}</span>}</span>
-          {phase === PHASE.typing ? <span className="wt-send is-armed">↑</span> : MIC}
+        <span className={`wt-pill${phase === PHASE.typing || phase === PHASE.attached ? ' is-focused' : ''}${tray ? ' wt-pill--attach' : ''}`}>
+          {tray && <div className="chat__attach-tray"><div className="chat__attach-card chat__attach-card--file">
+            <span className="chat__attach-card-icon chat__attach-card-icon--pdf">PDF</span>
+            <span className="chat__attach-card-name">receipts</span>
+            <span className="wt-attach-size">86 kB</span>
+            <span className="chat__attach-card-remove" aria-hidden="true">×</span>
+          </div></div>}
+          <span className="wt-pill__line">
+            <span className="wt-pill__text">{phase === PHASE.typing ? <Typewriter key="type" text={CHAT_PROMPT} speed={42} startDelay={120} reserve={false} placeholder="Message Möbius…" /> : <span className="wt-pill__placeholder">Message Möbius…</span>}</span>
+            <ComposerAction kind={phase === PHASE.typing ? 'send' : phase >= PHASE.thinking && phase < PHASE.done ? 'stop' : 'mic'} />
+          </span>
         </span>
       </div>
-      {phase >= PHASE.tapBrain && phase <= PHASE.chosen && finger && <Touch x={finger.x} y={finger.y} from={finger.from} second={phase >= PHASE.tapRow} out={phase === PHASE.chosen} />}
+      {phase >= PHASE.tapBrain && phase <= PHASE.attached && finger && <Touch x={finger.x} y={finger.y} from={finger.from} second={phase >= PHASE.tapRow && phase < PHASE.tapAttach} out={phase === PHASE.attached} />}
     </div>
     <div className="wt-chatmock__pane" aria-hidden="true">
       {phase >= PHASE.done
@@ -209,7 +232,7 @@ function HelpResult() {
 }
 
 const REQUESTS = [
-  { id: 'remind', summary: 'The agent asks when to send the reminder. The first option, tomorrow at 9:00 AM, gets picked and the agent confirms it.', short: 'Set a reminder', label: 'Remind me to call Mom', tools: [['search', 'Checked your calendar'], ['plan', 'Asked when to remind you'], ['edit', 'Saved the reminder']], Result: ReminderResult },
+  { id: 'remind', summary: 'The agent asks when to send the reminder. The first option, tomorrow at 9:00 AM, gets picked and the agent confirms it.', short: 'Set a reminder', label: 'Remind me to send the invoice', tools: [['search', 'Checked your calendar'], ['plan', 'Asked when to remind you'], ['edit', 'Saved the reminder']], Result: ReminderResult },
   { id: 'look', summary: 'The agent answers: go in late March to early April for cherry blossoms, or mid November for autumn leaves, and book about a month ahead. It cites three references.', short: 'Look something up', label: 'Look up the best time to visit Kyoto', tools: [['web', 'Searched the web'], ['files', 'Read 3 pages'], ['edit', 'Wrote the answer']], Result: LookupResult },
   { id: 'help', summary: 'The agent works through a goal to plan a weekend trip to Lisbon: find flights and a hotel, plan each day, and save the itinerary. The goal completes.', short: 'Plan a big task', label: 'Plan a weekend trip to Lisbon', tools: [['search', 'Looked up flights and hotels'], ['plan', 'Planned the days'], ['edit', 'Saved the itinerary']], Result: HelpResult },
 ]
@@ -217,7 +240,6 @@ const REQUESTS = [
 const TYPE_START = 500
 const STEP_DELAYS = [TYPE_START + 1500, 450, 1000, 1100]
 const newRun = (key, reduced) => ({ key, shown: reduced ? STEP_DELAYS.length : 0, typed: false, finger: null })
-const MIC = <span className="wt-pill__action" aria-hidden="true"><svg className="wt-mic" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg></span>
 
 /* One real-looking Möbius chat. Tap a suggestion and it is typed and sent from the composer, then
    the conversation unfolds the way it does for real: your message, a Thinking line once the agent
@@ -283,9 +305,9 @@ export function AgentBrainFlow() {
         <span className="wt-brainbtn"><BrainUsageIcon leftPercent={14} rightPercent={6} width={34} height={34} /></span>
         <span className={`wt-pill${typing && typeStarted ? ' is-focused' : ''}`}>
           <span className="wt-pill__text">{typing && typeStarted
-            ? <Typewriter key={`${selected}-${run}`} text={request.label} speed={32} startDelay={0} />
+            ? <Typewriter key={`${selected}-${run}`} text={request.label} speed={32} startDelay={0} reserve={false} placeholder="Message Möbius…" />
             : <span className="wt-pill__placeholder">Message Möbius…</span>}</span>
-          {typing && typeStarted ? <span className="wt-send is-armed">↑</span> : MIC}
+          <ComposerAction kind={typing && typeStarted ? 'send' : shown > 0 && !done ? 'stop' : 'mic'} />
         </span>
       </div>
     </div>

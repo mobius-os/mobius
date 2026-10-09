@@ -7,6 +7,7 @@ obvious and prevents current schema work from disappearing into boot plumbing.
 """
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -1369,10 +1370,13 @@ def mapped_schema_gaps(eng) -> list[str]:
       gaps.append(f"{table.name} (missing table)")
       continue
     live = {column["name"] for column in inspector.get_columns(table.name)}
+    # `chats.messages` is the previous release's transcript column, kept as
+    # a derived mirror while it exists. The next release drops it; this
+    # release must still serve that database (transcript_rows.legacy_present).
     gaps.extend(
       f"{table.name}.{column.name}"
       for column in table.columns
-      if column.name not in live
+      if column.name not in live and not column.info.get("legacy_transcript")
     )
   return gaps
 
@@ -6047,6 +6051,283 @@ def _move_chat_media_out_of_generated(eng) -> None:
       )
 
 
+def _swap_chat_note_sections(eng) -> None:
+  """Name each chat note's sections for what they hold.
+
+  ``## Digest`` used to hold the short, replaceable chat summary and
+  ``## Summary`` the append-only full record. Each note keeps its content and
+  order; the two platform headings the old readers recognised (the first line
+  of each) trade names, and the recovery-coverage hash key follows the full
+  record. Every note is first copied to ``backups/chat-notes-before-0083`` and
+  each rewrite derives from that copy, so a crash part-way reruns to the same
+  result; ``0086_drop_chat_note_backup`` deletes the copy once this is
+  recorded. A note that is not valid UTF-8 is still renamed, byte for byte,
+  rather than stopping boot.
+  """
+  import shutil
+
+  del eng
+  root = Path(os.environ.get("DATA_DIR", "/data"))
+  chats_dir = root / "shared" / "memory" / "chats"
+  backup = root / "backups" / "chat-notes-before-0083"
+  complete = backup / ".complete"
+  renamed = {"## digest": "## Summary", "## summary": "## Digest"}
+
+  def swapped(note: str) -> str:
+    lines = note.split("\n")
+    body_start = 0
+    if note.startswith("---\n"):
+      end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+      if end is not None:
+        body_start = end + 1
+        for i in range(1, end):
+          if lines[i].startswith("recovery_coverage:"):
+            lines[i] = lines[i].replace('"summary_sha256"', '"digest_sha256"')
+    seen: set[str] = set()
+    for i in range(body_start, len(lines)):
+      key = lines[i].strip().lower()
+      if key in renamed and key not in seen:
+        seen.add(key)
+        lines[i] = renamed[key]
+    return "\n".join(lines)
+
+  if not complete.exists():
+    shutil.rmtree(backup, ignore_errors=True)
+    for note in chats_dir.glob("*/index.md"):
+      target = backup / note.parent.name / "index.md"
+      target.parent.mkdir(parents=True, exist_ok=True)
+      shutil.copy2(note, target)
+    backup.mkdir(parents=True, exist_ok=True)
+    complete.touch()
+  for saved in backup.glob("*/index.md"):
+    live = chats_dir / saved.parent.name / "index.md"
+    if not live.parent.is_dir():
+      continue
+    temporary = live.with_name(".index.migrating")
+    note = saved.read_text(encoding="utf-8", errors="surrogateescape")
+    temporary.write_text(swapped(note), encoding="utf-8", errors="surrogateescape")
+    os.replace(temporary, live)
+
+
+def _drop_chat_note_backup(eng) -> None:
+  """Delete the note copy ``0083_swap_chat_note_sections`` made.
+
+  The copy only made a crash during that migration safe to rerun. The ledger
+  records it first, and keeping the copy would let a purged chat's note
+  outlive the chat.
+  """
+  import shutil
+
+  del eng
+  root = Path(os.environ.get("DATA_DIR", "/data"))
+  shutil.rmtree(root / "backups" / "chat-notes-before-0083", ignore_errors=True)
+
+
+def _add_transcript_rows(eng, *, reconvert_all: bool = False) -> None:
+  """Install the schema half of per-message transcript storage.
+
+  This adds what the ORM does not own (creating the ORM-owned transcript
+  tables too when run without ``create_all``), idempotently and in one
+  transaction:
+
+  * search entries (titles at seq -1, prose rows) with their FTS5 index;
+  * triggers keeping those entries current for every writer, including the
+    previous release, and removing every transcript-derived row with its
+    chat (``chats_deleted``; the connection never enforces foreign keys);
+  * while the previous release's ``chats.messages`` exists,
+    ``chats_messages_written``, which clears a chat's conversion marker
+    (``models.ChatTranscriptState``) whenever any writer updates that column.
+    Existing chats start unconverted; transcript_rows converts them without
+    blocking boot.
+
+  ``reconvert_all`` (boot repair only, never the ledgered run) also clears
+  every conversion marker in the same transaction; see
+  ``ensure_transcript_triggers``.
+
+  The previous release ignores all of this: it adds no column to ``chats``,
+  and every trigger names only columns that release maps. SQLite only, the
+  shipped persistence runtime.
+  """
+  prose_flag = 32  # transcript_rows.PROSE when this migration was written
+  # Titles are stored stripped, as the previous search index stored them.
+  whitespace = "char(32, 9, 10, 11, 12, 13)"
+
+  if eng.dialect.name != "sqlite":
+    raise RuntimeError(
+      f"transcript rows require SQLite; unsupported database: {eng.dialect.name}"
+    )
+  prose_entry = (
+    "INSERT INTO chat_search_entries (chat_id, seq, ts, role, text) "
+    "SELECT NEW.chat_id, NEW.seq, "
+    "CASE WHEN json_type(NEW.ts) = 'integer' THEN CAST(NEW.ts AS INTEGER) END, "
+    f"NEW.role, json_extract(NEW.body, '$.content') WHERE NEW.flags & {prose_flag}; "
+  )
+  title_entry = (
+    "DELETE FROM chat_search_entries WHERE chat_id = NEW.id AND seq = -1; "
+    "INSERT INTO chat_search_entries (chat_id, seq, text) "
+    f"SELECT NEW.id, -1, trim(NEW.title, {whitespace}) "
+    f"WHERE coalesce(trim(NEW.title, {whitespace}), '') <> ''; "
+  )
+  with eng.begin() as conn:
+    tables = {row[0] for row in conn.exec_driver_sql(
+      "SELECT name FROM sqlite_master WHERE type = 'table'"
+    )}
+    if "chats" not in tables:
+      return  # A partial schema without chats has no transcripts to own.
+    # create_all normally made these first (models.ChatMessage,
+    # ChatTranscriptState, ChatTranscriptDamage); the same DDL, frozen here,
+    # lets the migration stand alone.
+    for statement in (
+      "CREATE TABLE IF NOT EXISTS chat_messages (chat_id VARCHAR(64) NOT NULL, "
+      "seq INTEGER NOT NULL, message_key TEXT, message_id TEXT, client_id TEXT, "
+      "role TEXT, ts TEXT, flags INTEGER NOT NULL, body TEXT NOT NULL, "
+      "PRIMARY KEY (chat_id, seq), "
+      "FOREIGN KEY(chat_id) REFERENCES chats (id) ON DELETE CASCADE)",
+      "CREATE INDEX IF NOT EXISTS ix_chat_messages_message_key "
+      "ON chat_messages (chat_id, message_key)",
+      "CREATE INDEX IF NOT EXISTS ix_chat_messages_client_id "
+      "ON chat_messages (chat_id, client_id)",
+      "CREATE TABLE IF NOT EXISTS chat_transcript_state (chat_id VARCHAR(64) NOT NULL, "
+      "PRIMARY KEY (chat_id), "
+      "FOREIGN KEY(chat_id) REFERENCES chats (id) ON DELETE CASCADE)",
+      "CREATE TABLE IF NOT EXISTS chat_transcript_damage (id INTEGER NOT NULL, "
+      "chat_id VARCHAR(64) NOT NULL, raw BLOB NOT NULL, error TEXT NOT NULL, "
+      "recorded_at DATETIME NOT NULL, PRIMARY KEY (id), "
+      "FOREIGN KEY(chat_id) REFERENCES chats (id) ON DELETE CASCADE)",
+      "CREATE INDEX IF NOT EXISTS ix_chat_transcript_damage_chat_id "
+      "ON chat_transcript_damage (chat_id)",
+    ):
+      conn.exec_driver_sql(statement)
+    columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(chats)")}
+    legacy = "messages" in columns
+    statements = [
+      "CREATE TABLE IF NOT EXISTS chat_search_entries ("
+      "id INTEGER PRIMARY KEY, chat_id VARCHAR(64) NOT NULL, seq INTEGER NOT NULL, "
+      "ts BIGINT, role TEXT, text TEXT NOT NULL)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_chat_search_entries_position "
+      "ON chat_search_entries (chat_id, seq)",
+      "CREATE VIRTUAL TABLE IF NOT EXISTS chat_search_entries_fts USING fts5("
+      "text, content='chat_search_entries', content_rowid='id', "
+      "tokenize='unicode61 remove_diacritics 2')",
+      "CREATE TRIGGER IF NOT EXISTS chat_search_entries_ai AFTER INSERT ON chat_search_entries "
+      "BEGIN INSERT INTO chat_search_entries_fts(rowid, text) VALUES (NEW.id, NEW.text); END",
+      "CREATE TRIGGER IF NOT EXISTS chat_search_entries_ad AFTER DELETE ON chat_search_entries "
+      "BEGIN INSERT INTO chat_search_entries_fts(chat_search_entries_fts, rowid, text) "
+      "VALUES ('delete', OLD.id, OLD.text); END",
+      "CREATE TRIGGER IF NOT EXISTS chat_messages_ai AFTER INSERT ON chat_messages "
+      f"BEGIN {prose_entry}END",
+      "CREATE TRIGGER IF NOT EXISTS chat_messages_ad AFTER DELETE ON chat_messages "
+      "BEGIN DELETE FROM chat_search_entries WHERE chat_id = OLD.chat_id AND seq = OLD.seq; END",
+      "CREATE TRIGGER IF NOT EXISTS chat_messages_au AFTER UPDATE ON chat_messages "
+      "BEGIN DELETE FROM chat_search_entries WHERE chat_id = OLD.chat_id AND seq = OLD.seq; "
+      f"{prose_entry}END",
+      "CREATE TRIGGER IF NOT EXISTS chats_title_ai AFTER INSERT ON chats "
+      f"BEGIN {title_entry}END",
+      "CREATE TRIGGER IF NOT EXISTS chats_title_au AFTER UPDATE OF title ON chats "
+      f"BEGIN {title_entry}END",
+    ]
+    if legacy:
+      statements += [
+        "CREATE TRIGGER IF NOT EXISTS chats_messages_written "
+        "AFTER UPDATE OF messages ON chats "
+        "BEGIN DELETE FROM chat_transcript_state WHERE chat_id = NEW.id; END",
+      ]
+    deleted = (
+      "DELETE FROM chat_messages WHERE chat_id = OLD.id; "
+      "DELETE FROM chat_search_entries WHERE chat_id = OLD.id; "
+      "DELETE FROM chat_transcript_damage WHERE chat_id = OLD.id; "
+      + "".join(
+        # The previous release's own search index: hard-deleted prose must
+        # not outlive its chat there either.
+        f"DELETE FROM {table} WHERE chat_id = OLD.id; "
+        for table in ("chat_search_docs", "chat_search_state") if table in tables
+      )
+      + "DELETE FROM chat_transcript_state WHERE chat_id = OLD.id; "
+    )
+    statements.append(
+      f"CREATE TRIGGER IF NOT EXISTS chats_deleted AFTER DELETE ON chats BEGIN {deleted}END"
+    )
+    for statement in statements:
+      conn.exec_driver_sql(statement)
+    if reconvert_all and legacy:
+      # Writes made while chats_messages_written was missing left their
+      # markers behind; chats.messages is exact in every case (this
+      # release's mirror or the previous release's newer write).
+      conn.exec_driver_sql("DELETE FROM chat_transcript_state")
+    # Titles are read from before the legacy column, so this never reads a
+    # transcript; prose entries arrive as each chat converts.
+    conn.exec_driver_sql(
+      "INSERT OR IGNORE INTO chat_search_entries (chat_id, seq, text) "
+      f"SELECT id, -1, trim(title, {whitespace}) FROM chats "
+      f"WHERE coalesce(trim(title, {whitespace}), '') <> ''"
+    )
+
+
+# Triggers that keep transcript-derived data and the previous release's
+# change detection correct. Losing one (a later table rebuild drops a table's
+# triggers) would silently stop detecting the previous release's writes.
+TRANSCRIPT_TRIGGERS = (
+  "chats_messages_written", "chats_deleted", "chats_title_ai", "chats_title_au",
+  "chat_messages_ai", "chat_messages_ad", "chat_messages_au",
+  "chat_search_entries_ai", "chat_search_entries_ad",
+)
+
+
+def ensure_transcript_triggers(eng) -> list[str]:
+  """Reinstall missing transcript triggers from 0087's frozen DDL; boot-time.
+
+  The ledger never reruns 0087, so this one-``sqlite_master``-read check is
+  what keeps the triggers present while the previous release's column
+  exists. Returns the names it found missing (normally none).
+  """
+  from sqlalchemy import inspect as sa_inspect
+
+  if eng.dialect.name != "sqlite" or "chats" not in sa_inspect(eng).get_table_names():
+    return []
+  with eng.connect() as conn:
+    if "messages" not in {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(chats)")}:
+      return []
+    present = {row[0] for row in conn.exec_driver_sql(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+    )}
+  missing = [name for name in TRANSCRIPT_TRIGGERS if name not in present]
+  if missing:
+    detection_lost = "chats_messages_written" in missing
+    logging.getLogger(__name__).warning(
+      "reinstalling missing transcript triggers: %s%s", ", ".join(missing),
+      "; every chat will be re-converted from chats.messages, because the "
+      "previous release's writes went undetected while it was missing"
+      if detection_lost else "",
+    )
+    _add_transcript_rows(eng, reconvert_all=detection_lost)
+    _repair_transcript_derived_rows(eng)
+  return missing
+
+
+def _repair_transcript_derived_rows(eng) -> None:
+  """Bring derived rows back in line after triggers were missing.
+
+  Chats hard-deleted while ``chats_deleted`` was missing left their rows,
+  search entries, damage records and markers behind, and titles changed
+  while a title trigger was missing left stale entries. Both are derived
+  data, so they are removed and the title entries rebuilt from ``chats``;
+  prose entries follow their rows, which conversion maintains.
+  """
+  whitespace = "char(32, 9, 10, 11, 12, 13)"
+  with eng.begin() as conn:
+    for table in ("chat_messages", "chat_search_entries", "chat_transcript_damage",
+                  "chat_transcript_state"):
+      conn.exec_driver_sql(
+        f"DELETE FROM {table} WHERE chat_id NOT IN (SELECT id FROM chats)"
+      )
+    conn.exec_driver_sql("DELETE FROM chat_search_entries WHERE seq = -1")
+    conn.exec_driver_sql(
+      "INSERT INTO chat_search_entries (chat_id, seq, text) "
+      f"SELECT id, -1, trim(title, {whitespace}) FROM chats "
+      f"WHERE coalesce(trim(title, {whitespace}), '') <> ''"
+    )
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -6148,6 +6429,11 @@ _SCHEMA_MIGRATIONS = (
   ("0083_retire_quiet_write_sessions", _retire_quiet_write_sessions),
   ("0084_chat_media_directory", _move_chat_media_out_of_generated),
   ("0085_app_shell_shortcuts", _add_app_shell_shortcuts),
+  # Shipped to an instance under this id before 0084/0085 existed; renumbering
+  # would rerun it there and swap the headings back.
+  ("0083_swap_chat_note_sections", _swap_chat_note_sections),
+  ("0086_drop_chat_note_backup", _drop_chat_note_backup),
+  ("0087_transcript_rows", _add_transcript_rows),
 )
 
 

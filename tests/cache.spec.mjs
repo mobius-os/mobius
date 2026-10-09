@@ -88,6 +88,35 @@ async function visitChat(page, chatId) {
   })
 }
 
+/** Whether IndexedDB holds the chat's own detail entry in the restorable
+ *  shape ChatView paints from (queryClient.js persister, chatDetailCache.js
+ *  `restorationWindowComplete`). The chat id alone is not enough: the chat
+ *  list entry also contains it. */
+async function hasPersistedChatDetail(page, chatId) {
+  return page.evaluate((id) => new Promise(resolve => {
+    const req = indexedDB.open('keyval-store')
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains('keyval')) {
+        db.close(); resolve(false); return
+      }
+      const get = db.transaction('keyval', 'readonly')
+        .objectStore('keyval').get('mobius-query-cache')
+      get.onsuccess = () => {
+        db.close()
+        const queries = get.result?.clientState?.queries || []
+        resolve(queries.some(q => (
+          q.queryKey?.[0] === 'chat-messages'
+          && String(q.queryKey[1]) === id
+          && q.state?.data?.restorationWindowComplete === true
+        )))
+      }
+      get.onerror = () => { db.close(); resolve(false) }
+    }
+    req.onerror = () => resolve(false)
+  }), chatId)
+}
+
 // ---------------------------------------------------------------------------
 
 // These tests mock the network via page.route and assert no service-worker
@@ -135,9 +164,10 @@ test.describe('Chat messages cache (TanStack Query)', () => {
             || document.querySelector('.chat__form')),
       { timeout: 10000 }
     )
-    // Wait long enough for the initial fetch to resolve AND for the
-    // persister's 1-second throttle to flush to IndexedDB.
-    await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
+    // The shell (composer) mounts before chat A's detail read answers, and
+    // the persister writes at most once per second. Leaving before chat A's
+    // own entry reaches IndexedDB would make the return visit a cold load.
+    await expect.poll(() => hasPersistedChatDetail(page, chatA)).toBe(true)
 
     // Navigate to chat B.
     await visitChat(page, chatB)
@@ -147,37 +177,10 @@ test.describe('Chat messages cache (TanStack Query)', () => {
             || document.querySelector('.chat__form')),
       { timeout: 10000 }
     )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
 
-    // Verify that the cache actually got populated for chat A. We
-    // peek at the IndexedDB persister key — `mobius-query-cache`.
-    const cacheHasChatA = await page.evaluate(async (id) => {
-      // Open idb-keyval's default store and read the persister payload.
-      const dbName = 'keyval-store'
-      const storeName = 'keyval'
-      return new Promise(resolve => {
-        const req = indexedDB.open(dbName)
-        req.onsuccess = () => {
-          const db = req.result
-          if (!db.objectStoreNames.contains(storeName)) {
-            db.close(); resolve(false); return
-          }
-          const tx = db.transaction(storeName, 'readonly')
-          const get = tx.objectStore(storeName).get('mobius-query-cache')
-          get.onsuccess = () => {
-            db.close()
-            const blob = get.result
-            // Persister stores a JSON-serializable cache snapshot.
-            const serialized = JSON.stringify(blob || {})
-            resolve(serialized.includes(id))
-          }
-          get.onerror = () => { db.close(); resolve(false) }
-        }
-        req.onerror = () => resolve(false)
-      })
-    }, chatA)
-
-    expect(cacheHasChatA).toBe(true)
+    // Chat B's page restored chat A's entry and persists it again; the next
+    // load reads whatever this page last wrote.
+    expect(await hasPersistedChatDetail(page, chatA)).toBe(true)
 
     // Block the chat A messages fetch so we can prove the cache served.
     await page.route(`**/api/chats/${chatA}**`, route => route.abort())

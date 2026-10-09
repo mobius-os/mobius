@@ -1,4 +1,5 @@
 """Manual Resume attribution stays product-owned while providers can continue."""
+from app import transcript_rows
 
 import pytest
 from pydantic import ValidationError
@@ -67,7 +68,7 @@ def test_delayed_resume_cannot_restart_an_automatically_superseded_turn(
   with SessionLocal() as db:
     current = db.get(models.Chat, cid)
     assert [row["cid"] for row in current.pending_messages] == ["b"]
-    assert all(row.get("cid") != "late-manual" for row in current.messages)
+    assert all(row.get("cid") != "late-manual" for row in list(transcript_rows.history(current)))
     assert db.query(models.ChatRun).filter_by(chat_id=cid).count() == 2
 
 
@@ -115,7 +116,7 @@ def test_manual_resume_retry_preserves_queue_and_original_authority(
   with SessionLocal() as db:
     current = db.get(models.Chat, cid)
     assert [row["cid"] for row in current.pending_messages] == ["b"]
-    assert all(row.get("cid") != "manual-a" for row in current.messages)
+    assert all(row.get("cid") != "manual-a" for row in list(transcript_rows.history(current)))
     resumed = db.get(models.ChatRun, calls[0]["run_token"])
     assert resumed.continuation_json == {
       "reason": "manual",
@@ -206,7 +207,7 @@ def test_legacy_resume_without_cid_gets_a_fresh_control_identity(
     assert len(calls) == 2
     assert calls[0]["run_token"] != calls[1]["run_token"]
     with SessionLocal() as db:
-      assert [row["cid"] for row in db.get(models.Chat, chat.id).messages] == ["owner"]
+      assert [row["cid"] for row in list(transcript_rows.history(db.get(models.Chat, chat.id)))] == ["owner"]
   finally:
     chat_mod.discard_starting(chat.id)
 
@@ -233,7 +234,7 @@ def test_provider_only_resume_preserves_durable_goal_without_transcript_control(
     goal_id = original.goal_id
     goal = db.get(models.ChatGoal, goal_id)
     goal.status = goal_status
-    before = list(db.get(models.Chat, chat.id).messages)
+    before = list(transcript_rows.history(db.get(models.Chat, chat.id)))
     db.commit()
 
   result = writer.submit(StartTurn(
@@ -248,7 +249,7 @@ def test_provider_only_resume_preserves_durable_goal_without_transcript_control(
     assert run.continuation_json["goal_id"] == goal_id
     assert db.get(models.ChatGoal, goal_id).status == "open"
     assert db.query(models.ChatGoal).filter_by(chat_id=chat.id).count() == 1
-    assert db.get(models.Chat, chat.id).messages == before
+    assert list(transcript_rows.history(db.get(models.Chat, chat.id))) == before
     assert "Verify recovery" in resume_context(db, run.id)
   assert result["history"][-1].content
 
@@ -341,7 +342,7 @@ def test_resume_notice_belongs_only_to_first_visible_answer_across_pages(
   ).json()
   assert first_page["messages"][0]["continuation_reason"] == reason
   db.refresh(db.get(models.Chat, chat_id))
-  assert all("continuation_reason" not in message for message in db.get(models.Chat, chat_id).messages)
+  assert all("continuation_reason" not in message for message in list(transcript_rows.history(db.get(models.Chat, chat_id))))
 
 
 def test_resume_notice_cannot_borrow_a_run_from_another_chat_or_invalid_segment(

@@ -1,4 +1,5 @@
 """A helper's delivered result is its report, not its progress narration."""
+from app import transcript_rows
 import asyncio
 from types import SimpleNamespace
 
@@ -48,7 +49,7 @@ def test_wake_notice_delivers_report_not_narration(chat, db, separator, terminal
     db.expire_all()
     saved = db.get(models.Chat, chat.id)
     # The child transcript keeps the full narration as evidence.
-    assert NARRATION.strip() in saved.messages[-1]['content']
+    assert NARRATION.strip() in transcript_rows.at(db, saved, -1)['content']
     row = models.Delegation(id='result-helper', parent_chat_id='parent',
                             child_chat_id=chat.id, task_key='inspect')
     notice = _compose_wake_notice(db, [row], {row.id: TOKEN})
@@ -59,11 +60,16 @@ def test_wake_notice_delivers_report_not_narration(chat, db, separator, terminal
   asyncio.run(scenario())
 
 
-def test_result_keeps_latest_text_and_error_with_content_only_fallback():
-  chat = SimpleNamespace(messages=[{'role': 'assistant', 'content': 'old narration + report',
-    'blocks': [{'type': 'text', 'content': 'old narration'},
-               {'type': 'text', 'content': 'report'},
-               {'type': 'error', 'message': 'Provider stopped'}]}])
+def test_result_keeps_latest_text_and_error_with_content_only_fallback(db):
+  from app.chat_writer import create_chat
+  chat = create_chat(id='result-fallback', title='helper', messages=[
+    {'role': 'assistant', 'content': 'old narration + report',
+     'blocks': [{'type': 'text', 'content': 'old narration'},
+                {'type': 'text', 'content': 'report'},
+                {'type': 'error', 'message': 'Provider stopped'}]}])
+  db.add(chat)
+  db.commit()
   assert _assistant_result(chat) == 'report\n\nProvider stopped'
-  chat.messages = [{'role': 'assistant', 'content': 'Legacy content-only report'}]
+  transcript_rows.replace_all(db, chat, [{'role': 'assistant', 'content': 'Legacy content-only report'}])
+  db.commit()
   assert _assistant_result(chat) == 'Legacy content-only report'

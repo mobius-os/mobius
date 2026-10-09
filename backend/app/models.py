@@ -14,6 +14,7 @@ separate encrypted app-secrets API.
 """
 
 import secrets
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -22,7 +23,8 @@ from sqlalchemy import (
   true,
 )
 
-from sqlalchemy.orm import column_property, relationship, validates
+from sqlalchemy.types import TypeDecorator
+from sqlalchemy.orm import column_property, deferred, relationship, validates
 
 from app.database import Base
 from app.shell_install_pass import ShellInstallPassGrant
@@ -201,11 +203,20 @@ class Chat(Base):
   # then never overwrites it. A clear-title PATCH resets it to false so the name
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
-  messages = Column(JSON, nullable=False, default=list)
+  # The previous release's whole-transcript JSON. Message rows are the
+  # authority; while this column exists, transcript_rows rewrites it from the
+  # rows in the same transaction as every row change, so the previous image
+  # can be rolled back to at any time. Never loaded or ORM-updated. It has no
+  # default of either kind: the legacy NOT NULL column is supplied by
+  # chat_writer.create_chat while it exists, and a database whose column the
+  # next release dropped must never see it in an INSERT (or its RETURNING).
+  # See TRANSCRIPT_STORAGE_DESIGN.md.
+  legacy_messages = deferred(Column(
+    "messages", JSON, nullable=False, info={"legacy_transcript": True},
+  ))
   # Drawer/list reads need only to know whether a transcript is empty. Keeping
-  # that fact beside the blob prevents every chat-list request from scanning
-  # every stored transcript. All runtime transcript writes flow through normal
-  # ORM assignment or the two explicit bulk paths in chat_writer.
+  # that fact beside scalar metadata avoids transcript reads in chat lists.
+  # Row mutations update this flag through chat_writer's domain commands.
   has_messages = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
@@ -326,10 +337,6 @@ class Chat(Base):
     DateTime, nullable=True, default=lambda: datetime.now(UTC)
   )
 
-  @validates("messages")
-  def _sync_has_messages(self, _key, value):
-    self.has_messages = bool(value)
-    return value
 
 
 class ChatGoal(Base):
@@ -1684,6 +1691,23 @@ class AppActivityState(Base):
   unseen = Column(Boolean, nullable=False, default=True, server_default=true())
 
 
+class AppBadgeState(Base):
+  """The unread count an installed app reports for its sidebar row.
+
+  The app owns this number (like the web Badging API): it knows what is
+  actually unread, so the shell never derives it from notifications. Kept
+  outside ``apps`` so a count change never advances ``App.updated_at``, the
+  executable-bundle cache key. Contract and serialization: ``app_badge``.
+  """
+
+  __tablename__ = "app_badge_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  count = Column(Integer, nullable=False)
+  # The app's state revision for this count; NULL after an unrevisioned report.
+  revision = Column(Integer, nullable=True)
+
+
 class AppRecencyState(Base):
   """Durable last-opened timestamp for one installed app.
 
@@ -2105,3 +2129,85 @@ class ChatActivityPosition(Base):
   chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
   event_id = Column(String(128), primary_key=True)
   position = Column(JSON, nullable=True)
+
+
+class TranscriptJSONText(TypeDecorator):
+  """Exact JSON text for transcript bodies.
+
+  SQLite gives a column declared JSON numeric affinity, which turns 1.0 into
+  1 and loses large-integer precision. TEXT keeps the encoder's exact bytes;
+  the legacy mirror concatenates these bytes, so they must be default
+  ``json.dumps`` output (a JSON null body is the text ``null``).
+  """
+  impl = Text
+  cache_ok = True
+
+  def process_bind_param(self, value, _dialect):
+    return json.dumps(value)
+
+  def process_result_value(self, value, _dialect):
+    return json.loads(value) if value is not None else None
+
+
+class TranscriptJSONProjection(TranscriptJSONText):
+  """An exact JSON scalar projection; absent (or JSON null) is SQL NULL."""
+  cache_ok = True
+
+  def process_bind_param(self, value, _dialect):
+    return None if value is None else json.dumps(value)
+
+
+class ChatMessage(Base):
+  """One unchanged transcript item; position, not optional identity, is its key.
+
+  Projections are lookup hints derived from ``body`` by
+  ``transcript_rows.attributes``. ``body`` stays the last column so scans of
+  the small projections never read a large body's overflow pages. Deleting a
+  chat removes its rows through the ``chats_deleted`` trigger (both images).
+  """
+  __tablename__ = "chat_messages"
+  __table_args__ = (
+    Index("ix_chat_messages_message_key", "chat_id", "message_key"),
+    Index("ix_chat_messages_client_id", "chat_id", "client_id"),
+  )
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+  seq = Column(Integer, primary_key=True)
+  # json.dumps(str(body["id"])): the indexed equality key for id lookups.
+  message_key = Column(Text, nullable=True)
+  # The exact id value (any JSON type) for identity coordinates.
+  message_id = Column(TranscriptJSONProjection, nullable=True)
+  # The exact cid, or for a cid-less legacy user row its derived legacy-<ts>
+  # identity (chat_writer.cid_of, flagged DERIVED_CID): one equality lookup.
+  client_id = Column(TranscriptJSONProjection, nullable=True)
+  role = Column(Text, nullable=True)
+  ts = Column(TranscriptJSONProjection, nullable=True)
+  flags = Column(Integer, nullable=False, default=0)
+  body = Column(TranscriptJSONText, nullable=False)
+
+
+class ChatTranscriptState(Base):
+  """Release-1 conversion marker: a row means this chat's rows are authoritative.
+
+  While the previous release's ``chats.messages`` exists, the schema trigger
+  ``chats_messages_written`` deletes the row whenever any writer updates that
+  column, and transcript_rows re-inserts it after its own mirror update. A
+  chat without a row is converted from ``chats.messages`` before its rows are
+  used. Unused once the column is gone (the next release drops this table).
+  """
+  __tablename__ = "chat_transcript_state"
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+
+
+class ChatTranscriptDamage(Base):
+  """Exact bytes of a legacy transcript that was not a JSON message list.
+
+  Written in the same transaction that replaces the chat's rows with a visible
+  recovery placeholder, so the original is never lost. Removed only with its
+  chat.
+  """
+  __tablename__ = "chat_transcript_damage"
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+  raw = Column(LargeBinary, nullable=False)
+  error = Column(Text, nullable=False)
+  recorded_at = Column(DateTime, nullable=False, default=now_naive_utc)

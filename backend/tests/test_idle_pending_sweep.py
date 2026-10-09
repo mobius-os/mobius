@@ -1,4 +1,6 @@
 """Recovery of old pending queues with no durable or in-memory run owner."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 import time
@@ -23,7 +25,7 @@ def _seed_pending(
   now_ms = int(time.time() * 1000)
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id,
       title="pending",
       provider="claude",
@@ -83,7 +85,7 @@ def _read(chat_id: str):
         if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES
         else None
       ),
-      list(chat.messages or []),
+      list(transcript_rows.history(chat)),
       list(chat.pending_messages or []),
     )
   finally:
@@ -195,7 +197,7 @@ def test_idle_pending_sweep_candidate_query_does_not_load_transcripts(
   chat_id = "idle-empty-large-transcript"
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="large but idle",
       provider="codex",
@@ -317,7 +319,7 @@ def test_idle_pending_sweep_finds_queues_without_reading_transcripts(monkeypatch
   _seed_pending(chat_id, age_secs=180)
   db = SessionLocal()
   try:
-    db.add(models.Chat(id="idle-empty-queue", title="empty", provider="claude",
+    db.add(create_chat(id="idle-empty-queue", title="empty", provider="claude",
                        messages=[{"role": "user", "content": "x", "ts": 1}]))
     db.commit()
   finally:

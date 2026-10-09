@@ -1,4 +1,5 @@
 """Tests for app-scoped token creation and enforcement."""
+from app.chat_writer import create_chat
 
 import io
 
@@ -375,7 +376,7 @@ def test_app_token_can_access_own_storage_regardless_of_share(
 def test_app_token_cannot_upload_to_chat(client, owner_token, db):
   """App tokens must not be able to upload files to chats."""
   from app import models
-  chat = models.Chat(id="upload-test", title="test", messages=[])
+  chat = create_chat(id="upload-test", title="test", messages=[])
   db.add(chat)
   db.commit()
 
@@ -391,7 +392,7 @@ def test_app_token_cannot_upload_to_chat(client, owner_token, db):
 def test_app_token_cannot_delete_upload(client, owner_token, db):
   """App tokens must not be able to delete chat uploads."""
   from app import models
-  chat = models.Chat(id="del-test", title="test", messages=[])
+  chat = create_chat(id="del-test", title="test", messages=[])
   db.add(chat)
   db.commit()
 

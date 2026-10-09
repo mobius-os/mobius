@@ -4,6 +4,7 @@ These cover the gaps the expanded review surfaced: a soft-delete leaving a stale
 "running" run record, a hard purge orphaning run records (no FK cascade on
 SQLite), and the boot orphan sweep masking a destructive reconcile that failed.
 """
+from app.chat_writer import create_chat
 
 from datetime import UTC, datetime
 
@@ -18,7 +19,7 @@ from app.timeutil import SOFT_DELETE_TTL
 def _seed_chat(chat_id, *, messages=None, deleted_at=None):
   db = SessionLocal()
   try:
-    c = models.Chat(
+    c = create_chat(
       id=chat_id, title="t", messages=messages or [], pending_messages=[],
       session_id="sess", provider="claude",
     )

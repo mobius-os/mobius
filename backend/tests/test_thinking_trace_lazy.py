@@ -1,4 +1,5 @@
 """Deferred reasoning storage, bounded wire events, and lazy read endpoint."""
+from app.chat_writer import create_chat
 import time
 import uuid
 
@@ -87,7 +88,7 @@ def test_broadcast_coalesces_thinking_deltas_in_replay_log():
 
 def test_thinking_trace_endpoint_serves_exact_full_text(client, auth, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.add(models.ThinkingTrace(
         chat_id=chat_id, thinking_id="think-x", content="full reasoning",
         revision=14, complete=True,
@@ -107,7 +108,7 @@ def test_thinking_trace_endpoint_serves_exact_full_text(client, auth, db):
 def test_thinking_trace_endpoint_bounds_expansion_preview(client, auth, db):
     chat_id = str(uuid.uuid4())
     content = "reasoning\n" * (THINKING_TRACE_PREVIEW_CHARS // 10 + 1000)
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.add(models.ThinkingTrace(
         chat_id=chat_id,
         thinking_id="think-large",
@@ -133,7 +134,7 @@ def test_thinking_trace_endpoint_404s_when_settled_and_missing(
     client, auth, db,
 ):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     r = client.get(
         f"/api/chats/{chat_id}/thinking-trace/missing?revision=1",

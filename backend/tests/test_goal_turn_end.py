@@ -3,12 +3,15 @@
 One targeted clean-ending settlement pass replaces unattended normal idleness.
 It never fabricates owner questions, shrinks scope or recovers physical failure.
 """
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 from tests.goal_fixtures import goal_run as make_goal_run
 
 import pytest
 
 from app import models
+from app.chat_writer import create_chat
 from app.chat_writer import PromotePending, StartTurn, get_writer
 
 
@@ -45,7 +48,7 @@ def _add_goal_run(db, chat, run_id="goal-run", *, goal_id="goal-run", plan=UNFIN
 def _question_blocks(chat):
   return [
     block
-    for message in chat.messages or []
+    for message in list(transcript_rows.history(chat)) or []
     for block in message.get("blocks") or []
     if block.get("type") == "question"
   ]
@@ -95,7 +98,7 @@ async def test_clean_goal_ending_keeps_exact_responsibility_in_one_settlement_pa
   assert recovery.goal_id == "goal-run"
   assert recovery.continuation_json["reason"] == "goal_settlement"
   assert recovery.status == "running"
-  assert not any(message.get("kind") == "continuation" for message in saved.messages)
+  assert not any(message.get("kind") == "continuation" for message in transcript_rows.history(saved))
 
 
 def test_queue_promotion_without_exact_ending_authority_never_starts_a_goal(db, chat):
@@ -247,7 +250,7 @@ def test_goal_settlement_requires_the_current_writer_token(db, chat, owner):
 def test_goal_settlement_preserves_delegation_authority(db, chat, state):
   from datetime import UTC, datetime
   _add_goal_run(db, chat)
-  db.add(models.Chat(id="parent", title="Parent", messages=[]))
+  db.add(create_chat(id="parent", title="Parent", messages=[]))
   delegation = models.Delegation(
     id="helper", parent_chat_id="parent", parent_root_run_id="parent-root",
     task_key="bounded-task", child_chat_id=chat.id, provider="codex",
@@ -310,7 +313,7 @@ async def test_second_unhanded_ending_preserves_goal_and_records_durable_recover
   assert db.get(models.ChatGoal, "goal-run").status == "open"
   assert db.get(models.ChatRun, token).status == "failed"
   assert any(block.get("code") == "goal_settlement_unfinished"
-             for message in db.get(models.Chat, chat.id).messages
+             for message in transcript_rows.history(db.get(models.Chat, chat.id))
              for block in message.get("blocks") or [])
 
 
@@ -420,14 +423,14 @@ def test_an_armed_wait_does_not_block_completion_and_keeps_watching(db, chat):
 
 def test_an_open_owner_card_does_not_block_completion(db, chat):
   _add_goal_run(db, chat, plan=SETTLED)
-  chat.messages = [*chat.messages, {
+  transcript_rows.replace_all(object_session(chat), chat, [*list(transcript_rows.history(chat)), {
     "role": "assistant", "id": "goal-run:assistant:1", "ts": 2, "content": "",
     "blocks": [{
       "type": "question", "question_id": "merge-approval",
       "response_mode": "continuation",
       "questions": [{"id": "q", "question": "Merge it?", "options": []}],
     }],
-  }]
+  }])
   chat.pending_question_id = "merge-approval"
   db.commit()
 
@@ -520,7 +523,7 @@ def test_a_lone_legacy_goal_handoff_is_retired_unrun(db, chat):
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_messages == []
   assert not any(
-    "Continue the unfinished Goal" in str(m.get("content")) for m in saved.messages
+    "Continue the unfinished Goal" in str(m.get("content")) for m in list(transcript_rows.history(saved))
   )
   assert db.get(models.ChatRun, "successor") is None
 
@@ -542,7 +545,7 @@ def test_a_legacy_goal_handoff_behind_owner_input_never_runs(db, chat):
   saved = db.get(models.Chat, chat.id)
   assert saved.pending_messages == []
   assert not any(
-    "Continue the unfinished Goal" in str(m.get("content")) for m in saved.messages
+    "Continue the unfinished Goal" in str(m.get("content")) for m in list(transcript_rows.history(saved))
   )
 
 

@@ -1,4 +1,6 @@
 """Browser initiator attribution survives provider admission and queue boundaries."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from types import SimpleNamespace
 
@@ -46,7 +48,7 @@ def test_run_lineage_revalidation_and_guest_steer_boundary(tmp_path):
     db.add(owner)
     db.commit()
     grant, _ = link_grant(db, owner, 'guest')
-    chat = models.Chat(id='chat')
+    chat = create_chat(id='chat')
     db.add(chat)
     db.add(models.ChatRun(
       id='run', chat_id='chat', root_run_id='run', status='running',
@@ -81,8 +83,8 @@ async def test_revoke_stop_rechecks_current_run_and_preserves_queue(tmp_path, mo
   factory = sessionmaker(bind=eng)
   monkeypatch.setattr(database, 'SessionLocal', factory)
   with factory() as db:
-    db.add(models.Chat(id='guest-chat'))
-    db.add(models.Chat(id='owner-chat'))
+    db.add(create_chat(id='guest-chat'))
+    db.add(create_chat(id='owner-chat'))
     db.add(models.ChatRun(
       id='guest-run', chat_id='guest-chat', status='running',
       browser_grant_id='grant',
@@ -146,7 +148,7 @@ def test_revoked_guest_head_is_terminal_without_blocking_owner(tmp_path):
     db.add(owner)
     db.commit()
     grant, _ = link_grant(db, owner, 'guest')
-    chat = models.Chat(id='mixed-chat', provider='claude')
+    chat = create_chat(id='mixed-chat', provider='claude')
     guest = {
       'role': 'user', 'content': 'guest text', 'cid': 'guest-cid', 'ts': 1,
       '_browser_grant_id': grant.id
@@ -164,7 +166,7 @@ def test_revoked_guest_head_is_terminal_without_blocking_owner(tmp_path):
     ))
     assert result['promoted']['content'] == 'owner text'
     db.expire(chat)
-    assert [row['content'] for row in chat.messages] == ['owner text']
+    assert [row['content'] for row in list(transcript_rows.history(chat))] == ['owner text']
     assert len(chat.pending_messages) == 1
     rejected = chat.pending_messages[0]
     assert rejected['content'] == 'guest text'
@@ -185,7 +187,7 @@ def test_explicit_rejection_keeps_owner_queue_bytes(tmp_path):
              'ts': 1, '_browser_grant_id': 'revoked-grant'}
     owner = {'role': 'user', 'content': 'owner must continue', 'cid': 'owner',
              'ts': 2}
-    db.add(models.Chat(id='chat', pending_messages=[guest, owner]))
+    db.add(create_chat(id='chat', pending_messages=[guest, owner]))
     db.commit()
     actor = ChatWriterActor(session_factory=lambda: db)
     assert actor._reject_browser_pending(db, RejectBrowserPending(
@@ -209,7 +211,7 @@ def test_revoked_grant_cannot_commit_start_turn_after_launch_race(tmp_path):
   with Session(eng) as db:
     owner = models.Owner(username='owner', hashed_password='unused')
     db.add(owner)
-    db.add(models.Chat(id='chat'))
+    db.add(create_chat(id='chat'))
     db.commit()
     grant, _ = link_grant(db, owner, 'guest')
     revoke_grant(db, grant.id, owner.id)
@@ -222,7 +224,7 @@ def test_revoked_grant_cannot_commit_start_turn_after_launch_race(tmp_path):
       ))
     db.rollback()
     assert db.get(models.ChatRun, 'late-run') is None
-    assert db.get(models.Chat, 'chat').messages == []
+    assert list(transcript_rows.history(db.get(models.Chat, 'chat'))) == []
 
 
 def test_guest_submitted_child_under_owner_run_retains_guest_lineage(tmp_path):
@@ -230,7 +232,7 @@ def test_guest_submitted_child_under_owner_run_retains_guest_lineage(tmp_path):
   models.Base.metadata.create_all(eng)
   with Session(eng) as db:
     owner = models.Owner(username='owner', hashed_password='unused')
-    db.add_all((owner, models.Chat(id='parent')))
+    db.add_all((owner, create_chat(id='parent')))
     db.add(models.ChatRun(id='owner-run', chat_id='parent', status='running',
                           root_run_id='owner-run'))
     db.commit()
@@ -297,7 +299,7 @@ def test_exact_goal_resume_inherits_target_grant_not_intervening_owner_run(tmp_p
     db.commit()
     grant, _ = link_grant(db, owner, 'guest')
     base = datetime.now(UTC)
-    db.add(models.Chat(id='chat', messages=[{'role': 'user', 'content': 'Work', 'ts': 1}]))
+    db.add(create_chat(id='chat', messages=[{'role': 'user', 'content': 'Work', 'ts': 1}]))
     db.add(models.ChatGoal(id='goal', chat_id='chat', objective='Finish work', status='stopped', revision=3))
     db.add(models.ChatRun(
       id='target', chat_id='chat', root_run_id='target', status='completed',
@@ -339,7 +341,7 @@ def test_guest_cannot_resume_retained_owner_goal_through_its_intervening_run(tmp
     db.commit()
     grant, _ = link_grant(db, owner, 'guest')
     base = datetime.now(UTC)
-    db.add(models.Chat(id='chat'))
+    db.add(create_chat(id='chat'))
     db.add(models.ChatGoal(id='goal', chat_id='chat', objective='Owner work', status='stopped', revision=3))
     db.add(models.ChatRun(id='target', chat_id='chat', root_run_id='target', status='completed',
       goal_id='goal', goal_objective='Owner work', started_at=base))

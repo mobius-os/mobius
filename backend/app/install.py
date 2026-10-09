@@ -76,6 +76,7 @@ from app.manifest_contract import (
   REQUIRED_STRING_FIELDS,
   ManifestContractError,
   package_bytes,
+  package_limit_message,
   python_lock,
   skill_member_paths,
   static_asset_entries,
@@ -1601,6 +1602,46 @@ def package_content_digest_from_git(
     return package_content_digest_from_tree(tree)
 
 
+def read_recorded_update_source(
+  source_dir: str | Path, candidate_tree: Mapping[str, bytes],
+) -> dict[str, bytes]:
+  """Read installed runtime source without applying incoming-package rules.
+
+  Historical manifests may predate validation and size limits. If one cannot
+  be read safely, use the candidate's runtime paths plus the entry. Otherwise
+  include prior declared sources too, so previews preserve deletions. Only
+  this old/new runtime-path union is materialized, never old assets or other
+  repository files. Callers hold the source lock.
+  """
+  with app_git.open_ref_tree(source_dir, app_git.UPSTREAM_BRANCH) as tree:
+    paths = set(candidate_tree) | {"index.jsx"}
+    if "mobius.json" not in tree:
+      # Pre-manifest imports recorded runtime source directly, not a clone.
+      # Keep that source set so a dropped legacy module remains an update.
+      paths.update(set(tree) - _MERGED_NON_SOURCE)
+    raw_manifest = tree.get("mobius.json")
+    manifest = None
+    if (
+      raw_manifest is not None
+      and _package_input_size(raw_manifest) <= _MANIFEST_MAX_BYTES
+    ):
+      try:
+        manifest = json.loads(_package_input_bytes(raw_manifest))
+      except (OSError, RuntimeError, ValueError):
+        pass
+    if isinstance(manifest, dict):
+      sources = manifest.get("source_files")
+      if isinstance(sources, list):
+        paths.update(rel for rel in sources if isinstance(rel, str))
+      schedule = manifest.get("schedule")
+      if isinstance(schedule, dict) and isinstance(schedule.get("job"), str):
+        paths.add(schedule["job"])
+    return {
+      rel: _package_input_bytes(data)
+      for rel, data in tree.items() if rel in paths and data is not None
+    }
+
+
 def _git_runtime_source_tree(
   source_dir: str | Path,
   commit: str,
@@ -2378,6 +2419,14 @@ class InstallCandidate:
   canonical_source_url: str = ""
 
 
+class PackageTooLarge(ValueError):
+  """A Git package exceeds its manifest or declared-input size bound.
+
+  A `ValueError`, so callers that treat any unusable candidate as unknown keep
+  doing so, while preview and apply can tell the owner the actual reason.
+  """
+
+
 @dataclass(frozen=True)
 class GitInstallCandidate:
   """One complete install package read from one immutable Git commit."""
@@ -2403,6 +2452,15 @@ class GitInstallCandidate:
     if self.candidate.bundled_job is not None and isinstance(schedule, dict):
       tree[schedule["job"]] = self.candidate.bundled_job
     return tree
+
+
+def _reviewed_commit_has_manifest(source_dir: str | Path, commit: str) -> bool:
+  """Check manifest presence without confusing a Git failure with absence."""
+  proc = app_git._run(
+    Path(source_dir), "ls-tree", "--name-only", f"{commit}^{{commit}}",
+    "--", "mobius.json", read_only=True,
+  )
+  return "mobius.json" in proc.stdout.splitlines()
 
 
 def _reviewed_git_package_commit(source_dir: str | Path, commit: str) -> str:
@@ -2440,6 +2498,30 @@ class _GitPackageInputs:
     )
 
 
+def _read_git_package_manifest(
+  tree: Mapping[str, PackageContentBytes | None], *, strict: bool,
+) -> dict:
+  """Validate a Git manifest, checking its metadata before materialization."""
+  raw_manifest = tree.get("mobius.json")
+  if raw_manifest is None:
+    raise ValueError("candidate Git tree is missing manifest mobius.json")
+  size = _package_input_size(raw_manifest)
+  if size > _MANIFEST_MAX_BYTES:
+    raise PackageTooLarge(
+      f"This app's mobius.json is {size} bytes, more than the "
+      f"{_MANIFEST_MAX_BYTES} byte manifest limit.",
+    )
+  try:
+    manifest = json.loads(_package_input_bytes(raw_manifest))
+  except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    raise ValueError("candidate Git manifest is invalid") from exc
+  if strict:
+    _validate_manifest(manifest)
+  else:
+    _validate_discovery_manifest(manifest)
+  return manifest
+
+
 def _read_git_package_inputs(
   tree: Mapping[str, PackageContentBytes | None], *, strict: bool,
 ) -> _GitPackageInputs:
@@ -2454,20 +2536,10 @@ def _read_git_package_inputs(
     except KeyError as exc:
       raise ValueError(f"candidate Git tree is missing {field} {relative}") from exc
 
-  try:
-    manifest = json.loads(_package_input_bytes(required("mobius.json", "manifest")))
-  except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-    raise ValueError("candidate Git manifest is invalid") from exc
-  if strict:
-    _validate_manifest(manifest)
-  else:
-    _validate_discovery_manifest(manifest)
+  manifest = _read_git_package_manifest(tree, strict=strict)
   size = package_bytes(manifest, lambda rel: _package_input_size(tree.get(rel)))
   if size > _PACKAGE_MAX_BYTES:
-    raise ValueError(
-      f"candidate package is {size} bytes, more than the "
-      f"{_PACKAGE_MAX_BYTES // (1024 * 1024)} MiB app package limit",
-    )
+    raise PackageTooLarge(package_limit_message(size))
 
   entry_bytes = required(manifest["entry"], "entry")
   source_files = {
@@ -2535,23 +2607,25 @@ def read_git_install_candidate(
   """Read every declared install input from one already-fetched commit."""
   repo = Path(source_dir)
   resolved = _reviewed_git_package_commit(repo, commit)
-  tree = app_git.read_ref_tree(repo, resolved)
-
-  inputs = _read_git_package_inputs(tree, strict=strict)
+  # Spool the commit rather than reading every file into memory: the package
+  # bound is checked first, then only declared inputs are materialized.
+  with app_git.open_ref_tree(repo, resolved) as tree:
+    inputs = _read_git_package_inputs(tree, strict=strict)
+    entry_bytes = _package_input_bytes(inputs.entry_bytes)
+    static_assets = {
+      key: _package_input_bytes(value) for key, value in inputs.static_assets.items()
+    }
+    source_files = {
+      key: _package_input_bytes(value) for key, value in inputs.source_files.items()
+    }
+    seeds = {
+      key: _package_input_bytes(value) for key, value in inputs.seeds.items()
+    }
+    content_digest = inputs.content_digest()
   manifest = inputs.manifest
-  entry_bytes = _package_input_bytes(inputs.entry_bytes)
   icon_processed = inputs.icon_processed
   icon_warning = inputs.icon_warning
   bundled_job = inputs.bundled_job
-  static_assets = {
-    key: _package_input_bytes(value) for key, value in inputs.static_assets.items()
-  }
-  source_files = {
-    key: _package_input_bytes(value) for key, value in inputs.source_files.items()
-  }
-  seeds = {
-    key: _package_input_bytes(value) for key, value in inputs.seeds.items()
-  }
 
   raw_base = _normalize_raw_base(
     source_url.rsplit("/mobius.json", 1)[0]
@@ -2580,7 +2654,6 @@ def read_git_install_candidate(
     source_files=source_files,
     seeds=seeds,
   )
-  content_digest = inputs.content_digest()
   return GitInstallCandidate(
     commit=resolved,
     candidate=InstallCandidate(
@@ -3991,8 +4064,8 @@ async def install_from_manifest(
       _normalize_raw_base(raw_base or "") + "mobius.json"
     )
     try:
-      candidate_tree = await asyncio.to_thread(
-        app_git.read_ref_tree, reviewed_app.source_dir, reviewed_commit,
+      has_manifest = await asyncio.to_thread(
+        _reviewed_commit_has_manifest, reviewed_app.source_dir, reviewed_commit,
       )
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
       raise HTTPException(
@@ -4009,7 +4082,7 @@ async def install_from_manifest(
     # Git commit. Legacy URL-import conflict receipts predate that invariant;
     # replay those through their existing digest guard until the one-time
     # migration population disappears.
-    if "mobius.json" not in candidate_tree and expected_upstream_commit:
+    if not has_manifest and expected_upstream_commit:
       candidate = await _fetch_install_candidate(
         manifest_url=manifest_url,
         manifest=manifest,
@@ -4030,6 +4103,10 @@ async def install_from_manifest(
           reviewed_source_url,
           source_identity=reviewed_app.source_identity,
         )
+      except PackageTooLarge as exc:
+        raise HTTPException(
+          413, detail={"code": "package_too_large", "message": str(exc)},
+        ) from exc
       except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
         raise HTTPException(
           409,

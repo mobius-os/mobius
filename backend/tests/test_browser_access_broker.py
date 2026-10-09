@@ -1,5 +1,6 @@
 """The local MCP broker cannot outlive a shared-browser grant."""
 
+from app.chat_writer import create_chat
 import asyncio
 import threading
 
@@ -218,7 +219,7 @@ def test_only_committed_access_changes_wake_open_broker_streams(tmp_path):
       slug='more', name='More', url='https://more.example/mcp',
       enabled=True, status='ok', tools_json=[], est_tokens=0,
     )), db.commit()))
-    assert not bumps(lambda: (db.add(models.Chat(id='c1', title='x')), db.commit()))
+    assert not bumps(lambda: (db.add(create_chat(id='c1', title='x')), db.commit()))
 
     # An uncommitted revocation must not wake anyone.
     def rolled_back():
@@ -261,7 +262,7 @@ def test_only_committed_access_changes_wake_open_broker_streams(tmp_path):
     other.enabled = False
     db.flush()
     with db.begin_nested():
-      db.add(models.Chat(id='c2', title='y'))
+      db.add(create_chat(id='c2', title='y'))
     assert access_signal.current_revision() == before
     db.commit()
     assert access_signal.current_revision() != before

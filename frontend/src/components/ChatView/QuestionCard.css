@@ -241,16 +241,48 @@
   transform-origin: center;
 }
 
+/* The paperclip sits beside the answer box, as in the message composer. */
+.qcard__answer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.qcard__composer {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, rgba(128,128,128,.1));
+  transition: border-color .15s, box-shadow .15s;
+}
+.qcard__composer--active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+}
+.qcard__composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+/* Files sit inside the answer box above the text, like the message composer. */
+.qcard__answer-files {
+  padding: 10px 10px 0;
+}
+.qcard__answer-files:empty {
+  display: none;
+}
+.qcard__answer-files .chat__attachments {
+  max-width: 100%;
+}
 .qcard__input {
   display: block;
   width: 100%;
   min-width: 0;
   min-height: 38px;
-  margin-top: 10px;
   padding: 10px 11px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface-2, rgba(128,128,128,.1));
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
   color: var(--text);
   font-size: 13px;
   font-family: inherit;
@@ -268,20 +300,17 @@
   overscroll-behavior-y: auto;
   resize: none;
   box-sizing: border-box;
-  transition: border-color .15s, box-shadow .15s;
+}
+
+/* The composer carries the keyboard focus ring; don't draw a second one
+   around its textarea under the global textarea:focus-visible rule. */
+.qcard__input:focus-visible {
+  outline: none;
 }
 
 .qcard__input::placeholder {
   color: var(--muted);
   opacity: .85;
-}
-.qcard__input--active {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
-}
-.qcard__input:focus,
-.qcard__input:focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .qcard__input:disabled,
 .qcard__input[readonly] {
@@ -290,6 +319,34 @@
   color: var(--muted);
   -webkit-text-fill-color: var(--muted);
   opacity: 1;
+}
+
+.qcard__file-input {
+  display: none;
+}
+.qcard__attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.qcard__attach:hover:not(:disabled) {
+  color: var(--text);
+}
+.qcard__attach:disabled {
+  cursor: default;
+  opacity: .5;
+}
+.qcard__attach:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .qcard__submit-error {
@@ -378,4 +435,14 @@
   font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+/* A grouped card's shared files sit once, at card level, below the answers. */
+.qcard--grouped > .qcard__answer-files {
+  padding: 12px 16px 0;
+}
+@media (max-width: 560px) {
+  .qcard--grouped > .qcard__answer-files {
+    padding-inline: 14px;
+  }
 }

@@ -1,3 +1,4 @@
+from app.chat_writer import create_chat
 import asyncio
 import shutil
 import threading
@@ -3186,7 +3187,7 @@ def test_run_codex_sdk_turn_persists_thread_id_before_terminal_result(
 
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id="chat-early",
       title="t",
       messages=[],
@@ -3773,7 +3774,7 @@ def test_record_collab_child_links_attributes_spawned_children(db):
   # Locks the DEFENSIVE path: on codex 0.144.5 receiver_thread_ids is always
   # empty so this never fires in production, but a future SDK that populates it
   # on a spawn op must still attribute each child thread to this chat.
-  db.add(models.Chat(
+  db.add(create_chat(
     id="collab-chat", title="t", messages=[], pending_messages=[],
     provider="codex", session_id=None,
   ))
@@ -3797,7 +3798,7 @@ def test_record_collab_child_links_attributes_spawned_children(db):
 def test_record_collab_child_links_ignores_non_spawn_ops(db):
   # sendInput / resumeAgent reference a child already recorded at its spawn;
   # they must not mint a fresh first-sight row here (gate is spawn-only).
-  db.add(models.Chat(
+  db.add(create_chat(
     id="collab-chat-2", title="t", messages=[], pending_messages=[],
     provider="codex", session_id=None,
   ))
@@ -3818,7 +3819,7 @@ def test_persist_session_id_records_codex_link(db):
   # Item 1: the persistence funnel (run on both thread_start and thread_resume)
   # records the append-only codex session->chat link alongside the actor's
   # Chat.session_id write.
-  db.add(models.Chat(
+  db.add(create_chat(
     id="codex-persist", title="t", messages=[], pending_messages=[],
     provider="codex", session_id=None,
   ))

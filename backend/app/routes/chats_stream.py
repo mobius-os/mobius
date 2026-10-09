@@ -11,8 +11,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from starlette.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
+from app import transcript_rows
 from app import activity, chat_archive, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat_event_sink import active_sink_stream_snapshot
@@ -60,6 +61,7 @@ from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.goal_commands import goal_clear_requested
 from app.owner_input import publish_owner_input_changed
+from app.upload_lifecycle import attachment_names, is_draft, sweep_expired_uploads
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -175,7 +177,7 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   # durable provider, so the model check must evaluate against that same value.
   if (
     chat.created_by_app_id is None
-    and not (chat.messages or [])
+    and not chat.has_messages
     and not (chat.pending_messages or [])
     and not is_chat_running(chat.id)
     and not is_draining()
@@ -257,8 +259,16 @@ def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
-def _content_with_uploads(chat: models.Chat, content: str) -> str:
-  """Returns message content with the session upload notice appended."""
+def _content_with_uploads(
+  chat: models.Chat, content: str, attachments: list[dict] | None = None,
+) -> str:
+  """Returns message content with the session upload notice appended.
+
+  It lists the files already sent in this chat plus this message's own
+  `attachments`, which it marks, so the agent can tell what a message or
+  answer refers to. Unsent drafts (another card's or the composer's) stay out
+  until a message carrying them is admitted.
+  """
   settings = get_settings()
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
@@ -268,18 +278,57 @@ def _content_with_uploads(chat: models.Chat, content: str) -> str:
   if "[Files in this session:" in content:
     return content
   if chat.uploads:
+    own = attachment_names(attachments)
     safe_entries = []
     for f in chat.uploads:
+      if is_draft(f) and f.get("name") not in own:
+        continue
       safe = _safe_upload_path(f['path'], settings.data_dir)
       if safe is not None:
         safe_entries.append(
           f"- {f['name']} → {safe}"
           f" ({f.get('mime_type', 'unknown')}, {round(f['size'] / 1024)} KB)"
+          + (" — attached to this message" if f.get("name") in own else "")
         )
     if safe_entries:
       lines = "\n".join(safe_entries)
       content += f"\n\n[Files in this session:\n{lines}]"
   return content
+
+
+# One answer's files, bounded before canonicalization. Composer sends keep
+# their existing (unbounded) contract; this applies to card answers only.
+MAX_QUESTION_ATTACHMENTS = 20
+
+
+def _canonical_question_attachments(
+  chat: models.Chat, attachments: list[dict] | None,
+) -> list[dict] | None:
+  """Resolve card-level file references once, before either answer path writes."""
+  if not attachments:
+    return None
+  if len(attachments) > MAX_QUESTION_ATTACHMENTS:
+    raise HTTPException(
+      status_code=422,
+      detail=f"Attach at most {MAX_QUESTION_ATTACHMENTS} files to one answer.",
+    )
+  uploads = {entry.get("name"): entry for entry in (chat.uploads or [])}
+  canonical: dict[str, dict] = {}
+  for attachment in attachments:
+    name = attachment.get("name") if isinstance(attachment, dict) else None
+    entry = uploads.get(name) if isinstance(name, str) and name else None
+    if not entry or not _safe_upload_path(entry.get("path"), get_settings().data_dir):
+      raise HTTPException(
+        status_code=409,
+        detail=f"{name if isinstance(name, str) and name else 'An attached file'} is no longer available. Remove it and attach it again.",
+      )
+    # Same shape as composer attachments: the file is addressed by name.
+    canonical.setdefault(name, {
+      "name": name,
+      "size": entry.get("size", 0),
+      "mime_type": entry.get("mime_type", "application/octet-stream"),
+    })
+  return list(canonical.values())
 
 
 async def _append_to_pending(
@@ -429,18 +478,19 @@ def _duplicate_send_response(
       # idle queue into exactly one run. A preflight acknowledgement here
       # would leave durable work parked until some later user action.
       return None
-  for row in list(chat.messages or []):
-    if row.get("role") == "user" and cid_of(row) == cid:
-      return JSONResponse(
-        status_code=200,
-        content={
-          "status": "duplicate",
-          "message": row,
-          # A retry can race a later turn. The client must not tear down that
-          # unrelated live stream while reconciling this durable message.
-          "running": is_chat_running(chat_id),
-        },
-      )
+  db = object_session(chat)
+  seq = transcript_rows.client_message_seq(db, chat, cid)
+  if seq is not None:
+    return JSONResponse(
+      status_code=200,
+      content={
+        "status": "duplicate",
+        "message": transcript_rows.at(db, chat, seq),
+        # A retry can race a later turn. The client must not tear down that
+        # unrelated live stream while reconciling this durable message.
+        "running": is_chat_running(chat_id),
+      },
+    )
   return None
 
 
@@ -451,7 +501,7 @@ def _user_message_from_body(
   """Builds the durable user message payload for a send request."""
   user_msg = {
     "role": "user",
-    "content": _content_with_uploads(chat, body.content),
+    "content": _content_with_uploads(chat, body.content, body.attachments),
     "ts": int(time.time() * 1000),
   }
   # Carry the client-minted identity when present; API clients may omit it, so
@@ -533,7 +583,7 @@ def _is_exact_agent_card_retry(
 # The answer-merge logic lives in `chat_writer.apply_answers_to_last_
 # question` and is no longer called from this route directly: C2 routes
 # every answer write through the writer actor's `AnswerQuestion` command
-# (the sole runtime mutator of `chat.messages`), and the queue append
+# (the sole runtime mutator of transcript rows), and the queue append
 # carries answers via `AppendPending`. The merge runs on the actor thread
 # so it can't lost-update against a concurrent streaming snapshot.
 
@@ -748,6 +798,8 @@ async def _send_message_impl(
   from app.platform_restart import restart_action_block
   restart_block = restart_action_block(chat, body.question_id)
   if restart_block is not None:
+    if body.attachments:
+      raise HTTPException(409, detail="A Restart card can't take files. Remove the attachment to continue.")
     selections = body.selected_options
     if not selections:
       feedback = list((body.answers or {}).values())
@@ -1027,10 +1079,18 @@ async def _send_message_impl(
           and saved_card is not None):
         body = _confine_agent_card_answer(body, saved_card)
         agent_exact_retry = _is_exact_agent_card_retry(body, saved_card)
+      body = body.model_copy(update={
+        "attachments": _canonical_question_attachments(chat, body.attachments),
+      })
       try:
         quiet_answer = bool(saved_card and questions.closes_without_reply(
           saved_card, body.answers, body.selected_options,
         ))
+      except questions.AnswerConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+      if quiet_answer and body.attachments:
+        raise HTTPException(409, detail="This choice closes the card without sending files. Remove the attachment to continue.")
+      try:
         if quiet_answer:
           await await_ack(get_writer().submit(AnswerQuestion(
             chat_id=chat_id, question_id=body.question_id,
@@ -1096,6 +1156,7 @@ async def _send_message_impl(
         event = {
           "type": "answers_applied", "question_id": body.question_id,
           "answers": body.answers,
+          "attachments": body.attachments or [],
         }
         sink = get_active_sink(chat_id)
         if sink is not None:
@@ -1109,6 +1170,10 @@ async def _send_message_impl(
           "status": "queued", "answer_turn": "queued", "message": stored,
         })
       pending = questions.get(chat_id)
+      if pending is not None and body.attachments:
+        # Provider-native parked questions are disabled for Claude and Codex;
+        # only saved cards carry files. Refuse rather than drop them.
+        raise HTTPException(409, detail="This question can't take files. Remove the attachment to continue.")
       if pending is not None:
         if (
           body.question_id is not None
@@ -1237,6 +1302,7 @@ async def _send_message_impl(
             "type": "answers_applied",
             "question_id": body.question_id,
             "answers": body.answers,
+            "attachments": body.attachments or [],
           })
       except chat_queue.PendingAdmissionBlocksPromotion as exc:
         if exc.reason == "activation":
@@ -1313,6 +1379,7 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  await sweep_expired_uploads(db, chat, attachment_names(body.attachments))
 
   if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
@@ -1843,10 +1910,12 @@ async def cancel_pending_message(
   # concurrent POST/promote can't lost-update. Returns the remaining
   # queue so the client can reconcile drift (e.g. the backend promoted a
   # message into the active turn between the click and the DELETE).
-  ack = get_writer().submit(
-    CancelPending(chat_id=chat_id, run_token="", cid=cid)
-  )
-  result = await await_ack(ack)
+  # Cancelling can release the row's uploads, so it holds the same per-chat
+  # lock as admission, upload and discard while the writer commits.
+  async with chat_queue.get_lock(chat_id):
+    result = await await_ack(get_writer().submit(
+      CancelPending(chat_id=chat_id, run_token="", cid=cid)
+    ))
   return {"pending_messages": result["pending"]}
 
 
@@ -1881,12 +1950,16 @@ async def update_pending_message(
   require_chat_embed_operation(principal, "chat:send")
   require_nondelegated_owner_control(principal)
   chat = get_active_chat_for_principal(
-    db, chat_id, principal, load_fields=(models.Chat.uploads,),
+    db, chat_id, principal,
+    load_fields=(models.Chat.uploads, models.Chat.pending_messages),
   )
   content = body.content.strip()
   if not content:
     raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
-  content = _content_with_uploads(chat, content)
+  # A row's attachments never change after admission, so this snapshot read
+  # is safe even if the writer later finds the row already promoted.
+  row = next((m for m in chat.pending_messages or [] if m.get("cid") == cid), {})
+  content = _content_with_uploads(chat, content, row.get("attachments"))
   # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
   # so an edit racing a concurrent promote/cancel can't lost-update.
   ack = get_writer().submit(

@@ -1,6 +1,6 @@
 """Dependency-free manifest contract shared by install and preflight."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 import json
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -30,8 +30,8 @@ MANIFEST_MAX_BYTES = 64 * 1024
 # real safety bound, and no single file or file kind has its own cap. Store
 # publication bounds both its whole tree and this declared sum by the same
 # number, so every app the Store accepts is installable. The Store host
-# preserves releases up to 64 MiB too. What the
-# shell can load is a separate, smaller bound on the compiled module
+# preserves releases up to 64 MiB too. What the shell can load is a separate,
+# smaller bound on the compiled module
 # (`app_compile_contract.COMPILED_MODULE_MAX_BYTES`): large data belongs in
 # `static_assets`, fetched at runtime, rather than imported into the bundle.
 PACKAGE_MAX_BYTES = 64 * 1024 * 1024
@@ -362,37 +362,59 @@ def static_asset_entries(value) -> dict[str, str]:
   _fail("Manifest `static_assets` must be an object or array.")
 
 
-def package_bytes(manifest: Mapping, size_of: Callable[[str], int]) -> int:
-  """Bytes installing this package downloads and writes, per declaration.
+def package_input_paths(manifest: Mapping) -> Iterator[str]:
+  """Yield every repo-relative file declared by a validated manifest.
 
-  Counts the entry, icon and job, every source file, and the file behind every
-  static-asset destination and file seed. A file named by several declarations
-  counts once for each, because each is written separately, so one file cannot
-  stand in for thousands of destinations. Install charges its download budget
-  the same way, and local apply, the validator, Git installs and Store
-  publication bound this same sum by `PACKAGE_MAX_BYTES`, so a package the
-  Store accepts installs everywhere. Inline seeds live in the manifest, which
-  its own cap bounds. `size_of` gives a declared file's size, or 0 when it is
-  missing (its own check reports that).
+  Order is entry, icon, schedule job, source_files, static-asset sources, then
+  file seeds. Collections keep declaration order; separate destinations using
+  the same source each count. List-form static assets count each path once.
+  Static destinations and inline JSON seeds are not source files. mobius.json
+  itself is excluded: its bytes have a separate manifest cap. Other file-backed
+  features (services, setup, prompts, skills) must appear in source_files.
   """
   schedule = manifest.get("schedule")
-  declared = [
+  static_sources = static_asset_entries(manifest.get("static_assets") or {}).values()
+  declared = (
     manifest.get("entry"),
     manifest.get("icon"),
     schedule.get("job") if isinstance(schedule, Mapping) else None,
     *(manifest.get("source_files") or []),
-    *static_asset_entries(manifest.get("static_assets")).values(),
+    *static_sources,
     *(manifest.get("storage_seeds") or {}).values(),
-  ]
-  return sum(size_of(rel) for rel in declared if isinstance(rel, str) and rel)
+  )
+  for rel in declared:
+    if isinstance(rel, str) and rel:
+      yield rel
+
+
+def package_bytes(manifest: Mapping, size_of: Callable[[str], int]) -> int:
+  """Sum declared inputs per written destination, including source aliases.
+
+  Each alias consumes the budget again because each destination is written
+  separately. Install, local apply, validation and publication use this same
+  sum. Inline seeds are bounded by the manifest cap. `size_of` returns 0 for a
+  missing file; the caller's content validation reports that missing input.
+  """
+  return sum(size_of(rel) for rel in package_input_paths(manifest))
+
+
+def size_on_disk(root: Path, rel: str) -> int:
+  """A declared file's size from its metadata, or 0 when it is not a file."""
+  path = root / rel
+  return path.stat().st_size if path.is_file() else 0
 
 
 def package_bytes_on_disk(root: Path, manifest: Mapping) -> int:
   """`package_bytes` for a source tree, from file metadata before any read."""
-  def size_of(rel: str) -> int:
-    path = root / rel
-    return path.stat().st_size if path.is_file() else 0
-  return package_bytes(manifest, size_of)
+  return package_bytes(manifest, lambda rel: size_on_disk(root, rel))
+
+
+def package_limit_message(declared: int) -> str:
+  """The one refusal every path gives for a package over the bound."""
+  return (
+    f"This app declares {declared} bytes of files, more than the "
+    f"{PACKAGE_MAX_BYTES // (1024 * 1024)} MiB app package limit."
+  )
 
 
 def _validate_running_label(running_label, field: str) -> None:

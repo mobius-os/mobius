@@ -232,7 +232,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
 | `codex_appserver.py` | Small helper module: `codex_sdk_runner.py` imports its one surviving function, `_extract_bash_command`, which pulls the bash command string out of a shell tool item. The SDK runner does its own event/tool classification locally. |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
-| `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL `Chat.messages` / `Chat.pending_messages` mutations route through it (do not write those columns directly) |
+| `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL transcript-row / `Chat.pending_messages` mutations route through it (do not write those records directly) |
 | `chat_queue.py` | Per-chat queue lock + turn-end `drain_and_release` / `promote_pending_messages_locked` + the `TerminalDisposition` state machine; the awaited bridge between `chat.py` and the writer actor |
 | `broadcast.py` | `ChatBroadcast` per-chat in-memory event bus; decouples the turn runner from SSE clients |
 | `events.py` | Pure data transforms accumulating streaming events into the persisted message structure |
@@ -264,7 +264,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
+| `memory.py` | `build_memory_block()` — assembles only recent-chat Summaries; graph/app data is never injected here |
 | `skills.py` | Skill enumeration (flat `<name>.md` + external-convention `<name>/SKILL.md` dirs), dependency-free frontmatter parsing, provenance labels (`seed`/`agent`/`app:<slug>`/`installed:<source>`), and `write_index()` — the generated `shared/skills/skills-index.md` both providers Read (regenerated on boot, app-skill sync, and skill install/uninstall) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -551,7 +551,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed-app contributions** — any app's manifest may declare one root-level `system_prompt` markdown file; install review is the consent. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile against `.seed-skills.json` at server start, preserving local changes, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. The working agent writes that note through its run-bound `checkpoint_chat` tool; there is no turn-end summarizer. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed-app contributions** — any app's manifest may declare one root-level `system_prompt` markdown file; install review is the consent. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; platform skills reconcile against `.seed-skills.json` at server start, preserving local changes, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a short `## Summary`, and a cumulative `## Digest` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Summaries. The working agent writes that note through its run-bound `checkpoint_chat` tool; there is no turn-end summarizer. Compaction prefers the chat's cumulative Digest. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
 
 Platform skill reconciliation is a server startup step, not part of the source
 updater or the image. The served checkout applies its own
@@ -1384,11 +1384,11 @@ serializer), and the FULL output is fetched only when the block is expanded (`GE
 
 Each chat maintains a **growing per-chat note** at
 `/data/shared/memory/chats/<chat-id>/index.md` — a one-line name (frontmatter
-`description`, mirroring the chat title), a short `## Digest`, and an uncapped
-cumulative `## Summary`. The **working agent authors it** as it works through
-the run-bound `checkpoint_chat` MCP tool: `title` renames the chat unless the
-owner locked a name, `digest` replaces the Digest, and `summary` appends one
-timestamped Summary entry. `POST /api/chat/continuity/checkpoints` admits only
+`description`, mirroring the chat title), a short replaceable `## Summary`, and
+an append-only full `## Digest`. The **working agent authors it** as it works
+through the run-bound `checkpoint_chat` MCP tool: `title` renames the chat
+unless the owner locked a name, `chat_summary` replaces the Summary, and
+`digest_entry` appends one timestamped Digest entry. Neither layer has a length cap. `POST /api/chat/continuity/checkpoints` admits only
 the chat's live run (`AuthorizeCheckpoint` in the writer actor), then rewrites
 the file atomically under the chat's transition lock
 (`backend/app/chat_continuity.py`). There is no summarizer model, second store,
@@ -1397,9 +1397,9 @@ transcript remains the source of truth. This note is **core continuity** — it
 exists and is useful even when the Memory app is not installed. Its consumers:
 
 - **Short-term continuity into new chats.** A fresh chat opens with only the gist and
-  bounded Digest from the ~10 most-recently-modified chats
+  whole Summary of the 10 most recently active chats
   (`backend/app/memory.py`); the fenced path lets the agent deliberately open a
-  relevant full note. Facts and cumulative Summaries are not injected.
+  relevant full note. Facts and full Digests are not injected.
 - **Knowledge graph (installed Memory app).** The app requests structurally
   redacted chat text through its declared API permission, writes a complete graph to
   a same-filesystem staging tree, and atomically advances a JSON `.ready` pointer to
@@ -1409,7 +1409,7 @@ exists and is useful even when the Memory app is not installed. Its consumers:
   (`backend/scripts/init_chat_summaries.py`).
 - **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
   reads.
-- **Compaction + provider switch.** The cumulative Summary is the source for compacting a
+- **Compaction + provider switch.** The full Digest is the source for compacting a
   long chat and for the provider-switch handoff below — preferred over a from-scratch
   default compaction.
 
@@ -1436,7 +1436,7 @@ remains as a rolling-upgrade bridge for older clients that compact and then
 PATCH the provider.
 
 The incoming provider runs a disposable, tool-free synthesis turn over the complete
-running `## Summary` plus the complete current transcript. Large sources are folded
+cumulative `## Digest` plus the complete current transcript. Large sources are folded
 through bounded progressive synthesis turns so no middle interval is silently
 omitted. The writer actor then stores that portable brief, changes
 provider/settings, clears the outgoing session, and supersedes outgoing
@@ -1610,6 +1610,17 @@ and late answers, duplicate submissions, stopped/interrupted/failed runs,
 foreign run authority, and native-question overlap.
 
 ## Chat persistence — single-writer actor
+
+Transcripts are position-addressed `ChatMessage` rows; `transcript_rows.py`
+is the transaction-local read/write primitive. Optional message IDs never
+replace `(chat_id, seq)`. Creation goes through `chat_writer.create_chat`.
+While the previous release's `chats.messages` column exists, the commit hook
+in `transcript_rows.py` rewrites it from the rows of every chat changed in the
+transaction, so that release can always be rolled back to; chats it wrote are
+converted on demand or in the background, never before readiness. Search
+entries and purge cleanup are schema triggers. See
+`TRANSCRIPT_STORAGE_DESIGN.md`.
+
 
 All chat-domain mutations — transcript writes, run-markers, question rows, answers, finalize, error-persist — route through the single-writer actor in `chat_writer.py` as **domain commands** (`PersistTranscript`, `QuestionCommit`, `Finalize`, `PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`). Every command allocates an ack `Future`, but only the strict paths (`QuestionCommit`, `Finalize`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) *await* it (commit-before-ack); `PersistTranscript` and `PersistError` are submitted fire-and-forget — `PersistTranscript` additionally coalesces rapid streaming snapshots, while `PersistError` does not coalesce. One dedicated thread owns the SQLAlchemy session and a FIFO command queue; async callers submit a command and await its `Future`. The blocking `db.commit()` (which SQLite's `busy_timeout` can stall up to 5s) thus never runs on the event loop, and the actor never touches asyncio or `ChatBroadcast` (those stay loop-owned).
 

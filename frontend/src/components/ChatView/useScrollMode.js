@@ -1161,6 +1161,12 @@ export default function useScrollMode({
     const scrollEl = scrollRef.current
     const spacerEl = spacerRef.current
     if (!scrollEl || !spacerEl) return
+    // transitionMode publishes on the scroller that exists at that moment. An
+    // empty chat has none when its first send lands the pin, so the scroller
+    // this controller installs on must receive the mode the chat already owns.
+    if (modeRef.current && scrollEl.dataset.scrollMode !== modeRef.current.kind) {
+      scrollEl.dataset.scrollMode = modeRef.current.kind
+    }
     const chatEl = chatRef.current
     const isQuestionEditor = target => (
       target?.dataset?.chatInlineEditor === 'question-answer'

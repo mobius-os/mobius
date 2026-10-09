@@ -283,3 +283,19 @@ export function chatSearchOpenTarget(result) {
     focusComposer: !result.anchor_key,
   }
 }
+
+// Chats an update has not converted yet are searchable by title only. The
+// search response counts them (X-Search-Unindexed-Chats) so the shell can say
+// so instead of silently missing their message text.
+export const UNINDEXED_CHATS_HEADER = 'X-Search-Unindexed-Chats'
+
+export function unindexedChatCount(headers) {
+  const count = Number.parseInt(headers?.get?.(UNINDEXED_CHATS_HEADER) ?? '', 10)
+  return Number.isFinite(count) && count > 0 ? count : 0
+}
+
+export function unindexedChatsNote(chatState) {
+  const count = chatState?.status === 'ready' ? chatState.unindexed || 0 : 0
+  if (count <= 0) return null
+  return `Message text in ${count} older chat${count === 1 ? '' : 's'} isn't searchable yet.`
+}

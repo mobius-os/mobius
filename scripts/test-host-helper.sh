@@ -7,7 +7,22 @@
 #   sudo scripts/test-host-helper.sh <previous-sha> <target-sha>
 #
 # Set MOBIUS_RELEASE_REPLAY=1 to also prove automatic dependency restoration
-# with a strictly newer worker. No live host may be used for either mode.
+# with a strictly newer worker. Set MOBIUS_TRANSCRIPT_PROOF=1 to also prove
+# that per-message transcript storage survives real container replacements.
+# The image and the served source are separate: an image replacement serves
+# the existing /data/platform checkout unless an update was prepared for it,
+# and /api/version's "sha" names the image. So the proof prepares the target
+# exactly as Settings does, and every check runs and asserts the code the
+# container actually serves (/tmp/serving-source, /tmp/serving-sha, and the
+# uvicorn process's working directory):
+#   3. the worker swaps in the prepared target: it converts and writes;
+#   4. the previous image keeps serving the target source (a restart-loadable
+#      release): every transcript stays exact;
+#   5. a committed served tree that fails the import probe makes the
+#      entrypoint serve the previous image's baked code, which reads every
+#      transcript exactly and writes;
+#   6. the source is repaired and the target image returns: exactly the
+#      previous code's changes were marked, and they re-convert exactly. No live host may be used for either mode.
 # Both SHAs must have published official images. Run on a disposable systemd
 # host with Docker Compose (a CI runner); it installs root-owned units there.
 #
@@ -27,6 +42,10 @@ TARGET="${2:?target sha}"
 [[ $PREVIOUS =~ ^[0-9a-f]{40}$ && $TARGET =~ ^[0-9a-f]{40}$ && $PREVIOUS != "$TARGET" ]] \
   || { echo "two distinct full release SHAs are required" >&2; exit 2; }
 REPLAY=${MOBIUS_RELEASE_REPLAY:-0}
+TRANSCRIPTS=${MOBIUS_TRANSCRIPT_PROOF:-0}
+[[ $TRANSCRIPTS == 0 || $TRANSCRIPTS == 1 ]] || { echo "MOBIUS_TRANSCRIPT_PROOF must be 0 or 1" >&2; exit 2; }
+[[ $REPLAY == 0 || $TRANSCRIPTS == 0 ]] \
+  || { echo "the release replay and the transcript proof each prepare their own update; run one" >&2; exit 2; }
 [[ $REPLAY == 0 || $REPLAY == 1 ]] || { echo "MOBIUS_RELEASE_REPLAY must be 0 or 1" >&2; exit 2; }
 IMAGE=ghcr.io/mobius-os/mobius
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -81,12 +100,29 @@ queue() {  # <sha>: write the request exactly as the app does; prints its nonce
   echo "$nonce"
 }
 
-replaced_with() {  # <sha>: the container runs and serves exactly that release
+replaced_with() {  # <sha>: the container runs that image (not necessarily its source)
   [[ $(docker inspect -f '{{.Image}}' mobius) == $(docker image inspect -f '{{.Id}}' "$IMAGE:sha-$1") ]] \
     || fail "the running container is not sha-$1"
   [[ $(docker exec mobius curl -fsS http://127.0.0.1:8000/api/version \
         | python3 -c 'import json, sys; print(json.load(sys.stdin).get("sha"))') == "$1" ]] \
-    || fail "the container does not serve sha-$1"
+    || fail "the container's image does not report sha-$1"
+}
+
+served() {  # prints "<source> <sha>": what the entrypoint selected for uvicorn
+  docker exec mobius sh -c 'printf "%s %s\n" "$(cat /tmp/serving-source)" "$(cat /tmp/serving-sha)"'
+}
+
+serves_source() {  # <source> <sha>: the served tree is that source and contains that release
+  local source sha
+  read -r source sha < <(served)
+  [[ $source == "$1" ]] || fail "the container serves its $source tree, not $1 (served $sha)"
+  if [[ $source == baked ]]; then
+    [[ $sha == "$2" ]] || fail "the baked floor is $sha, not $2"
+  else
+    # A prepared update may be a local merge commit, so ask the served clone.
+    docker exec -u mobius mobius git -C /data/platform merge-base --is-ancestor "$2" "$sha" \
+      || fail "the served /data/platform at $sha does not contain $2"
+  fi
 }
 
 docker info >/dev/null || fail "Docker is unavailable"
@@ -128,6 +164,59 @@ fi
 printf 'SECRET_KEY=host-helper-regression-key-0123456789abcdef\nDOMAIN=localhost\n' >"$ENV_FILE"
 chmod 0600 "$ENV_FILE"
 
+
+# Transcript proof helpers (MOBIUS_TRANSCRIPT_PROOF=1). The probe runs the
+# serving release's own code; waits poll observable state only.
+TPROOF=$(mktemp -d /tmp/mobius-transcript-proof.XXXXXX)
+served_backend() {  # the serving uvicorn process's working directory
+  # As the server's own user: the container has no CAP_SYS_PTRACE, so root
+  # cannot read another user's /proc/<pid>/cwd.
+  docker exec -u mobius mobius sh -c 'readlink "/proc/$(pgrep -n -u mobius -f "/bin/uvicorn app\.main:app")/cwd"'
+}
+tprobe() {  # <command>: runs in the code the server runs; any error fails at once
+  local backend output
+  backend=$(served_backend) && [[ -n $backend ]] || fail "cannot locate the serving uvicorn process"
+  docker cp "$ROOT/scripts/transcript_rollback_probe.py" mobius:/tmp/probe.py
+  if ! output=$(docker exec -u mobius -w "$backend" -e PYTHONPATH="$backend" \
+      mobius python3 /tmp/probe.py "$1" 2>"$TPROOF/probe.err"); then
+    cat "$TPROOF/probe.err" >&2
+    fail "transcript probe '$1' failed in $backend"
+  fi
+  printf '%s\n' "$output"
+}
+tconverge() {  # waits only on a valid "still pending" answer
+  local answer
+  while :; do
+    answer=$(tprobe pending)
+    case $answer in
+      '{"pending": 0}') return 0 ;;
+      '{"pending": '[1-9]*'}') sleep 1 ;;
+      *) fail "unexpected conversion answer: $answer" ;;
+    esac
+  done
+}
+tmarks() {  # <expected json list>: chats without a conversion marker, exactly
+  local marks
+  marks=$(tprobe unconverted)
+  python3 - "$marks" "$1" <<'PY' || fail "unconverted chats differ: $marks (expected $1)"
+import json, sys
+state, expected = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+assert state["unconverted"] == expected, state["unconverted"]
+assert set(state["purged_leftovers"].values()) == {0}, state["purged_leftovers"]
+PY
+}
+tsame() {  # <label> <expected.json> <actual.json>: the damaged chat may become its placeholder
+  python3 - "$2" "$3" "$1" <<'PY' || fail "transcripts differ"
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+a.pop("damaged", None); damaged = b.pop("damaged", None)
+assert damaged is None or damaged["messages"][0].get("transcript_damage") is True, damaged
+# Canonical text, so 1 / 1.0 / True, -0.0 / 0.0 and NaN are distinguished.
+a, b = ({k: json.dumps(v, sort_keys=True) for k, v in d.items()} for d in (a, b))
+assert a == b, f"{sys.argv[3]}: {sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))[:5]}"
+PY
+}
+
 echo "1. the previous release runs as an owner deploys it"
 cd "$SEED"
 MOBIUS_IMAGE="$IMAGE:sha-$PREVIOUS" docker compose --env-file "$ENV_FILE" \
@@ -147,6 +236,10 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 docker exec mobius test -s /data/service-token.txt || fail "the instance has no service token"
+if [[ $TRANSCRIPTS == 1 ]]; then
+  tprobe seed >/dev/null
+  tprobe dump >"$TPROOF/seeded.json"
+fi
 
 echo "2. the owner installs the helper once, from that checkout"
 scripts/install-rebuild-helper.sh || fail "the installer failed"
@@ -180,12 +273,44 @@ assert isinstance(prepared, dict) and prepared["state"] == "prepared", prepared
 assert not prepared["requires_image"], "choose a restart-loadable historical source pair"
 SOURCE
 fi
+if [[ $TRANSCRIPTS == 1 ]]; then
+  echo "   prepare the target source exactly as Settings does"
+  bundle_ref=refs/transcript-proof/target-$$
+  git -C "$ROOT" update-ref "$bundle_ref" "$TARGET"
+  git -C "$ROOT" bundle create "$TPROOF/target.bundle" "$bundle_ref" >/dev/null 2>&1 \
+    || fail "could not bundle the target"
+  git -C "$ROOT" update-ref -d "$bundle_ref"
+  docker cp "$TPROOF/target.bundle" mobius:/tmp/target.bundle
+  docker exec mobius chmod 0644 /tmp/target.bundle
+  docker exec -u mobius mobius git -C /data/platform fetch -q /tmp/target.bundle "$bundle_ref" \
+    || fail "the previous release could not fetch the target"
+  docker exec -i -u mobius -w /data/platform/backend mobius python3 - "$TARGET" <<'SOURCE' \
+    || fail "the previous release's updater did not prepare the target"
+import sys
+from app import platform_update as pu
+preview = pu.platform_update_preview(target_sha=sys.argv[1])
+assert not preview["conflict_paths"], preview["conflict_paths"]
+plan = {key: preview[key] for key in ("plan_id", "current_sha", "target_sha", "image_digest")}
+prepared = pu.prepare_reviewed_update(**plan)
+assert isinstance(prepared, dict) and prepared["state"] == "prepared", prepared
+SOURCE
+fi
 before=$(docker inspect -f '{{.Id}}' mobius)
 echo "3. the app requests the target release"
 nonce=$(queue "$TARGET")
 wait_status "$nonce" succeeded
 replaced_with "$TARGET"
 [[ $(docker inspect -f '{{.Id}}' mobius) != "$before" ]] || fail "container was not replaced"
+if [[ $TRANSCRIPTS == 1 ]]; then
+  serves_source platform "$TARGET"
+  tconverge
+  tprobe dump >"$TPROOF/converted.json"
+  tsame "the target converted every chat exactly" "$TPROOF/seeded.json" "$TPROOF/converted.json"
+  [[ $(tprobe mirror-exact) == '{"differ": []}' ]] || fail "a converted chat's legacy bytes are not its rows"
+  tprobe write-new >/dev/null
+  [[ $(tprobe mirror-exact) == '{"differ": []}' ]] || fail "a mirror after target writes is not byte-exact"
+  tprobe dump >"$TPROOF/target.json"
+fi
 if [[ $REPLAY == 1 ]]; then
   # Never call setup/rerun here: startup alone must restore the declarations.
   for _ in $(seq 1 120); do
@@ -249,5 +374,57 @@ assert active["sha256"] == sys.argv[1], "active worker is not the reviewed relea
 assert hashlib.sha256((root / "workers" / active["file"]).read_bytes()).hexdigest() == sys.argv[1]
 print("release replay: active worker bytes match the published target source")
 WORKER_VERIFY
+fi
+if [[ $TRANSCRIPTS == 1 ]]; then
+  # What the product serves here: normally the target source, because this
+  # release is restart-loadable and an image replacement never reverts it;
+  # the image's baked floor if that source cannot import on it.
+  read -r step4_source step4_sha < <(served)
+  echo "   the previous image serves its $step4_source tree at $step4_sha"
+  case $step4_source in
+    platform) serves_source platform "$TARGET" ;;
+    baked) serves_source baked "$PREVIOUS" ;;
+    *) fail "the previous image reports an unknown served source: $step4_source" ;;
+  esac
+  tprobe dump >"$TPROOF/previous-image.json"
+  tsame "the previous image keeps every transcript exact" "$TPROOF/target.json" "$TPROOF/previous-image.json"
+  [[ $(tprobe mirror-exact) == '{"differ": []}' ]] || fail "a mirror is not byte-exact on the previous image"
+
+  echo "5. a broken served tree falls back to the previous image's baked code"
+  repaired=$(docker exec -u mobius mobius git -C /data/platform rev-parse HEAD)
+  # A committed edit that fails the import probe, as a broken agent edit would.
+  docker exec -u mobius mobius sh -c '
+    cd /data/platform &&
+    printf "\nraise ImportError(\"transcript proof: broken served tree\")\n" >> backend/app/main.py &&
+    git -c user.name=transcript-proof -c user.email=transcript-proof@localhost \
+      commit -q -m "Break the served tree" -- backend/app/main.py' \
+    || fail "could not commit the broken served tree"
+  docker restart mobius >/dev/null
+  until docker exec mobius curl -fsS -o /dev/null http://127.0.0.1:8000/api/ready 2>/dev/null; do
+    [[ $(docker inspect -f '{{.State.Running}}' mobius) == true ]] \
+      || fail "the previous image stopped instead of serving its baked floor"
+    sleep 2
+  done
+  serves_source baked "$PREVIOUS"
+  tprobe dump >"$TPROOF/baked.json"
+  tsame "the previous code reads every transcript exactly" "$TPROOF/target.json" "$TPROOF/baked.json"
+  wrote=$(tprobe write-old)
+  tprobe dump >"$TPROOF/previous-wrote.json"
+  # The schema triggers mark exactly the chats a pre-rows previous release
+  # changed; a row-based previous release keeps every chat converted.
+  tmarks "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["expect_unconverted"]))' "$wrote")"
+
+  echo "6. the source is repaired and the target release returns"
+  docker exec -u mobius mobius git -C /data/platform reset -q --hard "$repaired" \
+    || fail "could not repair the served tree"
+  nonce=$(queue "$TARGET")
+  wait_status "$nonce" succeeded
+  replaced_with "$TARGET"
+  serves_source platform "$TARGET"
+  tconverge
+  tprobe dump >"$TPROOF/final.json"
+  [[ $(tprobe mirror-exact) == '{"differ": []}' ]] || fail "a re-converted chat's legacy bytes are not its rows"
+  tsame "the target re-converted the previous code's writes" "$TPROOF/previous-wrote.json" "$TPROOF/final.json"
+  echo "host helper: transcripts survived target -> previous image -> previous code -> target"
 fi
 echo "host helper: worker revision $seeded -> $expected arrived with the image, replaced the container, and is active"

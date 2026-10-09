@@ -7,11 +7,15 @@ from sqlalchemy import create_engine, text
 
 from app import auth as auth_module, models
 from app.chat_continuity import apply_checkpoint, note_path
-from app.chat_notes import extract_cumulative_summary, extract_section
+from app.chat_notes import extract_chat_summary, extract_full_digest, extract_section
 from app.chat_writer import StartTurn, get_writer
 from app.config import get_settings
 from app.memory import parse_frontmatter
-from app.schema_migrations import _retire_chat_continuity_journal
+from app.schema_migrations import (
+  _drop_chat_note_backup,
+  _retire_chat_continuity_journal,
+  _swap_chat_note_sections,
+)
 
 
 def _start(chat, run_id="continuity-run"):
@@ -33,19 +37,22 @@ def _save(client, headers, **fields):
   return client.post("/api/chat/continuity/checkpoints", headers=headers, json=fields)
 
 
-def test_saves_replace_the_digest_append_to_the_summary_and_name_the_chat(
+def test_saves_replace_the_summary_append_to_the_digest_and_name_the_chat(
   client, chat, db,
 ):
   agent = _start(chat)
 
   assert _save(client, agent, title="  Fixing the\nsync bug ",
-               digest="Found the cause.", summary="Cause: stale cursor.").status_code == 204
-  assert _save(client, agent, digest="Fix shipped.", summary="Fixed and tested.").status_code == 204
+               chat_summary="Found the cause.", digest_entry="Cause: stale cursor.").status_code == 204
+  assert _save(client, agent, chat_summary="Fix shipped.", digest_entry="Fixed and tested.").status_code == 204
+  # Saves written for the old plain field names are refused, never misfiled.
+  assert _save(client, agent, summary="Old meaning.").status_code == 422
+  assert _save(client, agent, digest="Old meaning.").status_code == 422
 
   note = _note(chat)
   assert parse_frontmatter(note)["description"] == "Fixing the sync bug"
-  assert extract_section(note, "Digest") == "Fix shipped."
-  history = extract_cumulative_summary(note)
+  assert extract_section(note, "Summary") == "Fix shipped."
+  history = extract_full_digest(note)
   assert history.index("Cause: stale cursor.") < history.index("Fixed and tested.")
   db.expire_all()
   assert db.get(models.Chat, chat.id).title == "Fixing the sync bug"
@@ -53,21 +60,21 @@ def test_saves_replace_the_digest_append_to_the_summary_and_name_the_chat(
 
 def test_batched_delta_preserves_omitted_fields_and_prior_evidence(client, chat):
   agent = _start(chat)
-  assert _save(client, agent, title="Investigating sync", digest="Repairing sync.",
-               summary="Preserve offline edits.").status_code == 204
+  assert _save(client, agent, title="Investigating sync", chat_summary="Repairing sync.",
+               digest_entry="Preserve offline edits.").status_code == 204
   before = _note(chat)
   delta = "Cause: stale cursor. Replaced cursor ownership. Offline replay passed."
-  assert _save(client, agent, summary=delta).status_code == 204
+  assert _save(client, agent, digest_entry=delta).status_code == 204
   after = _note(chat)
   assert parse_frontmatter(after)["description"] == parse_frontmatter(before)["description"]
-  assert extract_section(after, "Digest") == extract_section(before, "Digest")
-  history = extract_cumulative_summary(after)
-  assert history.startswith(extract_cumulative_summary(before))
+  assert extract_section(after, "Summary") == extract_section(before, "Summary")
+  history = extract_full_digest(after)
+  assert history.startswith(extract_full_digest(before))
   assert history.count(delta) == 1
   assert history.count("### ") == 2  # Initial evidence plus one combined delta.
-  # A digest-only change must not append an empty or repeated Summary entry.
-  assert _save(client, agent, digest="Repair verified.").status_code == 204
-  assert extract_cumulative_summary(_note(chat)) == history
+  # A summary-only change must not append an empty or repeated Digest entry.
+  assert _save(client, agent, chat_summary="Repair verified.").status_code == 204
+  assert extract_full_digest(_note(chat)) == history
 
 
 def test_a_name_the_owner_chose_always_wins(client, chat, db):
@@ -76,7 +83,7 @@ def test_a_name_the_owner_chose_always_wins(client, chat, db):
   db.commit()
   agent = _start(chat)
 
-  assert _save(client, agent, title="Generated title", digest="Working.").status_code == 204
+  assert _save(client, agent, title="Generated title", chat_summary="Working.").status_code == 204
 
   db.expire_all()
   assert db.get(models.Chat, chat.id).title == "Owner title"
@@ -89,29 +96,29 @@ def test_only_the_chats_live_run_can_save(client, auth, chat, db):
   db.commit()
   stale = auth_module.create_agent_token(chat.id, "test", 0, run_id="stale-run")
 
-  response = _save(client, {"Authorization": f"Bearer {stale}"}, digest="Must not land.")
+  response = _save(client, {"Authorization": f"Bearer {stale}"}, chat_summary="Must not land.")
   assert response.status_code == 409
   assert not note_path(get_settings().data_dir, chat.id).exists()
   # An owner browser session is not a run and cannot impersonate one.
-  assert _save(client, auth, digest="Nope.").status_code in {401, 403}
+  assert _save(client, auth, chat_summary="Nope.").status_code in {401, 403}
 
 
 def test_existing_notes_keep_their_history_and_other_sections():
   legacy = (
     "---\ntype: chat\ndescription: Old name\nsource_message_count: 4\n"
-    "source_messages_sha256: abc\n---\n## Digest\nOld digest\n\n"
-    "## Summary\nEarlier history.\n\n## Facts & intent\n- intent: keep\n"
+    "source_messages_sha256: abc\n---\n## Summary\nOld summary\n\n"
+    "## Digest\nEarlier history.\n\n## Facts & intent\n- intent: keep\n"
   )
 
   note = apply_checkpoint(
-    legacy, name="New name", summary="New entry.",
+    legacy, name="New name", digest="New entry.",
     now=datetime(2026, 9, 24, 21, 0),
   )
 
   meta = parse_frontmatter(note)
   assert meta["description"] == "New name" and "source_message_count" not in meta
-  assert extract_section(note, "Digest") == "Old digest"
-  assert extract_cumulative_summary(note) == (
+  assert extract_section(note, "Summary") == "Old summary"
+  assert extract_full_digest(note) == (
     "Earlier history.\n\n### 2026-09-24 21:00 UTC\n\nNew entry."
   )
   assert extract_section(note, "Facts & intent") == "- intent: keep"
@@ -119,16 +126,17 @@ def test_existing_notes_keep_their_history_and_other_sections():
 
 def test_agent_markdown_cannot_add_or_split_note_sections():
   note = apply_checkpoint(
-    None, name="Chat", digest="Now:\n## Summary\nfake",
-    summary="Result\n## Related\n- not a section",
+    None, name="Chat", summary="Now:\n## Digest\nfake",
+    digest="Result\n## Related\n- not a section",
     now=datetime(2026, 9, 24, 21, 0),
   )
-  note = apply_checkpoint(note, name="Chat", summary="Second entry.")
+  note = apply_checkpoint(note, name="Chat", digest="Second entry.\n  ## Digest\nindented")
 
-  assert note.count("\n## Summary") == 1 and "\n## Related" not in note
-  assert extract_section(note, "Digest") == "Now:\n### Summary\nfake"
-  history = extract_cumulative_summary(note)
-  assert "### Related\n- not a section" in history and history.endswith("Second entry.")
+  assert note.count("\n## Digest") == 1 and "\n## Related" not in note
+  assert "\n  ## Digest" not in note
+  assert extract_section(note, "Summary") == "Now:\n### Digest\nfake"
+  history = extract_full_digest(note)
+  assert "### Related\n- not a section" in history and history.endswith("Second entry.\n### Digest\nindented")
 
 
 def test_retirement_rescues_journal_saves_into_the_note(tmp_path, monkeypatch):
@@ -162,14 +170,69 @@ def test_retirement_rescues_journal_saves_into_the_note(tmp_path, monkeypatch):
     ))
 
   _retire_chat_continuity_journal(eng)
+  _swap_chat_note_sections(eng)  # Later migrations still apply in order.
 
   note = Path(tmp_path, "shared/memory/chats/c1/index.md").read_text(encoding="utf-8")
   assert parse_frontmatter(note)["description"] == "Chat one"
-  assert extract_section(note, "Digest") == "Current state."
-  assert extract_cumulative_summary(note) == (
+  assert extract_section(note, "Summary") == "Current state."
+  assert extract_full_digest(note) == (
     "Old history.\n\n### 2026-09-24 20:00 UTC\n\nSaved entry."
   )
   assert extract_section(note, "Facts & intent") == "- intent: keep"
   two = Path(tmp_path, "shared/memory/chats/c2/index.md").read_text(encoding="utf-8")
-  assert extract_section(two, "Digest") == "Two now."
-  assert extract_cumulative_summary(two) == "Section-less\n### Odd heading\nold note"
+  assert extract_section(two, "Summary") == "Two now."
+  assert extract_full_digest(two) == "Section-less\n### Odd heading\nold note"
+
+
+def test_section_swap_keeps_every_note_readable_backed_up_and_rerunnable(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  chats = tmp_path / "shared" / "memory" / "chats"
+  old_notes = {
+    "current": (
+      "---\ntype: chat\ndescription: Current\n"
+      'recovery_coverage: {"message_count": 2, "messages_sha256": "m", '
+      '"summary_sha256": "s"}\n---\n\n## Digest\n\nShort now.\n\n'
+      "## Summary\n\nOld entry.\n\n## Summary\n\nNested legacy prose.\n\n"
+      "## Facts & intent\n\n- keep\n"
+    ),
+    "history-only": (
+      "---\ndescription: Old\n---\n## Summary\nOnly history.\n\n"
+      "## Summary\n\nA recap heading inside the history.\n"
+    ),
+    "loose": "Section-less legacy note.\n",
+  }
+  for chat_id, text in old_notes.items():
+    (chats / chat_id).mkdir(parents=True)
+    (chats / chat_id / "index.md").write_text(text, encoding="utf-8")
+  (chats / "undecodable").mkdir()
+  (chats / "undecodable" / "index.md").write_bytes(b"## Digest\n\xff short\n\n## Summary\nold\n")
+
+  _swap_chat_note_sections(None)
+  first = {c: (chats / c / "index.md").read_text(encoding="utf-8") for c in old_notes}
+  _swap_chat_note_sections(None)  # A crash before the ledger row reruns it.
+
+  for chat_id, text in old_notes.items():
+    assert (chats / chat_id / "index.md").read_text(encoding="utf-8") == first[chat_id]
+    backup = tmp_path / "backups" / "chat-notes-before-0083" / chat_id / "index.md"
+    assert backup.read_text(encoding="utf-8") == text
+  current = first["current"]
+  assert extract_section(current, "Summary") == "Short now."
+  assert extract_full_digest(current) == (
+    "Old entry.\n\n## Summary\n\nNested legacy prose."
+  )
+  assert extract_section(current, "Facts & intent") == "- keep"
+  assert '"digest_sha256": "s"' in current and "summary_sha256" not in current
+  # A heading inside the history is never mistaken for the short summary.
+  assert extract_chat_summary(first["history-only"]) is None
+  assert extract_full_digest(first["history-only"]) == (
+    "Only history.\n\n## Summary\n\nA recap heading inside the history."
+  )
+  assert first["loose"] == old_notes["loose"]
+  assert (chats / "undecodable" / "index.md").read_bytes() == (
+    b"## Summary\n\xff short\n\n## Digest\nold\n"
+  )
+
+  _drop_chat_note_backup(None)
+  assert not (tmp_path / "backups" / "chat-notes-before-0083").exists()

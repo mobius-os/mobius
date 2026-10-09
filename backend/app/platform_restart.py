@@ -24,6 +24,7 @@ from typing import Literal
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app import transcript_rows
 from app import models
 from app.timeutil import now_naive_utc
 
@@ -234,7 +235,7 @@ def restart_action_block(chat, question_id: str | None) -> dict | None:
   """Return only an exact typed Restart card; never fall back to latest."""
   if not question_id:
     return None
-  for message in reversed(list(chat.messages or [])):
+  for message in reversed(transcript_rows.history(chat)):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     for block in message.get("blocks") or []:

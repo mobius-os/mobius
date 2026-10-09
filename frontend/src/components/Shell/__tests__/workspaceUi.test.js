@@ -942,7 +942,7 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     drawer,
-    /ownerRequired \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: waiting \? \([\s\S]*?drawer__waiting-icon[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    /ownerRequired \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: waiting \? \([\s\S]*?drawer__waiting-icon[\s\S]*?: attentionDot \? \([\s\S]*?drawer__attention-dot/,
     'owner input and active work must precede durable waiting and unseen completion',
   )
   assert.match(drawer, /drawer__attention-diamond drawer__owner-input-dot/)

@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import select
 import signal
 import subprocess
 import stat
@@ -4787,8 +4788,12 @@ async def test_cancelled_apply_reports_cancellation_after_transaction_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paused_phase", [
+  pu.PlatformUpdatePhase.FINALIZING,
+  pu.PlatformUpdatePhase.COMPLETE,
+])
 async def test_apply_keeps_cross_process_lock_through_final_progress(
-  monkeypatch, clone_env,
+  monkeypatch, clone_env, paused_phase,
 ):
   origin, platform = clone_env
   target = _advance_origin(
@@ -4798,15 +4803,33 @@ async def test_apply_keeps_cross_process_lock_through_final_progress(
   )
   pu._fetch(platform)
   preview = pu.platform_update_preview(platform, target_sha=target)
-  finalizing = threading.Event()
-  release_finalizing = threading.Event()
+  progress_published = threading.Event()
+  release_progress = threading.Event()
+  set_progress = pu._set_update_progress
 
-  def delayed_hook_refresh(*_args, **_kwargs):
-    finalizing.set()
-    assert release_finalizing.wait(timeout=5)
-    return None
+  def reconciled(repo, **kwargs):
+    assert repo == platform
+    assert kwargs["lock_already_held"] is True
+    assert kwargs["target_ref"] == target
+    return pu.ReconcileResult(
+      "updated", preview["current_sha"], target, target,
+      hook_source_sha=target,
+    )
 
-  monkeypatch.setattr(pu, "_refresh_git_hooks", delayed_hook_refresh)
+  def paused_progress(phase, **kwargs):
+    set_progress(phase, **kwargs)
+    if phase == paused_phase:
+      progress_published.set()
+      assert release_progress.wait(timeout=5)
+
+  # This tests the outer Apply transaction, not reconciliation/build latency.
+  # Keep its real flock and durable progress writes; isolate unrelated work so
+  # bounded event waits contain a broken handshake, not a full update's runtime.
+  monkeypatch.setattr(pu, "_reconcile_under_lock", reconciled)
+  monkeypatch.setattr(pu, "_record_update_activation", lambda *_args:
+    platform_activation.classify_activation([]))
+  monkeypatch.setattr(pu, "_refresh_git_hooks", lambda *_args: None)
+  monkeypatch.setattr(pu, "_set_update_progress", paused_progress)
   applying = asyncio.create_task(pu.apply_platform_update(
     SimpleNamespace(),
     plan_id=preview["plan_id"],
@@ -4814,23 +4837,26 @@ async def test_apply_keeps_cross_process_lock_through_final_progress(
     target_sha=preview["target_sha"],
     repo=platform,
   ))
-  assert await asyncio.to_thread(finalizing.wait, 2)
+  try:
+    assert await asyncio.to_thread(progress_published.wait, 2)
 
-  with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
-    with pu._reconcile_flock(blocking=False):
-      pass
-  progress = pu.platform_update_progress()
-  assert progress["active"] is True
-  assert progress["phase"] == pu.PlatformUpdatePhase.FINALIZING.value
+    with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+      with pu._reconcile_flock(blocking=False):
+        pass
+    progress = pu.platform_update_progress()
+    assert progress["active"] is (paused_phase != pu.PlatformUpdatePhase.COMPLETE)
+    assert progress["phase"] == paused_phase.value
+  finally:
+    # Drain the admitted operation even if the handshake or lock assertion fails,
+    # before monkeypatch/temporary-repository teardown can race its worker.
+    release_progress.set()
+    result = await applying
 
-  release_finalizing.set()
-  result = await applying
-  assert result["state"] in {
-    pu.PlatformUpdateState.UP_TO_DATE.value,
-    pu.PlatformUpdateState.RESTART_NEEDED.value,
-    pu.PlatformUpdateState.ACTIVATION_NEEDED.value,
-  }
+  assert result["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
   assert pu.platform_update_progress()["active"] is False
+  assert pu.platform_update_progress()["phase"] == pu.PlatformUpdatePhase.COMPLETE.value
+  with pu._reconcile_flock(blocking=False):
+    pass
 
 
 def test_preview_reports_an_active_update_instead_of_waiting(clone_env):
@@ -7799,3 +7825,291 @@ def test_failed_split_index_companion_capture_refuses_resolver_removal(clone_env
   assert resolver.exists()
   assert raw_path.read_bytes() == raw
   assert pu.RECONCILE_PRE_FLAG.exists()
+
+
+# --- Local edits that carry their own tests ----------------------------------
+# A local edit can import cleanly yet use something the release removed, so it
+# breaks only when a chat turn runs it. Its own tests are the evidence.
+
+_TEST_RUNNER = 'cd "$(dirname "$0")/../backend" && exec python3 -m pytest "$@"\n'
+_STORE_PY = "MESSAGES = ['hello']\n"
+_LOCAL_VOICE = {
+  "backend/app/voice.py": "def last():\n  from app import store\n  return store.MESSAGES[-1]\n",
+  "backend/tests/test_voice.py": "from app import voice\n\n\ndef test_last_reads_the_store():\n  assert voice.last() == 'hello'\n",
+}
+
+
+def _release_with_test_runner(origin: Path, platform: Path) -> None:
+  _advance_origin(origin, edits={
+    "scripts/wt-pytest.sh": _TEST_RUNNER, "backend/app/store.py": _STORE_PY,
+  }, msg="release with a test runner")
+  assert pu.reconcile_clone(platform).status == "updated"
+
+
+def test_update_rolls_back_when_it_breaks_a_local_edits_own_test(clone_env):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  pre = _local_commit(platform, edits=_LOCAL_VOICE, msg="local voice")
+  # Text-clean and import-clean: only running the local code shows the break.
+  _advance_origin(origin, edits={"backend/app/store.py": "LEGACY = ['hello']\n"},
+                  msg="rename store field")
+
+  res = pu.reconcile_clone(platform)
+
+  assert res.status == "rolled_back"
+  assert _served_sha(platform) == pre
+  assert "test_last_reads_the_store" in pu._read_rolled_back_flag()["error"]
+  assert (platform / "backend/app/store.py").read_text() == _STORE_PY
+
+
+def test_update_proceeds_when_local_edits_own_tests_still_pass(clone_env):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  _local_commit(platform, edits=_LOCAL_VOICE, msg="local voice")
+  _advance_origin(origin, edits={"backend/app/store.py": _STORE_PY + "OTHER = 1\n"},
+                  msg="unrelated store change")
+
+  res = pu.reconcile_clone(platform)
+
+  assert res.status == "updated"
+  assert "OTHER = 1" in (platform / "backend/app/store.py").read_text()
+  assert (platform / "backend/app/voice.py").exists()
+
+
+def test_already_failing_local_test_does_not_hold_updates_back(clone_env):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  _local_commit(platform, edits={
+    **_LOCAL_VOICE,
+    "backend/tests/test_voice.py": _LOCAL_VOICE["backend/tests/test_voice.py"]
+    + "\n\ndef test_known_broken():\n  assert False\n",
+  }, msg="local voice with a known failure")
+  _advance_origin(origin, edits={"backend/app/store.py": _STORE_PY + "OTHER = 1\n"},
+                  msg="unrelated store change")
+
+  assert pu.reconcile_clone(platform).status == "updated"
+
+
+def test_uncommitted_local_edit_is_tested_across_the_update(clone_env):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  for rel, content in _LOCAL_VOICE.items():
+    (platform / rel).parent.mkdir(parents=True, exist_ok=True)
+    (platform / rel).write_text(content)
+  _advance_origin(origin, edits={"backend/app/store.py": "LEGACY = ['hello']\n"},
+                  msg="rename store field")
+
+  res = pu.reconcile_clone(platform)
+
+  assert res.status == "rolled_back"
+  assert (platform / "backend/app/voice.py").exists()
+  assert (platform / "backend/app/store.py").read_text() == _STORE_PY
+
+
+@pytest.mark.parametrize("breaks", [False, True])
+def test_reviewed_prepare_checks_local_tests_without_touching_served_checkout(clone_env, breaks):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  pre = _local_commit(platform, edits=_LOCAL_VOICE, msg="local voice")
+  target = _advance_origin(origin, edits={
+    "backend/app/store.py": "LEGACY = ['hello']\n" if breaks else _STORE_PY + "OTHER = 1\n",
+  })
+  pu._fetch(platform)
+  # A concurrent working edit is not part of the frozen reviewed snapshot.
+  live = platform / "backend/app/store.py"
+  live.write_text("MESSAGES = ['later edit']\n")
+  status = _git(platform, "status", "--porcelain").stdout
+  if breaks:
+    with pytest.raises(pu.PlatformUpdateError, match="test_last_reads_the_store"):
+      pu.prepare_reviewed_update(**_apply_plan(pre, target, platform))
+    assert pu.read_prepared_update() is None
+  else:
+    result = pu.prepare_reviewed_update(**_apply_plan(pre, target, platform))
+    assert result["local_tests"]["status"] == "compared"
+    assert result["local_tests"]["baseline"]["passed"]
+    assert pu.read_prepared_update()["local_tests"] == result["local_tests"]
+  assert _served_sha(platform) == pre
+  assert live.read_text() == "MESSAGES = ['later edit']\n"
+  assert _git(platform, "status", "--porcelain").stdout == status
+  assert len(_git(platform, "worktree", "list", "--porcelain").stdout.split("worktree ")) == 2
+
+
+@pytest.mark.parametrize("mode", ["missing_runner", "collection", "image", "omitted", "known_failure"])
+def test_prepare_retains_limits_of_local_test_evidence(clone_env, monkeypatch, mode):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  edits = dict(_LOCAL_VOICE)
+  if mode == "known_failure":
+    edits["backend/tests/test_voice.py"] += "\ndef test_known_failure():\n  assert False\n"
+  pre = _local_commit(platform, edits=edits, msg="local voice")
+  changes = {"backend/app/store.py": _STORE_PY + "OTHER = 1\n"}
+  if mode == "missing_runner":
+    changes["scripts/wt-pytest.sh"] = "exit 78\n"
+  elif mode == "collection":
+    changes["backend/app/store.py"] = "raise ImportError('no dependency')\n"
+    # Collection imports store; a collection error is not a failed test id.
+    pre = _local_commit(platform, edits={
+      "backend/tests/test_voice.py": "from app import store\n" + _LOCAL_VOICE["backend/tests/test_voice.py"],
+    })
+  elif mode == "omitted":
+    changes["scripts/wt-pytest.sh"] = _TEST_RUNNER.replace('"$@"', '"$@" -k nothing_matches')
+  elif mode == "image":
+    changes["Dockerfile"] = "FROM next-image\n"
+    monkeypatch.setattr("app.restart_util.validate_restart_source", lambda *_: pytest.fail("wrong image probe"))
+    monkeypatch.setattr(pu.local_change_tests, "run", lambda *_: pytest.fail("wrong image tests"))
+  target = _advance_origin(origin, edits=changes)
+  pu._fetch(platform)
+  result = pu.prepare_reviewed_update(**_apply_plan(pre, target, platform))
+  report = result["local_tests"]
+  assert report["status"] == ("compared" if mode == "known_failure" else "incomplete")
+  assert not report["regressions"]
+  if mode != "known_failure":
+    assert report["incomplete"]
+  assert pu.read_prepared_update()["local_tests"] == report
+  assert pu.prepared_update_preview(platform)["local_tests"] == report
+  assert report["baseline_sha"] == pre
+  assert report["candidate_sha"] == result["prepared"]
+  assert report["target_sha"] == target
+
+
+@pytest.mark.parametrize("baseline,candidate,expected", [
+  ("def test_a(): assert True\n", "def test_a(): assert False\n", "regression"),
+  ("def test_a(): assert False\n", "def test_a(): assert False\n", "compared"),
+  ("def test_a(): assert True\ndef test_b(): assert True\n", "def test_a(): assert True\n", "incomplete"),
+  ("def test_a(): assert True\n", "import pytest\n@pytest.mark.skip\ndef test_a(): pass\n", "incomplete"),
+  ("raise ImportError('missing')\n", "def test_a(): assert False\n", "incomplete"),
+  ("def test_a(): assert True\n", "raise ImportError('missing')\n", "incomplete"),
+  ("def test_a(): assert True\n", "raise KeyboardInterrupt\n", "incomplete"),
+])
+def test_local_runner_requires_comparable_executed_test_ids(tmp_path, baseline, candidate, expected):
+  from app import local_change_tests as lt
+  _git(tmp_path, "init", "-q")
+  (tmp_path / "scripts").mkdir()
+  (tmp_path / "scripts/wt-pytest.sh").write_text(_TEST_RUNNER)
+  tests = tmp_path / "backend/tests"
+  tests.mkdir(parents=True)
+  test = tests / "test_local.py"
+  test.write_text(baseline)
+  before = lt.run(tmp_path, ["tests/test_local.py"])
+  test.write_text(candidate)
+  # Avoid Python's same-second bytecode cache affecting this tiny fixture.
+  import shutil
+  shutil.rmtree(tests / "__pycache__", ignore_errors=True)
+  after = lt.run(tmp_path, ["tests/test_local.py"])
+  report = lt.compare(["tests/test_local.py"], before, after)
+  assert report["status"] == expected
+
+
+def test_local_runner_rejects_missing_files_and_exit_report_disagreement(tmp_path):
+  from app import local_change_tests as lt
+  assert lt.run(tmp_path, ["tests/missing.py"]).unavailable
+  report = tmp_path / "report.xml"
+  report.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                    '<testcase classname="tests.test_a" name="test_a"/></testsuite>')
+  assert lt._read_report(report, 0).passed == frozenset({"tests.test_a::test_a"})
+  assert lt._read_report(report, 1).unavailable
+  assert lt._read_report(report, 2).unavailable
+  report.write_text(report.read_text().replace('tests="1"', 'tests="2"'))
+  assert lt._read_report(report, 0).unavailable
+  report.write_text('<testsuite><testcase classname="tests.test_a" name="test_a"><error/></testcase></testsuite>')
+  assert lt._read_report(report, 1).unavailable
+
+
+def _process_has_exited(pid, timeout_ms):
+  """Observe kernel exit, not the scheduling instant after group SIGKILL."""
+  try:
+    fd = os.pidfd_open(pid)
+  except ProcessLookupError:
+    return True
+  try:
+    poll = select.poll()
+    poll.register(fd, select.POLLIN)
+    return bool(poll.poll(timeout_ms))
+  finally:
+    os.close(fd)
+
+
+def test_process_exit_observation_rejects_a_surviving_child():
+  child = subprocess.Popen(["sleep", "60"])
+  try:
+    assert not _process_has_exited(child.pid, 0)
+    child.kill()
+    assert _process_has_exited(child.pid, 5000)
+  finally:
+    if child.poll() is None:
+      child.kill()
+    child.wait()
+  assert _process_has_exited(child.pid, 0)
+
+
+def test_local_runner_timeout_kills_descendants_and_removes_runtime(tmp_path):
+  from app import local_change_tests as lt
+  _git(tmp_path, "init", "-q")
+  (tmp_path / "scripts").mkdir()
+  (tmp_path / "backend/tests").mkdir(parents=True)
+  (tmp_path / "backend/tests/test_local.py").touch()
+  (tmp_path / "scripts/wt-pytest.sh").write_text(
+    'mktemp -d "$TMPDIR/runtime.XXXXXX" > runtime-path\n'
+    'sleep 60 &\necho $! > child-pid\nwait\n'
+  )
+  result = lt.run(tmp_path, ["tests/test_local.py"], timeout=1)
+  assert "timed out" in result.unavailable
+  assert not Path((tmp_path / "runtime-path").read_text().strip()).exists()
+  pid = int((tmp_path / "child-pid").read_text().strip())
+  assert _process_has_exited(pid, 5000), "runner descendant survived timeout cleanup"
+
+
+def test_local_runner_unavailable_output_is_not_retained(tmp_path):
+  from app import local_change_tests as lt
+  _git(tmp_path, "init", "-q")
+  (tmp_path / "scripts").mkdir()
+  (tmp_path / "backend/tests").mkdir(parents=True)
+  (tmp_path / "backend/tests/test_local.py").touch()
+  (tmp_path / "scripts/wt-pytest.sh").write_text('echo private-local-data; exit 78\n')
+  result = lt.run(tmp_path, ["tests/test_local.py"])
+  assert result.unavailable == "local tests produced no report (exit 78)"
+
+
+def test_local_tests_cannot_dirty_the_validated_candidate(clone_env):
+  origin, platform = clone_env
+  _release_with_test_runner(origin, platform)
+  pre = _local_commit(platform, edits={
+    **_LOCAL_VOICE,
+    "backend/tests/test_voice.py": _LOCAL_VOICE["backend/tests/test_voice.py"] + (
+      '\nfrom pathlib import Path\n'
+      'Path("app/voice.py").write_text("broken by test\\n")\n'
+    ),
+  })
+  target = _advance_origin(origin, edits={"backend/app/store.py": _STORE_PY + "OTHER = 1\n"})
+  pu._fetch(platform)
+  result = pu.prepare_reviewed_update(**_apply_plan(pre, target, platform))
+  assert result["local_tests"]["status"] == "compared"
+  assert (platform / "backend/app/voice.py").read_text() == _LOCAL_VOICE["backend/app/voice.py"]
+  assert pu._git_blob(platform, result["prepared"], "backend/app/voice.py") == _LOCAL_VOICE["backend/app/voice.py"].encode()
+
+
+@pytest.mark.parametrize("linked_worktree", [False, True], ids=["embedded-repo", "linked-worktree"])
+def test_image_activation_preserves_late_nested_repository_without_false_incoherence(
+  clone_env, tmp_path, linked_worktree,
+):
+  origin, platform = clone_env
+  record = _prepare_package_update(platform, origin)
+  nested = platform / "independent-work"
+  owner_repo = tmp_path / "owner-repo" if linked_worktree else nested
+  owner_repo.mkdir()
+  _git(owner_repo, "init", "-q")
+  (owner_repo / "owner.txt").write_text("independent owner work\n")
+  _git(owner_repo, "add", ".")
+  _git(owner_repo, "commit", "-qm", "owner work")
+  if linked_worktree:
+    _git(owner_repo, "worktree", "add", "--detach", str(nested))
+  nested_head = _git(nested, "rev-parse", "HEAD").stdout
+  (nested / "uncommitted.txt").write_text("do not discard\n")
+
+  _boot_image(record["target"])
+  assert pu.settle_prepared_update_for_this_image(platform) == "replayed"
+
+  _assert_update_active_with_late_work(platform, record["target"])
+  assert _git(nested, "rev-parse", "HEAD").stdout == nested_head
+  assert (nested / "owner.txt").read_text() == "independent owner work\n"
+  assert (nested / "uncommitted.txt").read_text() == "do not discard\n"

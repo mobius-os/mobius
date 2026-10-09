@@ -2,9 +2,9 @@
 
 The platform owns only per-chat summaries under
 ``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives the
-bounded Digest from the most recently touched notes, never their cumulative
-Summary/facts and never knowledge-graph files. Optional installed apps may use
-the sibling directory for richer data, but they activate and retrieve that data
+short Summary of the most recently active chats, never their cumulative Digest,
+facts, or knowledge-graph files. Optional installed apps may use the sibling
+directory for richer data, but they activate and retrieve that data
 through their own system-prompt contribution and reader.
 
 ``build_memory_block`` is pure; ``chat.py`` owns the surrounding private-context
@@ -18,30 +18,21 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.chat_notes import extract_section
+from app.chat_notes import extract_chat_summary
 
-# Budget for the always-injected recent-chat digest portion.
-DEFAULT_BUDGET_BYTES = 25_000
-DEFAULT_MAX_NOTES = 12
-# How many recent per-chat notes to inject at session start. Each is the
-# agent's one-paragraph Digest; the most-recently-modified ones open a fresh
-# session with recent conversational context.
+# How many recent per-chat notes to inject at session start. Each contributes
+# the agent's whole short Summary, with no size cap or budget; the most
+# recently active ones open a fresh session with recent conversational context.
 RECENT_CHAT_NOTES = 10
-# Per-note byte cap on the injected chat digest. The daytime agent is
-# instructed to keep each chat's summary bounded and high-level (the full
-# detail lives in the transcript, read on demand), but this is a defensive
-# cap so a note that grew past its intended size still injects a bounded
-# head rather than crowding out the other recent chats or blowing the budget.
-DIGEST_MAX_BYTES = 800
 
 # Injected once per new session, outside the individual recent-chat entries.
 # Keeping retrieval guidance here makes the structured entry contract and its
 # single shared instruction one source of truth.
 RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
-  "Each recent-chat entry gives a Name, Location, and bounded Digest. "
+  "Each recent-chat entry gives a Name, Location, and Summary. "
   "When more detail would materially help, read "
   "/data/shared/memory/<Location> for that chat's complete cumulative "
-  "summary. The platform alone publishes those files; do not edit them."
+  "digest. The platform alone publishes those files; do not edit them."
 )
 
 
@@ -52,7 +43,7 @@ class MemoryBlock:
   `text` is the bare context (no `<agent_experience>` envelope — the caller
   adds that plus the dynamic provider/timezone/viewport tail). `loaded` is the
   list of chat-note paths that made it into the block; `entries` is their
-  owner-visible name/location/digest representation. `mode` is
+  owner-visible name/location/summary representation. `mode` is
   "recent_chats" | "empty" for observability. Knowledge-graph material is
   deliberately never assembled here; installed apps recall it explicitly.
   """
@@ -107,23 +98,20 @@ def load_chat_summary_metadata(
   """Read the short, owner-visible layers of a published chat note.
 
   ``description`` is the one-line gist that normally becomes the chat name;
-  ``digest`` is the bounded cross-chat continuity paragraph. The unbounded
-  ``## Summary`` remains owned by :func:`compaction.load_cumulative_summary`
-  because it is also continuation-critical provider handoff state.
+  ``summary`` is the short cross-chat continuity paragraph. The cumulative
+  ``## Digest`` is owned by :func:`compaction.load_full_digest` because it is
+  also continuation-critical provider handoff state.
 
-  Missing and legacy notes are normal: older notes predate ``## Digest`` and
-  return ``None`` for that layer rather than duplicating their full Summary.
+  Missing and legacy notes are normal: older notes predate the short layer and
+  return ``None`` for it rather than duplicating their full Digest.
   """
   path = memory_dir(data_dir) / "chats" / chat_id / "index.md"
   text = _read(path)
   if not text.strip():
-    return {"description": None, "digest": None}
+    return {"description": None, "summary": None}
   description = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _note_section(text, "Digest")
-  return {
-    "description": description or None,
-    "digest": digest.strip() if digest and digest.strip() else None,
-  }
+  summary = _chat_summary(text)
+  return {"description": description or None, "summary": summary or None}
 
 
 def _read(path: Path) -> str:
@@ -133,75 +121,53 @@ def _read(path: Path) -> str:
     return ""
 
 
-def _truncate_bytes(text: str, limit: int) -> str:
-  """Truncates on a UTF-8 byte budget without splitting a codepoint."""
-  raw = text.encode("utf-8")
-  if len(raw) <= limit:
-    return text
-  return raw[:limit].decode("utf-8", errors="ignore")
-
-
 def build_memory_block(
   data_dir: str | Path,
   *,
-  budget_bytes: int = DEFAULT_BUDGET_BYTES,
-  max_notes: int = DEFAULT_MAX_NOTES,
   eligible_chat_ids: Collection[str] | None = None,
   ordered_chat_ids: Collection[str] | None = None,
 ) -> MemoryBlock:
   """Assembles the injected memory context.
 
-  Only recent-chat digests are injected, always and without a graph/app gate.
-  Each entry is the note's one-line ``description``, relative path, and bounded
-  ``## Digest`` paragraph. The cumulative ``## Summary``,
-  facts, graph router, MOCs, and atomic notes are never pulled into a new chat.
-  An installed app may teach the agent to request graph recall through
-  a separate prompt-scoped reader.
+  Only recent-chat summaries are injected, always and without a graph/app
+  gate. Each entry is the note's one-line ``description``, relative path, and
+  whole ``## Summary``. The full ``## Digest``, facts, graph router, MOCs, and
+  atomic notes are never pulled into a new chat. An installed app may teach
+  the agent to request graph recall through a separate prompt-scoped reader.
 
-  Returns an empty block only when there are no usable chat notes. ``max_notes``
-  can narrow the platform default but cannot expand it past
-  ``RECENT_CHAT_NOTES``. Pure: never writes and never raises on missing/garbled
-  files.
+  Returns an empty block only when there are no usable chat notes. Pure: never
+  writes and never raises on missing/garbled files.
   """
-  # Clamp at 0 so a stray negative budget can't reach the byte-slicing below,
-  # where a negative limit returns a SUFFIX of the text instead of empty.
-  budget_bytes = max(0, budget_bytes)
   root = memory_dir(data_dir)
   parts: list[str] = []
   loaded: list[str] = []
   entries: list[dict[str, str]] = []
-  used = 0
-  # Each note is independently capped. Continue past one that does not fit so
-  # an unusually long newest note cannot hide every older short digest.
-  note_limit = min(RECENT_CHAT_NOTES, max(0, max_notes))
   for note in _recent_chat_notes(
-    root, note_limit,
+    root, RECENT_CHAT_NOTES,
     eligible_chat_ids=eligible_chat_ids,
     ordered_chat_ids=ordered_chat_ids,
   ):
-    name, digest = _chat_digest_parts(note)
-    if not name and not digest:
+    text = _read(note)
+    name = str(parse_frontmatter(text).get("description", "")).strip()
+    summary = _chat_summary(text)
+    if not name and not summary:
       continue
     rel = f"chats/{note.parent.name}/index.md"
     safe_name = html.escape(name or note.parent.name, quote=False)
-    safe_digest = html.escape(digest, quote=False)
-    chunk = (
+    safe_summary = html.escape(summary, quote=False)
+    parts.append(
       "<recent_chat>\n"
       f"Name: {safe_name}\n"
       f"Location: {rel}\n"
-      f"Digest: {safe_digest}\n"
+      f"Summary: {safe_summary}\n"
       "</recent_chat>"
     )
-    if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
-      continue
-    parts.append(chunk)
     loaded.append(rel)
     entries.append({
       "name": name or note.parent.name,
       "location": rel,
-      "digest": digest,
+      "summary": summary,
     })
-    used += len(chunk.encode("utf-8")) + 2
 
   if not parts:
     return MemoryBlock(text="", loaded=[], entries=[], mode="empty")
@@ -273,25 +239,6 @@ def _strip_frontmatter(text: str) -> str:
   return rest[nl + 1:] if nl != -1 else ""
 
 
-def _note_section(text: str, heading: str) -> str | None:
-  """Read a section from the body of a platform-owned continuity note."""
-  return extract_section(_strip_frontmatter(text), heading)
-
-
-def _chat_digest_parts(note: Path) -> tuple[str, str]:
-  """Return a chat's one-line name and bounded cross-chat paragraph.
-
-  New notes carry an explicit ``## Digest``. Legacy notes fall back to their
-  ``## Summary`` (not the whole body, so facts never enter automatic startup
-  context); a heading-less legacy note falls back to its loose body.
-  """
-  text = _read(note)
-  if not text.strip():
-    return "", ""
-  desc = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _note_section(text, "Digest")
-  if digest is None:
-    digest = _note_section(text, "Summary")
-  if digest is None:
-    digest = _strip_frontmatter(text).strip()
-  return desc, _truncate_bytes(digest.strip(), DIGEST_MAX_BYTES).strip()
+def _chat_summary(text: str) -> str:
+  """Return a note's whole short chat summary, or ``""`` when it has none."""
+  return (extract_chat_summary(_strip_frontmatter(text)) or "").strip()

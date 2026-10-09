@@ -51,8 +51,8 @@ export function makeImmersive({ appId } = {}) {
     // name the parent origin reliably (see building-apps.md).
     // mode:'bar' asks the shell for the lighter "look like a standalone app"
     // collapse — hide the Möbius toolbar but keep the status-bar/notch strip so
-    // the app's own header sits below it (NOT the full-bleed under-the-notch
-    // takeover a game gets with the default mode:'full').
+    // the app's own header sits below it (NOT the full-viewport takeover a
+    // game gets with the default mode:'full' where the OS allows it).
     try {
       window.parent.postMessage(
         { type: 'moebius:immersive', value: !!value, mode: 'bar', appId }, '*',

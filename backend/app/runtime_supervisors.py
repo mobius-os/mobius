@@ -515,6 +515,13 @@ class RuntimeSupervisors:
                 "capacity alert tier=%s free=%s", result["tier"],
                 (result["snapshot"] or {}).get("data_free_bytes"),
               )
+          # This tick observes the disk; a transcript conversion that paused
+          # for disk resumes when this observation says pressure recovered.
+          from app.chat_writer import rearm_transcript_conversion
+          from app.resource_pressure import resource_status
+          disk_state = resource_status(data_dir)["pressure"]["disk"].get("state")
+          if rearm_transcript_conversion(str(disk_state)):
+            self.log.info("transcript conversion resumed after disk pressure recovered")
         except asyncio.CancelledError:
           raise
         except Exception as exc:

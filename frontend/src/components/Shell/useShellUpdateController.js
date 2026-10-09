@@ -44,7 +44,10 @@ export default function useShellUpdateController(inputs) {
     setUpdateAvailable(true)
   }, [])
 
-  const applyShellUpdate = useCallback(async () => {
+  // `inspectUpdate` asks the service worker for a newer shell before leaving.
+  // That check can wait up to SW_DISCOVERY_SETTLE_TIMEOUT_MS, so a reload that
+  // only re-reads the current document (the theme status-bar refresh) skips it.
+  const reloadShellDocument = useCallback(async ({ inspectUpdate }) => {
     if (applyingRef.current) return false
     applyingRef.current = true
 
@@ -61,11 +64,13 @@ export default function useShellUpdateController(inputs) {
     } = inputsRef.current
 
     let registration = null
-    try {
-      ;({ registration } = await inspectShellUpdate({
-        serviceWorker: nav.serviceWorker,
-      }))
-    } catch { /* online document navigation remains authoritative */ }
+    if (inspectUpdate) {
+      try {
+        ;({ registration } = await inspectShellUpdate({
+          serviceWorker: nav.serviceWorker,
+        }))
+      } catch { /* online document navigation remains authoritative */ }
+    }
 
     win.dispatchEvent(new win.Event(BEFORE_SHELL_RELOAD_EVENT))
     if (!sharedBrowserAccess) {
@@ -100,6 +105,15 @@ export default function useShellUpdateController(inputs) {
     return true
   }, [])
 
+  const applyShellUpdate = useCallback(
+    () => reloadShellDocument({ inspectUpdate: true }),
+    [reloadShellDocument],
+  )
+  const reloadShell = useCallback(
+    () => reloadShellDocument({ inspectUpdate: false }),
+    [reloadShellDocument],
+  )
+
   useEffect(() => watchForShellUpdateOnResume({
     doc: inputsRef.current.doc,
     win: inputsRef.current.win,
@@ -111,5 +125,6 @@ export default function useShellUpdateController(inputs) {
     updateAvailable,
     markShellUpdateAvailable,
     applyShellUpdate,
+    reloadShell,
   }
 }

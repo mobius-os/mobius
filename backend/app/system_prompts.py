@@ -252,7 +252,7 @@ def backfill_started_chat_prompt_snapshots(
   captured = 0
   for chat in rows:
     started = bool(
-      chat.messages
+      chat.has_messages
       or chat.pending_messages
       or chat.session_id
       or chat.id in run_chat_ids

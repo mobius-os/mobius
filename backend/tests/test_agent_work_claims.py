@@ -1,4 +1,5 @@
 """Workspace work ownership stays singular while explicit transfer remains possible."""
+from app.chat_writer import create_chat
 
 import pytest
 
@@ -15,8 +16,8 @@ from app.agent_work_claims import (
 
 def _fixture(db):
   owner = models.Owner(username="owner", hashed_password="not-used")
-  first = models.Chat(id="claim-first", title="Original integrator", messages=[])
-  second = models.Chat(id="claim-second", title="Broader author", messages=[])
+  first = create_chat(id="claim-first", title="Original integrator", messages=[])
+  second = create_chat(id="claim-second", title="Broader author", messages=[])
   db.add_all([owner, first, second])
   db.flush()
   runs = [
@@ -141,7 +142,7 @@ def test_completion_resolves_followers_and_same_key_cannot_be_reclaimed(db):
 
 def test_deleted_follower_cannot_suppress_live_follower_notification(db):
   owner, first, deleted = _fixture(db)
-  live = models.Chat(id="claim-live", title="Live follower", messages=[])
+  live = create_chat(id="claim-live", title="Live follower", messages=[])
   live_run = models.ChatRun(
     id="claim-run-live", root_run_id="claim-run-live",
     goal_id="claim-goal-live", goal_objective="Follow exact work",

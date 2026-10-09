@@ -1,4 +1,5 @@
 """Lifecycle cards share reply ownership, not one interchangeable event position."""
+from app import transcript_rows
 
 from datetime import UTC, datetime, timedelta
 import json
@@ -81,4 +82,4 @@ def test_wait_resume_and_goal_keep_their_event_positions_across_split_pages(
   assert earlier["continuation_reason"] == "restart"
   assert earlier["wait_summaries"][0]["id"] == "placement-wait"
   db.refresh(db.get(models.Chat, chat_id))
-  assert db.get(models.Chat, chat_id).messages == messages
+  assert list(transcript_rows.history(db.get(models.Chat, chat_id))) == messages

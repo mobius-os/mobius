@@ -21,9 +21,10 @@ from concurrent.futures import Future
 
 import pytest
 
-from app import models, schemas
+from app import models, schemas, transcript_rows
 from app.chat_writer import (
   _stamp_provider_batch,
+  apply_answers_to_last_question,
   AnswerQuestion,
   AppendPending,
   AppendSteeredUserMessage,
@@ -32,6 +33,7 @@ from app.chat_writer import (
   CancelPending,
   ChatWriterActor,
   ClearPending,
+  create_chat,
   FinishRun,
   Finalize,
   PersistError,
@@ -59,18 +61,19 @@ def _seed_chat(
   active_assistant_message_id=None,
   title="Test chat",
   title_locked=False,
+  provider="claude",
 ):
   """Insert a Chat row and return its id, committed via a throwaway session."""
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id,
       title=title,
       title_locked=title_locked,
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
       session_id=session_id,
-      provider="claude",
+      provider=provider,
       pending_question_id=pending_question_id,
       active_assistant_message_id=active_assistant_message_id,
     )
@@ -116,7 +119,7 @@ def _load_chat(chat_id="c1"):
     run = running_run(db, chat_id)
     # Detach plain copies so the caller can inspect after the session closes.
     return {
-      "messages": list(chat.messages or []),
+      "messages": transcript_rows.read_all(db, chat),
       "live_assistant": chat.live_assistant,
       "pending_messages": list(chat.pending_messages or []),
       "pending_question_id": chat.pending_question_id,
@@ -298,10 +301,26 @@ def test_question_commit_failure_raises_so_card_is_not_broadcast():
     def expire_all(self):
       self._db.expire_all()
 
+    @property
+    def info(self):
+      return self._db.info
+
+    def get_bind(self, *a, **k):
+      return self._db.get_bind(*a, **k)
+
+    def connection(self, *a, **k):
+      return self._db.connection(*a, **k)
+
     def execute(self, *a, **k):
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       raise OperationalError("stmt", {}, Exception("database is locked"))
@@ -365,6 +384,105 @@ def test_finalize_ack_only_after_commit(actor):
   tool = next(b for b in blocks if b.get("type") == "tool")
   assert tool["status"] != "running"
   assert chat["pending_question_id"] is None
+
+
+@pytest.mark.parametrize("command", ["finalize", "question"])
+@pytest.mark.parametrize("provider", ["claude", "codex", "mobius"])
+@pytest.mark.converted_chats  # A converted chat's row-path statements.
+def test_hot_terminal_write_updates_only_owned_message(actor, command, provider):
+  """A long chat's terminal boundary must not decode or rewrite its prefix."""
+  from sqlalchemy import event
+  from app.database import engine
+
+  prefix = [
+    {"role": "user", "content": f"older-{i}", "cid": f"cid-{i}", "ts": i + 1}
+    for i in range(200)
+  ]
+  _seed_chat(provider=provider, messages=[*prefix, {
+    "role": "assistant", "id": "owned-run", "ts": 500,
+    "blocks": [{"type": "text", "content": "partial"}],
+  }])
+  statements, mirrors = [], []
+
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    if "chat_messages" in statement.lower():
+      statements.append(statement.lower())
+    if statement.lower().lstrip().startswith("update chats set messages"):
+      mirrors.append(statement)
+
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    if command == "question":
+      queued = QuestionCommit(
+        chat_id="c1", run_token="owned-run", snapshot={
+          "role": "assistant", "id": "owned-run", "blocks": [
+            {"type": "question", "question_id": "q-hot", "questions": []},
+          ],
+        },
+      )
+    else:
+      queued = Finalize(
+        chat_id="c1", run_token="owned-run", snapshot={
+          "role": "assistant", "id": "owned-run", "blocks": [
+            {"type": "text", "content": "done"},
+          ],
+        },
+      )
+    assert _await(actor.submit(queued)) is True
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+
+  writes = [sql for sql in statements if sql.lstrip().startswith(
+    ("update", "insert", "delete"))]
+  # One owned row, plus release 1's single legacy-mirror update for the chat
+  # (transcript_rows joins the stored body text in position order and never
+  # decodes it).
+  assert [sql.split()[1] for sql in writes] == ["chat_messages"], statements
+  assert len(mirrors) == 1, mirrors
+  mirror_read = "select body from chat_messages where chat_id = ? order by seq"
+  assert all("message_key" in sql or "seq =" in sql or "ts" in sql or "max(" in sql
+             or sql.strip() == mirror_read
+             for sql in statements if sql.lstrip().startswith("select")), statements
+  assert len(_load_chat()["messages"]) == 201
+
+
+@pytest.mark.converted_chats  # A converted chat's row-path statements.
+def test_question_answer_streams_from_the_tail_and_updates_one_row():
+  from sqlalchemy import event
+  from app.database import engine
+
+  _seed_chat(messages=[
+    *({"role": "user", "content": f"old-{i}", "ts": i + 1}
+      for i in range(200)),
+    {"role": "assistant", "id": "owner", "ts": 500, "blocks": [
+      {"type": "question", "question_id": "last-q", "questions": []},
+    ]},
+  ])
+  statements = []
+
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    if "chat_messages" in statement.lower():
+      statements.append(statement.lower())
+
+  db = SessionLocal()
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    chat = db.get(models.Chat, "c1")
+    assert apply_answers_to_last_question(chat, {"answer": "yes"}, "last-q")
+    db.commit()
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+    db.close()
+
+  body_pages = [sql for sql in statements if sql.lstrip().startswith("select")
+                and "chat_messages.body" in sql]
+  writes = [sql for sql in statements if sql.lstrip().startswith("update chat_messages")]
+  # One reverse stream that stops at the card, and one exact-row read.
+  assert len(body_pages) == 2, statements
+  assert sum("order by chat_messages.seq desc" in sql for sql in body_pages) == 1
+  assert sum("seq =" in sql for sql in body_pages) == 1
+  assert len(writes) == 1, statements
+  assert _load_chat()["messages"][-1]["blocks"][0]["answers"] == {"answer": "yes"}
 
 
 # -- BLOCKING 2: must-persist commands fail (not falsely ack) on a no-op ---
@@ -1231,10 +1349,26 @@ def test_db_error_recreates_session_and_keeps_serving():
     def expire_all(self):
       self._db.expire_all()
 
+    @property
+    def info(self):
+      return self._db.info
+
+    def get_bind(self, *a, **k):
+      return self._db.get_bind(*a, **k)
+
+    def connection(self, *a, **k):
+      return self._db.connection(*a, **k)
+
     def execute(self, *a, **k):
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       if self._fail_next_commit:
@@ -1300,10 +1434,26 @@ def test_fatal_actor_fails_callers():
     def expire_all(self):
       self._db.expire_all()
 
+    @property
+    def info(self):
+      return self._db.info
+
+    def get_bind(self, *a, **k):
+      return self._db.get_bind(*a, **k)
+
+    def connection(self, *a, **k):
+      return self._db.connection(*a, **k)
+
     def execute(self, *a, **k):
       return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
+    def get(self, *a, **k):
+      return self._db.get(*a, **k)
+    def add(self, *a, **k):
+      return self._db.add(*a, **k)
+    def flush(self, *a, **k):
+      return self._db.flush(*a, **k)
 
     def commit(self):
       raise InvalidRequestError("session is in a broken state")
@@ -1560,7 +1710,7 @@ def test_reconciliation_works_independent_of_actor():
   # A chat stranded mid-turn with a partial assistant block.
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id="stranded",
       title="t",
       messages=[
@@ -1739,7 +1889,8 @@ def test_stale_finish_run_cannot_clear_successor_question(actor):
   assert chat["active_assistant_message_id"] is None
 
 
-def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
+@pytest.mark.parametrize("terminal_status", ["interrupted", "failed"])
+def test_stale_wedged_recovery_cannot_clobber_new_run(actor, terminal_status):
   """A delayed recovery for run A must not alter run B's marker or history."""
   _seed_chat(messages=[])
   _await(actor.submit(StartTurn(
@@ -1758,6 +1909,7 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
   result = _await(actor.submit(RecoverWedgedRun(
     chat_id="c1",
     run_token="old-run",
+    terminal_status=terminal_status,
     interruption_block={
       "type": "error", "message": "old recovery", "resumable": True,
     },
@@ -1768,8 +1920,49 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
   assert chat["running_status"] == "running"
   assert chat["active_assistant_message_id"] == "new-run"
   assert [message["content"] for message in chat["messages"]] == ["old", "new"]
+  # StartTurn already retired the predecessor; a late recovery cannot rewrite it.
   assert _load_run("old-run")["status"] == "interrupted"
   assert _load_run("new-run")["status"] == "running"
+
+
+def test_failed_wedged_recovery_commits_resumable_error_with_failed_run(actor):
+  """Setup failure closes the child as failed with its Resume error atomically."""
+  _seed_chat(messages=[], pending=[{"role": "user", "content": "later", "ts": 10}])
+  _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="setup-run",
+    user_msg={"role": "user", "content": "start", "ts": 1, "cid": "start"},
+    title_source="start",
+  )))
+  assert _await(actor.submit(RecoverWedgedRun(
+    chat_id="c1", run_token="setup-run", terminal_status="failed",
+    interruption_block={
+      "type": "error", "message": "Setup failed.", "resumable": True,
+    },
+  ))) is True
+
+  chat = _load_chat()
+  assert _load_run("setup-run")["status"] == "failed"
+  assert chat["running_status"] is None
+  assert chat["pending_messages"] == [{"role": "user", "content": "later", "ts": 10}]
+  assert chat["messages"][-1]["blocks"][-1] == {
+    "type": "error", "message": "Setup failed.", "resumable": True,
+  }
+
+
+def test_failed_wedged_recovery_rejects_invalid_error_without_closing_run(actor):
+  _seed_chat(messages=[])
+  _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="setup-run",
+    user_msg={"role": "user", "content": "start", "ts": 1, "cid": "start"},
+    title_source="start",
+  )))
+  with pytest.raises(Exception, match="requires an error block"):
+    _await(actor.submit(RecoverWedgedRun(
+      chat_id="c1", run_token="setup-run", terminal_status="failed",
+      interruption_block={"type": "text", "content": "not an error"},
+    )))
+  assert _load_run("setup-run")["status"] == "running"
+  assert len(_load_chat()["messages"]) == 1
 
 
 def test_append_pending_bumps_colliding_ts(actor):
@@ -1902,3 +2095,43 @@ def test_provider_batch_marks_only_visible_owner_rows():
   single = [{"role": "user", "cid": "x", "provider_batch": {"id": "stale"}}]
   _stamp_provider_batch(single)
   assert "provider_batch" not in single[0]
+
+
+def test_wedged_recovery_writes_only_the_recovery_row_without_reading_history(actor):
+  """Recovery changes at most the live overlay and the recovery row; it must
+  never decode or rewrite the settled history (the old PersistError path did)."""
+  from sqlalchemy import event
+  from app.database import engine
+
+  _seed_chat(messages=[{"role": "user", "content": "x" * 5000, "ts": i} for i in range(50)])
+  _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="run-a",
+    user_msg={"role": "user", "content": "go", "ts": 100, "cid": "go"},
+    title_source="go",
+  )))
+  statements = []
+
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    if "chat_messages" in statement.lower():
+      statements.append(statement.lower())
+
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    assert _await(actor.submit(RecoverWedgedRun(
+      chat_id="c1", run_token="run-a",
+      interruption_block={"type": "error", "message": "interrupted", "resumable": True},
+    ))) is True
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+  whole_history_reads = [
+    sql for sql in statements if sql.lstrip().startswith("select")
+    and "chat_messages.body" in sql and "seq =" not in sql and "seq in" not in sql
+    and "seq <" not in sql
+  ]
+  assert whole_history_reads == [], statements
+  row_writes = [sql for sql in statements if sql.lstrip().startswith(
+    ("insert into chat_messages", "update chat_messages", "delete from chat_messages"))]
+  assert len(row_writes) == 1, statements
+  messages = _load_chat()["messages"]
+  assert len(messages) == 52
+  assert messages[-1]["blocks"][-1]["message"] == "interrupted"

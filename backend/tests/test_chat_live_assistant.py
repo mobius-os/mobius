@@ -1,4 +1,6 @@
 """Streaming snapshots stay bounded without weakening transcript durability."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from app import models
 from app.chat_message_identity import assistant_message_index
@@ -17,7 +19,7 @@ def _chat(db, *, trailing_role="user"):
      "ts": 2},
     {"role": trailing_role, "content": "current", "ts": 3},
   ]
-  chat = models.Chat(
+  chat = create_chat(
     id="live-chat",
     title="Live",
     messages=messages,
@@ -52,7 +54,7 @@ def test_stream_snapshot_updates_only_live_value(db):
   }) is True
 
   db.refresh(chat)
-  assert chat.messages == history
+  assert list(transcript_rows.history(chat)) == history
   assert chat.live_assistant["ts"] == 4
   assert chat.live_assistant["blocks"][0]["text"] == "streaming"
   assert chat.active_assistant_message_id == "assistant-streaming"
@@ -81,38 +83,37 @@ def test_finalize_merges_live_turn_once_and_clears_snapshot(db):
   db.refresh(chat)
   assert outcome.value == "applied"
   assert chat.live_assistant is None
-  assert len(chat.messages) == len(history) + 1
-  assert chat.messages[-1]["id"] == "assistant-current"
-  assert chat.messages[-1]["ts"] == 4
-  assert chat.messages[-1]["blocks"][0]["text"] == "complete"
+  assert len(list(transcript_rows.history(chat))) == len(history) + 1
+  assert list(transcript_rows.history(chat))[-1]["id"] == "assistant-current"
+  assert list(transcript_rows.history(chat))[-1]["ts"] == 4
+  assert list(transcript_rows.history(chat))[-1]["blocks"][0]["text"] == "complete"
   assert chat.active_assistant_message_id == "assistant-current"
   assert chat.updated_at != history_version
 
 
-def test_materialized_snapshot_replaces_question_barrier_row():
-  class Row:
-    messages = [{
+def test_materialized_snapshot_replaces_question_barrier_row(db):
+  row = create_chat(id="question-overlay", title="Question overlay", messages=[{
       "role": "assistant",
       "blocks": [{"type": "question", "question_id": "q1"}],
       "ts": 7,
-    }]
-    live_assistant = {
+    }], live_assistant={
       "role": "assistant",
       "blocks": [
         {"type": "question", "question_id": "q1", "answers": {"q": "a"}},
         {"type": "text", "text": "continuing"},
       ],
       "ts": 7,
-    }
+    })
+  db.add(row)
+  db.flush()
 
-  projected = materialized_messages(Row())
+  projected = materialized_messages(row)
   assert len(projected) == 1
-  assert projected[0] == Row.live_assistant
+  assert projected[0] == row.live_assistant
 
 
-def test_materialized_snapshot_updates_exact_row_before_hidden_same_turn_answer():
-  class Row:
-    messages = [
+def test_materialized_snapshot_updates_exact_row_before_hidden_same_turn_answer(db):
+  row = create_chat(id="hidden-answer-overlay", title="Hidden answer", messages=[
       {
         "id": "assistant-live",
         "role": "assistant",
@@ -120,8 +121,7 @@ def test_materialized_snapshot_updates_exact_row_before_hidden_same_turn_answer(
         "ts": 7,
       },
       {"role": "user", "hidden": True, "content": "answer", "ts": 8},
-    ]
-    live_assistant = {
+    ], live_assistant={
       "id": "assistant-live",
       "role": "assistant",
       "blocks": [
@@ -129,16 +129,18 @@ def test_materialized_snapshot_updates_exact_row_before_hidden_same_turn_answer(
         {"type": "text", "text": "continuing"},
       ],
       "ts": 7,
-    }
+    })
+  db.add(row)
+  db.flush()
 
-  projected = materialized_messages(Row())
+  projected = materialized_messages(row)
   assert len(projected) == 2
-  assert projected[0] is Row.live_assistant
+  assert projected[0] is row.live_assistant
   assert projected[1]["hidden"] is True
 
 
 def test_terminal_snapshot_updates_exact_assistant_before_hidden_answer(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="same-turn-answer",
     title="Same turn",
     messages=[
@@ -166,14 +168,14 @@ def test_terminal_snapshot_updates_exact_assistant_before_hidden_answer(db):
   }) is True
 
   db.refresh(chat)
-  assert len(chat.messages) == 3
-  assert chat.messages[1]["id"] == "assistant-live"
-  assert chat.messages[1]["content"] == "continued"
-  assert chat.messages[2]["hidden"] is True
+  assert len(list(transcript_rows.history(chat))) == 3
+  assert list(transcript_rows.history(chat))[1]["id"] == "assistant-live"
+  assert list(transcript_rows.history(chat))[1]["content"] == "continued"
+  assert list(transcript_rows.history(chat))[2]["hidden"] is True
 
 
 def test_finalize_preserves_identity_before_hidden_same_turn_answer(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="same-turn-finalize",
     title="Same turn finalize",
     messages=[
@@ -202,14 +204,14 @@ def test_finalize_preserves_identity_before_hidden_same_turn_answer(db):
 
   db.refresh(chat)
   assert outcome.value == "applied"
-  assert len(chat.messages) == 3
-  assert chat.messages[1]["id"] == "assistant-live"
-  assert chat.messages[1]["content"] == "continued"
-  assert chat.messages[2]["hidden"] is True
+  assert len(list(transcript_rows.history(chat))) == 3
+  assert list(transcript_rows.history(chat))[1]["id"] == "assistant-live"
+  assert list(transcript_rows.history(chat))[1]["content"] == "continued"
+  assert list(transcript_rows.history(chat))[2]["hidden"] is True
 
 
 def test_unknown_assistant_identity_appends_instead_of_rewriting_old_tail(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="new-segment",
     title="New segment",
     messages=[
@@ -231,14 +233,14 @@ def test_unknown_assistant_identity_appends_instead_of_rewriting_old_tail(db):
   }) is True
 
   db.refresh(chat)
-  assert [message.get("id") for message in chat.messages] == [
+  assert [message.get("id") for message in list(transcript_rows.history(chat))] == [
     None, "assistant-old", "assistant-new",
   ]
-  assert chat.messages[1]["content"] == "old"
+  assert list(transcript_rows.history(chat))[1]["content"] == "old"
 
 
 def test_identity_adopts_only_a_trailing_pre_identity_partial(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="rolling-identity",
     title="Rolling identity",
     messages=[
@@ -260,9 +262,9 @@ def test_identity_adopts_only_a_trailing_pre_identity_partial(db):
   }) is True
 
   db.refresh(chat)
-  assert len(chat.messages) == 2
-  assert chat.messages[-1]["id"] == "assistant-current"
-  assert chat.messages[-1]["content"] == "complete"
+  assert len(list(transcript_rows.history(chat))) == 2
+  assert list(transcript_rows.history(chat))[-1]["id"] == "assistant-current"
+  assert list(transcript_rows.history(chat))[-1]["content"] == "complete"
 
 
 def test_codex_path_wrappers_are_normalized_before_json_storage(db):
@@ -303,7 +305,7 @@ def test_codex_path_wrappers_are_normalized_before_json_storage(db):
 
   db.refresh(chat)
   assert outcome.value == "applied"
-  assert chat.messages[-1]["blocks"][0]["cwd"] == "/data"
+  assert list(transcript_rows.history(chat))[-1]["blocks"][0]["cwd"] == "/data"
 
 
 def test_repeated_snapshots_never_update_the_historical_chat_row(db):
@@ -333,7 +335,7 @@ def test_repeated_snapshots_never_update_the_historical_chat_row(db):
   assert not any('update chats ' in sql for sql in statements)
   assert not any('chats.messages' in sql for sql in statements)
   db.refresh(chat)
-  assert chat.messages == history
+  assert list(transcript_rows.history(chat)) == history
   assert chat.live_assistant['blocks'][0]['content'] == 'three'
 
 
@@ -347,7 +349,7 @@ def test_live_snapshot_wal_bytes_do_not_scale_with_history(tmp_path):
     connection.execute(text('PRAGMA journal_mode=WAL'))
     connection.execute(text('PRAGMA wal_autocheckpoint=0'))
     with Session(bind=connection) as session:
-      chat = models.Chat(
+      chat = create_chat(
         id='large-history', messages=[{'role': 'user', 'content': 'x' * 2_000_000}],
         active_assistant_message_id='live',
         live_assistant={'id': 'live', 'role': 'assistant', 'blocks': [], 'ts': 2},

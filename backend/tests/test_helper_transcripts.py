@@ -1,4 +1,5 @@
 """Opening a helper shows its own conversation, and only to its parent chat."""
+from app.chat_writer import create_chat
 
 import json
 from pathlib import Path
@@ -87,8 +88,8 @@ def _record(db, chat_id, run_id, event):
 
 def _seed_parent_with_helpers(db):
   db.add_all([
-    models.Chat(id="helper-parent", title="Parent", messages=[]),
-    models.Chat(id="helper-stranger", title="Stranger", messages=[]),
+    create_chat(id="helper-parent", title="Parent", messages=[]),
+    create_chat(id="helper-stranger", title="Stranger", messages=[]),
   ])
   db.commit()
   for task_id in ("a1claude", "a2gone"):

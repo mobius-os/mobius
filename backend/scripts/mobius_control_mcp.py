@@ -1009,8 +1009,10 @@ def _call_list_agents(arguments: dict[str, Any]) -> dict:
 
 
 def _call_checkpoint_chat(arguments: dict[str, Any]) -> str:
-  if not arguments or not set(arguments).issubset({"title", "digest", "summary"}):
-    raise ValueError("checkpoint_chat takes one or more of title, digest, summary")
+  if not arguments or not set(arguments).issubset({"title", "chat_summary", "digest_entry"}):
+    raise ValueError(
+      "checkpoint_chat takes one or more of title, chat_summary, digest_entry"
+    )
   if not all(isinstance(value, str) for value in arguments.values()):
     raise ValueError("checkpoint_chat fields must be strings")
   _agent_api_call("POST", "/api/chat/continuity/checkpoints", arguments)
@@ -1204,12 +1206,12 @@ _TOOL_DEFINITIONS = {
     "name": CHECKPOINT_CHAT_TOOL,
     "description": (
       "Save this chat's continuity note. Every field is optional: title "
-      "renames the chat (a name the owner chose always wins), digest replaces "
-      "its short current paragraph, and summary appends one entry to its "
-      "cumulative Summary. Default to one concise changes-only save per substantive "
+      "renames the chat (a name the owner chose always wins), chat_summary "
+      "replaces its short Summary, and digest_entry appends one entry to its "
+      "cumulative Digest. Default to one concise changes-only save per substantive "
       "turn; save earlier before handoffs, owner-input cards, restarts, or "
       "risky/long work that needs a recovery checkpoint. Omit unchanged title "
-      "and digest; do not repeat saved facts or raw tool output. Omitted fields "
+      "and chat_summary; do not repeat saved facts or raw tool output. Omitted fields "
       "stay unchanged. If a save fails, read the note before retrying so an entry "
       "is not added twice."
     ),
@@ -1217,8 +1219,10 @@ _TOOL_DEFINITIONS = {
       "type": "object", "additionalProperties": False,
       "properties": {
         "title": {"type": "string", "maxLength": 200},
-        "digest": {"type": "string", "maxLength": 1000},
-        "summary": {"type": "string", "maxLength": 8000},
+        "chat_summary": {"type": "string",
+                         "description": "Short overview of the whole chat; replaces the previous one."},
+        "digest_entry": {"type": "string",
+                         "description": "New facts since the last save; appended to the cumulative Digest."},
       },
     },
   },

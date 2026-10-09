@@ -1,4 +1,5 @@
 """Chat drawer recency follows owner actions, not generic row updates."""
+from app.chat_writer import create_chat
 
 from datetime import UTC, datetime
 
@@ -8,7 +9,7 @@ from app.chat_writer import AppendSteeredUserMessage, get_writer
 
 def test_steered_message_advances_drawer_recency(db):
   old_activity = datetime(2000, 1, 1, tzinfo=UTC)
-  chat = models.Chat(
+  chat = create_chat(
     id="steer-recency",
     title="Steer recency",
     messages=[

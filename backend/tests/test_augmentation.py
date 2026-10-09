@@ -1,5 +1,7 @@
 # backend/tests/test_augmentation.py
 """Tests that send_message appends uploaded-file info to the user message."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 import io
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -82,7 +84,7 @@ def test_attachments_saved_in_message(client, db, auth, chat):
 
 
 def test_augmentation_with_uploads(client, db, auth, chat):
-  """When files are uploaded, the file list must be appended."""
+  """A message carrying an uploaded file gets the session file list appended."""
   client.post(
     f"/api/chats/{chat.id}/uploads",
     files=[("files", ("report.pdf", io.BytesIO(b"data"), "application/pdf"))],
@@ -98,7 +100,7 @@ def test_augmentation_with_uploads(client, db, auth, chat):
   with patch("app.routes.chats_stream.run_chat", new=fake_run_chat):
     client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "analyze this"},
+      json={"content": "analyze this", "attachments": [{"name": "report.pdf"}]},
       headers=auth,
     )
 
@@ -118,7 +120,7 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
     from app.database import SessionLocal
     s = SessionLocal()
     c = s.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    captured_messages.extend(c.messages or [])
+    captured_messages.extend(list(transcript_rows.history(c)) or [])
     s.close()
     _mark_done(chat_id)
 
@@ -236,7 +238,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     db.refresh(chat)
     # Stale pending plus the new send were promoted as separate ordered rows
     # (the provider-facing combined text is data["message"]["content"] above).
-    assert [m["content"] for m in chat.messages[-3:]] == ["stale 1", "stale 2", "new send"]
+    assert [m["content"] for m in list(transcript_rows.history(chat))[-3:]] == ["stale 1", "stale 2", "new send"]
     assert chat.pending_messages == []
     # Run was scheduled (gen bumped + starting marker set).
     assert chat.id in registry.all_alive_chat_ids()
@@ -278,8 +280,8 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
     assert data["message"]["_consumed_cids"] == ["legacy-100"]
 
     db.refresh(chat)
-    assert chat.messages[-1]["content"] == "secret reminder"
-    assert chat.messages[-1]["hidden"] is True
+    assert list(transcript_rows.history(chat))[-1]["content"] == "secret reminder"
+    assert list(transcript_rows.history(chat))[-1]["hidden"] is True
     assert [m["content"] for m in chat.pending_messages] == [
       "new visible send",
     ]
@@ -320,7 +322,7 @@ def test_stale_pending_started_response_when_new_send_remains_queued(
     assert data["position"] == 2
     assert data["message"]["content"] == "visible first"
     db.refresh(chat)
-    assert chat.messages[-1]["content"] == "visible first"
+    assert list(transcript_rows.history(chat))[-1]["content"] == "visible first"
     assert [m["content"] for m in chat.pending_messages] == [
       "hidden next",
       "new visible",
@@ -489,7 +491,7 @@ def test_promote_pending_messages(db):
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
-  chat = models.Chat(
+  chat = create_chat(
     id="promote-test",
     title="Test",
     messages=[{"role": "user", "content": "first"}],
@@ -510,8 +512,8 @@ def test_promote_pending_messages(db):
   assert chat.pending_messages == []
   # Visible transcript stores each queued send SEPARATELY; the provider
   # still gets the combined continuation (next_user.content) below.
-  assert len(chat.messages) == 3
-  assert [m["content"] for m in chat.messages[1:]] == ["queued msg 1", "queued msg 2"]
+  assert len(list(transcript_rows.history(chat))) == 3
+  assert [m["content"] for m in list(transcript_rows.history(chat))[1:]] == ["queued msg 1", "queued msg 2"]
   # Returned values for next run.
   assert next_user["content"] == "queued msg 1\nqueued msg 2"
   assert next_user["ts"] == 123
@@ -530,7 +532,7 @@ def test_promote_drains_all_at_once(db):
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
-  chat = models.Chat(
+  chat = create_chat(
     id="drain-test",
     title="Test",
     messages=[],
@@ -570,7 +572,7 @@ def test_promote_locked_atomic_with_append(db):
   from app.database import SessionLocal
   from app.schemas import SendMessage
 
-  chat = models.Chat(
+  chat = create_chat(
     id="late-drain-test",
     title="t",
     messages=[],
@@ -645,7 +647,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
-  chat = models.Chat(
+  chat = create_chat(
     id="starting-held-test",
     title="Test",
     messages=[],
@@ -681,7 +683,7 @@ def test_promote_and_append_dont_lose_messages(db):
   from app.database import SessionLocal
   from app.schemas import SendMessage
 
-  chat = models.Chat(
+  chat = create_chat(
     id="race-test",
     title="t",
     messages=[],
@@ -715,7 +717,7 @@ def test_promote_and_append_dont_lose_messages(db):
   try:
     asyncio.run(run())
     db.refresh(chat)
-    transcript_contents = [m["content"] for m in chat.messages]
+    transcript_contents = [m["content"] for m in list(transcript_rows.history(chat))]
     pending_contents = [m["content"] for m in chat.pending_messages]
     all_contents = "\n".join(transcript_contents + pending_contents)
     assert "head" in all_contents
@@ -742,7 +744,7 @@ def test_stop_clears_pending_queue(db):
   from app.chat import current_run_generation, stop_chat
   from unittest.mock import MagicMock
 
-  chat = models.Chat(
+  chat = create_chat(
     id="stop-clears",
     title="t",
     messages=[],
@@ -777,7 +779,7 @@ def test_stop_chat_for_clears_pending_queue(db):
   from app import models
   from app.chat import stop_chat_for
 
-  chat = models.Chat(
+  chat = create_chat(
     id="stop-for-clears",
     title="t",
     messages=[],
@@ -809,7 +811,7 @@ def test_stop_chat_for_empty_pending_reports_no_cleared_cids(db):
   from app import models
   from app.chat import stop_chat_for
 
-  chat = models.Chat(
+  chat = create_chat(
     id="stop-for-empty", title="t", messages=[], pending_messages=[],
   )
   db.add(chat)
@@ -827,7 +829,7 @@ def test_chat_stop_route_returns_cleared_pending_cids(client, db, auth):
   only what Stop actually removed (PM 115)."""
   from app import models
 
-  chat = models.Chat(
+  chat = create_chat(
     id="stop-route-clears",
     title="t",
     messages=[],
@@ -854,7 +856,7 @@ def test_cancel_pending_message_by_cid(client, db, auth):
   """DELETE /chats/{id}/pending/{cid} removes a queued message by its cid."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="cancel-test",
     title="t",
     messages=[],
@@ -883,7 +885,7 @@ def test_update_pending_message_preserves_identity_order_and_attachments(
   """PATCH changes only queued text; delivery identity and files stay put."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="edit-pending",
     title="t",
     messages=[],
@@ -921,7 +923,7 @@ def test_update_pending_message_reports_a_racing_promotion(client, db, auth):
   """A row that already left the queue is not recreated by a late edit."""
   from app import models
 
-  c = models.Chat(id="edit-gone", title="t", messages=[], pending_messages=[])
+  c = create_chat(id="edit-gone", title="t", messages=[], pending_messages=[])
   db.add(c)
   db.commit()
 
@@ -938,7 +940,7 @@ def test_update_pending_message_rejects_empty_content(client, db, auth):
   """Whitespace-only text is refused so an edit cannot blank a queued row."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="edit-empty",
     title="t",
     messages=[],
@@ -966,7 +968,8 @@ def test_update_pending_message_rederives_upload_manifest(client, db, auth, chat
   the browser only sends the visible text. (`chat` uses a UUID4 id the uploads
   route accepts.)"""
   chat.pending_messages = [
-    {"role": "user", "content": "before", "ts": 100, "cid": "c-up"},
+    {"role": "user", "content": "before", "ts": 100, "cid": "c-up",
+     "attachments": [{"name": "report.pdf"}]},
   ]
   db.commit()
 
@@ -994,7 +997,7 @@ def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
   by that value removes it (the value is stored now, not derived at read time)."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="cancel-legacy",
     title="t",
     messages=[],
@@ -1016,7 +1019,7 @@ def test_cancel_pending_message_rejects_cross_site_request(client, db, auth):
   """DELETE /chats/{id}/pending/{cid} rejects cross-site requests."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="cancel-cross-site",
     title="t",
     messages=[],
@@ -1038,7 +1041,7 @@ def test_cancel_pending_missing_cid_noop(client, db, auth):
   """DELETE with a cid not in the queue returns the unchanged queue."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="cancel-noop",
     title="t",
     messages=[],
@@ -1058,7 +1061,7 @@ def test_get_chat_returns_pending_messages(client, db, auth):
   """GET /chats/{id} must include pending_messages so client can hydrate."""
   from app import models
 
-  c = models.Chat(
+  c = create_chat(
     id="hydrate-test",
     title="t",
     messages=[],

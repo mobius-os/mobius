@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  activityEventsFromPages,
   carrierMessages,
   mergeProjectedActivity,
   peerRecordTool,
@@ -117,4 +118,12 @@ test('projected peer rows join a newer live payload once without replacing it', 
     mergeProjectedActivity([peer, bash, later], [peer, bash], [bash]),
     [peer, bash, later],
   )
+})
+
+test('an empty activity read keeps the no-activity identity so it is not a transcript change', () => {
+  const unloaded = activityEventsFromPages(undefined)
+  assert.deepEqual(unloaded, [])
+  assert.equal(activityEventsFromPages([{ events: [], next_before: null }]), unloaded)
+  const one = note('one', 1500)
+  assert.deepEqual(activityEventsFromPages([{ events: [one] }, { events: [one] }]), [one])
 })

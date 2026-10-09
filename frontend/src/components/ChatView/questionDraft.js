@@ -29,6 +29,7 @@ function parsedDraft(storage, key) {
       otherTexts: parsed.otherTexts && typeof parsed.otherTexts === 'object'
         ? parsed.otherTexts
         : {},
+      files: Array.isArray(parsed.files) ? parsed.files : [],
     }
   } catch {
     return null
@@ -60,7 +61,7 @@ export function questionDraftKey(chatId, questionId, questions) {
 
 
 export function readQuestionDraft(key, storage) {
-  if (!key) return { answers: {}, otherTexts: {} }
+  if (!key) return { answers: {}, otherTexts: {}, files: [] }
   const targets = storage ? [storage] : browserDraftStorages()
   for (let index = 0; index < targets.length; index++) {
     const draft = parsedDraft(targets[index], key)
@@ -78,31 +79,27 @@ export function readQuestionDraft(key, storage) {
     }
     return draft
   }
-  return { answers: {}, otherTexts: {} }
+  return { answers: {}, otherTexts: {}, files: [] }
 }
 
 
-export function writeQuestionDraft(
-  key,
-  answers,
-  otherTexts,
-  storage,
-) {
+export function writeQuestionDraft(key, { answers, otherTexts, files = [] }, storage) {
   if (!key) return
   const targets = storage ? [storage] : browserDraftStorages()
   const hasAnswers = Object.keys(answers || {}).length > 0
   const hasText = Object.values(otherTexts || {}).some(value => String(value || '').length > 0)
+  const savedFiles = files.filter(file => file.status === 'done').map(({ name, size, mime_type }) => ({ name, size, mime_type, status: 'done' }))
 
   // Clearing is authoritative across every fallback. Returning after the
   // first successful remove leaves older session data available to resurrect.
-  if (!hasAnswers && !hasText) {
+  if (!hasAnswers && !hasText && savedFiles.length === 0) {
     for (const target of targets) {
       try { target.removeItem(key) } catch { /* blocked store */ }
     }
     return
   }
 
-  const serialized = JSON.stringify({ version: 1, answers, otherTexts })
+  const serialized = JSON.stringify({ version: 1, answers, otherTexts, files: savedFiles })
   for (const target of targets) {
     try {
       target.setItem(key, serialized)

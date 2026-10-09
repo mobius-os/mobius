@@ -266,10 +266,14 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       width: scenario.viewport.width,
       height: scenario.viewport.expandedHeight,
     })
+    // The mode is already FOLLOW_BOTTOM before the resize. Wait until the
+    // controller has also followed the resized tail; otherwise the radio click
+    // below can auto-scroll the stale geometry and become reader movement.
     await page.waitForFunction(({ longTurn }) => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
       return scroll?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+        && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 1
         && (longTurn || (spacer?.offsetHeight || 0) >= 80)
     }, scenario, { timeout: 5000 })
 

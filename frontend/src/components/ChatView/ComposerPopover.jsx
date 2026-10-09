@@ -600,7 +600,7 @@ export default function ComposerPopover({
                 <span className="composer-popover__row-main">
                   <span className="composer-popover__row-title">Chat summary</span>
                   <span className="composer-popover__row-sub">
-                    Name, digest, full handoff
+                    Name, summary, full digest
                   </span>
                 </span>
               </button>

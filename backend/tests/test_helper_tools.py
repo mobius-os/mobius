@@ -1,4 +1,6 @@
 """Möbius helper tools: spawn/message/stop/list, identity, and result delivery."""
+from sqlalchemy.orm import object_session
+from app import transcript_rows
 
 from tests.goal_fixtures import goal_run as make_goal_run
 
@@ -271,6 +273,32 @@ def test_an_agent_reading_a_settled_result_is_not_woken_to_receive_it_again(
   assert delegations_mod._wake_eligible_rows_for_parent(
     db, parent_id, row.parent_root_run_id,
   ) == []
+
+
+def test_failed_setup_recovery_makes_helper_result_eligible_for_parent_wake(db):
+  """Interrupted attempts are not deliverable; failed setup is terminal."""
+  from app.chat_writer import RecoverWedgedRun, get_writer
+
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="setup-recovery-wake", child_status="running",
+  )
+  source = db.get(models.Delegation, delegation_id).parent_root_run_id
+  assert delegations_mod._wake_eligible_rows_for_parent(db, parent_id, source) == []
+
+  get_writer().submit(RecoverWedgedRun(
+    chat_id=child_id,
+    run_token="child-run-setup-recovery-wake",
+    terminal_status="failed",
+    interruption_block={
+      "type": "error", "message": "Setup failed.", "resumable": True,
+    },
+  )).result(timeout=5)
+
+  db.expire_all()
+  assert db.get(models.ChatRun, "child-run-setup-recovery-wake").status == "failed"
+  assert [row.id for row in delegations_mod._wake_eligible_rows_for_parent(
+    db, parent_id, source,
+  )] == [delegation_id]
 
 
 def test_viewing_a_helper_does_not_count_as_its_parent_receiving_the_result(
@@ -655,10 +683,10 @@ def test_the_conversation_panel_shows_a_helpers_own_steps(client, owner_token, d
     ],
   )
   child = db.get(models.Chat, child_id)
-  child.messages = [
-    *child.messages,
+  transcript_rows.replace_all(object_session(child), child, [
+    *list(transcript_rows.history(child)),
     {"role": "user", "content": "carrier", "hidden": True, "kind": "delegation_result"},
-  ]
+  ])
   db.commit()
   response = client.get(
     f"/api/chats/{_parent}/helpers/{delegation_id}",

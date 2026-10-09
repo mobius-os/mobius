@@ -178,7 +178,7 @@ test('chat image viewers mount above only their owning chat pane', () => {
   for (const source of [
     gallerySource,
     readFileSync(new URL('../ImagePreviewButton.jsx', import.meta.url), 'utf8'),
-    readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../FileChips.jsx', import.meta.url), 'utf8'),
     readFileSync(new URL('../markdown/InlineContent.jsx', import.meta.url), 'utf8'),
   ]) {
     assert.match(source, /<ChatPanePortal anchorRef=/)

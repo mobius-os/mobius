@@ -20,7 +20,7 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
 
 test('ordinary live-turn submission stays a queued Send, never implicit Steer', () => {
   const primaryAction = inputBar.match(
-    /function PrimaryAction\([\s\S]*?\n}\n\n\n\/\*\* File-upload chips/,
+    /function PrimaryAction\([\s\S]*?\n}\n\n\n\/\*\*\n \* The input bar/,
   )?.[0] || ''
   const sendBlock = primaryAction.match(
     /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,

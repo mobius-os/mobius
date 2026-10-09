@@ -4,6 +4,7 @@ tool_use_id); the sink reduces the wire event and submits the stash; the
 GET /tool-output/{tool_use_id} endpoint serves a bounded expansion preview and
 the exact text on explicit copy. Also covers the reducer
 carrying tool identity + truncation metadata onto the persisted block."""
+from app.chat_writer import create_chat
 import json
 import uuid
 
@@ -135,7 +136,7 @@ def test_chat_edit_diffs_endpoint_expands_only_linked_sidecars(client, auth, db)
     orphan_id = "edit-diff-" + ("b" * 64)
     preview = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+partial"
     full = preview + " complete"
-    db.add(models.Chat(
+    db.add(create_chat(
         id=chat_id,
         title="t",
         messages=[{
@@ -175,7 +176,7 @@ def test_chat_edit_diffs_endpoint_expands_only_linked_sidecars(client, auth, db)
 
 def test_tool_output_by_id_endpoint_serves_full_text(client, auth, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     big = "hello world\n" * 5000
     get_writer().submit(
@@ -189,7 +190,7 @@ def test_tool_output_by_id_endpoint_serves_full_text(client, auth, db):
 
 def test_tool_output_preview_inflates_only_the_bounded_prefix(client, auth, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     big = "0123456789" * (TOOL_OUTPUT_PREVIEW_CHARS // 10 + 1000)
     get_writer().submit(
@@ -213,7 +214,7 @@ def test_tool_output_preview_inflates_only_the_bounded_prefix(client, auth, db):
 
 def test_tool_output_barrier_observes_latest_queued_stash(client, auth, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.add(models.ToolOutput(
         chat_id=chat_id,
         tool_use_id="tu_latest",
@@ -240,7 +241,7 @@ def test_tool_output_barrier_observes_latest_queued_stash(client, auth, db):
 
 def test_tool_output_by_id_endpoint_404_when_absent(client, auth, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     r = client.get(f"/api/chats/{chat_id}/tool-output/missing", headers=auth)
     assert r.status_code == 404
@@ -250,7 +251,7 @@ def test_tool_output_by_id_endpoint_202_while_chat_is_running(
     client, auth, db, monkeypatch,
 ):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
 
@@ -265,7 +266,7 @@ def test_tool_output_by_id_endpoint_202_while_chat_is_running(
 
 def test_tool_output_by_id_endpoint_requires_owner(client, db):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     r = client.get(f"/api/chats/{chat_id}/tool-output/tu_x")
     assert r.status_code == 401
@@ -275,7 +276,7 @@ def test_settled_chat_detail_uses_lazy_sidecar_for_large_output(
     client, auth, db,
 ):
     chat_id = str(uuid.uuid4())
-    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(create_chat(id=chat_id, title="t", messages=[]))
     db.commit()
     block = {
         "type": "tool",
@@ -360,7 +361,7 @@ def test_chat_detail_recovers_a_legacy_memory_receipt_from_its_sidecar(
         source_dir="/data/apps/memory",
         capability_contract={"data": {"shared_memory": "write"}},
     ))
-    db.add(models.Chat(
+    db.add(create_chat(
         id=chat_id,
         title="t",
         messages=[{"role": "assistant", "blocks": [block]}],
@@ -429,7 +430,7 @@ def test_running_chat_detail_strips_history_but_keeps_live_excerpt(
         "tool_use_id": "tu_live",
         "output_truncated": True,
     }
-    db.add(models.Chat(
+    db.add(create_chat(
         id=chat_id,
         title="t",
         messages=[

@@ -8,6 +8,7 @@ and force failure modes.
 """
 
 import asyncio
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import io
@@ -6040,6 +6041,94 @@ def test_install_budget_binds_the_optional_icon(
   assert "reached while downloading icon.png" in r.json()["detail"]
 
 
+@pytest.mark.parametrize("static_assets,static_sources", [
+  ({"first.bin": "shared.bin", "second.bin": "shared.bin"}, ["shared.bin"] * 2),
+  (["shared.bin", "shared.bin"], ["shared.bin"]),
+])
+def test_package_input_paths_counts_static_destinations_in_declaration_order(
+  static_assets, static_sources,
+):
+  from app.manifest_contract import (
+    package_bytes, package_input_paths, validate_manifest_contract,
+  )
+
+  manifest = {
+    **MANIFEST_MULTI,
+    "icon": "icon.png", "schedule": {"job": "job.sh", "default": "* * * * *"},
+    "source_files": ["shared.bin", "prompt.md"],
+    "static_assets": static_assets,
+    "storage_seeds": {
+      "inline.json": {"text": "not-a-source.txt"},
+      "first.json": "seed.json", "second.json": "shared.bin",
+    },
+    "description": "README.md", "system_prompt": "prompt.md",
+  }
+  expected = [
+    "index.jsx", "icon.png", "job.sh", "shared.bin", "prompt.md",
+    *static_sources, "seed.json", "shared.bin",
+  ]
+  validate_manifest_contract(manifest)
+  assert list(package_input_paths(manifest)) == expected
+  sized_paths = []
+
+  def size_of(rel):
+    sized_paths.append(rel)
+    return 1
+
+  assert package_bytes(manifest, size_of) == len(expected)
+  assert sized_paths == expected
+
+
+def _spy_git_materialized_paths(monkeypatch):
+  """Observe materialization without mistaking Git's disk spool for RAM reads."""
+  paths = {}
+  materialized = []
+  open_tree = app_git.open_ref_tree
+  read_bytes = app_git.GitTreeBlob.read_bytes
+
+  @contextmanager
+  def tracked_tree(*args, **kwargs):
+    with open_tree(*args, **kwargs) as tree:
+      paths.update({id(blob): rel for rel, blob in tree.items() if blob is not None})
+      yield tree
+
+  def tracked_read(blob):
+    materialized.append(paths[id(blob)])
+    return read_bytes(blob)
+
+  monkeypatch.setattr(app_git, "open_ref_tree", tracked_tree)
+  monkeypatch.setattr(app_git.GitTreeBlob, "read_bytes", tracked_read)
+  return materialized
+
+
+@pytest.mark.parametrize("strict", [True, False])
+@pytest.mark.parametrize("reader", ["read_git_install_candidate", "read_git_package_summary"])
+def test_git_manifest_is_bounded_before_materialization(tmp_path, monkeypatch, strict, reader):
+  from app import install
+
+  repo, commit = _commit_package(tmp_path, {
+    "mobius.json": b"x" * (install._MANIFEST_MAX_BYTES + 1),
+    "index.jsx": JSX.encode(),
+  })
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  args = [repo, commit]
+  if reader == "read_git_install_candidate":
+    args.append("https://raw.githubusercontent.com/acme/budget/main/mobius.json")
+  with pytest.raises(install.PackageTooLarge, match="manifest limit"):
+    getattr(install, reader)(*args, strict=strict)
+  assert materialized == []
+
+
+def test_git_manifest_accepts_exact_size_boundary(tmp_path):
+  from app import install
+
+  raw = json.dumps({**MANIFEST_MULTI, "source_files": []}).encode()
+  raw += b" " * (install._MANIFEST_MAX_BYTES - len(raw))
+  repo, commit = _commit_package(tmp_path, {"mobius.json": raw, "index.jsx": JSX.encode()})
+  summary = install.read_git_package_summary(repo, commit, strict=True)
+  assert summary.manifest["id"] == MANIFEST_MULTI["id"]
+
+
 def test_git_package_inputs_are_bounded_like_http_installs(monkeypatch):
   from app import install
 
@@ -6056,11 +6145,355 @@ def test_git_package_inputs_are_bounded_like_http_installs(monkeypatch):
   }
   monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 399)
 
-  with pytest.raises(ValueError, match="app package limit"):
+  with pytest.raises(install.PackageTooLarge, match="MiB app package limit"):
     install._read_git_package_inputs(tree, strict=True)
 
   monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 400)
   assert install._read_git_package_inputs(tree, strict=True).static_assets
+
+
+def _commit_package(root: Path, files: dict[str, bytes]) -> tuple[Path, str]:
+  repo = root / "package"
+  for rel, body in files.items():
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_bytes(body)
+  git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t.test"]
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  subprocess.run([*git, "add", "-A"], check=True)
+  subprocess.run([*git, "commit", "-qm", "package"], check=True)
+  commit = subprocess.run(
+    [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  return repo, commit
+
+
+def test_git_install_candidate_spools_the_tree_and_materializes_only_declared_files(
+  tmp_path, monkeypatch,
+):
+  """Git still copies the whole tree to disk; only declared bodies enter RAM."""
+  from app import install
+
+  manifest = {
+    **MANIFEST_MULTI, "id": "git-stream", "source_files": [],
+    "static_assets": {"data.bin": "data.bin"},
+  }
+  repo, commit = _commit_package(tmp_path, {
+    "mobius.json": json.dumps(manifest).encode(),
+    "index.jsx": JSX.encode(),
+    "data.bin": b"x" * 100,
+    "undeclared.bin": b"y" * 5000,
+  })
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  source_url = "https://raw.githubusercontent.com/acme/git-stream/main/mobius.json"
+
+  read = install.read_git_install_candidate(repo, commit, source_url)
+  assert read.candidate.static_assets == {"data.bin": b"x" * 100}
+  assert set(materialized) == {"mobius.json", "index.jsx", "data.bin"}
+
+  materialized.clear()
+  monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 99)
+  with pytest.raises(install.PackageTooLarge, match="MiB app package limit"):
+    install.read_git_install_candidate(repo, commit, source_url)
+  assert materialized == ["mobius.json"]
+
+
+def _record_baseline_commit(app_repo: Path, tmp: Path, files: dict[str, bytes]) -> str:
+  pkg, commit = _commit_package(tmp, files)
+  subprocess.run(
+    ["git", "-C", str(app_repo), "fetch", "-q", str(pkg), commit], check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(app_repo), "update-ref", f"refs/heads/{app_git.UPSTREAM_BRANCH}", commit],
+    check=True,
+  )
+  return commit
+
+
+def _install_baseline_app(client, auth, db, slug):
+  r = _install_v1(
+    client, auth, f"https://{slug}.test/repo/", {**MANIFEST_NEWS, "id": slug}, JSX,
+  )
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  return app_id, Path(db.get(models.App, app_id).source_dir)
+
+
+@pytest.mark.parametrize("baseline", ["missing_name", "big_manifest", "bad_json"])
+def test_preview_with_old_or_odd_recorded_baseline_manifest(
+  client, auth, db, bypass_url_validation, tmp_path, monkeypatch, baseline,
+):
+  slug = f"baseline-{baseline.replace('_', '-')}"
+  app_id, repo = _install_baseline_app(client, auth, db, slug)
+  old = {**MANIFEST_MULTI, "id": slug, "source_files": ["removed.js"]}
+  if baseline == "missing_name":
+    old.pop("name")
+    raw = json.dumps(old).encode()
+  elif baseline == "big_manifest":
+    raw = json.dumps(old).encode() + b" " * (64 * 1024)
+  else:
+    raw = b"{not json"
+  _record_baseline_commit(repo, tmp_path, {
+    "mobius.json": raw, "index.jsx": JSX.encode(), "removed.js": b"old src",
+  })
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  candidate = _git_candidate({**MANIFEST_MULTI, "id": slug, "source_files": []}, JSX)
+  with patch("app.routes.apps._fetch_update_candidate", AsyncMock(return_value=candidate)):
+    preview = client.get(f"/api/apps/{app_id}/update-candidate-preview", headers=auth)
+  assert preview.status_code == 200, preview.text
+  diff = preview.json()["upstream_diff"]
+  assert ("removed.js" in diff) == (baseline == "missing_name")
+  expected = {"index.jsx"}
+  if baseline != "big_manifest":
+    expected.add("mobius.json")
+  if baseline == "missing_name":
+    expected.add("removed.js")
+  assert set(materialized) == expected
+
+
+@pytest.mark.parametrize("failure", [None, "baseline", "origin"])
+def test_update_check_legacy_baseline_over_bound_degrades(
+  client, auth, db, bypass_url_validation, tmp_path, monkeypatch, failure,
+):
+  slug = "legacy-check"
+  app_id, repo = _install_baseline_app(client, auth, db, slug)
+  _record_baseline_commit(repo, tmp_path, {"index.jsx": JSX.encode(), "big.js": b"x" * 5000})
+  manifest = {**MANIFEST_MULTI, "id": slug, "source_files": []}
+  candidate = _git_candidate(manifest, JSX)
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  monkeypatch.setattr(install, "fetch_git_package_summary", lambda *a, **k: candidate)
+  monkeypatch.setattr(install, "read_git_install_candidate", lambda *a, **k: candidate)
+  monkeypatch.setattr(install, "trusted_catalog_checkout", lambda *a, **k: None)
+  monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", 1000)
+  if failure == "origin":
+    monkeypatch.setattr(
+      install, "trusted_catalog_checkout", MagicMock(side_effect=RuntimeError("Git failed")),
+    )
+  if failure == "baseline":
+    monkeypatch.setattr(
+      install, "read_recorded_update_source", MagicMock(side_effect=RuntimeError("unreadable baseline")),
+    )
+  from fastapi.testclient import TestClient
+  from app.main import app as fastapi_app
+  quiet = TestClient(fastapi_app, raise_server_exceptions=False)
+  r = quiet.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert r.status_code == 200, r.text
+  assert (r.json()["update_available"] is None) == (failure is not None)
+  assert set(materialized) == (set() if failure == "baseline" else {"index.jsx", "big.js"})
+
+
+@pytest.mark.parametrize("raw_manifest", [b"[]", b'{"source_files": 1}', b"\xff", b"unreadable"])
+def test_recorded_update_source_falls_back_when_old_manifest_is_unusable(
+  tmp_path, monkeypatch, raw_manifest,
+):
+  repo, commit = _commit_package(tmp_path, {
+    "mobius.json": raw_manifest, "index.jsx": b"old entry",
+    "added.js": b"old added source", "undeclared.bin": b"not runtime",
+  })
+  app_git._run(repo, "branch", app_git.UPSTREAM_BRANCH, commit)
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  if raw_manifest == b"unreadable":
+    read_bytes = app_git.GitTreeBlob.read_bytes
+
+    def fail_manifest(blob):
+      if blob.size == len(raw_manifest):
+        raise OSError("manifest cannot be read")
+      return read_bytes(blob)
+
+    monkeypatch.setattr(app_git.GitTreeBlob, "read_bytes", fail_manifest)
+  recorded = install.read_recorded_update_source(repo, {"added.js": b"new source"})
+  assert recorded == {"index.jsx": b"old entry", "added.js": b"old added source"}
+  assert "undeclared.bin" not in materialized
+
+
+def test_recorded_update_source_keeps_old_job_without_validating_manifest(tmp_path):
+  repo, commit = _commit_package(tmp_path, {
+    "mobius.json": b'{"source_files": ["removed.js", 1], "schedule": {"job": "old.sh"}}',
+    "index.jsx": b"entry", "removed.js": b"removed", "old.sh": b"old job",
+  })
+  app_git._run(repo, "branch", app_git.UPSTREAM_BRANCH, commit)
+  assert install.read_recorded_update_source(repo, {"index.jsx": b"new entry"}) == {
+    "index.jsx": b"entry", "removed.js": b"removed", "old.sh": b"old job",
+  }
+
+
+@pytest.mark.parametrize("manifest_present", [False, True])
+def test_reviewed_commit_manifest_presence_without_reading_blobs(tmp_path, monkeypatch, manifest_present):
+  files = {"index.jsx": JSX.encode()}
+  if manifest_present:
+    files["mobius.json"] = b"not parsed for a presence check"
+  repo, commit = _commit_package(tmp_path, files)
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  assert install._reviewed_commit_has_manifest(repo, commit) is manifest_present
+  assert materialized == []
+  tree = app_git._run(repo, "rev-parse", f"{commit}^{{tree}}").stdout.strip()
+  for unavailable_commit in ("0" * 40, tree):
+    with pytest.raises(subprocess.CalledProcessError):
+      install._reviewed_commit_has_manifest(repo, unavailable_commit)
+
+
+def test_reviewed_manifest_probe_does_not_hide_git_failure(tmp_path, monkeypatch):
+  repo, commit = _commit_package(tmp_path, {"mobius.json": b"{}"})
+  run = app_git._run
+
+  def fail_manifest_probe(source_dir, *args, **kwargs):
+    if "ls-tree" in args or f"{commit}:mobius.json" in args:
+      raise subprocess.CalledProcessError(128, "git", stderr="Git failed")
+    return run(source_dir, *args, **kwargs)
+
+  monkeypatch.setattr(app_git, "_run", fail_manifest_probe)
+  with pytest.raises(subprocess.CalledProcessError):
+    install._reviewed_commit_has_manifest(repo, commit)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_update_preview_materializes_only_needed_baseline_paths(
+  client, auth, bypass_url_validation, monkeypatch, tmp_path, legacy,
+):
+  from app.routes import apps
+
+  manifest = {**MANIFEST_MULTI, "id": "baseline-preview", "source_files": ["removed.js"]}
+  files = {
+    "index.jsx": JSX.encode(), "removed.js": b"removed runtime source",
+    "added.js": b"old newly declared source", ".gitignore": b"ignored",
+  }
+  if not legacy:
+    # A historical package can have large declared assets; preview needs only
+    # runtime source, not those old payloads or unrelated repository files.
+    manifest["static_assets"] = {"old-data.bin": "old-data.bin"}
+    files.update({
+      "mobius.json": json.dumps(manifest).encode(),
+      "old-data.bin": b"historical declared asset" * 5000,
+      "undeclared.bin": b"repository-only data" * 5000,
+    })
+  repo, commit = _commit_package(tmp_path, files)
+  app_git._run(repo, "branch", app_git.UPSTREAM_BRANCH, commit)
+  response = _install_v1(
+    client, auth, "https://baseline-preview.test/repo/",
+    {**MANIFEST_NEWS, "id": "baseline-preview"}, JSX,
+  )
+  assert response.status_code == 201, response.text
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  monkeypatch.setattr(
+    install, "_PACKAGE_MAX_BYTES",
+    sum(len(files[rel]) for rel in ("index.jsx", "removed.js", "added.js")),
+  )
+  read_baseline = install.read_recorded_update_source
+  monkeypatch.setattr(
+    install, "read_recorded_update_source", lambda _repo, candidate: read_baseline(repo, candidate),
+  )
+  candidate = _git_candidate(
+    {**manifest, "source_files": ["added.js"], "static_assets": {}}, JSX,
+    sources={"added.js": b"new declared source"},
+  )
+  monkeypatch.setattr(apps, "_fetch_update_candidate", AsyncMock(return_value=candidate))
+  preview = client.get(
+    f"/api/apps/{response.json()['id']}/update-candidate-preview", headers=auth,
+  )
+  assert preview.status_code == 200, preview.text
+  diff = preview.json()["upstream_diff"]
+  assert "removed.js" in diff and "removed runtime source" in diff
+  assert "added.js" in diff and "old newly declared source" in diff
+  assert "undeclared.bin" not in diff
+  expected = {"index.jsx", "removed.js", "added.js"}
+  if not legacy:
+    expected.add("mobius.json")
+  assert set(materialized) == expected
+
+
+@pytest.mark.parametrize("oversized", ["manifest", "declared", "new_path", "legacy"])
+def test_update_preview_does_not_apply_candidate_limits_to_installed_source(
+  client, auth, bypass_url_validation, monkeypatch, tmp_path, oversized,
+):
+  from app import install
+  from app.routes import apps
+
+  manifest = {**MANIFEST_MULTI, "id": "baseline-budget", "source_files": []}
+  files = {"index.jsx": JSX.encode()}
+  if oversized != "legacy":
+    files["mobius.json"] = json.dumps(manifest).encode()
+  if oversized == "manifest":
+    files["mobius.json"] += b" " * install._MANIFEST_MAX_BYTES
+  else:
+    files["big.js"] = b"x" * 5000
+    if oversized == "declared":
+      manifest["source_files"] = ["big.js"]
+      files["mobius.json"] = json.dumps(manifest).encode()
+  repo, commit = _commit_package(tmp_path, files)
+  app_git._run(repo, "branch", app_git.UPSTREAM_BRANCH, commit)
+  response = _install_v1(
+    client, auth, "https://baseline-budget.test/repo/",
+    {**MANIFEST_NEWS, "id": "baseline-budget"}, JSX,
+  )
+  assert response.status_code == 201, response.text
+  materialized = _spy_git_materialized_paths(monkeypatch)
+  monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 4999)
+  read_baseline = install.read_recorded_update_source
+  monkeypatch.setattr(
+    install, "read_recorded_update_source", lambda _repo, candidate: read_baseline(repo, candidate),
+  )
+  candidate = _git_candidate(
+    {**manifest, "source_files": ["big.js"] if oversized == "new_path" else []}, JSX,
+    sources={"big.js": b"small new source"} if oversized == "new_path" else {},
+  )
+  monkeypatch.setattr(apps, "_fetch_update_candidate", AsyncMock(return_value=candidate))
+  preview = client.get(
+    f"/api/apps/{response.json()['id']}/update-candidate-preview", headers=auth,
+  )
+  assert preview.status_code == 200, preview.text
+  expected = {"index.jsx"}
+  if oversized in ("declared", "new_path"):
+    expected.update({"mobius.json", "big.js"})
+    assert "big.js" in preview.json()["upstream_diff"]
+  if oversized == "legacy":
+    expected.add("big.js")
+  assert set(materialized) == expected
+
+
+def test_update_preview_says_an_oversized_release_is_too_large(
+  client, auth, bypass_url_validation,
+):
+  from app import install
+
+  base = "https://oversized-preview.test/repo/"
+  r1 = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "oversized-preview"}, JSX)
+  assert r1.status_code == 201, r1.text
+  reason = install.package_limit_message(65 * 1024 * 1024)
+  with patch(
+    "app.routes.apps._fetch_update_candidate",
+    side_effect=install.PackageTooLarge(reason),
+  ):
+    preview = client.get(
+      f"/api/apps/{r1.json()['id']}/update-candidate-preview", headers=auth,
+    )
+
+  assert preview.status_code == 413, preview.text
+  assert preview.json()["detail"] == {"code": "package_too_large", "message": reason}
+
+
+def test_applying_an_oversized_reviewed_update_says_it_is_too_large(
+  client, auth, bypass_url_validation,
+):
+  from app import install
+
+  app = create_local_app(client, auth, name="Oversized reviewed update")
+  reason = install.package_limit_message(65 * 1024 * 1024)
+  with patch("app.install._reviewed_commit_has_manifest", return_value=True), patch(
+    "app.install.read_git_install_candidate",
+    side_effect=install.PackageTooLarge(reason),
+  ):
+    rejected = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": (
+        "https://raw.githubusercontent.com/acme/oversized/main/mobius.json"
+      ),
+      "reviewed_source_digest": "0" * 64,
+      "update_app_id": app["id"],
+      "reviewed_upstream_commit": "f" * 40,
+    })
+
+  assert rejected.status_code == 413, rejected.text
+  assert rejected.json()["detail"] == {
+    "code": "package_too_large", "message": reason,
+  }
 
 
 def test_multifile_install_rejects_incomplete_source_files(
@@ -6472,20 +6905,6 @@ def test_known_origin_check_never_falls_back_to_http(tmp_path):
       ))
   http_get.assert_not_called()
 
-
-@pytest.mark.parametrize("cloned", [False, True])
-def test_recorded_update_source_keeps_deletions_without_repository_noise(cloned):
-  from app.routes.apps import _recorded_update_source
-  previous = {"index.jsx": b"entry", "removed.js": b"old", ".gitignore": b"rules"}
-  if cloned:
-    previous.update({
-      "mobius.json": json.dumps({"source_files": ["removed.js"]}).encode(),
-      "README.md": b"not executable source",
-    })
-  incoming = {"index.jsx": b"entry"}
-  recorded = _recorded_update_source(previous, incoming)
-  assert recorded == {"index.jsx": b"entry", "removed.js": b"old"}
-  assert recorded != incoming
 
 def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
   tmp_path,

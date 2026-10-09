@@ -11,6 +11,7 @@ import asyncio
 from contextlib import nullcontext
 import time
 
+from app import transcript_rows
 from app import models, providers
 from app.broadcast import (
   create_broadcast,
@@ -236,8 +237,7 @@ async def start_programmatic_chat_continuation(
                 models.Chat.id == chat_id,
                 models.Chat.deleted_at.is_(None),
               ).first()
-              messages = list(chat.messages or []) if chat is not None else []
-              continuation = messages[-1] if messages else None
+              continuation = transcript_rows.at(db, chat, -1) if chat is not None else None
               safe_orphan = bool(
                 existing.provider_execution_admitted is False
                 and isinstance(continuation, dict)
@@ -258,7 +258,7 @@ async def start_programmatic_chat_continuation(
                     role=message.get("role", "user"),
                     content=message.get("content", "") or "",
                   )
-                  for message in messages
+                  for message in transcript_rows.history(chat)
                 ]
                 orphaned = {
                   "history": history,
@@ -438,7 +438,7 @@ async def start_programmatic_activity_continuation(
                     role=message.get("role", "user"),
                     content=message.get("content", "") or "",
                   )
-                  for message in list(chat.messages or [])
+                  for message in list(transcript_rows.history(chat))
                 ]
                 history.append(schemas.ChatMessage(
                   role="user", content=source["content"],

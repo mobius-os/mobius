@@ -1,4 +1,6 @@
 """Contracts for chat-attached, token-minimal contribution helpers."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 import hashlib
@@ -16,7 +18,7 @@ github_routes._limiter.enabled = False
 def _apps_and_source(client, auth, db):
   contribute_id = create_local_app(client, auth, name="Contribute")["id"]
   subagents_id = create_local_app(client, auth, name="Subagents")["id"]
-  source = models.Chat(
+  source = create_chat(
     id="source-chat",
     title="Source",
     messages=[{"role": "user", "content": "TOP SECRET TRANSCRIPT SENTINEL"}],
@@ -645,7 +647,7 @@ def test_repeated_prestart_admission_failures_become_actionable_attention(
     models.ChatRun.chat_id == row.child_chat_id,
   ).count() == 0
   db.refresh(source)
-  assert source.messages == [{
+  assert list(transcript_rows.history(source)) == [{
     "role": "user", "content": "TOP SECRET TRANSCRIPT SENTINEL",
   }]
 
@@ -701,7 +703,7 @@ def test_repeated_prestart_admission_failures_become_actionable_attention(
   assert duplicate.json()["work"]["id"] == retry_work_id
   assert db.query(models.Delegation).count() == 2
   db.refresh(source)
-  assert source.messages == [{
+  assert list(transcript_rows.history(source)) == [{
     "role": "user", "content": "TOP SECRET TRANSCRIPT SENTINEL",
   }]
 
@@ -711,7 +713,7 @@ def test_reconcile_isolates_one_failed_start_from_other_source_chats(
 ):
   auth = _auth(owner_token)
   app_id, _subagents_id, first_source = _apps_and_source(client, auth, db)
-  second_source = models.Chat(
+  second_source = create_chat(
     id="second-source-chat",
     title="Second source",
     messages=[],

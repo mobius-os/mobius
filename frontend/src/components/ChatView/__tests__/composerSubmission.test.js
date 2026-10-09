@@ -69,3 +69,20 @@ test('failed recovery records the exact content passed by both send paths', () =
   assert.ok(contextSend >= 0 && contextRecovery > contextSend,
     'fresh/context recovery must record the augmented content passed to transport')
 })
+
+test('a fresh send lands its pin once, at submit, not again on acknowledgement', () => {
+  const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const start = source.indexOf('const doSend = useCallback')
+  const end = source.indexOf('\n  }, [', start)
+  const doSend = source.slice(start, end)
+  const fresh = doSend.slice(doSend.indexOf('// FRESH SEND PATH'))
+  const transport = fresh.indexOf('await sendAfterSettingsSaved(')
+  const landings = [...fresh.matchAll(/landSentMessage\(cid, \{ intent: freshPinIntent \}\)/g)]
+    .map(match => match.index)
+
+  // A later commit of the same intent would replace a newer reader follow
+  // (a no-scroll tail swipe) or the filled-reservation handoff with the pin.
+  assert.equal(landings.length, 1, 'the fresh path commits its send intent exactly once')
+  assert.ok(transport > 0 && landings[0] < transport,
+    'the single landing happens at submit, before the POST is acknowledged')
+})

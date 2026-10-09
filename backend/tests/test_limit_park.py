@@ -24,6 +24,7 @@ Locks in the contracts of the limit-park feature:
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
 """
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
@@ -90,7 +91,7 @@ def _seed_chat(
 ):
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id=chat_id,
       title="t",
       messages=(
@@ -162,7 +163,7 @@ def _chat_row(chat_id: str):
     from app.run_state import has_running_run
     return {
       "running_status": "running" if has_running_run(db, chat_id) else None,
-      "messages": materialized_messages(row),
+      "messages": list(materialized_messages(row)),
       "pending": list(row.pending_messages or []),
     }
   finally:
@@ -1104,7 +1105,7 @@ def _delegated_limit_park(
     db.add(app)
     db.flush()
     parent_id = f"{cid}-parent"
-    db.add(models.Chat(
+    db.add(create_chat(
       id=parent_id, title="Parent", messages=[], provider="codex",
     ))
     child = db.get(models.Chat, cid)
@@ -1371,7 +1372,7 @@ def test_sweep_auto_resumes_an_active_delegation_under_its_original_identity(
       db.add(app)
       db.flush()
       app_id = app.id
-    db.add(models.Chat(
+    db.add(create_chat(
       id="sweep-delegation-parent", title="Parent", messages=[],
       provider="codex",
     ))
@@ -3506,3 +3507,41 @@ def test_provider_limit_continuation_does_not_claim_quota_recovered():
   assert source["hidden"] is True
   assert "Provider availability is not yet confirmed" in source["content"]
   assert "usage is available" not in source["content"]
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  cid = "setup-failure-visible"
+  _seed_chat(cid)
+  _seed_run(cid, "rt-setup-failure")
+
+  async def admitted(_data_dir):
+    pass
+
+  setup_started = False
+
+  async def broken_impl(*_args, **_kwargs):
+    nonlocal setup_started
+    setup_started = True
+    raise AttributeError("'Chat' object has no attribute 'messages'")
+
+  # Exercise setup recovery, not the host's storage/memory admission policy.
+  monkeypatch.setattr(chat_mod, "require_agent_turn_admission", admitted)
+  monkeypatch.setattr(chat_mod, "_run_chat_impl", broken_impl)
+  await chat_mod.run_chat(
+    [], chat_id=cid, session_id=None, provider_id="codex",
+    run_gen=chat_mod.current_run_generation(cid), run_token="rt-setup-failure",
+  )
+
+  assert setup_started, "injected setup failure must be reached"
+  assert _run_row("rt-setup-failure")["status"] == "failed"
+  tail = _chat_row(cid)["messages"][-1]
+  assert tail["role"] == "assistant"
+  error = tail["blocks"][-1]
+  assert error["type"] == "error"
+  assert "AttributeError" in error["message"]
+  assert "has no attribute 'messages'" not in error["message"]
+  assert error["resumable"] is True

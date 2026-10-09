@@ -7,6 +7,7 @@ owner-only `GET /api/chats/session-links` endpoint contract.
 """
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 from app import models
 from app.session_links import backfill_current_session_links, record_session_link
@@ -14,7 +15,7 @@ from test_app_fixtures import create_local_app
 
 
 def _chat(db, chat_id: str, *, provider: str = "claude", session_id=None):
-  c = models.Chat(
+  c = create_chat(
     id=chat_id,
     title="t",
     messages=[],

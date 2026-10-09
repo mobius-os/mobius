@@ -58,7 +58,7 @@ test('document attachments keep transcript order on separate lines', () => {
 })
 
 test('a pending composer image opens the same chat-pane viewer as a sent one', () => {
-  const bar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+  const bar = readFileSync(new URL('../FileChips.jsx', import.meta.url), 'utf8')
 
   // The thumbnail must be a real button (keyboard + a11y reachable), not a
   // click handler on the <img>, and must render the shared lightbox.

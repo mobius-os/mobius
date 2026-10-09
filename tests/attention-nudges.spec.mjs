@@ -186,10 +186,17 @@ for (const scenario of SCENARIOS) {
 
     await nudge.click()
 
+    // Measure the tail from fractional rects: the distance between the end of
+    // the scroller's content and its bottom edge. scrollHeight and clientHeight
+    // are whole numbers, so under the desktop shell's 90% root zoom their
+    // difference can sit more than 1px from the true maximum scrollTop even
+    // when the scroller is exactly at its tail.
     await page.waitForFunction(nudgeSelector => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (!scroll || document.querySelector(nudgeSelector)) return false
-      return Math.abs(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop) <= 1
+      if (!scroll?.lastElementChild || document.querySelector(nudgeSelector)) return false
+      const tailGap = scroll.getBoundingClientRect().bottom
+        - scroll.lastElementChild.getBoundingClientRect().bottom
+      return Math.abs(tailGap) <= 1
     }, scenario.nudgeSelector, { timeout: 5000 })
 
     const geometry = await page.evaluate(({ chatId, actionSelector }) => {
@@ -203,8 +210,9 @@ for (const scenario of SCENARIOS) {
       const actionRect = action?.getBoundingClientRect()
       const composerRect = composer?.getBoundingClientRect()
       return {
-        remaining: scroll
-          ? scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop
+        tailGap: scroll?.lastElementChild
+          ? scroll.getBoundingClientRect().bottom
+            - scroll.lastElementChild.getBoundingClientRect().bottom
           : null,
         actionBottom: actionRect?.bottom ?? null,
         composerTop: composerRect?.top ?? null,
@@ -212,7 +220,7 @@ for (const scenario of SCENARIOS) {
       }
     }, { chatId: chat.id, actionSelector: scenario.actionSelector })
 
-    expect(Math.abs(geometry.remaining)).toBeLessThanOrEqual(1)
+    expect(Math.abs(geometry.tailGap)).toBeLessThanOrEqual(1)
     expect(geometry.actionBottom).toBeLessThan(geometry.composerTop)
     expect(geometry.modeKind).toBe('ANCHOR_AT')
   })

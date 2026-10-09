@@ -12,6 +12,8 @@ simulation (the `reconcile_interrupted_chats` pure function, exactly as
 The conftest `fresh_db` fixture starts a real writer actor per test bound to
 the test DB, so `get_writer()` is the real path throughout.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 import importlib
@@ -71,7 +73,7 @@ def _seed_chat(chat_id, messages=None, pending=None, running=None,
 
   db = SessionLocal()
   try:
-    chat = models.Chat(
+    chat = create_chat(
       id=chat_id, title="t",
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
@@ -106,7 +108,7 @@ def _load(chat_id):
       models.ChatRun.status == "running",
     ).first() is not None
     return None if chat is None else {
-      "messages": list(chat.messages or []),
+      "messages": list(transcript_rows.history(chat)),
       "pending_messages": list(chat.pending_messages or []),
       "running": running,
     }

@@ -5,6 +5,8 @@ Covers the pure planner (`plan_chat_migration`), the `MigrateChat` actor command
 round-trip verification + rollback-on-failure contract, and the
 `scripts/migrate_chat_identity` orchestration.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 import pytest
 from sqlalchemy import exists, select, update
 
@@ -38,7 +40,7 @@ def _fat_tool_msg(ts=100, full=None, **blk_extra) -> dict:
 
 def _make_chat(db, cid, messages, pending=None, running=False,
                deleted_at=None):
-    chat = models.Chat(
+    chat = create_chat(
         id=cid, title="t", messages=messages, pending_messages=pending or [],
         deleted_at=deleted_at,
     )
@@ -211,8 +213,8 @@ def test_migrate_writes_backfill_extract_and_round_trips(db):
     assert res["bytes_moved"] == len(full)
 
     reread = _reread(db, "c1")
-    assert reread.messages[0]["cid"] == "legacy-1"
-    blk = reread.messages[1]["blocks"][0]
+    assert list(transcript_rows.history(reread))[0]["cid"] == "legacy-1"
+    blk = list(transcript_rows.history(reread))[1]["blocks"][0]
     assert blk["output_truncated"] is True
     assert blk["tool_use_id"] == "legacy-2-0"
     assert len(blk["output"]) < len(full)
@@ -242,7 +244,7 @@ def test_migrate_coalesces_and_extracts_large_legacy_thinking(db):
     res = _migrate("thinking-old")
     assert res["status"] == "migrated"
     assert res["thinking_extracted"] == 1
-    block = _reread(db, "thinking-old").messages[0]["blocks"][0]
+    block = list(transcript_rows.history(_reread(db, 'thinking-old')))[0]["blocks"][0]
     assert block == {
         "type": "thinking",
         "thinking_id": "legacy-thinking-8-0",
@@ -268,8 +270,8 @@ def test_migrate_dry_run_reports_without_writing(db):
     assert res["extracted"] == 1
 
     reread = _reread(db, "c2")
-    assert "cid" not in reread.messages[0]              # not written
-    assert "output_truncated" not in reread.messages[1]["blocks"][0]
+    assert "cid" not in list(transcript_rows.history(reread))[0]              # not written
+    assert "output_truncated" not in list(transcript_rows.history(reread))[1]["blocks"][0]
     assert db.query(models.ToolOutput).filter_by(chat_id="c2").count() == 0
 
 
@@ -297,8 +299,8 @@ def test_migrate_reports_unfixable_rows(db):
     assert res["backfilled"] == 1
     assert res["unfixable"] == [{"kind": "user_no_cid_no_ts", "index": 0}]
     reread = _reread(db, "c4")
-    assert "cid" not in reread.messages[0]
-    assert reread.messages[1]["cid"] == "legacy-3"
+    assert "cid" not in list(transcript_rows.history(reread))[0]
+    assert list(transcript_rows.history(reread))[1]["cid"] == "legacy-3"
 
 
 def test_migrate_skips_active_chat(db):
@@ -309,8 +311,8 @@ def test_migrate_skips_active_chat(db):
     res = _migrate("c5")
     assert res["status"] == "skipped_active"
     reread = _reread(db, "c5")
-    assert "cid" not in reread.messages[0]                    # untouched
-    assert "output_truncated" not in reread.messages[1]["blocks"][0]
+    assert "cid" not in list(transcript_rows.history(reread))[0]                    # untouched
+    assert "output_truncated" not in list(transcript_rows.history(reread))[1]["blocks"][0]
     assert db.query(models.ToolOutput).filter_by(chat_id="c5").count() == 0
 
 
@@ -326,7 +328,7 @@ def test_migrate_includes_soft_deleted_chat(db):
     res = _migrate("c6")
     assert res["status"] == "migrated"
     reread = _reread(db, "c6")
-    assert reread.messages[0]["cid"] == "legacy-1"
+    assert list(transcript_rows.history(reread))[0]["cid"] == "legacy-1"
     assert reread.deleted_at is not None      # NOT resurrected
 
 
@@ -352,9 +354,10 @@ def test_cas_guard_nonterminal_run_and_updated_at(db):
                 ),
             ),
         )
-        .values(messages=[{"a": 1}])
+        .values(title="cas-applied")
     )
     assert r1.rowcount == 1
+    transcript_rows.replace_all(db, "cx", [{"a": 1}])
     db.commit()
 
     # stale updated_at (a concurrent write happened) -> no-op (rowcount 0)
@@ -362,7 +365,7 @@ def test_cas_guard_nonterminal_run_and_updated_at(db):
     r2 = db.execute(
         update(models.Chat)
         .where(models.Chat.id == "cx", models.Chat.updated_at == stale)
-        .values(messages=[{"b": 2}])
+        .values(title="stale-must-not-apply")
     )
     assert r2.rowcount == 0
     db.rollback()
@@ -390,13 +393,47 @@ def test_cas_guard_nonterminal_run_and_updated_at(db):
                 ),
             ),
         )
-        .values(messages=[{"c": 3}])
+        .values(title="busy-must-not-apply")
     )
     assert r3.rowcount == 0
     db.rollback()
+    assert list(transcript_rows.history(db.get(models.Chat, "cx"))) == [{"a": 1}]
 
 
 # -- round-trip verification + rollback-on-failure ------------------------
+@pytest.mark.parametrize("race", ["updated_at", "nonterminal_run"])
+def test_actor_losing_cas_never_writes_transcript_and_rolls_back_stashes(db, monkeypatch, race):
+    from datetime import timedelta
+
+    original_messages = [{"role": "user", "ts": 1}, _fat_tool_msg(ts=2)]
+    _make_chat(db, "cas-race", original_messages)
+    actor = get_writer()
+    verify = actor._verify_round_trip
+
+    def changed_before_cas(session, chat_id, stashes):
+        verify(session, chat_id, stashes)
+        if race == "updated_at":
+            stamp = session.execute(
+                select(models.Chat.updated_at).where(models.Chat.id == chat_id)
+            ).scalar_one()
+            session.execute(update(models.Chat).where(models.Chat.id == chat_id)
+                            .values(updated_at=stamp + timedelta(seconds=1))
+                            .execution_options(synchronize_session=False))
+        else:
+            session.add(models.ChatRun(id="cas-race-run", chat_id=chat_id,
+                                       status="running", provider="claude"))
+            session.flush()
+
+    def forbidden_row_write(*args, **kwargs):
+        pytest.fail("A failed CAS must not reach normalized transcript writes")
+
+    monkeypatch.setattr(actor, "_verify_round_trip", changed_before_cas)
+    monkeypatch.setattr(transcript_rows, "replace_all", forbidden_row_write)
+    assert _migrate("cas-race")["status"] == "skipped_active"
+    assert list(transcript_rows.history(_reread(db, "cas-race"))) == original_messages
+    assert db.query(models.ToolOutput).filter_by(chat_id="cas-race").count() == 0
+
+
 def test_verify_round_trip_detects_mismatch(db):
     actor = get_writer()
     db.add(models.ToolOutput(chat_id="cv", tool_use_id="t", output="stored"))
@@ -424,9 +461,9 @@ def test_migrate_rolls_back_on_verify_failure(db, monkeypatch):
 
     # Loud failure, NO silent corruption: block still fat, no stash, cid not set.
     reread = _reread(db, "cf")
-    blk = reread.messages[1]["blocks"][0]
+    blk = list(transcript_rows.history(reread))[1]["blocks"][0]
     assert "output_truncated" not in blk
-    assert "cid" not in reread.messages[0]
+    assert "cid" not in list(transcript_rows.history(reread))[0]
     assert db.query(models.ToolOutput).filter_by(chat_id="cf").count() == 0
 
 
@@ -448,9 +485,9 @@ def test_migrate_defers_on_lock_contention(db, monkeypatch):
     assert res["status"] == "deferred_locked"
 
     reread = _reread(db, "cl")
-    blk = reread.messages[1]["blocks"][0]
+    blk = list(transcript_rows.history(reread))[1]["blocks"][0]
     assert "output_truncated" not in blk           # block still fat
-    assert "cid" not in reread.messages[0]          # no backfill
+    assert "cid" not in list(transcript_rows.history(reread))[0]          # no backfill
     assert db.query(models.ToolOutput).filter_by(chat_id="cl").count() == 0
 
 
@@ -462,7 +499,7 @@ def test_run_migrates_all_chats(db):
     by_id = {r["chat_id"]: r for r in results}
     assert by_id["s1"]["status"] == "migrated"
     assert by_id["s2"]["status"] == "migrated"
-    assert _reread(db, "s1").messages[0]["cid"] == "legacy-1"
+    assert list(transcript_rows.history(_reread(db, 's1')))[0]["cid"] == "legacy-1"
     assert db.query(models.ToolOutput).filter_by(chat_id="s1").count() == 1
 
 
@@ -471,14 +508,14 @@ def test_run_single_chat_id(db):
     _make_chat(db, "s4", [{"role": "user", "ts": 2}])
     results = migrate_chat_identity.run(chat_id="s3")
     assert [r["chat_id"] for r in results] == ["s3"]
-    assert "cid" not in _reread(db, "s4").messages[0]   # untouched
+    assert "cid" not in list(transcript_rows.history(_reread(db, 's4')))[0]   # untouched
 
 
 def test_run_dry_run_does_not_write(db):
     _make_chat(db, "s5", [{"role": "user", "ts": 1}, _fat_tool_msg(ts=2)])
     results = migrate_chat_identity.run(dry_run=True)
     assert results[0]["status"] == "dry_run"
-    assert "cid" not in _reread(db, "s5").messages[0]
+    assert "cid" not in list(transcript_rows.history(_reread(db, 's5')))[0]
     assert db.query(models.ToolOutput).filter_by(chat_id="s5").count() == 0
 
 

@@ -1,4 +1,6 @@
 """Durable Goal-plan validation, ordering, progress, and route contracts."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from tests.goal_fixtures import goal_run as make_goal_run
 
@@ -170,7 +172,7 @@ def test_completed_card_stays_at_successful_completion_not_later_segment(
   latest_page = client.get(f"/api/chats/{chat_id}?limit=1", headers=auth).json()["messages"]
   assert "goal_summaries" not in latest_page[0]
   db.refresh(db.get(models.Chat, chat_id))
-  saved = db.get(models.Chat, chat_id).messages[0]["blocks"]
+  saved = list(transcript_rows.history(db.get(models.Chat, chat_id)))[0]["blocks"]
   assert saved == blocks, "placement is a projection, never a transcript rewrite"
 
 
@@ -360,7 +362,7 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
     assert all(
       "/goal" not in str(message.get("content", ""))
-      for message in chat.messages
+      for message in list(transcript_rows.history(chat))
     )
 
     retry = client.post(
@@ -716,7 +718,7 @@ def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
   # parent-only boundary Goal promotion must enforce explicitly.
   from app.delegations import RunPolicy, delegation_execution_token
 
-  parent = models.Chat(
+  parent = create_chat(
     id="goal-scope-parent", title="Parent", messages=[],
     pending_messages=[], provider="codex",
   )
@@ -1290,10 +1292,10 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   )
   db.add(app)
   db.flush()
-  child_b = models.Chat(
+  child_b = create_chat(
     id="child-b", title="B", messages=[], created_by_app_id=app.id,
   )
-  child_x = models.Chat(
+  child_x = create_chat(
     id="child-x", title="X", messages=[], created_by_app_id=app.id,
   )
   db.add_all([child_b, child_x])
@@ -1354,10 +1356,10 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
   )
   db.add(app)
   db.flush()
-  old_child = models.Chat(
+  old_child = create_chat(
     id="goal-old-child", title="Old", messages=[], created_by_app_id=app.id,
   )
-  new_child = models.Chat(
+  new_child = create_chat(
     id="goal-new-child", title="New", messages=[], created_by_app_id=app.id,
   )
   db.add_all([old_child, new_child])
@@ -1499,7 +1501,7 @@ def test_running_parent_defers_to_its_running_child_leaf(client, owner_token, db
 def test_helper_without_a_goal_is_unfiled_and_cannot_name_a_task(db):
   from app.goal_plans import GoalPlanError, helper_plan_task
 
-  db.add(models.Chat(id="plain-chat", title="Plain", messages=[]))
+  db.add(create_chat(id="plain-chat", title="Plain", messages=[]))
   db.commit()
   assert helper_plan_task(db, "plain-chat", None) is None
   with pytest.raises(GoalPlanError, match="no active Goal plan"):

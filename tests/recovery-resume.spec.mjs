@@ -43,7 +43,7 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false } = {}) {
+async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false, successorBeforeAck = false } = {}) {
   await page.setViewportSize({
     width: Number(process.env.MOBIUS_RECOVERY_WIDTH || 1512),
     height: Number(process.env.MOBIUS_RECOVERY_HEIGHT || 911),
@@ -53,6 +53,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
   const accepted = deferred()
   const detailRequested = deferred()
   const detailAccepted = deferred()
+  const successorObserved = deferred()
   let holdDetail = false
   let rejectDetail = false
   let runtimeGate = null
@@ -94,6 +95,9 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
       const message = { role: 'user', kind: 'continuation', continuation_reason: 'manual',
         content: 'continue', cid: attempts.at(-1).cid, ts: 1788800000600 }
       messages.push(message)
+      // The queue's runtime poll may observe the resumed run before this
+      // acknowledgement reaches the page.
+      if (successorBeforeAck) await successorObserved.promise
       if (loseFirstAck && attempts.length === 1) return route.abort('connectionreset')
       return route.fulfill({ status: 202, json: { status: 'started', message, run_id: 'resumed-a' } })
     }
@@ -104,10 +108,10 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
           || /^\/api\/events\/system\/[^/]+\/visible-apps$/.test(url.pathname)) {
         return route.fulfill({ json: {} })
       }
-      if (url.pathname.includes('upload')) return route.fulfill({ json: {
+      if (url.pathname.includes('upload')) return route.fulfill({ json: [{
         name: 'draft-note.txt', filename: 'draft-note.txt', size: 16,
         mime_type: 'text/plain', url: `${path}/uploads/draft-note.txt`,
-      } })
+      }] })
       unexpected.push(`${req.method()} ${url.pathname}`)
       return route.fulfill({ json: {} })
     }
@@ -119,7 +123,10 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
       }
       if (holdDetail) { detailRequested.resolve(); await detailAccepted.promise }
       if (rejectDetail) return route.fulfill({ status: 503, json: { detail: 'Fixture transcript unavailable' } })
-      return route.fulfill({ json: detail() })
+      const observedSuccessor = resumed && url.pathname === `${path}/runtime`
+      await route.fulfill({ json: detail() })
+      if (observedSuccessor) successorObserved.resolve()
+      return
     }
     if (url.pathname === `${path}/stream`) return route.fulfill({ status: 204, body: '' })
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
@@ -213,7 +220,7 @@ for (const width of [1512, 390]) {
 }
 
 test('Resume waits for acknowledgement without changing draft, attachment, queue, or reading position', async ({ page }) => {
-  const state = await mount(page)
+  const state = await mount(page, { successorBeforeAck: true })
   const resume = state.surface.getByRole('button', { name: 'Resume', exact: true })
   await resume.evaluate(element => element.scrollIntoView({ block: 'center', behavior: 'instant' }))
   await state.surface.locator('.chat__scroll').hover()

@@ -1,6 +1,8 @@
 """Delegated-agent boundaries for owner-confirmed lifecycle controls."""
 
 from __future__ import annotations
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import hashlib
 import uuid
@@ -167,7 +169,7 @@ def test_delegated_bearer_cannot_enter_chat_lifecycle_controls(
     assert [response.status_code for response in responses] == [403] * 5
 
   deleted_id = str(uuid.uuid4())
-  deleted = models.Chat(
+  deleted = create_chat(
     id=deleted_id,
     title="Owner-deleted chat",
     provider="claude",
@@ -187,7 +189,7 @@ def test_delegated_bearer_cannot_enter_chat_lifecycle_controls(
     assert row.deleted_at is None
     assert not any(
       message.get("content") == "replace"
-      for message in row.messages
+      for message in list(transcript_rows.history(row))
       if isinstance(message, dict)
     )
 
@@ -261,7 +263,7 @@ def test_delegated_bearer_can_answer_visible_cards_but_not_create_them(
   assert cancelled.json()["status"] == "cancelled"
 
   db.expire_all()
-  question = db.get(models.Chat, parent_id).messages[0]["blocks"][0]
+  question = list(transcript_rows.history(db.get(models.Chat, parent_id)))[0]["blocks"][0]
   assert question["answers"] == {"confirm": "yes"}
 
 
@@ -492,7 +494,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   )
   assert replacement.status_code == 200, replacement.text
   db.expire_all()
-  assert db.get(models.Chat, chat_ids["foreign"]).messages == [
+  assert list(transcript_rows.history(db.get(models.Chat, chat_ids['foreign']))) == [
     {"role": "user", "content": "owner-approved"}
   ]
 
@@ -585,7 +587,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   db.refresh(identity_chat)
   assert all(
     "answers" not in block
-    for block in identity_chat.messages[-1]["blocks"]
+    for block in list(transcript_rows.history(identity_chat))[-1]["blocks"]
   )
 
   question_chat_id = _create_chat(client, owner_auth, "Visible card")
@@ -625,7 +627,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   assert legacy_retry.status_code == 200, legacy_retry.text
   assert legacy_changed_retry.status_code == 409, legacy_changed_retry.text
   db.refresh(question_chat)
-  assert question_chat.messages[-1]["blocks"][0]["answers"] == {
+  assert list(transcript_rows.history(question_chat))[-1]["blocks"][0]["answers"] == {
     "Continue?": "Yes",
   }
 
@@ -707,7 +709,7 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   assert "attachments" not in queued_answer
   assert "timezone" not in queued_answer
   assert "viewport" not in queued_answer
-  assert confined_chat.messages[-1]["blocks"][0]["selected_options"] == {
+  assert list(transcript_rows.history(confined_chat))[-1]["blocks"][0]["selected_options"] == {
     "choice": ["yes"],
   }
 
@@ -825,7 +827,7 @@ def test_overlapping_exact_agent_answer_is_acknowledged_after_lock(
   assert response.json()["answer_turn"] == "retry"
   db.refresh(chat)
   assert chat.pending_messages == []
-  assert chat.messages[-1]["blocks"][0]["answers"] == {"Continue?": "Yes"}
-  assert chat.messages[-1]["blocks"][0]["selected_options"] == {
+  assert list(transcript_rows.history(chat))[-1]["blocks"][0]["answers"] == {"Continue?": "Yes"}
+  assert list(transcript_rows.history(chat))[-1]["blocks"][0]["selected_options"] == {
     "choice": ["yes"],
   }

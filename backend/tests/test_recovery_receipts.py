@@ -1,4 +1,5 @@
 """A recovery receipt owns one deletion, including retry and history behavior."""
+from app.chat_writer import create_chat
 
 import asyncio
 import math
@@ -25,7 +26,7 @@ def resource(request, db, auth, monkeypatch):
   kind = request.param
   root = Path(get_settings().data_dir)
   if kind == "chat":
-    row = models.Chat(id=str(uuid4()), title="Receipt chat")
+    row = create_chat(id=str(uuid4()), title="Receipt chat")
   elif kind == "app":
     source = root / "apps" / "receipt-app"
     source.mkdir(parents=True)
@@ -50,7 +51,7 @@ def resource(request, db, auth, monkeypatch):
       id=project_id, name="Receipt project", project_type="blank",
       root_path=root_path, template_snapshot_json={},
     )
-    db.add(models.Chat(
+    db.add(create_chat(
       id=str(uuid4()), title="Receipt project chat", project_id=project_id,
     ))
   db.add(row)
@@ -120,7 +121,7 @@ def test_running_resource_delete_keeps_receipt_bound_to_owner(
 ):
   """Stop-result throwaways must not replace the authenticated owner."""
   owner = db.query(models.Owner).one()
-  chat = models.Chat(id=str(uuid4()), title="Running recovery chat")
+  chat = create_chat(id=str(uuid4()), title="Running recovery chat")
   if kind == "chat":
     row = chat
     url = f"/api/chats/{chat.id}"
@@ -230,7 +231,7 @@ def test_receipt_cannot_touch_a_recreated_same_id_resource(
   db.commit()
 
   if kind == "chat":
-    replacement = models.Chat(
+    replacement = create_chat(
       id=str(row.id), title="Recreated receipt chat", created_at=next_created_at,
     )
   elif kind == "app":
@@ -481,7 +482,7 @@ def test_recovery_waits_for_all_destructive_cleanup_before_starting_a_new_run(
       root_path=root_path, template_snapshot_json={},
     ))
   chat_ids = [str(uuid4()) for _ in range(2 if project_id else 1)]
-  db.add_all(models.Chat(id=chat_id, project_id=project_id, title="Cleanup child") for chat_id in chat_ids)
+  db.add_all(create_chat(id=chat_id, project_id=project_id, title="Cleanup child") for chat_id in chat_ids)
   db.commit()
   before_generations = {chat_id: chat_mod.current_run_generation(chat_id) for chat_id in chat_ids}
   for chat_id in chat_ids:

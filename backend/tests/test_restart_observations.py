@@ -1,4 +1,5 @@
 """Restart receipts remain visible independently of continuation admission."""
+from app import transcript_rows
 
 import asyncio
 from copy import deepcopy
@@ -64,7 +65,7 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
     assert wait.resume_delivered_at is None
     assert wait.action_approved_at is None
     assert chat.pending_question_id == qid
-    assert "observation" not in chat.messages[0]["blocks"][0]["platform_action"]
+    assert "observation" not in list(transcript_rows.history(chat))[0]["blocks"][0]["platform_action"]
 
 
 def test_observation_follows_current_hold_and_delivery_without_transcript_writes(
@@ -79,9 +80,9 @@ def test_observation_follows_current_hold_and_delivery_without_transcript_writes
   })
   with SessionLocal() as db:
     chat = db.get(models.Chat, chat_id)
-    original = deepcopy(chat.messages)
+    original = deepcopy(list(transcript_rows.history(chat)))
     def observation():
-      return project_restart_observations(db, chat_id, chat.messages)[0][
+      return project_restart_observations(db, chat_id, list(transcript_rows.history(chat)))[0][
         "blocks"][0]["platform_action"]["observation"]
     assert observation()["continuation"] == "restart_required"
     held[0] = False
@@ -90,7 +91,7 @@ def test_observation_follows_current_hold_and_delivery_without_transcript_writes
     wait.resume_delivered_at = now_naive_utc()
     db.commit()
     assert observation()["continuation"] == "delivered"
-    assert chat.messages == original
+    assert list(transcript_rows.history(chat)) == original
 
 
 def test_written_response_preserves_observed_restart_without_claiming_auto_resume():
@@ -100,7 +101,7 @@ def test_written_response_preserves_observed_restart_without_claiming_auto_resum
     wait = db.get(models.ChatWait, wait_id)
     wait.status = "cancelled"
     db.commit()
-    messages = deepcopy(db.get(models.Chat, chat_id).messages)
+    messages = deepcopy(list(transcript_rows.history(db.get(models.Chat, chat_id))))
     card = messages[0]["blocks"][0]
     card["platform_action"]["status"] = "responded"
     card["answers"] = {"Restart?": "Didn't we just restart?"}
@@ -117,7 +118,7 @@ def test_receipts_cannot_leak_across_cards_or_invent_a_restart(mismatch):
   chat_id = "observed-identity"
   _qid, wait_id, _run, _requirement = _install(chat_id, status="met")
   with SessionLocal() as db:
-    messages = deepcopy(db.get(models.Chat, chat_id).messages)
+    messages = deepcopy(list(transcript_rows.history(db.get(models.Chat, chat_id))))
     card = messages[0]["blocks"][0]
     if mismatch == "question":
       card["question_id"] = "unrelated-question"
@@ -140,7 +141,7 @@ def test_projection_preserves_message_window_and_unrelated_blocks(monkeypatch):
   _qid, _wait, _run, _requirement = _install(chat_id, status="met")
   monkeypatch.setattr(platform_update, "late_edits_pending", lambda: False)
   with SessionLocal() as db:
-    messages = deepcopy(db.get(models.Chat, chat_id).messages)
+    messages = deepcopy(list(transcript_rows.history(db.get(models.Chat, chat_id))))
     unrelated = {"role": "user", "content": "Another topic"}
     messages.append(unrelated)
     text = {"type": "text", "content": "Preserve me"}

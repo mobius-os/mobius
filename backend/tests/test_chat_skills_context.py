@@ -663,7 +663,9 @@ def test_core_prompt_asks_the_working_agent_to_keep_its_note_current():
   assert "A name the owner chose always wins" in normalized
   assert "one concise checkpoint before ending a substantive turn" in normalized
   assert "Never postpone necessary recovery saves until compaction" in normalized
-  assert "Send `title` and `digest` only when they need changing" in normalized
+  assert "**Summary** (`chat_summary`) — one short paragraph" in normalized
+  assert "**Digest** (`digest_entry`) — append only new" in normalized
+  assert "Send `title` and `chat_summary` only when they need changing" in normalized
   assert "rather than saving after each tool or intermediate result" in normalized
   assert "Omitted fields stay unchanged" in normalized
   assert "Never edit these notes directly" in normalized

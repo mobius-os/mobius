@@ -2,7 +2,7 @@
 """Create the always-on per-chat summary store, and nothing else.
 
 Knowledge-graph initialization belongs to an installed app. The base
-platform only guarantees the directory used by each chat's title/Digest/Summary
+platform only guarantees the directory used by each chat's title/Summary/Digest
 note exists and is writable by the agent.
 """
 

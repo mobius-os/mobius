@@ -389,9 +389,7 @@ def test_validator_rejects_a_package_over_the_limit_install_and_store_share(
 
   result = _run(tmp_path)
   assert result.returncode == 1
-  assert f"installs and the Store accept at most {PACKAGE_MAX_BYTES}" in (
-    result.stderr
-  )
+  assert "MiB app package limit" in result.stderr
 
 
 def test_validator_accepts_inline_seeds(tmp_path):
@@ -414,9 +412,7 @@ def test_validator_counts_every_declaration_of_a_shared_file(tmp_path):
 
   result = _run(tmp_path)
   assert result.returncode == 1
-  assert f"installs and the Store accept at most {PACKAGE_MAX_BYTES}" in (
-    result.stderr
-  )
+  assert "MiB app package limit" in result.stderr
 
 
 def test_validator_rejects_an_app_too_large_for_the_shell_to_load(tmp_path):

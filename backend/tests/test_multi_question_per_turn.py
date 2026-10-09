@@ -12,6 +12,8 @@ position — so a future runner that interleaves a tool block between
 two questions on a partial replay still merges correctly. These
 tests exercise both id-keyed and text-keyed branches.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from app import models
 from app.chat import _update_last_assistant_message
@@ -23,7 +25,7 @@ def _seed_chat_with_two_question_blocks(db, *, answers_for_first):
 
   Returns the chat id.
   """
-  chat = models.Chat(
+  chat = create_chat(
     id="multi-q-chat",
     title="multi q",
     messages=[
@@ -97,7 +99,7 @@ def test_id_keyed_merge_preserves_first_answer_when_second_is_answered(db):
 
   db.refresh(db.query(models.Chat).filter(models.Chat.id == chat_id).first())
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  assistant = chat.messages[-1]
+  assistant = list(transcript_rows.history(chat))[-1]
   blocks = assistant["blocks"]
   assert blocks[1]["type"] == "question"
   # The first answer carried over from the prior message snapshot.
@@ -111,7 +113,7 @@ def test_text_keyed_merge_when_id_missing(db):
   id. Locks in the secondary key path so a future SDK quirk doesn't
   silently downgrade to position-match."""
   # Seed with text-only questions (no id).
-  chat = models.Chat(
+  chat = create_chat(
     id="multi-q-textkey",
     title="multi q text",
     messages=[
@@ -154,7 +156,7 @@ def test_text_keyed_merge_when_id_missing(db):
   _update_last_assistant_message(db, chat.id, rewritten)
 
   db.refresh(chat)
-  blocks = chat.messages[-1]["blocks"]
+  blocks = list(transcript_rows.history(chat))[-1]["blocks"]
   assert blocks[0].get("answers") == {"Pick a fruit": "apple"}
   assert blocks[1].get("answers") == {"Pick a vegetable": "carrot"}
 
@@ -199,7 +201,7 @@ def test_merge_survives_block_reorder(db):
   _update_last_assistant_message(db, chat_id, rewritten)
 
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  blocks = chat.messages[-1]["blocks"]
+  blocks = list(transcript_rows.history(chat))[-1]["blocks"]
   # The first question is at index 0 in the new message vs. index 1
   # in the persisted message — position-match would have failed here.
   assert blocks[0].get("answers") == {"q-color": "blue"}

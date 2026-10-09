@@ -9,6 +9,7 @@ never broadcast.
 """
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 import asyncio
 import json
@@ -148,6 +149,9 @@ def _install_fake_client(monkeypatch, client_cls=_FakeClient) -> list:
 
   def _factory(options):
     client = client_cls(options)
+    # The runner hands Claude an anonymous prompt file that closes with the
+    # run, so read it while the client exists.
+    client.system_prompt = pathlib.Path(options.system_prompt["path"]).read_text(encoding="utf-8")
     clients.append(client)
     return client
 
@@ -1712,7 +1716,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
 
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    db.add(create_chat(
       id="claude-early",
       title="t",
       messages=[],
@@ -1933,6 +1937,41 @@ async def test_claude_chat_prompts_are_literal_on_new_and_resumed_turns(
 
 
 @pytest.mark.asyncio
+async def test_a_long_system_prompt_reaches_claude_whole_without_a_long_argument(
+  monkeypatch,
+):
+  """Linux refuses any single argv string of 128 KiB or more, so the prompt
+  must travel by file, whatever its size."""
+  from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+  commands: list[list[str]] = []
+
+  def _factory(options):
+    client = _FakeClient(options)
+    client.system_prompt = pathlib.Path(options.system_prompt["path"]).read_text(encoding="utf-8")
+    transport = SubprocessCLITransport(prompt="hello", options=options)
+    transport._cli_path = "claude"
+    commands.append(transport._build_command())
+    clients.append(client)
+    return client
+
+  clients: list = []
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
+  long_prompt = "Möbius constitution line.\n" * 8_000
+
+  await run_claude_sdk_turn(
+    user_message="hello", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="long-prompt", skill_text=long_prompt, bc=_ChatBus(),
+  )
+
+  assert len(long_prompt.encode()) > 128 * 1024
+  assert clients[0].system_prompt.startswith(long_prompt)
+  assert "--system-prompt-file" in commands[0]
+  assert "--system-prompt" not in commands[0]
+  assert max(len(arg.encode()) for arg in commands[0]) < 128 * 1024
+
+
+@pytest.mark.asyncio
 async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   clients = _install_fake_client(monkeypatch)
 
@@ -1947,20 +1986,20 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   # The Claude runner appends its provider-authored concise register on top of
   # the shared base (documented amendment to system_prompts.py's contract): the
   # shared base is preserved verbatim, with the register appended after it.
-  assert options.system_prompt.startswith(
+  assert clients[0].system_prompt.startswith(
     claude_sdk_runner._system_prompt_with_register("system")
   )
-  assert "$MOBIUS_GENERATED_DIR" in options.system_prompt
-  assert "Create downloadable deliverables only when the owner explicitly requests" in options.system_prompt
-  assert options.system_prompt.startswith("system")
-  assert "# Concise register" in options.system_prompt
-  assert "# Execution lifetimes in Möbius" in options.system_prompt
-  assert "TaskOutput" not in options.system_prompt
-  assert 'until [ -e "$TMPDIR/job.exit" ]' in options.system_prompt
-  assert "confirm its saved receipt" in options.system_prompt
+  assert "$MOBIUS_GENERATED_DIR" in clients[0].system_prompt
+  assert "Create downloadable deliverables only when the owner explicitly requests" in clients[0].system_prompt
+  assert clients[0].system_prompt.startswith("system")
+  assert "# Concise register" in clients[0].system_prompt
+  assert "# Execution lifetimes in Möbius" in clients[0].system_prompt
+  assert "TaskOutput" not in clients[0].system_prompt
+  assert 'until [ -e "$TMPDIR/job.exit" ]' in clients[0].system_prompt
+  assert "confirm its saved receipt" in clients[0].system_prompt
   # Normal steering is no longer falsely described as an interruption.
-  assert "they do not interrupt running work" in options.system_prompt
-  assert "rather than inferring that" in options.system_prompt
+  assert "they do not interrupt running work" in clients[0].system_prompt
+  assert "rather than inferring that" in clients[0].system_prompt
   assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
     options.disallowed_tools

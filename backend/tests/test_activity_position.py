@@ -1,4 +1,6 @@
 """An activity's saved display position cannot chase a growing response."""
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 from app import models
 from app.activity_position import attach_activity_positions, record_activity_position
@@ -7,7 +9,7 @@ from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_
 
 
 def test_saved_position_is_exact_chat_utf16_and_does_not_move_on_retry(db):
-  db.add_all([models.Chat(id='anchor-a', messages=[]), models.Chat(id='anchor-b', messages=[])])
+  db.add_all([create_chat(id='anchor-a', messages=[]), create_chat(id='anchor-b', messages=[])])
   db.commit()
   sink = ChatEventSink(ChatBroadcast('anchor-a'), chat_id='anchor-a')
   register_active_sink('anchor-a', sink)
@@ -33,13 +35,13 @@ def test_saved_position_is_exact_chat_utf16_and_does_not_move_on_retry(db):
     foreign = [{'id': 'peer:one'}]
     attach_activity_positions(db, 'anchor-b', foreign)
     assert foreign[0]['display_position'] is None
-    assert db.get(models.Chat, 'anchor-a').messages == []
+    assert list(transcript_rows.history(db.get(models.Chat, 'anchor-a'))) == []
   finally:
     unregister_active_sink('anchor-a', sink)
 
 
 def test_absence_is_saved_not_backfilled_from_a_later_turn(db):
-  db.add(models.Chat(id='anchor-quiet', messages=[]))
+  db.add(create_chat(id='anchor-quiet', messages=[]))
   db.commit()
   record_activity_position(db, 'anchor-quiet', 'delegation:one:completed')
   db.commit()
@@ -56,7 +58,7 @@ def test_absence_is_saved_not_backfilled_from_a_later_turn(db):
 
 
 def test_capture_is_rolled_back_with_event_transaction(db):
-  db.add(models.Chat(id='anchor-rollback', messages=[]))
+  db.add(create_chat(id='anchor-rollback', messages=[]))
   db.commit()
   record_activity_position(db, 'anchor-rollback', 'peer:rollback')
   db.rollback()
@@ -67,7 +69,7 @@ def test_peer_history_and_activity_share_the_creation_anchor(db):
   from app.agent_coordination import CoordinationScope, _persist_send, chat_message_history
   from app.chat_activity import chat_activity_page
 
-  db.add_all([models.Chat(id='anchor-send', messages=[]), models.Chat(id='anchor-receive', messages=[])])
+  db.add_all([create_chat(id='anchor-send', messages=[]), create_chat(id='anchor-receive', messages=[])])
   db.commit()
   sink = ChatEventSink(ChatBroadcast('anchor-receive'), chat_id='anchor-receive')
   register_active_sink('anchor-receive', sink)
@@ -132,7 +134,7 @@ def test_question_identity_resolves_position_when_live_hides_question_tool():
 def test_empty_and_whitespace_segments_never_advertise_phantom_identity(db):
   from app.chat_event_sink import active_sink_activity_position
 
-  db.add(models.Chat(id='unsealed-anchor', messages=[]))
+  db.add(create_chat(id='unsealed-anchor', messages=[]))
   db.commit()
   sink = ChatEventSink(ChatBroadcast('unsealed-anchor'), chat_id='unsealed-anchor',
                        )

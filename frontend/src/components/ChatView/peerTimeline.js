@@ -12,6 +12,17 @@ export function storedBlockRange(item) {
   return null
 }
 
+const NO_ACTIVITY_EVENTS = Object.freeze([])
+
+/** Merge loaded activity pages into unique events. The result's identity is
+ * the transcript-source signal for ChatView's scroll re-hold, so it changes
+ * only with content: query structural sharing keeps `pages` stable across
+ * identical refetches, and every empty read shares one array. */
+export function activityEventsFromPages(pages) {
+  const events = [...new Map((pages || []).flatMap(page => page.events).map(event => [event.id, event])).values()]
+  return events.length ? events : NO_ACTIVITY_EVENTS
+}
+
 export function peerTime(value) {
   if (typeof value === 'number') return value
   if (typeof value !== 'string' || !value) return NaN

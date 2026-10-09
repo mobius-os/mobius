@@ -23,9 +23,13 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
 
 ## Code invariants
 
-- **Chat persistence.** Every write to `Chat.messages` or `Chat.pending_messages`
-  goes through `chat_writer.py` domain commands; never assign either JSON column
-  directly. Read that module's docstring before changing chat persistence.
+- **Chat persistence.** Transcript-row and `Chat.pending_messages` mutations
+  go through `chat_writer.py` domain commands, using `transcript_rows.py` inside
+  that transaction; create chats only through `chat_writer.create_chat`. The
+  legacy `chats.messages` column is a mirror the commit hook derives from the
+  rows: never read or write it directly; `transcript_rows` readers serve an
+  unconverted chat from it themselves. Read `TRANSCRIPT_STORAGE_DESIGN.md`
+  before changing chat persistence.
 - **Owner-input cards.** Card access is deliberately uniform: any authenticated
   participant that can read a Q&A, Restart, or sealed-input card may answer it
   through that card's ordinary endpoint. The chat access check and exact card
@@ -78,6 +82,11 @@ reason to hide or skip validation. Inside Möbius:
 
 - run `scripts/test.sh --fast` for the cheap hermetic contracts and
   `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
+- keep memory bounded: the container shares one memory limit with every
+  running chat. Build the shell only through `npm run build` (it caps the heap
+  and takes the build lock); never call `vite` directly. Frontend tests run one
+  worker by default (`MOBIUS_TEST_CONCURRENCY`, about 550 MB each); raise it
+  only when nothing else is running, and never run test suites in parallel;
 - if the worktree runner says the checkout lock differs from the image runtime,
   treat those results as useful but not dependency-authoritative and use a
   lock-matched environment or hosted checks for that contract; and

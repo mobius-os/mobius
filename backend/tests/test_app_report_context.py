@@ -7,6 +7,7 @@ readable text, and wraps it in an <app_report> block so the agent has the
 brief as DATA without a tool call. These tests cover the helper + its
 strict date validation + the strip/cap logic.
 """
+from app.chat_writer import create_chat
 
 import os
 from pathlib import Path
@@ -35,7 +36,7 @@ def _app_chat(db, *, report_date=None, app=None):
     db.commit()
     db.refresh(app)
   settings = {"report_date": report_date} if report_date else None
-  chat = models.Chat(
+  chat = create_chat(
     id=f"report-chat-{report_date or 'none'}-{app.id}",
     title="brief", messages=[],
     created_by_app_id=app.id,
@@ -106,7 +107,7 @@ def test_malformed_report_date_rejected(db):
   db.add(app)
   db.commit()
   db.refresh(app)
-  chat = models.Chat(
+  chat = create_chat(
     id="report-chat-evil", title="x", messages=[],
     created_by_app_id=app.id,
     agent_settings_json={"report_date": "../../../etc/passwd"},
@@ -118,7 +119,7 @@ def test_malformed_report_date_rejected(db):
 
 def test_no_block_for_non_app_chat(db):
   # An owner-created chat (created_by_app_id NULL) never gets a report block.
-  chat = models.Chat(
+  chat = create_chat(
     id="owner-report-chat", title="x", messages=[],
     agent_settings_json={"report_date": "2026-06-22"},
   )

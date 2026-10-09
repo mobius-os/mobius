@@ -31,6 +31,5 @@ export default function WalkthroughSetup() {
               : choice === 'codex' ? <CodexAuth /> : <ProviderAuth authenticated={false} compact />}
           </div>
         </>}
-    {statusQuery.data?.mobius?.available && !configured.has('mobius') && <p className="wt-fine">Möbius · You also shows your Möbius agent access.</p>}
   </div>
 }

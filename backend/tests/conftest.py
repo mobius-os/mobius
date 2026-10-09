@@ -106,7 +106,7 @@ if (
     returncode=2,
   )
 
-from app.schema_migrations import _create_chat_search_tables
+from app.schema_migrations import _add_transcript_rows, _create_chat_search_tables
 from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter
@@ -184,6 +184,111 @@ def _isolate_git_env(monkeypatch, tmp_path, tmp_path_factory):
   )
 
 
+def _assert_legacy_mirrors_rows(connection) -> None:
+  """Suite-wide guard: a converted chat's legacy column equals its rows.
+
+  The previous release reads only ``chats.messages``; every committed state
+  this suite produces must leave it the decoded value of the rows.
+  """
+  import json as _json
+
+  def canonical(value):
+    return _json.dumps(value, sort_keys=True)
+
+  for chat_id, legacy in connection.exec_driver_sql(
+    "SELECT c.id, c.messages FROM chats c JOIN chat_transcript_state s ON s.chat_id = c.id"
+  ).fetchall():
+    rows = [_json.loads(body) for (body,) in connection.exec_driver_sql(
+      "SELECT body FROM chat_messages WHERE chat_id = ? ORDER BY seq", (chat_id,),
+    ).fetchall()]
+    assert canonical(_json.loads(legacy)) == canonical(rows), (
+      f"chat {chat_id}: chats.messages does not mirror its rows"
+    )
+
+
+_ALL_UNCONVERTED_PAUSED = [False]
+
+
+def pytest_configure(config):
+  config.addinivalue_line(
+    "markers", "converted_chats: keep chats converted in all-unconverted mode",
+  )
+
+
+@pytest.fixture(autouse=True)
+def _converted_chats_marker(request):
+  _ALL_UNCONVERTED_PAUSED[0] = request.node.get_closest_marker("converted_chats") is not None
+  yield
+  _ALL_UNCONVERTED_PAUSED[0] = False
+
+
+def _install_all_unconverted_mode():
+  """All-unconverted mode (MOBIUS_TEST_ALL_UNCONVERTED=1).
+
+  At every commit every chat loses its conversion marker, as if the previous
+  release had just written all of them: the state a first boot after an
+  update serves, at every moment of every test. Readers must then serve each
+  chat exactly from its legacy value, and each write converts its chat
+  inline again. Two guards hold throughout: no conversion runs on the event
+  loop's thread, and the event loop never blocks waiting for the writer.
+  Off by default. A test marked ``converted_chats`` pins the converted state
+  itself (conversion mechanics, converted-only search prose, row-path query
+  shapes) and runs with conversion left as it is.
+  """
+  if os.environ.get("MOBIUS_TEST_ALL_UNCONVERTED") != "1":
+    return
+  import asyncio
+  import functools
+
+  from sqlalchemy import event as sa_event
+  from sqlalchemy import text as sa_text
+  from sqlalchemy.orm import Session as SASession
+
+  from app import chat_writer as mode_chat_writer
+  from app import transcript_rows as mode_transcript_rows
+
+  def on_event_loop() -> bool:
+    try:
+      asyncio.get_running_loop()
+    except RuntimeError:
+      return False
+    return True
+
+  # Registered after transcript_rows' mirror listener, so it runs after it.
+  @sa_event.listens_for(SASession, "before_commit")
+  def unconvert_every_chat(session):
+    if _ALL_UNCONVERTED_PAUSED[0] or session.in_nested_transaction():
+      return
+    if session.execute(sa_text("SELECT 1 FROM chat_transcript_state LIMIT 1")).first():
+      session.execute(sa_text("DELETE FROM chat_transcript_state"))
+
+  # The process fact would otherwise end every per-read marker check.
+  mode_transcript_rows.mark_all_converted = lambda _db: None
+
+  import sys
+
+  def called_by_test_code() -> bool:
+    # A test seeding its own fixture state directly is not a production path.
+    frame = sys._getframe(2)
+    while frame is not None and frame.f_code.co_filename.endswith("transcript_rows.py"):
+      frame = frame.f_back
+    return frame is not None and "/tests/" in frame.f_code.co_filename
+
+  def off_the_loop(function):
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+      assert not on_event_loop() or called_by_test_code(), (
+        f"{function.__name__} ran on the event loop")
+      return function(*args, **kwargs)
+    return wrapper
+
+  mode_transcript_rows.convert = off_the_loop(mode_transcript_rows.convert)
+  mode_chat_writer.wait_ack = off_the_loop(mode_chat_writer.wait_ack)
+
+
+_install_all_unconverted_mode()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _test_schema():
   """Create model and migration-owned schemas once for the test process."""
@@ -193,8 +298,11 @@ def _test_schema():
   # numbered migrations after create_all. Search tables deliberately have no
   # ORM model, so install their migration-owned schema explicitly here.
   _create_chat_search_tables(engine)
+  _add_transcript_rows(engine)
   yield
   with engine.begin() as connection:
+    connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_entries_fts")
+    connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_entries")
     connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_fts")
     connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_docs")
     connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_state")
@@ -265,6 +373,11 @@ def fresh_db():
   # would otherwise hold a stale identity map across the drop/create.
   from app import chat_writer as chat_writer_mod
   chat_writer_mod.stop_writer(timeout=5)
+  # Per-engine schema and "all converted" facts describe one database; the
+  # suite reuses one engine across tests that rebuild its state.
+  from app import transcript_rows as transcript_rows_mod
+  transcript_rows_mod.reset_conversion_facts()
+  chat_writer_mod.transcript_conversion_status.update(state="idle", error=None, failed={})
   from app.database import SessionLocal as _WriterSession
   chat_writer_mod.start_writer(_WriterSession)
   # start_writer intentionally publishes before its worker opens and probes
@@ -306,6 +419,17 @@ def fresh_db():
   for _sub in ("apps", "app-secrets", "app-runtime", "app-envs", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
+  # Installed apps' model-provider declarations are projected into the
+  # process-global provider registry, and that projection is read-throttled
+  # for a second. The previous test's App rows are gone, so re-project from
+  # the empty tables now and reopen the throttle; otherwise a test that runs
+  # within a second of one that installed the identity app inherits its
+  # Möbius provider as available.
+  from app import providers as providers_mod
+  from app.config import get_settings as _get_settings
+  providers_mod.sync_app_model_providers(_get_settings().data_dir, force=True)
+  providers_mod._app_provider_sync_at = 0.0
+
   yield
   from app import chat_writer as _cw
   _cw.stop_writer(timeout=5)
@@ -314,11 +438,12 @@ def fresh_db():
   # The writer is already stopped, so no background transaction can race this
   # cleanup; the next test still gets a fresh actor and SQLAlchemy session.
   with engine.begin() as connection:
+    _assert_legacy_mirrors_rows(connection)
     # These disposable tables are migration-owned rather than ORM-owned, so
     # Base.metadata cannot include them in the generic deletion pass. Deleting
-    # docs first also drives the SQLite external-content FTS trigger.
-    connection.exec_driver_sql("DELETE FROM chat_search_docs")
-    connection.exec_driver_sql("DELETE FROM chat_search_state")
+    # search rows first also drives the SQLite external-content FTS triggers.
+    for name in ("chat_search_docs", "chat_search_state", "chat_search_entries"):
+      connection.exec_driver_sql(f'DELETE FROM "{name}"')
     for table in reversed(Base.metadata.sorted_tables):
       connection.execute(table.delete())
 
@@ -376,8 +501,8 @@ def chat(db, owner_token):
   no per-chat model; tests for that admission state clear this field.
   """
   import uuid
-  from app import models
-  c = models.Chat(
+  from app import chat_writer
+  c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title="Test chat",
     messages=[],

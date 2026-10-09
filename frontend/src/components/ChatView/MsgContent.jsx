@@ -470,6 +470,7 @@ function MsgContentInner({
               answeredMap={answers}
               platformAction={block.platform_action}
               submittedOptions={block.selected_options}
+              attachments={block.attachments}
               onAnswer={answerable ? onQuestionAnswer : undefined}
               onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
               onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}

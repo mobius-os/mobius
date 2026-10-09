@@ -498,6 +498,17 @@ def _start_chat_writer(_context: StartupContext) -> None:
   start_writer()
 
 
+def _start_transcript_conversion(_context: StartupContext) -> None:
+  """Convert chats the previous release wrote, in the background.
+
+  Readiness never waits for it: until a chat converts, its readers read its
+  legacy value, and its first write converts it inline (transcript_rows).
+  """
+  from app.chat_writer import start_transcript_conversion
+
+  start_transcript_conversion()
+
+
 def _backfill_active_assistant_identities(context: StartupContext) -> None:
   """Route the legacy parked-question identity repair through chat_writer."""
   from app import models
@@ -676,6 +687,7 @@ DATABASE_STARTUP_TASKS = (
   # failures still fail open exactly as they did when the writer started near
   # the end of the plan.
   StartupTask("start chat writer", _start_chat_writer),
+  StartupTask("start transcript conversion", _start_transcript_conversion),
   StartupTask(
     "backfill active assistant identities",
     _backfill_active_assistant_identities,

@@ -1091,6 +1091,10 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
+  // The one Resume POST this view has in flight. Its acknowledgement commits
+  // the continuation row that replaces the recovery card; a runtime read that
+  // lands first would retire the card with no row in its place.
+  const resumeRequestRef = useRef(null)
   // Terminal drain events are a wake-up hint for one exact attempt, never a
   // replacement for inspecting the durable outbox. Retain the hint only while
   // its cid + draft identity still name the mounted composer owner.
@@ -1561,10 +1565,7 @@ export default function ChatView({
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
       if (!preserveLocalTurn) {
-        pendingQueue.hydrate(data.pending_messages || [], {
-          completedCids: (data.messages || []).filter(message => message.role === 'user')
-            .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])]),
-        })
+        pendingQueue.hydrateFromTranscript(data.pending_messages || [], data.messages || [])
       }
       const runtime = {
         running: !!data.running,
@@ -1594,7 +1595,7 @@ export default function ChatView({
   }, [
     chatId,
     commitMessages,
-    pendingQueue.hydrate,
+    pendingQueue.hydrateFromTranscript,
     embedded,
     queryClient,
     reconcileFailedSendOutbox,
@@ -1643,6 +1644,11 @@ export default function ChatView({
       // never loaded; a resumed reply would then look like the whole chat.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
+      // While Resume awaits its acknowledgement, that request owns the
+      // recovery-to-running transition and refreshes the transcript when it
+      // settles. Adopting a successor observed by this poll first would remove
+      // the recovery card before its continuation row exists.
+      if (resumeRequestRef.current?.chatId === String(chatId)) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
       if (!runtimeTransition.adopt) return null
       const serverPending = data.pending_messages || []
@@ -2626,7 +2632,7 @@ export default function ChatView({
       setActivationPhase('ready')
     }
 
-    const settleRuntime = (runtime, visibleMessages) => {
+    const settleRuntime = (runtime, visibleMessages, authoritativeMessages) => {
       const transition = inspectRuntimeSnapshot(runtime)
       if (!transition.adopt) {
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
@@ -2667,7 +2673,10 @@ export default function ChatView({
       setLoading(false)
       setActivationRetrying(false)
       setActivationPhase('ready')
-      pendingQueue.hydrate(runtime.pending_messages || [])
+      // Activation can follow an offline/restart replay whose delivery receipt
+      // was missed while this pane was hidden. The validated detail/cache
+      // transcript, not just an empty runtime queue, owns that cid's handoff.
+      pendingQueue.hydrateFromTranscript(runtime.pending_messages || [], authoritativeMessages)
       retireUnownedRuntimeStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2807,7 +2816,7 @@ export default function ChatView({
           ),
         })
         applyMessagesToView(msgs, detailCache.offset)
-        settleRuntime(runtime, msgs)
+        settleRuntime(runtime, msgs, msgs)
         return
       }
 
@@ -2847,7 +2856,7 @@ export default function ChatView({
             ...handoffWindow,
           }
         })
-        settleRuntime(runtime, messagesRef.current)
+        settleRuntime(runtime, messagesRef.current, msgs)
         return
       }
 
@@ -2886,7 +2895,7 @@ export default function ChatView({
       // own real reflow.
       if (refreshed.messages.length === 0) {
         applyMessagesToView([], refreshed.offset)
-        settleRuntime(runtime, [])
+        settleRuntime(runtime, [], msgs)
         return
       }
 
@@ -2909,7 +2918,7 @@ export default function ChatView({
       if (activationCacheEntryState !== 'missing' && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, msgs)
         })
         return
       }
@@ -2921,7 +2930,7 @@ export default function ChatView({
         // transcript; cached activations above remain immediate.
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, msgs)
         })
         return
       }
@@ -2954,7 +2963,7 @@ export default function ChatView({
         if (frameIndex === lastFrame) break
         if (performance.now() - commitStartedAt < 48) stride *= 2
       }
-      settleRuntime(runtime, refreshed.messages)
+      settleRuntime(runtime, refreshed.messages, msgs)
     }
 
     loadActivation()
@@ -3038,6 +3047,7 @@ export default function ChatView({
     commitRuntimeSnapshot,
     inspectRuntimeSnapshot,
     onRuntimeSettledIdle,
+    pendingQueue.hydrateFromTranscript,
     reconcileFailedSendOutbox,
     retireUnownedRuntimeStream,
     retryActivation,
@@ -3750,8 +3760,8 @@ export default function ChatView({
           if (Array.isArray(result.message?._consumed_cids)) {
             pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
+          // The pin already landed at submit for this same cid; see below.
           const startedMessages = startedMessagesFromResponse(result)
-          landSentMessage(cid, { intent: freshPinIntent })
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
@@ -3770,10 +3780,10 @@ export default function ChatView({
       }
       const startedMessages = startedMessagesFromResponse(result)
       if (startedMessages) {
-        // The started row carries the same cid the client minted, so the pin
-        // targets that cid directly — no retarget from optimistic to canonical
-        // ts, and no last-row fallback. The funnel owns arming + staleness.
-        landSentMessage(cid, { intent: freshPinIntent })
+        // The started row carries the same cid the client minted, and the pin
+        // already landed on that cid at submit. Do not commit the send again:
+        // by now a no-scroll tail swipe or the filled-reservation handoff may
+        // own the mode, and a second commit would resurrect the replaced pin.
         commitMessages(prev => {
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
@@ -4007,7 +4017,7 @@ export default function ChatView({
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
       // renders no visible user bubble and never pins.
-      const response = await streamSend(text, undefined, {
+      const response = await streamSend(text, questionSubmissionContext?.attachments, {
         hidden: true,
         cid: silentCid,
         answers: resolvedAnswers,
@@ -4055,7 +4065,7 @@ export default function ChatView({
             msg.blocks = (msg.blocks || []).map(b => {
               if (b.type !== 'question') return b
               if (questionId && b.question_id !== questionId) return b
-              return { ...b, ...questionAnswerPatch(response.answers || resolvedAnswers, response) }
+              return { ...b, ...questionAnswerPatch(response.answers || resolvedAnswers, { ...response, attachments: questionSubmissionContext?.attachments }) }
             })
             updated[lastIdx] = msg
           }
@@ -4066,7 +4076,7 @@ export default function ChatView({
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
-        patchQuestionAnswers(questionId, response.answers || resolvedAnswers, response)
+        patchQuestionAnswers(questionId, response.answers || resolvedAnswers, { ...response, attachments: questionSubmissionContext?.attachments })
       }
       // Acceptance and visible response activity are deliberately separate.
       // Keep the card fixed through this answer-only commit; the stream hook
@@ -4285,10 +4295,19 @@ export default function ChatView({
   const resumeBlocked = useCallback(() => (
     isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
+  const sendResume = useCallback(async (text, attachments, options) => {
+    const request = { chatId: String(chatId) }
+    resumeRequestRef.current = request
+    try {
+      return await sendAfterSettingsSaved(text, attachments, options)
+    } finally {
+      if (resumeRequestRef.current === request) resumeRequestRef.current = null
+    }
+  }, [chatId, sendAfterSettingsSaved])
   const { resume: handleResume, state: resumeState } = useResume({
     chatId,
     runId: recoveryRunId,
-    send: sendAfterSettingsSaved,
+    send: sendResume,
     onAccepted: acceptResume,
     onRefresh: refreshResume,
     blocked: resumeBlocked,
@@ -5830,7 +5849,7 @@ export default function ChatView({
     chatId,
     goalId: goalPresentation?.id,
     goalRevision: goalPresentation?.revision,
-    send: sendAfterSettingsSaved,
+    send: sendResume,
     onAccepted: acceptResume,
     onRefresh: refreshResume,
     blocked: goalResumeBlocked,
@@ -6019,7 +6038,7 @@ export default function ChatView({
     >
       {fileDropActive && (
         <div className="chat__file-drop-target" aria-hidden="true">
-          <div className="chat__file-drop-card">Drop files to attach</div>
+          <div className="chat__file-drop-card">Drop files into the message composer</div>
         </div>
       )}
       {/* Single polite live region — announces state transitions only.

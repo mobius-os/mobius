@@ -47,6 +47,8 @@ from app.manifest_contract import (  # noqa: E402
   SYSTEM_PROMPT_MAX_BYTES,
   ManifestContractError,
   package_bytes_on_disk,
+  package_limit_message,
+  size_on_disk,
   static_asset_entries,
   validate_manifest_contract,
 )
@@ -181,25 +183,18 @@ def _referenced_file_findings(
 def _package_size_errors(root: Path, manifest_path: Path, manifest: dict) -> list[str]:
   errors: list[str] = []
 
-  def size(rel: str) -> int:
-    path = root / rel
-    return path.stat().st_size if path.is_file() else 0
-
   if manifest_path.stat().st_size > MANIFEST_MAX_BYTES:
     errors.append(f"manifest exceeds {MANIFEST_MAX_BYTES} bytes")
 
   package_total = package_bytes_on_disk(root, manifest)
   if package_total > PACKAGE_MAX_BYTES:
-    errors.append(
-      f"app package is {package_total} bytes; installs and the Store accept "
-      f"at most {PACKAGE_MAX_BYTES}"
-    )
+    errors.append(package_limit_message(package_total))
 
   for skill in manifest.get("skills") or []:
-    if isinstance(skill, str) and size(skill) > SKILL_MAX_BYTES:
+    if isinstance(skill, str) and size_on_disk(root, skill) > SKILL_MAX_BYTES:
       errors.append(f"skill {skill!r} exceeds {SKILL_MAX_BYTES} bytes")
   prompt = manifest.get("system_prompt")
-  if isinstance(prompt, str) and size(prompt) > SYSTEM_PROMPT_MAX_BYTES:
+  if isinstance(prompt, str) and size_on_disk(root, prompt) > SYSTEM_PROMPT_MAX_BYTES:
     errors.append(
       f"system_prompt {prompt!r} exceeds {SYSTEM_PROMPT_MAX_BYTES} bytes"
     )

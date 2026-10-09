@@ -1,6 +1,7 @@
 """Agent tools contributed by installed apps, and the moment of each call."""
 
 from __future__ import annotations
+from app.chat_writer import create_chat
 
 from datetime import timedelta
 
@@ -61,7 +62,7 @@ def _app(db, slug="reflection", *, contract=None, deleted=False):
 
 def _run(db, *, chat_id="chat-1", run_id="run-1", provider="claude"):
   if db.get(models.Chat, chat_id) is None:
-    db.add(models.Chat(id=chat_id, title="Chat", messages=[]))
+    db.add(create_chat(id=chat_id, title="Chat", messages=[]))
   db.add(models.ChatRun(id=run_id, chat_id=chat_id, provider=provider))
   db.commit()
 
@@ -234,7 +235,7 @@ def test_call_tells_the_app_a_helper_called_and_whether_it_may_write(
 ):
   app = _app(db)
   for chat_id in ("parent", "child"):
-    db.add(models.Chat(id=chat_id, title=chat_id, messages=[]))
+    db.add(create_chat(id=chat_id, title=chat_id, messages=[]))
   db.add(models.Delegation(
     id="helper", app_id=app.id, parent_chat_id="parent",
     parent_root_run_id="parent-run", task_key="helper", child_chat_id="child",

@@ -13,6 +13,8 @@ actor is the sole runtime mutator), so they are async and take a
 `run_token`. The conftest fresh_db fixture starts the actor per test, so
 these drive the real actor against the test DB.
 """
+from app import transcript_rows
+from app.chat_writer import create_chat
 
 import asyncio
 
@@ -76,7 +78,7 @@ def test_reset_for_tests_drops_lock_identity():
 
 
 def test_promote_pending_messages_locked_collapses_queue(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-head-test",
     title="t",
     messages=[],
@@ -106,7 +108,7 @@ def test_promote_pending_messages_locked_collapses_queue(db):
 
 
 def test_promote_pending_messages_locked_returns_none_on_empty_queue(db):
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-empty",
     title="t",
     messages=[],
@@ -145,7 +147,7 @@ def test_drain_parks_queued_work_behind_owner_question(db):
     "ts": 3,
     "cid": "wait-result",
   }]
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-question-barrier",
     title="t",
     messages=[question],
@@ -187,7 +189,7 @@ def test_drain_parks_queued_work_behind_owner_question(db):
   assert discarded == ["cq-question-barrier"]
   assert forgotten == ["cq-question-barrier"]
   db.refresh(chat)
-  assert chat.messages == [question]
+  assert list(transcript_rows.history(chat)) == [question]
   assert chat.pending_messages == queued
   assert chat.pending_question_id == "owner-decision"
 
@@ -196,7 +198,7 @@ def test_drain_and_release_promotes_then_holds_starting(db):
   """When the queue has a head, drain_and_release returns it and
   does NOT call discard_starting / forget_chat (the next turn owns
   the starting claim)."""
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-drain-with-head",
     title="t",
     messages=[],
@@ -234,7 +236,7 @@ def test_drain_and_release_promotes_then_holds_starting(db):
 def test_drain_and_release_releases_when_queue_empty(db):
   """When the queue is empty, drain_and_release calls discard_starting
   AND forget_chat atomically under the lock."""
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-drain-empty",
     title="t",
     messages=[],
@@ -272,7 +274,7 @@ def test_drain_and_release_no_op_when_not_owning_generation(db):
   current generation UNDER its lock, finds it no longer matches run_gen,
   and must NOT promote, discard, or forget. The newer owner of the
   generation is responsible for those."""
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-not-owner",
     title="t",
     messages=[],
@@ -315,7 +317,7 @@ def test_drain_serializes_with_concurrent_lock_holder(db):
   from reading until release. Locks the per-chat serialization
   invariant — without it, the late-drain critical section would race
   a concurrent POST append."""
-  chat = models.Chat(
+  chat = create_chat(
     id="cq-serialize",
     title="t",
     messages=[],
