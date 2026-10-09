@@ -3627,6 +3627,8 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    previous_title = chat.title
+    previously_visible = visible_in_owner_drawer(chat)
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id
@@ -3709,6 +3711,13 @@ async def patch_app_chat(
     chat.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(chat)
+    # Publish only committed presentation changes, never inferred run/card state.
+    if chat.title != previous_title:
+      get_system_broadcast().publish(renamed_event(chat))
+    if visible_in_owner_drawer(chat) != previously_visible:
+      get_system_broadcast().publish({
+        "type": "chat_visibility_changed", "chatId": str(chat.id),
+      })
     return {
       "ok": True,
       "id": chat.id,
