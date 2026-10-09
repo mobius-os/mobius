@@ -8,6 +8,9 @@ The send path spawns the agent runner, which these tests don't want to
 drive end-to-end — they assert on the AUTHORIZATION boundary (which
 status code each actor gets), which is decided before any runner work.
 """
+import json
+
+import pytest
 from sqlalchemy.orm import object_session
 from app import transcript_rows
 from app.chat_writer import create_chat
@@ -754,3 +757,317 @@ def test_app_chat_list_shows_whether_a_run_is_live(client, owner_token, db, monk
   listed = {chat["id"]: chat["running"] for chat in client.get("/api/app-chats", headers=auth).json()}
 
   assert listed == {live: True, idle: False}
+
+
+def test_app_can_rename_and_promote_only_its_own_chat(client, owner_token, db):
+  app_id, token = _make_app(client, owner_token, "companion-chat")
+  auth = {"Authorization": f"Bearer {token}"}
+  created = client.post("/api/app-chats", headers=auth, json={
+    "scope": "companion:one", "system_prompt": "Keep this prompt",
+  })
+  assert created.status_code == 201, created.text
+  chat_id = created.json()["id"]
+  row = db.get(models.Chat, chat_id)
+  original_settings = dict(row.agent_settings_json)
+  assert row.title_locked is False
+
+  changed = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": "  Companion conversation  ", "owner_visible": True,
+  })
+  assert changed.status_code == 200, changed.text
+  db.refresh(row)
+  assert row.title == "Companion conversation"
+  assert row.title_locked is True
+  assert row.created_by_app_id == app_id
+  assert row.agent_settings_json == {**original_settings, "owner_visible": True}
+  summary = client.get("/api/app-chats", headers=auth).json()[0]
+  assert summary["title"] == row.title
+  assert summary["title_locked"] is True
+  assert summary["owner_visible"] is True
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  assert chat_id in {r["id"] for r in client.get("/api/chats", headers=owner_auth).json()}
+
+  # Omission, null and blank titles do not undo an explicit name or visibility.
+  for payload in ({}, {"title": None, "owner_visible": None}, {"title": "   "}):
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json=payload)
+    assert response.status_code == 200, response.text
+    db.refresh(row)
+    assert row.title == "Companion conversation"
+    assert row.title_locked is True
+    assert row.agent_settings_json == {**original_settings, "owner_visible": True}
+
+  hidden = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "owner_visible": False,
+  })
+  assert hidden.status_code == 200, hidden.text
+  db.refresh(row)
+  assert row.agent_settings_json == original_settings
+  summary = client.get("/api/app-chats", headers=auth).json()[0]
+  assert summary["owner_visible"] is False
+  assert summary["title_locked"] is True
+  assert chat_id not in {r["id"] for r in client.get("/api/chats", headers=owner_auth).json()}
+
+
+@pytest.mark.parametrize("title", ["x" * 501, "bad\x00title", "bad\ntitle"])
+def test_app_chat_patch_rejects_invalid_title_without_promoting_chat(
+  client, owner_token, db, title,
+):
+  _, token = _make_app(client, owner_token, "invalid-title")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": title, "owner_visible": True,
+  })
+  assert response.status_code == 422, response.text
+  row = db.get(models.Chat, chat_id)
+  assert row.title == "New chat"
+  assert row.title_locked is False
+  assert not row.agent_settings_json.get("owner_visible")
+
+
+def test_app_chat_presentation_patch_preserves_started_chat_guards(
+  client, owner_token, db,
+):
+  _, token = _make_app(client, owner_token, "started-presentation")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={
+    "provider": "claude", "system_prompt": "Original prompt",
+  }).json()["id"]
+  row = db.get(models.Chat, chat_id)
+  row.has_messages = True
+  db.commit()
+  for rejected in ({"system_prompt": "Replacement"}, {"provider": "codex"}):
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+      **rejected, "title": "Must not stick", "owner_visible": True,
+    })
+    assert response.status_code == 409, response.text
+    db.refresh(row)
+    assert row.title == "New chat"
+    assert row.title_locked is False
+    assert not row.agent_settings_json.get("owner_visible")
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": "x" * 500, "owner_visible": True,
+  })
+  assert response.status_code == 200, response.text
+  db.refresh(row)
+  assert row.title == "x" * 500
+  assert row.title_locked is True
+  assert row.agent_settings_json["system_prompt"] == "Original prompt"
+  assert row.provider == "claude"
+
+
+def test_app_chat_presentation_patch_cannot_change_foreign_or_deleted_chats(
+  client, owner_token, db, presentation_events,
+):
+  app_id, token = _make_app(client, owner_token, "presentation-owner")
+  other_id, _ = _make_app(client, owner_token, "presentation-other")
+  from datetime import UTC, datetime
+
+  for chat_id, app, deleted, status in (
+    ("owner-presentation", None, None, 403),
+    ("other-presentation", other_id, None, 403),
+    ("deleted-presentation", app_id, datetime.now(UTC), 404),
+  ):
+    row = create_chat(id=chat_id, title="Original", messages=[], created_by_app_id=app)
+    row.deleted_at = deleted
+    db.add(row)
+    db.commit()
+    presentation_events.clear()
+    response = client.patch(f"/api/app-chats/{chat_id}", json={
+      "title": "Changed", "owner_visible": True,
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == status, response.text
+    assert presentation_events == []
+    db.refresh(row)
+    assert row.title == "Original"
+    assert not (row.agent_settings_json or {}).get("owner_visible")
+  own = client.post("/api/app-chats", json={}, headers={
+    "Authorization": f"Bearer {token}",
+  }).json()["id"]
+  presentation_events.clear()
+  response = client.patch(f"/api/app-chats/{own}", json={"title": "Owner"}, headers={
+    "Authorization": f"Bearer {owner_token}",
+  })
+  assert response.status_code == 403, response.text
+  assert presentation_events == []
+
+
+def test_app_chat_summary_tracks_card_identity_without_card_contents(
+  client, owner_token, db,
+):
+  app_id, token = _make_app(client, owner_token, "card-status")
+  row = create_chat(
+    id="card-status-chat", title="Card status", created_by_app_id=app_id,
+    messages=[{"role": "assistant", "content": "Private prose", "blocks": [{
+      "type": "question", "id": "card-one", "questions": ["Private question"],
+      "answers": {"answer": "Private answer"},
+    }]}],
+  )
+  db.add(row)
+  db.commit()
+  for pending in ("card-one", "card-two", None):
+    row.pending_question_id = pending
+    db.commit()
+    response = client.get("/api/app-chats", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    summary = response.json()[0]
+    assert summary["pending_question_id"] == pending
+    assert summary["awaiting_owner"] is bool(pending)
+    assert summary["owner_visible"] is False
+    assert summary["title_locked"] is False
+    assert not {"messages", "blocks", "questions", "answers"} & summary.keys()
+    assert "Private" not in json.dumps(summary)
+
+
+@pytest.fixture
+def presentation_events(monkeypatch):
+  from app.routes import chats
+  events = []
+
+  class Broadcast:
+    def publish(self, event):
+      events.append(event)
+
+  monkeypatch.setattr(chats, "get_system_broadcast", lambda: Broadcast())
+  return events
+
+
+def test_app_presentation_events_describe_committed_rows_only(
+  client, owner_token, db, monkeypatch,
+):
+  from app.database import SessionLocal
+  from app.routes import chats
+  from app.chat_visibility import visible_in_owner_drawer
+
+  _, token = _make_app(client, owner_token, "committed-presentation")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  row = db.get(models.Chat, chat_id)
+  row.pending_question_id = "private-card-identity"
+  db.commit()
+  events = []
+  committed = []
+
+  class Broadcast:
+    def publish(self, event):
+      # A distinct session proves neither event describes uncommitted state.
+      with SessionLocal() as reader:
+        saved = reader.get(models.Chat, chat_id)
+        committed.append((saved.title, saved.title_locked, visible_in_owner_drawer(saved)))
+      events.append(event)
+
+  monkeypatch.setattr(chats, "get_system_broadcast", lambda: Broadcast())
+  for payload, types, visible in (
+    ({"title": "  Companion  ", "owner_visible": True},
+     ["chat_renamed", "chat_visibility_changed"], True),
+    ({"owner_visible": False}, ["chat_visibility_changed"], False),
+    ({"owner_visible": True}, ["chat_visibility_changed"], True),
+    ({"title": "Renamed"}, ["chat_renamed"], True),
+  ):
+    events.clear()
+    committed.clear()
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json=payload)
+    assert response.status_code == 200, response.text
+    db.refresh(row)
+    assert [event["type"] for event in events] == types
+    assert committed == [(row.title, True, visible)] * len(types)
+    assert all(event["chatId"] == chat_id for event in events)
+    for event in events:
+      if event["type"] == "chat_renamed":
+        assert event == chats.renamed_event(row)
+      else:
+        assert event == {"type": "chat_visibility_changed", "chatId": chat_id}
+    assert "private-card-identity" not in json.dumps(events)
+    listed = client.get(f"/api/chats?ids={chat_id}", headers={
+      "Authorization": f"Bearer {owner_token}",
+    }).json()
+    assert (chat_id in {item["id"] for item in listed}) is visible
+
+
+@pytest.mark.parametrize("payload", [
+  {}, {"title": None, "owner_visible": None}, {"title": "  Same  "},
+  {"title": "   "}, {"owner_visible": True}, {"scope_label": "New label"},
+])
+def test_app_presentation_noops_emit_nothing(
+  client, owner_token, presentation_events, payload,
+):
+  _, token = _make_app(client, owner_token, "presentation-noop")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={
+    "title": "Same", "owner_visible": True,
+  }).json()["id"]
+  presentation_events.clear()
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json=payload)
+  assert response.status_code == 200, response.text
+  assert presentation_events == []
+
+
+@pytest.mark.parametrize("hidden", [True, False])
+def test_app_presentation_events_respect_explicit_drawer_override(
+  client, owner_token, db, presentation_events, hidden,
+):
+  _, token = _make_app(client, owner_token, "visibility-override")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  row = db.get(models.Chat, chat_id)
+  row.agent_settings_json = {**row.agent_settings_json, "drawer_hidden": hidden}
+  db.commit()
+  for visible in (True, False):
+    presentation_events.clear()
+    response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+      "owner_visible": visible,
+    })
+    assert response.status_code == 200, response.text
+    assert presentation_events == []
+
+
+@pytest.mark.parametrize("rejected", [
+  {"model": ""}, {"title": "x" * 501}, {"system_prompt": "Changed"},
+])
+def test_rejected_app_presentation_changes_emit_nothing(
+  client, owner_token, db, presentation_events, rejected,
+):
+  _, token = _make_app(client, owner_token, "rejected-presentation")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  row = db.get(models.Chat, chat_id)
+  row.has_messages = True
+  db.commit()
+  presentation_events.clear()
+  response = client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+    "title": "Changed", "owner_visible": True, **rejected,
+  })
+  assert response.status_code in (409, 422), response.text
+  db.refresh(row)
+  assert row.title == "New chat"
+  assert not row.title_locked
+  assert not row.agent_settings_json.get("owner_visible")
+  assert presentation_events == []
+
+
+def test_app_presentation_commit_failure_emits_nothing(
+  client, owner_token, db, monkeypatch, presentation_events,
+):
+  from sqlalchemy.orm import Session
+
+  _, token = _make_app(client, owner_token, "rollback-presentation")
+  auth = {"Authorization": f"Bearer {token}"}
+  chat_id = client.post("/api/app-chats", headers=auth, json={}).json()["id"]
+  presentation_events.clear()
+
+  def fail_commit(session):
+    session.flush()
+    session.rollback()
+    raise RuntimeError("simulated commit failure")
+
+  with monkeypatch.context() as patch:
+    patch.setattr(Session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+      client.patch(f"/api/app-chats/{chat_id}", headers=auth, json={
+        "title": "Must roll back", "owner_visible": True,
+      })
+  row = db.get(models.Chat, chat_id)
+  assert row.title == "New chat"
+  assert not row.title_locked
+  assert not row.agent_settings_json.get("owner_visible")
+  assert presentation_events == []
