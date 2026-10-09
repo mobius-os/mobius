@@ -473,6 +473,7 @@ def test_settled_detail_omits_fetchable_large_output_excerpt_without_mutation():
 
     projected = project_messages_for_detail(
         messages,
+        chat_id="c-detail",
         fetchable_tool_output_ids={"tu_large"},
     )
 
@@ -521,6 +522,7 @@ def test_detail_projection_keeps_only_live_and_unfetchable_outputs_inline():
 
     projected = project_messages_for_detail(
         messages,
+        chat_id="c-detail",
         fetchable_tool_output_ids={"tu_history"},
         live_message=messages[-1],
     )
@@ -547,6 +549,7 @@ def test_detail_projection_with_only_a_live_message_is_identity_stable():
 
     assert project_messages_for_detail(
         messages,
+        chat_id="c-detail",
         fetchable_tool_output_ids={"tu_live"},
         live_message=live,
     ) is messages
@@ -565,6 +568,7 @@ def test_detail_projection_keeps_excerpt_when_sidecar_is_missing():
 
     assert project_messages_for_detail(
         messages,
+        chat_id="c-detail",
         fetchable_tool_output_ids=set(),
     ) is messages
 
@@ -582,7 +586,10 @@ def test_historical_read_never_shows_a_task_still_running():
     messages = [bash("running"), bash("running")]
 
     projected = project_messages_for_detail(
-        messages, fetchable_tool_output_ids=set(), live_message=messages[1],
+        messages,
+        chat_id="c-detail",
+        fetchable_tool_output_ids=set(),
+        live_message=messages[1],
     )
 
     tasks = projected[0]["blocks"][0]["subagent"]

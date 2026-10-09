@@ -690,6 +690,7 @@ def _chat_detail_response(
   )
   page = project_messages_for_detail(
     page,
+    chat_id=chat.id,
     fetchable_tool_output_ids=fetchable_tool_ids,
     live_message=live_message,
   )
@@ -2020,6 +2021,7 @@ def get_chat_activity_detail(
   )
   projected = project_messages_for_detail(
     [detail_message],
+    chat_id=chat.id,
     fetchable_tool_output_ids=fetchable_tool_ids,
   )[0]["blocks"]
   return {

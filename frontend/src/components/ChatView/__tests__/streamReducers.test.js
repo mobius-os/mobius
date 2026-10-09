@@ -928,6 +928,15 @@ test('completed owner-card receipt identity reaches the live tool item', () => {
   assert.equal(next[0].owner_card_question_id, 'saved-card')
 })
 
+test('a live screenshot step keeps the name of the picture it saved', () => {
+  const prev = [toolItem('mcp__mobius_control__screenshot', { tool_use_id: 'shot' })]
+  const next = attachToolOutput(prev, 'excerpt', {
+    tool_use_id: 'shot', output_truncated: true, output_full_len: 264566,
+    saved_image: 'shot-1.png',
+  })
+  assert.equal(next[0].saved_image, 'shot-1.png')
+})
+
 test('suppresses every AskUserQuestion twin when two questions are in one message', () => {
   const blocks = [
     { type: 'tool', tool: 'AskUserQuestion', input: 'Q1', output: '', status: 'done' },

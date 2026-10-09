@@ -197,6 +197,7 @@ function MsgContentInner({
   activitySourceBlocks,
 }) {
   const positionedNotes = usePositionedPeerNotes(activityMessageId || msg.id)
+  // Memoized once per message: open image previews derive from this list.
   const generatedFiles = useMemo(() => (
     msg.role === 'assistant' && !isStreaming
       ? (msg.blocks || []).flatMap(block =>
@@ -601,13 +602,6 @@ function MsgContentInner({
     // arrive here after conversion to the same block shape, so the transcript
     // doesn't reshuffle on promote.
     const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
-    const generatedFiles = msg.role === 'assistant' && !isStreaming
-      ? (msg.blocks || []).flatMap(block =>
-          block.type === 'generated_files' && Array.isArray(block.files)
-            ? block.files.map(file => ({ ...file, kind: 'generated' }))
-            : [],
-        )
-      : []
     // The inbox is captured after the turn ends, which can be after a saved
     // question. Place those files after the agent's last prose but before any
     // terminal question card, including in already-saved transcripts.

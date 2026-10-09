@@ -22,6 +22,7 @@ import PeerMessageCard from './PeerMessageCard.jsx'
 import ToolImageResult from './ToolImageResult.jsx'
 import {
   generatedInboxImageName,
+  savedStepImageReference,
   servedImageReference,
   toolImageReference,
 } from './toolImageResult.js'
@@ -29,7 +30,7 @@ import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
-import { useToolImagePreview } from './useToolImagePreview.js'
+import { useStableImageReference, useToolImagePreview } from './useToolImagePreview.js'
 import ToolEditPreview from './ToolEditPreview.jsx'
 import { toolEditPreview } from './toolEditPreview.js'
 
@@ -143,9 +144,18 @@ function GenericToolBlock({
   const backgroundTask = runningBackgroundTask(t)
   const running = t.status === 'running' || !!backgroundTask
   const iconKind = toolActivityIcon(effectiveName)
-  const isImageTool = effectiveName === 'ViewImage'
-  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
   const failed = toolBlockFailed(t)
+  // A screenshot is visual only when the completed step records a saved file.
+  // Interrupted or unbound captures can finish without an exit code, but their
+  // output still needs the ordinary text and copy controls.
+  const savedScreenshot = useMemo(() => (
+    effectiveName === 'ScreenControl' && t.status === 'done' && !failed
+      ? savedStepImageReference(t.saved_image, chatId)
+      : null
+  ), [effectiveName, t.status, failed, t.saved_image, chatId])
+  const isImageTool = effectiveName === 'ViewImage'
+    || !!savedScreenshot
+  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
   // Historical activities can contain many closed edits. Keep the durable
   // marker cheap and defer parsing until this disclosure is prepared.
   const wantsPreparation = prepareRequested || desiredOpen
@@ -153,14 +163,15 @@ function GenericToolBlock({
     () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
     [failed, t.edit_preview, wantsPreparation],
   )
-  const generatedImage = useMemo(() => ({
+  const stepImage = useMemo(() => ({
+    savedImage: t.saved_image,
     files: generatedFiles,
     viewedDigest: t.viewed_image_sha256,
     completed: t.status === 'done',
-  }), [generatedFiles, t.viewed_image_sha256, t.tool, t.status])
+  }), [t.saved_image, generatedFiles, t.viewed_image_sha256, t.status])
   const servedImage = useMemo(() => (
-    isImageTool ? servedImageReference(t.input, chatId, generatedImage) : null
-  ), [isImageTool, t.input, chatId, generatedImage])
+    savedScreenshot || (isImageTool ? servedImageReference(t.input, chatId, stepImage) : null)
+  ), [savedScreenshot, isImageTool, t.input, chatId, stepImage])
   // `t.sources` is NOT rendered here: the turn's sources surface once at the
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
@@ -187,10 +198,11 @@ function GenericToolBlock({
     // barrier then guarantees the final queued stash wins the query.
     if (t.status === 'running') return
     if (!t.output_truncated || previewOutput !== null || missingOutput) return
-    // Protected chat media and /tmp rasters render through narrow routes,
-    // avoiding the image tool's much larger base64 sidecar. An image viewed
-    // elsewhere needs the complete result (not the ordinary 20k text preview)
-    // so the fallback data URL is valid.
+    // Protected chat media (including a screenshot's recorded file) and /tmp
+    // rasters render through narrow routes, avoiding the image tool's much
+    // larger base64 sidecar. An image viewed elsewhere needs the complete
+    // result (not the ordinary 20k text preview) so the fallback data URL is
+    // valid.
     if (isImageTool && servedImage) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
@@ -263,10 +275,10 @@ function GenericToolBlock({
   const hasOutput = !!shownOutput
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
-  const imageReference = useMemo(
-    () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId, generatedImage) : null),
-    [isImageTool, shownOutput, t.input, chatId, generatedImage],
-  )
+  const imageReference = useStableImageReference(useMemo(
+    () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId, stepImage) : null),
+    [isImageTool, shownOutput, t.input, chatId, stepImage],
+  ))
   const r = useMemo(
     () => (hasOutput && !isImageTool
       ? formatToolResult(shownOutput ?? '', { terminal: isShell })
