@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import app_cron, app_jobs, models, schemas
+from app import app_cron, app_jobs, fs_locks, models, schemas
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -16,7 +16,7 @@ from app.deps import (
   require_installation_owner_control,
 )
 from app.manifest_contract import ManifestContractError, validate_cron_expr
-from app.resource_access import live_app_or_404
+from app.resource_access import live_app_or_404, recheck_app_identity
 
 
 router = APIRouter()
@@ -573,7 +573,7 @@ def get_app_job_context(
   "/{app_id}/schedule",
   dependencies=[Depends(reject_cross_site)],
 )
-def update_app_schedule(
+async def update_app_schedule(
   app_id: int,
   body: schemas.AppScheduleUpdate,
   db: Session = Depends(get_db),
@@ -594,7 +594,23 @@ def update_app_schedule(
       status_code=403,
       detail="App token can only update its own schedule.",
     )
-  app = live_app_or_404(db, app_id)
+  original = live_app_or_404(db, app_id)
+  expected_nonce = principal.app_instance_id or original.token_nonce
+  async with fs_locks.install_uninstall_lock():
+    # Authentication may have opened a transaction before this lock wait.
+    # Re-read after a competing delete/update, never save against a stale row.
+    db.rollback()
+    recheck_app_identity(db, app_id, expected_nonce)
+    app = live_app_or_404(db, app_id)
+    async with fs_locks.source_dir_lock(app.source_dir):
+      return await app_cron.run_schedule_mutation(
+        _update_app_schedule_unlocked, app, body,
+      )
+
+
+def _update_app_schedule_unlocked(app: models.App, body: schemas.AppScheduleUpdate):
+  """Validate and save while the route owns the lifecycle and source locks."""
+  app_id = app.id
   from app import cron_tz
   try:
     validate_cron_expr(body.cron)
@@ -632,23 +648,24 @@ def update_app_schedule(
   # Provenance lets accepted updates keep this choice instead of resetting it
   # to the manifest default (see app_cron.owner_schedule_to_keep). It is
   # recorded before registering, so no declaration exists without it.
-  app_cron.record_schedule_choice(app_id, app_cron.ScheduleChoice(
-    source="owner",
-    cron=body.cron,
-    job=job_name,
-    timezone=timezone,
-    manifest_default=manifest_schedule[0] if manifest_schedule else None,
-  ))
-  if timezone is not None:
-    materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
-    app_cron.register_cron(
-      slug, materialized, job_path, app_id,
-      timezone=timezone, zone_cron=body.cron,
-    )
-    return {
-      "cron": materialized, "job": job_name,
-      "timezone": timezone, "zone_cron": body.cron,
-    }
-  app_cron.register_cron(slug, body.cron, job_path, app_id)
+  with app_cron.schedule_choice_rollback(app_id):
+    app_cron.record_schedule_choice(app_id, app_cron.ScheduleChoice(
+      source="owner",
+      cron=body.cron,
+      job=job_name,
+      timezone=timezone,
+      manifest_default=manifest_schedule[0] if manifest_schedule else None,
+    ))
+    if timezone is not None:
+      materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
+      app_cron.register_cron(
+        slug, materialized, job_path, app_id,
+        timezone=timezone, zone_cron=body.cron,
+      )
+      return {
+        "cron": materialized, "job": job_name,
+        "timezone": timezone, "zone_cron": body.cron,
+      }
+    app_cron.register_cron(slug, body.cron, job_path, app_id)
   return {"cron": body.cron, "job": job_name, "timezone": None,
           "zone_cron": None}

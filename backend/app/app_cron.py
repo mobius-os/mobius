@@ -1,16 +1,21 @@
 """Shared cron declaration and parsing primitives for installed apps."""
 
+import asyncio
 import json
+import logging
 import os
 import re
 import shlex
 import subprocess
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from fastapi import HTTPException
 
 from app.config import get_settings
+
+log = logging.getLogger(__name__)
 
 BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
@@ -83,6 +88,80 @@ def record_schedule_choice(app_id: int, choice: ScheduleChoice) -> None:
 
 def clear_schedule_choice(app_id: int) -> None:
   (schedule_state_dir(app_id) / _SCHEDULE_CHOICE_FILE).unlink(missing_ok=True)
+
+
+async def run_schedule_mutation(operation, *args, **kwargs):
+  """Finish blocking cron work before the caller releases its lifecycle lock.
+
+  Cancelling an asyncio.to_thread await does not stop its thread. Draining it
+  under the caller's install_uninstall_lock prevents a disconnected save or
+  teardown from racing the next mutation. Lock waits themselves stay async.
+  """
+  task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    while not task.done():
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
+    try:
+      task.result()
+    except Exception:
+      log.exception("Schedule mutation failed after its caller was cancelled")
+    raise
+
+
+def _restore_schedule_file(path: Path, data: bytes | None, mode: int | None) -> None:
+  if data is None:
+    path.unlink(missing_ok=True)
+    return
+  tmp = path.with_name(f".{path.name}.{os.getpid()}.rollback")
+  try:
+    tmp.write_bytes(data)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+  finally:
+    tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def schedule_choice_rollback(app_id: int):
+  """Restore a rejected save, not an accepted install awaiting cron retry.
+
+  The caller holds install_uninstall_lock from validation through rollback.
+  Snapshot raw bytes: unreadable or malformed provenance is not absence, and
+  a failed snapshot must refuse the save before either durable file changes.
+  """
+  snapshots = []
+  for name in (_SCHEDULE_CHOICE_FILE, "init-cron.sh"):
+    path = schedule_state_dir(app_id) / name
+    try:
+      try:
+        data = path.read_bytes()
+      except FileNotFoundError:
+        data, mode = None, None
+      else:
+        mode = path.stat().st_mode & 0o7777
+    except OSError as exc:
+      raise CronInfrastructureError(
+        500, "Could not read the current schedule; nothing was changed.",
+      ) from exc
+    snapshots.append((path, data, mode))
+  try:
+    yield
+  except BaseException:
+    for path, data, mode in snapshots:
+      try:
+        _restore_schedule_file(path, data, mode)
+      except OSError:
+        log.exception(
+          "Could not roll back schedule file %s for app %s", path.name, app_id,
+        )
+    raise
 
 
 def read_schedule_choice(app_id: int) -> ScheduleChoice | None:

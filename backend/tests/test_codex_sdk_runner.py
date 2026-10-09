@@ -4965,6 +4965,105 @@ def test_run_codex_sdk_turn_reseeds_lost_session_and_records_event(monkeypatch):
   )
 
 
+def _missing_rollout_codex(fresh_thread, sdk_holder, *, message):
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self.started = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_a):
+      return None
+
+    async def thread_resume(self, session_id, **kwargs):
+      # The shape current Codex returns when the rollout file is gone.
+      raise sdk_holder["sdk"]["InvalidRequestError"](-32600, message)
+
+    async def thread_start(self, *_a, **_k):
+      return fresh_thread
+
+  return FakeAsyncCodex
+
+
+def test_run_codex_sdk_turn_reseeds_when_rollout_file_is_gone(monkeypatch):
+  # Codex rejects resuming a thread whose rollout was deleted instead of
+  # handing back a different thread. That is still a lost session: start a
+  # fresh thread and reseed it from the chat's transcript, recording the event.
+  completed_turn = SimpleNamespace(id="turn-x", usage=None, error=None)
+  fresh_thread = _FakeThread("fresh-thread-123", _FakeTurnHandle([
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]))
+  sdk_holder: dict = {}
+  fake = _missing_rollout_codex(
+    fresh_thread, sdk_holder,
+    message="no rollout found for thread id lost-thread-1",
+  )
+  sdk_holder["sdk"] = _fake_sdk(fake)
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk_holder["sdk"])
+  events: list = []
+  from app import activity
+  monkeypatch.setattr(
+    activity, "log_event", lambda ev, **f: events.append((ev, f)) or True,
+  )
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="please continue",
+    session_id="lost-thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-missing-rollout",
+    bc=bc,
+    pending_questions={},
+    db=None,
+    resumed_context="<resumed_context>earlier chat</resumed_context>",
+  ))
+
+  assert result["error"] is None
+  assert result["session_id"] == "fresh-thread-123"
+  assert "<resumed_context>earlier chat</resumed_context>" in fresh_thread.turn_args[0]
+  assert any(
+    ev == "codex_session_reseed"
+    and f.get("requested_session") == "lost-thread-1"
+    and f.get("replacement_session") == "fresh-thread-123"
+    for ev, f in events
+  )
+
+
+def test_run_codex_sdk_turn_other_resume_rejection_still_fails(monkeypatch):
+  # Only a missing thread reseeds; any other rejected resume is a real error.
+  fresh_thread = _FakeThread("unused", _FakeTurnHandle([]))
+  sdk_holder: dict = {}
+  fake = _missing_rollout_codex(
+    fresh_thread, sdk_holder, message="model is not supported",
+  )
+  sdk_holder["sdk"] = _fake_sdk(fake)
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk_holder["sdk"])
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="continue",
+    session_id="requested-thread",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-1",
+    bc=bc,
+    pending_questions={},
+    db=None,
+    resumed_context="<resumed_context>earlier chat</resumed_context>",
+  ))
+
+  assert result["error"] is not None
+  assert "model is not supported" in result["error"]
+  assert fresh_thread.turn_args is None
+  assert not any(e.get("type") == "session_init" for e in bc.events)
+
+
 def test_running_codex_helper_row_shows_what_its_child_is_doing(monkeypatch):
   """The parent stream never carries a child's tool calls; its rollout does."""
   import json as _json

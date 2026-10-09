@@ -80,6 +80,10 @@ _KNOWN_STATES = {
   "no_change", "failed", "rolled_back", "needs_recovery",
 }
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
+# Recovery is not running (the browser must stop polling), but the controller
+# still owns its unresolved transaction. It is neither a retryable outcome nor
+# proof that the exact bound replacement ended.
+_UNRESOLVED_STATES = {"needs_recovery"}
 # The host path unit (mobius-rebuild.path) claims request.json within seconds.
 # Well past that with the host still idle, the helper is not picking up requests
 # (for example the path unit is not installed or not running).
@@ -428,7 +432,7 @@ def _read_host_status() -> dict[str, Any]:
       "The host controller returned unreadable replacement status.",
     )
   request = _inbox_dir() / "request.json"
-  if str(value.get("state") or "idle") not in _ACTIVE_STATES and request.is_file():
+  if str(value.get("state") or "idle") not in (_ACTIVE_STATES | _UNRESOLVED_STATES) and request.is_file():
     try:
       pending = json.loads(request.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -570,6 +574,13 @@ async def withdraw_unclaimed_host_request() -> RebuildStatus:
       "The host replacement helper is not configured on this deployment.",
       status_code=409,
     )
+  # An unresolved journal is host-owned even if a stray inbox file exists.
+  if (await asyncio.to_thread(_read_host_status)).get("state") in _UNRESOLVED_STATES:
+    raise DeploymentControlError(
+      "recovery_required",
+      "The previous container replacement needs host recovery before this request can be withdrawn.",
+      status_code=409,
+    )
   withdrawn = await asyncio.to_thread(_claim_unclaimed_request)
   nonce = str(withdrawn.get("nonce") or "") if withdrawn else ""
   if _OPERATION_RE.fullmatch(nonce):
@@ -703,7 +714,7 @@ def _host_request_ended(nonce: str) -> bool:
   if not isinstance(status, dict):
     return False
   if status.get("request_nonce") == nonce:
-    return str(status.get("state") or "idle") not in _ACTIVE_STATES
+    return str(status.get("state") or "idle") not in (_ACTIVE_STATES | _UNRESOLVED_STATES)
   return True
 
 
@@ -718,7 +729,7 @@ async def _binding_ended(operation: dict) -> bool:
     status = await read_rebuild_status()
   except DeploymentControlError:
     return False
-  if not status.get("supported") or status.get("state") in _ACTIVE_STATES:
+  if not status.get("supported") or status.get("state") in (_ACTIVE_STATES | _UNRESOLVED_STATES):
     return False
   return True
 
@@ -727,6 +738,18 @@ async def release_ended_binding() -> None:
   """Before cancelling a prepared update, release a binding whose
   replacement provably ended. Anything short of that proof keeps it, and
   cancelling then refuses."""
+  # Cancellation must not silently discard an unresolved host transaction
+  # even if an older prepared record lacks the operation binding.
+  try:
+    status = await read_rebuild_status()
+  except DeploymentControlError:
+    status = None
+  if status is not None and status.get("state") in _UNRESOLVED_STATES:
+    raise DeploymentControlError(
+      "recovery_required",
+      "The unresolved container replacement must be recovered before cancelling this update.",
+      status_code=409,
+    )
   operation = await asyncio.to_thread(_bound_operation)
   if operation is not None and await _binding_ended(operation):
     await _release_binding(operation)
@@ -754,9 +777,11 @@ async def keep_settling_update() -> None:
     record is not None and status is not None
     and platform_update.status_reports_bound_operation(status, record)
   ):
-    if status.get("state") in _ACTIVE_STATES:
+    if status.get("state") in (_ACTIVE_STATES | _UNRESOLVED_STATES):
       raise DeploymentControlError(
-        "already_running",
+        "recovery_required" if status.get("state") in _UNRESOLVED_STATES else "already_running",
+        "The unresolved container replacement must be recovered first."
+        if status.get("state") in _UNRESOLVED_STATES else
         "The container replacement is still running. Wait for it to finish.",
         status_code=409,
       )
@@ -826,9 +851,12 @@ def _ensure_can_rebuild(status: RebuildStatus) -> None:
       status.get("message") or "Container updates are not available here yet.",
       status_code=409,
     )
-  if status.get("state") in _ACTIVE_STATES:
+  if status.get("state") in (_ACTIVE_STATES | _UNRESOLVED_STATES):
     raise DeploymentControlError(
-      "already_running", "A container rebuild is already running.", status_code=409,
+      "recovery_required" if status.get("state") in _UNRESOLVED_STATES else "already_running",
+      "The previous container replacement needs recovery before another request."
+      if status.get("state") in _UNRESOLVED_STATES else "A container rebuild is already running.",
+      status_code=409,
     )
 
 

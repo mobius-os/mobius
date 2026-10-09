@@ -2,7 +2,8 @@
 import { isActivityBlock, storedBlockRange, withStoredBlockIndex } from './peerTimeline.js'
 import { waitWokeItsAnswer } from './waitHistory.js'
 import { assistantAnchorKey, messageKey } from '../../lib/chatDetailCache.js'
-import { assistantReplyRoot, isHiddenReplyCarrier, projectSteerContinuationMessage } from './steerContinuity.js'
+import { assistantReplyRoot, isHiddenReplyCarrier, projectSteerContinuationMessage, projectSteerPrefixMessage } from './steerContinuity.js'
+import { splitSteerMarkdown } from './markdown/steerMarkdownRange.js'
 
 /** Groups retain every source row/index, including the invisible delivery carriers.
  * Only a committed hidden steer can connect two explicit same-run identities. */
@@ -84,13 +85,17 @@ function joinMediaDimensions(earlier, later) {
  * thoughts/tools/timeline beats retain their position and existing safe cuts.
  * All rows keep their original keys and activity coordinates for restoration. */
 export function presentAssistantReply(rows, { activeIndex = -1, positions = new Map() } = {}) {
-  const presented = rows.map(row => ({ ...row, message: row.message }))
+  const presented = rows.map((row, index) => ({ ...row, message: index === 0 ? row.message
+    : projectSteerContinuationMessage(rows[index - 1].message, row.message, { active: index === activeIndex }) }))
+  // Resolve formatting before joining prose, while each source interval is intact.
+  for (let index = presented.length - 1; index > 0; index -= 1) {
+    presented[index - 1].message = projectSteerPrefixMessage(presented[index - 1].message, presented[index].message)
+  }
   let textOwner = null
   for (let index = 1; index < presented.length; index += 1) {
     const previous = rows[index - 1].message
     const current = rows[index].message
-    const projected = projectSteerContinuationMessage(previous, current, { active: index === activeIndex })
-    presented[index].message = projected
+    const projected = presented[index].message
     const replay = projected?.steer_replay
     const before = sourceBlocks(previous)
     const after = sourceBlocks(current)
@@ -110,6 +115,8 @@ export function presentAssistantReply(rows, { activeIndex = -1, positions = new 
       const ownerBlocks = [...sourceBlocks(ownerMessage)]
       ownerBlocks[owner.block] = {
         ...ownerBlocks[owner.block], content: replay.text,
+        markdown_range: replay.prefixRange?.source !== replay.text
+          ? splitSteerMarkdown(replay.prefixRange?.source, replay.text.length)?.before : undefined,
         reply_text_owner: true,
         reply_live_text: index === activeIndex && after.length === 1,
       }
