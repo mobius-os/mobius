@@ -836,6 +836,62 @@ def test_delegation_listing_reads_a_fixed_number_of_queries_for_any_page_size(
   assert all(item["parent_chat_title"] == "Parent" for item in items)
 
 
+def test_helper_activity_grant_lets_an_app_observe_every_helper_read_only(
+  client, owner_token, db, monkeypatch,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  observer_id = create_local_app(client, owner_auth, name="Observer")["id"]
+  other_id = create_local_app(client, owner_auth, name="Other")["id"]
+  observer_auth = {"Authorization": "Bearer " + client.post(
+    "/api/auth/app-token", json={"app_id": observer_id}, headers=owner_auth,
+  ).json()["token"]}
+  parent_chat_id = _parent_with_run(client, owner_token, db)
+
+  async def fake_start(**_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
+  )
+  others = client.post("/api/delegations", json={
+    "app_id": other_id, "parent_chat_id": parent_chat_id,
+    "task_key": "other-app-helper", "prompt": "Review only.", "provider": "codex",
+  }, headers=owner_auth)
+  assert others.status_code == 201, others.text
+  helper_id = others.json()["id"]
+
+  def visible():
+    listing = client.get("/api/delegations", headers=observer_auth)
+    assert listing.status_code == 200, listing.text
+    return [item["id"] for item in listing.json()["items"]]
+
+  assert visible() == []
+  assert client.get(f"/api/delegations/{helper_id}", headers=observer_auth).status_code == 404
+
+  observer = db.query(models.App).filter(models.App.id == observer_id).one()
+  reviewed = dict(observer.capability_contract or {})
+  observer.capability_contract = {
+    **reviewed, "data": {**(reviewed.get("data") or {}), "helper_activity_read": True},
+  }
+  db.commit()
+
+  assert visible() == [helper_id]
+  detail = client.get(f"/api/delegations/{helper_id}", headers=observer_auth)
+  assert detail.status_code == 200, detail.text
+  assert detail.json()["task_key"] == "other-app-helper"
+  # Observing grants no history and no control over another app's helper.
+  assert client.get(
+    f"/api/delegations/{helper_id}?include_history=true", headers=observer_auth,
+  ).status_code == 403
+  assert client.post(
+    f"/api/delegations/{helper_id}/cancel", json={}, headers=observer_auth,
+  ).status_code == 404
+
+  observer.capability_contract = reviewed
+  db.commit()
+  assert visible() == []
+
+
 def test_helper_without_resumable_session_needs_parent_review(
   client, owner_token, db, monkeypatch,
 ):
