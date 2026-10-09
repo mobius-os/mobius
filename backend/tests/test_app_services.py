@@ -630,3 +630,52 @@ def test_http_callers_cannot_reach_the_platforms_tool_lane(client, auth, db, pat
     json={"arguments": {}, "call": {"chat_id": "forged"}},
   )
   assert response.status_code == 404
+
+
+def test_service_diagnostics_are_local_shape_only(client, auth, db, monkeypatch):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db, slug="diagnostic-shape")
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  (accepted / "service.py").write_text(
+    'import json\nprint(json.dumps({"status":502,"body":{"detail":"private body"},'
+    '"diagnostics":{"route":"/replies/{post_id}","error_type":"HTTPStatusError",'
+    '"upstream_status":404,"message":"private message","path":"/replies/private-id"}}))\n'
+  )
+  response = client.get(f"/api/apps/{app.id}/service/replies/private-id?token=private-query", headers=auth)
+  assert response.status_code == 502
+  assert response.json() == {"detail": "private body"}
+  flattened = {key: value for attrs in recorded for key, value in attrs.items()}
+  assert flattened == {
+    "mobius.app.slug": "diagnostic-shape",
+    "mobius.service.route": "/replies/{post_id}",
+    "mobius.service.error_type": "HTTPStatusError",
+    "mobius.service.upstream_status": 404,
+  }
+  assert "private" not in str(flattened)
+
+
+def test_service_boundary_failure_has_safe_category(client, auth, db, monkeypatch):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db, slug="boundary-diagnostic")
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  (accepted / "service.py").write_text('print("not JSON containing private data")\n')
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+  assert response.status_code == 502
+  assert {k: v for attrs in recorded for k, v in attrs.items()} == {
+    "mobius.app.slug": "boundary-diagnostic",
+    "mobius.service.error_type": "invalid_json",
+  }
+
+
+def test_malformed_optional_diagnostics_do_not_break_service(client, auth, db):
+  app = _service_app(db, slug="optional-diagnostic")
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  (accepted / "service.py").write_text(
+    'print(\'{"status":200,"body":{"ok":true},"diagnostics":{"route":"/x?secret",'
+    '"error_type":{"private":"text"},"upstream_status":true}}\')\n'
+  )
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+  assert response.status_code == 200
+  assert response.json() == {"ok": True}

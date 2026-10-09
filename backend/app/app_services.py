@@ -2,7 +2,12 @@
 
 The platform owns authentication, accepted-runtime identity, process limits,
 and revocation. The app owns the request paths and domain behavior behind one
-small JSON protocol. This is deliberately not a framework or an import hook:
+small JSON protocol. An optional response `diagnostics` object may contain
+`route` (a code-authored matched route template, never the concrete path),
+`error_type` (exception class name only), and `upstream_status` (HTTP integer).
+These fields are local tracing metadata only, not forwarded to HTTP callers.
+Never include request values, ids, exception messages, stderr, or response bodies.
+This is deliberately not a framework or an import hook:
 every request runs in its own process from one reviewed Python entrypoint and
 receives one JSON reply. An entry that declares ``MOBIUS_PRELOAD = True`` has
 its module setup run once and each request forked from it (``service_preload``);
@@ -26,7 +31,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from app import app_python_env, auth, models, service_preload
+from app import app_python_env, auth, models, service_preload, tracing
 from app.applied_app_runtime import AppliedRuntimeUnavailable, hold_runtime, runtime_root
 from app.browser_access import BrowserLineage, require_live
 from app.config import get_settings
@@ -314,7 +319,46 @@ async def cancel_browser_grant_calls(grant_id: str) -> None:
   await asyncio.gather(*(task for task in tasks if task is not asyncio.current_task()), return_exceptions=True)
 
 
+# Only platform-authored error labels are recorded; never export HTTP detail,
+# stderr, a request path, or an app response body.
+_SERVICE_FAILURES = {
+  "App service could not start.": "start_failed",
+  "App service failed before accepting its request.": "request_not_accepted",
+  "App service exceeded its execution limits.": "execution_limit",
+  "App service failed.": "process_failed",
+  "App service returned invalid JSON.": "invalid_json",
+  "App service returned an invalid response envelope.": "invalid_envelope",
+  "App service returned an invalid status.": "invalid_status",
+  "App service returned an invalid binary response.": "invalid_binary_response",
+  "App service returned an invalid media type.": "invalid_media_type",
+  "App service returned invalid binary data.": "invalid_binary_data",
+  "App service returned too much binary data.": "response_limit",
+}
+
+
 async def invoke_service(
+  app, owner, request_envelope: dict, *,
+  timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
+  lane: str | None = None,
+) -> tuple[int, object, dict[str, str], str | None]:
+  tracing.annotate(None, {"mobius.app.slug": getattr(app, "slug", None)})
+  try:
+    result = await _invoke_service(
+      app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
+    )
+  except HTTPException as exc:
+    if exc.status_code >= 500:
+      tracing.annotate(None, {"mobius.service.error_type":
+        _SERVICE_FAILURES.get(exc.detail, "service_boundary_error")
+        if isinstance(exc.detail, str) else "service_boundary_error"})
+    raise
+  except Exception as exc:
+    tracing.annotate(None, {"mobius.service.error_type": type(exc).__name__})
+    raise
+  return result
+
+
+async def _invoke_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
   lane: str | None = None,
@@ -410,12 +454,34 @@ async def invoke_service(
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
     raise HTTPException(502, "App service returned invalid JSON.") from exc
   if not isinstance(response, dict) or set(response) - {
-    "status", "body", "body_base64", "headers", "media_type",
+    "status", "body", "body_base64", "headers", "media_type", "diagnostics",
   }:
     raise HTTPException(502, "App service returned an invalid response envelope.")
   status = response.get("status", 200)
   if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
     raise HTTPException(502, "App service returned an invalid status.")
+  # App-authored shape only. These optional diagnostics are not returned to
+  # callers and cannot change the response or make an otherwise valid call fail.
+  diagnostics = response.get("diagnostics")
+  if isinstance(diagnostics, dict):
+    route = diagnostics.get("route")
+    error_type = diagnostics.get("error_type")
+    upstream_status = diagnostics.get("upstream_status")
+    safe = {}
+    if isinstance(route, str) and len(route) <= 256 and re.fullmatch(
+      r"/[A-Za-z0-9_/{:}.-]*", route,
+    ):
+      safe["mobius.service.route"] = route
+    if status >= 500:
+      if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", error_type):
+        safe["mobius.service.error_type"] = error_type
+      else:
+        safe["mobius.service.error_type"] = "app_http_error"
+      if type(upstream_status) is int and 100 <= upstream_status <= 599:
+        safe["mobius.service.upstream_status"] = upstream_status
+    tracing.annotate(None, safe)
+  elif status >= 500:
+    tracing.annotate(None, {"mobius.service.error_type": "app_http_error"})
   if status >= 500 and stderr:
     detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
     if detail:

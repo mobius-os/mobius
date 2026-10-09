@@ -158,6 +158,14 @@ agent-tool call (below) runs on a third lane that is not serialized per app, so
 several can run at once alongside the two request lanes. When lanes that run at
 the same time can touch the same state, the app must
 provide its own file or database locking.
+A response may optionally include `diagnostics` for local tracing:
+`{"route":"/replies/{post_id}","error_type":"HTTPStatusError","upstream_status":404}`.
+Use the matched code-authored route template, never the concrete request path;
+use exception class names, never messages or tracebacks. Do not include request
+values, content, credentials, or resource IDs. Only these bounded shape fields
+are recorded, and the diagnostics object is never forwarded to HTTP callers.
+Missing or malformed diagnostic fields do not change the service's response.
+
 The app owns its paths, policy, storage format, and domain behavior. This is a
 reviewed trusted process like an app job, not an operating-system sandbox.
 
