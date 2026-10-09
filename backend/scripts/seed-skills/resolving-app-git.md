@@ -83,6 +83,10 @@ The installer then compiles and promotes source, bundle, metadata, static
 assets, icon, seeds, schedule, and skills as one transaction; a failure leaves
 the previous app served and the resolution intact for a retry.
 
+Conflicts only in files outside the app package can be auto-kept locally.
+The install response names these as `kept_local_paths`: their upstream edits
+were dropped. Package conflicts still require resolution here.
+
 If it reports `resolution_behind_local_edits`, someone edited the live app in
 the same places while you worked. Run `git -C "$W" merge main`, reconcile,
 commit, and finish again. Any other refusal names what to fix.

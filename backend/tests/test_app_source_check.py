@@ -8,6 +8,8 @@ the automated "grep the build for https://" review step (prod CSP is
 `connect-src 'self'`).
 """
 
+import pytest
+
 from app.app_source_check import check_app_source, check_manifest_tree
 
 
@@ -305,3 +307,13 @@ def test_check_manifest_tree_flags_incomplete():
   result = check_manifest_tree(manifest, files)
   assert not result.ok
   assert result.errors[0].code == "undeclared_source"
+
+
+@pytest.mark.parametrize("reference", [
+  "import(`./helper.js`)", "new URL('./helper.js', import.meta.url)",
+])
+def test_literal_dynamic_and_module_url_dependencies_must_be_declared(reference):
+  files = {"index.jsx": reference, "helper.js": "export default 1"}
+  result = check_app_source(files, entry="index.jsx")
+  assert [finding.code for finding in result.errors] == ["undeclared_source"]
+  assert check_app_source(files, entry="index.jsx", source_files=["helper.js"]).ok

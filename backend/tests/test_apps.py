@@ -214,9 +214,9 @@ def test_update_app_distribution_fetch_normalizes_and_binds_stored_addresses(
     assert row.published_manifest_url is None
   else:
     assert response.status_code == 200, response.text
-    assert row.published_manifest_url == address
+    assert row.published_manifest_url == base + "/mobius.json"
     assert response.json()["distribution_manifest"] == {
-      "id": manifest["id"], "url": address, "kind": "published",
+      "id": manifest["id"], "url": base + "/mobius.json", "kind": "published",
     }
 
 

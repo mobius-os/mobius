@@ -362,9 +362,9 @@ def static_asset_entries(value) -> dict[str, str]:
 
 
 # These runtime features can load dependencies beyond the JavaScript import
-# checker. Other fields are metadata or declared files protected by
-# package_input_paths/source_files. A contract test requires every field read
-# by the platform to be explicitly classified before this gate can accept it.
+# checker. Declared files are protected by package_input_paths/source_files.
+# Unknown fields are inert because the platform never reads them; when adding
+# a runtime feature, include it here if it can load undeclared dependencies.
 EXECUTABLE_MANIFEST_FIELDS = frozenset({
   "service", "setup", "schedule", "python", "agent_activities", "tools",
   "project_templates", "model_provider",

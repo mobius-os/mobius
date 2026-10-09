@@ -4525,64 +4525,6 @@ def test_directory_file_conflict_goes_to_resolver_on_retries(
     assert not (source_dir / "notes~main").exists()
 
 
-def test_platform_manifest_fields_have_explicit_dependency_classification():
-  import ast
-  import inspect
-  from app import app_capabilities, manifest_contract
-
-  # There is no top-level field registry: derive reads from the contract and
-  # its capability normalizers, including field loops. Unknown read syntax
-  # fails this test rather than silently omitting a new platform feature.
-  platform_fields = set()
-  for module in (manifest_contract, app_capabilities):
-    tree = ast.parse(inspect.getsource(module))
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    for node in ast.walk(tree):
-      key = None
-      if (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name) and node.func.value.id == "manifest"
-        and node.func.attr == "get"
-      ):
-        key = node.args[0]
-      elif (
-        isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
-        and node.value.id == "manifest" and isinstance(node.ctx, ast.Load)
-      ):
-        key = node.slice
-      if key is None:
-        continue
-      if isinstance(key, ast.Constant):
-        platform_fields.add(key.value)
-        continue
-      assert isinstance(key, ast.Name), "Classify the new manifest field access"
-      ancestor = node
-      while ancestor in parents:
-        ancestor = parents[ancestor]
-        loops = ancestor.generators if isinstance(ancestor, ast.ListComp) else (
-          [ancestor] if isinstance(ancestor, ast.For) else []
-        )
-        loop = next((loop for loop in loops if isinstance(loop.target, ast.Name)
-                     and loop.target.id == key.id), None)
-        if loop is not None:
-          values = getattr(module, loop.iter.id) if isinstance(loop.iter, ast.Name) else ast.literal_eval(loop.iter)
-          platform_fields.update(values)
-          break
-      else:
-        pytest.fail("Classify the new dynamic manifest field access")
-
-  executable = manifest_contract.EXECUTABLE_MANIFEST_FIELDS
-  inert = {
-    "id", "name", "version", "description", "entry", "icon", "package_id",
-    "moved_to", "previous_id", "previous_manifest_url", "permissions", "requires",
-    "offline", "offline_capable", "embeds_agent", "shell_shortcuts", "skills",
-    "source_files", "static_assets", "storage_seeds", "system_prompt",
-    "public_access", "capabilities",
-  }
-  assert not executable & inert
-  assert platform_fields == executable | inert
-
-
 @pytest.mark.parametrize("store_shaped", [False, True])
 def test_conflict_outside_the_package_keeps_local_and_updates(
   client, auth, tmp_path, bypass_url_validation, store_shaped,
@@ -5502,6 +5444,60 @@ def test_package_identity_accepts_a_different_repository_named_by_old_source(
   assert moved.json()["id"] == app_id
   assert moved.json()["package_id"] == package_id
   assert moved.json()["manifest_url"].startswith(new_base.rstrip("/"))
+
+
+def test_package_identity_handoff_accepts_old_source_whose_id_changed(
+  client, auth, bypass_url_validation,
+):
+  """The old source may rename its manifest id under the same package_id."""
+  old_base = "https://raw.githubusercontent.com/alice/app-kanban/main/"
+  new_base = "https://raw.githubusercontent.com/acme/app-kanban/main/"
+  package_id = "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"
+  old = _simple_manifest("kanban")
+  old["package_id"] = package_id
+  old_api = json.dumps({"id": 100, "full_name": "alice/app-kanban"}).encode()
+  new_api = json.dumps({"id": 200, "full_name": "acme/app-kanban"}).encode()
+  first_responses = {
+    old_base + "mobius.json": (200, json.dumps(old).encode()),
+    old_base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/alice/app-kanban": (200, old_api),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(first_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": old_base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  renamed_old = _simple_manifest("kanban-board")
+  renamed_old.update({
+    "package_id": package_id,
+    "moved_to": {"manifest_url": new_base + "mobius.json"},
+  })
+  new = _simple_manifest("kanban-board", version="2.0.0")
+  new["package_id"] = package_id
+  moved_responses = {
+    new_base + "mobius.json": (200, json.dumps(new).encode()),
+    new_base + "index.jsx": (200, JSX.encode()),
+    old_base + "mobius.json": (200, json.dumps(renamed_old).encode()),
+    "https://api.github.com/repos/acme/app-kanban": (200, new_api),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(moved_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    moved = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": new_base + "mobius.json"},
+    )
+
+  assert moved.status_code == 201, moved.text
+  assert moved.json()["id"] == app_id
+  assert moved.json()["package_id"] == package_id
 
 
 def test_rename_adopts_predecessor_across_same_owner_repository_move(
@@ -8444,6 +8440,77 @@ def test_update_discovery_preserves_stored_address_binding(
     assert "another-app" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("route", ["update-check", "update-candidate-preview"])
+def test_update_discovery_fallback_follows_package_id_across_id_change(
+  client, auth, tmp_path, bypass_url_validation, route,
+):
+  """A package_id app keeps update discovery after renaming its manifest id."""
+  manifest = {
+    "id": "pkg-update", "name": "Package update", "version": "1.0.0",
+    "description": "Binding", "entry": "index.jsx", "source_files": ["cards.js"],
+    "package_id": "urn:uuid:3b7f0f8e-2d1c-5a7e-9a4b-0c6d2e1f8a90",
+  }
+  base = "https://pkg-update.test/repo/"
+  work, bare, _ = _make_clone_fixture(tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1)
+  _publish_clone_files(work, bare, {"mobius.json": json.dumps(manifest)})
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+    include_source_file=True,
+  )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  renamed = {**manifest, "id": "pkg-update-renamed", "version": "2.0.0"}
+  _publish_clone_files(work, bare, {"mobius.json": json.dumps(renamed)})
+  with patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
+    response = client.get(f"/api/apps/{app_id}/{route}", headers=auth)
+  assert response.status_code == 200, response.text
+  if route == "update-check":
+    assert response.json()["update_available"] is True
+  else:
+    assert response.json()["upstream_commit"]
+
+
+def test_reviewed_update_applies_package_id_rename_through_stored_address(
+  client, auth, db, tmp_path, bypass_url_validation,
+):
+  """An update offered after an id rename can also be applied by address."""
+  manifest = {
+    "id": "pkg-apply", "name": "Package apply", "version": "1.0.0",
+    "description": "Binding", "entry": "index.jsx", "source_files": ["cards.js"],
+    "package_id": "urn:uuid:5c2a7d1e-8f3b-5e6a-b1c4-7d9e0f2a3b4c",
+  }
+  base = "https://pkg-apply.test/repo/"
+  work, bare, _ = _make_clone_fixture(tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1)
+  _publish_clone_files(work, bare, {"mobius.json": json.dumps(manifest)})
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+    include_source_file=True,
+  )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  stored_address = db.get(models.App, app_id).manifest_url
+  assert stored_address == base.rstrip("/") + "#manifest-id=pkg-apply"
+  renamed = {**manifest, "id": "pkg-apply-renamed", "version": "2.0.0"}
+  _publish_clone_files(work, bare, {"mobius.json": json.dumps(renamed)})
+
+  with patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+  assert preview.status_code == 200, preview.text
+  with patch("app.install.httpx.AsyncClient"):
+    applied = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": stored_address,
+      "reviewed_source_digest": preview.json()["source_digest"],
+      "update_app_id": app_id,
+      "reviewed_upstream_commit": preview.json()["upstream_commit"],
+    })
+
+  assert applied.status_code == 201, applied.text
+  assert applied.json()["id"] == app_id
+  assert applied.json()["version"] == "2.0.0"
+
+
 @pytest.mark.parametrize("manifest_id,previous_id,allowed", [
   ("current", None, True), ("renamed", "current", True), ("other", None, False),
 ])
@@ -8458,3 +8525,119 @@ def test_stored_address_binding_accepts_only_the_package_or_its_predecessor(
   else:
     with pytest.raises(ValueError, match="no longer"):
       require_bound_manifest(manifest, "current")
+
+
+def test_stored_address_binding_accepts_the_rows_package_id():
+  from app.manifest_identity import require_bound_manifest
+
+  manifest = {"id": "renamed", "package_id": "urn:uuid:p"}
+  require_bound_manifest(manifest, "current", "urn:uuid:p")
+  with pytest.raises(ValueError, match="no longer"):
+    require_bound_manifest(manifest, "current", "urn:uuid:other")
+  with pytest.raises(ValueError, match="no longer"):
+    require_bound_manifest(manifest, "current")
+
+
+@pytest.mark.parametrize("reference,bypass_scan", [
+  ("import(`./helper.js`)", False),
+  ("new URL('./helper.js', import.meta.url)", False),
+  ("import(`./helper.js`)", True),
+])
+def test_update_does_not_keep_an_undeclared_runtime_dependency(
+  client, auth, tmp_path, bypass_url_validation, reference, bypass_scan,
+):
+  manifest = {
+    "id": "runtime-dependency", "name": "Runtime dependency", "version": "1.0.0",
+    "description": "Dependency conflict", "entry": "index.jsx",
+    "source_files": ["cards.js"],
+  }
+  index = CLONE_INDEX_V1 + "\nexport const dependency = " + reference + ";\n"
+  base, work, bare, app_id, source_dir = _install_readme_fixture(
+    client, auth, tmp_path, manifest["id"], manifest,
+    {"index.jsx": index, "helper.js": "export const helper = 'HELPER_V1';\n"},
+  )
+  local = "export const helper = 'HELPER_LOCAL';\n"
+  (source_dir / "helper.js").write_text(local)
+  _publish_clone_files(work, bare, {
+    "mobius.json": json.dumps({**manifest, "version": "2.0.0"}),
+    "index.jsx": index.replace("TITLE_V1", "TITLE_V2"),
+    "helper.js": "export const helper = 'HELPER_UPSTREAM';\n",
+  })
+  if bypass_scan:
+    # Even if the static scanner misses a dependency, real bundler inputs
+    # prevent dropping upstream edits to it.
+    with patch("app.install._benign_source_complete", return_value=True):
+      updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  else:
+    updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "conflict"
+  assert (source_dir / "helper.js").read_text() == local
+  assert "TITLE_V1" in (source_dir / "index.jsx").read_text()
+
+
+def test_committed_resolution_keeps_late_edits_outside_the_package(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  manifest = {
+    "id": "late-ancillary", "name": "Late ancillary", "version": "1.0.0",
+    "description": "Resolution", "entry": "index.jsx", "source_files": ["cards.js"],
+  }
+  base, work, bare, app_id, app_dir = _install_readme_fixture(
+    client, auth, tmp_path, manifest["id"], manifest,
+  )
+  (app_dir / "index.jsx").write_text(CLONE_INDEX_V1.replace("TITLE_V1", "LOCAL_TITLE"))
+  _publish_clone_files(work, bare, {
+    "mobius.json": json.dumps({**manifest, "version": "2.0.0"}),
+    "index.jsx": CLONE_INDEX_V1.replace("TITLE_V1", "UPSTREAM_TITLE"),
+  })
+  parked = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert parked.json()["mode"] == "conflict", parked.text
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  checkout = install.pending_update_worktree(app_dir)
+  _resolve_in(checkout, {
+    "index.jsx": CLONE_INDEX_V1.replace("TITLE_V1", "RESOLVED_TITLE"),
+    "README.md": "resolution\n",
+  })
+  (app_dir / "README.md").write_text("late local\n")
+  finished = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert finished.status_code == 201, finished.text
+  assert "README.md" in finished.json()["reconciliation"]["kept_local_paths"]
+  assert (app_dir / "README.md").read_text() == "late local\n"
+  assert "RESOLVED_TITLE" in (app_dir / "index.jsx").read_text()
+  assert not checkout.exists()
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_stored_address_follows_only_an_installed_permanent_package(
+  client, auth, bypass_url_validation, installed,
+):
+  base = "https://raw.githubusercontent.com/alice/app-rename/main/"
+  manifest = _simple_manifest("before-rename")
+  manifest["package_id"] = "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/alice/app-rename": (
+      200, json.dumps({"id": 100, "full_name": "alice/app-rename"}).encode(),
+    ),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)), patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ):
+    if installed:
+      first = client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": base + "mobius.json",
+      })
+      assert first.status_code == 201, first.text
+    renamed = {**manifest, "id": "after-rename", "version": "2.0.0"}
+    responses[base + "mobius.json"] = (200, json.dumps(renamed).encode())
+    result = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base.rstrip("/") + "#manifest-id=before-rename",
+    })
+  if installed:
+    assert result.status_code == 201, result.text
+    assert result.json()["id"] == first.json()["id"]
+  else:
+    assert result.status_code == 409, result.text

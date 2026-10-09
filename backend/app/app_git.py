@@ -3987,10 +3987,11 @@ def resolve_benign_conflict(
   source_dir: str | Path, conflict_paths: list[str],
   *, merge_base: str | None = None,
   package_paths: set[str] | None = None,
+  incoming: str = UPSTREAM_BRANCH,
 ) -> BenignResolution | None:
   """Reconcile package conflicts or keep local ancillary paths, else None.
 
-  Call only after `merge_upstream` reports a conflict. Try each narrow
+  Call after a merge with ``incoming`` reports a conflict. Try each narrow
   per-file merge first (structural JSON or APP_VERSION-only line resolution).
   Residual conflicts outside ``package_paths`` retain local bytes/deletions;
   package conflicts still need the owner-resolver flow. The returned tree
@@ -4020,7 +4021,7 @@ def resolve_benign_conflict(
   if merge_base is not None:
     args.extend(("--merge-base", merge_base))
   proc = _run(
-    repo, *args, LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    repo, *args, LOCAL_BRANCH, incoming, check=False,
   )
   if proc.returncode != 1:
     return None
@@ -4038,7 +4039,7 @@ def resolve_benign_conflict(
   base_ref = merge_base
   if base_ref is None:
     base_proc = _run(
-      repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+      repo, "merge-base", LOCAL_BRANCH, incoming, check=False,
     )
     base_ref = base_proc.stdout.strip() if base_proc.returncode == 0 else ""
   if not base_ref:
@@ -4047,7 +4048,7 @@ def resolve_benign_conflict(
   kept_local: list[str] = []
   for rel in merge_conflicts:
     ours = read_blob(repo, LOCAL_BRANCH, rel)
-    theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
+    theirs = read_blob(repo, incoming, rel)
     base = read_blob(repo, base_ref, rel)
     merged = (
       _resolve_benign_conflict_file(rel, base, ours, theirs)
