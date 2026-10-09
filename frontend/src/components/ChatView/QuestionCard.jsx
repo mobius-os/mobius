@@ -26,7 +26,7 @@ import FileChips from './FileChips.jsx'
 import Attachments from './Attachments.jsx'
 import { pastedFiles, filePasteNeedsDefaultPrevented } from './pasteUpload.js'
 import { Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
+import { fileBelongsToQuestion, resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
 import {
   isRestartCardAction,
   restartCardSelectedOptions,
@@ -318,7 +318,7 @@ export default function QuestionCard({
     preparedSubmissionRef.current = null
     const resolved = {}
     const lines = questions.map(q => {
-      const own = readyFiles.filter(file => file.group === q.question)
+      const own = readyFiles.filter(file => fileBelongsToQuestion(file.group, q.question, questions.length))
       const val = resolveQuestionAnswer(answers[q.question], otherTexts[q.question])
         || (own.length ? `Attached ${own.length} file${own.length === 1 ? '' : 's'}` : '')
       resolved[q.question] = val
@@ -373,19 +373,21 @@ export default function QuestionCard({
   if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'
     ? 'Confirming answer…' : 'Queued on this device'
 
-  // Files sit inside their answer box. Older untagged files stay in a shared
-  // lane rather than being presented as a particular answer's evidence.
+  // Files sit inside their answer box. On grouped cards, older untagged files
+  // stay in a shared lane; only a single-question card can own them unambiguously.
   const sentAttachments = attachments || localAnswer?.body?.attachments || submitted?.attachments || []
   const answerFiles = question => platformAction ? null : (
     <div className="qcard__answer-files" role="group" aria-label="Files for this answer">
       {selectionLocked
-        ? <Attachments attachments={sentAttachments.filter(file => file.question === question)} chatId={chatId} />
-        : <FileChips files={files.filter(file => file.group === question)} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
+        ? <Attachments attachments={sentAttachments.filter(file => fileBelongsToQuestion(file.question, question, questions.length))} chatId={chatId} />
+        : <FileChips files={files.filter(file => fileBelongsToQuestion(file.group, question, questions.length))} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
     </div>
   )
-  const sharedFiles = selectionLocked
-    ? sentAttachments.filter(file => file.question == null)
-    : files.filter(file => file.group == null)
+  const sharedFiles = grouped
+    ? (selectionLocked
+      ? sentAttachments.filter(file => file.question == null)
+      : files.filter(file => file.group == null))
+    : []
 
   return (
     <div

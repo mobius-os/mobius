@@ -40,20 +40,21 @@ test('a file-only question answer can submit and ordinary cards offer upload', (
   try {
     const questions = [{ question: 'Send a picture', options: [] }]
     const key = questionDraftKey('file-only', 'file-only-q', questions)
-    writeQuestionDraft(key, { answers: {}, otherTexts: {}, files: [{ name: 'photo.png', group: 'Send a picture', status: 'done', size: 4, mime_type: 'image/png' }] }, storage)
+    writeQuestionDraft(key, { answers: {}, otherTexts: {}, files: [{ name: 'photo.png', status: 'done', size: 4, mime_type: 'image/png' }] }, storage)
     const html = renderToStaticMarkup(createElement(QuestionCard, {
       chatId: 'file-only', questionId: 'file-only-q', questions,
     }))
     assert.match(html, /Attach a photo or file/)
-    assert.match(html, /class="qcard__submit"[^>]*>Submit</)
+    assert.match(html, /class="qcard__submit">Submit</)
     assert.equal((html.match(/aria-label="Files for this answer"/g) || []).length, 1)
     const submitted = renderToStaticMarkup(createElement(QuestionCard, {
       chatId: 'file-only', questionId: 'file-only-q', questions,
       answeredMap: { 'Send a picture': 'Attached 1 file' },
-      attachments: [{ name: 'photo.png', size: 4, mime_type: 'image/png', question: 'Send a picture' }],
+      attachments: [{ name: 'photo.png', size: 4, mime_type: 'image/png' }],
     }))
     assert.match(submitted, /aria-label="Files for this answer"/)
     assert.match(submitted, /chat__attachments/)
+    assert.doesNotMatch(submitted, /Shared card files/)
     // The attach row stays with the Submitted action row, so answering never
     // moves the card; it only stops taking files.
     assert.match(submitted, /class="qcard__attach"[^>]*disabled=""/)
