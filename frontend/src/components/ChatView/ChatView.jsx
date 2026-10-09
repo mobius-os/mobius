@@ -78,7 +78,8 @@ import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.
 import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import CompactionProgress from './CompactionProgress.jsx'
-import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
+import useCompactCommands from './hooks/useCompactCommands.js'
+import { mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -706,16 +707,6 @@ export default function ChatView({
   )
   const [fileDropActive, setFileDropActive] = useState(false)
   const fileDragDepthRef = useRef(0)
-  // A "/compact" submission is a chat action, not a turn: it rewrites the live
-  // context instead of asking the model anything.
-  const [compactingChat, setCompactingChat] = useState(false)
-  const compactingChatRef = useRef(false)
-  const compactingChatTargetRef = useRef(null)
-  const stoppingCompactionRef = useRef(false)
-  const [compactProgressRecord, setCompactProgressRecord] = useState(null)
-  const compactProgressRequestRef = useRef(0)
-  const activeCompactChatRef = useRef(chatId)
-  activeCompactChatRef.current = chatId
   // The server's view of the same window, shared by every pane and device.
   const serverCompactingKind = useSyncExternalStore(
     subscribeChatCompaction,
@@ -4175,91 +4166,10 @@ export default function ChatView({
     patchQuestionAnswers,
   ])
 
-  // "/compact" never becomes a message. It asks the backend to replace this
-  // chat's live context with a fresh briefing and reset the provider session;
-  // the visible transcript is untouched and the platform renders the stored
-  // compaction as its own "Context compacted" card. A card action passes no
-  // submitted input, so the owner's unrelated draft is left untouched.
-  const refreshCompactProgress = useCallback(async (targetChatId = chatId) => {
-    if (!targetChatId || provisionalNewChat || activeCompactChatRef.current !== targetChatId) return
-    const request = ++compactProgressRequestRef.current
-    try {
-      const result = await jsonOrThrow(await api.chats.compactProgress(targetChatId), 'Compaction progress failed')
-      if (request === compactProgressRequestRef.current && activeCompactChatRef.current === targetChatId) {
-        setCompactProgressRecord({ chatId: targetChatId, progress: result.progress || null })
-      }
-    } catch {
-      // A failed status read must not erase the last known recovery handle.
-    }
-  }, [chatId, provisionalNewChat])
-
-  useEffect(() => {
-    // Read on entry and on the existing compaction edge, including other tabs.
-    // There is deliberately no timer and no automatic next POST.
-    void refreshCompactProgress(chatId)
-  }, [chatId, serverCompactingKind, refreshCompactProgress])
-
-  async function runCompactCommand(instructions = '', submittedInput = '/compact', recoveryId = null) {
-    if (!activationSettledRef.current) return
-    if (!chatId || provisionalNewChat) {
-      setSendFailure('There’s no chat context to compact yet.')
-      return
-    }
-    if (compactingChatRef.current) return
-    if (serverCompactingKind === 'compact') return
-    if (isProviderSwitchBlocking(chatId)) return
-    compactingChatRef.current = true
-    compactingChatTargetRef.current = chatId
-    setCompactingChat(true)
-    if (submittedInput !== null) setComposerInput('')
-    setSendFailure(null)
-    const targetChatId = chatId
-    const request = ++compactProgressRequestRef.current
-    let completed = false
-    try {
-      const result = await jsonOrThrow(await api.chats.compact(targetChatId, {
-        ...(instructions ? { instructions } : {}),
-        batch_id: crypto.randomUUID(),
-        ...(recoveryId ? { recovery_id: recoveryId } : {}),
-      }), 'Compaction failed')
-      if (request === compactProgressRequestRef.current && activeCompactChatRef.current === targetChatId) {
-        setCompactProgressRecord({ chatId: targetChatId, progress: result.progress || null })
-      }
-      if (result.ok) {
-        completed = true
-        if (activeCompactChatRef.current === targetChatId) await fetchMessages({ force: true })
-      }
-    } catch (err) {
-      if (!completed && submittedInput !== null && activeCompactChatRef.current === targetChatId) {
-        setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
-      }
-      if (activeCompactChatRef.current === targetChatId) {
-        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-      }
-    } finally {
-      await refreshCompactProgress(targetChatId)
-      compactingChatRef.current = false
-      compactingChatTargetRef.current = null
-      setCompactingChat(false)
-    }
-  }
-
-  async function stopCompactCommand() {
-    if (!chatId || stoppingCompactionRef.current) return
-    stoppingCompactionRef.current = true
-    const targetChatId = chatId
-    ++compactProgressRequestRef.current
-    try {
-      await jsonOrThrow(await api.chats.compactStop(targetChatId), 'Pausing compaction failed')
-    } catch (err) {
-      if (activeCompactChatRef.current === targetChatId) {
-        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-      }
-    } finally {
-      await refreshCompactProgress(targetChatId)
-      stoppingCompactionRef.current = false
-    }
-  }
+  const { compactingChat, compactingChatTargetRef, compactProgressRecord, runCompactCommand, stopCompactCommand } = useCompactCommands({
+    chatId, provisionalNewChat, hidden, serverCompactingKind,
+    activationSettledRef, inputValueRef, setComposerInput, setSendFailure, fetchMessages,
+  })
 
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)

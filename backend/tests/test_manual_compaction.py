@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import httpx
+import threading
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -242,6 +243,121 @@ async def test_stop_cancels_only_preparation_and_preserves_progress(client, auth
   assert chat.session_id == "original-session"
   assert list(transcript_rows.history(chat)) == original
   assert not registry.is_alive(chat_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", ["pause", "restart"])
+async def test_queued_checkpoint_after_pause_or_restart_keeps_saved_sections_resumable(
+    client, auth, db, monkeypatch, fake_synthesis, interrupt):
+  from app import chat as chat_mod, manual_compaction
+  from app.chat_writer import AdvanceManualCompaction
+  from app.main import app
+
+  chat_id, original = make_chat(client, auth, db, large=True)
+  loop = asyncio.get_running_loop()
+  queued = asyncio.Event()
+  release = threading.Event()
+  persist = manual_compaction.persist_manual_progress
+  bump = registry.bump_generation
+
+  def held_checkpoint(session, cmd):
+    if isinstance(cmd, AdvanceManualCompaction) and cmd.next_chunk == 2:
+      loop.call_soon_threadsafe(queued.set)
+      assert release.wait(5), "checkpoint was not released"
+    return persist(session, cmd)
+
+  def fenced(target):
+    generation = bump(target)
+    if target == chat_id:
+      release.set()
+    return generation
+
+  monkeypatch.setattr(manual_compaction, "persist_manual_progress", held_checkpoint)
+  monkeypatch.setattr(registry, "bump_generation", fenced)
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as cli:
+    worker = asyncio.create_task(cli.post(
+      f"/api/chats/{chat_id}/compact", headers=auth, json={"batch_id": "first"}))
+    try:
+      await asyncio.wait_for(queued.wait(), 5)
+      if interrupt == "pause":
+        stopped = await cli.post(f"/api/chats/{chat_id}/compact-stop", headers=auth)
+        assert stopped.status_code == 200, stopped.text
+      else:
+        # Exercise the real drain, but never restart a process.
+        await chat_mod.drain_all_for_restart(timeout=2, prepared_runs=[])
+      response = await asyncio.wait_for(worker, 5)
+      assert response.status_code == 200, response.text
+      result = response.json()
+    finally:
+      release.set()
+      if not worker.done():
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+  assert result["ok"] is False
+  assert result["progress"]["state"] == "paused"
+  assert result["progress"]["next_chunk"] == 1
+  assert len(fake_synthesis) == 2
+  db.expire_all()
+  row = db.get(models.Chat, chat_id)
+  assert row.session_id == "original-session"
+  assert list(transcript_rows.history(row)) == original
+  assert client.get(f"/api/chats/{chat_id}/compact-progress", headers=auth).json()["progress"]["state"] == "paused"
+  assert len(fake_synthesis) == 2  # Observation never starts another call.
+  if interrupt == "restart":
+    chat_mod.draining = False
+    registry.reset_for_tests()  # Model a fresh runtime; the draft is durable.
+  continued = batch(client, auth, chat_id, "continued", "first").json()
+  assert continued["progress"]["next_chunk"] == 9
+  assert len(fake_synthesis) == 10  # Section 1 was not summarized again.
+
+
+@pytest.mark.parametrize("status", ["paused", "complete"])
+def test_late_checkpoint_cannot_invalidate_an_ended_batch(
+    client, auth, db, fake_synthesis, status):
+  from app.chat_writer import AdvanceManualCompaction
+
+  chat_id, _ = make_chat(client, auth, db, large=True)
+  batch(client, auth, chat_id)
+  db.expire_all()
+  draft = db.get(models.ChatCompactionDraft, "first")
+  draft.state = {**draft.state, "status": status}
+  db.commit()
+  saved = copy.deepcopy(draft.state)
+  receipt = get_writer().submit(AdvanceManualCompaction(
+    chat_id=chat_id, recovery_id="first", batch_id="first",
+    generation=registry.current_generation(chat_id),
+    expected_chunk=8, next_chunk=9, briefing="Late result",
+  )).result(5)
+  assert receipt["status"] == "conflict"
+  db.expire_all()
+  assert db.get(models.ChatCompactionDraft, "first").state == saved
+
+
+def test_changed_note_still_invalidates_a_current_checkpoint(client, auth, db, fake_synthesis):
+  from app.chat_writer import BeginManualCompaction, AdvanceManualCompaction
+
+  chat_id, _ = make_chat(client, auth, db, large=True)
+  batch(client, auth, chat_id)
+  generation = registry.current_generation(chat_id)
+  admitted = get_writer().submit(BeginManualCompaction(
+    chat_id=chat_id, recovery_id="first", batch_id="continued",
+    generation=generation, continuing=True,
+  )).result(5)
+  assert admitted["status"] == "admitted"
+  path = note_path(get_settings().data_dir, chat_id)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text("## Digest\nA new owner correction", encoding="utf-8")
+  receipt = get_writer().submit(AdvanceManualCompaction(
+    chat_id=chat_id, recovery_id="first", batch_id="continued",
+    generation=generation, expected_chunk=8, next_chunk=9, briefing="Old-source result",
+  )).result(5)
+  assert receipt["status"] == "conflict"
+  db.expire_all()
+  saved = db.get(models.ChatCompactionDraft, "first").state
+  assert saved["status"] == "stale"
+  assert saved["next_chunk"] == 8
+  assert len(fake_synthesis) == 8
 
 
 def test_evidence_pointers_preserve_tool_and_image_sources_without_interpreting_them(client, auth, db, fake_synthesis):

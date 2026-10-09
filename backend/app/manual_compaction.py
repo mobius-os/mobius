@@ -137,7 +137,13 @@ def persist_manual_progress(db, cmd) -> dict:
       or draft.state.get("batch_id") != cmd.batch_id):
     return {"status": "conflict"}
   if isinstance(cmd, AdvanceManualCompaction):
-    if (checked_draft(db, chat, cmd.recovery_id, cmd.batch_id, cmd.generation) is None
+    # Pause/restart revokes this batch's ownership, not its source snapshot.
+    # An already queued result must not invalidate saved sections or reopen an
+    # ended batch; only source/cursor conflicts make preparation stale.
+    if (draft.state["status"] != "running"
+        or registry.current_generation(chat.id) != cmd.generation):
+      return {"status": "conflict"}
+    if (not _matches_source(db, chat, draft.state)
         or draft.state["next_chunk"] != cmd.expected_chunk
         or cmd.next_chunk != cmd.expected_chunk + 1
         or cmd.next_chunk > draft.state["total_chunks"]):
