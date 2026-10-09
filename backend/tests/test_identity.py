@@ -947,12 +947,12 @@ def _bad_limits(**changes):
 
 
 @pytest.mark.parametrize("payload", [
-  {**_workspace_plans(), "extra": 1},
   {"workspaces": _workspace_plans()["workspaces"]},
+  {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 2},
+  {**_workspace_plans(), "current": ""},
   {**_workspace_plans(), "workspaces": "nope"},
   {**_workspace_plans(), "current": 7},
   {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 101},
-  _workspace_plans(extra="x"),
   _workspace_plans(id=""),
   _workspace_plans(id="w" * 129),
   _workspace_plans(name=3),
@@ -968,7 +968,6 @@ def _bad_limits(**changes):
   _workspace_plans(**_bad_limits(included_usd=True)),
   _workspace_plans(**_bad_limits(memory_options_mb=["1024"])),
   _workspace_plans(**_bad_limits(cpu_choices=list(range(51)))),
-  _workspace_plans(**_bad_limits(extra=1)),
 ])
 def test_railway_workspace_plans_contract_rejects_unbounded_or_malformed_state(payload):
   from app.routes.identity import _railway_workspace_plans_contract
@@ -976,6 +975,24 @@ def test_railway_workspace_plans_contract_rejects_unbounded_or_malformed_state(p
   with pytest.raises(HTTPException) as refused:
     _railway_workspace_plans_contract(payload)
   assert refused.value.status_code == 502
+
+
+def test_railway_workspace_plans_contract_drops_fields_a_newer_account_service_adds():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  payload = _workspace_plans(extra="x", **_bad_limits(future_limit=5))
+  payload["extra_top"] = 1
+  payload["workspaces"][0]["plan_limits"]["future_limit"] = 5
+
+  assert _railway_workspace_plans_contract(payload) == _workspace_plans()
+
+
+def test_railway_workspace_plans_contract_counts_characters_not_bytes():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  assert _railway_workspace_plans_contract(
+    _workspace_plans(name="\N{GRINNING FACE}" * 128)
+  )["workspaces"][0]["name"] == "\N{GRINNING FACE}" * 128
 
 
 def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspaces():

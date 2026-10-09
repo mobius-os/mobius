@@ -1015,23 +1015,28 @@ def _railway_workspaces_contract(payload: object) -> dict:
 
 
 _RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "enterprise", "unknown"}
-_RAILWAY_PLAN_LIMIT_LISTS = {"cpu_choices", "memory_options_mb", "volume_options_mb"}
-_RAILWAY_PLAN_LIMIT_INTS = {
+_RAILWAY_PLAN_LIMIT_LISTS = ("cpu_choices", "memory_options_mb", "volume_options_mb")
+_RAILWAY_PLAN_LIMIT_INTS = (
   "max_cpu", "default_cpu", "max_memory_mb", "default_memory_mb", "default_volume_mb",
-}
+)
+_RAILWAY_WORKSPACE_PLAN_KEYS = ("id", "name", "plan", "deploy_blocked", "plan_limits")
 
 
 def _is_positive_int(value: object) -> bool:
   return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _railway_plan_limits_valid(limits: object) -> bool:
-  if not isinstance(limits, dict) or set(limits) != (
-    _RAILWAY_PLAN_LIMIT_LISTS | _RAILWAY_PLAN_LIMIT_INTS | {"included_usd"}
-  ):
-    return False
+def _railway_plan_limits_projection(limits: object) -> dict | None:
+  """The known plan-limit fields, or None when any is missing or malformed.
+
+  A newer account service may add fields; they are dropped here rather than
+  rejected, so an older platform keeps the per-workspace flow working.
+  """
+  keys = (*_RAILWAY_PLAN_LIMIT_LISTS, *_RAILWAY_PLAN_LIMIT_INTS, "included_usd")
+  if not isinstance(limits, dict) or not set(keys) <= set(limits):
+    return None
   included = limits["included_usd"]
-  return (
+  if not (
     all(
       isinstance(limits[key], list)
       and len(limits[key]) <= 50
@@ -1044,32 +1049,46 @@ def _railway_plan_limits_valid(limits: object) -> bool:
       or (isinstance(included, (int, float)) and not isinstance(included, bool)
           and 0 <= included <= 100000)
     )
-  )
+  ):
+    return None
+  return {key: limits[key] for key in keys}
+
+
+def _railway_workspace_plan_projection(item: object) -> dict | None:
+  if (
+    not isinstance(item, dict)
+    or not set(_RAILWAY_WORKSPACE_PLAN_KEYS) <= set(item)
+    or not isinstance(item["id"], str) or not 0 < len(item["id"]) <= 128
+    or not isinstance(item["name"], str) or not 0 < len(item["name"]) <= 128
+    or item["plan"] not in _RAILWAY_PLANS
+    or not isinstance(item["deploy_blocked"], str) or len(item["deploy_blocked"]) > 1000
+  ):
+    return None
+  limits = _railway_plan_limits_projection(item["plan_limits"])
+  if limits is None:
+    return None
+  return {**{key: item[key] for key in _RAILWAY_WORKSPACE_PLAN_KEYS[:4]}, "plan_limits": limits}
 
 
 def _railway_workspace_plans_contract(payload: object) -> dict:
   invalid = HTTPException(502, "The Möbius account service returned invalid workspace plans.")
-  if not isinstance(payload, dict) or set(payload) != {"workspaces", "current"}:
+  if not isinstance(payload, dict) or not {"workspaces", "current"} <= set(payload):
     raise invalid
-  workspaces = payload["workspaces"]
+  raw_workspaces = payload["workspaces"]
   current = payload["current"]
   if (
-    not isinstance(workspaces, list)
-    or len(workspaces) > 100
-    or (current is not None and (not isinstance(current, str) or len(current) > 128))
-    or any(
-      not isinstance(item, dict)
-      or set(item) != {"id", "name", "plan", "deploy_blocked", "plan_limits"}
-      or not isinstance(item["id"], str) or not 0 < len(item["id"]) <= 128
-      or not isinstance(item["name"], str) or not 0 < len(item["name"]) <= 128
-      or item["plan"] not in _RAILWAY_PLANS
-      or not isinstance(item["deploy_blocked"], str) or len(item["deploy_blocked"]) > 1000
-      or not _railway_plan_limits_valid(item["plan_limits"])
-      for item in workspaces
-    )
+    not isinstance(raw_workspaces, list)
+    or len(raw_workspaces) > 100
+    or (current is not None and (not isinstance(current, str) or not 0 < len(current) <= 128))
   ):
     raise invalid
-  return payload
+  workspaces = [_railway_workspace_plan_projection(item) for item in raw_workspaces]
+  if (
+    any(item is None for item in workspaces)
+    or len({item["id"] for item in workspaces}) != len(workspaces)
+  ):
+    raise invalid
+  return {"workspaces": workspaces, "current": current}
 
 
 def _railway_metrics_contract(payload: object) -> dict:
