@@ -431,3 +431,93 @@ def test_log_directory_failure_cannot_install_a_rejected_schedule(
   assert rejected.status_code == 500
   assert {p: p.read_bytes() for p in state.iterdir()} == before
   assert (tmp_path / "crontab.txt").read_bytes() == before_live
+
+
+@pytest.mark.parametrize("cancel_during_compensation", [False, True])
+def test_cancelled_predecessor_adoption_restores_cron_before_releasing_lifecycle(
+  db, scheduled_app, tmp_path, monkeypatch, cancel_during_compensation,
+):
+  _fake_crontab(tmp_path, monkeypatch)
+  original_root = Path(scheduled_app.source_dir)
+  original_name = scheduled_app.name
+  monkeypatch.setenv("MOBIUS_APP_BASE", str(original_root.parent))
+  app_cron.record_schedule_choice(scheduled_app.id, ScheduleChoice(
+    source="owner", cron="0 6 * * *", job="fetch.sh",
+  ))
+  app_cron.register_cron(
+    scheduled_app.slug, "0 6 * * *", original_root / "fetch.sh", scheduled_app.id,
+  )
+  live = tmp_path / "crontab.txt"
+  before_live = live.read_bytes()
+  declaration = app_cron.schedule_state_dir(scheduled_app.id) / "init-cron.sh"
+  before_declaration = declaration.read_bytes()
+  entered, release = Event(), Event()
+  unregister = install._unregister_cron
+
+  def blocked_unregister(source):
+    entered.set()
+    assert release.wait(5)
+    unregister(source)
+    assert "0 6 * * *" not in live.read_text()
+
+  monkeypatch.setattr(install, "_unregister_cron", blocked_unregister)
+  restoring, finish_restore = Event(), Event()
+  reconcile = install._reconcile_cron_after_install_rollback
+
+  def blocked_reconcile():
+    restoring.set()
+    if cancel_during_compensation:
+      assert finish_restore.wait(5)
+    reconcile()
+
+  monkeypatch.setattr(install, "_reconcile_cron_after_install_rollback", blocked_reconcile)
+  journal = install.InstallJournal()
+  target = install.InstallTarget(
+    existing=scheduled_app, mode="update", adopting_previous_id=True,
+    adopting_trusted_origin=False, trusted_catalog_origin=False,
+    canonical_manifest_url="https://example.test/successor/mobius.json",
+    origin_migration=None, package_id=None, source_identity=None,
+    source_handoff_required=False,
+  )
+
+  async def adopt():
+    async with fs_locks.install_uninstall_lock():
+      try:
+        await install._prepare_app_row(
+          db, candidate=SimpleNamespace(manifest={"id": "successor", "name": "Successor"}),
+          target=target, source="store", journal=journal, warnings=[],
+        )
+      finally:
+        # This runs before the lifecycle lock releases, even on cancellation.
+        assert live.read_bytes() == before_live
+        assert original_root.is_dir()
+        assert not (original_root.parent / "successor").exists()
+
+  async def run():
+    task = asyncio.create_task(adopt())
+    try:
+      await _entered(entered)
+      task.cancel()
+      await asyncio.sleep(0)
+      assert fs_locks.install_uninstall_lock().locked()
+      assert not task.done()
+      release.set()
+      if cancel_during_compensation:
+        await _entered(restoring)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert fs_locks.install_uninstall_lock().locked()
+        assert not task.done()
+    finally:
+      release.set()
+      finish_restore.set()
+      with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not fs_locks.install_uninstall_lock().locked()
+
+  asyncio.run(run())
+  db.refresh(scheduled_app)
+  assert scheduled_app.name == original_name
+  assert scheduled_app.source_dir == str(original_root)
+  assert declaration.read_bytes() == before_declaration
+  assert journal.rollback_actions == []

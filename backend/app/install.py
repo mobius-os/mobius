@@ -3525,14 +3525,27 @@ async def _prepare_app_row(
             except HTTPException:
               target_taken = True
             if not target_taken and not Path(target_source_dir).exists():
-              await app_cron.run_schedule_mutation(
-                _unregister_cron, Path(old_source_dir),
-              )
-              os.rename(old_source_dir, target_source_dir)
-              converged = True
+              # Unregister is already a pre-commit mutation, even if the
+              # source rename never starts. Arm its compensation before the
+              # worker can change cron or cancellation can interrupt the await.
               journal.rollback_actions.append(
                 _reconcile_cron_after_install_rollback
               )
+              try:
+                await app_cron.run_schedule_mutation(
+                  _unregister_cron, Path(old_source_dir),
+                )
+              except asyncio.CancelledError:
+                # The unregister worker has drained. Restore the uncommitted
+                # row and filesystem journal while both lifecycle/source locks
+                # still exclude competitors, then propagate the cancellation.
+                db.rollback()
+                await app_cron.run_schedule_mutation(
+                  journal.rollback_materialization,
+                )
+                raise
+              os.rename(old_source_dir, target_source_dir)
+              converged = True
               journal.rollback_actions.append(
                 lambda o=old_source_dir, n=target_source_dir:
                   os.rename(n, o)
