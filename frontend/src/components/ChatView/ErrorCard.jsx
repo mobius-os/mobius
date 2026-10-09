@@ -27,6 +27,9 @@ export function errorCardViewModel(block) {
   const resourceWait = isResourcePause(block)
   const modelCapacity = block.pause?.kind === 'model_capacity'
   const modelCapacityExhausted = block.pause?.kind === 'model_capacity_exhausted'
+  // The provider's safety check declined this conversation on this model.
+  // Time does not change that outcome, so it is never presented as a retry.
+  const providerRefusal = block.pause?.kind === 'provider_refusal'
   const { checkAt, resetAt } = pauseTiming(block.pause)
   const parked = isProviderLimitPause(block.pause) || (!!checkAt && !block.pause?.kind)
   // Old saved handoff notes lacked the pause descriptor. Recognize only
@@ -42,11 +45,12 @@ export function errorCardViewModel(block) {
     parked,
     modelCapacity,
     modelCapacityExhausted,
+    providerRefusal,
     resourceWait,
     goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: credits ? 'Credits needed' : goalHandoff ? 'Goal paused' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: credits ? 'Credits needed' : goalHandoff ? 'Goal paused' : providerRefusal ? 'Model declined' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     checkLabel: formatResetTime(checkAt),
     resetLabel: parked ? formatResetTime(resetAt) : null,
   }
@@ -72,7 +76,9 @@ export default function ErrorCard({
   const platformHold = !block.pause?.manual && (vm.modelCapacity || vm.parked || vm.resourceWait || block.pause?.kind === 'restart') && (
     continuationWait === 'restart_required' || continuationWait === 'restoring_edits'
   )
-  const recoveryTitle = platformHold
+  const recoveryTitle = vm.providerRefusal
+    ? 'This model declined to continue'
+    : platformHold
     ? (continuationWait === 'restart_required' ? 'Waiting for a server restart' : 'Waiting for the platform update')
     : vm.modelCapacity
     ? !manualRecovery
@@ -85,7 +91,9 @@ export default function ErrorCard({
         ? 'Ready to retry'
         : 'Provider limit reached'
     : null
-  const recoveryCopy = platformHold
+  const recoveryCopy = vm.providerRefusal
+    ? 'Its safety check stopped this turn, so retrying the same conversation on this model usually fails again. Your work is saved. Switch model, then Resume or start a fresh session from a summary of this chat.'
+    : platformHold
     ? block.pause?.kind === 'restart'
       ? continuationWait === 'restart_required'
         ? 'Waiting for a server restart to load the restored work. This chat will continue after those changes are loaded.'
@@ -119,7 +127,7 @@ export default function ErrorCard({
         className="chat__error-status"
         role={vm.benign ? undefined : 'alert'}
       >
-        {vm.parked || vm.modelCapacity ? (
+        {vm.parked || vm.modelCapacity || vm.providerRefusal ? (
           <>
             <div className="chat__recovery-title">{recoveryTitle}</div>
             <div className="chat__recovery-copy">{recoveryCopy}</div>

@@ -4171,7 +4171,8 @@ export default function ChatView({
   // "/compact" never becomes a message. It asks the backend to replace this
   // chat's live context with a fresh briefing and reset the provider session;
   // the visible transcript is untouched and the platform renders the stored
-  // compaction as its own "Context compacted" card.
+  // compaction as its own "Context compacted" card. A card action passes no
+  // submitted input, so the owner's unrelated draft is left untouched.
   async function runCompactCommand(instructions = '', submittedInput = '/compact') {
     if (!activationSettledRef.current) return
     if (!chatId || provisionalNewChat) {
@@ -4182,13 +4183,15 @@ export default function ChatView({
     if (isProviderSwitchBlocking(chatId)) return
     compactingChatRef.current = true
     setCompactingChat(true)
-    setComposerInput('')
+    if (submittedInput !== null) setComposerInput('')
     setSendFailure(null)
     try {
       await api.chats.compact(chatId, { instructions })
       await fetchMessages({ force: true })
     } catch (err) {
-      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
+      if (submittedInput !== null) {
+        setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
+      }
       setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
     } finally {
       compactingChatRef.current = false
@@ -4315,6 +4318,17 @@ export default function ChatView({
     onRefresh: refreshResume,
     blocked: resumeBlocked,
   })
+  // A provider refusal is answered by changing the request, not by retrying
+  // it: the card reuses the composer's model picker and the /compact handoff.
+  // Stable references keep MsgContent's memo intact.
+  const runCompactCommandRef = useRef(null)
+  runCompactCommandRef.current = runCompactCommand
+  const handleRefusalModelChoice = useCallback(() => {
+    setModelSelectionRequest(request => request + 1)
+  }, [])
+  const handleRefusalFreshSession = useCallback(() => {
+    void runCompactCommandRef.current?.('', null)
+  }, [])
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
@@ -5841,6 +5855,9 @@ export default function ChatView({
     if (pendingResumeBlock.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual) {
       return 'Response paused for restart. Möbius will continue automatically.'
     }
+    if (pendingResumeBlock.pause?.kind === 'provider_refusal') {
+      return 'This model declined to continue. Switch model or start a fresh session.'
+    }
     return 'Turn paused — Resume available.'
   })()
   // Chat surfaces retain all work, but Goal labels use only its exact owners.
@@ -6019,6 +6036,8 @@ export default function ChatView({
       onQuestionSubmitIntent={prepareQuestionSubmission}
       onQuestionSubmitCancel={cancelQuestionSubmission}
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
+      onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
+      onRefusalFreshSession={handleRefusalFreshSession}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6386,7 +6405,9 @@ export default function ChatView({
                             : 'Provider limit reached — continuation available'
                         : pendingResumeBlock?.pause?.kind === 'restart' && !pendingResumeBlock.pause.manual
                           ? 'Paused for restart — continuing automatically'
-                          : 'Turn paused — tap to resume'}
+                          : pendingResumeBlock?.pause?.kind === 'provider_refusal'
+                            ? 'Model declined — choose how to continue'
+                            : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (

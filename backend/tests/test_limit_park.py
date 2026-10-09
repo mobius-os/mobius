@@ -3497,6 +3497,36 @@ def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
   assert "five automatic retries" in sink.events[-1]["message"]
 
 
+def test_provider_refusal_is_a_resumable_pause_never_a_retry():
+  """A refusal is not a limit or a busy model: no automatic retry is
+  scheduled, and the card owns the moves that change the request."""
+  report = "API Error: safeguards flagged this message. Details: [category]"
+  sink = _Sink()
+
+  # The 429 proves the refusal outranks the usage-limit branch.
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": report, "provider_refusal": True, "api_error_status": 429},
+    report,
+    provider_id="claude",
+  )
+
+  assert kwargs == {"parked": False}
+  event = sink.events[-1]
+  assert event["type"] == "error"
+  assert event["resumable"] is True
+  assert event["pause"] == {"kind": "provider_refusal", "provider": "claude"}
+  assert event["message"] == report
+
+
+def test_unmarked_failure_with_refusal_like_text_stays_a_plain_error():
+  sink = _Sink()
+  text = "API Error: safeguards flagged this message."
+
+  assert chat_mod._park_exit(sink, {"error": text}, text) == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": text}
+
+
 def test_provider_limit_continuation_does_not_claim_quota_recovered():
   from app.continuations import continuation_protocol_source
 
