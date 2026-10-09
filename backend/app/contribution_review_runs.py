@@ -238,6 +238,34 @@ def merge_work_key(target):
   return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:merge"
 
 
+def draft_ready_allowed(row):
+  return (row.mode == "review_fix_merge" and
+    (row.options_json or {}).get("confirmation_scope") == "named_pr_repairs_ready_and_reviewed_successors")
+
+
+def readiness_blocker(target, repo, pull, pr):
+  if not merge_permission(repo):
+    return "Your repository write permission is no longer available."
+  if pull.get("state") != "open" or pull.get("merged") or pull.get("draft") is not True:
+    return "This exact pull request is not an open draft."
+  if pr.get("headRefOid") != target["head_sha"]:
+    return "The pull request changed during the readiness check."
+  return checks_blocker(pr)
+
+
+def mark_ready(gh, cwd, target):
+  # GitHub's mutation has no expected-head parameter: caller must hold the
+  # credential lock and recheck the exact PR immediately before this call.
+  query = """mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft headRefOid}}}"""
+  result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
+    "-f", f"id={target['pr_id']}").stdout)
+  pull = ((result.get("data") or {}).get("markPullRequestReadyForReview") or {}).get("pullRequest")
+  if (result.get("errors") or not isinstance(pull, dict) or pull.get("id") != target["pr_id"]
+      or pull.get("headRefOid") != target["head_sha"] or pull.get("isDraft") is not False):
+    raise HTTPException(409, "GitHub did not confirm readiness of the exact pull request.")
+  return pull
+
+
 def fence_public_transition(db, row):
   """Serialize admission, not public I/O, across distinct action work keys.
 
@@ -351,6 +379,38 @@ def arm_merge(db, row, target, outcome, principal):
   return None
 
 
+def arm_ready(db, row, target, receipt, principal):
+  """Fence one readiness mutation per exact PR/head across overlapping grants."""
+  work_key = f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:ready"
+  claim = agent_work_claims.claim_work(db, owner_id=row.owner_id,
+    chat_id=row.chat_id, run_id=principal.run_id, work_key=work_key,
+    summary=f"Mark reviewed draft {key(target)} ready at {target['head_sha'][:12]}.")
+  if claim["state"] in {"held_by_peer", "completed"}:
+    raise HTTPException(409, "This draft readiness already has an owning conversation. Follow its saved result.")
+  fence_public_transition(db, row)
+  fenced = db.execute(update(models.AgentWorkClaim).where(
+    models.AgentWorkClaim.id == claim["id"],
+    models.AgentWorkClaim.revision == claim["revision"],
+    models.AgentWorkClaim.owner_chat_id == row.chat_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).values(owner_run_id=principal.run_id))
+  if fenced.rowcount != 1:
+    db.rollback()
+    raise HTTPException(409, "Draft readiness ownership changed. No public attempt started.")
+  item_key = key(target)
+  prior = db.query(models.ContributionReviewRun).filter(
+    models.ContributionReviewRun.owner_id == row.owner_id,
+    models.ContributionReviewRun.outcomes_json[item_key]["ready_attempt"]["head_sha"].as_string() == target["head_sha"],
+  ).populate_existing().first()
+  if prior is not None:
+    db.rollback()
+    raise HTTPException(409, "An earlier draft readiness attempt is saved. Reconcile it read-only; do not repeat it.")
+  require_public_transition_clear(db, row, target)
+  previous = (row.outcomes_json or {}).get(item_key, {})
+  save_outcome(db, row, item_key, {**previous, "ready_attempt": receipt})
+
+
 def write_outcome(db, row, item_key, outcome):
   """CAS an outcome inside the caller's admission transaction; do not commit."""
   revision = row.revision
@@ -379,11 +439,22 @@ def save_outcome(db, row, item_key, outcome):
 
 def view(row):
   outcomes = row.outcomes_json or {}
-  items = [outcomes.get(key(t), {"state": "reviewing"}) for t in row.targets_json]
-  states = [item["state"] for item in items]
-  state = ("needs_you" if any(s in {"needs_you", "merge_unknown"} for s in states)
+  def projected(item):
+    outcome = outcomes.get(key(item), {"state": "reviewing"})
+    attempt = outcome.get("ready_attempt") or {}
+    # Readiness is a public-attempt overlay, not a replacement for saved
+    # private-review evidence. Unknown must be visible and block new actions.
+    if attempt.get("state") == "unknown":
+      return {**outcome, "state": "ready_unknown"}
+    if attempt.get("state") == "attempting":
+      return {**outcome, "state": "marking_ready"}
+    return outcome
+  projected_items = [projected(t) for t in row.targets_json]
+  states = [item["state"] for item in projected_items]
+  state = ("needs_you" if any(s in {"needs_you", "merge_unknown", "ready_unknown"} for s in states)
            else "complete" if all(s in {"all_clear", "merged"} for s in states)
            else "queued" if all(s in {"queued", "merged", "all_clear"} for s in states)
+           else "marking_ready" if any(s == "marking_ready" for s in states)
            else "pushing" if any(s == "pushing" for s in states)
            else "repairing" if any(s == "repairing" for s in states)
            else "reviewing")
@@ -393,7 +464,7 @@ def view(row):
           "created_at": row.created_at.isoformat() + "Z",
           "items": [{**t, "approved_head_sha": t["head_sha"], "approved_base_sha": t["base_sha"],
                      "work_key": merge_work_key(effective_target(row, t)), **item}
-                    for t, item in zip(row.targets_json, items)]}
+                    for t, item in zip(row.targets_json, projected_items)]}
 
 
 def brief(row):
@@ -523,6 +594,17 @@ def takeover_brief(row):
     "No maximum repair round count is configured for this grant."
     if limit is None else f"At most {limit} repair rounds per PR."
   )
+  readiness_instruction = (
+    f"For a draft, AFTER fresh independent all-clear and passing tests, POST {endpoint}/ready "
+    "with repo, number, exact head_sha, reviewed_base_sha, independent_receipt_id, "
+    "summary, all six scope values, tests and tests_passed:true. The server alone "
+    "checks current actor, rights, exact head/base and GitHub checks, then marks "
+    "ready with one durable attempt receipt. An uncertain result is read-only "
+    "reconciliation, never a repeated mutation. Only after confirmed readiness "
+    "may the parent submit all_clear to /outcomes for merge/queue."
+    if draft_ready_allowed(row) else
+    "This grant does not authorize marking a draft ready for review. A draft blocks merge."
+  )
   return f"""Privately review and, only where necessary, repair these named PRs under the
 explicit scoped takeover grant. Original selection is immutable:
 {json.dumps(row.targets_json)}
@@ -558,6 +640,7 @@ finish_agent_work with release:false and the confirmed head outcome. Never
 finish another chat's claim.
 When autopilot is disabled perform the requested immediate step and hand off, rather than
 starting unattended follow-up turns. This flag never broadens mutation consent.
+{readiness_instruction}
 Then parent alone POST {endpoint}/outcomes with repo, number, exact head_sha,
 reviewed_base_sha, independent_receipt_id, state all_clear or needs_you, summary,
 all six scope values, tests and tests_passed. The server alone checks live base,

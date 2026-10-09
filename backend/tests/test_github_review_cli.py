@@ -138,6 +138,20 @@ def test_edited_resolved_snapshot_cannot_misrepresent_frozen_start_options(tmp_p
     cli.load_preview(path, "owner-chat")
 
 
+def test_draft_ready_permission_is_explicit_frozen_and_never_added_to_legacy_selection():
+  with patch.object(cli, "inspect_pr", return_value={**ITEM, "is_draft": True}), patch.object(cli, "api", return_value=PREVIEW):
+    draft = cli.prepare_selection(["example/project#7"], "review_fix_merge", "owner-chat")
+    with pytest.raises(ValueError, match="allow-mark-ready"):
+      cli.freeze_preview(draft)
+    new = cli.freeze_preview(draft, allow_mark_ready=True)
+    assert new["confirmation_scope"] == cli.DRAFT_TAKEOVER_SCOPE
+    assert cli.start_body(new)["confirmation_scope"] == cli.DRAFT_TAKEOVER_SCOPE
+    assert "is_draft" not in cli.start_body(new)["items"][0]
+    with pytest.raises(ValueError, match="identity changed"):
+      cli.verify_selection({**new, "confirmation_scope": cli.TAKEOVER_SCOPE})
+  assert selection()["confirmation_scope"] == cli.TAKEOVER_SCOPE
+
+
 POSTING = {**SNAPSHOT, "post_review": True}
 POSTING_PREVIEW = {"options": POSTING, "preview_sha256": hashlib.sha256(json.dumps(POSTING, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}
 

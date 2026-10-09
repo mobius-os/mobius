@@ -55,6 +55,16 @@ Choose the least authority that satisfies the request:
   repairs and conditional merge of freshly independently reviewed successors.
   The confirmation scope is `named_pr_repairs_and_reviewed_successors`.
 
+Draft takeover is a separate explicit permission: new scope
+`named_pr_repairs_ready_and_reviewed_successors` includes marking the named
+PRs ready after fresh independent all-clear, passing tests and GitHub checks.
+Prepare a fresh preview with `--allow-mark-ready` only when that public effect
+is intended; disclose that marking ready may notify reviewers. The flag is
+proposal input, never consent. Old saved grants and the repair-only scope
+`named_pr_repairs_and_reviewed_successors` do not acquire this permission.
+Private review and pinned merge never mark a draft ready. A repository with no
+checks configured has none to wait for; any configured checks must pass.
+
 `--post-review` (review mode only) freezes the owner's choice to post the
 finished verdict on the PR as one GitHub comment review from the connected
 account. Use it only when the owner asked for a public review; it grants no
@@ -113,6 +123,16 @@ fast-forward commit. Parent POSTs `/repairs` with predecessor identity,
 summary, tests and `tests_passed:true`. The server derives and validates the
 diff/head, live access and one guarded push receipt. Every confirmed successor
 needs a new independent full-diff review and fresh tests.
+
+For a draft under the readiness scope, the bound parent POSTs `/ready` before
+`/outcomes`, with repo/number/head_sha, reviewed_base_sha,
+independent_receipt_id, all six scope values, summary, tests and
+tests_passed:true. The server verifies the live actor, exact head/base, fresh
+independent review and passing GitHub checks, then owns one durable mark-ready
+attempt. This is not a merge verdict: use the existing fresh merge gate after
+readiness is confirmed. Never use a raw `gh` mutation. Unknown readiness is
+reconciled read-only through `/observe`, not retried; Stop prevents a new
+attempt but cannot cancel one GitHub has already admitted.
 
 Only the bound parent POSTs `/outcomes`. For takeover, include exact
 `reviewed_base_sha`, fresh `independent_receipt_id`, all six scope values and

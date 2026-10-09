@@ -200,15 +200,22 @@ def test_github_blockers_stop_before_merge(changes):
 
 
 @pytest.mark.parametrize("rollup", [None, {"state": "SUCCESS"}])
-def test_merge_accepts_passing_or_absent_checks(rollup):
+def test_merge_and_draft_readiness_agree_on_passing_or_absent_checks(rollup):
   checks = {**CHECKS, "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
   assert domain.merge_blocker(TARGET, REPO, PULL, checks) is None
+  assert domain.readiness_blocker(TARGET, REPO, {**PULL, "draft": True}, checks) is None
 
 
 @pytest.mark.parametrize("rollup", [{"state": "PENDING"}, {"state": "FAILURE"}, {}])
-def test_merge_refuses_any_unsuccessful_rollup(rollup):
+def test_merge_and_draft_readiness_refuse_any_unsuccessful_rollup(rollup):
   checks = {**CHECKS, "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
   assert domain.merge_blocker(TARGET, REPO, PULL, checks)
+  assert domain.readiness_blocker(TARGET, REPO, {**PULL, "draft": True}, checks)
+
+
+def test_draft_readiness_still_requires_the_head_commit_check_result():
+  checks = {**CHECKS, "commits": {"nodes": []}}
+  assert domain.readiness_blocker(TARGET, REPO, {**PULL, "draft": True}, checks)
 
 
 def test_removed_permission_stops_merge():

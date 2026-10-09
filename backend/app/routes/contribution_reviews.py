@@ -28,7 +28,8 @@ from app.github_connection import _github_connection_transaction
 router = APIRouter(tags=["contribution-reviews"])
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
-REVIEW_CAPABILITIES = {"post_review": True}
+REVIEW_CAPABILITIES = {"draft_takeover": True, "post_review": True}
+TAKEOVER_SCOPES = {"named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"}
 
 
 class PullIdentity(BaseModel):
@@ -79,7 +80,7 @@ class StartReviews(BaseModel):
   request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
   mode: Literal["review", "review_merge", "review_fix_merge"]
   options: ReviewOptions | None = None
-  confirmation_scope: Literal["named_pr_repairs_and_reviewed_successors"] | None = None
+  confirmation_scope: Literal["named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"] | None = None
   items: list[SelectedPR] = Field(min_length=1, max_length=20)
   chat_approval: ChatApproval | None = None
 
@@ -208,7 +209,7 @@ async def start_reviews(app_id: int | None, body: StartReviews,
   approval = _chat_approval(db, body, principal)
   app_nonce = _authorize_context(db, app_id, principal)
   _assert_app_current(db, app_id, app_nonce)
-  if body.mode == "review_fix_merge" and body.confirmation_scope != "named_pr_repairs_and_reviewed_successors":
+  if body.mode == "review_fix_merge" and body.confirmation_scope not in TAKEOVER_SCOPES:
     raise HTTPException(422, "Confirm scoped repairs to the named PR and freshly reviewed successors before takeover.")
   if body.options is not None and body.options.post_review and body.mode != "review":
     raise HTTPException(422, "Posting a review on GitHub is available for Review only.")
@@ -380,6 +381,9 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       if row.mode == "review_fix_merge":
         reviews.require_independent_clear(row, target, body)
     if body.state == "all_clear" and row.mode in {"review_merge", "review_fix_merge"}:
+      ready_attempt = previous.get("ready_attempt")
+      if ready_attempt and ready_attempt.get("state") != "ready":
+        raise HTTPException(409, "The draft readiness attempt is uncertain. Reconcile it read-only before merge.")
       if pull.get("merged"):
         outcome.update(state="merged", merge_sha=pull.get("merge_commit_sha"))
         reviews.save_outcome(db, row, item_key, outcome)
@@ -639,8 +643,117 @@ class RepairPublish(PullIdentity):
 
 
 def _repair_allowed(row):
-  if row.mode != "review_fix_merge" or (row.options_json or {}).get("confirmation_scope") != "named_pr_repairs_and_reviewed_successors":
+  if row.mode != "review_fix_merge" or (row.options_json or {}).get("confirmation_scope") not in TAKEOVER_SCOPES:
     raise HTTPException(403, "This mode does not authorize public repairs. Confirm scoped takeover separately.")
+
+
+def _require_ready_attempt_resolved(previous):
+  attempt = previous.get("ready_attempt")
+  if attempt and attempt.get("state") != "ready":
+    raise HTTPException(409, "The draft readiness attempt is uncertain. Reconcile it read-only before any new public action.")
+
+
+class DraftReady(PullIdentity):
+  reviewed_base_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+  independent_receipt_id: str = Field(min_length=1, max_length=64)
+  summary: str = Field(min_length=1, max_length=4000)
+  scope: list[str] = Field(min_length=6, max_length=6)
+  tests: str = Field(min_length=1, max_length=4000)
+  tests_passed: bool
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/ready",
+             dependencies=[Depends(reject_cross_site)])
+async def mark_draft_ready(app_id: int | None, run_id: str, body: DraftReady,
+                           db: Session = Depends(get_db),
+                           principal: Principal = Depends(get_agent_run_principal)):
+  row = _row(db, app_id, run_id, principal)
+  if not reviews.draft_ready_allowed(row):
+    raise HTTPException(403, "This frozen grant does not authorize marking a draft ready for review.")
+  _parent(db, row, principal)
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    db.refresh(row)
+    target = _target(row, body)
+    item_key = reviews.key(target)
+    previous = (row.outcomes_json or {}).get(item_key, {})
+    cwd = Path(get_settings().data_dir) / "platform"
+    attempt = previous.get("ready_attempt")
+    if attempt:
+      # The mutation is unrepeatable after admission, including lost responses.
+      try:
+        live_repo, live = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
+      except Exception:
+        return {"run": _run_view(db, row), "blocked": "The earlier readiness attempt is uncertain; it was not repeated."}
+      if live.get("state") == "open" and live.get("draft") is False:
+        if not reviews.merge_permission(live_repo):
+          return {"run": _run_view(db, row), "blocked": "The earlier readiness attempt is visible, but write permission changed; no action was repeated."}
+        actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
+        if str(actor.get("id") or "") != row.github_actor_id:
+          return {"run": _run_view(db, row), "blocked": "The earlier readiness attempt is visible, but the GitHub actor changed; no action was repeated."}
+        try:
+          await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
+        except HTTPException:
+          return {"run": _run_view(db, row), "blocked": "The target base changed; exact readiness evidence cannot be confirmed."}
+        if attempt.get("state") != "ready":
+          reviews.save_outcome(db, row, item_key, {**previous,
+            "ready_attempt": {**attempt, "state": "ready"}})
+        return {"run": _run_view(db, row)}
+      return {"run": _run_view(db, row), "blocked": "The earlier readiness attempt is not confirmed; it was not repeated."}
+    reviews.require_public_transition_clear(db, row, target)
+    if body.tests_passed is not True or set(body.scope) != SCOPE or not body.tests.strip():
+      raise HTTPException(422, "Fresh full-rubric review and passing tests are required before draft readiness.")
+    reviews.require_independent_clear(row, target, body)
+    async with _github_connection_transaction():
+      actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
+      if str(actor.get("id") or "") != row.github_actor_id:
+        raise HTTPException(409, "The connected GitHub actor changed. Approve a new selection.")
+      repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
+      await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
+      checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
+      blocker = reviews.readiness_blocker(target, repo, pull, checks)
+      if blocker:
+        raise HTTPException(409, blocker)
+      _parent(db, row, principal)
+      # GitHub has no expected-head argument for this mutation. Minimize the
+      # race by re-reading identity, base, rights and checks after preflight.
+      repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
+      await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
+      checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
+      blocker = reviews.readiness_blocker(target, repo, pull, checks)
+      if blocker:
+        raise HTTPException(409, blocker)
+      actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
+      if str(actor.get("id") or "") != row.github_actor_id:
+        raise HTTPException(409, "The connected GitHub actor changed during preflight.")
+      _parent(db, row, principal)
+      receipt = {"id": str(uuid.uuid4()), "state": "attempting",
+        "head_sha": target["head_sha"], "base_sha": target["base_sha"],
+        "independent_receipt_id": body.independent_receipt_id,
+        "review_run_id": principal.run_id, "summary": body.summary,
+        "tests": body.tests, "tests_passed": True, "scope": body.scope}
+      reviews.arm_ready(db, row, target, receipt, principal)
+      try:
+        _parent(db, row, principal)
+        await asyncio.to_thread(reviews.mark_ready, _gh, cwd, target)
+        # The GraphQL response confirms the PR/head but not the target base.
+        # A second live read keeps a post-mutation base drift uncertain.
+        confirmed_repo, confirmed = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
+        await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
+        if (not reviews.merge_permission(confirmed_repo) or confirmed.get("state") != "open"
+            or confirmed.get("draft") is not False):
+          raise HTTPException(409, "GitHub did not confirm the exact draft is ready.")
+        actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
+        if str(actor.get("id") or "") != row.github_actor_id:
+          raise HTTPException(409, "The connected GitHub actor changed after the readiness attempt.")
+        _parent(db, row, principal)
+      except Exception:
+        receipt["state"] = "unknown"
+      else:
+        receipt["state"] = "ready"
+      db.refresh(row)
+      previous = row.outcomes_json[item_key]
+      reviews.save_outcome(db, row, item_key, {**previous, "ready_attempt": receipt})
+    return {"run": _run_view(db, row), **({"blocked": "The readiness response is uncertain; observe read-only before proceeding."} if receipt["state"] == "unknown" else {})}
 
 
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/repair-checkout",
@@ -656,6 +769,7 @@ async def repair_checkout(app_id: int | None, run_id: str, body: RepairCheckout,
     db.refresh(row)
     target = _target(row, body)
     previous = row.outcomes_json.get(reviews.key(target), {})
+    _require_ready_attempt_resolved(previous)
     if previous.get("merge_attempted") or previous.get("state") in {"merged", "queued", "merge_unknown"}:
       raise HTTPException(409, "An existing merge attempt must be reconciled before any repair.")
     attempts = previous.get("repair_attempts", [])
@@ -719,6 +833,7 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
         "repair_attempts": attempts, "successor": {"head_sha": pending["head_sha"], "base_sha": pending["base_sha"]},
         "head_sha": pending["head_sha"], "state": "reviewing"})
       return {"run": _run_view(db, row)}
+    _require_ready_attempt_resolved(previous)
     target = _target(row, body)
     if body.tests_passed is not True:
       raise HTTPException(422, "Failed or unknown tests block public repair publication.")
@@ -825,6 +940,11 @@ async def core_repair_checkout(run_id: str, body: RepairCheckout, db: Session = 
 @router.post("/api/github/review-runs/{run_id}/repairs", dependencies=[Depends(reject_cross_site)])
 async def core_publish_repair(run_id: str, body: RepairPublish, db: Session = Depends(get_db), principal: Principal = Depends(get_agent_run_principal)):
   return await publish_repair(None, run_id, body, db, principal)
+
+
+@router.post("/api/github/review-runs/{run_id}/ready", dependencies=[Depends(reject_cross_site)])
+async def core_mark_draft_ready(run_id: str, body: DraftReady, db: Session = Depends(get_db), principal: Principal = Depends(get_agent_run_principal)):
+  return await mark_draft_ready(None, run_id, body, db, principal)
 
 
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/stop",
@@ -936,6 +1056,26 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
       previous = row.outcomes_json.get(reviews.key(original), {})
       if not previous:
         continue
+      ready_attempt = previous.get("ready_attempt")
+      if ready_attempt and ready_attempt.get("state") != "ready":
+        target = reviews.effective_target(row, original)
+        try:
+          live_repo, live = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)
+        except Exception:
+          live = None
+        if (live and reviews.merge_permission(live_repo) and live.get("state") == "open"
+            and live.get("draft") is False):
+          try:
+            await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
+          except HTTPException:
+            pass
+          else:
+            actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")
+            if str(actor.get("id") or "") == row.github_actor_id:
+              _assert_app_current(db, row.app_id, row.app_nonce)
+              reviews.save_outcome(db, row, reviews.key(original), {**previous,
+                "ready_attempt": {**ready_attempt, "state": "ready"}})
+              previous = row.outcomes_json[reviews.key(original)]
       attempts = list(previous.get("repair_attempts", []))
       pending = next((a for a in attempts if a.get("state") in {"pushing", "push_unknown"}), None)
       if pending:

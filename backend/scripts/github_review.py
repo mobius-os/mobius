@@ -27,6 +27,7 @@ OPTION_FIELDS = ("review_prompt", "fix_prompt", "merge_prompt", "max_rounds", "a
 # their hash; it is carried only when present.
 OPTIONAL_OPTION_FIELDS = ("post_review",)
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
+DRAFT_TAKEOVER_SCOPE = "named_pr_repairs_ready_and_reviewed_successors"
 
 
 def api(path, *, method="GET", data=None, headers=None):
@@ -61,7 +62,7 @@ def inspect_pr(reference):
   base = gh_api(f"repos/{canonical_repo}/git/ref/heads/{quote(base_ref, safe='')}")
   return {"repo": canonical_repo.lower(), "number": number,
     "head_sha": pull["head"]["sha"], "base_ref": base_ref,
-    "base_sha": base["object"]["sha"], "title": pull["title"], "url": pull["html_url"]}
+    "base_sha": base["object"]["sha"], "is_draft": pull.get("draft") is True, "title": pull["title"], "url": pull["html_url"]}
 
 
 def prepare_selection(references, mode, chat_id):
@@ -92,12 +93,16 @@ def frozen_options(snapshot):
   return {**options, **{key: snapshot[key] for key in OPTIONAL_OPTION_FIELDS if key in snapshot}}
 
 
-def freeze_preview(selection, options=None, agent=None, *, post_review=False):
+def freeze_preview(selection, options=None, agent=None, *, allow_mark_ready=False, post_review=False):
   """Save resolved prompts/model before consent; later start never re-resolves silently."""
+  if allow_mark_ready and selection["mode"] != "review_fix_merge":
+    raise ValueError("Mark-ready permission requires review_fix_merge.")
   if post_review:
     if selection["mode"] != "review":
       raise ValueError("Posting the review on GitHub is available for review mode only.")
     options = {**(options or {}), "post_review": True}
+  if selection["mode"] == "review_fix_merge" and any(item.get("is_draft") for item in selection["items"]) and not allow_mark_ready:
+    raise ValueError("Draft takeover needs --allow-mark-ready and explicit consent to mark ready after review and checks.")
   preview = api("/api/github/review-preview", method="POST",
                 data={"options": options, "agent": agent})
   snapshot = preview["options"]
@@ -110,7 +115,7 @@ def freeze_preview(selection, options=None, agent=None, *, post_review=False):
               "effort": snapshot.get("reasoning_effort")},
     "preview_sha256": preview["preview_sha256"], "resolved_snapshot": snapshot}
   if selection["mode"] == "review_fix_merge":
-    frozen["confirmation_scope"] = TAKEOVER_SCOPE
+    frozen["confirmation_scope"] = DRAFT_TAKEOVER_SCOPE if allow_mark_ready else TAKEOVER_SCOPE
   identity = start_body(frozen)
   identity.pop("request_id")
   frozen["request_id"] = "selection-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
@@ -184,6 +189,7 @@ def main(argv=None):
   preview = commands.add_parser("preview", help="Inspect named PRs and freeze prompts/model without starting work")
   preview.add_argument("prs", nargs="+")
   preview.add_argument("--mode", choices=("review", "review_merge", "review_fix_merge"), default="review")
+  preview.add_argument("--allow-mark-ready", action="store_true", help="Include draft mark-ready permission after review/checks in this new takeover preview")
   preview.add_argument("--post-review", action="store_true", help="Review mode only: post the verdict as a GitHub review comment when the run finishes")
   preview.add_argument("--options", help="JSON file with the five editable fields")
   preview.add_argument("--agent", help="JSON file: provider/model/effort")
@@ -206,7 +212,7 @@ def main(argv=None):
     result = api(path + "/observe", method="POST", data={}) if args.command == "observe" else api(path)
   elif args.command == "preview":
     selection = freeze_preview(prepare_selection(args.prs, args.mode, os.environ["CHAT_ID"]),
-      read_object(args.options) if args.options else None, read_object(args.agent) if args.agent else None,
+      read_object(args.options) if args.options else None, read_object(args.agent) if args.agent else None, allow_mark_ready=args.allow_mark_ready,
       post_review=args.post_review)
     save_preview(args.output, selection)
     result = {"selection": selection, "preview_file": args.output, "approved": False}
