@@ -989,7 +989,7 @@ def _railway_workspaces_contract(payload: object) -> dict:
   return payload
 
 
-_RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "unknown"}
+_RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "enterprise", "unknown"}
 _RAILWAY_PLAN_LIMIT_LISTS = {"cpu_choices", "memory_options_mb", "volume_options_mb"}
 _RAILWAY_PLAN_LIMIT_INTS = {
   "max_cpu", "default_cpu", "max_memory_mb", "default_memory_mb", "default_volume_mb",

@@ -916,7 +916,7 @@ def _bad_limits(**changes):
   _workspace_plans(id="w" * 129),
   _workspace_plans(name=3),
   _workspace_plans(name=""),
-  _workspace_plans(plan="enterprise"),
+  _workspace_plans(plan="platinum"),
   _workspace_plans(deploy_blocked="x" * 1001),
   _workspace_plans(deploy_blocked=None),
   _workspace_plans(plan_limits=None),
@@ -941,9 +941,11 @@ def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspac
   from app.routes.identity import _railway_workspace_plans_contract
 
   unknown = _workspace_plans(plan="unknown", **_bad_limits(included_usd=None))
+  enterprise = _workspace_plans(plan="enterprise", **_bad_limits(included_usd=None))
   empty = {"workspaces": [], "current": None}
 
   assert _railway_workspace_plans_contract(unknown) == unknown
+  assert _railway_workspace_plans_contract(enterprise) == enterprise
   assert _railway_workspace_plans_contract(empty) == empty
 
 
