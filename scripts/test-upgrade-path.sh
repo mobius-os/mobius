@@ -228,7 +228,10 @@ else
   reply=$(api POST /api/platform/apply "$plan")
   # Every applied outcome is fine (updated, up_to_date for live-only changes,
   # restart_needed); conflict, rolled_back or an error is a refusal.
-  applied_state=$([ "$(code "$reply")" = 200 ] && field "$(body "$reply")" 'd.get("state")')
+  [ "$(code "$reply")" = 200 ] \
+    || fail "the previous release refused to apply the candidate ($(code "$reply")): $(body "$reply")"
+  applied_state=$(field "$(body "$reply")" 'd.get("state")') \
+    || fail "the previous release returned an invalid apply response ($(code "$reply")): $(body "$reply")"
   if [ "$needs_helper" = true ]; then
     [ "$applied_state" = activation_needed ] && reviewed_helper_preview "$(body "$reply")" \
       || fail "the installed candidate lost its reviewed helper-maintenance handoff: $(body "$reply")"
