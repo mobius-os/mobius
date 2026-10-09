@@ -1,6 +1,8 @@
 """App-attributed notifications drive a durable drawer activity marker."""
 
-from app import models
+from datetime import timedelta
+
+from app import app_activity, models
 from app.broadcast import get_system_broadcast
 
 
@@ -32,9 +34,7 @@ def test_app_notification_marks_list_unseen_and_open_acknowledges(
       "target": f"/shell/?app={app.id}",
     })
     assert sent.status_code == 200, sent.text
-    assert events.get_nowait() == {
-      "type": "app_activity", "appId": str(app.id),
-    }
+    event = events.get_nowait()
   finally:
     system_bus.unsubscribe(events)
 
@@ -43,11 +43,18 @@ def test_app_notification_marks_list_unseen_and_open_acknowledges(
   row = next(item for item in listed.json() if item["id"] == app.id)
   assert row["has_unseen_activity"] is True
   observed_version = row["unseen_activity_version"]
+  # The live event carries exactly what the list row reports, so a shell can
+  # mark this one app without re-downloading the whole app list.
+  assert event == {
+    "type": "app_activity", "appId": str(app.id),
+    "unseenActivityVersion": observed_version,
+    "appCreatedAt": row["created_at"],
+  }
 
   seen = client.post(
     f"/api/apps/{app.id}/activity/seen",
     headers=auth,
-    json={"activity_version": observed_version},
+    json={"activity_version": observed_version, "app_created_at": row["created_at"]},
   )
   assert seen.status_code == 204, seen.text
   row = next(
@@ -55,6 +62,72 @@ def test_app_notification_marks_list_unseen_and_open_acknowledges(
     if item["id"] == app.id
   )
   assert row["has_unseen_activity"] is False
+
+
+def test_stale_or_missing_app_lifetime_cannot_clear_activity(client, auth, db):
+  app = _app(db)
+  assert client.post("/api/notifications/send", headers=auth, json={
+    "title": "Background work finished", "source_type": "app", "source_id": str(app.id),
+  }).status_code == 200
+  state = db.get(models.AppActivityState, app.id)
+  db.refresh(state)
+  response = client.post(f"/api/apps/{app.id}/activity/seen", headers=auth, json={
+    "activity_version": state.activity_version,
+    "app_created_at": "earlier-app-lifetime",
+  })
+  assert response.status_code == 409
+  missing = client.post(f"/api/apps/{app.id}/activity/seen", headers=auth, json={
+    "activity_version": state.activity_version,
+  })
+  assert missing.status_code == 422
+  db.refresh(state)
+  assert state.unseen is True
+
+
+def test_seen_write_rechecks_lifetime_after_route_read(client, auth, db):
+  app = _app(db)
+  assert client.post("/api/notifications/send", headers=auth, json={
+    "title": "Background work finished", "source_type": "app", "source_id": str(app.id),
+  }).status_code == 200
+  state = db.get(models.AppActivityState, app.id)
+  db.refresh(state)
+  original_created_at = app.created_at
+  # Simulate the app identity changing after the route read but before its
+  # acknowledgement UPDATE. The SQL write, not just the route, must reject it.
+  app.created_at = original_created_at + timedelta(seconds=1)
+  db.commit()
+  assert app_activity.mark_seen(db, app.id, state.activity_version, original_created_at) is None
+  db.refresh(state)
+  assert state.unseen is True
+
+
+def test_seen_receipt_reports_only_the_version_actually_cleared(client, auth, db):
+  app = _app(db)
+  assert client.post("/api/notifications/send", headers=auth, json={
+    "title": "Background work finished", "source_type": "app", "source_id": str(app.id),
+  }).status_code == 200
+  state = db.get(models.AppActivityState, app.id)
+  db.refresh(state)
+  version = state.activity_version
+  bus = get_system_broadcast()
+  events = bus.subscribe()
+  try:
+    seen = client.post(f"/api/apps/{app.id}/activity/seen", headers=auth, json={
+      "activity_version": version + 100,
+      "app_created_at": app.created_at.isoformat(),
+    })
+    assert seen.status_code == 204
+    assert events.get_nowait() == {
+      "type": "app_activity_seen", "appId": str(app.id),
+      "appCreatedAt": app.created_at.isoformat(), "seenThroughVersion": version,
+    }
+    assert client.post(f"/api/apps/{app.id}/activity/seen", headers=auth, json={
+      "activity_version": version + 100,
+      "app_created_at": app.created_at.isoformat(),
+    }).status_code == 204
+    assert events.empty(), "a duplicate acknowledgement is not new evidence"
+  finally:
+    bus.unsubscribe(events)
 
 
 def test_late_seen_request_does_not_erase_newer_app_activity(client, auth, db):
@@ -79,7 +152,7 @@ def test_late_seen_request_does_not_erase_newer_app_activity(client, auth, db):
   stale = client.post(
     f"/api/apps/{app.id}/activity/seen",
     headers=auth,
-    json={"activity_version": observed_version},
+    json={"activity_version": observed_version, "app_created_at": app.created_at.isoformat()},
   )
   assert stale.status_code == 204
   db.refresh(first)
@@ -88,7 +161,7 @@ def test_late_seen_request_does_not_erase_newer_app_activity(client, auth, db):
   current = client.post(
     f"/api/apps/{app.id}/activity/seen",
     headers=auth,
-    json={"activity_version": newer_version},
+    json={"activity_version": newer_version, "app_created_at": app.created_at.isoformat()},
   )
   assert current.status_code == 204
   db.refresh(first)
@@ -108,7 +181,7 @@ def test_seen_rejects_versions_outside_sqlite_integer_range(client, auth, db):
     response = client.post(
       f"/api/apps/{app.id}/activity/seen",
       headers=auth,
-      json={"activity_version": invalid_version},
+      json={"activity_version": invalid_version, "app_created_at": app.created_at.isoformat()},
     )
     assert response.status_code == 422, response.text
 

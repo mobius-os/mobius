@@ -94,6 +94,9 @@ import {
   appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
+  rememberSeenAppActivity,
+  seenAppActivityVersion,
+  withAppActivity,
   withAppActivitySeen,
   withAppsFlagged,
   withoutAppFlagged,
@@ -2299,6 +2302,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // duplicate renders share one request, while genuinely newer activity can
   // be acknowledged independently without waiting for an older request.
   const appActivityAckRef = useRef(new Set())
+  // Highest acknowledged version per app lifetime. Retain old lifetimes for
+  // this mounted session so delayed receipts/events cannot cross ID reuse.
+  const appActivitySeenThroughRef = useRef(new Map())
   useEffect(() => {
     for (const rawId of visibleAppIds) {
       const appId = Number(rawId)
@@ -2306,15 +2312,22 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       const app = apps.find(row => Number(row.id) === appId)
       if (!app?.has_unseen_activity || !app?.unseen_activity_version) continue
       const observedActivityVersion = app.unseen_activity_version
+      const appCreatedAt = app.created_at
       acknowledgeAppActivity({
         appId,
         activityVersion: observedActivityVersion,
+        appCreatedAt,
         inFlight: appActivityAckRef.current,
         request: api.apps.markActivitySeen,
+        confirmSeen: (seenAppId, seenThroughVersion) => {
+          rememberSeenAppActivity(
+            appActivitySeenThroughRef.current, seenAppId, appCreatedAt, seenThroughVersion,
+          )
+        },
         clearCached: (seenAppId, seenThroughVersion) => {
           queryClient.setQueryData(
             appQueries.keys.all,
-            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion),
+            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion, appCreatedAt),
           )
         },
         restoreServerTruth: () => appQueries.list.invalidate(queryClient),
@@ -2986,11 +2999,32 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Allowance changes leave sign-in and available models unchanged.
       void settingsQueries.providerUsage.reset(queryClient, ev.provider)
     } else if (ev.type === 'app_activity') {
-      // A durable activity marker (an app-attributed notification) or the
-      // app's reported unread badge changed. A refetch surfaces the dot or
-      // pill; if the app is already visible, the effect
-      // above immediately acknowledges it instead of leaving a stale nudge.
-      void invalidateShellListCache('apps').then(refreshApps)
+      // Versioned notification activity updates one cached app. Badge changes
+      // and unknown markers still require the authoritative list.
+      const next = queryClient.isFetching({ queryKey: appQueries.keys.all }) === 0
+        ? withAppActivity(
+          queryClient.getQueryData(appQueries.keys.all),
+          ev.appId,
+          ev.unseenActivityVersion,
+          {
+            appCreatedAt: ev.appCreatedAt,
+            seenThrough: seenAppActivityVersion(
+              appActivitySeenThroughRef.current, ev.appId, ev.appCreatedAt,
+            ),
+          },
+        )
+        : null
+      if (next) queryClient.setQueryData(appQueries.keys.all, next)
+      else void invalidateShellListCache('apps').then(refreshApps)
+    } else if (ev.type === 'app_activity_seen') {
+      // An app opened in another tab may have cleared a notification before
+      // this tab processes its earlier activity event. The exact cleared
+      // version prevents that delayed event from re-lighting the dot.
+      rememberSeenAppActivity(
+        appActivitySeenThroughRef.current, ev.appId, ev.appCreatedAt, ev.seenThroughVersion,
+      )
+      queryClient.setQueryData(appQueries.keys.all, rows =>
+        withAppActivitySeen(rows, ev.appId, ev.seenThroughVersion, ev.appCreatedAt))
     } else if (ev.type === 'chat_deleted') {
       // Exact mutation evidence from this or another live tab. Update the
       // in-memory drawer synchronously; the normal missing-active-chat effect

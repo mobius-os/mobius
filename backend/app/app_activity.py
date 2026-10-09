@@ -1,6 +1,8 @@
 """Durable per-app unread activity derived from app-attributed notifications."""
 
-from sqlalchemy import update
+from datetime import datetime
+
+from sqlalchemy import exists, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -67,21 +69,43 @@ def mark_from_notification(
   return app_id
 
 
-def mark_seen(db: Session, app_id: int, seen_through_version: int) -> None:
+def unseen_activity_marker(db: Session, app_id: int) -> tuple[int, str] | None:
+  """The unread version and app lifetime reported by the app list."""
+  row = db.query(
+    models.AppActivityState.activity_version, models.App.created_at,
+  ).join(models.App, models.App.id == models.AppActivityState.app_id).filter(
+    models.AppActivityState.app_id == app_id,
+    models.AppActivityState.unseen.is_(True),
+  ).first()
+  return (row.activity_version, row.created_at.isoformat()) if row else None
+
+
+def mark_seen(
+  db: Session, app_id: int, seen_through_version: int, app_created_at: datetime,
+) -> int | None:
   """Acknowledge only activity the opening shell actually observed.
 
   A newer notification can race the acknowledgement request. Bounding the
   update by its observed monotonic version keeps that newer event unread instead of
-  letting a late acknowledgement erase it.
+  letting a late acknowledgement erase it. Check the app lifetime in the same
+  SQL statement, not just in the route's earlier identity read.
   """
-  db.execute(
+  row = db.execute(
     update(models.AppActivityState)
     .where(
       models.AppActivityState.app_id == app_id,
       models.AppActivityState.activity_version <= seen_through_version,
+      models.AppActivityState.unseen.is_(True),
+      exists().where(
+        models.App.id == app_id,
+        models.App.created_at == app_created_at,
+        models.App.deleted_at.is_(None),
+      ),
     )
     .values(unseen=False)
-  )
+    .returning(models.AppActivityState.activity_version)
+  ).first()
+  return row[0] if row else None
 
 
 def annotate_apps(db: Session, apps: list[models.App]) -> list[models.App]:

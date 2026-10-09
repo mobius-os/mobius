@@ -81,13 +81,14 @@ export function appAttentionIds(apps, newAppIds, visibleAppIds = []) {
 
 // Optimistically clear the query-cache flag as soon as a visible app is
 // acknowledged. A failed POST invalidates the list and restores server truth.
-export function withAppActivitySeen(apps, appId, seenThroughVersion = Infinity) {
+export function withAppActivitySeen(apps, appId, seenThroughVersion = Infinity, appCreatedAt) {
   const id = Number(appId)
   const seenThrough = Number(seenThroughVersion)
   if (!Array.isArray(apps) || Number.isNaN(id)) return apps
   let changed = false
   const next = apps.map(app => {
-    if (Number(app?.id) !== id || !app?.has_unseen_activity) return app
+    if (Number(app?.id) !== id || !app?.has_unseen_activity ||
+        (appCreatedAt !== undefined && app.created_at !== appCreatedAt)) return app
     const rowVersion = Number(app.unseen_activity_version)
     if (
       Number.isFinite(seenThrough) &&
@@ -104,6 +105,53 @@ export function withAppActivitySeen(apps, appId, seenThroughVersion = Infinity) 
   return changed ? next : apps
 }
 
+// Apply one live app_activity marker to the cached list, so the drawer dot
+// appears without re-downloading every app row. Returns null when the event
+// carries no version or the app is not cached: the caller then refetches
+// server truth. A version the shell already acknowledged never re-lights.
+export function withAppActivity(apps, appId, activityVersion, { seenThrough, appCreatedAt } = {}) {
+  const id = Number(appId)
+  const version = Number(activityVersion)
+  if (!Array.isArray(apps) || !Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(version) || version <= 0 || !appCreatedAt) {
+    return null
+  }
+  let found = false
+  let changed = false
+  const next = apps.map(app => {
+    if (Number(app?.id) !== id) return app
+    if (app.created_at !== appCreatedAt) return app
+    found = true
+    if (Number.isFinite(Number(seenThrough)) && version <= Number(seenThrough)) {
+      return app
+    }
+    const current = Number(app.unseen_activity_version)
+    if (app.has_unseen_activity && Number.isFinite(current) && current >= version) {
+      return app
+    }
+    changed = true
+    return { ...app, has_unseen_activity: true, unseen_activity_version: version }
+  })
+  if (!found) return null
+  return changed ? next : apps
+}
+
+// Seen receipts from this tab or another tab share one lifetime-bound floor.
+// The server reports the version it actually cleared, not a caller's larger
+// requested bound, so this can never hide future activity.
+const appActivityLifetimeKey = (id, createdAt) => `${id}:${createdAt}`
+
+export function rememberSeenAppActivity(seen, appId, appCreatedAt, version) {
+  const id = Number(appId)
+  const n = Number(version)
+  if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(n) || n <= 0 || !appCreatedAt) return
+  const key = appActivityLifetimeKey(id, appCreatedAt)
+  seen.set(key, Math.max(seen.get(key) ?? 0, n))
+}
+
+export function seenAppActivityVersion(seen, appId, appCreatedAt) {
+  return seen.get(appActivityLifetimeKey(Number(appId), appCreatedAt))
+}
+
 // Own one exact app/version acknowledgement. The key is released before a
 // failed request restores server truth, so the resulting refetch can retry
 // immediately while the app is still visible. A successful request clears the
@@ -112,20 +160,23 @@ export function withAppActivitySeen(apps, appId, seenThroughVersion = Infinity) 
 export async function acknowledgeAppActivity({
   appId,
   activityVersion,
+  appCreatedAt,
   inFlight,
   request,
   clearCached,
+  confirmSeen = () => {},
   restoreServerTruth,
 }) {
-  const key = `${appId}:${activityVersion}`
+  const key = `${appId}:${activityVersion}${appCreatedAt ? `:${appCreatedAt}` : ''}`
   if (inFlight.has(key)) return false
   inFlight.add(key)
   clearCached(appId, activityVersion)
   try {
-    const response = await request(appId, activityVersion)
+    const response = await request(appId, activityVersion, appCreatedAt)
     if (!response?.ok) {
       throw new Error(`activity acknowledgement failed (${response?.status ?? 'unknown'})`)
     }
+    confirmSeen(appId, activityVersion)
     clearCached(appId, activityVersion)
     return true
   } catch {

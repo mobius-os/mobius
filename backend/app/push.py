@@ -244,12 +244,17 @@ def _prepare_owner_notification(
     return notification_id, None
 
   if activity_app_id is not None:
-    # The row above is durable; this replay-free event only makes a live shell
-    # refetch immediately. A reconnect/boot refetch recovers a missed event.
+    # The row above is durable. The replay-free event carries the committed
+    # marker version so a live shell marks that one app instead of
+    # re-downloading every app row; a reconnect/boot refetch recovers a missed
+    # event.
+    from app.app_activity import unseen_activity_marker
     from app.broadcast import get_system_broadcast
-    get_system_broadcast().publish({
-      "type": "app_activity", "appId": str(activity_app_id),
-    })
+    event = {"type": "app_activity", "appId": str(activity_app_id)}
+    marker = unseen_activity_marker(db, activity_app_id)
+    if marker is not None:
+      event["unseenActivityVersion"], event["appCreatedAt"] = marker
+    get_system_broadcast().publish(event)
 
   # Replay-free nudge so a live shell's bell badge refetches immediately;
   # an SSE-reconnect refetch recovers any missed event. Deliberately BEFORE
