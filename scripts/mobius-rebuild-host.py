@@ -1142,6 +1142,14 @@ def return_unverified_request(request: Path, claimed: Path) -> None:
 
 
 def run() -> int:
+    launcher = os.environ.get("MOBIUS_REBUILD_LAUNCHER")
+    if launcher is not None and (not launcher.isdigit() or int(launcher) < 2):
+        # A legacy launcher cannot retain this trial's recovery owner. Leave
+        # both status and request untouched: its unchanged-status success path
+        # puts the candidate back instead of consuming the one-shot trial.
+        print("Reinstall the reviewed host helper before another replacement; "
+              "launcher revision 2 is required.", file=sys.stderr)
+        return 0
     config_value = config()
     request = config_value["control_dir"] / "inbox" / "request.json"
     if not os.path.lexists(request):

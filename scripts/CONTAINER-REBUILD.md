@@ -193,38 +193,64 @@ it) above every revision offered or installed so far. That high-water mark
 never drops, so neither a dropped candidate nor an older official image's
 worker is ever offered again.
 
-The launcher removes the candidate from its record before trying it on the
-next replacement, so a trial that the host interrupts is never repeated. The
-candidate becomes active only when that replacement succeeds, and only if no
-newer worker was installed while it ran. Otherwise the proven worker handles
-the retry, and `reconcile` always runs the proven worker. A faulty worker change
-therefore costs one update attempt, never the ability to update. Worker files
-are small and never deleted.
+The launcher moves a candidate into a durable recovery-owner pin before its
+one trial. Only that exact, hash-verified worker reconciles its unfinished
+transaction; the old active worker cannot interpret a new worker's preboot
+stages. A separate trial lock survives launcher death in the child process,
+including the window before the worker creates its journal. Neither recovery
+nor an interrupted launcher replays the candidate's original `run`.
 
-Worker changes reach installed hosts through ordinary updates, taking effect
-from the replacement after the release that ships them, so keep each change
-compatible with its predecessor for one release. CI requires a higher
-`WORKER_REVISION` whenever the worker changes, and a post-publish job proves
-that each published worker reaches a host installed from the previous release
-and performs a real replacement there.
+A fresh successful outcome promotes the candidate only when its recorded
+predecessor remains active. The pin retains the baseline operation/status so
+recovery can finish promotion after a crash without trusting stale success.
+A rollback or failed trial keeps the previous active worker. Worker files are
+small and never deleted while the index can still name them.
 
-Before it drains the running app, a worker records the replacement in
-`/var/lib/mobius-rebuild/transaction.json`: operation, nonce, and previous
-image ID. Compose starts the verified image through a helper-owned tag pointed
-at its ID (`mobius-rebuild-target`). The worker currently on `main` attempts to
-restore the recorded previous image after an interrupted replacement; that
-attempt can fail and leave the journal and `needs_recovery` status in place.
-The separately reviewed controller migration (#1745) is intended to first
-observe whether the journaled target actually completed, retain an ambiguous
-journal even if a container is healthy, and report a durable but handoff-degraded
-service outcome without reversing it. Those newer behaviors apply only after
-that controller is integrated and installed; this document does not claim they
-run on the current helper. In either case, the app must preserve unresolved
-status and binding, refuse retry and cancellation, and not mask it with an
-unrelated queued inbox file. A new request waits until the journal is settled.
-Failure handling, rollback and settlement run under the replacement lock that
-the installer and `reconcile` also take. The record's schema is shared by every
-worker revision.
+Worker changes normally reach installed hosts through ordinary updates. Changes
+to the frozen launcher or systemd units instead require the explicit helper
+migration. Revision **4** installs launcher revision **2**, including pinned
+recovery ownership; an image update alone does not replace that launcher.
+Reinstall from the reviewed checkout only during separately authorized host
+maintenance. The installer preserves an unresolved transaction; installation
+is not permission to discard handoff evidence or perform another cutover.
+A new worker refuses a replacement trial under launcher revision 1 without
+changing status or claiming the request, allowing that launcher to put the
+candidate back for the installer. The app's unclaimed-request status makes
+that queued condition actionable without changing the root trial outcome.
+An interrupted legacy launcher can still
+lose that pending candidate; its revision high-water protection is not bypassed.
+A fixed helper without a launcher remains supported and reconciles its own work.
+
+### Recovery transitions
+
+Every worker transition below holds `replace.lock`. A transaction is removed
+only after publishing its durable outcome. Reconciliation repeats observations,
+not an already-consumed chat handoff.
+
+| Durable state | Evidence required | Permitted next action |
+| --- | --- | --- |
+| Prepared replacement | Exact previous image and accepted cutover | Journal replacement intent before Compose mutates the app |
+| Replacement started | Fresh whole-container observation | Observe the target; retain an old source still running; restore only the recorded previous image |
+| Rollback creating | Recognized target/previous image, no prior rollback boot | Compose creates without starting; journal exact rollback container |
+| Rollback prepared | Exact container has never started | Refresh acceptance only within the original receipt lifetime; persist start intent before starting |
+| Rollback starting | Exact never-started container **and** unchanged trusted unconsumed acceptance | Persist a preboot transition before refreshing expired acceptance; never retry from Docker metadata alone |
+| Rollback running/restarting | Exact previous image | Observe readiness; never recreate a boot that is making progress |
+| Healthy with missing handoff proof | No exact consumed receipt | Keep service running and retain `needs_recovery`; do not manufacture an ACK |
+| Durable outcome | Exact outcome already recorded | Republish status and clear the journal, without another boot |
+
+A failed container observation retries discovery and inspection together.
+Multiple containers are ambiguous, not a reason to pick the first ID. The
+recurring systemd timer continues reconciliation after transient Docker errors
+or a lost immediate recovery attempt. Boot budgets include slow readiness plus
+rollback work and observation overhead; these are bounded independently of
+query timeouts.
+
+The supervisor consumes acceptance outside the host replacement lock. Its
+root-owned ledger is therefore separate authority: Docker's `created` state
+or zero `StartedAt` cannot establish that handoff authorization is unconsumed.
+The original receipt expires after one hour; refreshed preboot acceptance does
+not extend it. Expiry can leave a serviceable rollback with manual chat recovery
+still required. Never clear that transaction merely because health is green.
 
 The root status records `worker_revision`, `launcher_revision` and the last
 `worker_adoption` outcome for operators. Fixed helpers keep working: the app does not require the launcher, and

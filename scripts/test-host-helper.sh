@@ -31,8 +31,9 @@
 # 2. Install the helper once from that checkout.
 # 3. The app requests <target>: the installed worker replaces the container
 #    and offers <target>'s worker when its revision is higher.
-# 4. The app requests <previous> again: the offered worker performs this real
-#    replacement and becomes the active worker.
+# 4. When the target advances the frozen helper requirement, explicitly install
+#    that migration and prove the old launcher preserves the queued request.
+#    The offered/installed worker then performs the real replacement to <previous>.
 
 set -euo pipefail
 
@@ -243,8 +244,10 @@ fi
 
 echo "2. the owner installs the helper once, from that checkout"
 scripts/install-rebuild-helper.sh || fail "the installer failed"
-[[ $(field "$STATUS" 'd.get("launcher_revision")') == 1 ]] \
-  || fail "the installed helper is not the launcher"
+seed_launcher=$(git -C "$ROOT" show "$PREVIOUS:scripts/mobius-rebuild-launcher.py" \
+  | sed -n 's/^LAUNCHER_REVISION = \([0-9]*\)$/\1/p')
+[[ $(field "$STATUS" 'd.get("launcher_revision")') == "$seed_launcher" ]] \
+  || fail "the installed helper is not the previous release's launcher"
 [[ $(active_revision) == "$seeded" ]] || fail "the installed worker is not revision $seeded"
 
 if [[ $REPLAY == 1 ]]; then
@@ -348,8 +351,48 @@ if (( target_revision > seeded )); then
   [[ $adoption == offered* ]] || fail "revision $target_revision was not offered"
 fi
 
+# Worker bytes cannot upgrade the frozen launcher/units. Exercise the same
+# explicit host-maintenance step required of an owner, without starting another
+# app replacement or pretending the image installed these files by itself.
+previous_helper=$(git -C "$ROOT" show "$PREVIOUS:deployment/self-hosted-helper.required")
+target_helper=$(git -C "$ROOT" show "$TARGET:deployment/self-hosted-helper.required")
+nonce=
+if (( target_helper > previous_helper )); then
+  # Stop dispatch, not the app, so the old launcher's refusal can be observed
+  # without a concurrent ExecStopPost status refresh obscuring the proof.
+  systemctl stop mobius-rebuild.path
+  if systemctl cat mobius-rebuild-reconcile.timer >/dev/null 2>&1; then
+    systemctl stop mobius-rebuild-reconcile.timer
+  fi
+  for _ in $(seq 1 60); do
+    systemctl is-active --quiet mobius-rebuild.service || break
+    sleep 2
+  done
+  systemctl is-active --quiet mobius-rebuild.service && fail "previous replacement still running"
+  nonce=$(queue "$PREVIOUS")
+  if (( seed_launcher == 1 && target_helper >= 4 )); then
+    prior_status=$(sha256sum "$STATUS")
+    prior_container=$(docker inspect -f '{{.Id}}' mobius)
+    /usr/local/libexec/mobius-rebuild-host run || fail "legacy launcher admission failed"
+    [[ $(sha256sum "$STATUS") == "$prior_status" ]] || fail "legacy trial changed status"
+    [[ $(docker inspect -f '{{.Id}}' mobius) == "$prior_container" ]] || fail "legacy trial replaced app"
+    python3 - "$target_revision" <<'PENDING'
+import json, sys
+from pathlib import Path
+index = json.loads(Path("/var/lib/mobius-rebuild/workers.json").read_text())
+assert index["candidate"]["revision"] == int(sys.argv[1]), "candidate was consumed"
+assert not Path("/var/lib/mobius-rebuild/transaction.json").exists(), "legacy trial journaled"
+PENDING
+    docker exec mobius test -f /data/mobius-rebuild/inbox/request.json \
+      || fail "legacy trial claimed the queued request"
+  fi
+  echo "   install the target's explicitly required host-helper migration"
+  git -C "$SEED" checkout -q "$TARGET"
+  "$SEED/scripts/install-rebuild-helper.sh" || fail "target helper migration failed"
+fi
+
 echo "4. the app requests the previous release again"
-nonce=$(queue "$PREVIOUS")
+[[ -n $nonce ]] || nonce=$(queue "$PREVIOUS")
 wait_status "$nonce" succeeded
 replaced_with "$PREVIOUS"
 expected=$(( target_revision > seeded ? target_revision : seeded ))

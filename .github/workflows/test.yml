@@ -214,6 +214,15 @@ jobs:
           mypy
       - name: Verify recovery timer and queued-request dispatch on real systemd
         run: sudo env GITHUB_ACTIONS=true python3 scripts/test-rebuild-recovery-units.py
+      - name: Prove rebuild recovery against disposable Docker and the real ledger
+        # Root is needed for the Host's root-trusted receipt checks. This runs
+        # only on GitHub-hosted runners, uses unique local images/projects, and
+        # never reaches a production daemon or registry.
+        run: >-
+          sudo env PATH="$PATH" GITHUB_ACTIONS=true
+          RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"
+          MOBIUS_DOCKER_RECOVERY_PROOF=1
+          python3 scripts/test-rebuild-recovery-docker.py
       - name: Audit locked Python runtime dependencies
         working-directory: backend
         run: pip-audit --strict --disable-pip -r requirements.lock

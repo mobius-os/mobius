@@ -1485,8 +1485,8 @@ def test_generated_units_allow_the_bounded_recovery_budget(tmp_path):
   assert host.ROLLBACK_HEALTH_SECONDS == 600
   assert host.WORKER_REVISION > 2
   marker = SCRIPT.parents[1] / "deployment" / "self-hosted-helper.required"
-  assert marker.read_text().strip() == "3"
-  assert "# Helper protocol revision: 3 " in source
+  assert marker.read_text().strip() == "4"
+  assert "# Helper protocol revision: 4 " in source
   impact = platform_activation.classify_activation(
     ["deployment/self-hosted-helper.required"], deployment="self_hosted",
   )
@@ -2233,3 +2233,26 @@ def test_consumed_proof_rechecks_pending_authorization_after_snapshot(tmp_path, 
   monkeypatch.setattr(host.os, "stat", appearing)
   assert not host.cutover_boot_consumed(config, transaction["operation_id"])
   assert checks[0] == 2
+
+
+@pytest.mark.parametrize("revision", ["1", "0", "", "invalid"])
+def test_incompatible_launcher_leaves_trial_and_request_unconsumed(monkeypatch, capsys, revision):
+  monkeypatch.setenv("MOBIUS_REBUILD_LAUNCHER", revision)
+  monkeypatch.setattr(host, "config", lambda: pytest.fail("must not inspect or mutate before admission"))
+  assert host.run() == 0
+  assert "launcher revision 2 is required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("revision", [None, "2", "3"])
+def test_fixed_helper_and_compatible_launcher_reach_normal_admission(monkeypatch, revision):
+  if revision is None:
+    monkeypatch.delenv("MOBIUS_REBUILD_LAUNCHER", raising=False)
+  else:
+    monkeypatch.setenv("MOBIUS_REBUILD_LAUNCHER", revision)
+  class Admitted(Exception):
+    pass
+  def config():
+    raise Admitted
+  monkeypatch.setattr(host, "config", config)
+  with pytest.raises(Admitted):
+    host.run()

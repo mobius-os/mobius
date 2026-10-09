@@ -6,7 +6,6 @@ import hashlib
 import importlib.util
 import io
 import json
-import multiprocessing
 import os
 import signal
 import subprocess
@@ -408,10 +407,33 @@ elif sys.argv[1] == 'reconcile':
   assert host.offer_worker(worker(2, body), IMAGE_ID).startswith("offered")
   monkeypatch.setattr(launcher.os, "geteuid", lambda: 0)
   monkeypatch.setattr(launcher, "PYTHON", sys.executable)
-  process = multiprocessing.get_context("fork").Process(
-    target=launcher.main, args=(["launcher", "run"],),
-  )
-  process.start()
+  # Start a fresh interpreter: forking the threaded pytest process can itself
+  # deadlock before the ownership boundary this regression is meant to test.
+  bootstrap = f"""import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('launcher', {str(ROOT / 'scripts/mobius-rebuild-launcher.py')!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+base = Path({str(state)!r})
+module.STATE_DIR = base
+for name, relative in {{'WORKERS':'workers', 'INDEX':'workers.json', 'STATUS':'status.json',
+                       'LOCK':'replace.lock', 'TRIAL_LOCK':'candidate.lock',
+                       'TRANSACTION':'transaction.json'}}.items():
+    setattr(module, name, base / relative)
+uid = os.getuid()
+def private(path, *, directory):
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    kind = 0o040000 if directory else 0o100000
+    return info.st_mode & 0o170000 == kind and info.st_uid == uid and not info.st_mode & 0o077
+module._root_private = private
+module.os.geteuid = lambda: 0
+module.PYTHON = sys.executable
+raise SystemExit(module.main(['launcher', 'run']))
+"""
+  process = subprocess.Popen([sys.executable, "-c", bootstrap])
   child_pid = None
   try:
     deadline = time.monotonic() + 5
@@ -420,8 +442,8 @@ elif sys.argv[1] == 'reconcile':
     assert (state / "child-ready").exists()
     child_pid = int((state / "child-ready").read_text())
     process.kill()  # after Popen, before the child writes transaction.json
-    process.join(timeout=5)
-    assert not process.is_alive()
+    process.wait(timeout=5)
+    assert process.poll() is not None
     assert not launcher.TRANSACTION.exists()
     assert launcher.main(["launcher", "reconcile"]) == 0
     assert _index(state)["recovery"]["revision"] == 2
@@ -437,9 +459,9 @@ elif sys.argv[1] == 'reconcile':
     assert _index(state)["active"]["revision"] == 1
     assert not launcher.TRANSACTION.exists()
   finally:
-    if process.is_alive():
+    if process.poll() is None:
       process.kill()
-      process.join(timeout=5)
+      process.wait(timeout=5)
     if child_pid is not None and not (state / "child-done").exists():
       try:
         os.kill(child_pid, signal.SIGKILL)

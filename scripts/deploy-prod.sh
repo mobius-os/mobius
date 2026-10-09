@@ -1059,6 +1059,7 @@ info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 # the Compose tag everywhere is load-bearing: otherwise preflight can boot the
 # old image and rollback can re-tag a reference Compose never recreates.
 PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
+RUNNING_CID=$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null || echo "")
 RUNNING_IMAGE_REF=$(
   docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo ""
 )
@@ -1067,6 +1068,70 @@ RUNNING_CONFIG_HASH=$(
     '{{ index .Config.Labels "com.docker.compose.config-hash" }}' \
     "$CONTAINER" 2>/dev/null || echo ""
 )
+if [ -z "$RUNNING_CID" ] || [ -z "$PREV_IMAGE" ]; then
+  fail "could not snapshot the running container identity; refusing to deploy"
+  exit 1
+fi
+
+# The per-user deploy lock does not serialize the root replacement helper.
+# Take its *existing* private lock only after build/preflight, immediately
+# before touching the live app or cutover ledger. FD 8 stays open through
+# health verification, receipt finalization, and any rollback. Never create
+# or chmod the helper's lock from this unprivileged deployment script.
+acquire_helper_replacement_fence() {
+  local state=/var/lib/mobius-rebuild config=/etc/mobius-rebuild
+  local lock="$state/replace.lock" journal="$state/transaction.json"
+  local owner mode
+  [ "$TARGET" = "prod" ] || return 0
+  if [ ! -e "$state" ] && [ ! -L "$state" ] && \
+     [ ! -e "$config" ] && [ ! -L "$config" ]; then
+    return 0  # no root helper installed on this host
+  fi
+  if [ ! -d "$state" ] || [ -L "$state" ] || \
+     [ ! -f "$lock" ] || [ -L "$lock" ]; then
+    fail "the root replacement helper is present but its private lock is unavailable; ask the host administrator to inspect $lock"
+    return 1
+  fi
+  if ! read -r owner mode < <(stat -c '%u %a' "$state" 2>/dev/null) || \
+     [ "$owner" != 0 ] || (( (8#$mode & 077) != 0 )); then
+    fail "the root replacement helper state is not root-private; refusing to cut over"
+    return 1
+  fi
+  if ! read -r owner mode < <(stat -c '%u %a' "$lock" 2>/dev/null) || \
+     [ "$owner" != 0 ] || (( (8#$mode & 077) != 0 )); then
+    fail "the root replacement lock is not root-private; refusing to cut over"
+    return 1
+  fi
+  if ! exec 8<>"$lock"; then
+    fail "cannot open $lock; run this deployment with the host privileges needed for the root helper, or ask the host administrator"
+    return 1
+  fi
+  if ! flock -n 8; then
+    fail "the root replacement helper owns $lock; wait for it to settle, then retry the deployment"
+    return 1
+  fi
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fail "the root replacement helper has a pending transaction at $journal; reconcile it before deploying"
+    return 1
+  fi
+}
+
+revalidate_live_snapshot() {
+  local cid image ref config_hash
+  cid=$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null) || cid=""
+  image=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null) || image=""
+  ref=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null) || ref=""
+  config_hash=$(docker inspect -f \
+    '{{ index .Config.Labels "com.docker.compose.config-hash" }}' \
+    "$CONTAINER" 2>/dev/null) || config_hash=""
+  if [ -z "$cid" ] || [ "$cid" != "$RUNNING_CID" ] || \
+     [ "$image" != "$PREV_IMAGE" ] || \
+     [ "$ref" != "$RUNNING_IMAGE_REF" ] || \
+     [ "$config_hash" != "$RUNNING_CONFIG_HASH" ]; then
+    fail "the live ${CONTAINER} changed during build/preflight; no cutover was attempted. Re-run deploy from a fresh snapshot"
+    return 1
+  fi
+}
 # Ask Compose once instead of duplicating the prod and test defaults here. This
 # also honors an image configured in .env before we freeze the result for the
 # preflight, cutover, and rollback paths.
@@ -1536,6 +1601,9 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
     fail "the preflighted image has no verifiable source revision"
     exit 1
   fi
+  presence_gate "cutover (recreate ${CONTAINER})"
+  acquire_helper_replacement_fence
+  revalidate_live_snapshot
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     step "install the image's reviewed source before container replacement"
     source_bundle=$(mktemp)
@@ -1574,7 +1642,11 @@ fi
 
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
-presence_gate "cutover (recreate ${CONTAINER})"
+if [ "$BUILT_THIS_RUN" != "1" ]; then
+  presence_gate "cutover (recreate ${CONTAINER})"
+  acquire_helper_replacement_fence
+  revalidate_live_snapshot
+fi
 TARGET_IMAGE=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)
 FORCE_APP_RECREATE=0
 if [ "$TARGET" = "prod" ] && [ -n "$TARGET_IMAGE" ] && \

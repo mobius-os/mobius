@@ -6,7 +6,7 @@ set -euo pipefail
 # This installs the frozen launcher and seeds it with this checkout's worker;
 # later worker changes arrive with verified official images, so this runs once.
 #
-# Helper protocol revision: 3 (recurring, interruption-safe replacement recovery).
+# Helper protocol revision: 4 (pinned candidate recovery ownership).
 # Keep in step with deployment/self-hosted-helper.required; never decrement.
 
 if [[ $EUID -ne 0 ]]; then
