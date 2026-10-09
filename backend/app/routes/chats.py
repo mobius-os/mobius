@@ -705,6 +705,7 @@ def _chat_detail_response(
   from app.chat_media_dimensions import project_message_image_dimensions
   page = project_message_image_dimensions(
     page,
+    db=db,
     chat_id=chat.id,
     data_dir=get_settings().data_dir,
   )

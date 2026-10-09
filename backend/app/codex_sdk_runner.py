@@ -26,6 +26,7 @@ advertise it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import concurrent.futures as _cf
 import functools
@@ -33,6 +34,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,6 +125,42 @@ HELPER_PROGRESS_INTERVAL_S = 3.0
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
   """Supply the configured-data fallback without overriding provider setup."""
   env.setdefault("CODEX_HOME", str(Path(data_dir) / "cli-auth" / "codex"))
+
+
+def _stage_codex_generated_image(data_dir: str, chat_id: str, result: str) -> str:
+  """Stage the native PNG result, never read a provider-supplied saved path.
+
+  Use the existing deliverable inbox/publication lifecycle for confinement,
+  immutable storage, authorization, and crash recovery. Image bytes stay out
+  of tool outputs and chat JSON.
+  """
+  if not isinstance(result, str) or not result:
+    raise ValueError("generated image result is missing")
+  limit = generated_files.MAX_RECORDED_BYTES
+  if len(result) > ((limit + 2) // 3) * 4:
+    raise ValueError("generated image exceeds the deliverable size limit")
+  content = base64.b64decode(result.strip(), validate=True)
+  if len(content) > limit or not content.startswith(b"\x89PNG\r\n\x1a\n"):
+    raise ValueError("generated image result is not a supported PNG")
+  directory = generated_files.output_dir(data_dir, chat_id, create=True)
+  directory_fd = generated_files._open_directory(directory, create=False)
+  name = f"generated-image-{uuid.uuid4().hex}.png"
+  temporary = f".{name}.tmp"
+  try:
+    fd = os.open(
+      temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+      dir_fd=directory_fd,
+    )
+    with os.fdopen(fd, "wb") as stream:
+      stream.write(content)
+    os.rename(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    return name
+  finally:
+    try:
+      os.unlink(temporary, dir_fd=directory_fd)
+    except FileNotFoundError:
+      pass
+    os.close(directory_fd)
 
 
 def _process_group_capture_delay(elapsed: float) -> float:
@@ -942,6 +980,7 @@ def _sdk_imports() -> dict[str, Any]:
     ErrorNotification,
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
+    ImageGenerationThreadItem,
     ImageViewThreadItem,
     ItemCompletedNotification,
     ItemGuardianApprovalReviewCompletedNotification,
@@ -997,6 +1036,7 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
+    "ImageGenerationThreadItem": ImageGenerationThreadItem,
     "ImageViewThreadItem": ImageViewThreadItem,
     "Personality": Personality,
     "ReasoningEffort": ReasoningEffort,
@@ -1610,6 +1650,7 @@ async def _run_codex_sdk_turn(
   # completed item. Retain them only for the lifetime of this turn so a Codex
   # path that omits that aggregate can still publish one authoritative result.
   command_output_deltas: dict[str, list[str]] = {}
+  delivered_image_ids: set[str] = set()
   helper_host = None
   codex_context = (
     sdk["AsyncCodex"](config=config) if helper_host_key is None else None
@@ -2113,6 +2154,34 @@ async def _run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          image_generation_cls = sdk.get("ImageGenerationThreadItem")
+          image_delivery_error = None
+          if (
+            image_generation_cls is not None
+            and isinstance(item, image_generation_cls)
+            and item.id in delivered_image_ids
+          ):
+            continue  # A repeated completion must not create a second image.
+          if (
+            image_generation_cls is not None
+            and isinstance(item, image_generation_cls)
+            and item.status == "completed"
+            and getattr(item, "failure", None) is None
+          ):
+            try:
+              image_name = await asyncio.to_thread(
+                _stage_codex_generated_image, runtime_data_dir, chat_id, item.result,
+              )
+              published = await generated_files.publish_inbox_files(
+                bc, data_dir=runtime_data_dir, chat_id=chat_id,
+              )
+              if image_name not in published:
+                image_delivery_error = "The image was generated, but Möbius could not attach it."
+              else:
+                delivered_image_ids.add(item.id)
+            except (OSError, ValueError):
+              log.warning("Codex generated-image capture failed chat_id=%s", chat_id, exc_info=True)
+              image_delivery_error = "The image was generated, but Möbius could not attach it."
           if isinstance(item, sdk["ContextCompactionThreadItem"]):
             _publish_codex_context_compaction(bc, chat_id)
             continue
@@ -2134,6 +2203,9 @@ async def _run_codex_sdk_turn(
             for event in _tool_completed_events(
               item, sdk, streamed_command_output=streamed_command_output,
             ):
+              if image_delivery_error and event["type"] == "tool_output":
+                event["content"] = image_delivery_error
+                event["output_exit_code"] = 1
               image_view_cls = sdk.get("ImageViewThreadItem")
               if image_view_cls is not None and isinstance(item, image_view_cls):
                 # Bind the completed view to its bytes without retaining a

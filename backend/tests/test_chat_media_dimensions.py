@@ -158,3 +158,56 @@ def test_projection_marks_unreadable_local_images_explicitly(tmp_path):
     f"{prefix}/missing.png": None,
     f"{prefix}/..%2F..%2Fsecret.png": None,
   }
+
+
+def test_projection_sizes_native_and_markdown_generated_images_from_recorded_store(tmp_path, db, chat):
+  from app.models import GeneratedFile
+  from app.generated_files import stored_dir
+
+  base = stored_dir(str(tmp_path), chat.id, create=True)
+  Image.new('RGB', (1536, 1024)).save(base / 'opaque-key', 'PNG')
+  db.add(GeneratedFile(chat_id=chat.id, name='art work.png', path='opaque-key',
+    size=100, mime_type='image/png'))
+  db.commit()
+  href = f'/api/chats/{chat.id}/generated-files/art%20work.png'
+  messages = [
+    {'role': 'assistant', 'blocks': [{'type': 'generated_files', 'files': [{
+      'name': 'art work.png', 'mime_type': 'image/png', 'previewable': True,
+    }]}]},
+    {'role': 'assistant', 'content': f'![art]({href}?preview=true)'},
+  ]
+  projected = project_message_image_dimensions(messages, chat_id=chat.id,
+    data_dir=str(tmp_path), db=db)
+  with patch('app.image_previews.Image.open', side_effect=AssertionError('warm sizing reopened')):
+    assert project_message_image_dimensions(messages, chat_id=chat.id,
+      data_dir=str(tmp_path), db=db) == projected
+  assert all('media_dimensions' not in message for message in messages)
+  assert all(message['media_dimensions'] == {
+    href: {'width': 1536, 'height': 1024},
+  } for message in projected)
+
+
+def test_generated_dimensions_follow_recorded_storage_and_reject_unrecorded_paths(tmp_path, db, chat):
+  from app.models import GeneratedFile
+  from app.generated_files import stored_dir
+
+  base = stored_dir(str(tmp_path), chat.id, create=True)
+  Image.new('RGB', (120, 300)).save(base / 'frozen-key', 'PNG')
+  Image.new('RGB', (500, 500)).save(base / 'unrecorded.png', 'PNG')
+  (base / 'symlink-key').symlink_to(base / 'frozen-key')
+  for name, path in [
+    ('stored.png', 'frozen-key'),
+    ('missing.png', 'missing-key'),
+    ('escape.png', '../outside.png'),
+    ('link.png', 'symlink-key'),
+  ]:
+    db.add(GeneratedFile(chat_id=chat.id, name=name, path=path,
+      size=100, mime_type='image/png'))
+  db.commit()
+  prefix = f'/api/chats/{chat.id}/generated-files'
+  names = ['stored.png', 'missing.png', 'escape.png', 'link.png', 'unrecorded.png']
+  messages = [{'role': 'assistant', 'content': ' '.join(f'![x]({prefix}/{name})' for name in names)}]
+  result = project_message_image_dimensions(messages, chat_id=chat.id,
+    data_dir=str(tmp_path), db=db)[0]['media_dimensions']
+  assert result[f'{prefix}/stored.png'] == {'width': 120, 'height': 300}
+  assert all(result[f'{prefix}/{name}'] is None for name in names[1:])

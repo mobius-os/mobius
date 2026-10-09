@@ -4,6 +4,7 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 import DocumentAttachment from './DocumentAttachment.jsx'
+import { ExpandableImage } from './markdown/InlineContent.jsx'
 
 export function generatedFileCanPreview(file) {
   return file?.kind === 'generated'
@@ -27,22 +28,26 @@ export function documentAttachmentIdentity(file, chatId) {
   return `${chatId}:${file.name}:${file.sha256 || ''}`
 }
 
-export default function Attachments({ attachments, chatId }) {
+export default function Attachments({ attachments, chatId, mediaDimensions }) {
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0
+
+  const needsToken = hasAttachments && attachments.some(file =>
+    file.kind !== 'generated' || !attachmentIsGalleryImage(file),
+  )
 
   // Fetch a short-lived media token for this chat. Owner JWTs must not appear
   // in ?token= query params (they leak into access logs/history/Referer).
   const [tokenParam, setTokenParam] = useState(null)
   const [expandedNames, setExpandedNames] = useState(() => new Set())
   useEffect(() => {
-    if (!hasAttachments) return undefined
+    if (!needsToken) return undefined
     setTokenParam(null)
     let cancelled = false
     mediaTokenParam(chatId).then(p => {
       if (!cancelled) setTokenParam(p || null)
     })
     return () => { cancelled = true }
-  }, [chatId, hasAttachments])
+  }, [chatId, needsToken])
 
   if (!hasAttachments) return null
   const images = attachments.filter(attachmentIsGalleryImage)
@@ -53,7 +58,16 @@ export default function Attachments({ attachments, chatId }) {
     <div className={`chat__attachments${hasDocuments ? ' chat__attachments--documents' : ''}`}>
       {images.length > 0 && (
         <div className="chat__attach-images">
-          {images.map((img, i) => (
+          {images.map((img, i) => img.kind === 'generated' ? (
+            <span key={img.name} className="chat__generated-image">
+              <ExpandableImage
+                href={`/api/chats/${encodeURIComponent(chatId)}/generated-files/${encodeURIComponent(img.name)}`}
+                alt={img.name}
+                loading="eager"
+                mediaDimensions={mediaDimensions}
+              />
+            </span>
+          ) : (
             <AttachImage
               key={i}
               src={tokenParam

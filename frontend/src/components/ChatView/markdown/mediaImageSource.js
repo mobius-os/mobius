@@ -3,7 +3,7 @@
 // distinction at the URL boundary so galleries, lightboxes, and downloads all
 // continue to receive the original without rebuilding query strings.
 
-const CHAT_MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(uploads|media)\//
+const CHAT_MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(uploads|media|generated-files)\//
 
 export function getMediaChatId(src) {
   const match = String(src || '').match(CHAT_MEDIA_PATH_RE)

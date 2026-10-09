@@ -52,10 +52,9 @@ def dimensions_cache_path(file_path: Path, base: Path) -> Path:
 def _oriented_dimensions(source: Image.Image) -> tuple[int, int] | None:
   """Read display dimensions from headers, including EXIF rotation.
 
-  Pillow keeps ``Image.open`` lazy here: reading size and EXIF metadata does not
-  decode the compressed raster. That matters on the chat-detail path, where a
-  large screenshot must not briefly become a large RAM allocation merely to
-  reserve its layout box.
+  Most formats expose size and rotation in their headers. Pillow may decode
+  PNGs to find trailing EXIF metadata; the owning dimensions cache keeps that
+  cold-read cost out of repeated chat-detail responses.
   """
   width, height = source.size
   try:
@@ -73,7 +72,7 @@ def stored_image_dimensions(file_path: Path, base: Path) -> dict | None:
   """Return cached display dimensions for a stored raster image.
 
   The disk sidecar is keyed by the source's size and nanosecond mtime. A cold
-  lookup parses only the image header, then writes atomically; later chat reads
+  lookup reads size and rotation, then writes atomically; later chat reads
   do not open the image at all. Invalid or unsupported files deliberately have
   no dimensions so the renderer can show an explicit image error rather than a
   guessed aspect ratio that changes after decode.

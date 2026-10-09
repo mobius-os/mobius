@@ -17,6 +17,14 @@ const md = new Marked()
 md.use(mathTokens())
 
 
+export function markdownImageHrefs(text) {
+  const hrefs = []
+  md.walkTokens(tokenize(text), token => {
+    if (token.type === 'image') hrefs.push(token.href)
+  })
+  return hrefs
+}
+
 function tokenize(text) {
   return md.lexer(text || '')
 }

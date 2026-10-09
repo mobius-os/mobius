@@ -5315,3 +5315,162 @@ def test_own_stop_does_not_turn_stale_size_details_into_recovery(monkeypatch):
   assert result["error"] is None
   assert result["terminal_status"] == "interrupted"
   assert not result.get("context_window_exceeded")
+
+
+_IMAGE_RESULT = (
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'
+  '/x8AAwMCAO+a3ioAAAAASUVORK5CYII='
+)
+
+
+@pytest.mark.parametrize('result', [None, 'not-base64!', '', 'c2VjcmV0'])
+def test_generated_image_rejects_invalid_bytes_without_leaving_files(tmp_path, result):
+  from app import generated_files
+
+  with pytest.raises(ValueError):
+    codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', result)
+  assert generated_files._inbox_names(str(tmp_path), 'chat') == []
+
+
+def test_generated_image_preserves_bytes_and_uses_unique_names(tmp_path):
+  import base64
+  from app import generated_files
+
+  names = [codex_sdk_runner._stage_codex_generated_image(
+    str(tmp_path), 'chat', _IMAGE_RESULT,
+  ) for _ in range(2)]
+  inbox = generated_files.output_dir(str(tmp_path), 'chat')
+  assert names[0] != names[1]
+  assert all((inbox / name).read_bytes() == base64.b64decode(_IMAGE_RESULT) for name in names)
+  assert sorted(path.name for path in inbox.iterdir()) == sorted(names)
+
+
+def test_generated_image_obeys_existing_deliverable_size_limit(tmp_path, monkeypatch):
+  from app import generated_files
+
+  monkeypatch.setattr(generated_files, 'MAX_RECORDED_BYTES', 8)
+  with pytest.raises(ValueError, match='size limit'):
+    codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
+
+
+@pytest.mark.parametrize('status,result,expected_files,capacity', [
+  ('completed', _IMAGE_RESULT, 1, 500),
+  ('completed', 'invalid!', 0, 500),
+  ('completed', '', 0, 500),
+  ('failed', _IMAGE_RESULT, 0, 500),
+  ('completed', _IMAGE_RESULT, 0, 0),
+])
+def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
+  client, db, auth, chat, monkeypatch, tmp_path, status, result, expected_files, capacity,
+):
+  import base64
+  import json
+  v = pytest.importorskip('openai_codex.generated.v2_all')
+  from app import generated_files
+  from app.agent_activity import EMPTY_AGENT_ACTIVITY_BINDING
+  from app.broadcast import ChatBroadcast
+  from app.chat_event_sink import ChatEventSink
+  from app.config import get_settings
+
+  # savedPath is intentionally outside the generator tree and contains unrelated
+  # bytes: delivery must use the typed result, never open that supplied path.
+  private_path = tmp_path / 'not-an-image'
+  private_path.write_bytes(b'do not read this')
+  started = v.ImageGenerationThreadItem(
+    id='image-call', type='imageGeneration', status='in_progress', result='',
+  )
+  completed = v.ImageGenerationThreadItem(
+    id='image-call', type='imageGeneration', status=status, result=result,
+    savedPath=str(private_path), transparentBackground=True,
+  )
+  notifications = [
+    SimpleNamespace(method='item/started', payload=v.ItemStartedNotification(
+      item=started, threadId='thread-1', turnId='turn-1', startedAtMs=1,
+    )),
+    SimpleNamespace(method='item/completed', payload=v.ItemCompletedNotification(
+      item=completed, threadId='thread-1', turnId='turn-1', completedAtMs=2,
+    )),
+    *_goal_completion_notifications(),
+  ]
+  if expected_files:
+    notifications.insert(2, notifications[1])  # Native completion replay.
+  thread = _FakeThread('thread-1', _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update({
+    'ImageGenerationThreadItem': v.ImageGenerationThreadItem,
+    'ItemStartedNotification': v.ItemStartedNotification,
+    'ItemCompletedNotification': v.ItemCompletedNotification,
+  })
+  monkeypatch.setattr(codex_sdk_runner, '_sdk_imports', lambda: sdk)
+  sink = ChatEventSink(
+    ChatBroadcast(chat.id), chat.id, run_token='rt-image',
+    agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
+  )
+  if capacity == 0:
+    async def no_capacity():
+      return 0
+    monkeypatch.setattr(sink, 'generated_file_capacity', no_capacity)
+  outcome = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message='Create an image', session_id=None, base_env={}, cwd=str(tmp_path),
+    chat_id=chat.id, bc=sink, pending_questions={}, db=None,
+  ))
+  assert outcome['error'] is None
+  tools = [block for block in sink.assistant_blocks if block.get('tool') == 'ImageGen']
+  assert len(tools) == 1
+  assert tools[0]['tool_use_id'] == 'image-call'
+  assert tools[0]['output_exit_code'] == (0 if expected_files else 1)
+  assert private_path.read_bytes() == b'do not read this'
+  rows = db.query(models.GeneratedFile).filter_by(chat_id=chat.id).all()
+  assert len(rows) == expected_files
+  serialized = json.dumps(sink.assistant_blocks)
+  assert str(private_path) not in serialized
+  assert _IMAGE_RESULT not in serialized
+  pending = generated_files._inbox_names(get_settings().data_dir, chat.id)
+  assert len(pending) == (1 if capacity == 0 else 0)
+  if capacity == 0:
+    assert 'could not attach' in tools[0]['output']
+  if expected_files:
+    row = rows[0]
+    res = client.get(
+      f'/api/chats/{chat.id}/generated-files/{row.name}',
+      headers=auth, params={'preview': True},
+    )
+    assert res.status_code == 200
+    assert res.content == base64.b64decode(_IMAGE_RESULT)
+    assert res.headers['content-type'] == 'image/png'
+    # Reopening the chat must retain the attachment even with no final prose.
+    reopened = client.get(f'/api/chats/{chat.id}?limit=10', headers=auth).json()
+    attachment_blocks = [
+      b for m in reopened['messages'] for b in m.get('blocks', [])
+      if b.get('type') == 'generated_files'
+    ]
+    assert attachment_blocks[0]['files'][0]['name'] == row.name
+
+
+def test_image_delivery_limit_has_no_false_success(tmp_path):
+  from app import generated_files
+
+  class FullSink:
+    async def generated_file_capacity(self):
+      return 0
+
+  name = codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
+  receipt = asyncio.run(generated_files.publish_inbox_files(
+    FullSink(), data_dir=str(tmp_path), chat_id='chat',
+  ))
+  assert receipt == {}
+  assert (generated_files.output_dir(str(tmp_path), 'chat') / name).exists()
