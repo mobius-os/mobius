@@ -13,6 +13,7 @@ import signal
 import time
 
 PROC_ROOT = Path('/proc')
+PF_KTHREAD = 0x00200000  # Linux /proc/<pid>/stat field 9.
 DAEMONS = frozenset({'agent-browser-linux-x64', 'agent-browser-linux-arm64'})
 BROWSERS = frozenset({'chrome', 'chromium', 'chromium-browser',
                      'chrome_crashpad_handler', 'crashpad_handler'})
@@ -52,11 +53,11 @@ class BrowserChatUsage:
   pss_bytes: int | None
 
 
-def _process_state(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int]:
+def _process_state(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int, bool]:
   fields = (proc_root / str(pid) / 'stat').read_text().rsplit(') ', 1)[1].split()
   if fields[0] == 'Z':
     raise ProcessLookupError(pid)
-  return int(fields[1]), int(fields[19])
+  return int(fields[1]), int(fields[19]), bool(int(fields[6]) & PF_KTHREAD)
 
 
 def _identity(pid: int, proc_root: Path = PROC_ROOT) -> ProcessIdentity:
@@ -92,7 +93,16 @@ def _browser_inventory(proc_root: Path) -> tuple[dict, bool]:
       continue
     pid = int(entry.name)
     try:
-      parent, ticks = _process_state(pid, proc_root)
+      parent, ticks, kernel_thread = _process_state(pid, proc_root)
+      if kernel_thread:
+        # Kernel tasks have no userspace argv/exe. A recycled PID is unknown,
+        # not proof that a new userspace browser is irrelevant.
+        try:
+          if _process_state(pid, proc_root) != (parent, ticks, True):
+            complete = False
+        except (FileNotFoundError, ProcessLookupError):
+          pass
+        continue
       args = tuple(x.decode('utf-8', errors='surrogateescape')
                    for x in (entry / 'cmdline').read_bytes().split(b'\0') if x)
       # argv cannot establish browser identity, but an argv0 naming an

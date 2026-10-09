@@ -7,10 +7,11 @@ from app import browser_processes as RESET
 
 
 def _write_process(proc_root, pid, *, ppid=1, start_ticks=None,
-                   args=("/opt/chrome",), environment=None, state="S"):
+                   args=("/opt/chrome",), environment=None, state="S", flags=0):
   process = proc_root / str(pid)
   process.mkdir(parents=True, exist_ok=True)
   fields = [state, str(ppid), *("0" for _ in range(17)), str(start_ticks or pid)]
+  fields[6] = str(flags)
   (process / "stat").write_text(f"{pid} (process with spaces) {' '.join(fields)}\n")
   (process / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
   (process / "exe").unlink(missing_ok=True)
@@ -118,6 +119,53 @@ def test_unreadable_unrelated_executable_does_not_poison_browser_inventory(tmp_p
   scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
   assert scan.complete
   assert _pids(scan) == [100]
+
+
+def test_kernel_thread_without_argv_does_not_poison_browser_inventory(tmp_path, monkeypatch):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  _write_process(tmp_path, 200, flags=RESET.PF_KTHREAD)
+  (tmp_path / "200" / "cmdline").write_bytes(b"")
+  original = RESET.os.readlink
+  def readlink(path):
+    if path == tmp_path / "200" / "exe":
+      raise PermissionError("kernel task exe denied")
+    return original(path)
+  monkeypatch.setattr(RESET.os, "readlink", readlink)
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert scan.complete and _pids(scan) == [100]
+
+
+def test_empty_argv_userspace_process_with_unknown_exe_stays_incomplete(tmp_path, monkeypatch):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  _write_process(tmp_path, 200)
+  (tmp_path / "200" / "cmdline").write_bytes(b"")
+  original = RESET.os.readlink
+  def readlink(path):
+    if path == tmp_path / "200" / "exe":
+      raise PermissionError("exe denied")
+    return original(path)
+  monkeypatch.setattr(RESET.os, "readlink", readlink)
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert not scan.complete and not scan.idle and _pids(scan) == [100]
+  with pytest.raises(RESET.SessionResetError, match="incomplete"):
+    RESET.browser_usage_by_chat(proc_root=tmp_path)
+
+
+def test_recycled_kernel_pid_is_unknown_not_skipped(tmp_path, monkeypatch):
+  _write_process(tmp_path, 100, environment={"CHAT_ID": "a"})
+  _write_process(tmp_path, 200, start_ticks=20, flags=RESET.PF_KTHREAD)
+  original = RESET._process_state
+  reads = 0
+  def state(pid, root):
+    nonlocal reads
+    if pid == 200:
+      reads += 1
+      if reads == 2:
+        return 1, 99, False
+    return original(pid, root)
+  monkeypatch.setattr(RESET, "_process_state", state)
+  scan = RESET.scan_browser_processes(chat_id="a", proc_root=tmp_path)
+  assert not scan.complete and _pids(scan) == [100]
 
 
 def test_zombies_are_ignored_even_with_identifying_cmdline(tmp_path):
