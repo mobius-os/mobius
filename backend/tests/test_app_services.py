@@ -834,7 +834,10 @@ def test_http_dense_container_decode_peak_includes_input_allocation(
   monkeypatch.setattr(app_services, "invoke_service", decoded_only)
   # Reproduce the predecessor's decode at the same HTTP boundary, with only
   # 2.1 MB of input (never a dense 60 MiB/OOM trial).
-  monkeypatch.setattr(app_services.ServiceExchangeAdmission, "decode", lambda _self, raw: json.loads(raw))
+  async def predecessor_decode(_self, raw):
+    return json.loads(raw)
+
+  monkeypatch.setattr(app_services.ServiceExchangeAdmission, "decode", predecessor_decode)
   tracemalloc.start()
   try:
     raw = b"[" + b"[]," * 699_999 + b"[]]"
@@ -936,8 +939,9 @@ def test_http_decode_cost_rejects_before_materialization(client, auth, db, monke
 
 
 @pytest.mark.parametrize("shape", ["scalar", "original", "gallery"])
+@pytest.mark.parametrize("public", [False, True], ids=["private", "public"])
 def test_http_reviewed_media_allowance_preserves_twenty_mib_gif_and_gallery(
-  client, auth, db, shape,
+  client, auth, db, shape, public,
 ):
   import base64
 
@@ -947,14 +951,15 @@ items = [body] if isinstance(body, str) else body["items"]
 print(json.dumps({"body": [{"size": len(base64.b64decode(item)), "sha256": hashlib.sha256(base64.b64decode(item)).hexdigest()} for item in items]}))
 '''
   import hashlib
-  app = _service_app(db, service_bytes=service, max_bytes=60 * 1024 * 1024)
+  app = _service_app(db, access="public", service_bytes=service, max_bytes=60 * 1024 * 1024)
   gif = b"GIF89a" + b"x" * (20 * 1024 * 1024 - 6)
   encoded = base64.b64encode(gif).decode("ascii")
   items = [encoded] * (2 if shape == "gallery" else 1)
   body = encoded if shape == "scalar" else {"items": items, "caption": "雪😀"}
   # ensure_ascii=False exercises the full Unicode text copy alongside base64.
   raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-  response = client.post(f"/api/apps/{app.id}/service/media", headers=auth, content=raw)
+  path = f"/api/app-services/{app.slug}/media" if public else f"/api/apps/{app.id}/service/media"
+  response = client.post(path, headers=auth, content=raw)
   assert response.status_code == 200
   assert response.json() == [{"size": len(gif), "sha256": hashlib.sha256(gif).hexdigest()}] * len(items)
   assert app_services._admitted_exchange_cost == 0
@@ -1163,7 +1168,10 @@ async def test_spawned_response_decode_peak_includes_stdout_allocation(db, auth,
   owner = db.query(models.Owner).first()
   monkeypatch.setattr(service_preload, "ready_host", lambda *_: None)
   real_decode = app_services.ServiceExchangeAdmission.decode_response
-  monkeypatch.setattr(app_services.ServiceExchangeAdmission, "decode_response", lambda _self, raw: json.loads(raw))
+  async def predecessor_decode(_self, raw):
+    return json.loads(raw)
+
+  monkeypatch.setattr(app_services.ServiceExchangeAdmission, "decode_response", predecessor_decode)
   tracemalloc.start()
   try:
     result = await app_services.invoke_service(app, owner, {"actor": {}}, lane="tools")
@@ -1252,8 +1260,8 @@ def test_http_exchange_reservation_covers_simultaneous_envelopes_and_json_respon
   real_response = routes._response
   seen = []
 
-  def decode(self, raw):
-    value = real_decode(self, raw)
+  async def decode(self, raw):
+    value = await real_decode(self, raw)
     seen.append((self.cost, self.request_cost, self.response_cost))
     assert self.cost == 3 * self.max_bytes + self.request_cost + self.response_cost
     assert self.request_cost > 0 and self.response_cost > 0
@@ -1427,3 +1435,268 @@ def test_http_response_construction_failure_releases_exchange(client, auth, db, 
   with pytest.raises(RuntimeError, match="response construction failed"):
     client.post(f"/api/apps/{app.id}/service/echo", headers=auth, json={})
   assert app_services._admitted_exchange_cost == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["self", "shared", "public"])
+@pytest.mark.parametrize("trickle", [False, True], ids=["stalled", "trickling"])
+async def test_actual_http_body_deadline_is_total_and_releases_reservations(
+  db, auth, monkeypatch, route, trickle,
+):
+  import httpx
+  from app.main import app as application
+  from app.routes import app_services as routes
+
+  app = _service_app(db, access="public", max_bytes=60 * 1024 * 1024)
+  assert routes.SERVICE_BODY_TIMEOUT_SECONDS == 120
+  monkeypatch.setattr(routes, "SERVICE_BODY_TIMEOUT_SECONDS", 0.08)
+  started = asyncio.Event()
+  cancelled = asyncio.Event()
+  received = []
+
+  async def body():
+    try:
+      started.set()
+      received.append(True)
+      yield b'"'
+      while True:
+        if trickle:
+          await asyncio.sleep(0.01)
+          received.append(True)
+          yield b'x'
+        else:
+          await asyncio.Event().wait()
+    finally:
+      cancelled.set()
+
+  path = {
+    "self": f"/api/apps/{app.id}/service/echo",
+    "shared": f"/api/services/{app.slug}/echo",
+    "public": f"/api/app-services/{app.slug}/echo",
+  }[route]
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+    response = await asyncio.wait_for(http.post(path, headers=auth, content=body()), 2)
+  assert started.is_set() and cancelled.is_set()
+  assert len(received) >= (2 if trickle else 1)
+  assert response.status_code == 408
+  assert response.json()["detail"] == "App service request body timed out."
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+async def test_stalled_public_http_cannot_monopolize_private_or_tool_admission(
+  db, auth, monkeypatch,
+):
+  import httpx
+  from app.main import app as application
+  from app.routes import app_services as routes
+
+  app = _service_app(db, access="public", max_bytes=60 * 1024 * 1024)
+  owner = db.query(models.Owner).first()
+  monkeypatch.setattr(routes, "SERVICE_BODY_TIMEOUT_SECONDS", 5)
+  started = asyncio.Event()
+  cancelled = asyncio.Event()
+  denied_reads = []
+
+  async def stalled():
+    try:
+      started.set()
+      yield b'"'
+      await asyncio.Event().wait()
+    finally:
+      cancelled.set()
+
+  async def denied():
+    denied_reads.append(True)
+    yield b'{}'
+
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+    first = asyncio.create_task(http.post(f"/api/app-services/{app.slug}/echo", content=stalled()))
+    try:
+      await asyncio.wait_for(started.wait(), 2)
+      held = 3 * 60 * 1024 * 1024
+      assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == held
+      second = await http.post(f"/api/app-services/{app.slug}/echo", content=denied())
+      assert second.status_code == 413
+      assert "public ingress budget" in second.json()["detail"]
+      assert denied_reads == []
+      # Both real HTTP private execution and direct tool execution retain the
+      # same 60 MiB grant while the anonymous read remains stalled.
+      private = await asyncio.wait_for(http.post(f"/api/apps/{app.id}/service/echo", headers=auth, json={}), 3)
+      assert private.status_code == 201
+      result = await asyncio.wait_for(app_services.invoke_service(
+        app, owner, {"actor": {"scope": "owner"}, "body": {}, "path": "echo",
+                     "method": "POST", "query": {}, "public": False}, lane="tools",
+      ), 3)
+      assert result[0] == 201
+      assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == held
+    finally:
+      first.cancel()
+      await asyncio.gather(first, return_exceptions=True)
+  assert cancelled.is_set()
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+async def test_public_read_transfer_keeps_total_body_ownership(monkeypatch):
+  from starlette.requests import Request
+  from app.routes.app_services import _envelope
+
+  max_bytes = 4096
+  initial = 3 * max_bytes
+  observed = []
+  real_decode = app_services.ServiceExchangeAdmission.decode
+
+  async def decode(self, raw):
+    assert app_services._public_ingress_cost == 0
+    assert app_services._admitted_exchange_cost == self.cost == initial
+    observed.append(raw)
+    return await real_decode(self, raw)
+
+  monkeypatch.setattr(app_services.ServiceExchangeAdmission, "decode", decode)
+
+  async def receive():
+    assert app_services._public_ingress_cost == app_services._admitted_exchange_cost == initial
+    return {"type": "http.request", "body": b'{"value":"accepted"}', "more_body": False}
+
+  request = Request({"type": "http", "method": "POST", "headers": [], "query_string": b""}, receive)
+  with app_services.ServiceExchangeAdmission(max_bytes, public_ingress=True) as admission:
+    envelope = await _envelope(request, "echo", public=True, actor={}, max_bytes=max_bytes, admission=admission)
+    assert envelope["body"] == {"value": "accepted"}
+    assert app_services._admitted_exchange_cost == admission.cost > initial
+    assert app_services._public_ingress_cost == 0
+    admission.finish_ingress()  # phase completion is idempotent
+    assert app_services._admitted_exchange_cost == admission.cost
+  assert observed == [b'{"value":"accepted"}']
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+async def test_public_disconnect_during_body_read_releases_both_budgets():
+  from starlette.requests import ClientDisconnect, Request
+  from app.routes.app_services import _envelope
+
+  messages = iter([
+    {"type": "http.request", "body": b'"', "more_body": True},
+    {"type": "http.disconnect"},
+  ])
+
+  async def receive():
+    return next(messages)
+
+  request = Request({"type": "http", "method": "POST", "headers": [], "query_string": b""}, receive)
+  with pytest.raises(ClientDisconnect):
+    with app_services.ServiceExchangeAdmission(4096, public_ingress=True) as admission:
+      await _envelope(request, "echo", public=True, actor={}, max_bytes=4096, admission=admission)
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("escape", [b'\\n', b'\\"', b'\\\\', b'\\u1234'])
+async def test_actual_public_http_escape_heavy_scalar_does_not_starve_heartbeat(
+  db, auth, escape,
+):
+  import httpx
+  import time
+  from app.main import app as application
+
+  service = b'''import json, sys
+value = json.load(sys.stdin)["body"]
+print(json.dumps({"body": {"length": len(value)}}))
+'''
+  app = _service_app(db, access="public", service_bytes=service, max_bytes=60 * 1024 * 1024)
+  raw = b'"' + escape * ((4 * 1024 * 1024) // len(escape)) + b'"'
+  expected = len(json.loads(raw))
+  beats = []
+  running = True
+
+  async def heartbeat():
+    while running:
+      beats.append(time.monotonic())
+      await asyncio.sleep(0.01)
+
+  beat = asyncio.create_task(heartbeat())
+  try:
+    await asyncio.sleep(0.02)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+      response = await http.post(f"/api/app-services/{app.slug}/echo", content=raw)
+    await asyncio.sleep(0.02)
+  finally:
+    running = False
+    await beat
+  assert response.status_code == 200
+  assert response.json() == {"length": expected}
+  gap = max(b - a for a, b in zip(beats, beats[1:]))
+  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {gap:.4f}s")
+  assert gap < 0.2, "bounded scanner monopolized the event loop for an escaped scalar"
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["request", "response"])
+async def test_cooperative_resource_scan_cancel_releases_owned_bytes(monkeypatch, direction):
+  scanned = asyncio.Event()
+  matcher = app_services._JSON_STRING_CONTENT
+
+  class ObservedMatcher:
+    def match(self, *args):
+      scanned.set()
+      return matcher.match(*args)
+
+  monkeypatch.setattr(app_services, "_JSON_STRING_CONTENT", ObservedMatcher())
+  raw = b'"' + b'\\n' * 100_000 + b'"'
+
+  async def decode():
+    with app_services.ServiceExchangeAdmission(1024 * 1024) as admission:
+      return await (admission.decode(raw) if direction == "request" else admission.decode_response(raw))
+
+  task = asyncio.create_task(decode())
+  try:
+    await asyncio.wait_for(scanned.wait(), 1)
+    assert not task.done()
+    assert app_services._admitted_exchange_cost == 3 * 1024 * 1024
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
+
+
+@pytest.mark.asyncio
+async def test_revocation_cancels_attributed_response_scan_before_handoff(db, auth, monkeypatch):
+  from app import service_preload
+
+  service = b'''import json, sys
+json.load(sys.stdin)
+sys.stdout.write('{"body":"' + '\\\\n' * 100_000 + '"}')
+'''
+  app = _service_app(db, service_bytes=service)
+  owner = db.query(models.Owner).first()
+  grant_id = "a" * 32
+  monkeypatch.setattr(app_services, "_validate_browser_call", lambda *_: None)
+  monkeypatch.setattr(service_preload, "ready_host", lambda *_: None)
+  scanned = asyncio.Event()
+  matcher = app_services._JSON_STRING_CONTENT
+
+  class ObservedMatcher:
+    def match(self, *args):
+      scanned.set()
+      return matcher.match(*args)
+
+  monkeypatch.setattr(app_services, "_JSON_STRING_CONTENT", ObservedMatcher())
+  task = asyncio.create_task(app_services.invoke_service(
+    app, owner, {"actor": {"browser_grant_id": grant_id}}, lane="tools",
+  ))
+  try:
+    await asyncio.wait_for(scanned.wait(), 3)
+    assert app_services.browser_grant_has_active_calls(grant_id)
+    assert not task.done()
+    await app_services.cancel_browser_grant_calls(grant_id)
+    assert task.cancelled()
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+  assert grant_id not in app_services._browser_calls
+  assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0

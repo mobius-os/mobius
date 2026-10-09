@@ -167,6 +167,16 @@ request envelope and complete JSON response envelope (including base64 and
 metadata), before any binary response is decoded. Requests exceeding the
 accepted limit are rejected while streaming, before the whole body is buffered;
 the platform's independent 64 MiB HTTP request backstop remains in force.
+Service HTTP body reads have a **120-second total deadline**, not a deadline
+reset by each fragment. Incomplete reads return HTTP **408** and release their
+reservation; the separate 15-second service execution timeout is unchanged.
+Grant liveness is checked again before invocation. Pre-invocation body reads
+end on deadline, disconnect or caller cancellation; they are not yet part of
+the browser grant's attributed execution calls.
+Storage reads outside service routes do not inherit this deadline. Near-ceiling
+60 MiB service bodies therefore need roughly 512 KiB/s over that read lifetime.
+The shared streaming body reader accumulates bytes rather than retaining a
+list entry and source allocation for every transport fragment.
 
 Service exchange admission also bounds decoded resources independently of
 serialized bytes, in both directions: at most 262,144 structural marks (string
@@ -175,7 +185,11 @@ depth 64, and a conservative 320 MiB decoded-resource estimate per direction.
 The estimate includes Unicode text, string storage and 256 bytes per
 structural mark. A bounded lexical scan checks these limits before the
 standard-library JSON parser materializes either the HTTP request or service
-stdout; punctuation inside strings does not consume structural marks. The
+stdout; punctuation inside strings does not consume structural marks. String
+content (including escape-heavy input) is scanned in native bounded 64 KiB
+chunks with a cooperative cancellation/yield point per chunk, rather than a
+Python iteration per escape or an uninterrupted whole-body scan. JSON syntax
+and values remain exclusively authoritative in the standard-library parser. The
 complete request envelope, including tool and policy requests, also has the
 same depth and decoded-cost ceilings and at most 262,144 visited values/keys.
 Large base64 scalars, 20 MiB originals/downloads, and galleries fitting the
@@ -183,7 +197,12 @@ reviewed 60 MiB serialized grant remain supported.
 
 One process-wide 512 MiB estimated exchange budget covers body/stdio reading,
 decoding, serialization, retained execution backlog and response handoff
-across all lanes. Each exchange reserves three times its accepted serialized
+across all lanes. Anonymous HTTP reads additionally share a **192 MiB ingress
+sub-budget within that same 512 MiB total**, not an additional allowance. This
+prevents stalled public bodies from taking all private/tool admission. Once a
+public read completes, its sub-budget share is released while the same total
+reservation continues to own the body, decoding, execution and response.
+Each exchange reserves three times its accepted serialized
 ceiling for simultaneous raw, pipe/buffer and encoder copies, plus decoded
 cost before materialization. Once request decoding is complete, its freed
 transient Unicode copy is replaced by the retained envelope estimate; the

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +19,8 @@ from app.storage_io import read_capped_body
 
 
 router = APIRouter(tags=["app-services"])
+# Total body-read lifetime, separate from the unchanged 15-second execution timeout.
+SERVICE_BODY_TIMEOUT_SECONDS = 120
 _limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
 
 
@@ -84,15 +87,22 @@ async def _envelope(
     or segments[:1] == ["tools"]
   ):
     raise HTTPException(404, "App service path not found.")
-  raw = await read_capped_body(
-    request,
-    max_bytes,
-    too_large="App service request is too large.",
-  )
+  try:
+    async with asyncio.timeout(SERVICE_BODY_TIMEOUT_SECONDS):
+      raw = await read_capped_body(
+        request,
+        max_bytes,
+        too_large="App service request is too large.",
+      )
+  except TimeoutError as exc:
+    raise HTTPException(408, "App service request body timed out.") from exc
+  # Only the anonymous ingress share is released. The raw body remains owned
+  # by the same total exchange reservation through decoding and invocation.
+  admission.finish_ingress()
   body = None
   if raw:
     try:
-      body = admission.decode(raw)
+      body = await admission.decode(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
       raise HTTPException(400, "App service requests must contain JSON.") from exc
   return {
@@ -201,7 +211,9 @@ async def public_app_service(
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
-  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
+  with app_services.ServiceExchangeAdmission(
+    app_services.service_max_bytes(service), public_ingress=True,
+  ) as admission:
     envelope = await _envelope(
       request, path, public=True, actor={"scope": "public"},
       max_bytes=app_services.service_max_bytes(service), admission=admission,

@@ -73,9 +73,14 @@ MAX_JSON_STRUCTURE = 262_144
 MAX_JSON_DEPTH = 64
 MAX_JSON_DECODE_COST = 320 * 1024 * 1024
 MAX_ADMITTED_EXCHANGE_COST = 512 * 1024 * 1024
+MAX_PUBLIC_INGRESS_COST = 192 * 1024 * 1024
 _admitted_exchange_cost = 0
+_public_ingress_cost = 0
 _JSON_RESOURCE_MARKS = re.compile(r'["\\{}\[\],:]')
-_JSON_STRING_MARKS = re.compile(r'["\\]')
+# Disjoint alternatives consume string content in native, bounded chunks,
+# including escaped quotes/backslashes. This only finds the end of a string;
+# stdlib JSON still validates escapes and syntax. Never loop per escape in Python.
+_JSON_STRING_CONTENT = re.compile(r'(?:[^"\\]+|\\[\s\S])*')
 _JSON_WIDE_TEXT = re.compile(r'[^\x00-\xff]')
 _JSON_ASTRAL_TEXT = re.compile(r'[^\x00-\uffff]')
 
@@ -102,8 +107,9 @@ class ServiceExchangeAdmission:
   decode/encode estimate stays held through HTTP rendering or tool handoff.
   """
 
-  def __init__(self, max_bytes: int):
+  def __init__(self, max_bytes: int, *, public_ingress: bool = False):
     self.max_bytes = max_bytes
+    self.public_ingress = public_ingress
     self.cost = 0
     self.request_cost = 0
     self.response_cost = 0
@@ -114,17 +120,29 @@ class ServiceExchangeAdmission:
 
   def __exit__(self, *_):
     global _admitted_exchange_cost
+    self.finish_ingress()
     _admitted_exchange_cost -= self.cost
     self.cost = 0
     self.request_cost = 0
     self.response_cost = 0
 
+  def finish_ingress(self):
+    """Transfer a completed public read without releasing its total reservation."""
+    global _public_ingress_cost
+    if self.public_ingress:
+      _public_ingress_cost -= self.cost
+      self.public_ingress = False
+
   def _reserve(self, cost: int, *, direction: str = "request"):
-    global _admitted_exchange_cost
+    global _admitted_exchange_cost, _public_ingress_cost
     # No await between checking and reserving: all callers run on the owning
     # event loop, including HTTP, policy and agent-tool invocations.
     if _admitted_exchange_cost - self.cost + cost > MAX_ADMITTED_EXCHANGE_COST:
       self._reject(direction, "admission budget is exhausted")
+    if self.public_ingress:
+      if _public_ingress_cost - self.cost + cost > MAX_PUBLIC_INGRESS_COST:
+        self._reject(direction, "public ingress budget is exhausted")
+      _public_ingress_cost += cost - self.cost
     _admitted_exchange_cost += cost - self.cost
     self.cost = cost
 
@@ -140,18 +158,18 @@ class ServiceExchangeAdmission:
     self.request_cost = request_cost
     self.response_cost = response_cost
 
-  def decode(self, raw: bytes):
-    return self._decode(raw, direction="request")
+  async def decode(self, raw: bytes):
+    return await self._decode(raw, direction="request")
 
-  def decode_response(self, raw: bytes):
-    return self._decode(raw, direction="response")
+  async def decode_response(self, raw: bytes):
+    return await self._decode(raw, direction="response")
 
-  def _decode(self, raw: bytes, *, direction: str):
+  async def _decode(self, raw: bytes, *, direction: str):
     if not raw and direction == "request":
       return None
     decoder = codecs.getincrementaldecoder(json.detect_encoding(raw))("surrogatepass")
     in_string = False
-    escaped_at = -1
+    pending_escape = False
     string_length = 0
     string_width = 1
     text_length = 0
@@ -159,9 +177,12 @@ class ServiceExchangeAdmission:
     structures = 0
     depth = 0
     decoded_cost = 0
-    offset = 0
     cost = 64
     for start in range(0, len(raw), 64 * 1024):
+      # Bound uninterrupted scan work, not the media allowance. This yields
+      # only while the raw body/stdio remains owned by the exchange lease.
+      # It also makes scans cancellable without an unkillable worker thread.
+      await asyncio.sleep(0)
       chunk = decoder.decode(raw[start:start + 64 * 1024], final=start + 64 * 1024 >= len(raw))
       text_length += len(chunk)
       # Measure Unicode width in C over bounded spans, not one Python
@@ -170,27 +191,40 @@ class ServiceExchangeAdmission:
       text_width = max(text_width, _json_text_width(chunk))
       last = 0
       while last < len(chunk):
-        marks = _JSON_STRING_MARKS if in_string else _JSON_RESOURCE_MARKS
-        mark = marks.search(chunk, last)
+        if in_string:
+          # A final backslash can escape the first character of the next
+          # incremental text chunk (also for UTF-16/32 inputs).
+          if pending_escape:
+            string_length += 1
+            last += 1
+            pending_escape = False
+            if last == len(chunk):
+              break
+          end = _JSON_STRING_CONTENT.match(chunk, last).end()
+          string_length += end - last
+          string_width = max(string_width, _json_text_width(chunk, last, end))
+          if chunk.find("\\", last, end) != -1:
+            # Raw escape characters at width four conservatively cover any
+            # decoded Unicode value without interpreting or rewriting it.
+            string_width = 4
+          if end == len(chunk):
+            break
+          if chunk[end] == "\\":
+            # Only an unpaired terminal backslash stops the content matcher.
+            pending_escape = True
+            string_length += 1
+            string_width = 4
+          else:
+            in_string = False
+            decoded_cost += 64 + string_length * string_width
+          last = end + 1
+          continue
+        mark = _JSON_RESOURCE_MARKS.search(chunk, last)
         if mark is None:
           break
         index = mark.start()
         char = mark.group()
-        if in_string:
-          string_length += index - last
-          if index > last:
-            string_width = max(string_width, _json_text_width(chunk, last, index))
-          if char == '"' and offset + index != escaped_at:
-            in_string = False
-            decoded_cost += 64 + string_length * string_width
-          else:
-            string_length += 1
-            if char == "\\" and offset + index != escaped_at:
-              escaped_at = offset + index + 1
-              # Escapes can decode to non-BMP characters. Counting their raw
-              # characters at four bytes each is conservative, not rewriting.
-              string_width = 4
-        elif char == '"':
+        if char == '"':
           in_string = True
           string_length = 0
           string_width = 1
@@ -205,10 +239,6 @@ class ServiceExchangeAdmission:
         if structures > MAX_JSON_STRUCTURE or depth > MAX_JSON_DEPTH:
           self._reject(direction, "structural resource limit exceeded")
         last = index + 1
-      if in_string:
-        string_length += len(chunk) - last
-        string_width = max(string_width, _json_text_width(chunk, last))
-      offset += len(chunk)
       # 256 bytes per structural mark covers container entries, scalar
       # objects and allocator overhead even for densely nested empty objects.
       cost = decoded_cost + structures * 256 + text_length * text_width + 64
@@ -551,14 +581,26 @@ async def invoke_service(
     contextlib.nullcontext(admission) if admission is not None
     else ServiceExchangeAdmission(service_max_bytes(service))
   )
-  with boundary as admitted:
-    # HTTP admission already covers decoding. Also account for the envelope
-    # metadata and impose the same structural boundary on non-HTTP callers.
-    admitted.retain(request_envelope)
-    return await _invoke_admitted_service(
-      app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
-      admission=admitted,
-    )
+  browser = _actor_browser(request_envelope.get("actor") or {})
+  grant_id = browser.grant_id if browser is not None else None
+  try:
+    with boundary as admitted:
+      # HTTP admission already covers decoding. Also account for the envelope
+      # metadata and impose the same structural boundary on non-HTTP callers.
+      admitted.retain(request_envelope)
+      return await _invoke_admitted_service(
+        app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
+        admission=admitted,
+      )
+  finally:
+    # Attribution includes cooperative response scanning, not just execution.
+    # Revocation must still cancel a result that has not been handed off.
+    if grant_id is not None:
+      calls = _browser_calls.get(grant_id)
+      if calls is not None:
+        calls.discard(asyncio.current_task())
+        if not calls:
+          _browser_calls.pop(grant_id, None)
 
 
 async def _invoke_admitted_service(
@@ -656,16 +698,11 @@ async def _invoke_admitted_service(
         raise HTTPException(502, "App service failed.")
   finally:
     pin.close()
-    if grant_id is not None:
-      calls = _browser_calls.get(grant_id)
-      if calls is not None:
-        calls.discard(task)
-        if not calls:
-          _browser_calls.pop(grant_id, None)
   try:
-    response = admission.decode_response(stdout)
+    response = await admission.decode_response(stdout)
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
     raise HTTPException(502, "App service returned invalid JSON.") from exc
+  _validate_browser_call(owner, browser)
   if not isinstance(response, dict) or set(response) - {
     "status", "body", "body_base64", "headers", "media_type",
   }:
