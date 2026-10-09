@@ -160,6 +160,89 @@ def normalize_claude_usage(
   }
 
 
+HELPER_TASK_COUNTERS = ("total_tokens", "tool_uses", "duration_ms")
+
+
+def reported_counter(value: Any) -> int | None:
+  """A provider counter as reported, or None when it is absent or malformed.
+
+  Unlike ``_count``, an unusable value stays unknown instead of becoming a
+  false zero; a reported zero is kept.
+  """
+  if isinstance(value, bool):
+    return None
+  if isinstance(value, float) and value.is_integer():
+    value = int(value)
+  return value if isinstance(value, int) and value >= 0 else None
+
+
+def normalize_claude_helper_task_usage(
+  *,
+  final: Any,
+  progress: Any,
+  attributable: bool,
+  turn_duration_ms: int,
+) -> dict | None:
+  """Usage of one Claude helper turn hosted as a Claude Code background task.
+
+  The host sees only Claude's task counters (``TaskUsage``): the optional
+  ``usage`` of the terminal task notification (``final``) and the latest
+  valid per-counter task-so-far observations (``progress``). A terminal
+  task update can be the only end event, so a progress snapshot is the best
+  remaining evidence; it is a lower bound, labelled ``partial``, and never
+  added to the final counters. Each counter falls back on its own, so a
+  missing or malformed one stays unknown rather than zero. Claude reports no
+  input/output/cache split for a task, so those fields are always unknown.
+
+  ``attributable`` is False when the task's counters may include an earlier
+  turn (a follow-up resumes the same task); the provider evidence is kept but
+  no counter is claimed for this turn. Returns None when Claude reported
+  nothing usable, so the run stays without usage.
+  """
+  final = final if isinstance(final, dict) else {}
+  progress = progress if isinstance(progress, dict) else {}
+  counters: dict[str, int | None] = {}
+  sources: dict[str, str | None] = {}
+  for field in HELPER_TASK_COUNTERS:
+    for source, values in (("task_notification", final), ("task_progress", progress)):
+      value = reported_counter(values.get(field))
+      if value is not None:
+        counters[field], sources[field] = value, source
+        break
+    else:
+      counters[field], sources[field] = None, None
+  if all(value is None for value in counters.values()):
+    return None
+  total_source = sources["total_tokens"]
+  coverage = {"task_notification": "final", "task_progress": "partial"}.get(
+    total_source, "unknown",
+  ) if attributable else "unknown"
+  claimed = coverage != "unknown"
+  return {
+    "provider": "claude",
+    "scope": "helper_task",
+    "calculation": total_source if claimed else None,
+    "coverage": coverage,
+    "input_tokens": None,
+    "uncached_input_tokens": None,
+    "output_tokens": None,
+    "cache_read_input_tokens": None,
+    "cache_creation_input_tokens": None,
+    "reasoning_output_tokens": None,
+    "total_tokens": counters["total_tokens"] if claimed else None,
+    "tool_uses": counters["tool_uses"] if attributable else None,
+    "duration_ms": (
+      counters["duration_ms"] if attributable and counters["duration_ms"] is not None
+      else turn_duration_ms
+    ),
+    "counter_sources": sources if attributable else None,
+    "provider_task_usage": {
+      "notification": _plain(final) or None,
+      "progress": _plain(progress) or None,
+    },
+  }
+
+
 _CODEX_FIELDS = (
   "input_tokens",
   "cached_input_tokens",

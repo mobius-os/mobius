@@ -6,6 +6,8 @@ import stat
 
 import pytest
 
+from app.chat_writer import create_chat
+
 from app import claude_helper_host as claude_host
 from app import helper_hosts
 from app.provider_errors import ProviderErrorKind, classify_provider_error
@@ -196,6 +198,7 @@ def test_dispatcher_launches_only_registered_specs_verbatim(tmp_path):
 def test_helper_calls_carry_their_own_identity_and_block_native_fanout(tmp_path):
   host = _claude_host(tmp_path)
   writer = _turn(tmp_path, dispatch_id="dw")
+  writer.started.set()
   host._turn_by_agent.update({"agent-w": writer})
 
   def call(agent, name, tool_input):
@@ -240,41 +243,21 @@ def test_a_resumed_helper_reports_to_its_current_follow_up_turn(tmp_path):
   assert host._turn_for_parent("toolu_launch") is follow_up
 
 
-def test_a_dispatcher_that_answers_without_the_call_is_asked_again(tmp_path):
-  """Seen live after a restart: the dispatcher replied "OK" without calling,
-  so the resumed helper waited out 90 s and was rebuilt from its history. The
-  host asks again at once, and each dispatch is used once, so a late original
-  call and the repeated one can never launch two helpers."""
+def test_dispatcher_reply_without_the_call_fails_once_without_retry(tmp_path):
   host = _claude_host(tmp_path)
-  queries: list[str] = []
-  decisions: list[str] = []
-
-  class _ForgetfulDispatcher:
+  queries = []
+  class ForgetfulDispatcher:
     async def query(self, line):
       queries.append(line)
-      if len(queries) == 1:
-        host._dispatcher_replied()  # "OK", and no call
-        return
-      dispatch_id = line.split()[1]
-      for tool_use_id in ("toolu_late", "toolu_again"):
-        decision = await host.pre_tool_use(
-          {"tool_name": "Agent", "tool_input": {"description": dispatch_id}},
-          tool_use_id, None,
-        )
-        decisions.append(decision["hookSpecificOutput"]["permissionDecision"])
-      host._on_task_started(_Started("agent-1", "toolu_late"))
       host._dispatcher_replied()
-      asyncio.get_running_loop().call_soon(turn.finish, "completed")
-
-  host._client = _ForgetfulDispatcher()
+  host._client = ForgetfulDispatcher()
   turn = _turn(tmp_path)
   asyncio.run(host.run_turn(turn))
-
-  assert queries == ["SPAWN d1", "SPAWN d1"]
-  assert decisions == ["allow", "deny"]
-  assert (turn.status, turn.dispatch_error, turn.agent_id) == (
-    "completed", None, "agent-1",
-  )
+  assert queries == ["SPAWN d1"]
+  assert turn.dispatch_error == "not_called" and turn.status == "failed"
+  assert "No work was launched" in turn.summary
+  assert host._dispatcher_call("Agent", {"description": "d1"}, "late")[
+    "hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_a_late_end_of_the_previous_run_never_ends_a_follow_up(tmp_path):
@@ -336,7 +319,7 @@ class _DispatcherClient:
     verb, dispatch_id = line.split()
     turn = self.host._turn_by_dispatch[dispatch_id]
     tool = "Agent" if verb == "SPAWN" else "SendMessage"
-    key = "description" if verb == "SPAWN" else "summary"
+    key = "description" if verb == "SPAWN" else "to"
     decision = await self.host.pre_tool_use(
       {"tool_name": tool, "tool_input": {key: dispatch_id}},
       f"toolu_{verb.lower()}", None,
@@ -346,6 +329,7 @@ class _DispatcherClient:
     )
     # A resumed helper reports under the tool call that first launched it.
     self.host._on_task_started(_Started(turn.agent_id or "agent-1", "toolu_spawn"))
+    self.host._dispatcher_replied()
     asyncio.get_running_loop().call_soon(self.settle, turn, verb)
 
 
@@ -519,16 +503,307 @@ def test_a_usage_limit_inside_a_host_parks_like_the_private_runner(
   ) is ProviderErrorKind.USAGE_LIMIT
 
 
+def _task_events():
+  from claude_agent_sdk import types as sdk
+
+  def started(task_id="agent-1", tool_use_id="toolu_spawn"):
+    return sdk.TaskStartedMessage(
+      subtype="task_started", data={}, task_id=task_id, description="d1",
+      uuid="u", session_id="s", tool_use_id=tool_use_id, task_type="local_agent",
+    )
+
+  def progress(total, task_id="agent-1"):
+    usage = {"total_tokens": total, "tool_uses": 1, "duration_ms": 10}
+    return sdk.TaskProgressMessage(
+      subtype="task_progress", data={"usage": usage}, task_id=task_id,
+      description="d1", usage=usage, uuid="u", session_id="s",
+    )
+
+  def updated(status, task_id="agent-1"):
+    patch = {"status": status}
+    return sdk.TaskUpdatedMessage(
+      subtype="task_updated", data={"patch": patch}, task_id=task_id, patch=patch,
+    )
+
+  def notification(status, usage, task_id="agent-1"):
+    return sdk.TaskNotificationMessage(
+      subtype="task_notification", data={}, task_id=task_id, status=status,
+      output_file="", summary="done", uuid="u", session_id="s", usage=usage,
+    )
+
+  return sdk, started, progress, updated, notification
+
+
+class _Sink:
+  def __init__(self):
+    self.events = []
+
+  def publish(self, event):
+    self.events.append(event)
+
+
+def _read_stream(tmp_path, messages):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  turn.sink = _Sink()
+  host._turn_by_tool_use["toolu_spawn"] = turn
+
+  class _Stream:
+    async def receive_messages(self):
+      for message in messages:
+        yield message
+
+  host._client = _Stream()
+  asyncio.run(host._read())
+  return turn
+
+
+def test_a_terminal_update_before_any_notification_keeps_the_latest_progress(
+  tmp_path,
+):
+  """Claude may end a background task with only a terminal task update. Its
+  cumulative progress snapshot is then the best evidence: kept once (not
+  summed), and a notification arriving after the turn settled is not used."""
+  sdk, started, progress, updated, notification = _task_events()
+  turn = _read_stream(tmp_path, [
+    started(), progress(100), progress(150), progress(150),
+    # Dispatcher and per-call counters are never the child task's aggregate.
+    sdk.ResultMessage(
+      subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+      num_turns=1, session_id="host", usage={"input_tokens": 9_999},
+    ),
+    sdk.AssistantMessage(
+      content=[sdk.TextBlock(text="partial")], model="claude",
+      parent_tool_use_id="toolu_spawn", usage={"input_tokens": 7_777},
+    ),
+    updated("completed"),
+    notification("completed", {"total_tokens": 999, "tool_uses": 4, "duration_ms": 50}),
+  ])
+
+  assert turn.status == "completed"
+  assert turn.final_usage is None
+  assert turn.progress_usage["total_tokens"] == 150
+
+
+def test_partial_progress_keeps_last_valid_fields_without_summing_or_hiding_resets(tmp_path):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path)
+  turn.started.set()
+  host._turn_by_agent["agent-1"] = turn
+  host._on_task_progress("agent-1", {"total_tokens": 100, "duration_ms": 8})
+  host._on_task_progress("agent-1", {"tool_uses": 3, "total_tokens": None})
+  host._on_task_progress("agent-1", {"total_tokens": "bad", "duration_ms": False})
+  assert turn.progress_usage == {"total_tokens": 100, "duration_ms": 8, "tool_uses": 3}
+  # A new valid lower counter replaces the old one, never max or sum.
+  host._on_task_progress("agent-1", {"total_tokens": 0})
+  assert turn.progress_usage["total_tokens"] == 0
+
+
+def test_a_notification_before_a_terminal_update_carries_the_final_counters(
+  tmp_path,
+):
+  _sdk, started, progress, updated, notification = _task_events()
+  turn = _read_stream(tmp_path, [
+    started(), progress(100),
+    notification("completed", {"total_tokens": 240, "tool_uses": 2, "duration_ms": 50}),
+    updated("completed"),
+  ])
+  assert turn.final_usage["total_tokens"] == 240
+  assert turn.progress_usage["total_tokens"] == 100
+
+
+def test_a_previous_runs_late_counters_never_reach_a_follow_up(tmp_path):
+  """A follow-up is mapped to the reused agent before it resumes. Late
+  progress or end counters of the previous run must not be attributed to it
+  (nor end it: test_a_late_end_of_the_previous_run_never_ends_a_follow_up)."""
+  host = _claude_host(tmp_path)
+  first = _turn(tmp_path, dispatch_id="d1")
+  host._turn_by_tool_use["toolu_launch"] = first
+  host._on_task_started(_Started("agent-1", "toolu_launch"))
+  host._on_task_end("agent-1", "completed", None, {"total_tokens": 10})
+
+  follow_up = _turn(tmp_path, dispatch_id="d2")
+  follow_up.agent_id = "agent-1"
+  host._turn_by_agent["agent-1"] = follow_up
+  host._on_task_progress("agent-1", {"total_tokens": 11})
+  host._on_task_end("agent-1", "completed", None, {"total_tokens": 12})
+  assert (follow_up.progress_usage, follow_up.final_usage) == (None, None)
+
+  host._on_task_started(_Started("agent-1", "toolu_launch"))
+  host._on_task_progress("agent-1", {"total_tokens": 20})
+  host._on_task_end("agent-1", "completed", "answer", None)
+  # Nothing reaches the settled first turn either.
+  host._on_task_progress("agent-1", {"total_tokens": 30})
+  assert first.final_usage == {"total_tokens": 10} and first.progress_usage is None
+  assert follow_up.progress_usage == {"total_tokens": 20}
+
+
+def _settle_with(events):
+  def settle(turn, verb):
+    host = settle.host
+    for kind, payload in events(verb):
+      if kind == "progress":
+        host._on_task_progress(turn.agent_id, payload)
+      else:
+        host._on_task_end(turn.agent_id, kind, None, payload)
+  return settle
+
+
+def test_hosted_helper_turn_results_carry_only_attributable_task_usage(
+  tmp_path, monkeypatch,
+):
+  """A spawned task's counters are this turn's. A follow-up resumes the same
+  Claude task, whose counters may span earlier turns, so it claims none."""
+  settle = _settle_with(lambda verb: [
+    ("progress", {"total_tokens": 50}),
+    ("completed", {"total_tokens": 120 if verb == "SPAWN" else 300,
+                   "tool_uses": 0, "duration_ms": 70}),
+  ])
+  turn, client, saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+
+  spawned = turn("task")
+  assert spawned["error"] is None
+  assert spawned["usage_metrics"]["total_tokens"] == 120
+  assert spawned["usage_metrics"]["coverage"] == "final"
+  assert spawned["usage_metrics"]["tool_uses"] == 0
+
+  resumed = turn("more", spawned["session_id"])
+  assert resumed["usage_metrics"]["coverage"] == "unknown"
+  assert resumed["usage_metrics"]["total_tokens"] is None
+
+
+@pytest.mark.parametrize("ending", ["failed", "stopped"])
+def test_a_failed_or_stopped_helper_still_reports_its_partial_usage(
+  tmp_path, monkeypatch, ending,
+):
+  settle = _settle_with(lambda _verb: [
+    ("progress", {"total_tokens": 75, "tool_uses": 1, "duration_ms": 5}),
+    (ending, None),
+  ])
+  turn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+
+  result = turn("task")
+  assert result["error"]
+  usage = result["usage_metrics"]
+  assert (usage["total_tokens"], usage["coverage"]) == (75, "partial")
+
+
+def test_a_helper_with_no_reported_counters_reports_no_usage(tmp_path, monkeypatch):
+  settle = _settle_with(lambda _verb: [("completed", None)])
+  turn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = client.host
+  assert "usage_metrics" not in turn("task")
+
+
+def _owner_stops_mid_task(tmp_path, monkeypatch, *, force, claude_reports_stop):
+  """Run a real hosted turn whose helper reported progress, then end it with
+  the owner's Stop (or force-stop) through the registered runner handle, and
+  attach the turn's result metrics to its durable run like chat.py does."""
+  from app import chat as chat_mod
+  from app import models
+  from app.database import SessionLocal
+  from app.runner_registry import RunnerKind, registry
+  from app.usage_metrics import run_usage_quality, summarize_chat_run_tokens
+  from tests.goal_fixtures import goal_run
+
+  db = SessionLocal()
+  try:
+    db.add(create_chat(id="child", title="t", messages=[], pending_messages=[],
+                       provider="claude"))
+    db.add(goal_run(db, id="rt-stop", chat_id="child", status="running",
+                    provider="claude"))
+    db.commit()
+  finally:
+    db.close()
+
+  progressed = asyncio.Event()
+
+  def settle(turn, _verb):
+    settle.host._on_task_progress(
+      turn.agent_id, {"total_tokens": 75, "tool_uses": 1, "duration_ms": 5},
+    )
+    progressed.set()
+
+  _turn_fn, client, _saved = _host_turns(tmp_path, monkeypatch, settle)
+  settle.host = host = client.host
+  stopped_agents: list[str] = []
+
+  async def stop_task(agent_id):
+    stopped_agents.append(agent_id)
+    if claude_reports_stop:
+      # Claude acknowledges a stopped task with a terminal end, no counters.
+      host._on_task_end(agent_id, "stopped", None, None)
+
+  client.stop_task = stop_task
+
+  async def scenario():
+    running = asyncio.create_task(claude_host.run_claude_host_turn(
+      user_message="task", session_id=None,
+      base_env={"CHAT_ID": "child", "TMPDIR": str(tmp_path)},
+      chat_id="child", skill_text="helper", bc=None, agent_settings=None,
+      skills_enabled=False, run_policy=None, connector_plan=None,
+      helper_host_key=_key(), data_dir=str(tmp_path),
+    ))
+    await asyncio.wait_for(progressed.wait(), 10)
+    handle = registry.get_handle("child", RunnerKind.CLAUDE_SDK)
+    assert isinstance(handle, claude_host.ActiveClaudeHelperTurn)
+    stopped = await (handle.force_stop(timeout=1) if force else handle.stop(timeout=1))
+    result = await asyncio.wait_for(running, 10)
+    await chat_mod._record_run_metrics(
+      chat_id="child", run_token="rt-stop",
+      provider_session_id=result["session_id"], cost_usd=result["cost_usd"],
+      usage=result.get("usage_metrics"),
+    )
+    return stopped, result
+
+  stopped, result = asyncio.run(scenario())
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == "rt-stop").one()
+    stored = (run.total_tokens, run.input_tokens, run_usage_quality(run.usage_json))
+    summary = summarize_chat_run_tokens([run])
+  finally:
+    db.close()
+  assert registry.get_handle("child", RunnerKind.CLAUDE_SDK) is None
+  return stopped, stopped_agents, result, stored, summary
+
+
+@pytest.mark.parametrize("force,claude_reports_stop", [
+  (False, True),   # owner Stop: Claude reports the stopped task
+  (True, False),   # force-stop: Claude never answers stop_task
+])
+def test_an_owner_stop_keeps_the_helpers_progress_as_partial_usage(
+  tmp_path, monkeypatch, force, claude_reports_stop,
+):
+  """An owner's Stop is not a provider failure, yet the work done so far is
+  real: its latest progress total reaches the durable run as a partial lower
+  bound, never as a final or zero total, and the turn settles without waiting
+  for a notification Claude may never send."""
+  stopped, stopped_agents, result, stored, summary = _owner_stops_mid_task(
+    tmp_path, monkeypatch, force=force, claude_reports_stop=claude_reports_stop,
+  )
+  assert stopped is True
+  assert stopped_agents == ["agent-1"]
+  assert result["error"] is None
+  usage = result["usage_metrics"]
+  assert (usage["total_tokens"], usage["coverage"]) == (75, "partial")
+  assert usage["calculation"] == "task_progress"
+  assert stored == (75, None, "partial")
+  assert summary["totals"]["total_tokens"] == 75
+  assert summary["coverage"]["runs_by_quality"]["final"] == 0
+
+
 def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   tmp_path, monkeypatch, caplog,
 ):
   """Two helpers failed with "could not start" and left nothing to diagnose;
-  the timeout records the dispatcher's own last reply, and the host's logs
+  the exact unconsumed request records the dispatcher's last reply; logs
   reach the persistent chat log."""
   import logging
   from app import startup
 
-  monkeypatch.setattr(claude_host, "DISPATCH_START_TIMEOUT", 0.05)
   host = claude_host.ClaudeHelperHost(
     _key(), options_factory=None, session_file=tmp_path / "host.json",
   )
@@ -536,13 +811,14 @@ def test_a_dispatch_that_never_starts_says_what_the_dispatcher_did(
   class _SilentDispatcher:
     async def query(self, _line):
       host.dispatcher_last = "server_error: API Error: 529 Overloaded"
+      host._dispatcher_replied()
 
   host._client = _SilentDispatcher()
   turn = _turn(tmp_path)
   with caplog.at_level(logging.WARNING, logger="app.claude_helper_host"):
     asyncio.run(host.run_turn(turn))
 
-  assert turn.dispatch_error == "timeout"
+  assert turn.dispatch_error == "not_called"
   assert "529 Overloaded" in caplog.text and "tool_call_seen=False" in caplog.text
 
   startup._route_diagnostics_to_chat_log(None)
@@ -657,11 +933,14 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
     skill_text="CONSTITUTION", connector_plan=None, skills_enabled=False,
     model=None, supports_effort=supports_effort,
   )
-  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None, pre_compact=None)
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None,
+                         pre_compact=None, subagent_stop=None)
   for resume in (None, "host-session"):
     with ExitStack() as stack:
       options = factory(host, resume, stack)
     assert options.include_partial_messages and options.forward_subagent_text
+    assert "PostToolUseFailure" in options.hooks
+    assert all("SubagentHandback" in agent.disallowedTools for agent in options.agents.values())
     assert set(options.agents) == {
       "mobius-helper", *(claude_host.agent_type_for(e) for e in claude_host.EFFORTS),
     }
@@ -799,3 +1078,148 @@ def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypat
   assert host.exit_evidence is evidence
   assert evidence.was_oom_killed(3)
   assert not evidence.was_oom_killed(4)
+
+
+def test_message_dispatch_uses_required_recipient_not_optional_summary(tmp_path):
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path, dispatch_id='message-id')
+  turn.kind = 'message'
+  turn.spec = {'to': 'actual-agent', 'message': 'Approved bounded follow-up'}
+  host._turn_by_dispatch[turn.dispatch_id] = turn
+  host._specs[turn.dispatch_id] = turn.spec
+  # Neither a mismatched tool nor optional presentation text may consume it.
+  for tool, data in [('Agent', {'description': turn.dispatch_id}),
+                     ('SendMessage', {'to': 'foreign', 'summary': turn.dispatch_id})]:
+    refused = host._dispatcher_call(tool, data, 'bad')
+    assert refused['hookSpecificOutput']['permissionDecision'] == 'deny'
+    assert turn.dispatch_id in host._specs
+  accepted = host._dispatcher_call('SendMessage',
+      {'to': turn.dispatch_id, 'message': turn.dispatch_id}, 'good')
+  assert accepted['hookSpecificOutput']['updatedInput'] == turn.spec
+  assert host._turn_by_tool_use['good'] is turn
+  assert host._dispatcher_call('SendMessage', {'to': turn.dispatch_id}, 'again')[
+      'hookSpecificOutput']['permissionDecision'] == 'deny'
+  turn.env_file.remove()
+
+
+def test_dispatcher_reaching_for_a_look_alike_tool_is_told_how_to_resume(tmp_path):
+  # Live, the Haiku dispatcher answered MESSAGE with Möbius's own
+  # send_agent_message (always loaded) instead of loading the deferred
+  # SendMessage, so every follow-up, including answers, never started.
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path, dispatch_id='message-id')
+  turn.kind = 'message'
+  turn.spec = {'to': 'actual-agent', 'message': 'The answer'}
+  host._turn_by_dispatch[turn.dispatch_id] = turn
+  host._specs[turn.dispatch_id] = turn.spec
+  refused = host._dispatcher_call(
+      'mcp__mobius_control__send_agent_message',
+      {'recipients': [turn.dispatch_id], 'body': turn.dispatch_id}, 'wrong')
+  output = refused['hookSpecificOutput']
+  assert output['permissionDecision'] == 'deny'
+  assert 'SendMessage' in output['permissionDecisionReason']
+  assert 'select:SendMessage' in output['permissionDecisionReason']
+  # The refusal consumes nothing, so the corrected call in the same turn works.
+  assert turn.dispatch_id in host._specs
+  assert host._dispatcher_call('ToolSearch', {'query': 'select:SendMessage'}, 'load') == {}
+  accepted = host._dispatcher_call('SendMessage',
+      {'to': turn.dispatch_id, 'message': turn.dispatch_id}, 'good')
+  assert accepted['hookSpecificOutput']['updatedInput'] == turn.spec
+  turn.env_file.remove()
+
+
+def test_dispatcher_prompt_names_the_builtin_tools_and_how_to_load_sendmessage():
+  prompt = claude_host.DISPATCHER_PROMPT
+  assert 'built-in SendMessage' in prompt
+  assert 'select:SendMessage' in prompt
+  assert 'send_agent_message' in prompt  # named as the tool never to use
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', ['timeout', 'unreachable'])
+async def test_follow_up_dispatch_failure_does_not_invent_session_loss(
+  tmp_path, monkeypatch, error,
+):
+  from contextlib import asynccontextmanager
+  from app import providers, process_groups
+  async def supports(*_):
+    return False
+  monkeypatch.setattr(providers, 'model_supports_effort', supports)
+  monkeypatch.setattr(process_groups, 'terminate_run_processes', lambda *_a, **_kw: None)
+  class Host:
+    session_id = 'saved-host'
+    async def run_turn(self, turn, on_started):
+      turn.dispatch_error = error
+  @asynccontextmanager
+  async def lease(*_):
+    yield Host()
+  monkeypatch.setattr(helper_hosts.MANAGER, 'lease', lease)
+  result = await claude_host.run_claude_host_turn(
+      user_message='Continue', session_id='claude-host:saved-host:child:launch',
+      base_env={'TMPDIR': str(tmp_path)}, chat_id='dispatch-failure',
+      skill_text='', bc=None, agent_settings={}, skills_enabled=False,
+      run_policy=None, connector_plan=None, helper_host_key=_key(), data_dir=str(tmp_path))
+  assert result['session_id'] == 'claude-host:saved-host:child:launch'
+  assert 'DELEGATION_WRITE_REVIEW_REQUIRED' in result['error']
+  assert 'will not replay work automatically' in result['error']
+  assert ('did not start' in result['error']) == (error == 'timeout')
+  assert ('could not deliver' in result['error']) == (error == 'unreachable')
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_helper_ends_at_its_own_recorded_question_and_stays_resumable(tmp_path):
+  """A hosted helper's recorded question ends only that helper's task, through
+  PostToolUse ``continue_: False`` (completed and resumable by SendMessage),
+  never ``stop_task`` (unresumable). A receipt its own run did not record, a
+  non-control tool, or another helper's question changes nothing."""
+  import json as _json
+  from types import SimpleNamespace
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path, dispatch_id='asker')
+  turn.agent_id = 'asker'
+  turn.started.set()
+  turn.sink = SimpleNamespace(ends_turn=lambda receipt_id: receipt_id == 'mine')
+  host._turn_by_agent['asker'] = host._turn_by_dispatch['asker'] = turn
+  stopped = []
+  host._client = SimpleNamespace(stop_task=lambda agent: stopped.append(agent))
+
+  def asked(receipt_id, tool='mcp__mobius_control__ask_parent', agent='asker'):
+    return {'tool_name': tool, 'agent_id': agent, 'tool_response': [{'type': 'text', 'text': _json.dumps(
+      {'state': 'turn_end', 'turn_end_id': receipt_id, 'question_id': 'q-1'})}]}
+
+  ended = await host.post_tool_use(asked('mine'), 'ask-1', {})
+  assert ended['continue_'] is False
+  assert await host.post_tool_use(asked('not-mine'), 'ask-2', {}) == {}
+  assert await host.post_tool_use(asked('mine', tool='Read'), 'echo', {}) == {}
+  assert await host.post_tool_use(asked('mine', agent='someone-else'), 'other', {}) == {}
+  turn.done.set()
+  assert await host.post_tool_use(asked('mine'), 'late', {}) == {}
+  assert stopped == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['success', 'refusal', 'foreign', 'interrupted', 'failure'])
+async def test_hosted_claude_script_question_stops_only_at_its_own_successful_receipt(tmp_path, outcome):
+  import json
+  from types import SimpleNamespace
+  host = _claude_host(tmp_path)
+  turn = _turn(tmp_path, dispatch_id='script-asker')
+  turn.agent_id = 'script-asker'
+  turn.started.set()
+  turn.sink = SimpleNamespace(ends_turn=lambda receipt_id: receipt_id == 'mine')
+  host._turn_by_agent['script-asker'] = host._turn_by_dispatch['script-asker'] = turn
+  stopped = []
+  host._client = SimpleNamespace(stop_task=lambda agent: stopped.append(agent))
+  receipt = {'state': 'turn_end', 'turn_end_id': 'foreign' if outcome == 'foreign' else 'mine'}
+  response = {'stdout': json.dumps(receipt), 'stderr': '', 'interrupted': outcome == 'interrupted'}
+  if outcome == 'refusal':
+    response['stdout'] = json.dumps({'isError': True, 'content': [receipt]})
+  output = await host.post_tool_use({
+    'hook_event_name': 'PostToolUseFailure' if outcome == 'failure' else 'PostToolUse',
+    'tool_name': 'Bash', 'agent_id': 'script-asker', 'tool_response': response,
+  }, 'script-question', {})
+  if outcome == 'success':
+    assert output['continue_'] is False
+  else:
+    assert output == {}
+  assert stopped == []
