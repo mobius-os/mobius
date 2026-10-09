@@ -9,6 +9,7 @@ legacy restart_ledger.py remains untouched and executes only after admission.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import math
@@ -24,6 +25,10 @@ from pathlib import Path
 
 class AdmissionError(RuntimeError):
     """No permission to run legacy bootstrap or mutate its ledger."""
+
+
+class UntrustedInode(AdmissionError):
+    """Ownership/type failure: bytes must never be promoted into authority."""
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9._:-]{8,160}\Z")
@@ -72,10 +77,10 @@ class AdmissionStore:
         self.uid, self.gid = trusted_uid, trusted_gid
 
     def _trusted(self, info, *, directory=False):
-        _require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
-                 and info.st_uid == self.uid and info.st_gid == self.gid
-                 and not info.st_mode & 0o022
-                 and (directory or info.st_nlink == 1), "untrusted admission/ledger inode")
+        if not ((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+                and info.st_uid == self.uid and info.st_gid == self.gid
+                and not info.st_mode & 0o022 and (directory or info.st_nlink == 1)):
+            raise UntrustedInode("untrusted admission/ledger inode")
 
     def _directory(self, path):
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -170,12 +175,27 @@ class AdmissionStore:
                  and set(value["slots"]) == {"target", "rollback"}
                  and isinstance(value.get("quiesced"), list), "missing/malformed operation")
         source = value["source"]
-        _require(_cid(source.get("cid")) and _image(source.get("image"))
-                 and _token(source.get("boot_id")), "invalid source identity")
-        self._receipt(value.get("receipt"), value["operation"], source["boot_id"])
+        _require(_cid(source.get("cid")) and _image(source.get("image")), "invalid source identity")
+        if value.get("receipt") is None:
+            _require(value.get("ledger_degraded") is True and source.get("boot_id") is None
+                     and value.get("source_handoff_valid") in (None, False), "invalid service-only operation")
+        else:
+            _require(_token(source.get("boot_id")), "invalid source boot")
+            self._receipt(value["receipt"], value["operation"], source["boot_id"])
         _require("source_handoff_valid" in value and (
             type(value["source_handoff_valid"]) is bool if source["cid"] in value["quiesced"]
             else value["source_handoff_valid"] is None), "invalid source handoff snapshot")
+        reset = value.get("ledger_reset")
+        if reset is not None:
+            _require(value.get("ledger_degraded") is True and isinstance(reset, dict)
+                     and re.fullmatch(r"[0-9a-f]{32}", str(reset.get("id", "")))
+                     and _token(reset.get("owner_token"))
+                     and reset.get("stage") in {"intent", "detached", "ready"}
+                     and reset.get("quarantine") == ".restart-ledger-quarantine-" + reset["id"]
+                     and (reset.get("old_identity") is None or (
+                         isinstance(reset["old_identity"], list) and len(reset["old_identity"]) == 2
+                         and all(type(v) is int and v >= 0 for v in reset["old_identity"])))
+                     and reset.get("cleanup") in {"pending", "clean", "retained"}, "invalid ledger reset")
         tokens, cids = set(), {source["cid"]}
         for role, slot in value["slots"].items():
             _require(isinstance(slot, dict) and isinstance(slot.get("attempts"), list)
@@ -216,11 +236,7 @@ class AdmissionStore:
     def _save(self, directory, value):
         self._write(directory, "state.json", value)
 
-    def prepare(self, operation, receipt, source_cid, source_image, source_boot_id):
-        _require(_token(operation) and _cid(source_cid) and _image(source_image)
-                 and _token(source_boot_id), "invalid operation/source identity")
-        self._receipt(receipt, operation, source_boot_id)
-        source = {"cid": source_cid, "image": source_image, "boot_id": source_boot_id}
+    def _ensure_state_directory(self):
         try:
             self.state_dir.mkdir(mode=0o700)
         except FileExistsError:
@@ -232,6 +248,13 @@ class AdmissionStore:
             os.fsync(parent)
         finally:
             os.close(parent)
+
+    def prepare(self, operation, receipt, source_cid, source_image, source_boot_id):
+        _require(_token(operation) and _cid(source_cid) and _image(source_image)
+                 and _token(source_boot_id), "invalid operation/source identity")
+        self._receipt(receipt, operation, source_boot_id)
+        source = {"cid": source_cid, "image": source_image, "boot_id": source_boot_id}
+        self._ensure_state_directory()
         with self._locked() as directory:
             try:
                 os.stat("state.json", dir_fd=directory, follow_symlinks=False)
@@ -253,6 +276,53 @@ class AdmissionStore:
             state = {"version": 1, "operation": operation, "receipt": receipt, "source": source,
                      "source_handoff_valid": None, "quiesced": [], "slots": {role: {"consumed": None, "attempts": []}
                                                 for role in ("target", "rollback")}}
+            self._save(directory, state)
+            return state
+
+    def prepare_for_recovery(self, operation, source_cid, source_image, *, allow_service_only=False):
+        """Own initial receipt sampling; damaged evidence grants SERVICE only.
+
+        Existing gate state always wins. No external receipt is needed on
+        replay, and no later receipt can upgrade a service-only operation.
+        Absent valid receipt, the host must explicitly assert drained/down
+        recovery eligibility; this method does not inspect Docker.
+        """
+        _require(_token(operation) and _cid(source_cid) and _image(source_image),
+                 "invalid recovery identity")
+        self._ensure_state_directory()
+        with self._locked() as directory:
+            try:
+                os.stat("state.json", dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                state = self._state(directory)
+                _require(state["operation"] == operation and state["source"]["cid"] == source_cid
+                         and state["source"]["image"] == source_image, "recovery identity changed")
+                return state
+            ledger = None
+            receipt = None
+            try:
+                ledger = self._directory(self.data_dir / ".restart-ledger")
+                candidate = self._read(ledger, "cutover-receipt.json")
+                _require(isinstance(candidate, dict) and _token(candidate.get("source_boot_id")),
+                         "missing recovery receipt")
+                self._receipt(candidate, operation, candidate["source_boot_id"])
+                receipt = candidate
+            except (AdmissionError, OSError) as exc:
+                if not self._resettable(exc):
+                    raise
+            finally:
+                if ledger is not None:
+                    os.close(ledger)
+            state = {"version": 1, "operation": operation, "receipt": receipt,
+                     "source": {"cid": source_cid, "image": source_image,
+                                "boot_id": receipt["source_boot_id"] if receipt else None},
+                     "source_handoff_valid": None, "quiesced": [],
+                     "slots": {role: {"consumed": None, "attempts": []} for role in ("target", "rollback")}}
+            if receipt is None:
+                _require(allow_service_only is True, "service-only preparation requires host recovery proof")
+                state["ledger_degraded"] = True
             self._save(directory, state)
             return state
 
@@ -288,13 +358,19 @@ class AdmissionStore:
                     # The host asserts exact removal BEFORE this snapshot.
                     # A legacy source may already have stolen/partly consumed
                     # its acceptance. Receipt alone never repairs that loss.
-                    ledger = self._directory(self.data_dir / ".restart-ledger")
+                    ledger = None
                     try:
-                        state["source_handoff_valid"] = self._original_evidence(
+                        ledger = self._directory(self.data_dir / ".restart-ledger")
+                        state["source_handoff_valid"] = not state.get("ledger_degraded", False) and self._original_evidence(
                             state, self._read(ledger, "accepted.json"), self._read(ledger, "ack.json"),
                             self._read(ledger, "boot-id", text=True))
+                    except (AdmissionError, OSError) as exc:
+                        if not self._resettable(exc):
+                            raise
+                        state["source_handoff_valid"] = False
                     finally:
-                        os.close(ledger)
+                        if ledger is not None:
+                            os.close(ledger)
                 state["quiesced"].append(cid)
                 self._save(directory, state)
 
@@ -385,7 +461,8 @@ class AdmissionStore:
 
     @staticmethod
     def _matches(value, state):
-        return (isinstance(value, dict) and value.get("version") == 1
+        return (isinstance(state.get("receipt"), dict)
+                and isinstance(value, dict) and value.get("version") == 1
                 and value.get("action") == "external_cutover"
                 and value.get("cutover_id") == state["operation"]
                 and value.get("nonce") == state["receipt"]["nonce"])
@@ -400,7 +477,7 @@ class AdmissionStore:
 
     @classmethod
     def _handoff_evidence(cls, state, role, accepted, ack, boot):
-        if state["source_handoff_valid"] is not True:
+        if state["source_handoff_valid"] is not True or state.get("ledger_degraded"):
             return False
         if cls._original_evidence(state, accepted, ack, boot):
             return True
@@ -433,6 +510,181 @@ class AdmissionStore:
                 os.unlink(name, dir_fd=ledger)
                 os.fsync(ledger)
 
+    @staticmethod
+    def _resettable(exc):
+        return isinstance(exc, AdmissionError) or (isinstance(exc, OSError)
+            and exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EACCES})
+
+    def _probe_ledger(self):
+        ledger = self._directory(self.data_dir / ".restart-ledger")
+        try:
+            for name in ("accepted.json", "ack.json", "boot-id", "cutover-receipt.json", "cutover-challenge.json"):
+                self._read(ledger, name, text=name == "boot-id")
+        finally:
+            os.close(ledger)
+
+    def _ordinary_acceptance(self, now):
+        """Salvage ONLY independently trusted, fresh ordinary restart proof."""
+        ledger = None
+        try:
+            ledger = self._directory(self.data_dir / ".restart-ledger")
+            accepted = self._read(ledger, "accepted.json")
+            boot = self._read(ledger, "boot-id", text=True)
+            if (isinstance(accepted, dict) and accepted.get("version") == 1
+                    and accepted.get("action") is None and _token(accepted.get("nonce"))
+                    and _token(boot) and accepted.get("source_boot_id") == boot
+                    and _number(accepted.get("created_at")) and _number(accepted.get("accepted_at"))
+                    and accepted["accepted_at"] <= now + 5 and now - accepted["accepted_at"] <= 600):
+                return accepted
+        except (AdmissionError, OSError) as exc:
+            if not self._resettable(exc):
+                raise  # storage errors are not permission to discard evidence
+        finally:
+            if ledger is not None:
+                os.close(ledger)
+        return None
+
+    @staticmethod
+    def _identity(parent, name):
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        return [info.st_dev, info.st_ino]
+
+    def _start_ledger_reset(self, directory, state, token, now):
+        # /data itself is intentionally application-owned. Pin its directory,
+        # never follow the ledger or quarantine entry, and never traverse an
+        # untrusted ledger to make its contents trusted by changing ownership.
+        data = os.open(self.data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            # Past retained namespaces are inert, never reopened or trusted.
+            # Keep constant-size journal history and bounded work per reset.
+            reset_id = secrets.token_hex(16)
+            state["ledger_degraded"] = True
+            state["ledger_reset"] = {
+                "id": reset_id, "owner_token": token, "stage": "intent", "cleanup": "pending",
+                "old_identity": self._identity(data, ".restart-ledger"),
+                "quarantine": ".restart-ledger-quarantine-" + reset_id,
+                "ordinary_acceptance": self._ordinary_acceptance(now),
+            }
+            self._save(directory, state)  # MUST precede moving any namespace
+        finally:
+            os.close(data)
+
+    def _clean_quarantine(self, data, reset):
+        """Bounded, nonrecursive deletion of our exact detached namespace.
+
+        Unknown/nested/oversized contents stay inert for manual cleanup. Legacy
+        ownership sweeps may chown them; they are NEVER authority. No symlink
+        target is followed or deleted; old quarantine history is not revisited.
+        """
+        quarantine = old = None
+        try:
+            quarantine = self._directory(self.data_dir / reset["quarantine"])
+            identity = self._identity(quarantine, "old")
+            if identity is not None:
+                if identity != reset["old_identity"]:
+                    return "retained"
+                info = os.stat("old", dir_fd=quarantine, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    old = os.open("old", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=quarantine)
+                    entries = []
+                    with os.scandir(old) as scan:
+                        for entry in scan:
+                            known = entry.name in {"accepted.json", "ack.json", "boot-id",
+                                "cutover-receipt.json", "cutover-challenge.json", ".admission-reset.json"}
+                            if len(entries) == 32 or not known or entry.is_dir(follow_symlinks=False):
+                                return "retained"
+                            entries.append(entry.name)
+                    for name in entries:
+                        os.unlink(name, dir_fd=old)
+                    os.fsync(old)
+                    os.close(old)
+                    old = None
+                    os.rmdir("old", dir_fd=quarantine)
+                else:
+                    os.unlink("old", dir_fd=quarantine)
+            os.fsync(quarantine)
+            os.close(quarantine)
+            quarantine = None
+            os.rmdir(reset["quarantine"], dir_fd=data)
+            os.fsync(data)
+            return "clean"
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM, errno.ENOTEMPTY, errno.EBUSY}:
+                raise
+            return "retained"
+        finally:
+            if old is not None:
+                os.close(old)
+            if quarantine is not None:
+                os.close(quarantine)
+
+    def _resume_ledger_reset(self, directory, state):
+        reset = state["ledger_reset"]
+        data = os.open(self.data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        quarantine = fresh = None
+        try:
+            try:
+                os.mkdir(reset["quarantine"], mode=0o700, dir_fd=data)
+            except FileExistsError:
+                pass
+            quarantine = self._directory(self.data_dir / reset["quarantine"])
+            _require(not os.fstat(quarantine).st_mode & 0o077, "quarantine is not root-private")
+            os.fsync(data)
+            if reset["stage"] == "intent":
+                detached = self._identity(quarantine, "old")
+                live = self._identity(data, ".restart-ledger")
+                if detached is not None:
+                    _require(detached == reset["old_identity"] and live is None,
+                             "ledger reset namespace changed")
+                elif live is not None:
+                    _require(live == reset["old_identity"], "ledger reset source changed")
+                    os.rename(".restart-ledger", "old", src_dir_fd=data, dst_dir_fd=quarantine)
+                os.fsync(quarantine)
+                os.fsync(data)
+                reset["stage"] = "detached"
+                self._save(directory, state)
+            try:
+                os.mkdir(".restart-ledger", mode=0o755, dir_fd=data)
+            except FileExistsError:
+                pass
+            fresh = self._directory(self.data_dir / ".restart-ledger")
+            _require(self._identity(data, ".restart-ledger") != reset["old_identity"],
+                     "old ledger was not detached")
+            marker = self._read(fresh, ".admission-reset.json")
+            if marker is None:
+                with os.scandir(fresh) as scan:
+                    entries = []
+                    for entry in scan:
+                        _require(len(entries) < 32 and re.fullmatch(
+                            r"\.\.admission-reset\.json\.[0-9a-f]{24}", entry.name),
+                            "unmarked nonempty reset namespace")
+                        self._trusted(entry.stat(follow_symlinks=False))
+                        entries.append(entry.name)
+                for name in entries:
+                    os.unlink(name, dir_fd=fresh)
+                os.fsync(fresh)
+                self._write(fresh, ".admission-reset.json", {"id": reset["id"]})
+            else:
+                _require(marker == {"id": reset["id"]}, "reset namespace belongs to another reset")
+            if reset["ordinary_acceptance"] is not None:
+                self._write(fresh, "accepted.json", reset["ordinary_acceptance"])
+            os.fsync(fresh)
+            os.fsync(data)
+            os.close(quarantine)
+            quarantine = None
+            reset["cleanup"] = self._clean_quarantine(data, reset)
+            reset["stage"] = "ready"
+            self._save(directory, state)
+        finally:
+            if fresh is not None:
+                os.close(fresh)
+            if quarantine is not None:
+                os.close(quarantine)
+            os.close(data)
+
     def enter(self, token, boot_id, *, now=None):
         """Return continuation/service_only; denial raises before touching /data."""
         _require(_token(token) and _token(boot_id), "invalid attempt/boot token")
@@ -447,6 +699,15 @@ class AdmissionStore:
             _require(attempt["state"] in {"open", "admitted"} and attempt["issued"]
                      and attempt["cid"] not in state["quiesced"], "attempt denied")
             self._quiescent(state, role)
+            if state.get("ledger_reset", {}).get("stage") in {"intent", "detached"}:
+                self._resume_ledger_reset(directory, state)
+            try:
+                self._probe_ledger()
+            except (AdmissionError, OSError) as exc:
+                if not self._resettable(exc):
+                    raise
+                self._start_ledger_reset(directory, state, token, current)
+                self._resume_ledger_reset(directory, state)
             ledger = self._directory(self.data_dir / ".restart-ledger")
             try:
                 if attempt["state"] == "admitted":
@@ -458,6 +719,12 @@ class AdmissionStore:
                     return "service_only"
                 _require(state["slots"][role]["consumed"] is None, "slot consumed")
                 receipt = state["receipt"]
+                if state.get("ledger_degraded"):
+                    self._retire_matching(ledger, state, all_external_acceptance=True)
+                    attempt.update(state="admitted", boot_id=boot_id, continuation=False)
+                    state["slots"][role]["consumed"] = {"generation": attempt["generation"], "boot_id": boot_id}
+                    self._save(directory, state)
+                    return "service_only"
                 original = self._read(ledger, "cutover-receipt.json")
                 _require(original == receipt, "original receipt changed or missing")
                 existing = self._read(ledger, "accepted.json")

@@ -1,12 +1,84 @@
 """Host admission topology and non-dispatch installation publication."""
 import copy
 import json
+import os
 import subprocess
 
 import pytest
 
 from tests.test_mobius_rebuild_host import host
 from tests.test_admission_host_recovery import incident
+
+
+def test_prepared_gate_survives_retirement_of_original_ledger_receipt(incident):
+    c = incident
+    c.host.prepare_admission(c.config, c.tx)
+    before = c.gate.observe()
+    c.legacy.CUTOVER_RECEIPT_PATH.unlink()
+    c.host.prepare_admission(c.config, c.tx)
+    assert c.gate.observe() == before
+    assert len(c.docker.removes) == 1
+
+
+@pytest.mark.parametrize('source_status,drain_confirmed,allowed', [
+    ('running', False, False), ('running', True, True),
+    ('exited', False, True), ('restarting', False, True), ('missing', False, True),
+])
+def test_missing_initial_receipt_never_removes_undrained_serviceable_source(
+        incident, source_status, drain_confirmed, allowed):
+    c = incident
+    c.legacy.CUTOVER_RECEIPT_PATH.unlink()
+    c.tx['drain_confirmed'] = drain_confirmed
+    source = c.tx['source_container']
+    if source_status == 'missing':
+        del c.docker.containers[source]
+    else:
+        c.docker.containers[source]['State']['Status'] = source_status
+    if not allowed:
+        with pytest.raises(RuntimeError):
+            c.host.prepare_admission(c.config, c.tx)
+        assert not c.docker.removes and not c.docker.starts
+        return
+    c.host.prepare_admission(c.config, c.tx)
+    state = c.gate.observe()
+    assert state['ledger_degraded'] is True
+    assert state['receipt'] is None and state['source_handoff_valid'] is False
+    assert source in state['quiesced']
+
+
+def test_settlement_requires_gate_boot_not_only_a_matching_legacy_pair(incident):
+    c = incident
+    cid = c.host.prepare_rollback(c.config, c.tx)
+    assert c.docker.complete_start(cid)
+    ack = json.loads(c.legacy.ACK_PATH.read_text())
+    ack['target_boot_id'] = 'unrelated-boot-12345678'
+    os.chmod(c.legacy.ACK_PATH, 0o600)
+    os.chmod(c.legacy.BOOT_PATH, 0o600)
+    c.legacy.ACK_PATH.write_text(json.dumps(ack))
+    c.legacy.BOOT_PATH.write_text(ack['target_boot_id'])
+    assert c.host.cutover_boot_consumed(c.config, c.tx['operation_id'])
+    assert not c.host.finish_verified(c.config, c.tx, cid, c.tx['previous_image'],
+                                     state='rolled_back', code='replacement_failed', message='test')
+    assert c.host.read_json(c.host.STATUS)['code'] == 'handoff_boot_unconfirmed'
+    assert c.host.TRANSACTION.exists()
+
+
+def test_new_proven_rejection_supersedes_old_unknown_observation(incident, monkeypatch):
+    c = incident
+    c.tx['phase'] = 'replacement_started'
+    c.host.write_transaction(c.tx)
+    c.host.prepare_admission(c.config, c.tx)
+    cid = c.host.prepare_attempt(c.config, c.tx, 'target')
+    assert c.docker.complete_start(cid)
+    c.host.write_status(c.config, operation_id=c.tx['operation_id'], state='needs_recovery',
+                        code='observation_unconfirmed', message='prior unknown observation')
+    def reject(*_):
+        raise c.host.ProvenanceRejected('wrong served revision')
+    monkeypatch.setattr(c.host, 'verify_served_generation', reject)
+    c.host.reconcile()
+    status = c.host.read_json(c.host.STATUS)
+    assert status['state'] == 'rolled_back'
+    assert status['code'] == 'replacement_failed'
 
 
 def topology(tmp_path, monkeypatch):

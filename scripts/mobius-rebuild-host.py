@@ -885,12 +885,27 @@ def quiesce_target(config_value: dict, transaction: dict) -> None:
 
 def prepare_admission(config_value: dict, transaction: dict):
     gate = admission_store(config_value, transaction)
-    receipt = read_json(config_value["data_dir"] / ".restart-ledger" / "cutover-receipt.json")
-    # prepare is idempotent and validates any existing state; replay also
-    # covers power loss after the directory/lock was created but before state.
-    gate.prepare(transaction["operation_id"], receipt, transaction["source_container"],
-                 transaction["previous_image"], receipt.get("source_boot_id"))
-    state = gate.observe()
+    # A missing receipt after a failed drain must not authorize removal of a
+    # still-serviceable source. A completed drain or exact evidence that the
+    # source is already down permits service-only restoration, never handoff.
+    service_only = transaction.get("drain_confirmed") is True
+    if not service_only:
+        cid = transaction["source_container"]
+        try:
+            result = docker_command(["docker", "container", "inspect", "--format", "{{json .}}", cid],
+                                    check=False)
+            if result.returncode == 0:
+                item = json.loads(result.stdout)
+                service_only = (item.get("Id") == cid and item.get("Image") == transaction["previous_image"]
+                                and item.get("State", {}).get("Status") in {"created", "exited", "dead", "restarting"})
+            else:
+                service_only = result.returncode == 1 and result.stderr.strip().lower() in {
+                    f"error response from daemon: no such container: {cid}",
+                    f"error response from daemon: no such object: {cid}"}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # Unknown source state never grants service-only cutover.
+    state = gate.prepare_for_recovery(transaction["operation_id"], transaction["source_container"],
+                                      transaction["previous_image"], allow_service_only=service_only)
     if state["operation"] != transaction["operation_id"] or state["source"]["cid"] != transaction["source_container"]:
         raise RuntimeError("admission and replacement journals disagree")
     if state["source"]["cid"] not in state["quiesced"]:
@@ -919,8 +934,12 @@ def rollback(config_value: dict, operation: str, expected: str,
         write_status(config_value, **transaction["outcome"])
         clear_transaction()
         return 0 if transaction["outcome"]["state"] == "succeeded" else 1
-    code = transaction.get("failure_code", code)
-    detail = transaction.get("failure_detail", detail)
+    # Preserve the original failure, except when later evidence resolves an
+    # earlier unknown observation into a definite replacement failure.
+    if not (transaction.get("failure_code") == "observation_unconfirmed"
+            and code in {"replacement_failed", "readiness_budget_exhausted"}):
+        code = transaction.get("failure_code", code)
+        detail = transaction.get("failure_detail", detail)
     transaction.update(failure_code=code, failure_detail=detail)
     write_transaction(transaction)
     if transaction.get("admission_version") != 1:
@@ -1439,6 +1458,7 @@ def execute_replacement(config_value: dict, transaction: dict) -> int:
     write_transaction(transaction)
     try:
         request_drain(config_value, operation, cid)
+        transaction["drain_confirmed"] = True
         transaction["phase"] = "replacement_started"
         write_transaction(transaction)
         write_status(config_value, operation_id=operation, state="replacing", expected_sha=expected,
@@ -1457,8 +1477,13 @@ def execute_replacement(config_value: dict, transaction: dict) -> int:
                                     state="succeeded", code=None,
                                     message="Container rebuilt successfully.") else 1
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        code = "observation_unconfirmed"
+        if isinstance(exc, ProvenanceRejected):
+            code = "replacement_failed"
+            transaction.update(failure_code=code, failure_detail=str(exc)[:300])
+            write_transaction(transaction)
         write_status(config_value, operation_id=operation, state="needs_recovery", expected_sha=expected,
-                     request_nonce=transaction.get("request_nonce"), code="observation_unconfirmed",
+                     request_nonce=transaction.get("request_nonce"), code=code,
                      message=f"The replacement remains journaled for recovery: {str(exc)[:180]}")
         return 1
 
@@ -1481,7 +1506,8 @@ def write_transaction(value: dict) -> None:
 
 
 def cutover_boot_consumed(config_value: dict, operation: str, *,
-                          trusted_uid: int = 0, trusted_gid: int = 0) -> bool:
+                          trusted_uid: int = 0, trusted_gid: int = 0,
+                          expected_boot_id: str | None = None) -> bool:
     """Read-only proof that this boot consumed the exact cutover authorization.
 
     A receipt alone is inert, but accepted.json can authorize a future boot.
@@ -1527,6 +1553,7 @@ def cutover_boot_consumed(config_value: dict, operation: str, *,
                 or ack.get("action") != "external_cutover"
                 or ack.get("cutover_id") != operation
                 or ack.get("target_boot_id") != boot
+                or (expected_boot_id is not None and boot != expected_boot_id)
                 or not re.fullmatch(token, boot)
                 or not isinstance(ack.get("nonce"), str)
                 or not re.fullmatch(token, ack["nonce"])
@@ -1563,13 +1590,16 @@ def finish_verified(config_value: dict, transaction: dict, cid: str, image: str,
     Finalization and the journal cannot be atomic together. A crash in between
     therefore replays an honest degraded outcome, never authorizes another boot.
     """
+    expected_boot_id = None
     if transaction.get("admission_version") == 1:
         gate_state = admission_store(config_value, transaction).observe()
         role = "target" if state == "succeeded" else "rollback"
         slot = gate_state["slots"][role]
         if not slot["consumed"] or slot["attempts"][-1]["cid"] != cid:
             raise RuntimeError("healthy container has no matching admission")
-    if not cutover_boot_consumed(config_value, transaction["operation_id"]):
+        expected_boot_id = slot["consumed"]["boot_id"]
+    if not cutover_boot_consumed(config_value, transaction["operation_id"],
+                                 expected_boot_id=expected_boot_id):
         write_status(config_value, state="needs_recovery", code="handoff_boot_unconfirmed",
                      message="The container is healthy, but this boot has not proven consumption of "
                              "the exact handoff. Keep the transaction for manual Host recovery.")

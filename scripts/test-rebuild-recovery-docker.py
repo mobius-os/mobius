@@ -326,11 +326,12 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=2 CMD test -f /data/ready
                                     return original_docker(args, **kwargs)
                                 finally:
                                     if lock is not None:
-                                        # Docker accepted Start while the wrapper
-                                        # was blocked on its real gate lock. Fence
-                                        # the exact old CID before it can enter.
+                                        # Freeze the blocked wrapper, then let the
+                                        # REAL host close its admission before
+                                        # removing it. Test code must not remove
+                                        # the CID ahead of the durable CLOSE.
                                         assert barrier.accepted.is_set()
-                                        command("docker", "rm", "-f", target_cid, timeout=15)
+                                        command("docker", "pause", target_cid, timeout=15)
                                         fcntl.flock(lock, fcntl.LOCK_UN)
                                         lock.close()
                                         lock = None

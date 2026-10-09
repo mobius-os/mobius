@@ -222,7 +222,7 @@ def test_rollback_ack_never_allocates_second_rollback(setup):
 
 
 @pytest.mark.parametrize("damage", ["symlink", "mode", "json", "nan", "duplicate", "directory", "hardlink"])
-def test_malformed_trusted_acceptance_fails_before_claim(setup, damage):
+def test_damaged_acceptance_is_reset_without_continuation(setup, damage):
     module, store, legacy, _ = setup
     rollback_open(store)
     path = legacy.ACCEPTED_PATH
@@ -238,9 +238,10 @@ def test_malformed_trusted_acceptance_fails_before_claim(setup, damage):
         os.link(path, path.parent / "alias")
     else:
         path.write_text({"json": "[", "nan": '{"value":NaN}', "duplicate": '{"x":1,"x":2}'}[damage])
-    with pytest.raises((module.AdmissionError, OSError)):
-        store.enter(TOKEN, "denied-boot-12345678", now=NOW)
-    assert store.observe()["slots"]["rollback"]["consumed"] is None
+    assert store.enter(TOKEN, "service-boot-12345678", now=NOW) == "service_only"
+    assert store.observe()["ledger_degraded"] is True
+    assert not legacy.begin_boot("service-boot-12345678", now=NOW)
+    assert not legacy.ACK_PATH.exists()
 
 
 def test_untrusted_gate_and_malformed_state_do_not_mutate_acceptance(setup):
@@ -659,3 +660,400 @@ def test_prepare_never_reinitializes_existing_null_state(setup):
     with pytest.raises(module.AdmissionError):
         store.prepare(OP, receipt, SOURCE, IMAGE, SOURCE_BOOT)
     assert state.read_text() == "null"
+
+
+
+def _root_ownership_case(parent, damage, role):
+    """Runs only under explicitly requested sudo, wholly in a disposable root."""
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=parent) as temporary:
+        root = Path(temporary)
+        data = root / "data"
+        data.mkdir()
+        legacy = legacy_at(data)
+        legacy.begin_boot(SOURCE_BOOT, now=1000)
+        legacy.open_cutover(OP, now=1000)
+        legacy.INTENT_PATH.write_text(json.dumps({
+            "version": 1, "action": "external_cutover", "cutover_id": OP,
+            "nonce": "nonce-original-12345678", "source_boot_id": SOURCE_BOOT, "created_at": 1000,
+        }))
+        assert legacy.accept_cutover(OP, now=NOW)
+        receipt = json.loads(legacy.CUTOVER_RECEIPT_PATH.read_text())
+        module = load(GATE_PATH, "root_admission_gate")
+        store = module.AdmissionStore(root / "gate", data)
+        if role == "source":
+            # The legacy source can die during ownership sweep before the host
+            # copied its receipt into the independent root gate.
+            paths = ([legacy.LEDGER_DIR] if damage == "directory" else
+                     [legacy.CUTOVER_RECEIPT_PATH] if damage == "record" else
+                     [legacy.LEDGER_DIR, *legacy.LEDGER_DIR.iterdir()])
+            for path in paths:
+                os.chown(path, 65534, 65534, follow_symlinks=False)
+            try:
+                store.prepare_for_recovery(OP, SOURCE, IMAGE)
+            except module.AdmissionError:
+                pass
+            else:
+                raise AssertionError("missing explicit host service recovery proof")
+            state = store.prepare_for_recovery(OP, SOURCE, IMAGE, allow_service_only=True)
+            assert state["receipt"] is None and state["source"]["boot_id"] is None
+            rollback_open(store)
+            assert store.enter(TOKEN, "restored-source-12345678", now=NOW + 1) == "service_only"
+            assert not legacy.begin_boot("restored-source-12345678", now=NOW + 1)
+            assert not legacy.ACK_PATH.exists()
+            assert store.observe()["source_handoff_valid"] is False
+            return
+        store.prepare(OP, receipt, SOURCE, IMAGE, SOURCE_BOOT)
+        store.quiesce(SOURCE)
+        token, image, cid = (TOKEN, IMAGE, ROLLBACK) if role == "rollback" else ("target-token-12345678", NEW_IMAGE, TARGET)
+        store.allocate(role, token, image)
+        store.bind(role, token, cid)
+        store.open(role, token)
+        store.issue_start(role, token)
+        assert store.enter(token, "first-boot-12345678", now=NOW) == "continuation"
+        assert legacy.begin_boot("first-boot-12345678", now=NOW)
+        original_consumption = store.observe()["slots"][role]["consumed"]
+        # These are the real UID/GID transitions caused by the frozen legacy
+        # entrypoint's find/chown, not mode-only or mocked stat approximations.
+        paths = ([legacy.LEDGER_DIR] if damage == "directory" else
+                 [legacy.ACK_PATH] if damage == "record" else
+                 [legacy.LEDGER_DIR, *legacy.LEDGER_DIR.iterdir()])
+        for path in paths:
+            os.chown(path, 65534, 65534, follow_symlinks=False)
+        if role == "target":
+            store.quiesce(TARGET)
+            store.allocate("rollback", TOKEN, IMAGE)
+            store.bind("rollback", TOKEN, ROLLBACK)
+            store.open("rollback", TOKEN)
+            store.issue_start("rollback", TOKEN)
+            token = TOKEN
+        assert store.enter(token, "restored-boot-12345678", now=NOW + 1) == "service_only"
+        assert not legacy.begin_boot("restored-boot-12345678", now=NOW + 1)
+        assert not legacy.ACK_PATH.exists() and not legacy.ACCEPTED_PATH.exists()
+        state = store.observe()
+        assert state["slots"][role]["consumed"] == original_consumption
+        assert state["ledger_degraded"] is True
+        assert state["ledger_reset"]["stage"] == "ready"
+        assert state["ledger_reset"]["cleanup"] == "clean"
+        assert not list(data.glob(".restart-ledger-quarantine-*"))
+        assert legacy.LEDGER_DIR.stat().st_uid == 0
+        assert store.enter(token, "later-service-boot-12345678", now=NOW + 2) == "service_only"
+        assert not legacy.begin_boot("later-service-boot-12345678", now=NOW + 2)
+
+
+@pytest.mark.parametrize("damage", ["directory", "record", "whole-sweep"])
+@pytest.mark.parametrize("role", ["source", "target", "rollback"])
+def test_real_root_partial_legacy_ownership_sweep(tmp_path, damage, role):
+    import shutil
+    sudo = shutil.which("sudo")
+    if os.geteuid() != 0 and (not sudo or subprocess.run([sudo, "-n", "true"], capture_output=True).returncode):
+        pytest.skip("real ownership test requires root or passwordless sudo")
+    invocation = [sys.executable, "-c",
+        "import importlib.util,sys; "
+        "s=importlib.util.spec_from_file_location('root_ownership_test',sys.argv[1]); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "m._root_ownership_case(sys.argv[2],sys.argv[3],sys.argv[4])",
+        str(Path(__file__).resolve()), str(tmp_path), damage, role]
+    if os.geteuid() != 0:
+        invocation = [sudo, "-n", *invocation]
+    result = subprocess.run(invocation, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_reset_preserves_only_independently_trusted_ordinary_restart(setup):
+    _, store, legacy, _ = setup
+    rollback_open(store)
+    store.enter(TOKEN, "first-boot-12345678", now=NOW)
+    legacy.begin_boot("first-boot-12345678", now=NOW)
+    request = {"version": 1, "nonce": "independent-ordinary-12345678",
+               "source_boot_id": "first-boot-12345678", "created_at": NOW + 1}
+    legacy.INTENT_PATH.write_text(json.dumps(request))
+    legacy.REQUEST_PATH.write_text(json.dumps(request))
+    assert legacy.accept("first-boot-12345678", now=NOW + 1)
+    ordinary = json.loads(legacy.ACCEPTED_PATH.read_text())
+    legacy.ACK_PATH.chmod(0o666)  # acceptance, boot and directory remain trusted
+    assert store.enter(TOKEN, "planned-boot-12345678", now=NOW + 2) == "service_only"
+    assert json.loads(legacy.ACCEPTED_PATH.read_text()) == ordinary
+    assert legacy.begin_boot("planned-boot-12345678", now=NOW + 2)
+    assert json.loads(legacy.ACK_PATH.read_text())["nonce"] == request["nonce"]
+
+
+def test_untrusted_directory_cannot_launder_root_owned_ordinary_bytes(setup):
+    _, store, legacy, _ = setup
+    rollback_open(store)
+    store.enter(TOKEN, "first-boot-12345678", now=NOW)
+    legacy.begin_boot("first-boot-12345678", now=NOW)
+    legacy._write_json(legacy.ACCEPTED_PATH, {"version": 1, "nonce": "untrusted-ordinary-12345678",
+        "source_boot_id": "first-boot-12345678", "created_at": NOW, "accepted_at": NOW}, 0o600)
+    legacy.LEDGER_DIR.chmod(0o777)
+    assert store.enter(TOKEN, "service-boot-12345678", now=NOW + 1) == "service_only"
+    assert store.observe()["ledger_reset"]["ordinary_acceptance"] is None
+    assert not legacy.begin_boot("service-boot-12345678", now=NOW + 1)
+
+
+def test_ledger_symlink_reset_never_traverses_or_deletes_target(setup, tmp_path):
+    import shutil
+    _, store, legacy, _ = setup
+    rollback_open(store)
+    store.enter(TOKEN, "first-boot-12345678", now=NOW)
+    outside = tmp_path / "unrelated"
+    outside.mkdir()
+    sentinel = outside / "do-not-delete"
+    sentinel.write_text("unrelated bytes")
+    shutil.rmtree(legacy.LEDGER_DIR)
+    legacy.LEDGER_DIR.symlink_to(outside, target_is_directory=True)
+    assert store.enter(TOKEN, "service-boot-12345678", now=NOW + 1) == "service_only"
+    assert not legacy.LEDGER_DIR.is_symlink()
+    assert sentinel.read_text() == "unrelated bytes"
+    assert not legacy.begin_boot("service-boot-12345678", now=NOW + 1)
+
+
+@pytest.mark.parametrize("boundary", ["intent-before", "intent-after", "rename-before", "rename-after",
+    "detached-before", "detached-after", "mkdir-before", "mkdir-after", "marker-before", "marker-after",
+    "cleanup-before", "cleanup-after", "ready-before", "ready-after"])
+def test_reset_resumes_after_each_namespace_and_publication_boundary(setup, monkeypatch, boundary):
+    module, store, legacy, _ = setup
+    rollback_open(store)
+    store.enter(TOKEN, "first-boot-12345678", now=NOW)
+    legacy.begin_boot("first-boot-12345678", now=NOW)
+    consumption = store.observe()["slots"]["rollback"]["consumed"]
+    legacy.LEDGER_DIR.chmod(0o777)
+    fired = [False]
+    def hit(name):
+        if not fired[0] and name == boundary:
+            fired[0] = True
+            raise PowerLoss(name)
+    save, rename, mkdir, write, clean = store._save, module.os.rename, module.os.mkdir, store._write, store._clean_quarantine
+    def save_boundary(directory, state):
+        stage = state.get("ledger_reset", {}).get("stage")
+        hit(str(stage) + "-before")
+        save(directory, state)
+        hit(str(stage) + "-after")
+    def rename_boundary(*args, **kwargs):
+        hit("rename-before")
+        rename(*args, **kwargs)
+        hit("rename-after")
+    def mkdir_boundary(path, *args, **kwargs):
+        if path == ".restart-ledger":
+            hit("mkdir-before")
+        mkdir(path, *args, **kwargs)
+        if path == ".restart-ledger":
+            hit("mkdir-after")
+    def write_boundary(directory, name, value, mode=0o600):
+        if name == ".admission-reset.json":
+            hit("marker-before")
+        write(directory, name, value, mode)
+        if name == ".admission-reset.json":
+            hit("marker-after")
+    def clean_boundary(*args):
+        hit("cleanup-before")
+        result = clean(*args)
+        hit("cleanup-after")
+        return result
+    monkeypatch.setattr(store, "_save", save_boundary)
+    monkeypatch.setattr(module.os, "rename", rename_boundary)
+    monkeypatch.setattr(module.os, "mkdir", mkdir_boundary)
+    monkeypatch.setattr(store, "_write", write_boundary)
+    monkeypatch.setattr(store, "_clean_quarantine", clean_boundary)
+    with pytest.raises(PowerLoss):
+        store.enter(TOKEN, "interrupted-service-12345678", now=NOW + 1)
+    assert fired[0]
+    assert store.enter(TOKEN, "recovered-service-12345678", now=NOW + 2) == "service_only"
+    assert not legacy.begin_boot("recovered-service-12345678", now=NOW + 2)
+    assert store.observe()["slots"]["rollback"]["consumed"] == consumption
+    assert store.observe()["ledger_reset"]["stage"] == "ready"
+    assert not list(store.data_dir.glob(".restart-ledger-quarantine-*"))
+
+
+@pytest.mark.parametrize("damage", ["missing", "directory-mode", "file-mode", "json", "shape", "symlink"])
+def test_initial_recovery_requires_explicit_service_proof_and_cannot_upgrade(setup, tmp_path, damage):
+    module, original, legacy, receipt = setup
+    path = legacy.CUTOVER_RECEIPT_PATH
+    if damage == "missing":
+        path.unlink()
+    elif damage == "directory-mode":
+        legacy.LEDGER_DIR.chmod(0o777)
+    elif damage == "file-mode":
+        path.chmod(0o666)
+    elif damage == "json":
+        path.chmod(0o600)
+        path.write_text("[")
+    elif damage == "shape":
+        path.chmod(0o600)
+        path.write_text("{}")
+    else:
+        path.unlink()
+        path.symlink_to(legacy.ACCEPTED_PATH)
+    store = module.AdmissionStore(tmp_path / "new-gate", original.data_dir, os.getuid(), os.getgid())
+    with pytest.raises(module.AdmissionError, match="host recovery proof"):
+        store.prepare_for_recovery(OP, SOURCE, IMAGE)
+    assert not (store.state_dir / "state.json").exists()
+    state = store.prepare_for_recovery(OP, SOURCE, IMAGE, allow_service_only=True)
+    assert state["receipt"] is None and state["source"]["boot_id"] is None
+    assert state["ledger_degraded"] is True
+    # Even a newly trusted copy of the exact original receipt cannot upgrade.
+    legacy.LEDGER_DIR.chmod(0o755)
+    if path.is_symlink():
+        path.unlink()
+    legacy._write_json(path, receipt, 0o600)
+    assert store.prepare_for_recovery(OP, SOURCE, IMAGE) == state
+    rollback_open(store)
+    assert store.observe()["source_handoff_valid"] is False
+    assert store.enter(TOKEN, "recovery-boot-12345678", now=NOW) == "service_only"
+    assert not legacy.begin_boot("recovery-boot-12345678", now=NOW)
+    assert not legacy.ACK_PATH.exists()
+
+
+def test_recovery_replay_uses_gate_receipt_not_retired_legacy_copy(setup):
+    module, store, legacy, _ = setup
+    state = store.observe()
+    legacy.CUTOVER_RECEIPT_PATH.unlink()
+    assert store.prepare_for_recovery(OP, SOURCE, IMAGE) == state
+    with pytest.raises(module.AdmissionError, match="identity changed"):
+        store.prepare_for_recovery(OP, TARGET, IMAGE, allow_service_only=True)
+
+
+def test_initial_recovery_can_sample_trusted_receipt(setup, tmp_path):
+    module, original, _, receipt = setup
+    store = module.AdmissionStore(tmp_path / "new-gate", original.data_dir, os.getuid(), os.getgid())
+    state = store.prepare_for_recovery(OP, SOURCE, IMAGE)
+    assert state["receipt"] == receipt and not state.get("ledger_degraded")
+    rollback_open(store)
+    assert store.enter(TOKEN, "recovery-boot-12345678", now=NOW + 601) == "continuation"
+
+
+@pytest.mark.parametrize("failure", ["read", "save"])
+def test_initial_recovery_does_not_swallow_io_failure(setup, tmp_path, monkeypatch, failure):
+    import errno
+    module, original, _, _ = setup
+    store = module.AdmissionStore(tmp_path / "new-gate", original.data_dir, os.getuid(), os.getgid())
+    def broken(*_args, **_kwargs):
+        raise OSError(errno.EIO, "injected storage failure")
+    monkeypatch.setattr(store, "_read" if failure == "read" else "_save", broken)
+    with pytest.raises(OSError, match="storage failure"):
+        store.prepare_for_recovery(OP, SOURCE, IMAGE, allow_service_only=True)
+    assert not (store.state_dir / "state.json").exists()
+
+
+def test_retained_unknown_quarantine_is_inert_and_does_not_block_next_flat_reset(setup):
+    _, store, legacy, _ = setup
+    rollback_open(store)
+    store.enter(TOKEN, "first-boot-12345678", now=NOW)
+    legacy.begin_boot("first-boot-12345678", now=NOW)
+    unknown = legacy.LEDGER_DIR / "unknown-owner-data"
+    unknown.mkdir()
+    (unknown / "keep").write_text("not ours to delete")
+    legacy.LEDGER_DIR.chmod(0o777)
+    assert store.enter(TOKEN, "recovery-boot-12345678", now=NOW + 1) == "service_only"
+    first = store.observe()["ledger_reset"]
+    assert first["cleanup"] == "retained"
+    retained = store.data_dir / first["quarantine"]
+    assert (retained / "old" / "unknown-owner-data" / "keep").read_text() == "not ours to delete"
+    assert not legacy.begin_boot("recovery-boot-12345678", now=NOW + 1)
+    retained.chmod(0o777)  # no promise of continued trust after legacy sweep
+    legacy.LEDGER_DIR.chmod(0o777)
+    assert store.enter(TOKEN, "another-boot-12345678", now=NOW + 2) == "service_only"
+    second = store.observe()["ledger_reset"]
+    assert second["id"] != first["id"] and second["cleanup"] == "clean"
+    assert retained.exists()
+    assert not legacy.begin_boot("another-boot-12345678", now=NOW + 2)
+
+
+def test_denied_attempt_does_not_reset_damaged_ledger(setup):
+    module, store, legacy, _ = setup
+    rollback_open(store)
+    assert store.close_pending("rollback", TOKEN)
+    legacy.LEDGER_DIR.chmod(0o777)
+    inode = legacy.LEDGER_DIR.stat().st_ino
+    with pytest.raises(module.AdmissionError):
+        store.enter(TOKEN, "denied-boot-12345678", now=NOW)
+    assert legacy.LEDGER_DIR.stat().st_ino == inode
+    assert not store.observe().get("ledger_reset")
+
+
+@pytest.mark.parametrize("already_admitted", [True, False])
+def test_process_death_before_and_after_every_reset_fsync(setup, tmp_path, already_admitted):
+    """os._exit bypasses finally: includes unpublished marker/state temporaries."""
+    import shutil
+    _, store, legacy, _ = setup
+    rollback_open(store)
+    if already_admitted:
+        store.enter(TOKEN, "first-boot-12345678", now=NOW)
+        legacy.begin_boot("first-boot-12345678", now=NOW)
+    consumed = store.observe()["slots"]["rollback"]["consumed"]
+    legacy.LEDGER_DIR.chmod(0o777)
+    child = '''import importlib.util,os,sys
+s=importlib.util.spec_from_file_location("gate",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+g=m.AdmissionStore(sys.argv[2],sys.argv[3],os.getuid(),os.getgid())
+original=os.fsync; count=0; stop=int(sys.argv[4]); phase=sys.argv[5]
+def sync(fd):
+ global count
+ count+=1
+ if count==stop and phase=="before": os._exit(91)
+ if count==stop and phase=="error": raise OSError(5,"injected fsync failure")
+ original(fd)
+ if count==stop and phase=="after": os._exit(91)
+os.fsync=sync
+g.enter(sys.argv[6],"interrupted-boot-12345678",now=1002)
+print(count)
+'''
+    def copied(name):
+        root = tmp_path / name
+        root.mkdir()
+        shutil.copytree(store.state_dir, root / "gate")
+        shutil.copytree(store.data_dir, root / "data")
+        return root
+    def invoke(root, stop, phase):
+        return subprocess.run([sys.executable, "-c", child, str(GATE_PATH), str(root / "gate"),
+            str(root / "data"), str(stop), phase, TOKEN], capture_output=True, text=True, timeout=10)
+    count = invoke(copied("count"), 0, "after")
+    assert count.returncode == 0, count.stderr
+    boundaries = int(count.stdout)
+    assert boundaries >= 18
+    for phase in ("before", "after", "error"):
+        for stop in range(1, boundaries + 1):
+            root = copied(f"{phase}-{stop}")
+            result = invoke(root, stop, phase)
+            assert result.returncode == (1 if phase == "error" else 91), (phase, stop, result.stderr)
+            if phase == "error":
+                assert "injected fsync failure" in result.stderr
+            module = load(GATE_PATH, "resumed_gate")
+            resumed = module.AdmissionStore(root / "gate", root / "data", os.getuid(), os.getgid())
+            claimed_before_retry = resumed.observe()["slots"]["rollback"]["consumed"]
+            assert resumed.enter(TOKEN, "resumed-boot-12345678", now=NOW + 2) == "service_only", (phase, stop)
+            frozen = legacy_at(root / "data")
+            assert not frozen.begin_boot("resumed-boot-12345678", now=NOW + 2)
+            assert not frozen.ACK_PATH.exists()
+            final = resumed.observe()["slots"]["rollback"]
+            assert final["attempts"][0]["continuation"] is False or already_admitted
+            assert final["consumed"] == (consumed or claimed_before_retry or {
+                "generation": 1, "boot_id": "resumed-boot-12345678"})
+
+
+def test_closed_reset_owner_never_enters_but_fenced_successor_resumes_service_only(setup, monkeypatch):
+    module, store, legacy, _ = setup
+    rollback_open(store)
+    legacy.LEDGER_DIR.chmod(0o777)
+    save = store._save
+    def interrupted(directory, state):
+        save(directory, state)
+        if state.get("ledger_reset", {}).get("stage") == "intent":
+            raise PowerLoss("reset intent durable")
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_save", interrupted)
+        with pytest.raises(PowerLoss):
+            store.enter(TOKEN, "old-unclaimed-12345678", now=NOW)
+    assert store.close_pending("rollback", TOKEN)
+    store.fenced("rollback", TOKEN, ROLLBACK)
+    newer = "successor-token-12345678"
+    store.allocate("rollback", newer, IMAGE)
+    store.bind("rollback", newer, "4" * 64)
+    store.open("rollback", newer)
+    store.issue_start("rollback", newer)
+    with pytest.raises(module.AdmissionError):
+        store.enter(TOKEN, "old-denied-12345678", now=NOW + 1)
+    assert store.observe()["ledger_reset"]["stage"] == "intent"
+    assert store.enter(newer, "successor-boot-12345678", now=NOW + 1) == "service_only"
+    assert not legacy.begin_boot("successor-boot-12345678", now=NOW + 1)
+    assert store.observe()["slots"]["rollback"]["consumed"] == {
+        "generation": 2, "boot_id": "successor-boot-12345678"}

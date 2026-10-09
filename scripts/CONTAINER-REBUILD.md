@@ -257,10 +257,23 @@ during separately authorized host maintenance.
 The installer refuses **any existing transaction**, including an unwrapped
 legacy rollback whose Start may already have been issued, before changing
 controller code or units; it checks again while holding the dispatch and
-replacement locks in launcher order. This also prevents the timer from selecting
-a stale worker to run immediately after installation. Each lock acquisition has
-a 30-second budget: a busy controller makes installation refuse, not terminate
+replacement locks in launcher order. Before publication it stops only the path
+watcher and reconciliation timer, then requires both run and reconciliation
+services to be inactive (or failed) with no queued systemd job. An already selected
+launcher-1 child paused before acquiring the replacement lock still makes its
+oneshot service active/activating: installation refuses without stopping or
+killing it. Lock ordering alone cannot fence that older launcher. Failed
+installation restores each dispatch source's previous running/stopped state;
+restoration errors require manual inspection. Each lock acquisition has a
+30-second budget: a busy controller makes installation refuse, not terminate
 active recovery or wait indefinitely.
+
+This migration fence covers the installed systemd dispatch paths and cooperating
+launcher-2 callers. Concurrent direct invocation of a legacy worker/launcher,
+manual `systemctl start` of controller services, or another installer is unsupported:
+the operator must exclude those during separately authorized maintenance. There
+is no process-name scan that proves an independently paused legacy process cannot
+resume; the installer does not claim to discover or fence such callers.
 Keep the transaction and handoff evidence intact and settle the incident through
 its existing recovery owner or explicitly authorized manual maintenance first.
 Installation cannot retroactively enroll an old consumer or grant a second boot.
@@ -319,6 +332,24 @@ cancellation lineage survives. An admitted, unexplained missing, changed, or
 previously attempted rollback does not become recreateable from Docker metadata
 or a v1 acceptance witness. Missing proof remains `needs_recovery`.
 
+A crash during a legacy entrypoint's recursive ownership repair can leave the
+restart ledger untrusted. The wrapper journals a permanent service-only reset
+before detaching that namespace, then creates a fresh trusted ledger; it never
+makes old bytes authoritative by changing their ownership. Interrupted resets
+resume before legacy bootstrap. Only independently trusted, fresh ordinary
+restart acceptance may survive this reset; the old cutover cannot regain
+continuation. Missing initial receipt evidence likewise permits service-only
+preparation only after the host proves a completed drain or an exact down/missing
+source. A healthy undrained source is not removed merely because its receipt is
+missing. Existing gate state remains authoritative on replay.
+
+Cleanup of the detached ledger is bounded and nonrecursive. Unknown or nested
+contents remain inert for manual cleanup under `.restart-ledger-quarantine-*`;
+they are never read back as authority. Legacy ownership repair may change their
+ownership, so retained directories are not promised to remain root-private.
+Storage and synchronization errors remain explicit failures, not permission to
+invent continuation.
+
 A new worker refuses a replacement trial under launcher revision 1 without
 changing status or claiming the request, allowing that launcher to put the
 candidate back for the installer. The app's unclaimed-request status makes
@@ -335,11 +366,12 @@ not an already-consumed chat handoff.
 
 | Durable state | Evidence required | Permitted next action |
 | --- | --- | --- |
-| Prepared replacement | Exact previous image and accepted cutover | Journal replacement intent before Compose mutates the app |
-| Replacement started | Fresh whole-container observation | Observe the target; retain an old source still running; restore only the recorded previous image |
-| Rollback creating | Recognized target/previous image, no prior rollback boot | Compose creates without starting; journal exact rollback container |
-| Rollback prepared | Exact verified wrapped container and open, unconsumed admission slot | Persist start intent before one Start; refresh handoff only within the original receipt lifetime |
-| Rollback starting | Authoritative admission slot under its shared lock | If admitted, observe only; otherwise durably CLOSE and fence the exact CID before a new generation, never retry ambiguous Start |
+| Prepared replacement | Exact previous image, source CID and durable drain receipt | Journal replacement intent before removing the exact source |
+| Replacement started | Gate-owned source identity and fresh whole-container observation | Observe an exact bound target; after source quiescence, restore only the recorded previous image if needed |
+| Attempt allocated | Unconsumed slot, frozen configuration and fenced predecessor | Create without starting, verify and bind the exact container |
+| Attempt open | Bound wrapped container and quiesced source/target | Persist `issued` before one Start; only the wrapper may prepare acceptance and admit a boot |
+| Start issued | Authoritative admission slot under its shared lock | If admitted, observe only; otherwise durably CLOSE and fence the exact CID before a new generation, never retry ambiguous Start |
+| Attempt closed and fenced | Durable revocation plus confirmed exact-CID removal | Allocate the next generation of the same unconsumed slot |
 | Rollback running/restarting | Exact previous image | Observe readiness; never recreate a boot that is making progress |
 | Healthy with missing handoff proof | No exact consumed receipt | Keep service running and retain `needs_recovery`; do not manufacture an ACK |
 | Durable outcome | Exact outcome already recorded | Republish status and clear the journal, without another boot |

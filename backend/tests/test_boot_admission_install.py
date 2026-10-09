@@ -189,7 +189,7 @@ def test_transaction_appearing_at_lock_acquisition_refuses_publication(tmp_path)
     state.mkdir()
     code = _refusal() + SOURCE.split("umask 077\n", 1)[1].split("# BEGIN PINNED", 1)[0]
     code = code.replace("/var/lib/mobius-rebuild", str(state)).replace("/etc/mobius-rebuild", str(etc))
-    code = '''systemctl() { :; }
+    code = '''systemctl() { if [ "$1" = show ]; then printf 'LoadState=not-found\\nActiveState=inactive\\nJob=\\n'; fi; }
 flock() { if [ "${3:-}" = 9 ]; then printf '{"phase":"rollback_started"}' >"$STATE/transaction.json"; fi; }
 ''' + code + '\ntouch "$PUBLISHED"\n'
     published = tmp_path / "controller-changed"
@@ -460,3 +460,158 @@ def test_generated_unit_budgets_cover_pull_full_cutover_and_recovery(tmp_path):
     assert main["Service"].getint("TimeoutStartSec") == run_budget == 9000
     assert main["Service"].getint("TimeoutStopSec") == recovery_budget == 3600
     assert recovery["Service"].getint("TimeoutStartSec") == recovery_budget
+
+
+def _dispatch_quiescence():
+    return SOURCE.split('# BEGIN MIGRATION DISPATCH QUIESCENCE\n', 1)[1].split(
+        '# END MIGRATION DISPATCH QUIESCENCE', 1,
+    )[0]
+
+
+def _fake_systemd():
+    # Files are isolated unit state, not the host service manager. A selected
+    # delayed child marks the oneshot activating until it is explicitly resumed.
+    return r'''systemctl() {
+  printf '%s\n' "$*" >>"$FIXTURE/calls"
+  local verb=$1 unit=$2 active=inactive job= load=loaded
+  case "$verb" in
+    show)
+      [[ ! -f "$FIXTURE/$unit.unreadable" ]] || return 1
+      [[ ! -f "$FIXTURE/$unit.state" ]] || active=$(cat "$FIXTURE/$unit.state")
+      [[ ! -f "$FIXTURE/$unit.job" ]] || job=$(cat "$FIXTURE/$unit.job")
+      [[ ! -f "$FIXTURE/$unit.missing" ]] || load=not-found
+      printf 'Job=%s\nActiveState=%s\nLoadState=%s\n' "$job" "$active" "$load"
+      ;;
+    stop)
+      [[ ! -f "$FIXTURE/$unit.stop-fails" ]] || return 1
+      printf inactive >"$FIXTURE/$unit.state"
+      if [[ $unit == mobius-rebuild-reconcile.timer && -f "$FIXTURE/late-selection" ]]; then
+        printf activating >"$FIXTURE/mobius-rebuild.service.state"
+      fi
+      ;;
+    start) printf active >"$FIXTURE/$unit.state" ;;
+    *) return 99 ;;
+  esac
+}
+'''
+
+
+def _run_quiescence(tmp_path, tail='touch "$FIXTURE/published"', extra=''):
+    return subprocess.run(
+        ['bash', '-eu', '-c', _fake_systemd() + extra + _dispatch_quiescence() + '\n' + tail],
+        env={**os.environ, 'FIXTURE': str(tmp_path), 'RESOLVED': str(tmp_path / 'resolved')},
+        capture_output=True, text=True, timeout=5,
+    )
+
+
+@pytest.mark.parametrize('service', ['mobius-rebuild.service', 'mobius-rebuild-reconcile.service'])
+@pytest.mark.parametrize('state,job', [('active', ''), ('activating', ''), ('deactivating', ''),
+                                    ('inactive', '71'), ('failed', '71')])
+def test_migration_refuses_active_or_queued_legacy_services_and_restores_dispatch(tmp_path, service, state, job):
+    (tmp_path / 'mobius-rebuild.path.state').write_text('active')
+    (tmp_path / 'mobius-rebuild-reconcile.timer.state').write_text('inactive')
+    (tmp_path / (service + '.state')).write_text(state)
+    (tmp_path / (service + '.job')).write_text(job)
+    result = _run_quiescence(tmp_path)
+    assert result.returncode == 1, result.stderr
+    assert 'leave recovery running' in result.stderr
+    assert not (tmp_path / 'published').exists()
+    assert (tmp_path / 'mobius-rebuild.path.state').read_text() == 'active'
+    assert (tmp_path / 'mobius-rebuild-reconcile.timer.state').read_text() == 'inactive'
+    calls = (tmp_path / 'calls').read_text().splitlines()
+    assert not any(line.startswith(('stop mobius-rebuild.service', 'stop mobius-rebuild-reconcile.service'))
+                   for line in calls)
+    assert (tmp_path / (service + '.state')).read_text() == state
+
+
+def test_selection_just_before_dispatch_stop_is_observed_before_mutation(tmp_path):
+    (tmp_path / 'late-selection').touch()
+    result = _run_quiescence(tmp_path)
+    assert result.returncode == 1
+    assert not (tmp_path / 'published').exists()
+    assert (tmp_path / 'mobius-rebuild.service.state').read_text() == 'activating'
+
+
+@pytest.mark.parametrize('problem', ['stop-fails', 'unreadable'])
+def test_dispatch_failure_refuses_publication_and_restores_previous_timer(tmp_path, problem):
+    (tmp_path / 'mobius-rebuild.path.state').write_text('inactive')
+    (tmp_path / 'mobius-rebuild-reconcile.timer.state').write_text('active')
+    (tmp_path / ('mobius-rebuild-reconcile.timer.' + problem)).touch()
+    result = _run_quiescence(tmp_path)
+    assert result.returncode == 1
+    assert not (tmp_path / 'published').exists()
+    assert (tmp_path / 'mobius-rebuild.path.state').read_text() == 'inactive'
+    assert (tmp_path / 'mobius-rebuild-reconcile.timer.state').read_text() == 'active'
+
+
+def test_quiescent_dispatch_is_held_until_publication_and_restored_on_failure(tmp_path):
+    for unit in ('mobius-rebuild.path', 'mobius-rebuild-reconcile.timer'):
+        (tmp_path / (unit + '.state')).write_text('active')
+    tail = '''[[ $(cat "$FIXTURE/mobius-rebuild.path.state") == inactive ]]
+[[ $(cat "$FIXTURE/mobius-rebuild-reconcile.timer.state") == inactive ]]
+touch "$FIXTURE/published"
+exit 42
+'''
+    result = _run_quiescence(tmp_path, tail)
+    assert result.returncode == 42
+    assert (tmp_path / 'published').exists()
+    for unit in ('mobius-rebuild.path', 'mobius-rebuild-reconcile.timer'):
+        assert (tmp_path / (unit + '.state')).read_text() == 'active'
+    assert SOURCE.index('# END MIGRATION DISPATCH QUIESCENCE') < SOURCE.index('install -d -m 0700')
+
+
+def test_launcher1_selected_child_before_lock_is_not_fenced_by_lock_order_alone(tmp_path):
+    # Deterministic negative control: a selected legacy child is paused BEFORE
+    # flock. Neither the new dispatch lock nor a bounded worker flock timeout
+    # constrains this pause. It can execute after both installer locks release.
+    child = r'''
+import fcntl, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+(root / 'mobius-rebuild.service.state').write_text('activating')
+print('selected-before-lock', flush=True)
+sys.stdin.readline()
+with (root / 'replace.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    (root / 'legacy-ran').write_text((root / 'config').read_text())
+'''
+    process = subprocess.Popen([sys.executable, '-c', child, str(tmp_path)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == 'selected-before-lock'
+        with (tmp_path / 'candidate.lock').open('a') as dispatch, (tmp_path / 'replace.lock').open('a') as replacement:
+            fcntl.flock(dispatch, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(replacement, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Actual new preflight refuses before changing config or code,
+            # despite both cooperative locks being available to the installer.
+            result = _run_quiescence(tmp_path)
+            assert result.returncode == 1
+            assert not (tmp_path / 'published').exists()
+            assert process.poll() is None  # installer did not kill active recovery
+            (tmp_path / 'config').write_text('new config if lock-only installer published')
+        process.communicate('\n', timeout=5)
+        assert process.returncode == 0
+        assert (tmp_path / 'legacy-ran').read_text() == 'new config if lock-only installer published'
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_incomplete_systemd_observation_cannot_prove_quiescence(tmp_path):
+    result = _run_quiescence(tmp_path, extra="""
+systemctl() { printf 'LoadState=loaded\\nActiveState=inactive\\n'; }
+""")
+    assert result.returncode == 1
+    assert 'Cannot inspect dispatch unit' in result.stderr
+    assert not (tmp_path / 'published').exists()
+
+
+def test_successful_publication_does_not_restore_obsolete_dispatch_state(tmp_path):
+    result = _run_quiescence(tmp_path, tail="""
+systemctl start mobius-rebuild.path
+systemctl start mobius-rebuild-reconcile.timer
+MIGRATION_COMPLETE=1
+""")
+    assert result.returncode == 0, result.stderr
+    for unit in ('mobius-rebuild.path', 'mobius-rebuild-reconcile.timer'):
+        assert (tmp_path / (unit + '.state')).read_text() == 'active'

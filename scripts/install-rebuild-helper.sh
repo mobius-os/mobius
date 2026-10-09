@@ -262,16 +262,74 @@ if any(value in serialized for value in (
 PY_BASE
 
 umask 077
+# BEGIN MIGRATION DISPATCH QUIESCENCE
+# Launcher 1 does not hold candidate.lock while selecting a worker. A selected
+# child paused before replace.lock could otherwise outlive this installation.
+# Stop only dispatch sources; never stop/kill a replacement or its recovery.
+DISPATCH_UNITS=(mobius-rebuild.path mobius-rebuild-reconcile.timer)
+DISPATCH_RESTORE=()
+MIGRATION_COMPLETE=0
+unit_state() {
+  local info key value
+  UNIT_LOAD= UNIT_ACTIVE= UNIT_JOB= UNIT_JOB_SEEN=0
+  info=$(systemctl show "$1" --all --property=LoadState --property=ActiveState --property=Job) || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      LoadState) UNIT_LOAD=$value ;;
+      ActiveState) UNIT_ACTIVE=$value ;;
+      Job) UNIT_JOB=$value; UNIT_JOB_SEEN=1 ;;
+    esac
+  done <<<"$info"
+  [[ $UNIT_LOAD == loaded || $UNIT_LOAD == not-found ]] \
+    && [[ -n $UNIT_ACTIVE && $UNIT_JOB_SEEN == 1 ]]
+}
+migration_cleanup() {
+  local rc=$? i
+  trap - EXIT
+  rm -f "$RESOLVED"
+  # Release our fences before restoring dispatch. No active worker was stopped.
+  exec 9>&- 8>&-
+  if [[ $MIGRATION_COMPLETE == 0 ]]; then
+    for i in "${!DISPATCH_RESTORE[@]}"; do
+      systemctl "${DISPATCH_RESTORE[$i]}" "${DISPATCH_UNITS[$i]}" 2>/dev/null \
+        || echo "Could not restore scheduling for ${DISPATCH_UNITS[$i]}; inspect systemd before retrying." >&2
+    done
+  fi
+  exit "$rc"
+}
+# Snapshot BOTH sources before stopping either. Refuse transitional/queued
+# states rather than guessing which scheduling state should be restored.
+for unit in "${DISPATCH_UNITS[@]}"; do
+  unit_state "$unit" || { echo "Cannot inspect dispatch unit $unit." >&2; exit 1; }
+  [[ -z $UNIT_JOB || $UNIT_JOB == 0 ]] \
+    || { echo "Dispatch unit $unit has a queued job; retry migration after it settles." >&2; exit 1; }
+  case "$UNIT_ACTIVE" in
+    active) DISPATCH_RESTORE+=(start) ;;
+    inactive|failed) DISPATCH_RESTORE+=(stop) ;;
+    *) echo "Dispatch unit $unit is transitioning; retry migration after it settles." >&2; exit 1 ;;
+  esac
+done
+trap migration_cleanup EXIT
+for unit in "${DISPATCH_UNITS[@]}"; do
+  unit_state "$unit" || { echo "Cannot inspect dispatch unit $unit." >&2; exit 1; }
+  if [[ $UNIT_LOAD != not-found ]]; then
+    systemctl stop "$unit" || { echo "Cannot pause dispatch unit $unit." >&2; exit 1; }
+  fi
+done
+# Inactive includes no delayed launcher/worker child in these oneshot units.
+# Job must also be empty: an inactive service with a queued start is not fenced.
+for unit in "${DISPATCH_UNITS[@]}" mobius-rebuild.service mobius-rebuild-reconcile.service; do
+  unit_state "$unit" || { echo "Cannot inspect controller unit $unit." >&2; exit 1; }
+  if [[ $UNIT_ACTIVE != inactive && $UNIT_ACTIVE != failed ]] \
+      || [[ -n $UNIT_JOB && $UNIT_JOB != 0 ]]; then
+    echo "Controller unit $unit is active or queued; leave recovery running and retry migration after it settles." >&2
+    exit 1
+  fi
+done
+# END MIGRATION DISPATCH QUIESCENCE
 install -d -m 0700 /etc/mobius-rebuild /var/lib/mobius-rebuild
-# Nothing may replace the app while the controller changes: stop new requests
-# from starting a run, wait for a running one, and hold its lock until the
-# installation is complete. Requests stay queued meanwhile.
-systemctl stop mobius-rebuild.path 2>/dev/null || true
-# A failed installation leaves the previous controller in charge, not paused.
-trap 'rm -f "$RESOLVED"; systemctl start mobius-rebuild.path 2>/dev/null || true' EXIT
-# Match launcher lock order: dispatch first, replacement second. The timer may
-# still fire while the path unit is stopped; it must not select an old worker
-# and leave that worker waiting to run after the migration releases replace.lock.
+# Launcher 2 also cooperates with this lock order. Keep both locks through
+# publication; unit quiescence above supplies the missing launcher-1 fence.
 exec 8>>/var/lib/mobius-rebuild/candidate.lock
 flock -w 30 8 \
   || { echo "A controller dispatch is active; retry helper migration after it settles." >&2; exit 1; }
@@ -486,6 +544,7 @@ exec 8>&-
 systemctl enable mobius-rebuild-reconcile.service
 systemctl enable --now mobius-rebuild-reconcile.timer
 systemctl enable --now mobius-rebuild.path
+MIGRATION_COMPLETE=1
 
 echo "Container rebuild support installed for Compose project '$PROJECT'."
 echo "Topology: ${FILES[*]:-$FROZEN_SOURCE}"

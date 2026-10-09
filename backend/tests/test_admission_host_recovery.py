@@ -272,8 +272,8 @@ def incident(tmp_path, monkeypatch):
     monkeypatch.setattr(host, "retain_images", lambda *_: None)
     monkeypatch.setattr(host, "adopt_from_image", lambda *_: "test")
     proof = host.cutover_boot_consumed
-    monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op:
-                        proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid()))
+    monkeypatch.setattr(host, "cutover_boot_consumed", lambda c, op, **kwargs:
+                        proof(c, op, trusted_uid=os.getuid(), trusted_gid=os.getgid(), **kwargs))
     return SimpleNamespace(host=host, gate=gate, module=module, legacy=legacy, config=config,
                            tx=tx, docker=docker, clock=clock)
 
