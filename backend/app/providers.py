@@ -34,7 +34,6 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from urllib.parse import urlparse
 
 from app.storage_io import atomic_write
 
@@ -1184,23 +1183,13 @@ class AppModelProvider(BaseProvider):
     return None, (usage if counted else None)
 
   def _relay_base_url(self) -> str:
-    from app.config import get_settings
-    # Match connectors._broker_url: API_BASE_URL may be the public origin,
-    # but a local capability must go directly to the backend, never its proxy.
+    # entrypoint.sh binds uvicorn to ${PORT:-8000}. API_BASE_URL may name a
+    # public proxy (even on localhost); its port is not the backend listener.
+    # Keep the capability on a direct loopback connection for both engines.
     try:
-      parsed = urlparse(get_settings().api_base_url)
-      configured_port = parsed.port
+      port = int(os.environ.get("PORT") or "8000")
     except ValueError as exc:
       raise ValueError("The configured Möbius API port is invalid.") from exc
-    env_port = os.environ.get("PORT")
-    if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
-      port = configured_port if configured_port is not None else (
-        443 if parsed.scheme == "https" else 80
-      )
-    elif env_port and env_port.isdigit():
-      port = int(env_port)
-    else:
-      port = configured_port if configured_port is not None else 8000
     if not 1 <= port <= 65535:
       raise ValueError("The configured Möbius API port is invalid.")
     return f"http://127.0.0.1:{port}/api/model-relay/app-{self.app_id}"

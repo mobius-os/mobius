@@ -605,37 +605,36 @@ async def test_messages_turn_reads_its_own_effort_catalog_without_claude_discove
   assert providers._model_registry_cache == {}
 
 
-@pytest.mark.parametrize("api_url,env_port,port", [
-  ("https://public.example.com/instance", None, 8000),
-  ("https://public.example.com", "8123", 8123),
-  ("https://public.example.com:9443", None, 9443),
-  ("http://localhost:8124", "8123", 8124),
-  ("http://127.0.0.1:8125", None, 8125),
-  ("http://[::1]:8126", None, 8126),
+@pytest.mark.parametrize("api_url", [
+  "https://public.example.com/instance",
+  "https://public.example.com:9443",
+  "http://localhost:8000",
+  "http://localhost:8123",
+  "http://localhost:8124",
+  "http://127.0.0.1:8125",
+  "http://[::1]:8126",
+  "http://localhost",
 ])
-def test_relay_capability_stays_on_loopback_with_a_public_api_origin(
+@pytest.mark.parametrize("env_port,port", [(None, 8000), ("", 8000), ("8123", 8123)])
+def test_relay_uses_backend_listener_not_api_origin(
   monkeypatch, tmp_path, api_url, env_port, port,
 ):
   import os
 
   monkeypatch.setattr(os, "environ", {} if env_port is None else {"PORT": env_port})
   monkeypatch.setattr(get_settings(), "api_base_url", api_url)
-  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
   expected = f"http://127.0.0.1:{port}/api/model-relay/app-4242"
-  assert adapter.build_env({}, str(tmp_path))["ANTHROPIC_BASE_URL"] == expected
-  assert f'model_providers.app_4242.base_url="{expected}/v1"' in adapter.codex_config_overrides()
+  messages = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  responses = providers.AppModelProvider(4242, _manifest(protocol="responses")["model_provider"])
+  assert messages.build_env({}, str(tmp_path))["ANTHROPIC_BASE_URL"] == expected
+  assert f'model_providers.app_4242.base_url="{expected}/v1"' in responses.codex_config_overrides()
 
 
-@pytest.mark.parametrize("api_url,env_port", [
-  ("https://public.example.com:bad", "8000"),
-  ("https://public.example.com", "65536"),
-  ("http://localhost:0", None),
-])
-def test_relay_rejects_invalid_local_ports(monkeypatch, api_url, env_port):
+@pytest.mark.parametrize("env_port", ["0", "65536", "bad", "-1"])
+def test_relay_rejects_invalid_backend_listener_ports(monkeypatch, env_port):
   import os
 
-  monkeypatch.setattr(os, "environ", {} if env_port is None else {"PORT": env_port})
-  monkeypatch.setattr(get_settings(), "api_base_url", api_url)
+  monkeypatch.setattr(os, "environ", {"PORT": env_port})
   adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
   with pytest.raises(ValueError, match="API port is invalid"):
     adapter._relay_base_url()
