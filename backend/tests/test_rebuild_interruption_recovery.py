@@ -175,6 +175,70 @@ def test_power_loss_at_every_rollback_boundary_never_repeats_boot(incident, monk
   assert (docker.creates, docker.boots) == before
 
 
+@pytest.mark.parametrize("boundary", [
+  "outcome-1-before", "outcome-1-after", "finalize-before", "finalize-after",
+  "outcome-2-before", "outcome-2-after", "outcome-3-before", "outcome-3-after",
+  "status-before", "status-after", "clear-before", "clear-after",
+])
+def test_settlement_interruption_preserves_consumed_boot_and_honest_outcome(
+  incident, monkeypatch, boundary,
+):
+  config, tx, ledger, docker, _clock = incident
+  docker.crash = boundary
+  persist, publish, clear = host.write_transaction, host.write_status, host.clear_transaction
+  finalize = host.restart_ledger
+  outcomes = [0]
+
+  def write(value):
+    if value.get("outcome"):
+      outcomes[0] += 1
+      stage = f"outcome-{outcomes[0]}"
+      docker.boundary(f"{stage}-before")
+      persist(value)
+      docker.boundary(f"{stage}-after")
+    else:
+      persist(value)
+
+  def finish(*args, **kwargs):
+    if args[2] != "finalize-cutover":
+      return finalize(*args, **kwargs)
+    docker.boundary("finalize-before")
+    result = finalize(*args, **kwargs)
+    docker.boundary("finalize-after")
+    return result
+
+  def status(*args, **kwargs):
+    if kwargs.get("state") == "rolled_back":
+      docker.boundary("status-before")
+      publish(*args, **kwargs)
+      docker.boundary("status-after")
+    else:
+      publish(*args, **kwargs)
+
+  def remove():
+    docker.boundary("clear-before")
+    clear()
+    docker.boundary("clear-after")
+
+  monkeypatch.setattr(host, "write_transaction", write)
+  monkeypatch.setattr(host, "restart_ledger", finish)
+  monkeypatch.setattr(host, "write_status", status)
+  monkeypatch.setattr(host, "clear_transaction", remove)
+  with pytest.raises(PowerLoss):
+    host.recover(config, tx)
+  assert docker.boots == 1
+  assert ledger.ACK_PATH.exists() and not ledger.ACCEPTED_PATH.exists()
+  host.reconcile()
+  host.reconcile()
+  assert docker.boots == 1 and not host.TRANSACTION.exists()
+  outcome = host.read_json(host.STATUS)
+  assert outcome["state"] == "rolled_back"
+  # Once the preliminary outcome is durable, recovery does not invent proof
+  # that finalization completed in the gap before its second durable write.
+  if boundary in {"outcome-1-after", "finalize-before", "finalize-after", "outcome-2-before"}:
+    assert outcome["code"] == "handoff_finalize_unconfirmed"
+
+
 def test_transient_daemon_failure_retries_on_next_reconcile(incident):
   config, tx, _ledger, docker, _clock = incident
   docker.errors = 3
