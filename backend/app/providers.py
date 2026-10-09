@@ -34,6 +34,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlparse
 
 from app.storage_io import atomic_write
 
@@ -1184,7 +1185,25 @@ class AppModelProvider(BaseProvider):
 
   def _relay_base_url(self) -> str:
     from app.config import get_settings
-    return f"{get_settings().api_base_url.rstrip('/')}/api/model-relay/app-{self.app_id}"
+    # Match connectors._broker_url: API_BASE_URL may be the public origin,
+    # but a local capability must go directly to the backend, never its proxy.
+    try:
+      parsed = urlparse(get_settings().api_base_url)
+      configured_port = parsed.port
+    except ValueError as exc:
+      raise ValueError("The configured Möbius API port is invalid.") from exc
+    env_port = os.environ.get("PORT")
+    if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+      port = configured_port if configured_port is not None else (
+        443 if parsed.scheme == "https" else 80
+      )
+    elif env_port and env_port.isdigit():
+      port = int(env_port)
+    else:
+      port = configured_port if configured_port is not None else 8000
+    if not 1 <= port <= 65535:
+      raise ValueError("The configured Möbius API port is invalid.")
+    return f"http://127.0.0.1:{port}/api/model-relay/app-{self.app_id}"
 
   def codex_config_overrides(self) -> list[str]:
     provider_id = f"app_{self.app_id}"
@@ -1210,7 +1229,10 @@ class AppModelProvider(BaseProvider):
 
   def build_env(self, base_env, data_dir, chat_id=None):
     env = dict(base_env)
-    for name in list(env):
+    # SDKs merge the ambient environment underneath this override mapping.
+    # Apply the existing credential-name policy to both sets of names without
+    # copying ambient values or stripping unrelated control/run variables.
+    for name in os.environ.keys() | env.keys():
       if name.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN")) or name in {
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
       }:

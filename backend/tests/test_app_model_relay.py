@@ -272,6 +272,9 @@ async def test_messages_sdk_child_overrides_ambient_auth_and_routing(
   # Replace, rather than read, the process environment: no real credentials
   # are inspected and no subprocess is started by this regression.
   competing = {
+    "OPENAI_API_KEY": "synthetic-openai-key",
+    "OTHER_API_TOKEN": "synthetic-other-token",
+    "OTHER_AUTH_TOKEN": "synthetic-other-auth",
     "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-owner-oauth",
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR": "123",
     "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR": "124",
@@ -297,6 +300,9 @@ async def test_messages_sdk_child_overrides_ambient_auth_and_routing(
     "ANTHROPIC_API_KEY": "synthetic-owner-key",
     "ANTHROPIC_BASE_URL": "https://ambient.example.com",
     "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
+    "AGENT_TOKEN": "synthetic-control-token",
+    "MOBIUS_RUN_TOKEN": "synthetic-run",
+    "API_BASE_URL": "http://127.0.0.1:9",
   })
   adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
   monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
@@ -328,6 +334,9 @@ async def test_messages_sdk_child_overrides_ambient_auth_and_routing(
   assert all(captured.get(name) == "" for name in competing)
   assert captured["ANTHROPIC_API_KEY"] == providers.model_relay_token("app-4242")
   assert captured["ANTHROPIC_BASE_URL"] == adapter._relay_base_url()
+  assert captured["AGENT_TOKEN"] == "synthetic-control-token"
+  assert captured["MOBIUS_RUN_TOKEN"] == "synthetic-run"
+  assert captured["API_BASE_URL"] == "http://127.0.0.1:9"
   assert captured["CLAUDE_CONFIG_DIR"].startswith(str(tmp_path))
   assert captured["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "example/flash"
 
@@ -594,3 +603,76 @@ async def test_messages_turn_reads_its_own_effort_catalog_without_claude_discove
   )
   assert captured == ["high"]
   assert providers._model_registry_cache == {}
+
+
+@pytest.mark.parametrize("api_url,env_port,port", [
+  ("https://public.example.com/instance", None, 8000),
+  ("https://public.example.com", "8123", 8123),
+  ("https://public.example.com:9443", None, 9443),
+  ("http://localhost:8124", "8123", 8124),
+  ("http://127.0.0.1:8125", None, 8125),
+  ("http://[::1]:8126", None, 8126),
+])
+def test_relay_capability_stays_on_loopback_with_a_public_api_origin(
+  monkeypatch, tmp_path, api_url, env_port, port,
+):
+  import os
+
+  monkeypatch.setattr(os, "environ", {} if env_port is None else {"PORT": env_port})
+  monkeypatch.setattr(get_settings(), "api_base_url", api_url)
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  expected = f"http://127.0.0.1:{port}/api/model-relay/app-4242"
+  assert adapter.build_env({}, str(tmp_path))["ANTHROPIC_BASE_URL"] == expected
+  assert f'model_providers.app_4242.base_url="{expected}/v1"' in adapter.codex_config_overrides()
+
+
+@pytest.mark.parametrize("api_url,env_port", [
+  ("https://public.example.com:bad", "8000"),
+  ("https://public.example.com", "65536"),
+  ("http://localhost:0", None),
+])
+def test_relay_rejects_invalid_local_ports(monkeypatch, api_url, env_port):
+  import os
+
+  monkeypatch.setattr(os, "environ", {} if env_port is None else {"PORT": env_port})
+  monkeypatch.setattr(get_settings(), "api_base_url", api_url)
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  with pytest.raises(ValueError, match="API port is invalid"):
+    adapter._relay_base_url()
+
+
+def test_responses_sdk_child_scrubs_inherited_credentials_but_preserves_control_env(
+  monkeypatch, tmp_path,
+):
+  import os
+  from openai_codex.client import CodexClient, CodexConfig
+
+  # Exercise the real SDK merge, intercepting Popen before any child exists.
+  monkeypatch.setattr(os, "environ", {
+    "OPENAI_API_KEY": "synthetic-openai-key",
+    "OTHER_API_TOKEN": "synthetic-other-token",
+    "OTHER_AUTH_TOKEN": "synthetic-other-auth",
+    "AGENT_TOKEN": "synthetic-control-token",
+    "API_BASE_URL": "http://127.0.0.1:9",
+    "MOBIUS_RUN_TOKEN": "synthetic-run",
+  })
+  adapter = providers.AppModelProvider(4242, _manifest(protocol="responses")["model_provider"])
+  captured = {}
+
+  def stop_before_spawn(*args, **kwargs):
+    captured.update(kwargs["env"])
+    raise RuntimeError("synthetic stop before process creation")
+
+  monkeypatch.setattr("openai_codex.client.subprocess.Popen", stop_before_spawn)
+  client = CodexClient(CodexConfig(
+    launch_args_override=("synthetic-codex",),
+    env=adapter.build_env({"BASE_API_KEY": "synthetic-base-key"}, str(tmp_path)),
+  ))
+  with pytest.raises(RuntimeError, match="synthetic stop"):
+    client.start()
+  for name in ("OPENAI_API_KEY", "OTHER_API_TOKEN", "OTHER_AUTH_TOKEN", "BASE_API_KEY"):
+    assert captured[name] == ""
+  assert captured["MOBIUS_APP_MODEL_KEY_4242"] == providers.model_relay_token("app-4242")
+  assert captured["AGENT_TOKEN"] == "synthetic-control-token"
+  assert captured["API_BASE_URL"] == "http://127.0.0.1:9"
+  assert captured["MOBIUS_RUN_TOKEN"] == "synthetic-run"

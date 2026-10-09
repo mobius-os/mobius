@@ -741,7 +741,8 @@ async def test_reused_claude_host_keeps_dispatch_names_across_capability_changes
 
   supported = initial_support
 
-  async def supports_effort(data_dir, model):
+  async def supports_effort(data_dir, model, *, provider_id):
+    assert provider_id == "claude"
     return supported
 
   monkeypatch.setattr(providers, "model_supports_effort", supports_effort)
@@ -799,3 +800,54 @@ def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypat
   assert host.exit_evidence is evidence
   assert evidence.was_oom_killed(3)
   assert not evidence.was_oom_killed(4)
+
+
+@pytest.mark.asyncio
+async def test_cold_app_messages_helper_never_discovers_the_owners_claude_catalog(
+  tmp_path, monkeypatch,
+):
+  from contextlib import asynccontextmanager
+  from types import SimpleNamespace
+  from app import providers, process_groups
+
+  provider_id = "app-4242"
+  model = "example/flash"
+  monkeypatch.setitem(providers.PROVIDERS, provider_id, providers.AppModelProvider(4242, {
+    "name": "Example", "protocol": "anthropic_messages",
+    "default_model": model,
+    "models": [{"id": model, "label": "Flash", "effort_levels": ["high"]}],
+  }))
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+
+  async def unexpected_discovery(*args, **kwargs):
+    pytest.fail("an app helper must not discover the owner's native provider catalog")
+
+  monkeypatch.setattr(providers, "_fetch_model_entries", unexpected_discovery)
+  dispatched = []
+
+  class Host:
+    session_id = "host-session"
+
+    async def run_turn(self, turn, on_started):
+      dispatched.append(turn.spec)
+      turn.finish("completed")
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    assert key.provider_id == provider_id
+    yield Host()
+
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr(process_groups, "terminate_run_processes", lambda *_a, **_kw: None)
+  result = await claude_host.run_claude_host_turn(
+    user_message="inspect", session_id=None, base_env={"TMPDIR": str(tmp_path)},
+    chat_id="app-effort-test", skill_text="", bc=None, agent_settings=None,
+    skills_enabled=False,
+    run_policy=SimpleNamespace(model=model, effort="high", scope="write"),
+    connector_plan=None,
+    helper_host_key=helper_hosts.HostKey("parent", provider_id, str(tmp_path), "setup"),
+    data_dir=str(tmp_path),
+  )
+  assert result["error"] is None
+  assert dispatched[0]["subagent_type"] == "mobius-helper-high"
+  assert providers._model_registry_cache == {}
