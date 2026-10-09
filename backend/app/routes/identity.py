@@ -807,8 +807,26 @@ async def read_avatar(
   )
 
 
-async def _managed_railway_remote(*, include_region_options: bool = False) -> dict:
-  suffix = "?region_options=1" if include_region_options else ""
+def _railway_inventory_query(
+  *, include_region_options: bool, include_workspace_ids: bool,
+) -> str:
+  """The opt-in extensions an app asked for; older account services ignore them."""
+  flags = [
+    name for name, wanted in (
+      ("region_options", include_region_options),
+      ("workspace_ids", include_workspace_ids),
+    ) if wanted
+  ]
+  return "?" + "&".join(f"{name}=1" for name in flags) if flags else ""
+
+
+async def _managed_railway_remote(
+  *, include_region_options: bool = False, include_workspace_ids: bool = False,
+) -> dict:
+  suffix = _railway_inventory_query(
+    include_region_options=include_region_options,
+    include_workspace_ids=include_workspace_ids,
+  )
   response = await _managed_response("GET", "/api/instance/v1/railway" + suffix)
   if response.status_code != 200:
     raise HTTPException(502, "The Möbius account service could not read Railway state.")
@@ -820,6 +838,7 @@ async def _managed_railway_remote(*, include_region_options: bool = False) -> di
 
 async def _linked_railway_remote(
   db: Session, owner_id: int, *, include_region_options: bool = False,
+  include_workspace_ids: bool = False,
 ) -> tuple[str, dict | None]:
   link = _linked_row(db, owner_id)
   if link is None:
@@ -834,7 +853,10 @@ async def _linked_railway_remote(
     return "signed_out", None
   try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      suffix = "?region_options=1" if include_region_options else ""
+      suffix = _railway_inventory_query(
+        include_region_options=include_region_options,
+        include_workspace_ids=include_workspace_ids,
+      )
       response = await client.get(
         get_settings().mobius_account_origin + "/api/account/v1/railway" + suffix,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -862,10 +884,12 @@ async def read_railway(
   db: Session = Depends(get_db),
 ):
   include_region_options = request.query_params.get("region_options") == "1"
+  include_workspace_ids = request.query_params.get("workspace_ids") == "1"
   if get_settings().mobius_sso_enabled:
     try:
       payload = await _managed_railway_remote(
         include_region_options=include_region_options,
+        include_workspace_ids=include_workspace_ids,
       )
     except HTTPException as exc:
       if exc.status_code == 502:
@@ -874,6 +898,7 @@ async def read_railway(
     return {"railway_access": "available", **payload}
   access, payload = await _linked_railway_remote(
     db, owner.id, include_region_options=include_region_options,
+    include_workspace_ids=include_workspace_ids,
   )
   return {
     "railway_access": access,

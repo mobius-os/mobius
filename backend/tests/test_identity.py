@@ -33,6 +33,44 @@ async def test_managed_railway_inventory_forwards_region_opt_in_only_when_reques
 
 
 @pytest.mark.asyncio
+async def test_managed_railway_inventory_forwards_each_opt_in_only_when_requested(monkeypatch):
+  from app.routes import identity
+
+  paths = []
+
+  async def managed_response(method, path, **_kwargs):
+    paths.append(path)
+    return httpx.Response(200, json={"connection": None, "instances": []})
+
+  monkeypatch.setattr(identity, "_managed_response", managed_response)
+  await identity._managed_railway_remote(include_workspace_ids=True)
+  await identity._managed_railway_remote(
+    include_region_options=True, include_workspace_ids=True,
+  )
+  assert paths == [
+    "/api/instance/v1/railway?workspace_ids=1",
+    "/api/instance/v1/railway?region_options=1&workspace_ids=1",
+  ]
+
+
+def test_linked_railway_inventory_forwards_the_workspace_opt_in(
+  client, auth, monkeypatch,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(200, {"connection": None, "instances": []}),
+  )
+  plain = client.get("/api/identity/railway", headers=granted)
+  asked = client.get(
+    "/api/identity/railway?region_options=1&workspace_ids=1", headers=granted,
+  )
+
+  assert (plain.status_code, asked.status_code) == (200, 200)
+  base = "https://www.mobius.you/api/account/v1/railway"
+  assert [call[1] for call in calls] == [base, base + "?region_options=1&workspace_ids=1"]
+
+
+@pytest.mark.asyncio
 async def test_linked_instance_resolves_another_accounts_handle(db, monkeypatch):
   from app.routes import identity
 
@@ -805,6 +843,9 @@ def _linked_railway_bridge(client, auth, monkeypatch, respond):
     async def request(self, method, url, **kwargs):
       calls.append((method, url, kwargs.get("json")))
       return respond(method, url)
+
+    async def get(self, url, **kwargs):
+      return await self.request("GET", url, **kwargs)
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   return granted, calls
