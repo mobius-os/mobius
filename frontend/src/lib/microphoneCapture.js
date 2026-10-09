@@ -1,3 +1,5 @@
+import { acquireAudioSession } from './audioSession.js'
+
 const DEFAULT_MAX_SECONDS = 30
 const MAX_SECONDS = 60
 const START_TIMEOUT_MS = 5_000
@@ -23,6 +25,7 @@ function cleanupNode(node) {
 export async function startMicrophoneCapture({
   mediaDevices = globalThis.navigator?.mediaDevices,
   AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext,
+  navigator = globalThis.navigator,
   maxSeconds,
   onLevel,
 } = {}) {
@@ -33,6 +36,7 @@ export async function startMicrophoneCapture({
     throw new Error('Audio recording is unavailable in this browser.')
   }
 
+  const releaseAudioSession = acquireAudioSession('play-and-record', navigator)
   let stream
   let context
   let source
@@ -80,6 +84,7 @@ export async function startMicrophoneCapture({
     cleanupNode(source)
     stream?.getTracks?.().forEach((track) => track.stop())
     try { context?.close?.() } catch {}
+    releaseAudioSession()
   }
 
   function finish(cancelled = false) {

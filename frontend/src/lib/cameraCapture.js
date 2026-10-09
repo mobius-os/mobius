@@ -1,3 +1,5 @@
+import { acquireAudioSession } from './audioSession.js'
+
 const DEFAULT_MAX_DURATION_MS = 60_000
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024
 const PROGRESS_INTERVAL_MS = 500
@@ -34,6 +36,7 @@ export function startCameraCapture({
   mediaDevices = globalThis.navigator?.mediaDevices,
   MediaRecorderCtor = globalThis.MediaRecorder,
   BlobCtor = globalThis.Blob,
+  navigator = globalThis.navigator,
   facingMode = 'environment',
   audio = false,
   maxDurationMs = DEFAULT_MAX_DURATION_MS,
@@ -49,6 +52,9 @@ export function startCameraCapture({
     )
   }
 
+  const releaseAudioSession = audio
+    ? acquireAudioSession('play-and-record', navigator)
+    : () => {}
   const durationLimit = finitePositive(maxDurationMs, DEFAULT_MAX_DURATION_MS)
   const byteLimit = Math.floor(finitePositive(maxBytes, DEFAULT_MAX_BYTES))
   const stoppedTracks = new Set()
@@ -112,6 +118,7 @@ export function startCameraCapture({
     durationTimer = null
     publishPreview(null)
     stopTracks(stream, stoppedTracks)
+    releaseAudioSession()
   }
 
   function fail(error, { stopRecorder = true } = {}) {

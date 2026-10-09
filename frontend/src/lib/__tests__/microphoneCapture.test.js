@@ -13,6 +13,7 @@ test('microphone duration is finite and bounded', () => {
 })
 
 test('shell microphone capture returns mono PCM and releases every resource', async () => {
+  const navigator = { audioSession: { type: 'playback' } }
   let processor
   let trackStopped = false
   let contextClosed = false
@@ -35,8 +36,10 @@ test('shell microphone capture returns mono PCM and releases every resource', as
   }
 
   const control = await startMicrophoneCapture({
+    navigator,
     mediaDevices: {
       async getUserMedia() {
+        assert.equal(navigator.audioSession.type, 'play-and-record')
         return { getTracks: () => [{ stop: () => { trackStopped = true } }] }
       },
     },
@@ -46,6 +49,7 @@ test('shell microphone capture returns mono PCM and releases every resource', as
   })
 
   const ready = control.ready
+  assert.equal(navigator.audioSession.type, 'play-and-record')
   processor.onaudioprocess({
     inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.75, 0.5]) },
   })
@@ -59,6 +63,17 @@ test('shell microphone capture returns mono PCM and releases every resource', as
   assert.equal(trackStopped, true)
   assert.equal(contextClosed, true)
   assert.equal(processor.onaudioprocess, null)
+  assert.equal(navigator.audioSession.type, 'playback')
+})
+
+test('microphone permission denial restores playback routing', async () => {
+  const navigator = { audioSession: { type: 'playback' } }
+  await assert.rejects(startMicrophoneCapture({
+    navigator,
+    AudioContextCtor: class { close() {} },
+    mediaDevices: { async getUserMedia() { throw new Error('denied') } },
+  }), /denied/)
+  assert.equal(navigator.audioSession.type, 'playback')
 })
 
 test('audio context activation is requested before the microphone permission promise', async () => {
