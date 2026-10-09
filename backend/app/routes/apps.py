@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, defer
 from app import chat_writer
 from app import transcript_rows
 from app import (
-  activity, app_activity, app_apply, app_capability_acceptance, app_git,
+  activity, app_activity, app_apply, app_badge, app_capability_acceptance, app_git,
   app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
   icon_cache, models, project_git, providers, schemas,
   source_dirs, workspace_files,
@@ -78,7 +78,7 @@ from app.deps import (
   get_owner_or_app_with_manage_apps, reject_cross_site,
   require_nondelegated_owner_control, require_nondelegated_owner_or_app_control,
 )
-from app.resource_access import live_app, live_app_or_404
+from app.resource_access import live_app, live_app_or_404, recheck_app_identity
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -583,6 +583,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppRecencyState).filter(
     models.AppRecencyState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  app_badge.clear(db, deleted_app_id)
   db.query(models.ChatAppArtifact).filter(
     models.ChatAppArtifact.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
@@ -692,9 +693,9 @@ async def list_apps(
     )
     .all()
   )
-  return app_recency.annotate_apps(
+  return app_badge.annotate_apps(db, app_recency.annotate_apps(
     db, app_activity.annotate_apps(db, apps)
-  )
+  ))
 
 
 @router.get(
@@ -2130,9 +2131,9 @@ def get_app(
 ):
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
-  return app_recency.annotate_apps(
+  return app_badge.annotate_apps(db, app_recency.annotate_apps(
     db, app_activity.annotate_apps(db, [app])
-  )[0]
+  ))[0]
 
 
 @router.post(
@@ -2172,6 +2173,78 @@ def mark_app_activity_seen(
   app_activity.mark_seen(db, app_id, body.activity_version)
   db.commit()
   return Response(status_code=204)
+
+
+class AppBadgeRequest(BaseModel):
+  count: int = Field(ge=0, le=app_badge.MAX_BADGE_INTEGER)
+  # The app's state revision captured with the count. A report not newer than
+  # the stored revision is stale and ignored; omit it to reset the ordering.
+  revision: int | None = Field(default=None, ge=0, le=app_badge.MAX_BADGE_INTEGER)
+
+
+@router.put(
+  "/{app_id}/badge",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def set_app_badge(
+  app_id: int,
+  body: AppBadgeRequest,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal_or_public_service),
+):
+  """Report the unread count shown on the app's sidebar row (0 clears it).
+
+  The owner or the app itself may report, including its service while
+  answering a public request: unread items usually arrive that way (another
+  instance delivering a message), and, like notifying the owner, a count is
+  reviewed-safe for that narrow scope. An app token cannot badge a sibling.
+
+  The answer is the stored badge and whether this report applied, so an app
+  can tell a stale report (a newer one already landed) from a restore (its own
+  revision went backwards) and reset with an unrevisioned report.
+
+  That reset is deliberately open to every allowed caller (the app or the
+  owner): it clears the stored revision, after which a delayed older report
+  applies again until the app's next revisioned report. Reopening the ordering
+  is the price of a simple restore path; the count is a hint, never data.
+
+  The write runs under the app's storage lock; keep it a tiny transition.
+  """
+  require_nondelegated_owner_or_app_control(principal)
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403, detail="App token can only set its own badge.",
+    )
+  # An app token is bound to the installation that minted it; recheck it under
+  # the lock a data wipe or uninstall holds, so a request authorized before one
+  # cannot write afterwards (nor into a replacement that reused the id). Every
+  # app token is minted with that binding; one without it fails closed rather
+  # than comparing the row to itself. An owner request has no such binding: it
+  # pins the installation it resolves just before taking the lock, so the
+  # recheck only covers that short gap.
+  if principal.app_id is not None:
+    if principal.app_instance_id is None:
+      raise HTTPException(
+        status_code=401, detail="App token is not bound to an installation.",
+      )
+    expected_nonce = principal.app_instance_id
+  else:
+    expected_nonce = live_app_or_404(db, app_id).token_nonce
+  # The per-app storage lock is held across the write and commit: keep the
+  # work inside it to this tiny read-decide-write. It also means a report waits
+  # behind any long operation holding the lock (a wipe, an uninstall).
+  async with fs_locks.app_storage_lock(app_id):
+    recheck_app_identity(db, app_id, expected_nonce)
+    if live_app(db, app_id, populate=True) is None:
+      raise HTTPException(status_code=404, detail="App not found.")
+    report = app_badge.apply_report(db, app_id, body.count, body.revision)
+    db.commit()
+  if report.changed:
+    from app.broadcast import get_system_broadcast
+    get_system_broadcast().publish({"type": "app_activity", "appId": str(app_id)})
+  return {
+    "count": report.count, "revision": report.revision, "applied": report.applied,
+  }
 
 
 @router.patch(
@@ -2880,6 +2953,9 @@ async def delete_app_data(
     # recreate the erased tree after the wipe, and a fresh runtime gets a clean
     # browser-local generation instead of adopting an old outbox.
     app.token_nonce = secrets.token_hex(16)
+    # The badge counted data that no longer exists; forgetting it also resets
+    # the app's report ordering for its fresh start.
+    app_badge.clear(db, app.id)
     # The new nonce changes frame_version, so a currently-open app remounts
     # against its now-empty storage; updated_at refreshes list consumers.
     app.updated_at = now_naive_utc()

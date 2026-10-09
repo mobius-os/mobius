@@ -148,7 +148,7 @@ import {
  *  target. Its glyph stack stays mounted so CSS can finish the directional
  *  glyph before Stop appears, without timing state in React. Send → Steer
  *  remains immediate. Mic stays distinct as the idle input affordance. */
-function PrimaryActionGlyphs({ action }) {
+export function PrimaryActionGlyphs({ action }) {
   return (
     <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
       <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={24} height={24} />

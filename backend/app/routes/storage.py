@@ -47,6 +47,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.resource_access import recheck_app_identity
 from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
@@ -192,33 +193,10 @@ def _check_cross_app(
   return target
 
 
-def _recheck_app_identity(db: Session, app_id: int, expected_nonce) -> None:
-  """Re-verify, UNDER the per-app lock, that app_id is still the SAME app it
-  was at authorization time.
-
-  A plain existence check isn't enough: SQLite reuses a freed integer id, so
-  between a slow PUT/DELETE's authorization and its locked filesystem mutation,
-  the app can be uninstalled and a DIFFERENT app can reuse the id — the old
-  request would then write/delete inside the replacement's storage tree. The
-  per-app `token_nonce` rotates with the row, so a mismatch (or a missing row)
-  means the original app is gone and we must not touch the tree (Codex review
-  round-9 #1). `populate_existing()` forces a fresh DB read past the session's
-  identity map so a concurrent uninstall's committed delete/recreate is seen.
-  """
-  row = (
-    db.query(models.App)
-    .populate_existing()
-    .filter(models.App.id == app_id)
-    .first()
-  )
-  if row is None or row.token_nonce != expected_nonce:
-    raise HTTPException(status_code=404, detail="App not found.")
-
-
 # The write/delete core shared by the owner routes and the anonymous public
 # lane. Each function runs UNDER the caller's per-app storage lock, after the
 # caller has re-verified that the app is still the same one it authorized
-# (`_recheck_app_identity` / public `_same_live_grant`): the lock is what makes
+# (`recheck_app_identity` / public `_same_live_grant`): the lock is what makes
 # the CAS check and the quota computation atomic against a concurrent same-app
 # write or an interleaved uninstall.
 
@@ -781,7 +759,7 @@ async def move_app_file(
   src = _resolve(base, body.from_path)
   dst = _resolve(base, body.to)
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     if not src.exists():
       raise HTTPException(status_code=404, detail="Source not found.")
     if dst.exists():
@@ -838,7 +816,7 @@ async def delete_app_folder(
   base = Path(data_dir) / "apps" / str(app_id)
   target = _resolve(base, path)
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     if target.resolve() == base.resolve():
       raise HTTPException(
         status_code=400, detail="Cannot delete the app storage root."
@@ -889,7 +867,7 @@ async def write_app_file(
   # round-6 #3, round-9 #1). Möbius runs one uvicorn worker, so this in-process
   # lock fully serializes write vs uninstall.
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     before_size = check_write_precondition(file_path, if_match, if_none_match)
     version = commit_write(
       data_dir, app_id, path, file_path, content, stored_mime,
@@ -938,7 +916,7 @@ async def delete_app_file(
   # unlink a file belonging to the REPLACEMENT app that recycled the id (Codex
   # review round-8 #1, round-9 #1).
   async with fs_locks.app_storage_lock(app_id):
-    _recheck_app_identity(db, app_id, expected_nonce)
+    recheck_app_identity(db, app_id, expected_nonce)
     deleted_size = remove_file(data_dir, app_id, path, file_path)
   if activity.should_emit_storage_write(app_id, path):
     activity.log_event(

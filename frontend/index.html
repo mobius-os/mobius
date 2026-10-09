@@ -16,14 +16,20 @@
     <meta name="description" content="AI-powered personal app platform." />
     <!-- iOS PWA: hides Safari UI chrome when launched from home screen -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <!-- black-translucent extends the web view UNDER the iOS status bar /
-         notch — the shell bar pads by env(safe-area-inset-top), and
-         immersive mode (moebius:immersive, .pm/128) relies on that stable
-         edge-to-edge coordinate space. WebKit establishes this policy from
-         the installed document; runtime theme changes must not rewrite it,
-         and changing it can require removing + reinstalling the Home Screen
-         app before iOS adopts the new viewport contract. -->
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- `default` (opaque) bar on purpose. Under `black-translucent`, installed
+         WebKit sizes the web view 47 pt short of the screen bottom (iPhone
+         390x844: innerHeight = visualViewport = 797) and the page can neither
+         measure nor paint that band (cf. WebKit bug 301994). Correcting for it
+         in the viewport hook still left the composer ~10 pt high. With
+         `default`, env(safe-area-inset-bottom) is accurate and the composer
+         rests on the safe area. The bar is tinted from theme-color to the
+         active theme; iOS re-reads its colour only on load/foreground, hence
+         the reload after a Settings theme switch. This also applies to
+         standalone /apps/<slug>/ installs and fullscreen games (which reuse
+         this document), and immersive apps cannot paint under the notch.
+         Icons added before this change keep the old policy until re-added.
+         See PR #1632. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Möbius" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="/moebius.png" />

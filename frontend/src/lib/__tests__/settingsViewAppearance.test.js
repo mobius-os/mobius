@@ -155,7 +155,7 @@ test('Möbius subscription status uses the same consumed-credit copy as the brai
 
 test('appearance indicator waits for the same seeded theme repaint as the palette', () => {
   assert.doesNotMatch(view, /setThemeMode\(newMode\)/)
-  assert.match(view, /await themeService\.toggleTheme\(queryClient, currentMode, api\)/)
+  assert.match(view, /themeService\.toggleTheme\(queryClient, currentMode, api\)/)
   assert.match(view, /setThemeMode\(themeModeQuery\.data === 'light'/)
 })
 

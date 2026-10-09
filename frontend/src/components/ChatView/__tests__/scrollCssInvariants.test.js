@@ -52,15 +52,20 @@ test('project copy files hand off inside their dialog, not to the background', (
   assert.match(copyCss, /\.project-copy-dialog\s*\{[^}]*overscroll-behavior:\s*contain;/)
 })
 
-test('the composer and transcript both reserve the full device safe area', () => {
+test('the composer and transcript use the same chat bottom inset', () => {
+  const chat = ruleBody('.chat')
   const foot = ruleBody('.chat__foot')
   const list = ruleBody('.chat__list')
 
-  assert.match(foot, /bottom:\s*env\(safe-area-inset-bottom,\s*0px\)/)
-  assert.match(
-    list,
-    /var\(--composer-h,\s*80px\)\s*\+\s*env\(safe-area-inset-bottom,\s*0px\)\s*\+\s*16px/,
-  )
+  // One value: zero while the shell is fitted above a keyboard, otherwise the
+  // platform's share (default all) of the device bottom safe area.
+  assert.match(chat, /--chat-foot-safe-bottom:\s*var\(\s*--chat-foot-bottom-inset,\s*calc\(env\(safe-area-inset-bottom,\s*0px\)\s*\*\s*var\(--chat-foot-inset-reserve,\s*1\)\)\s*\)/)
+  assert.match(foot, /bottom:\s*var\(--chat-foot-safe-bottom\)/)
+  assert.match(list, /var\(--composer-h,\s*80px\)\s*\+\s*var\(--chat-foot-safe-bottom\)\s*\+\s*16px/)
+  // Only installed iOS narrows it, to the Android composer position.
+  assert.match(css, /@supports \(-webkit-touch-callout: none\)\s*\{\s*@media \(display-mode: standalone\)[^{]*\{\s*\.chat\s*\{\s*--chat-foot-inset-reserve:\s*0\.25;\s*\}/)
+  assert.equal(css.match(/--chat-foot-inset-reserve:\s*[\d.]+;/g)?.length, 1)
+  assert.doesNotMatch(css, /--chat-foot-extra-bottom/)
   assert.doesNotMatch(foot, /safe-area-inset-bottom[\s\S]*-\s*14px/)
   assert.doesNotMatch(list, /safe-area-inset-bottom[\s\S]*-\s*14px/)
 })
@@ -71,7 +76,7 @@ test('the composer backdrop fills the safe area without moving controls into it'
 
   assert.match(
     backdrop,
-    /bottom:\s*calc\(0px\s*-\s*env\(safe-area-inset-bottom,\s*0px\)\)/,
+    /bottom:\s*calc\(0px\s*-\s*var\(--chat-foot-safe-bottom\)\)/,
   )
   assert.match(embeddedBackdrop, /bottom:\s*0/)
 })
