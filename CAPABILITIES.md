@@ -169,9 +169,11 @@ request-derived data. A path-shaped string alone cannot prove it is a template.
 Likewise declare the finite, code-authored exception class labels:
 `"diagnostics_error_types": ["HTTPStatusError", "ValueError"]`. The accepted
 contract freezes this allowlist too; only exact matches are traced on 5xx
-responses. Missing, malformed, or undeclared error labels become
-`app_http_error`; existing accepted contracts without this declaration now use
-that generic category until a new declaration is reviewed and accepted.
+responses under `mobius.service.app_error_type`. The platform-owned
+`mobius.service.error_type` is `app_http_error` for valid app 5xx responses, whether
+or not a class label is supplied. Missing, malformed, or undeclared error labels
+omit `mobius.service.app_error_type`; existing accepted contracts without this
+declaration omit it until a new declaration is reviewed and accepted.
 Declarations must contain at most 128 distinct class-name labels, each 1-128
 characters matching `[A-Za-z_][A-Za-z0-9_.]*`. Class-shaped syntax alone cannot
 prove provenance: reviewers must verify that labels are stable code-authored

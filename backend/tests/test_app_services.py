@@ -654,7 +654,8 @@ def test_service_diagnostics_are_local_shape_only(client, auth, db, monkeypatch)
   assert flattened == {
     "mobius.app.slug": "diagnostic-shape",
     "mobius.service.route": "/replies/{post_id}",
-    "mobius.service.error_type": "HTTPStatusError",
+    "mobius.service.error_type": "app_http_error",
+    "mobius.service.app_error_type": "HTTPStatusError",
     "mobius.service.upstream_status": 404,
   }
   assert "private" not in str(flattened)
@@ -879,7 +880,8 @@ def test_error_labels_require_accepted_not_draft_declaration(
   assert response.headers["content-type"].startswith("text/plain")
   assert {k: v for attrs in recorded for k, v in attrs.items()} == {
     "mobius.app.slug": "service-test",
-    "mobius.service.error_type": "HTTPStatusError" if declaration else "app_http_error",
+    "mobius.service.error_type": "app_http_error",
+    **({"mobius.service.app_error_type": "HTTPStatusError"} if declaration else {}),
   }
 
 
@@ -939,3 +941,34 @@ def test_declared_app_label_cannot_override_platform_boundary_category(
   assert response.status_code == 502
   assert response.json() == {"detail": "response headers must be a bounded object"}
   assert recorded[-1] == {"mobius.service.error_type": "invalid_headers"}
+
+
+@pytest.mark.parametrize("invalid_headers", [False, True])
+def test_app_error_label_cannot_collide_with_platform_category(
+  client, auth, db, monkeypatch, invalid_headers,
+):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db, diagnostics_error_types=["invalid_headers"])
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  envelope = {
+    "status": 503, "body": {"detail": "app failure"},
+    "headers": [] if invalid_headers else {"Content-Language": "en"},
+    "diagnostics": {"error_type": "invalid_headers", "upstream_status": 404},
+  }
+  (accepted / "service.py").write_text(f"print({json.dumps(envelope)!r})\n")
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+  if invalid_headers:
+    assert response.status_code == 502
+    assert response.json() == {"detail": "response headers must be a bounded object"}
+  else:
+    assert response.status_code == 503
+    assert response.json() == {"detail": "app failure"}
+    assert response.headers["content-language"] == "en"
+  flattened = {k: v for attrs in recorded for k, v in attrs.items()}
+  assert flattened == {
+    "mobius.app.slug": "service-test",
+    "mobius.service.error_type": "invalid_headers" if invalid_headers else "app_http_error",
+    "mobius.service.app_error_type": "invalid_headers",
+    "mobius.service.upstream_status": 404,
+  }

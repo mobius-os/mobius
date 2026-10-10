@@ -513,11 +513,10 @@ async def _invoke_service(
     if isinstance(route, str) and isinstance(routes, list) and route in routes:
       safe["mobius.service.route"] = route
     if status >= 500:
+      safe["mobius.service.error_type"] = "app_http_error"
       error_types = service.get("diagnostics_error_types", [])
       if isinstance(error_type, str) and isinstance(error_types, list) and error_type in error_types:
-        safe["mobius.service.error_type"] = error_type
-      else:
-        safe["mobius.service.error_type"] = "app_http_error"
+        safe["mobius.service.app_error_type"] = error_type
       if type(upstream_status) is int and 100 <= upstream_status <= 599:
         safe["mobius.service.upstream_status"] = upstream_status
     tracing.annotate(None, safe)
