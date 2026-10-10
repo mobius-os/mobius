@@ -1403,49 +1403,76 @@ function DeploymentMetrics({ token, instance, compact = false }) {
   )
 }
 
-function RecoverySection({ token, instance }) {
+export function RecoverySection({ token, instance }) {
   // "Open Recovery" starts an ephemeral Railway worker on the account host and,
   // when it reports ready, hands off to the worker's own web UI in a popup — the
-  // same web flow the mobius.you website uses. No credentials touch this frame.
+  // same web flow the mobius.you website uses. No credentials touch Settings.
   const [recovery, setRecovery] = useState(null)
-  const pollRef = useRef(null)
-  const busyRef = useRef(false)
+  const sessionRef = useRef(null)
 
-  useEffect(() => () => {
-    clearTimeout(pollRef.current)
-    busyRef.current = false
-  }, [])
-
-  const poll = useCallback(async () => {
-    try {
-      const status = await identityRequest(token, `/railway/deployments/${instance.id}/recovery/status`)
-      setRecovery({ state: status.state, message: status.message, error: status.error })
-      if (status.state === 'ready' && status.open_url) {
-        window.open(status.open_url, 'mobius-recovery', 'width=940,height=760')
-        busyRef.current = false
-        return
-      }
-      if (status.state === 'starting') {
-        pollRef.current = setTimeout(poll, 2500)
-      } else {
-        busyRef.current = false
-      }
-    } catch (requestError) {
-      busyRef.current = false
-      setRecovery({ state: 'error', message: requestError.message, error: '' })
+  useEffect(() => {
+    const session = { controller: null, popup: null, timer: null }
+    sessionRef.current = session
+    setRecovery(null)
+    return () => {
+      sessionRef.current = null
+      clearTimeout(session.timer)
+      session.controller?.abort()
+      try { session.popup?.close() } catch { /* popup already gone */ }
     }
   }, [token, instance.id])
 
   const start = async () => {
-    if (busyRef.current) return
-    busyRef.current = true
-    setRecovery({ state: 'starting', message: 'Starting a temporary recovery worker\u2026', error: '' })
+    const session = sessionRef.current
+    if (!session || session.controller) return
+    // Reserve under the click's user activation, before creating a paid worker.
+    const popup = window.open('about:blank', 'mobius-recovery', 'width=940,height=760')
+    if (!popup) {
+      setRecovery({ state: 'error', message: 'Your browser blocked the recovery window. Allow popups, then try again.', error: '' })
+      return
+    }
+    const controller = new AbortController()
+    session.controller = controller
+    session.popup = popup
+    const active = () => sessionRef.current === session
+      && session.controller === controller
+      && !controller.signal.aborted
+    const finish = error => {
+      session.controller = null
+      session.popup = null
+      if (error) {
+        try { popup.close() } catch { /* popup already gone */ }
+        setRecovery({ state: 'error', message: error.message, error: '' })
+      }
+    }
+    const poll = async () => {
+      if (!active()) return
+      try {
+        if (popup.closed) throw new Error('The recovery window was closed. Try again when you are ready.')
+        const status = await identityRequest(token, `/railway/deployments/${instance.id}/recovery/status`, { signal: controller.signal })
+        if (!active()) return
+        if (popup.closed) throw new Error('The recovery window was closed. Try again when you are ready.')
+        if (status.state === 'ready') {
+          if (!status.open_url) throw new Error('Möbius did not return a recovery address. Please try again.')
+          popup.location.replace(status.open_url)
+          setRecovery({ state: status.state, message: status.message, error: status.error })
+          finish()
+        } else if (status.state === 'starting') {
+          setRecovery({ state: status.state, message: status.message, error: status.error })
+          session.timer = setTimeout(poll, 2500)
+        } else {
+          finish(new Error(status.error || status.message || 'Recovery could not start. Please try again.'))
+        }
+      } catch (requestError) {
+        if (active()) finish(requestError)
+      }
+    }
+    setRecovery({ state: 'starting', message: 'Starting a temporary recovery worker…', error: '' })
     try {
-      await identityRequest(token, `/railway/deployments/${instance.id}/recovery`, { method: 'POST' })
-      poll()
+      await identityRequest(token, `/railway/deployments/${instance.id}/recovery`, { method: 'POST', signal: controller.signal })
+      if (active()) await poll()
     } catch (requestError) {
-      busyRef.current = false
-      setRecovery({ state: 'error', message: requestError.message, error: '' })
+      if (active()) finish(requestError)
     }
   }
 

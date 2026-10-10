@@ -1,3 +1,5 @@
+import { accountLinkCompletion, accountLinkRegistration } from '../../../lib/accountLinkBroker.js'
+
 export const ACCOUNT_MODES = Object.freeze(['signed_out', 'linked', 'managed'])
 export const RAILWAY_ACCESS = Object.freeze([
   'signed_out',
@@ -13,8 +15,6 @@ export const DELETION_STATES = Object.freeze([
   'unknown',
 ])
 
-const ACCOUNT_LINK_WINDOW_MS = 10 * 60 * 1000
-const BROKER_ACK_WINDOW_MS = 5 * 1000
 const ACCOUNT_LINK_STATE = /^[A-Za-z0-9_-]{32,512}$/
 const ACCOUNT_LINK_ATTEMPT = /^[A-Za-z0-9_-]{16,512}$/
 const ACCOUNT_LINK_CODE = /^[A-Za-z0-9_-]{32,512}$/
@@ -580,38 +580,24 @@ export function waitForAccountLink({
   attempt,
   signal,
   eventTarget = window,
-  parentWindow = window.parent,
-  shellOrigin = window.location.origin,
   now = Date.now,
-  registrationTimeoutMs = BROKER_ACK_WINDOW_MS,
   closedPollMs = 350,
 }) {
   const authorizationOrigin = attempt.authorization_origin
     || new URL(attempt.authorization_url).origin
-  // The account service enforces the absolute expiry. Use a bounded local
-  // window here so a skewed browser clock can neither reject a fresh attempt
-  // immediately nor retain a broker registration indefinitely.
-  const deadline = now() + ACCOUNT_LINK_WINDOW_MS
+  // Native Settings owns the opener. It is not an opaque mini-app frame and
+  // cannot register through AppCanvas's attributed-frame broker.
+  const registration = accountLinkRegistration({
+    type: 'moebius:account-link-register',
+    authorizationOrigin,
+    state: attempt.state,
+    expiresAt: attempt.expires_at,
+  }, now)
 
   return new Promise((resolve, reject) => {
     let settled = false
-    let registered = false
     let closedTimer = null
     let expiryTimer = null
-    let registrationTimer = null
-
-    const unregister = () => {
-      try {
-        parentWindow.postMessage({
-          type: 'moebius:account-link-unregister',
-          state: attempt.state,
-        }, shellOrigin)
-      } catch { /* parent retired with this frame */ }
-    }
-
-    const closePopup = () => {
-      try { popup?.close?.() } catch { /* cross-origin popup already gone */ }
-    }
 
     const finish = (error, result) => {
       if (settled) return
@@ -620,46 +606,28 @@ export function waitForAccountLink({
       signal?.removeEventListener('abort', abort)
       clearInterval(closedTimer)
       clearTimeout(expiryTimer)
-      clearTimeout(registrationTimer)
-      unregister()
-      closePopup()
+      try { popup?.close?.() } catch { /* cross-origin popup already gone */ }
       error ? reject(error) : resolve(result)
     }
 
     const receive = event => {
-      if (event.source !== parentWindow || event.origin !== shellOrigin) return
-      const message = event.data
-      if (
-        !registered
-        && exactKeys(message, ['type', 'state'])
-        && message.type === 'moebius:account-link-registered'
-        && message.state === attempt.state
-      ) {
-        registered = true
-        clearTimeout(registrationTimer)
-        try {
-          popup.location.replace(attempt.authorization_url)
-        } catch {
-          finish(new Error('The sign-in window could not be opened. Please try again.'))
-        }
-        return
-      }
-      if (
-        !registered
-        || !exactKeys(message, ['type', 'code', 'state', 'authorizationOrigin'])
-        || message.type !== 'moebius:account-link-result'
-        || message.authorizationOrigin !== authorizationOrigin
-        || message.state !== attempt.state
-        || typeof message.code !== 'string'
-        || !ACCOUNT_LINK_CODE.test(message.code)
-      ) return
-      finish(null, { code: message.code, state: message.state })
+      if (event.source !== popup) return
+      const completion = accountLinkCompletion(event, registration, now)
+      if (!completion || !ACCOUNT_LINK_CODE.test(completion.code)) return
+      finish(null, { code: completion.code, state: completion.state })
     }
-
     const abort = () => finish(new Error('Sign-in cancelled.'))
 
     eventTarget.addEventListener('message', receive)
     signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) {
+      abort()
+      return
+    }
+    if (!registration) {
+      finish(new Error('Möbius could not prepare secure sign-in. Please try again.'))
+      return
+    }
     closedTimer = setInterval(() => {
       if (popup.closed) {
         finish(new Error('The sign-in window was closed. Try again when you are ready.'))
@@ -667,24 +635,13 @@ export function waitForAccountLink({
     }, closedPollMs)
     expiryTimer = setTimeout(() => {
       finish(new Error('Sign-in took too long. Please try again.'))
-    }, Math.max(0, deadline - now()))
-    registrationTimer = setTimeout(() => {
-      finish(new Error('Möbius could not prepare secure sign-in. Please try again.'))
-    }, registrationTimeoutMs)
+    }, Math.max(0, registration.deadline - now()))
 
-    if (signal?.aborted) {
-      abort()
-      return
-    }
+    // Listen before navigation: a fast authorization result must not be lost.
     try {
-      parentWindow.postMessage({
-        type: 'moebius:account-link-register',
-        authorizationOrigin,
-        state: attempt.state,
-        expiresAt: attempt.expires_at,
-      }, shellOrigin)
+      popup.location.replace(attempt.authorization_url)
     } catch {
-      finish(new Error('Möbius could not prepare secure sign-in. Please try again.'))
+      finish(new Error('The sign-in window could not be opened. Please try again.'))
     }
   })
 }
