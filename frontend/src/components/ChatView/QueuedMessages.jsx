@@ -11,6 +11,7 @@ import {
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
 import { queuedHint } from './queuedHint.js'
+import { queuedPreview } from './queuedPreview.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { autoGrowTextarea } from './composerTextareaSizing.js'
 import { restoreQueuedEditorAfterSave } from './queuedEditorFocus.js'
@@ -21,7 +22,6 @@ import {
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 
-const TRUNCATE_AT = 80
 // Matches .queued__editor-input max-height; the JS fallback caps growth here
 // for browsers without native field-sizing.
 const EDITOR_MAX_HEIGHT = 160
@@ -207,11 +207,7 @@ export default function QueuedMessages({
             const key = keyOf(msg)
             const text = stripAugmentation(msg.content || '')
             const isExpanded = expanded.has(key)
-            const needsTruncation = text.length > TRUNCATE_AT || text.includes('\n')
-            const firstLine = text.split('\n')[0]
-            const preview = firstLine.length > TRUNCATE_AT
-              ? firstLine.slice(0, TRUNCATE_AT) + '…'
-              : firstLine + (text.includes('\n') ? ' …' : '')
+            const { preview, needsTruncation } = queuedPreview(text)
             const MessageSurface = needsTruncation ? 'button' : 'div'
             const isEditing = editingCid === key
             const rejected = msg.recoveryAvailable
