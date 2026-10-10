@@ -5514,6 +5514,145 @@ def test_generated_image_preserves_bytes_and_uses_unique_names(tmp_path):
   assert sorted(path.name for path in inbox.iterdir()) == sorted(names)
 
 
+class _ImagePublicationSink:
+  def __init__(self):
+    self.events = []
+
+  async def generated_file_capacity(self):
+    return 500
+
+  async def publish_generated_file(self, event):
+    self.events.append(event)
+    return event['name']
+
+
+def test_generated_image_crash_residue_stays_outside_publication(tmp_path):
+  import base64
+  import multiprocessing
+  import os
+  from app import generated_files
+
+  def crash_during_capture():
+    original = os.fdopen
+
+    class CrashingWrite:
+      def __init__(self, fd, *args, **kwargs):
+        self.stream = original(fd, *args, **kwargs)
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *args):
+        return self.stream.__exit__(*args)
+
+      def write(self, content):
+        self.stream.write(content[:8])
+        self.stream.flush()
+        os._exit(77)
+
+    os.fdopen = CrashingWrite
+    codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
+
+  process = multiprocessing.get_context('fork').Process(target=crash_during_capture)
+  process.start()
+  try:
+    process.join(5)
+    assert process.exitcode == 77
+  finally:
+    if process.is_alive():
+      process.terminate()
+      process.join(5)
+    process.close()
+
+  sink = _ImagePublicationSink()
+  assert asyncio.run(generated_files.publish_inbox_files(
+    sink, data_dir=str(tmp_path), chat_id='chat',
+  )) == {}
+  assert sink.events == []
+  residue = list(generated_files.stored_dir(str(tmp_path), 'chat').iterdir())
+  assert len(residue) == 1
+  assert residue[0].read_bytes() == base64.b64decode(_IMAGE_RESULT)[:8]
+  # A complete capture still recovers, and owner-named hidden files stay valid.
+  name = codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
+  inbox = generated_files.output_dir(str(tmp_path), 'chat')
+  (inbox / '.owner-notes.txt').write_bytes(b'finished owner deliverable')
+  receipt = asyncio.run(generated_files.publish_inbox_files(
+    sink, data_dir=str(tmp_path), chat_id='chat',
+  ))
+  assert set(receipt) == {name, '.owner-notes.txt'}
+  assert generated_files._inbox_names(str(tmp_path), 'chat') == []
+  for event in sink.events:
+    expected = base64.b64decode(_IMAGE_RESULT) if event['name'] == name else b'finished owner deliverable'
+    assert (generated_files.stored_dir(str(tmp_path), 'chat') / event['path']).read_bytes() == expected
+
+
+def test_generated_image_cancelled_capture_never_publishes_partial_bytes(tmp_path, monkeypatch):
+  import base64
+  import os
+  import threading
+  from app import generated_files
+
+  entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+  original_fdopen = os.fdopen
+
+  class BlockedWrite:
+    def __init__(self, fd, *args, **kwargs):
+      self.stream = original_fdopen(fd, *args, **kwargs)
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *args):
+      return self.stream.__exit__(*args)
+
+    def write(self, content):
+      self.stream.write(content[:8])
+      self.stream.flush()
+      entered.set()
+      assert release.wait(5), 'capture was not released'
+      self.stream.write(content[8:])
+
+  def capture():
+    try:
+      return codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
+    finally:
+      finished.set()
+
+  async def cancel_and_publish():
+    sink = _ImagePublicationSink()
+    task = asyncio.create_task(asyncio.to_thread(capture))
+    try:
+      assert await asyncio.to_thread(entered.wait, 5)
+      task.cancel()
+      with pytest.raises(asyncio.CancelledError):
+        await task
+      # Match the runner's final inbox publication while its worker still writes.
+      assert await generated_files.publish_inbox_files(
+        sink, data_dir=str(tmp_path), chat_id='chat',
+      ) == {}
+      assert sink.events == []
+    finally:
+      release.set()
+      assert await asyncio.to_thread(finished.wait, 5)
+    names = generated_files._inbox_names(str(tmp_path), 'chat')
+    assert len(names) == 1
+    assert (generated_files.output_dir(str(tmp_path), 'chat') / names[0]).read_bytes() == base64.b64decode(_IMAGE_RESULT)
+    receipt = await generated_files.publish_inbox_files(
+      sink, data_dir=str(tmp_path), chat_id='chat',
+    )
+    assert list(receipt) == names
+    assert len(sink.events) == 1
+    assert generated_files._inbox_names(str(tmp_path), 'chat') == []
+
+  def blocked_fdopen(fd, *args, **kwargs):
+    if not entered.is_set():
+      return BlockedWrite(fd, *args, **kwargs)
+    return original_fdopen(fd, *args, **kwargs)
+
+  monkeypatch.setattr(os, 'fdopen', blocked_fdopen)
+  asyncio.run(cancel_and_publish())
+
+
 def test_generated_image_obeys_existing_deliverable_size_limit(tmp_path, monkeypatch):
   from app import generated_files
 

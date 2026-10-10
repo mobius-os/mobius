@@ -310,6 +310,8 @@ export function ExpandableImage({
         // Generated files serve the original bytes; inline disposition is
         // required in both the transcript and its expanded viewer.
         setResolvedSrc(`${BASE}${path}${param}${path.includes('/generated-files/') ? '&preview=true' : ''}`)
+      }, () => {
+        if (!cancelled) setLoadState('error')
       })
     } else {
       // Non-media API path or external URL: use owner token (or no token for external).
@@ -329,7 +331,7 @@ export function ExpandableImage({
   // returning null until resolvedSrc let the whole box insert late and shove the
   // surrounding text. The <img> swaps in once resolvedSrc lands.
   if (!rawSrc) return null
-  if (dimensionError || loadState === 'error') {
+  if (dimensionError) {
     return (
       <span className="md-image-error" role="img" aria-label={alt || 'Image unavailable'}>
         Image unavailable
@@ -343,11 +345,11 @@ export function ExpandableImage({
         type="button"
         className="md-image-frame"
         style={imageVars || undefined}
-        aria-label={`Open ${alt || 'image'} preview`}
+        aria-label={loadState === 'error' ? `Image unavailable: ${alt || 'image'}` : `Open ${alt || 'image'} preview`}
         disabled={!resolvedSrc || loadState !== 'loaded'}
         aria-busy={loadState === 'loading'}
         onClick={() => {
-          if (!resolvedSrc) return
+          if (!resolvedSrc || loadState !== 'loaded') return
           if (onOpen) onOpen(imageIndex, { href, src: resolvedSrc, alt })
           else {
             historyDismiss.open()
@@ -356,7 +358,8 @@ export function ExpandableImage({
         }}
       >
         {loadState === 'loading' && <span className="md-image-loading" role="status">Loading image…</span>}
-        {previewSrc && (
+        {loadState === 'error' && <span className="md-image-loading" role="status">Image unavailable</span>}
+        {loadState !== 'error' && previewSrc && (
           <img
             src={previewSrc}
             alt={alt}
@@ -368,7 +371,7 @@ export function ExpandableImage({
           />
         )}
       </button>
-      {!onOpen && open && resolvedSrc && <ChatPanePortal anchorRef={buttonRef}>
+      {!onOpen && open && resolvedSrc && loadState === 'loaded' && <ChatPanePortal anchorRef={buttonRef}>
         <ImageLightbox src={resolvedSrc} alt={alt} onClose={historyDismiss.close} />
       </ChatPanePortal>}
     </>

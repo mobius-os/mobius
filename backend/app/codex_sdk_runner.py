@@ -174,22 +174,30 @@ def _stage_codex_generated_image(data_dir: str, chat_id: str, result: str) -> st
     raise ValueError("generated image result is not a valid bounded PNG") from exc
   directory = generated_files.output_dir(data_dir, chat_id, create=True)
   directory_fd = generated_files._open_directory(directory, create=False)
+  stored_fd = None
   name = f"generated-image-{uuid.uuid4().hex}.png"
   temporary = f".{name}.tmp"
   try:
+    # Reuse the private store's existing temporary-file boundary. A crash or
+    # cancelled await must never expose an unfinished capture to inbox recovery.
+    stored_fd = generated_files._open_directory(
+      generated_files.stored_dir(data_dir, chat_id, create=True), create=False,
+    )
     fd = os.open(
       temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
-      dir_fd=directory_fd,
+      dir_fd=stored_fd,
     )
     with os.fdopen(fd, "wb") as stream:
       stream.write(content)
-    os.rename(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    os.rename(temporary, name, src_dir_fd=stored_fd, dst_dir_fd=directory_fd)
     return name
   finally:
-    try:
-      os.unlink(temporary, dir_fd=directory_fd)
-    except FileNotFoundError:
-      pass
+    if stored_fd is not None:
+      try:
+        os.unlink(temporary, dir_fd=stored_fd)
+      except FileNotFoundError:
+        pass
+      os.close(stored_fd)
     os.close(directory_fd)
 
 
