@@ -204,9 +204,12 @@ test('Möbius account mirrors the Möbius · You app layout', () => {
   assert.match(account, /planCheckedRef\.current = true\n\s*identityRequest\(token, '\/railway\/plan\/refresh', \{ method: 'POST' \}\)/)
 })
 
-test('Settings detail back button uses the shared icon instead of a text arrow', () => {
+test('Settings detail back button has a 44px touch target and keeps the shared 18px icon', () => {
   assert.match(view, /className="settings__back"[\s\S]*<ArrowLeft width=\{18\} height=\{18\}/)
   assert.match(css, /\.settings__back\s*\{[^}]*display:\s*grid;[^}]*place-items:\s*center;/s)
+  const backStyle = css.match(/\.settings__back\s*\{([^}]+)\}/s)[1]
+  assert.match(backStyle, /width:\s*44px;/)
+  assert.match(backStyle, /height:\s*44px;/)
   assert.doesNotMatch(view, />←<\/button>/)
 })
 
