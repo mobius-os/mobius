@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react'
@@ -37,6 +38,7 @@ import {
   disconnectIdentity,
   loadIdentity,
   publishIdentity,
+  retryDeploymentDeletion,
   useAvatarSource,
   useIdentityQuery,
 } from './identity-client.js'
@@ -1506,8 +1508,8 @@ export function RecoverySection({ token, instance }) {
   )
 }
 
-function DeletionRecoverySection({
-  token, instance, pending, onConfirmAbsent,
+export function DeletionRecoverySection({
+  token, instance, pending, onConfirmAbsent, onDiagnosis,
 }) {
   const [diagnosis, setDiagnosis] = useState(null)
   const [checkError, setCheckError] = useState('')
@@ -1520,6 +1522,8 @@ function DeletionRecoverySection({
     setDiagnosis(null)
     setCheckError('')
     setUnsupported(false)
+    setConfirmRecord(false)
+    onDiagnosis(null)
     ;(async () => {
       try {
         const result = await identityRequest(
@@ -1527,17 +1531,20 @@ function DeletionRecoverySection({
           `/railway/deployments/${instance.id}/deletion`,
           { signal: controller.signal },
         )
-        if (!controller.signal.aborted) setDiagnosis(result)
+        if (!controller.signal.aborted) {
+          setDiagnosis(result)
+          onDiagnosis(result)
+        }
       } catch (requestError) {
         if (controller.signal.aborted) return
-        // Older Möbius hosts do not have this read-only check yet. Preserve the
-        // existing retry path rather than turning a staged upgrade into an error.
+        // Older hosts cannot establish a safe retry; leave Railway inspection
+        // available without treating an unsupported check as permission.
         if (requestError.status === 404) setUnsupported(true)
         else setCheckError(requestError.message)
       }
     })()
     return () => controller.abort()
-  }, [instance.id, revision, token])
+  }, [instance.id, instance.railway_url, instance.status, instance.actions.retry, revision, token, onDiagnosis])
 
   const checking = !diagnosis && !checkError && !unsupported
   const title = checking
@@ -1553,7 +1560,7 @@ function DeletionRecoverySection({
     ? 'This read-only check does not change your deployment.'
     : diagnosis?.message
       || checkError
-      || 'Try deleting again, or open Railway to check the project directly.'
+      || 'Open Railway to check the project first. Deletion cannot be retried until Möbius confirms it still exists.'
   const RecoveryIcon = checking ? ArrowRotateCw : diagnosis?.can_confirm_absent ? CheckCircle : Warning
   const absenceNeedsOwnerCheck = diagnosis?.state === 'missing_unconfirmed'
 
@@ -1582,7 +1589,7 @@ function DeletionRecoverySection({
             Open Railway <ArrowUpRight width={16} />
           </button>
         )}
-        {checkError && (
+        {(checkError || (diagnosis && diagnosis.state !== 'missing')) && (
           <button
             type="button"
             className="id-btn"
@@ -1844,28 +1851,48 @@ function ManageDeploymentPanel({
   )
 }
 
-function DeleteDeploymentModal({
+export function DeleteDeploymentModal({
   instance, token, onClose, onRetry, onDelete, onConfirmAbsent,
 }) {
   const [pending, setPending] = useState('')
   const [error, setError] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deletionDiagnosis, setDeletionDiagnosis] = useState(null)
+  const onDiagnosis = useCallback(next => {
+    setDeletionDiagnosis(next)
+    setConfirmDelete(false)
+  }, [])
   const closeRef = useRef(null)
   const dialogRef = useDialog(onClose, Boolean(pending), closeRef)
   const retryingDelete = String(instance.status).toLowerCase() === 'delete_failed'
   const cancellingBuild = deploymentIsBuilding(instance)
+  const canRetryDelete = deletionDiagnosis?.state === 'present' && instance.actions.retry === true
+  const operationRef = useRef(null)
+
+  // Dialog close controls are blocked while pending, but Settings itself can
+  // unmount or switch accounts. Invalidate that intent before async reads resume.
+  useLayoutEffect(() => {
+    const controller = new AbortController()
+    operationRef.current = controller
+    setPending('')
+    setError('')
+    setConfirmDelete(false)
+    setDeletionDiagnosis(null)
+    return () => controller.abort()
+  }, [token, instance.id, instance.railway_url, instance.status, instance.actions.retry])
 
   const run = async (action, work) => {
-    if (pending) return
+    const controller = operationRef.current
+    if (pending || !controller || controller.signal.aborted) return
     setPending(action)
     setError('')
     try {
-      await work()
-      onClose()
+      await work(controller.signal)
+      if (!controller.signal.aborted) onClose()
     } catch (requestError) {
-      setError(requestError.message)
+      if (!controller.signal.aborted) setError(requestError.message)
     } finally {
-      setPending('')
+      if (!controller.signal.aborted) setPending('')
     }
   }
 
@@ -1894,6 +1921,7 @@ function DeleteDeploymentModal({
             token={token}
             instance={instance}
             pending={pending}
+            onDiagnosis={onDiagnosis}
             onConfirmAbsent={() => run(
               'confirm-absent',
               () => onConfirmAbsent(instance.id),
@@ -1922,10 +1950,12 @@ function DeleteDeploymentModal({
               <button
                 type="button"
                 className="id-btn id-btn--danger"
-                disabled={Boolean(pending)}
+                disabled={Boolean(pending) || (retryingDelete && !canRetryDelete)}
                 onClick={() => run(
                   retryingDelete ? 'retry-delete' : 'delete',
-                  () => retryingDelete ? onRetry(instance.id) : onDelete(instance.id),
+                  signal => retryingDelete
+                    ? retryDeploymentDeletion(token, instance, onRetry, { signal })
+                    : onDelete(instance.id),
                 )}
               >
                 {pending
@@ -1935,7 +1965,7 @@ function DeleteDeploymentModal({
             </div>
           </div>
         ) : (
-          <button type="button" className="id-btn id-btn--danger" onClick={() => setConfirmDelete(true)}>
+          <button type="button" className="id-btn id-btn--danger" disabled={Boolean(pending) || (retryingDelete && !canRetryDelete)} onClick={() => setConfirmDelete(true)}>
             <Trash width={16} /> {retryingDelete ? 'Try deleting again' : cancellingBuild ? 'Cancel deployment' : 'Delete deployment'}
           </button>
         )}
@@ -2159,7 +2189,7 @@ function IdentityLoading() {
   )
 }
 
-export default function IdentityAccount({ token }) {
+export default function IdentityAccount({ token, active = true }) {
   const queryClient = useQueryClient()
   const identityQuery = useIdentityQuery(token)
   const data = identityQuery.data ?? null
@@ -2653,7 +2683,7 @@ export default function IdentityAccount({ token }) {
             })}
           />
         )}
-        {deletingDeployment && (
+        {deletingDeployment && active && (
           <DeleteDeploymentModal
             instance={deletingDeployment}
             token={token}

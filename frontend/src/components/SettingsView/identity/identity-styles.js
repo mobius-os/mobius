@@ -602,11 +602,11 @@ export const IDENTITY_STYLES = `
 }
 
 .id-name-edit {
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
-  margin: -7px 0;
+  margin: -13px 0;
   padding: 0;
   border: 0;
   border-radius: 9px;

@@ -11,6 +11,17 @@ const css = readFileSync(
   'utf8',
 )
 
+const accountView = readFileSync(
+  new URL('../../components/SettingsView/identity/IdentityAccount.jsx', import.meta.url),
+  'utf8',
+)
+
+test('hidden Settings unmounts the deletion modal while retaining the account page', () => {
+  assert.match(view, /<IdentityAccount token=\{getToken\(\)\} active=\{active\}/)
+  assert.match(accountView, /IdentityAccount\(\{ token, active = true \}\)/)
+  assert.match(accountView, /\{deletingDeployment && active && \(\s*<DeleteDeploymentModal/)
+})
+
 const updates = readFileSync(
   new URL('../../components/SettingsView/PlatformUpdates.jsx', import.meta.url), 'utf8',
 )

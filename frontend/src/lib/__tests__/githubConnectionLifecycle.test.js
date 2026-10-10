@@ -27,6 +27,49 @@ const renderConnection = () => renderHook(() => GithubConnection({
   onExpand: noop,
 }))
 
+test('closing and reopening GitHub discards disconnect confirmation', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let disconnects = 0
+  api.github = {
+    status: async () => json({ connected: true, login: 'owner', scopes: ['public_repo', 'workflow'], device_flow_available: true }),
+    disconnect: async () => { disconnects++; return json({}) },
+  }
+  let view
+  const props = { active: true, expanded: true, onExpand: noop, onToggle: () => view.rerender({ ...props, expanded: false }) }
+  view = renderHook(next => GithubConnection(next), props)
+  t.after(() => view.unmount())
+  await tick(20)
+  findButton(view.result.current, 'Disconnect…').props.onClick()
+  assert.ok(findButton(view.result.current, 'Disconnect'))
+  findNode(view.result.current, node => node.props?.className === 'settings__account-link').props.onClick()
+  view.rerender(props)
+  assert.ok(findButton(view.result.current, 'Disconnect…'))
+  assert.ok(!findButton(view.result.current, 'Disconnect'))
+  assert.equal(disconnects, 0)
+})
+
+test('closing GitHub preserves an active device-code attempt without cancelling or restarting it', async t => {
+  const original = api.github
+  t.after(() => { api.github = original })
+  let polls = 0
+  api.github = {
+    status: async () => json({ connected: false, device_flow_available: true, active_attempt: attempt }),
+    connectPoll: async () => { polls++; return json({ status: 'pending', retry_after: 100 }) },
+    connectCancel: async () => assert.fail('collapse must not cancel sign-in'),
+    connectStart: async () => assert.fail('collapse must not restart sign-in'),
+  }
+  const props = { active: true, expanded: true, onExpand: noop, onToggle: noop }
+  const view = renderHook(next => GithubConnection(next), props)
+  t.after(() => view.unmount())
+  await tick(20)
+  const before = findSignIn(view.result.current).props.attempt
+  view.rerender({ ...props, expanded: false })
+  view.rerender(props)
+  assert.equal(findSignIn(view.result.current).props.attempt, before)
+  assert.equal(polls, 1)
+})
+
 test('private-access removal guides GitHub revocation and reconnects with public scopes', async t => {
   const original = api.github
   t.after(() => { api.github = original })

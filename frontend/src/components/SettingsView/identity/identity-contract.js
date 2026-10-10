@@ -52,7 +52,7 @@ export function suggestRailwayRegion(zone, offsetMinutes) {
 
 const DELETE_CONFIRMATION_FALLBACK = (
   "Möbius couldn't confirm whether Railway removed this project. "
-  + 'Try deleting again, or open Railway to check.'
+  + 'Check Railway first. Only retry deletion if the same project still exists and is eligible for removal.'
 )
 
 export class IdentityRequestError extends Error {

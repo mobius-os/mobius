@@ -57,6 +57,11 @@ export default function GithubConnection({ active = true, focusRef, attention = 
 
   useEffect(() => () => waitRef.current?.abort(), [])
 
+  // Closing the disclosure cancels destructive intent, not device-code sign-in.
+  useEffect(() => {
+    if (!expanded || !active) setConfirmDisconnect(false)
+  }, [expanded, active])
+
   const waitFor = useCallback(async (attempt, controller = new AbortController()) => {
     if (controller.signal.aborted) return
     if (waitRef.current !== controller) waitRef.current?.abort()

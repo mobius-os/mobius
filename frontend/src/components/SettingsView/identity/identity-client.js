@@ -5,6 +5,7 @@
    shows on the overview row immediately. */
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { BASE } from '../../../api/client.js'
 
 import {
   IdentityRequestError,
@@ -24,7 +25,7 @@ export const IDENTITY_STALE_MS = 30_000
 export async function identityRequest(token, path = '', options = {}) {
   let response
   try {
-    response = await fetch(path.startsWith('/api/') ? path : `/api/identity${path}`, {
+    response = await fetch(`${BASE}${path.startsWith('/api/') ? path : `/api/identity${path}`}`, {
       ...options,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -64,6 +65,36 @@ export async function identityRequest(token, path = '', options = {}) {
   return body
 }
 
+/** An ambiguous deletion is not permission to repeat a destructive request. */
+export async function retryDeploymentDeletion(token, instance, retry, { signal } = {}) {
+  const assertActive = () => {
+    if (signal?.aborted) throw new DOMException('Deletion retry was cancelled.', 'AbortError')
+  }
+  assertActive()
+  const { id } = instance
+  const inventory = await identityRequest(token, '/railway', { signal })
+  assertActive()
+  const current = inventory.instances.find(instance => instance.id === id)
+  if (
+    inventory.connection?.connected !== true
+    || current?.status.toLowerCase() !== 'delete_failed'
+    || current.actions.retry !== true
+    || !instance.railway_url
+    || current.railway_url !== instance.railway_url
+  ) {
+    throw new IdentityRequestError('Check Railway first. This deployment is no longer eligible for deletion retry.')
+  }
+  const diagnosis = await identityRequest(token, `/railway/deployments/${id}/deletion`, { signal })
+  assertActive()
+  if (diagnosis.state !== 'present') {
+    throw new IdentityRequestError('Check Railway first. Möbius could not confirm that the same project still exists; deletion was not retried.')
+  }
+  // The account service still owns atomic project identity/eligibility checks
+  // at mutation time. These fresh reads contain the UI's stale retry intent.
+  assertActive()
+  return retry(id)
+}
+
 /** Read the shared identity, reusing a fresh cached copy or an in-flight read. */
 export function loadIdentity(queryClient, token, { force = false } = {}) {
   return queryClient.fetchQuery({
@@ -100,7 +131,7 @@ export function useIdentityQuery(token, { enabled = true } = {}) {
 }
 
 export async function fetchAvatarBlob(token, signal) {
-  const response = await fetch('/api/identity/avatar', {
+  const response = await fetch(`${BASE}/api/identity/avatar`, {
     headers: { Authorization: `Bearer ${token}` },
     signal,
   })

@@ -984,7 +984,7 @@ export default function SettingsView({
         </section>}
 
         {mobiusAccountOpen && <div className="settings__account-page">
-          <IdentityAccount token={getToken()} />
+          <IdentityAccount token={getToken()} active={active} />
         </div>}
 
         {!mobiusAccountOpen && <section

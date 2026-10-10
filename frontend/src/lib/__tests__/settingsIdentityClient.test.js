@@ -8,9 +8,102 @@ import {
   disconnectIdentity,
   loadIdentity,
   publishIdentity,
+  retryDeploymentDeletion,
 } from '../../components/SettingsView/identity/identity-client.js'
+import { deploymentPresentation } from '../../components/SettingsView/identity/identity-contract.js'
 
 const realFetch = globalThis.fetch
+
+const deletionTarget = {
+  id: 'mob_example', name: 'Example', status: 'delete_failed', url: null,
+  railway_url: 'https://railway.com/project/example', current_step: null, last_error: null,
+  resources: { cpu: null, memory_mb: null, volume_size_mb: null, plan: 'hobby' },
+  actions: { edit_resources: false, retry: true, delete: true },
+}
+const deletionInventory = target => ({
+  railway_access: 'available',
+  connection: { connected: true, account: 'owner', workspace: 'workspace', plan: 'hobby', deploy_blocked: '' },
+  instances: target ? [target] : [],
+})
+
+test('ambiguous deletion copy requires Railway reconciliation rather than blind retry', () => {
+  for (const last_error of [null, 'Check the build logs']) {
+    const presentation = deploymentPresentation({ ...deletionTarget, last_error })
+    assert.match(presentation.detail, /Check Railway first/)
+    assert.match(presentation.detail, /same project still exists and is eligible/)
+    assert.doesNotMatch(presentation.detail, /Try deleting again/)
+  }
+})
+
+test('deletion retry revalidates inventory and Railway presence before the mutation callback', async () => {
+  serve(
+    { body: deletionInventory(deletionTarget) },
+    { body: { state: 'present', message: 'Project still exists.', can_confirm_absent: false } },
+  )
+  let retried = false
+  await retryDeploymentDeletion('token', deletionTarget, async id => {
+    assert.equal(id, deletionTarget.id)
+    assert.deepEqual(calls.map(call => call.url), [
+      '/api/identity/railway', '/api/identity/railway/deployments/mob_example/deletion',
+    ])
+    retried = true
+  })
+  assert.equal(retried, true)
+})
+
+for (const state of ['missing', 'missing_unconfirmed', 'authorization', 'unknown']) {
+  test(`deletion retry does not mutate after a ${state} reconciliation`, async () => {
+    serve(
+      { body: deletionInventory(deletionTarget) },
+      { body: { state, message: 'Check Railway.', can_confirm_absent: state.startsWith('missing') } },
+    )
+    await assert.rejects(retryDeploymentDeletion('token', deletionTarget, () => assert.fail('unsafe retry')), /deletion was not retried/)
+  })
+}
+
+for (const target of [null,
+  { ...deletionTarget, id: 'mob_other' },
+  { ...deletionTarget, status: 'deleting' },
+  { ...deletionTarget, actions: { ...deletionTarget.actions, retry: false } },
+  { ...deletionTarget, railway_url: 'https://railway.com/project/replacement' },
+  { ...deletionTarget, railway_url: null },
+]) {
+  test(`deletion retry rejects a stale or ineligible target (${JSON.stringify(target)})`, async () => {
+    serve({ body: deletionInventory(target) })
+    await assert.rejects(retryDeploymentDeletion('token', deletionTarget, () => assert.fail('unsafe retry')), /no longer eligible/)
+    assert.equal(calls.length, 1)
+  })
+}
+
+for (const failure of [
+  { status: 404, body: { detail: 'Check unavailable' } },
+  { status: 503, body: { detail: 'Check unavailable' } },
+  { body: { state: 'present', message: 'Malformed diagnosis', can_confirm_absent: true } },
+  new TypeError('network down'),
+]) {
+  test(`deletion retry fails closed when reconciliation fails (${JSON.stringify(failure)})`, async () => {
+    serve({ body: deletionInventory(deletionTarget) }, failure)
+    await assert.rejects(retryDeploymentDeletion('token', deletionTarget, () => assert.fail('unsafe retry')))
+  })
+}
+
+for (const inventory of [
+  { ...deletionInventory(deletionTarget), connection: { ...deletionInventory(deletionTarget).connection, connected: false } },
+  { railway_access: 'unavailable', connection: null, instances: [] },
+  { ...deletionInventory(deletionTarget), instances: [{ id: deletionTarget.id }] },
+]) {
+  test(`deletion retry fails closed on unavailable or malformed inventory (${JSON.stringify(inventory)})`, async () => {
+    serve({ body: inventory })
+    await assert.rejects(retryDeploymentDeletion('token', deletionTarget, () => assert.fail('unsafe retry')))
+    assert.equal(calls.length, 1)
+  })
+}
+
+test('deletion retry rejects an original target without a Railway project identity', async () => {
+  serve({ body: deletionInventory(deletionTarget) })
+  await assert.rejects(retryDeploymentDeletion('token', { ...deletionTarget, railway_url: null }, () => assert.fail('unsafe retry')), /no longer eligible/)
+  assert.equal(calls.length, 1)
+})
 let calls
 let queryClient
 
