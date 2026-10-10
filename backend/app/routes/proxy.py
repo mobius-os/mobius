@@ -156,20 +156,20 @@ def _fetch_error(url: str, exc: httpx.RequestError) -> HTTPException:
 
 async def _read_bounded_body(
   upstream: httpx.Response, max_bytes: int, url: str,
-) -> tuple[bytes, bool]:
-  """Read at most one byte past the limit, classifying mid-stream failures."""
+) -> bytes:
+  """Return a bounded prefix without waiting for EOF, classifying stream failures."""
   body = bytearray()
   try:
     async for chunk in upstream.aiter_bytes():
-      room = max_bytes + 1 - len(body)
+      room = max_bytes - len(body)
       if room <= 0:
         break
       body.extend(chunk[:room])
-      if len(body) > max_bytes:
+      if len(body) >= max_bytes:
         break
   except httpx.RequestError as exc:
     raise _fetch_error(url, exc) from exc
-  return bytes(body[:max_bytes]), len(body) > max_bytes
+  return bytes(body)
 
 
 async def _read_external_get(
@@ -178,6 +178,7 @@ async def _read_external_get(
   max_bytes: int,
   *,
   headers: dict[str, str] | None = None,
+  probe_truncation: bool = True,
 ) -> _ExternalRead:
   """Read one public URL with a byte cap and SSRF-safe redirect handling.
 
@@ -220,17 +221,17 @@ async def _read_external_get(
         current_url = urljoin(current_url, location)
         continue
 
-      body, truncated = await _read_bounded_body(
-        upstream, max_bytes, current_url,
+      body = await _read_bounded_body(
+        upstream, max_bytes + int(probe_truncation), current_url,
       )
       return _ExternalRead(
-        body=body,
+        body=body[:max_bytes],
         status_code=upstream.status_code,
         content_type=upstream.headers.get(
           "content-type", "application/octet-stream",
         ),
         final_url=current_url,
-        truncated=truncated,
+        truncated=len(body) > max_bytes,
         forwarded_headers={
           name: upstream.headers[name]
           for name in _FORWARDED_RESPONSE_HEADERS
@@ -281,7 +282,7 @@ async def _capped_response(
   except Exception as exc:
     raise HTTPException(status_code=502, detail=str(exc))
   try:
-    body, _ = await _read_bounded_body(r, _MAX_BYTES, str(req.url))
+    body = await _read_bounded_body(r, _MAX_BYTES, str(req.url))
     headers = {
       name: r.headers[name]
       for name in _FORWARDED_RESPONSE_HEADERS
@@ -371,6 +372,7 @@ async def proxy_get(
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     read = await _read_external_get(
       client, url, _MAX_BYTES, headers={"User-Agent": _PROXY_USER_AGENT},
+      probe_truncation=False,
     )
   return Response(
     content=read.body,

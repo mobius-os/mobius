@@ -647,7 +647,11 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
     raise CommunityPublicationError(str(exc), "invalid_manifest") from exc
   icon = manifest.get("icon")
   icon_item = next((item for item in files if item["path"] == icon), None)
-  if icon_item is not None:
+  if icon:
+    if icon_item is None:
+      raise CommunityPublicationError(
+        f"The app icon {icon} is missing from the published snapshot.", "invalid_icon",
+      )
     try:
       icon_assets.normalize_icon(base64.b64decode(icon_item["content_base64"]))
     except icon_assets.InvalidIcon as exc:

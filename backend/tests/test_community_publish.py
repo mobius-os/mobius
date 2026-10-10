@@ -572,3 +572,16 @@ def test_snapshot_refuses_additional_recognizable_credential_patterns(
 
   assert raised.value.code == "secret_detected"
   assert credential not in raised.value.detail
+
+
+def test_snapshot_refuses_declared_icon_missing_from_snapshot(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  manifest = json.loads((repo / "mobius.json").read_text())
+  manifest["icon"] = "missing.png"
+  _commit_files(repo, app, {"mobius.json": json.dumps(manifest).encode()})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_icon"
+  assert "missing.png" in raised.value.detail

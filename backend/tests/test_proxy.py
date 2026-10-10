@@ -149,7 +149,7 @@ def test_proxy_get_allows_opaque_app_frame_request(
   }, headers=owner_auth)
   assert token_response.status_code == 200, token_response.text
 
-  async def fake_read(_client, url, max_bytes, *, headers):
+  async def fake_read(_client, url, max_bytes, *, headers, probe_truncation):
     assert url == "https://example.com/manifest.json"
     return _ExternalRead(
       body=b'{"id":"test"}', status_code=200,
@@ -248,7 +248,7 @@ def test_proxy_releases_db_connection_before_external_fetch(
   baseline_checked_out = checked_out_connections()
   checked_out = []
 
-  async def fake_read(_client, url, max_bytes, *, headers):
+  async def fake_read(_client, url, max_bytes, *, headers, probe_truncation):
     assert url == "https://example.com/data"
     checked_out.append(checked_out_connections())
     return _ExternalRead(
@@ -313,7 +313,7 @@ def test_proxy_sends_identifiable_user_agent(client, owner_token, monkeypatch):
     seen.append(req.headers.get("user-agent"))
     return Response(content=b"ok", media_type="text/plain")
 
-  async def fake_read(_client, url, max_bytes, *, headers):
+  async def fake_read(_client, url, max_bytes, *, headers, probe_truncation):
     seen.append(headers["User-Agent"])
     return _ExternalRead(
       body=b"ok", status_code=200, content_type="text/plain",
@@ -761,3 +761,52 @@ def test_validate_url_ipv6_brackets():
     pinned, host_header, _ = validate_url_safe("http://example.com/")
   assert "[2606:2800:220:1:248:1893:25c8:1946]" in pinned
   assert host_header == "example.com"
+
+
+@pytest.mark.parametrize("consumer", ["get", "post", "public_transport"])
+def test_proxy_returns_exact_cap_without_waiting_for_stalled_upstream(
+  monkeypatch, consumer,
+):
+  from app.routes.proxy import _MAX_BYTES, proxy_get
+
+  _pin_every_hop(monkeypatch)
+
+  class _StalledUpstream(_HopUpstream):
+    async def aiter_bytes(self):
+      yield b"x" * _MAX_BYTES
+      await asyncio.Event().wait()
+
+  upstream = _StalledUpstream(200)
+  fake_client, _ = _hop_client([upstream])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  async def read():
+    if consumer == "get":
+      operation = proxy_get("https://site.example/body")
+    else:
+      operation = _capped_response(
+        fake_client(), httpx.Request(
+          "POST" if consumer == "post" else "GET", "https://site.example/body",
+        ),
+        forward_cache_headers=consumer == "public_transport",
+      )
+    return await asyncio.wait_for(operation, timeout=1)
+
+  response = asyncio.run(read())
+  assert response.status_code == 200
+  assert response.body == b"x" * _MAX_BYTES
+  assert upstream.closed
+
+
+def test_favicon_reader_still_probes_for_truncation(monkeypatch):
+  _pin_every_hop(monkeypatch)
+  upstream = _HopUpstream(200, b"12345")
+  fake_client, _ = _hop_client([upstream])
+
+  result = asyncio.run(_read_external_get(
+    fake_client(), "https://site.example/icon", 4,
+  ))
+
+  assert result.body == b"1234"
+  assert result.truncated
+  assert upstream.closed
