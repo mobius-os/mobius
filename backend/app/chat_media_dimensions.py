@@ -109,11 +109,12 @@ def project_message_image_dimensions(
   message_references = [_message_image_references(message, pattern, chat_id) for message in messages]
   generated_names = {filename for references in message_references
     for kind, filename in references.values() if kind == "generated-files"}
+  # Stored rows are bounded per chat; Markdown references are not. Intersect
+  # in Python so hostile text cannot exhaust the database bind-parameter limit.
   generated_rows = {
     row.name: row for row in db.query(GeneratedFile).filter(
       GeneratedFile.chat_id == chat_id,
-      GeneratedFile.name.in_(generated_names),
-    ).all()
+    ).all() if row.name in generated_names
   } if generated_names and db is not None else {}
   generated_dimensions = {
     name: _generated_dimensions(row, data_dir, chat_id)

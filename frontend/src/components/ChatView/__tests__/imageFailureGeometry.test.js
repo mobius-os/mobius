@@ -23,7 +23,7 @@ const vite = await createServer({
       return null
     },
     transform(code, id) {
-      if (!id.endsWith('/markdown/InlineContent.jsx')) return null
+      if (!id.endsWith('/markdown/InlineContent.jsx') && !id.endsWith('/ChatView/Attachments.jsx')) return null
       return code.replace("from 'react'", "from 'virtual:image-hooks'")
     },
     load(id) {
@@ -36,6 +36,7 @@ const vite = await createServer({
   }],
 })
 const { ExpandableImage } = await vite.ssrLoadModule('/src/components/ChatView/markdown/InlineContent.jsx')
+const { default: Attachments } = await vite.ssrLoadModule('/src/components/ChatView/Attachments.jsx')
 after(async () => {
   await vite.close()
   delete globalThis.__imageFailureHooks
@@ -110,5 +111,43 @@ test('an explicit server dimension verdict remains an immediate unavailable imag
     assert.equal(requests, 0)
   } finally {
     mounted.unmount()
+  }
+})
+
+
+test('authorized historical generated gallery images use the lazy default', async () => {
+  globalThis.__imageFailureToken = () => Promise.resolve('?token=MEDIA_ONLY')
+  const names = ['first.png', 'second.png', 'last.png']
+  const mediaDimensions = Object.fromEntries(names.map(name => [
+    `/api/chats/image-chat/generated-files/${name}`, { width: 120, height: 300 },
+  ]))
+  const gallery = hooks.renderHook(() => Attachments({
+    attachments: names.map(name => ({
+      kind: 'generated', name, mime_type: 'image/png', previewable: true,
+    })), chatId: 'image-chat', mediaDimensions,
+  }))
+  try {
+    for (const name of names) {
+      const child = findElement(gallery.result.current,
+        node => node.type === ExpandableImage && node.props.alt === name)
+      assert.ok(child, 'owning gallery must retain every generated image')
+      const mounted = hooks.renderHook(() => ExpandableImage(child.props))
+      try {
+        const geometry = frame(mounted.result.current).props.style
+        assert.equal(geometry['--md-image-ratio'], '120 / 300')
+        assert.equal(image(mounted.result.current), null, 'token pending')
+        await Promise.resolve()
+        const resolved = image(mounted.result.current)
+        assert.ok(resolved, 'authorized original image must render')
+        assert.equal(resolved.props.loading, 'lazy')
+        assert.equal(resolved.props.decoding, 'async')
+        assert.match(resolved.props.src, /generated-files\/.*\?token=MEDIA_ONLY&preview=true$/)
+        assert.deepEqual(frame(mounted.result.current).props.style, geometry)
+      } finally {
+        mounted.unmount()
+      }
+    }
+  } finally {
+    gallery.unmount()
   }
 })

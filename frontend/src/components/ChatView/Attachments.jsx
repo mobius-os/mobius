@@ -63,7 +63,6 @@ export default function Attachments({ attachments, chatId, mediaDimensions }) {
               <ExpandableImage
                 href={`/api/chats/${encodeURIComponent(chatId)}/generated-files/${encodeURIComponent(img.name)}`}
                 alt={img.name}
-                loading="eager"
                 mediaDimensions={mediaDimensions}
               />
             </span>

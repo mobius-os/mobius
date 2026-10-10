@@ -363,3 +363,23 @@ for (const origin of ['http://localhost', 'https://example.com']) {
     assert.equal(html.includes('chat__generated-image'), external)
   })
 }
+
+
+test('reopened generated gallery images reserve every frame before authorization', () => {
+  const chatId = 'chat-generated-file'
+  const names = ['first.png', 'second.png', 'last.png']
+  const mediaDimensions = Object.fromEntries(names.map(name => [
+    `/api/chats/${chatId}/generated-files/${name}`, { width: 120, height: 300 },
+  ]))
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: {
+      role: 'assistant', media_dimensions: mediaDimensions,
+      blocks: [{ type: 'generated_files', files: names.map(name => ({
+        name, size: 900, mime_type: 'image/png', previewable: true,
+      })) }],
+    },
+    chatId, isLastMsg: false, isStreaming: false,
+  }))
+  assert.equal((html.match(/class="md-image-frame"/g) || []).length, names.length)
+  assert.equal((html.match(/--md-image-ratio:120 \/ 300/g) || []).length, names.length)
+})

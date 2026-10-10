@@ -1,4 +1,7 @@
+import sqlite3
 from unittest.mock import patch
+
+import pytest
 
 from PIL import Image
 
@@ -211,3 +214,39 @@ def test_generated_dimensions_follow_recorded_storage_and_reject_unrecorded_path
     data_dir=str(tmp_path), db=db)[0]['media_dimensions']
   assert result[f'{prefix}/stored.png'] == {'width': 120, 'height': 300}
   assert all(result[f'{prefix}/{name}'] is None for name in names[1:])
+
+
+@pytest.mark.parametrize("variable_limit", [None, 999], ids=["native-limit", "legacy-limit"])
+def test_generated_reference_projection_exceeds_sqlite_bind_limit(tmp_path, db, chat, variable_limit):
+  from app.generated_files import stored_dir
+  from app.models import GeneratedFile
+
+  connection = db.connection().connection.driver_connection
+  native_limit = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+  if variable_limit is not None:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, variable_limit)
+  try:
+    limit = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    base = stored_dir(str(tmp_path), chat.id, create=True)
+    Image.new("RGB", (120, 300)).save(base / "opaque-key", "PNG")
+    for name in ["first.png", "last image.png"]:
+      db.add(GeneratedFile(chat_id=chat.id, name=name, path="opaque-key",
+        size=100, mime_type="image/png"))
+    db.flush()
+    prefix = f"/api/chats/{chat.id}/generated-files"
+    # Markdown is not bounded by the 500-row generated-file publication cap.
+    # Exercise the real SQLite connection, including its native build limit.
+    messages = [{"role": "assistant", "content": " ".join([
+      f"![first]({prefix}/first.png)",
+      *(f"![missing]({prefix}/missing-{i}.png)" for i in range(limit)),
+      f"![last]({prefix}/last%20image.png?preview=true)",
+    ])}]
+    result = project_message_image_dimensions(messages, chat_id=chat.id,
+      data_dir=str(tmp_path), db=db)[0]["media_dimensions"]
+    assert len(result) == limit + 2
+    assert result[f"{prefix}/first.png"] == {"width": 120, "height": 300}
+    assert result[f"{prefix}/last%20image.png"] == {"width": 120, "height": 300}
+    assert all(result[f"{prefix}/missing-{i}.png"] is None for i in range(limit))
+    assert "media_dimensions" not in messages[0]
+  finally:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, native_limit)
