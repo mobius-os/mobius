@@ -1221,20 +1221,36 @@ test('hosts without readiness opt-in still send and time out without visibility 
   }
 })
 
-test('background restoration waits for pane focus without starting an ownership timeout', async () => {
-  await withFakeWindow(async ({ window, parent }) => {
-    const nav = makeNav({ waitForNavigationReady: true })
-    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
-    const handle = nav.open('restored')
-    assert.equal(parent.messages.length, 0)
-    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: true })
-    const push = parent.messages.at(-1).data
-    assert.equal(push.userActivated, false)
-    assert.equal(push.label, 'restored')
-    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
-    assert.equal(await handle.ready, true)
-    handle.close()
-  })
+test('background restoration waits without an ownership deadline only after the host defers growth', async () => {
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  const timers = new Map()
+  let timerId = 0
+  globalThis.setTimeout = (cb, ms) => { timers.set(++timerId, { cb, ms }); return timerId }
+  globalThis.clearTimeout = id => timers.delete(id)
+  try {
+    await withFakeWindow(async ({ window, parent }) => {
+      const nav = makeNav({ waitForNavigationReady: true })
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+      const handle = nav.open('restored')
+      assert.equal(parent.messages.length, 1)
+      window.emit({ type: 'moebius:nav-push-deferred', requestId: parent.messages[0].data.requestId })
+      assert.equal(timers.size, 0, 'focus wait has no ownership timeout')
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+      assert.equal(parent.messages.length, 1, 'background visibility does not retry history growth')
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: true })
+      const push = parent.messages.at(-1).data
+      assert.equal(push.userActivated, false)
+      assert.equal(push.label, 'restored')
+      assert.equal(timers.size, 1)
+      window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+      assert.equal(await handle.ready, true)
+      handle.close()
+    })
+  } finally {
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
 })
 
 test('an activated background-pane request still waits for promotion, not focus', async () => {
@@ -1252,6 +1268,86 @@ test('an activated background-pane request still waits for promotion, not focus'
       window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
       assert.equal(await handle.ready, true)
       handle.close()
+    })
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'navigator', previous)
+    else delete globalThis.navigator
+  }
+})
+
+test('a user gesture flushes deferred outer views before its own inner view', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const userActivation = { isActive: false }
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userActivation } })
+  try {
+    await withFakeWindow(async ({ window, parent }) => {
+      const nav = makeNav({ waitForNavigationReady: true })
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+      const outer = nav.open('outer')
+      window.emit({ type: 'moebius:nav-push-deferred', requestId: parent.messages[0].data.requestId })
+      parent.messages.length = 0
+      userActivation.isActive = true
+      const inner = nav.open('inner')
+      assert.deepEqual(parent.messages.map(m => m.data.label), ['outer', 'inner'])
+      for (const { data } of parent.messages) {
+        assert.equal(data.userActivated, true)
+        window.emit({ type: 'moebius:nav-push-ack', requestId: data.requestId })
+      }
+      assert.equal(await outer.ready, true)
+      assert.equal(await inner.ready, true)
+      inner.close()
+      outer.close()
+    })
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'navigator', previous)
+    else delete globalThis.navigator
+  }
+})
+
+test('background restoration can acquire a reused slot without waiting for focus', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav({ waitForNavigationReady: true })
+    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+    const handle = nav.open('restored')
+    const push = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.equal(await handle.ready, true)
+    assert.deepEqual(await handle.outcome, { status: 'owned' })
+    handle.close()
+  })
+})
+
+test('closing a focus-deferred restoration cancels it without a later push', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav({ waitForNavigationReady: true })
+    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+    const handle = nav.open('detail')
+    window.emit({ type: 'moebius:nav-push-deferred', requestId: parent.messages[0].data.requestId })
+    handle.close()
+    assert.deepEqual(await handle.outcome, { status: 'cancelled' })
+    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: true })
+    assert.equal(parent.messages.length, 1)
+  })
+})
+
+test('promotion flushes queued restoration before a queued user gesture in a background pane', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const userActivation = { isActive: false }
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userActivation } })
+  try {
+    await withFakeWindow(async ({ window, parent }) => {
+      const nav = makeNav({ waitForNavigationReady: true })
+      const outer = nav.open('outer')
+      userActivation.isActive = true
+      const inner = nav.open('inner')
+      assert.equal(parent.messages.length, 0)
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+      assert.deepEqual(parent.messages.map(m => m.data.label), ['outer', 'inner'])
+      for (const { data } of parent.messages) window.emit({ type: 'moebius:nav-push-ack', requestId: data.requestId })
+      assert.equal(await outer.ready, true)
+      assert.equal(await inner.ready, true)
+      inner.close()
+      outer.close()
     })
   } finally {
     if (previous) Object.defineProperty(globalThis, 'navigator', previous)

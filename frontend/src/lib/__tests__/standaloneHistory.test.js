@@ -98,11 +98,13 @@ test('standalone uses shell retirement and skips dead document levels without re
 function sessionHistory() {
   const states = [standaloneHistoryState({}, [])]
   let index = 0
+  let childEntries = 0
   return {
     get state() { return states[index] },
-    get depth() { return states.length },
+    get depth() { return states.length + childEntries },
     pushState(state) { states.splice(++index, states.length, state) },
     replaceState(state) { states[index] = state },
+    pushIframeEntry() { childEntries += 1 },
     back() { if (index > 0) index -= 1 },
   }
 }
@@ -127,26 +129,18 @@ for (const reset of ['frame reload', 'host reload']) {
     assert.equal(result.skipRetired, false)
   })
 
-  test(`standalone ${reset} does not overwrite an iframe-created physical entry above a retired slot`, () => {
+  test(`standalone ${reset} child history leaves the host retired slot reusable`, () => {
     const history = sessionHistory()
     let registry = new Map()
     let entries = pushStandaloneHistoryEntry(history, [], registry, 81, entry('old'))
-    const retiredState = history.state
-    if (reset === 'host reload') {
-      registry = new Map()
-      entries = readStandaloneHistoryEntries(history.state)
-    } else {
-      retireAppEntries(registry, 81)
-    }
-    const childState = { iframe: 'child history' }
-    history.pushState(childState)
+    if (reset === 'host reload') registry = new Map()
+    else retireAppEntries(registry, 81)
+    const state = history.state
+    history.pushIframeEntry()
+    assert.equal(history.state, state, 'child pushState leaves top-level state unchanged')
     entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('restored'))
-    assert.equal(history.depth, 4, 'the physical cursor, not the logical stack, determines reuse')
-    assert.deepEqual(entries, [entry('old'), entry('restored')])
-    history.back()
-    assert.deepEqual(history.state, childState, 'child history is preserved')
-    history.back()
-    assert.deepEqual(history.state, retiredState, 'the retired sentinel was not replaced')
+    assert.equal(history.depth, 3, 'only child history grew')
+    assert.deepEqual(entries, [entry('restored')])
   })
 }
 

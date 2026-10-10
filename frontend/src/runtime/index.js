@@ -49,6 +49,9 @@
 //     handle.setGuidance(text), and handle.destroy(). See the
 //     "Agent-chat embed" block below.
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
+//     Restoration never moves focus. Reusing a retired slot can proceed in a
+//     promoted, visible background pane; new history entries wait for focus,
+//     leaving ready/outcome pending without an ownership timeout.
 //     outcome distinguishes host ownership from request failures; see
 //     building-apps.md.
 //   window.mobius.nav.setLocation(value)         -> reports the app's current place

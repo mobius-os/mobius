@@ -3319,7 +3319,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 		if (msg?.type === "moebius:frame-visibility") {
 			navigationFocused = msg.navigationFocused !== false;
 			navigationReady = !waitForNavigationReady || msg.visible === true && msg.navigationReady !== false;
-			if (navigationReady) for (const entry of entries) entry.send?.();
+			if (navigationReady) flushQueue();
 			return;
 		}
 		if (msg?.type !== "moebius:nav-forward" || typeof msg.requestId !== "string") return;
@@ -3353,6 +3353,10 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 		postForwardResult("moebius:nav-forward-ack", msg.requestId);
 	}
 	if (window.parent !== window) window.addEventListener("message", onHostMessage);
+	function flushQueue(activated = false) {
+		activated ||= [...entries].some((entry) => entry.userActivated && !entry.sent && !entry.done);
+		for (const entry of entries) entry.send?.(activated || entry.userActivated);
+	}
 	function open(label, onBackOrHandlers, onForwardArg) {
 		for (const old of [...entries]) if (!old.active && old.settled) old.dispose?.();
 		const handlers = onBackOrHandlers && typeof onBackOrHandlers === "object" ? onBackOrHandlers : {
@@ -3369,6 +3373,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			disposed: false,
 			settled: false,
 			sent: false,
+			waitingForFocus: false,
 			send: null,
 			cleanupTimer: null,
 			readyResolve: null,
@@ -3441,6 +3446,14 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 				return;
 			}
 			if (msg?.requestId !== requestId) return;
+			if (msg.type === "moebius:nav-push-deferred") {
+				clearTimeout(timer);
+				entry.sent = false;
+				entry.waitingForFocus = true;
+				if (entry.done) dispose();
+				else if (navigationFocused) flushQueue();
+				return;
+			}
 			if (msg.type === "moebius:nav-push-ack") {
 				entry.settled = true;
 				clearTimeout(timer);
@@ -3481,8 +3494,8 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 				}
 			};
 		}
-		entry.send = () => {
-			if (!navigationReady || !navigationFocused && !entry.userActivated || entry.sent || entry.done) return;
+		entry.send = (activated = entry.userActivated) => {
+			if (!navigationReady || !navigationFocused && entry.waitingForFocus && !activated || entry.sent || entry.done) return;
 			entry.sent = true;
 			timer = setTimeout(() => {
 				entry.done = true;
@@ -3498,7 +3511,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 					label: label || "app-detail",
 					requestId,
 					reversible: entry.reversible,
-					userActivated: entry.userActivated
+					userActivated: activated
 				}, window.location.origin);
 			} catch (e) {
 				clearTimeout(timer);
@@ -3507,7 +3520,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 				dispose();
 			}
 		};
-		entry.send();
+		flushQueue(entry.userActivated);
 		return {
 			ready,
 			outcome,

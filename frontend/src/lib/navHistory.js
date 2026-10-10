@@ -1,9 +1,9 @@
 // History-state tags for the shell's OWN session-history entries.
 //
-// A sandboxed mini-app or Web Studio preview iframe can push entries onto
-// the SHARED top-level session history. Those entries are intentionally left
-// untagged so the shell can ignore them. Shell entries carry three additional
-// pieces of state:
+// Child-frame pushState grows joint session history but does not change the
+// top-level history.state or navigation.entries(). These tags track only the
+// shell's own entries; they cannot identify iframe-owned history. Shell entries
+// carry the following state:
 //
 //   index — the shell-relative session-history position. It lets the popstate
 //           fallback distinguish Back from Forward without guessing.
@@ -96,8 +96,8 @@ export function isRetiredAppEntry(record) {
   return !record || record.status === 'retired'
 }
 
-// A retired logical entry is reusable only while its physical sentinel is
-// still current. An iframe can advance joint history without changing our stack.
+// Reuse requires agreement with the host's own current-entry tracking. This
+// cannot detect child-frame pushState, which leaves top-level state unchanged.
 export function isCurrentRetiredAppEntry(record, entryId, currentEntryId) {
   return typeof entryId === 'string' && entryId.length > 0
     && entryId === currentEntryId && isRetiredAppEntry(record)

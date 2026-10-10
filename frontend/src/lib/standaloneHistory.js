@@ -62,7 +62,7 @@ export function standaloneHistoryState(state, entries) {
   }
 }
 
-/** Push an app level, or replace a retired level proven to be physically current.
+/** Push an app level, or replace a retired level matching the host's current state.
  * Return the new logical stack only after the browser accepted the write. */
 export function pushStandaloneHistoryEntry(history, entries, registry, appId, meta = {}, url = '') {
   const current = entries.at(-1)

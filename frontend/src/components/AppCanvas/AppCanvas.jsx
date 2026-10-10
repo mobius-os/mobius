@@ -132,7 +132,7 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
 //
-// Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-ack` /
+// Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
 // `onMessage` handler. These wire the iframe's own back-stack into
 // the shell's pushState so device-back unwinds in-app routes first.
@@ -1136,9 +1136,8 @@ const AppCanvas = forwardRef(function AppCanvas({
         // visible. It may retire an entry it already owns, but it must never
         // install a NEW top-level history entry while off-screen. Gate on
         // VISIBLE (active tab of any visible pane), not focused — a background
-        // split's app is still interactive (contract §3.3.6). The runtime defers
-        // non-activated restoration until focus; the shell hook re-checks both
-        // pane ownership and focus as the authority.
+        // split's app is still interactive (contract §3.3.6). The shell permits
+        // background restoration only when it reuses the retired current slot.
         const ok = visibleRef.current ? onNavPush?.(appId, {
           requestId: msg.requestId,
           label: msg.label,
@@ -1149,7 +1148,9 @@ const AppCanvas = forwardRef(function AppCanvas({
         // can correlate when multiple nav-pushes are in flight. Apps that don't
         // pass a requestId get undefined back (backwards compatible).
         const requestId = msg.requestId
-        if (ok === false) {
+        if (ok === 'deferred') {
+          e.source.postMessage({ type: 'moebius:nav-push-deferred', requestId }, '*')
+        } else if (ok === false) {
           // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the app so it
           // can correct its own bookkeeping — otherwise its count drifts above
           // the shell's and the next nav-pop pops a sentinel it never owned,
@@ -1421,7 +1422,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, {
       type: 'moebius:frame-visibility',
       visible,
-      // Non-activated restoration waits for focus, independently of paint.
+      // Restoration that needs a new history entry waits for pane focus.
       navigationFocused: activeRef.current,
       // A chat handoff can keep pixels foreground after logical navigation ends.
       navigationReady: visible && visibleRef.current

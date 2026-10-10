@@ -305,7 +305,7 @@ export function makeNav({
   let locationText = validNavLocationText(location)
   let locationReported = false
   // Opted-in hosts declare when this document is promoted, visible and focused.
-  // Activated requests can use a visible background pane; restoration waits. Older
+  // The host defers restoration only when it needs a new history entry. Older
   // shells and published hosts keep immediate sends with the ownership timeout.
   let navigationReady = !waitForNavigationReady
   let navigationFocused = true
@@ -332,7 +332,7 @@ export function makeNav({
       navigationReady = !waitForNavigationReady
         || (msg.visible === true && msg.navigationReady !== false)
       if (navigationReady) {
-        for (const entry of entries) entry.send?.()
+        flushQueue()
       }
       return
     }
@@ -372,6 +372,13 @@ export function makeNav({
   }
   if (window.parent !== window) window.addEventListener('message', onHostMessage)
 
+  function flushQueue(activated = false) {
+    // A queued gesture releases earlier requests first, even if it arrived
+    // before promotion. Preserve outer-to-inner history order.
+    activated ||= [...entries].some(entry => entry.userActivated && !entry.sent && !entry.done)
+    for (const entry of entries) entry.send?.(activated || entry.userActivated)
+  }
+
   function open(label, onBackOrHandlers, onForwardArg) {
     // A new push discards the browser's Forward branch. Retire dormant runtime
     // entries from that branch so their closures cannot accumulate forever.
@@ -392,6 +399,7 @@ export function makeNav({
       disposed: false,
       settled: false,
       sent: false,
+      waitingForFocus: false,
       send: null,
       cleanupTimer: null,
       readyResolve: null,
@@ -478,6 +486,14 @@ export function makeNav({
         return
       }
       if (msg?.requestId !== requestId) return
+      if (msg.type === 'moebius:nav-push-deferred') {
+        clearTimeout(timer)
+        entry.sent = false
+        entry.waitingForFocus = true
+        if (entry.done) dispose()
+        else if (navigationFocused) flushQueue()
+        return
+      }
       if (msg.type === 'moebius:nav-push-ack') {
         entry.settled = true
         clearTimeout(timer)
@@ -524,8 +540,8 @@ export function makeNav({
         },
       }
     }
-    entry.send = () => {
-      if (!navigationReady || (!navigationFocused && !entry.userActivated)
+    entry.send = (activated = entry.userActivated) => {
+      if (!navigationReady || (!navigationFocused && entry.waitingForFocus && !activated)
           || entry.sent || entry.done) return
       entry.sent = true
       timer = setTimeout(() => {
@@ -546,7 +562,7 @@ export function makeNav({
             label: label || 'app-detail',
             requestId,
             reversible: entry.reversible,
-            userActivated: entry.userActivated,
+            userActivated: activated,
           },
           window.location.origin,
         )
@@ -557,7 +573,7 @@ export function makeNav({
         dispose()
       }
     }
-    entry.send()
+    flushQueue(entry.userActivated)
 
     return {
       ready,

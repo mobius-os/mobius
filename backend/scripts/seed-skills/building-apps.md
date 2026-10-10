@@ -1180,9 +1180,13 @@ its current place with `nav.setLocation(value)`.
 - Restore through the same path as a user action, so a restored nested view
   calls `nav.open(...)` and Back still works. Treat the saved value as untrusted
   input: check its ids against loaded data and fall back to the start view.
-  `nav.open` waits until the frame is promoted and visible before requesting
-  history ownership; its timeout starts then. Closing an unsent handle cancels
-  it. Mount the app before awaiting restoration; do not add timers to retry it.
+  `nav.open` waits for promotion and visibility. Restoration never moves pane
+  focus: reusing the current retired history slot proceeds even in a background
+  pane; adding a history entry waits for pane focus. `ready` and `outcome` can
+  stay pending until that focus arrives, without an ownership timeout running.
+  The timeout runs only while a sent request awaits an ownership reply. Closing
+  an unsent handle cancels it. Mount the app before awaiting restoration; do not
+  add timers to retry it.
   Restoring several nested levels in the shell can leave inactive browser
   history slots, requiring extra Back presses after the restored views close.
 - The shell keeps one location per app installation for the current browser
