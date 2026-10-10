@@ -36,7 +36,7 @@ test('a finished app update reaches a manager frame in the Store shape', () => {
   assert.deepEqual(posted, [{
     message: {
       type: 'moebius:managed-app-event',
-      event: { type: 'app_updated', appId: '42', sequence: 1 },
+      event: { type: 'app_updated', appId: '42' },
     },
     origin: '*',
   }])
@@ -44,7 +44,7 @@ test('a finished app update reaches a manager frame in the Store shape', () => {
   // A second completion for the same app is delivered again.
   hook.result.current({ type: 'app_updated', appId: 42 })
   assert.equal(posted.length, 2)
-  assert.equal(posted[1].message.event.sequence, 2)
+  assert.deepEqual(posted[1].message, posted[0].message)
   hook.unmount()
 })
 
@@ -67,7 +67,7 @@ test('capability rerenders do not redeliver an event to the same frame', () => {
   hook.result.current({ type: 'app_updated', appId: 7 })
   hook.rerender({ data: { manage_apps: true } })
   hook.rerender({ data: { manage_apps: true } })
-  assert.deepEqual(posted.map(item => item.message.event.sequence), [1])
+  assert.deepEqual(posted.map(item => item.message.event.appId), ['7'])
 
   // An incidental rerender must not replay the old event to a new frame.
   const replacement = fakeFrames()
@@ -77,7 +77,7 @@ test('capability rerenders do not redeliver an event to the same frame', () => {
   hook.rerender({ data: { manage_apps: true } })
   assert.equal(replacement.posted.length, 0)
   hook.result.current({ type: 'app_updated', appId: 7 })
-  assert.deepEqual(replacement.posted.map(item => item.message.event.sequence), [2])
+  assert.deepEqual(replacement.posted.map(item => item.message.event.appId), ['7'])
   hook.unmount()
 })
 
@@ -91,7 +91,6 @@ test('late manager capability does not replay a previously observed event', () =
   hook.result.current({ type: 'app_updated', appId: 8 })
   assert.equal(posted.length, 1)
   assert.equal(posted[0].message.event.appId, '8')
-  assert.equal(posted[0].message.event.sequence, 2)
   hook.unmount()
 })
 
@@ -109,7 +108,7 @@ test('a newly mounted canvas does not replay an earlier completion', () => {
   hook.rerender(true)
   assert.deepEqual(posted, [])
   observe({ type: 'app_updated', appId: 8 })
-  assert.deepEqual(posted.map(item => item.message.event.sequence), [2])
+  assert.deepEqual(posted.map(item => item.message.event.appId), ['8'])
   hook.unmount()
   observe({ type: 'app_updated', appId: 9 })
   assert.equal(posted.length, 1)
@@ -127,8 +126,8 @@ test('two completions in one system-event batch both reach every manager frame w
   for (const appId of [7, 8]) hook.result.current({ type: 'app_updated', appId })
   for (const messages of [posted, incoming.posted]) {
     assert.deepEqual(messages.map(item => item.message), [
-      { type: 'moebius:managed-app-event', event: { type: 'app_updated', appId: '7', sequence: 1 } },
-      { type: 'moebius:managed-app-event', event: { type: 'app_updated', appId: '8', sequence: 2 } },
+      { type: 'moebius:managed-app-event', event: { type: 'app_updated', appId: '7' } },
+      { type: 'moebius:managed-app-event', event: { type: 'app_updated', appId: '8' } },
     ])
   }
   assert.equal(pendingRenders, 0)
@@ -144,6 +143,6 @@ test('null app ids are dropped and capability revocation stops delivery', () => 
   hook.result.current({ type: 'app_updated', appId: 7 })
   hook.rerender({ data: { manage_apps: false } })
   hook.result.current({ type: 'app_updated', appId: 8 })
-  assert.deepEqual(posted.map(item => item.message.event.sequence), [1])
+  assert.deepEqual(posted.map(item => item.message.event.appId), ['7'])
   hook.unmount()
 })

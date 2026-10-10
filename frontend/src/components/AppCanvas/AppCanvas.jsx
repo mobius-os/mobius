@@ -76,8 +76,8 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      the iframe sits at its 10s loading-timeout.
 //
 //   Managed app lifecycle: {type: 'moebius:managed-app-event',
-//       event: {type: 'app_updated', appId, sequence}}       parent → frame
-//      Sent only for new sequences to frames with reviewed manage_apps.
+//       event: {type: 'app_updated', appId}}       parent → frame
+//      Every completion is sent to frames with reviewed manage_apps.
 //      appId is always the updated app's id as a string. Apps listen directly
 //      on window; the frame host does not handle or replay this message.
 //

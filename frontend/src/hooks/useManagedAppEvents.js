@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef } from 'react'
 // state would coalesce completions arriving in one SSE chunk to the last app.
 export function useManagedAppEvents() {
   const listeners = useRef(new Set())
-  const sequence = useRef(0)
   const subscribe = useCallback((listener) => {
     listeners.current.add(listener)
     return () => listeners.current.delete(listener)
@@ -14,7 +13,6 @@ export function useManagedAppEvents() {
     const event = {
       type: 'app_updated',
       appId: String(ev.appId),
-      sequence: ++sequence.current,
     }
     for (const listener of listeners.current) listener(event)
   }, [])

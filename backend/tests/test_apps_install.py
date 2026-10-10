@@ -38,20 +38,26 @@ def _bypass_cron_scaffold():
 
 @pytest.fixture(autouse=True)
 def _stub_resolver_run_chat():
-  """Resolver-chat endpoint tests never want a real agent turn, so stub
-  run_chat to a no-op. A test that needs the real spawn behavior patches over
-  this locally."""
-  async def _noop(*args, **kwargs):
+  """Complete resolver turns without starting a real agent."""
+  async def _noop():
     return None
-  with patch("app.chat.run_chat", new=_noop):
+
+  def _complete_turn(*args, chat_id, run_token, **kwargs):
+    from app.broadcast import remove_broadcast
+    from app.chat import discard_starting
+    from app.chat_writer import FinishRun, get_writer
+
+    # Settle before returning the response so later test-owned run states
+    # cannot race with asynchronous stub cleanup.
+    get_writer().submit(FinishRun(
+      chat_id=chat_id, run_token=run_token,
+    )).result(timeout=5)
+    discard_starting(chat_id)
+    remove_broadcast(chat_id)
+    return _noop()
+
+  with patch("app.chat_start.run_chat", new=_complete_turn):
     yield
-
-
-@pytest.fixture
-def idle_resolver_runs(monkeypatch):
-  """Model completed noop resolver turns in batch-rebinding tests."""
-  monkeypatch.setattr("app.run_state.has_run_in", lambda db, cid, statuses: False)
-  monkeypatch.setattr("app.chat.is_chat_running", lambda cid: False)
 
 
 @pytest.fixture
@@ -3942,7 +3948,7 @@ def test_successful_install_is_not_failed_by_pending_cleanup(
 
 @pytest.mark.parametrize("selection", ["subset", "single", "overlap"])
 def test_conflict_resolver_never_reuses_a_different_batch(
-  client, auth, bypass_url_validation, selection, idle_resolver_runs,
+  client, auth, bypass_url_validation, selection,
 ):
   apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
   app_ids = [app_id for app_id, _path, _name in apps]
@@ -3981,7 +3987,7 @@ def test_conflict_resolver_never_reuses_a_different_batch(
 
 
 def test_conflict_resolver_batch_does_not_reuse_stale_revision_bindings(
-  client, auth, bypass_url_validation, idle_resolver_runs,
+  client, auth, bypass_url_validation,
 ):
   apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
   app_ids = [app_id for app_id, _path, _name in apps]
@@ -4088,7 +4094,7 @@ def test_conflict_resolver_reuses_remaining_batch_after_app_leaves(
 
 @pytest.mark.parametrize("selection", ["overlap", "subset"])
 def test_conflict_resolver_displaced_chat_cannot_be_reused_for_remainder(
-  client, auth, bypass_url_validation, selection, idle_resolver_runs,
+  client, auth, bypass_url_validation, selection,
 ):
   apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
   ids = [item[0] for item in apps]
@@ -4239,7 +4245,10 @@ def test_conflict_resolver_batch_deduplicates_and_sorts_canonical_sources(
   monkeypatch.setattr(fs_locks, "source_dir_lock", source)
   monkeypatch.setattr(app_git, "is_repo", lambda repo: True)
   monkeypatch.setattr(routes, "_pending_store_update_receipt", lambda *args: {})
-  monkeypatch.setattr(routes, "_validate_pending_update", lambda *args: None)
+  monkeypatch.setattr(
+    routes, "_validate_pending_update",
+    lambda *args: routes._PendingUpdatePlan(conflict_paths=[]),
+  )
   monkeypatch.setattr(routes, "_park_pending_update", lambda *args: [])
   monkeypatch.setattr(routes, "_upstream_version", lambda *args: "2.0.0")
   monkeypatch.setattr(routes, "_start_conflict_resolver_turn", start_turn)
@@ -4338,7 +4347,7 @@ def _finish(client, auth, app_dir, replay):
 
 
 def test_finishing_installs_only_a_committed_resolution(
-  client, auth, bypass_url_validation, idle_resolver_runs,
+  client, auth, bypass_url_validation,
 ):
   """Finish never stages on the resolver's behalf: uncommitted work, committed
   markers, and an answer without the update are all refused."""
@@ -4434,7 +4443,7 @@ def _conflicted_app_with_local_file(client, auth, base, slug):
 
 
 def test_resolver_checkout_removed_after_validation_requires_a_fresh_plan(
-  client, auth, bypass_url_validation, idle_resolver_runs,
+  client, auth, bypass_url_validation,
 ):
   from app.database import SessionLocal
   from app.routes import apps as routes
@@ -8570,7 +8579,7 @@ def test_busy_resolver_retry_does_not_recreate_aborted_checkout(
 
 @pytest.mark.parametrize("state", ["idle", "live", "owner_question", "live_question"])
 def test_stale_resolver_binding_blocks_current_revision_only_while_busy(
-  client, auth, bypass_url_validation, monkeypatch, idle_resolver_runs, state,
+  client, auth, bypass_url_validation, monkeypatch, state,
 ):
   from app.database import SessionLocal
   apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
@@ -8661,3 +8670,29 @@ def test_conflict_resolver_prompt_rejects_oversized_metadata_without_truncating_
     routes._conflict_resolver_prompt(items)
   assert exc.value.status_code == 413
   assert "select fewer apps" in exc.value.detail
+
+
+def test_conflict_resolver_rejects_oversized_prompt_before_parking_any_checkout(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app.database import SessionLocal
+  from app.routes import apps as routes
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [app_id for app_id, _repo, _name in apps]
+  monkeypatch.setattr(routes, "_CONFLICT_RESOLVER_MAX_PROMPT_CHARS", 1)
+
+  def cannot_park(*args):
+    pytest.fail("Prompt budgeting must reject the batch before any checkout is parked")
+
+  monkeypatch.setattr(routes, "_park_pending_update", cannot_park)
+  rejected = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth, json={"app_ids": ids},
+  )
+  assert rejected.status_code == 413, rejected.text
+  assert "select fewer apps" in rejected.json()["detail"]
+  assert all(not install.pending_update_worktree(repo).exists()
+             for _app_id, repo, _name in apps)
+  with SessionLocal() as db:
+    assert all(db.get(models.App, app_id).conflict_resolver_chat_id is None
+               for app_id in ids)
