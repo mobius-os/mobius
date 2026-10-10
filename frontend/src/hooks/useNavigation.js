@@ -3,7 +3,7 @@ import {
   dropPopsForEntry,
   isMobiusNavState,
   isTopmostAppEntry,
-  isRetiredAppEntry,
+  isCurrentRetiredAppEntry,
   retireAppEntries,
   navEntryId,
   navEntryIndex,
@@ -841,10 +841,9 @@ export default function useNavigation({
       // level on top of it. Only the current slot is reusable: multi-level
       // restoration can still leave retired slots below it. A different
       // app/pane must keep its own history.
-      if (entryId && navEntryId(history.state) === entryId && current.kind === 'app'
+      if (isCurrentRetiredAppEntry(record, entryId, navEntryId(history.state)) && current.kind === 'app'
           && String(current.appNav?.appId) === String(appId)
           && String(current.route?.paneId) === String(ownerPaneId)
-          && isRetiredAppEntry(record)
           && (!record || ownerKeyOf(record.paneId, record.appId) === ownerKey)) {
         state = updateCurrentNavEntry(route, { kind: 'app', appNav })
         currentNavStateRef.current = state

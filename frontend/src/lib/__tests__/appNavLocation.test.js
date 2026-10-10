@@ -100,3 +100,18 @@ test('a frame without a known storage generation cannot overwrite or clear the s
     assert.equal(store.items.size, 1)
   }
 })
+
+for (const value of [NaN, Infinity, -Infinity]) {
+  test(`nonfinite location ${value} throws instead of clearing only the runtime`, () => {
+    assert.throws(() => encodeNavLocation(value), {
+      name: 'TypeError',
+      message: 'window.mobius.nav.setLocation: the location must be JSON-serializable',
+    })
+  })
+}
+
+test('only explicit null and undefined clear a location', () => {
+  assert.equal(encodeNavLocation(null), null)
+  assert.equal(encodeNavLocation(undefined), null)
+  assert.throws(() => encodeNavLocation({ toJSON: () => null }), TypeError)
+})

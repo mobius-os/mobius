@@ -1,4 +1,4 @@
-import { isRetiredAppEntry } from './navHistory.js'
+import { isCurrentRetiredAppEntry, isRetiredAppEntry } from './navHistory.js'
 
 const MAX_STANDALONE_HISTORY_ENTRIES = 40
 
@@ -54,6 +54,29 @@ export function standaloneHistoryState(state, entries) {
     mobiusStandaloneDepth: complete.length,
     mobiusStandaloneEntry: complete.at(-1) || null,
   }
+}
+
+/** Push an app level, or replace a retired level proven to be physically current.
+ * Return the new logical stack only after the browser accepted the write. */
+export function pushStandaloneHistoryEntry(history, entries, registry, appId, meta = {}, url = '') {
+  const current = entries.at(-1)
+  const physical = readStandaloneHistoryEntries(history.state)
+  const reuse = physical.length === entries.length && isCurrentRetiredAppEntry(
+    registry.get(current?.requestId), current?.requestId, physical.at(-1)?.requestId,
+  )
+  if (!reuse && entries.length >= MAX_STANDALONE_HISTORY_ENTRIES) return null
+  const entry = {
+    requestId: typeof meta.requestId === 'string' ? meta.requestId : null,
+    reversible: meta.reversible === true,
+  }
+  const next = reuse ? [...entries.slice(0, -1), entry] : [...entries, entry]
+  try {
+    history[reuse ? 'replaceState' : 'pushState'](standaloneHistoryState(history.state, next), '', url)
+  } catch {
+    return null
+  }
+  registry.set(entry.requestId, { appId: String(appId), status: 'live' })
+  return next
 }
 
 /**

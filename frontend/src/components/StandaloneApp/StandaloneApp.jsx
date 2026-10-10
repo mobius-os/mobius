@@ -15,12 +15,12 @@ import { readableAppDiagnostic } from '../../lib/appDiagnostic.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import {
-  MAX_STANDALONE_HISTORY_ENTRIES,
+  pushStandaloneHistoryEntry,
   readStandaloneHistoryEntries,
   reconcileStandaloneHistory,
   standaloneHistoryState,
 } from '../../lib/standaloneHistory.js'
-import { isRetiredAppEntry, retireAppEntries } from '../../lib/navHistory.js'
+import { retireAppEntries } from '../../lib/navHistory.js'
 import StandaloneInstallCard from './StandaloneInstallCard.jsx'
 import './StandaloneApp.css'
 
@@ -147,29 +147,12 @@ export default function StandaloneApp({ initialApp }) {
   }, [])
 
   const onNavPush = useCallback((appId, meta = {}) => {
-    const entries = navEntriesRef.current
-    const current = entries.at(-1)
-    // Only the current browser slot is reusable; deeper retired slots remain
-    // during multi-level restoration. Single-level restoration adds no ghost Back.
-    const reuse = entries.length > 0 && isRetiredAppEntry(navOwnersRef.current.get(current?.requestId))
-    if (!reuse && entries.length >= MAX_STANDALONE_HISTORY_ENTRIES) return false
-    const entry = {
-      requestId: typeof meta.requestId === 'string' ? meta.requestId : null,
-      reversible: meta.reversible === true,
-    }
-    const next = reuse ? [...entries.slice(0, -1), entry] : [...entries, entry]
-    try {
-      history[reuse ? 'replaceState' : 'pushState'](
-        standaloneHistoryState(history.state, next),
-        '',
-        window.location.href,
-      )
-      navEntriesRef.current = next
-      navOwnersRef.current.set(entry.requestId, { appId: String(appId), status: 'live' })
-      return true
-    } catch {
-      return false
-    }
+    const next = pushStandaloneHistoryEntry(
+      history, navEntriesRef.current, navOwnersRef.current, appId, meta, window.location.href,
+    )
+    if (!next) return false
+    navEntriesRef.current = next
+    return true
   }, [])
 
   const onNavReset = useCallback((appId) => {

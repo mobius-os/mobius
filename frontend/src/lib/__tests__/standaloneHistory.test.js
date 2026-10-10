@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 
 import {
   MAX_STANDALONE_HISTORY_ENTRIES,
+  pushStandaloneHistoryEntry,
   readStandaloneHistoryEntries,
   reconcileStandaloneHistory,
   standaloneHistoryState,
@@ -92,4 +93,76 @@ test('standalone uses shell retirement and skips dead document levels without re
   const skipped = reconcileStandaloneHistory(result.entries, standaloneHistoryState({}, []), { registry })
   assert.deepEqual(skipped.commands, [])
   assert.equal(skipped.skipRetired, false)
+})
+
+function sessionHistory() {
+  const states = [standaloneHistoryState({}, [])]
+  let index = 0
+  return {
+    get state() { return states[index] },
+    get depth() { return states.length },
+    pushState(state) { states.splice(++index, states.length, state) },
+    replaceState(state) { states[index] = state },
+    back() { if (index > 0) index -= 1 },
+  }
+}
+
+for (const reset of ['frame reload', 'host reload']) {
+  test(`standalone ${reset} reuses only the physically current retired sentinel`, () => {
+    const history = sessionHistory()
+    let registry = new Map()
+    let entries = pushStandaloneHistoryEntry(history, [], registry, 81, entry('old'))
+    if (reset === 'host reload') {
+      registry = new Map()
+      entries = readStandaloneHistoryEntries(history.state)
+    } else {
+      retireAppEntries(registry, 81)
+    }
+    entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('restored'))
+    assert.equal(history.depth, 2, 'restoration adds no ghost Back level')
+    assert.deepEqual(entries, [entry('restored')])
+    history.back()
+    const result = reconcileStandaloneHistory(entries, history.state, { registry })
+    assert.deepEqual(result.commands, [{ direction: 'back', requestId: 'restored' }])
+    assert.equal(result.skipRetired, false)
+  })
+
+  test(`standalone ${reset} does not overwrite an iframe-created physical entry above a retired slot`, () => {
+    const history = sessionHistory()
+    let registry = new Map()
+    let entries = pushStandaloneHistoryEntry(history, [], registry, 81, entry('old'))
+    const retiredState = history.state
+    if (reset === 'host reload') {
+      registry = new Map()
+      entries = readStandaloneHistoryEntries(history.state)
+    } else {
+      retireAppEntries(registry, 81)
+    }
+    const childState = { iframe: 'child history' }
+    history.pushState(childState)
+    entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('restored'))
+    assert.equal(history.depth, 4, 'the physical cursor, not the logical stack, determines reuse')
+    assert.deepEqual(entries, [entry('old'), entry('restored')])
+    history.back()
+    assert.deepEqual(history.state, childState, 'child history is preserved')
+    history.back()
+    assert.deepEqual(history.state, retiredState, 'the retired sentinel was not replaced')
+  })
+}
+
+test('standalone never reuses a retired entry whose identity cannot be proven', () => {
+  const history = sessionHistory()
+  const registry = new Map()
+  let entries = pushStandaloneHistoryEntry(history, [], registry, 81)
+  retireAppEntries(registry, 81)
+  entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('restored'))
+  assert.equal(history.depth, 3)
+  assert.equal(entries.length, 2)
+})
+
+test('a rejected standalone history write cannot register a live owner', () => {
+  const registry = new Map()
+  const history = { state: null, pushState() { throw new Error('blocked') } }
+  assert.equal(pushStandaloneHistoryEntry(history, [], registry, 81, entry('new')), null)
+  assert.equal(registry.size, 0)
 })

@@ -96,6 +96,13 @@ export function isRetiredAppEntry(record) {
   return !record || record.status === 'retired'
 }
 
+// A retired logical entry is reusable only while its physical sentinel is
+// still current. An iframe can advance joint history without changing our stack.
+export function isCurrentRetiredAppEntry(record, entryId, currentEntryId) {
+  return typeof entryId === 'string' && entryId.length > 0
+    && entryId === currentEntryId && isRetiredAppEntry(record)
+}
+
 export function retireAppEntries(registry, appId, reason = 'reset') {
   const retired = []
   for (const [entryId, record] of registry) {

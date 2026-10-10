@@ -3047,7 +3047,7 @@ function encodeNavLocation(value) {
 	} catch (error) {
 		throw new TypeError(`window.mobius.nav.setLocation: the location must be JSON-serializable (${error?.message || error})`);
 	}
-	if (typeof text !== "string") throw new TypeError("window.mobius.nav.setLocation: the location must be JSON-serializable");
+	if (typeof text !== "string" || text === "null") throw new TypeError("window.mobius.nav.setLocation: the location must be JSON-serializable");
 	const bytes = byteLength(text);
 	if (bytes > 4096) throw new RangeError(`window.mobius.nav.setLocation: the location is ${bytes} bytes as JSON; the limit is ${APP_NAV_LOCATION_MAX_BYTES}. Keep ids and view names here and larger state in window.mobius.storage.`);
 	return text;

@@ -20,7 +20,7 @@ export function encodeNavLocation(value) {
       `window.mobius.nav.setLocation: the location must be JSON-serializable (${error?.message || error})`,
     )
   }
-  if (typeof text !== 'string') {
+  if (typeof text !== 'string' || text === 'null') {
     throw new TypeError('window.mobius.nav.setLocation: the location must be JSON-serializable')
   }
   const bytes = byteLength(text)
