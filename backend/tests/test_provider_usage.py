@@ -2384,3 +2384,108 @@ def test_usage_invalidation_during_publication_cannot_restore_old_balance(
     result = future.result(timeout=3)
   assert result["credit_balance"] == "2"
   assert provider_usage._provider_usage_cache[key].snapshot["credit_balance"] == "2"
+
+
+@pytest.mark.parametrize("older_state", ["unavailable", "disconnected", "ready", "refused"])
+@pytest.mark.parametrize("force_refresh", [False, True])
+@pytest.mark.parametrize("account_changed", [False, True])
+def test_older_cross_loop_probe_cannot_replace_or_delete_newer_success(
+  monkeypatch, tmp_path, older_state, force_refresh, account_changed,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  started = threading.Event()
+  resume = threading.Event()
+  old_thread = None
+  probes = []
+
+  async def snapshot(_provider_id, _data_dir):
+    probes.append(threading.get_ident())
+    if threading.get_ident() == old_thread:
+      started.set()
+      assert await asyncio.to_thread(resume.wait, 5)
+      if older_state == "refused":
+        raise provider_usage.ProviderUsageRefused("codex", None)
+      return {**WEEKLY_READY, "state": older_state, "credit_balance": "old"}
+    return {**WEEKLY_READY, "credit_balance": "new"}
+
+  def older_read():
+    nonlocal old_thread
+    old_thread = threading.get_ident()
+    return asyncio.run(provider_usage.read_provider_usage(
+      "codex", data_dir, force_refresh=force_refresh,
+    ))
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    older = pool.submit(older_read)
+    try:
+      assert started.wait(5)
+      if account_changed:
+        provider_usage.forget_provider_usage("codex", data_dir)
+      newer = asyncio.run(provider_usage.read_provider_usage(
+        "codex", data_dir, force_refresh=force_refresh,
+      ))
+      path = provider_usage._last_reading_path(data_dir, "codex")
+      persisted = path.read_bytes()
+    finally:
+      resume.set()
+    older_result = older.result(timeout=5)
+
+  assert len(probes) == 2
+  assert older_result == newer
+  assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == newer
+  assert path.read_bytes() == persisted
+  assert json.loads(persisted)["snapshot"]["credit_balance"] == "new"
+  assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_restart_restoration_cannot_replace_a_concurrent_success(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  started = threading.Event()
+  resume = threading.Event()
+  old_thread = None
+  restored = provider_usage._CachedProviderUsage(
+    observed_at=provider_usage.time.monotonic(), next_check_at=0,
+    snapshot={**WEEKLY_READY, "credit_balance": "saved"},
+  )
+
+  def restore(_provider_id, _data_dir):
+    if threading.get_ident() == old_thread:
+      started.set()
+      assert resume.wait(5)
+      return restored
+    return None
+
+  async def snapshot(_provider_id, _data_dir):
+    if threading.get_ident() == old_thread:
+      raise provider_usage.ProviderUsageRefused("codex", None)
+    return {**WEEKLY_READY, "credit_balance": "new"}
+
+  def older_read():
+    nonlocal old_thread
+    old_thread = threading.get_ident()
+    return asyncio.run(provider_usage.read_provider_usage("codex", data_dir))
+
+  monkeypatch.setattr(provider_usage, "_restored_reading", restore)
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    older = pool.submit(older_read)
+    try:
+      assert started.wait(5)
+      asyncio.run(provider_usage.read_provider_usage("codex", data_dir))
+      path = provider_usage._last_reading_path(data_dir, "codex")
+      persisted = path.read_bytes()
+    finally:
+      resume.set()
+    result = older.result(timeout=5)
+
+  assert result["credit_balance"] == "new"
+  assert result["stale"] is True
+  assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == result
+  assert path.read_bytes() == persisted

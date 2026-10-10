@@ -103,6 +103,7 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
 _provider_usage_locks: dict[tuple[tuple[str, str], asyncio.AbstractEventLoop], asyncio.Lock] = {}
 _provider_usage_generation: dict[tuple[str, str], int] = {}
+_provider_usage_probe: dict[tuple[str, str], object] = {}
 # Invalidation is called from sync auth endpoints as well as async readers.
 # asyncio.Lock only coalesces probes; this lock protects the authority check
 # and publication across threads/event loops.
@@ -1360,7 +1361,7 @@ async def read_provider_usage(
       restored = _restored_reading(provider_id, data_dir)
       with _provider_usage_authority_lock:
         if generation == _provider_usage_generation.get(key, 0):
-          prior = restored
+          prior = _provider_usage_cache.get(key) or restored
           if prior is not None:
             _provider_usage_cache[key] = prior
     # A sign-in can finish while an earlier account's read is in flight. Do
@@ -1368,6 +1369,8 @@ async def read_provider_usage(
     for attempt in range(2):
       with _provider_usage_authority_lock:
         generation = _provider_usage_generation.get(key, 0)
+        probe = object()
+        _provider_usage_probe[key] = probe
       refusals = 0
       try:
         snapshot = await _provider_snapshot(provider_id, data_dir)
@@ -1395,6 +1398,14 @@ async def read_provider_usage(
         unavailable = copy.deepcopy(snapshot)
         unavailable["stale"] = False
       with _provider_usage_authority_lock:
+        if _provider_usage_probe.get(key) is not probe:
+          # A later probe on another loop owns publication. Do not retry an
+          # older refusal or disconnect over its successful observation.
+          if ready is not None and staged is not None:
+            staged.unlink(missing_ok=True)
+          return _held_usage(key) or _unavailable(
+            _configured_plan_label(provider_id, data_dir),
+          )
         if generation != _provider_usage_generation.get(key, 0):
           if ready is not None and staged is not None:
             staged.unlink(missing_ok=True)

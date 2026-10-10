@@ -989,6 +989,8 @@ class MobiusProvider(BaseProvider):
     self._held_lock = threading.Lock()
 
   def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
+    if self.app_id == app_id and self.declaration == declaration:
+      return
     self.app_id = app_id
     self.declaration = declaration
     self.forget_account_reads()

@@ -278,3 +278,49 @@ def test_held_balance_cannot_be_mutated_by_a_caller(monkeypatch):
   _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
   provider.trial_status()["spendable_units"] = 0
   assert provider.trial_status() == {"spendable_units": 3}
+
+
+def test_unchanged_declaration_preserves_identity_and_balance_holds(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {
+    "/identity": {"linked": True}, "/v1/balance": {"spendable_units": 3},
+  })
+  provider._identity()
+  provider.trial_status()
+  generation = provider._held_generation
+
+  # App synchronization reloads equal JSON into a distinct object.
+  provider.set_declaration(provider.app_id, json.loads(json.dumps(provider.declaration)))
+
+  assert provider._held_generation == generation
+  assert provider._identity() == {"linked": True}
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert broker.calls == ["/identity", "/v1/balance"]
+
+
+def test_unchanged_declaration_preserves_in_flight_account_read(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
+  broker.during_call = lambda: provider.set_declaration(
+    provider.app_id, json.loads(json.dumps(provider.declaration)),
+  )
+
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert broker.calls == ["/v1/balance"]
+
+
+def test_changed_declaration_or_app_discards_account_holds(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
+  provider.trial_status()
+  declaration = json.loads(json.dumps(provider.declaration))
+  declaration["name"] = "Updated provider"
+  provider.set_declaration(provider.app_id, declaration)
+  provider.trial_status()
+  provider.set_declaration(provider.app_id + 1, declaration)
+  provider.trial_status()
+  provider.set_declaration(None, None)
+
+  assert broker.calls == ["/v1/balance"] * 3
+  assert provider._held_reads == {}
