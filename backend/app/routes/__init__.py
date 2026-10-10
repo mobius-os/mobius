@@ -71,6 +71,7 @@ connectors_public_router = _load("connectors", "public_router")
 proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
 public_storage_router = _load("public_storage")
+live_rooms_router = _load("live_rooms")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
 screen_control_router = _load("screen_control")
@@ -130,6 +131,7 @@ __all__ = [
   "proxy_router",
   "public_apps_router",
   "public_storage_router",
+  "live_rooms_router",
   "local_services_router",
   "notify_router",
   "screen_control_router",

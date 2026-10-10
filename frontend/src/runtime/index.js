@@ -68,6 +68,7 @@
 //   window.mobius.capabilities.open(name, input)  -> capability session
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
 //   window.mobius.capabilities.invoke(name, input, {signal?}) -> one-shot result
+//   window.mobius.live.join(room, {name?, max?}) -> room: send/onMessage/onPresence/onStatus/sync/close (see live.js)
 //   window.mobius.projects.list()                    -> projects created by this app
 //   window.mobius.projects.create({templateId,name}) -> create and open a native project
 //   window.mobius.projects.open(projectId)           -> open one of this app's projects
@@ -103,6 +104,7 @@ import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
 import { makeProjects } from './projects.js'
+import { makeLive } from './live.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -112,6 +114,7 @@ export * from './navigation.js'
 export * from './capabilities.js'
 export * from './immersive.js'
 export * from './projects.js'
+export * from './live.js'
 
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
@@ -206,6 +209,7 @@ export function init({
     _runtimeContext.capabilities?._destroy?.()
     _runtimeContext.projects?._destroy?.()
     _runtimeContext.chat?._destroy?.()
+    _runtimeContext.live?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -222,6 +226,9 @@ export function init({
   const signal = makeSignal(appId, storage, appInstanceId)
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
   const projects = makeProjects()
+  // Live rooms accept the frame's own token, app-scoped or public-app; the
+  // relay checks scope and app id, so the app-only filter above does not apply.
+  const live = makeLive({ appId, getToken: (options) => tokenRef.current(options) })
   const chat = makeChat({ appId, getToken: scopedToken, storage })
   const api = {
     appId,
@@ -258,9 +265,10 @@ export function init({
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
     projects,
+    live,
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, live, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
