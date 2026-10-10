@@ -2816,3 +2816,82 @@ async def test_invalidation_before_probe_start_cannot_reuse_the_previous_account
   assert result["state"] == "unavailable"
   assert provider_usage._provider_usage_cache[key].snapshot["state"] == "unavailable"
   assert not provider_usage._last_reading_path(data_dir, "codex").exists()
+
+
+@pytest.mark.parametrize("force_unavailable", [False, True])
+def test_late_success_keeps_refusal_backoff_through_an_ordinary_concurrent_failure(
+  monkeypatch, tmp_path, force_unavailable,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  key = provider_usage._cache_key("codex", data_dir)
+  started = [threading.Event() for _ in range(3)]
+  finish = [threading.Event() for _ in range(3)]
+  calls = []
+
+  async def snapshot(_provider_id, _data_dir):
+    index = len(calls)
+    calls.append(threading.get_ident())
+    started[index].set()
+    assert await asyncio.to_thread(finish[index].wait, 5)
+    if index == 0:
+      return WEEKLY_READY
+    if index == 1:
+      raise provider_usage.ProviderUsageRefused("codex", 120)
+    return provider_usage._unavailable()
+
+  def read(*, force_refresh=False):
+    return asyncio.run(provider_usage.read_provider_usage(
+      "codex", data_dir, force_refresh=force_refresh,
+    ))
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=3) as pool:
+    success = pool.submit(read)
+    try:
+      assert started[0].wait(5)
+      refusal = pool.submit(read)
+      assert started[1].wait(5)
+      unavailable = pool.submit(read, force_refresh=force_unavailable)
+      assert started[2].wait(5)
+
+      finish[1].set()
+      assert refusal.result(timeout=5)["state"] == "unavailable"
+      refused_until = provider_usage._provider_usage_cache[key].next_check_at
+      assert provider_usage._provider_usage_cache[key].consecutive_refusals == 1
+
+      finish[2].set()
+      assert unavailable.result(timeout=5)["state"] == "unavailable"
+      after_failure = provider_usage._provider_usage_cache[key]
+      if force_unavailable:
+        # Explicit refresh still bypasses the hold; its failed fresh read
+        # retains the ordinary failure window rather than a stale fallback.
+        assert after_failure.consecutive_refusals == 0
+        assert after_failure.next_check_at < refused_until
+      else:
+        # This ordinary probe was already in flight when the refusal arrived.
+        # An advisory failure cannot revoke the provider's retry deadline.
+        assert after_failure.consecutive_refusals == 1
+        assert after_failure.next_check_at >= refused_until
+
+      finish[0].set()
+      ready = success.result(timeout=5)
+    finally:
+      for event in finish:
+        event.set()
+
+  assert ready["state"] == "ready"
+  held = asyncio.run(provider_usage.read_provider_usage("codex", data_dir))
+  assert held == {**ready, "stale": not force_unavailable}
+  cached = provider_usage._provider_usage_cache[key]
+  if force_unavailable:
+    assert cached.consecutive_refusals == 0
+    assert cached.next_check_at < refused_until
+  else:
+    assert cached.consecutive_refusals == 1
+    assert cached.next_check_at >= refused_until
+  assert len(calls) == 3
+  path = provider_usage._last_reading_path(data_dir, "codex")
+  assert json.loads(path.read_bytes())["snapshot"] == ready
+  assert list(path.parent.glob("*.tmp")) == []

@@ -1431,6 +1431,22 @@ async def read_provider_usage(
           continue
         current = _provider_usage_cache.get(key)
         if (
+          current is not None and current.consecutive_refusals
+          and (
+            (ready is not None and probe < publication.latest_probe)
+            or (
+              ready is None and not force_refresh
+              and snapshot.get("state") != "disconnected"
+              and current.next_check_at > now
+            )
+          )
+        ):
+          # An ordinary advisory failure cannot shorten an active refusal
+          # hold, including before a concurrent successful reading arrives.
+          # Explicit refresh and sequential disconnect retain their authority.
+          next_check_at = max(next_check_at, current.next_check_at)
+          refusals = max(refusals, current.consecutive_refusals)
+        if (
           ready is None and current is not None and current is not prior
           and _stale_reading_is_servable(current, now)
         ):
@@ -1447,12 +1463,6 @@ async def read_provider_usage(
             if not force_refresh:
               fallback["stale"] = current.stale
             return fallback
-        if (
-          ready is not None and probe < publication.latest_probe
-          and current is not None and current.consecutive_refusals
-        ):
-          next_check_at = max(next_check_at, current.next_check_at)
-          refusals = current.consecutive_refusals
         publication.latest_probe = max(publication.latest_probe, probe)
         if ready is not None:
           publication.authoritative_probe = probe
