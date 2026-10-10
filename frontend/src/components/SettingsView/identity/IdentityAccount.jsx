@@ -320,7 +320,7 @@ function HandleModal({ current, onClose, onSave, required = false }) {
   )
 }
 
-function SignInModal({ token, onClose, onSignedIn }) {
+export function SignInModal({ token, onClose, onSignedIn }) {
   const [pending, setPending] = useState('')
   const [error, setError] = useState('')
   const [completion, setCompletion] = useState(null)
@@ -364,6 +364,7 @@ function SignInModal({ token, onClose, onSignedIn }) {
         body: JSON.stringify(payload),
         signal: controller.signal,
       })
+      if (controller.signal.aborted) return
       setCompletion(null)
       onSignedIn(linked)
     } catch (requestError) {
@@ -374,8 +375,9 @@ function SignInModal({ token, onClose, onSignedIn }) {
       // retry so success never looks like failure and replay stays idempotent.
       let current = null
       try {
-        current = await identityRequest(token)
+        current = await identityRequest(token, '', { signal: controller.signal })
       } catch { /* keep the original completion error */ }
+      if (controller.signal.aborted) return
       if (current?.account_mode === 'linked' && !current.account_unavailable) {
         setCompletion(null)
         onSignedIn(current)
@@ -391,7 +393,7 @@ function SignInModal({ token, onClose, onSignedIn }) {
     } finally {
       if (completionAbortRef.current === controller) completionAbortRef.current = null
       completionBusyRef.current = false
-      setPending('')
+      if (!controller.signal.aborted) setPending('')
     }
   }
 
