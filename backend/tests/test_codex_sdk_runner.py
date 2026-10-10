@@ -5365,6 +5365,142 @@ def test_generated_image_rejects_malformed_png_before_staging(tmp_path, monkeypa
   assert generated_files._inbox_names(str(tmp_path), 'chat') == []
 
 
+def _generated_apng(size=(2, 2), *, default_image=False, malformed_later=False, declared_frames=2):
+  import struct
+  import zlib
+
+  def chunk(kind, payload):
+    data = kind + payload
+    return struct.pack('>I', len(payload)) + data + struct.pack('>I', zlib.crc32(data))
+
+  width, height = size
+  content = b'\x89PNG\r\n\x1a\n'
+  content += chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
+  content += chunk(b'acTL', struct.pack('>II', declared_frames, 0))
+  sequence = 0
+  for frame in range(2 + int(default_image)):
+    if not default_image or frame:
+      content += chunk(b'fcTL', struct.pack(
+        '>IIIIIHHBB', sequence, width, height, 0, 0, 1, 10, 0, 0,
+      ))
+      sequence += 1
+    compressor = zlib.compressobj()
+    row = b'\0' + bytes((frame * 100, 0, 0, 255)) * width
+    payload = b''.join(compressor.compress(row) for _ in range(height))
+    payload += compressor.flush()
+    if malformed_later and frame == 1:
+      payload = b'not a zlib stream'
+    if frame == 0:
+      content += chunk(b'IDAT', payload)
+    else:
+      content += chunk(b'fdAT', struct.pack('>I', sequence) + payload)
+      sequence += 1
+  return content + chunk(b'IEND', b'')
+
+
+@pytest.mark.parametrize('default_image', [False, True])
+def test_generated_image_rejects_malformed_later_apng_before_staging(tmp_path, monkeypatch, default_image):
+  import base64
+  import io
+  from PIL import Image
+  from app import generated_files
+
+  content = _generated_apng(default_image=default_image, malformed_later=True)
+  # Checksums and the first frame genuinely pass; only decoding later fails.
+  with Image.open(io.BytesIO(content)) as image:
+    image.verify()
+  with Image.open(io.BytesIO(content)) as image:
+    image.load()
+    with pytest.raises(OSError):
+      image.seek(1)
+      image.load()
+
+  def unexpected_write(*args, **kwargs):
+    pytest.fail('invalid APNG reached the staging directory')
+
+  monkeypatch.setattr(generated_files, 'output_dir', unexpected_write)
+  with pytest.raises(ValueError, match='valid bounded PNG'):
+    codex_sdk_runner._stage_codex_generated_image(
+      str(tmp_path), 'chat', base64.b64encode(content).decode(),
+    )
+  assert list(tmp_path.iterdir()) == []
+
+
+def test_generated_image_rejects_missing_declared_apng_frame_before_staging(tmp_path, monkeypatch):
+  import base64
+  import io
+  from PIL import Image
+  from app import generated_files
+
+  content = _generated_apng(declared_frames=3)
+  with Image.open(io.BytesIO(content)) as image:
+    image.verify()
+  with Image.open(io.BytesIO(content)) as image:
+    image.seek(1)
+    image.load()
+    with pytest.raises((EOFError, OSError)):
+      image.seek(2)
+
+  def unexpected_write(*args, **kwargs):
+    pytest.fail('incomplete APNG reached the staging directory')
+
+  monkeypatch.setattr(generated_files, 'output_dir', unexpected_write)
+  with pytest.raises(ValueError, match='valid bounded PNG'):
+    codex_sdk_runner._stage_codex_generated_image(
+      str(tmp_path), 'chat', base64.b64encode(content).decode(),
+    )
+  assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('default_image', [False, True])
+def test_generated_image_rejects_excessive_apng_work_before_staging(tmp_path, monkeypatch, default_image):
+  import base64
+  import io
+  from PIL import Image, PngImagePlugin
+  from app import generated_files
+
+  content = _generated_apng((4096, 4096), default_image=default_image)
+  # Each frame is under 32M pixels and valid, but their aggregate is over it.
+  with Image.open(io.BytesIO(content)) as image:
+    assert image.width * image.height < codex_sdk_runner.MAX_GENERATED_IMAGE_PIXELS
+    assert image.width * image.height * image.n_frames > codex_sdk_runner.MAX_GENERATED_IMAGE_PIXELS
+    for frame in range(image.n_frames):
+      image.seek(frame)
+      image.load()
+
+  def unexpected_write(*args, **kwargs):
+    pytest.fail('excessive APNG reached the staging directory')
+
+  def unexpected_decode(*args, **kwargs):
+    pytest.fail('excessive APNG reached pixel decoding')
+
+  monkeypatch.setattr(PngImagePlugin.PngImageFile, 'load', unexpected_decode)
+  monkeypatch.setattr(generated_files, 'output_dir', unexpected_write)
+  with pytest.raises(ValueError, match='valid bounded PNG'):
+    codex_sdk_runner._stage_codex_generated_image(
+      str(tmp_path), 'chat', base64.b64encode(content).decode(),
+    )
+  assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('default_image', [False, True])
+def test_generated_image_preserves_bounded_apng_bytes_at_limit(tmp_path, monkeypatch, default_image):
+  import base64
+  import io
+  from PIL import Image
+  from app import generated_files
+
+  content = _generated_apng(default_image=default_image)
+  with Image.open(io.BytesIO(content)) as image:
+    monkeypatch.setattr(codex_sdk_runner, 'MAX_GENERATED_IMAGE_PIXELS', 4 * image.n_frames)
+  name = codex_sdk_runner._stage_codex_generated_image(
+    str(tmp_path), 'chat', base64.b64encode(content).decode(),
+  )
+  inbox = generated_files.output_dir(str(tmp_path), 'chat')
+  assert (inbox / name).read_bytes() == content
+  assert [path.name for path in inbox.iterdir()] == [name]
+
+
 def test_generated_image_preserves_bytes_and_uses_unique_names(tmp_path):
   import base64
   from app import generated_files

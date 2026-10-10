@@ -158,12 +158,18 @@ def _stage_codex_generated_image(data_dir: str, chat_id: str, result: str) -> st
         ):
           raise ValueError("generated image dimensions exceed the pixel limit")
         image.verify()
-      # Chunk checksums alone do not prove that the pixel stream decodes.
+      # Chunk checksums alone do not prove that every pixel stream decodes.
       with Image.open(io.BytesIO(content)) as image:
-        image.load()
+        # APNG decoding composites each frame on the full canvas, including
+        # any separate default image. Bound the aggregate before decoding.
+        if image.width * image.height * image.n_frames > MAX_GENERATED_IMAGE_PIXELS:
+          raise ValueError("generated image frames exceed the pixel limit")
+        for frame in range(image.n_frames):
+          image.seek(frame)
+          image.load()
   except (
     Image.DecompressionBombError, Image.DecompressionBombWarning,
-    UnidentifiedImageError, OSError, SyntaxError, ValueError,
+    UnidentifiedImageError, EOFError, OSError, SyntaxError, ValueError,
   ) as exc:
     raise ValueError("generated image result is not a valid bounded PNG") from exc
   directory = generated_files.output_dir(data_dir, chat_id, create=True)
