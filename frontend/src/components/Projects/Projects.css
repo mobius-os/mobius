@@ -213,7 +213,7 @@
   font-weight: 600;
   cursor: pointer;
 }
-.projects-error { margin: 10px clamp(12px, 2vw, 20px); color: var(--danger, #c43d3d); font-size: 13px; }
+.projects-error { margin: 10px clamp(12px, 2vw, 20px); color: var(--danger, #c43d3d); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .projects-directory__scroll > .projects-error { margin-left: 0; }
 .projects-empty {
   min-height: 170px;

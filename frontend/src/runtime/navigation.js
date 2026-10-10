@@ -1,3 +1,4 @@
+import { encodeNavLocation, validNavLocationText } from '../lib/appNavLocation.js'
 
 // ── ChatSplit — window.mobius.split(opts) ────────────────────────────────────
 //
@@ -295,7 +296,19 @@ export function makeSplit() {
   }
 }
 
-export function makeNav() {
+// `location` is the JSON text the shell kept from this app's previous frame
+// (see lib/appNavLocation.js). The app reads it as `nav.location` to restore
+// its place and reports each new place with `nav.setLocation(value)`.
+export function makeNav({
+  location = null, waitForNavigationReady = false,
+} = {}) {
+  let locationText = validNavLocationText(location)
+  let locationReported = false
+  // Opted-in hosts declare when this document is promoted, visible and focused.
+  // The host defers restoration only when it needs a new history entry. Older
+  // shells and published hosts keep immediate sends with the ownership timeout.
+  let navigationReady = !waitForNavigationReady
+  let navigationFocused = true
   const stack = []
   const entries = new Set()
   const entriesByRequestId = new Map()
@@ -309,10 +322,20 @@ export function makeNav() {
   // One runtime-level responder makes Forward negotiation total: even a fresh
   // runtime with no retained closure explicitly rejects the request. The shell
   // never has to infer restoration from elapsed time or device speed.
-  function onForwardMessage(event) {
+  function onHostMessage(event) {
     if (event.origin !== window.location.origin) return
     if (event.source !== window.parent) return
     const msg = event.data
+    if (msg?.type === 'moebius:frame-visibility') {
+      // Only opted-in hosts promise to resend readiness after promotion/focus.
+      navigationFocused = msg.navigationFocused !== false
+      navigationReady = !waitForNavigationReady
+        || (msg.visible === true && msg.navigationReady !== false)
+      if (navigationReady) {
+        flushQueue()
+      }
+      return
+    }
     if (msg?.type !== 'moebius:nav-forward' || typeof msg.requestId !== 'string') return
     const entry = entriesByRequestId.get(msg.requestId)
     if (!entry || !entry.reversible || entry.done || entry.disposed) {
@@ -347,7 +370,14 @@ export function makeNav() {
     }
     postForwardResult('moebius:nav-forward-ack', msg.requestId)
   }
-  if (window.parent !== window) window.addEventListener('message', onForwardMessage)
+  if (window.parent !== window) window.addEventListener('message', onHostMessage)
+
+  function flushQueue(activated = false) {
+    // A queued gesture releases earlier requests first, even if it arrived
+    // before promotion. Preserve outer-to-inner history order.
+    activated ||= [...entries].some(entry => entry.userActivated && !entry.sent && !entry.done)
+    for (const entry of entries) entry.send?.(activated || entry.userActivated)
+  }
 
   function open(label, onBackOrHandlers, onForwardArg) {
     // A new push discards the browser's Forward branch. Retire dormant runtime
@@ -362,11 +392,15 @@ export function makeNav() {
     const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const entry = {
       requestId,
+      userActivated: globalThis.navigator?.userActivation?.isActive === true,
       owned: false,
       active: false,
       done: false,
       disposed: false,
       settled: false,
+      sent: false,
+      waitingForFocus: false,
+      send: null,
       cleanupTimer: null,
       readyResolve: null,
       outcomeResolve: null,
@@ -397,17 +431,7 @@ export function makeNav() {
         entry.readyResolve = null
       }
     }
-    const timer = setTimeout(() => {
-      // Ownership is unknown on timeout: the shell may have installed the
-      // sentinel but its ack may be delayed. Mark the request abandoned and
-      // retain correlation briefly so a late ack can be compensated by pop.
-      entry.done = true
-      settleOutcome('timeout')
-      entry.cleanupTimer = setTimeout(() => {
-        entry.settled = true
-        dispose()
-      }, 30000)
-    }, 5000)
+    let timer = null
 
     const dispose = () => {
       if (entry.disposed) return
@@ -437,10 +461,11 @@ export function makeNav() {
       entry.active = false
       entry.owned = false
       if (!entry.settled) {
-        // Preserve request correlation long enough to compensate a late ack
-        // with nav-pop; disposing now would strand a shell sentinel.
+        // Sent requests retain correlation to compensate a late ack with
+        // nav-pop; unsent requests can be disposed immediately.
         entry.done = true
         settleOutcome('cancelled')
+        if (!entry.sent) dispose()
         return
       }
       // A reversible, settled entry stays dormant so browser Forward can
@@ -461,6 +486,14 @@ export function makeNav() {
         return
       }
       if (msg?.requestId !== requestId) return
+      if (msg.type === 'moebius:nav-push-deferred') {
+        clearTimeout(timer)
+        entry.sent = false
+        entry.waitingForFocus = true
+        if (entry.done) dispose()
+        else if (navigationFocused) flushQueue()
+        return
+      }
       if (msg.type === 'moebius:nav-push-ack') {
         entry.settled = true
         clearTimeout(timer)
@@ -507,22 +540,40 @@ export function makeNav() {
         },
       }
     }
-    try {
-      window.parent.postMessage(
-        {
-          type: 'moebius:nav-push',
-          label: label || 'app-detail',
-          requestId,
-          reversible: entry.reversible,
-        },
-        window.location.origin,
-      )
-    } catch (e) {
-      clearTimeout(timer)
-      entry.settled = true
-      settleOutcome('error')
-      dispose()
+    entry.send = (activated = entry.userActivated) => {
+      if (!navigationReady || (!navigationFocused && entry.waitingForFocus && !activated)
+          || entry.sent || entry.done) return
+      entry.sent = true
+      timer = setTimeout(() => {
+        // Ownership is unknown on timeout: the shell may have installed the
+        // sentinel but its ack may be delayed. Mark the request abandoned and
+        // retain correlation briefly so a late ack can be compensated by pop.
+        entry.done = true
+        settleOutcome('timeout')
+        entry.cleanupTimer = setTimeout(() => {
+          entry.settled = true
+          dispose()
+        }, 30000)
+      }, 5000)
+      try {
+        window.parent.postMessage(
+          {
+            type: 'moebius:nav-push',
+            label: label || 'app-detail',
+            requestId,
+            reversible: entry.reversible,
+            userActivated: activated,
+          },
+          window.location.origin,
+        )
+      } catch (e) {
+        clearTimeout(timer)
+        entry.settled = true
+        settleOutcome('error')
+        dispose()
+      }
     }
+    flushQueue(entry.userActivated)
 
     return {
       ready,
@@ -533,5 +584,27 @@ export function makeNav() {
     }
   }
 
-  return { open }
+  function setLocation(value) {
+    const text = encodeNavLocation(value)
+    // The first report belongs to this document, even if it restored the same
+    // place: the outgoing frame may have reported a newer place during the swap.
+    if (text === locationText && locationReported) return
+    locationText = text
+    if (window.parent === window) return
+    try {
+      window.parent.postMessage(
+        { type: 'moebius:nav-location', location: text },
+        window.location.origin,
+      )
+      locationReported = true
+    } catch (e) {}
+  }
+
+  return {
+    open,
+    setLocation,
+    get location() {
+      return locationText === null ? null : JSON.parse(locationText)
+    },
+  }
 }

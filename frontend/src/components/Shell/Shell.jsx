@@ -1,5 +1,6 @@
 import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListReconciliation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
+import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -29,6 +30,7 @@ import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
+import { useManagedAppEvents } from '../../hooks/useManagedAppEvents.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import {
@@ -2953,8 +2955,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
+  const [subscribeManagedAppEvents, observeManagedAppEvent] = useManagedAppEvents()
+
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
+    observeManagedAppEvent(ev)
     if (ev.type === 'agent_coordination_message') {
       // Mailbox hints refresh owner views without polling a model inbox.
       const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
@@ -3059,6 +3064,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // copy, or a stale one, of a chat archived elsewhere.
       if (ev.chatId) refreshChatRows(ev.chatId)
       void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'chat_visibility_changed') {
+      // Membership comes from the scoped owner read, including an absent row
+      // when a companion hides its chat. Absence is not deletion evidence.
+      if (ev.chatId) refreshChatRows(ev.chatId)
     } else if (ev.type === 'chat_renamed') {
       // The committed event carries the exact changed row fields. Apply those
       // in place so renaming one chat cannot parse and reconcile all hundreds
@@ -3102,7 +3111,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Refresh server truth before warming or placing. app_updated/app_created
       // remain lifecycle refreshes; app_preview_ready is the explicit
       // build-session action that reveals either a new app or an updated one.
-      // `updated_at` drives the iframe live-swap; the chat-artifact query above
+      // `frame_version` drives the iframe live-swap; the chat-artifact query above
       // owns the durable Icon Drop and unread-dot state.
       Promise.all([
         invalidateShellListCache('apps'),
@@ -3315,7 +3324,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
-    markStreamingAcknowledged, markStreamingEnd,
+    markStreamingAcknowledged, markStreamingEnd, observeManagedAppEvent,
     onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
     refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
@@ -4410,6 +4419,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
     // follows the workspace to its recent tab or collapsed sibling; no global demote.
     retireAppHistory(id, 'deleted')
+    clearAppNavLocation(id)
     tombstoneRoute('app', id)
     const sid = String(id)
     dropFromWarmLru(cid => String(cid) === sid)
@@ -4431,9 +4441,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // Wipes an app's stored data back to empty while KEEPING it installed —
   // a separate, additive action from deleteApp (which tombstones the whole
   // app). Lives here, like deleteApp, so it has access to notifyShell and
-  // refreshApps. The app STAYS in the list; refreshApps picks up the bumped
-  // updated_at, which rotates versionForApp's cache-buster so an open iframe
-  // remounts against its now-empty storage — no manual cache eviction.
+  // refreshApps. The app STAYS in the list; refreshApps picks up the new
+  // storage generation in frame_version, which rotates versionForApp's
+  // cache-buster so an open iframe remounts against its now-empty storage —
+  // no manual cache eviction.
   async function deleteAppData(id) {
     let res
     try {
@@ -4455,6 +4466,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // retire the old frame's physical history — its replacement starts with an
     // empty internal nav stack (contract §4.1.5) — and drop any warm-only frame.
     retireAppHistory(id, 'data-reset')
+    clearAppNavLocation(id)
     const sid = String(id)
     dropFromWarmLru(cid => String(cid) === sid)
     clearAppFrameStorage(id)
@@ -4912,10 +4924,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               interactive={appRuntimeVisible
                 && !modalDrawerOpen && !modeBeatActive}
               version={versionForApp(id)}
+              storageGeneration={app?.storage_generation}
               appName={app?.name}
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}
+              subscribeManagedAppEvents={subscribeManagedAppEvents}
               pendingIntent={appIntents[String(id)] || null}
               immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
                 ? immersiveMode

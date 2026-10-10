@@ -118,6 +118,7 @@ from app.chat_writer import (
   wait_ack as _wait_ack,
 )
 from app.config import get_settings
+from app import tracing
 from app.events import (
   blocks_have_renderable_content,
   build_assistant_message,
@@ -657,6 +658,10 @@ async def _record_run_metrics(
   # still measured facts; only a wholly empty result is a true no-op.
   if usage is None and cost_usd is None and provider_session_id is None:
     return
+  tracing.annotate(None, {
+    f"mobius.usage.{key}": value for key, value in (usage or {}).items()
+    if isinstance(value, (int, float)) and not isinstance(value, bool)
+  })
   try:
     await _await_ack(get_writer().submit(RecordRunMetrics(
       chat_id=chat_id,
@@ -716,7 +721,8 @@ async def _recover_wedged_run_strict(
   message: str = "This response could not be saved. You can resume the turn.",
   kind: str | None = None,
   resumable: bool = True,
-) -> None:
+  terminal_status: str = "interrupted",
+) -> bool:
   """Atomically leave a durable interruption marker and close a wedged run.
 
   Callers pass ``message`` (and optionally ``kind``/``resumable``) so the same
@@ -730,9 +736,10 @@ async def _recover_wedged_run_strict(
       chat_id=chat_id,
       run_token=run_token,
       interruption_block=_pause_note(message, kind=kind, resumable=resumable),
+      terminal_status=terminal_status,
     )
   )
-  await _await_ack(ack)
+  return bool(await _await_ack(ack))
 
 
 @dataclass(frozen=True)
@@ -2856,6 +2863,18 @@ def is_chat_running(chat_id: str) -> bool:
   return bc is not None and bc.running
 
 
+def is_chat_busy(
+  db: Session, chat: models.Chat,
+  *, run_statuses: Iterable[str] = models.NONTERMINAL_RUN_STATUSES,
+) -> bool:
+  """Work remains queued, running, or resumable for this chat."""
+  return bool(
+    is_chat_running(chat.id)
+    or chat.pending_messages
+    or run_state.has_run_in(db, chat.id, run_statuses)
+  )
+
+
 def mark_starting(chat_id: str) -> bool:
   """Atomically marks a chat as starting.  Returns False if already active."""
   if is_chat_running(chat_id):
@@ -3410,7 +3429,7 @@ _BROWSER_CLOSE_KILL_GRACE = 1.0
 _BROWSER_CLOSE_KILL_WAIT_TIMEOUT = 1.0
 
 
-async def _close_browser_session(chat_id: str) -> None:
+async def _close_browser_session(chat_id: str) -> bool:
   """Close every agent-browser session created by this chat.
 
   Best-effort: logs cleanup failures without preventing turn completion.
@@ -3420,7 +3439,7 @@ async def _close_browser_session(chat_id: str) -> None:
   Chromium trees would otherwise escape terminal cleanup.
   """
   if not chat_id:
-    return
+    return False
   log = _get_logger()
 
   targets: set[browser_profiles.BrowserSessionTarget] = set()
@@ -3429,7 +3448,7 @@ async def _close_browser_session(chat_id: str) -> None:
     scan = await asyncio.to_thread(browser_profiles.browser_session_targets_for_chat, chat_id)
     targets.update(scan.targets)
     if scan.idle:
-      return
+      return True
     if not scan.complete:
       log.warning(
         "agent-browser session discovery incomplete for chat %s", chat_id,
@@ -3562,10 +3581,12 @@ async def _close_browser_session(chat_id: str) -> None:
         log.info("agent-browser ownership released chat_id=%s", chat_id)
       from app.file_cache import browser_tool_paths, reclaim_file_cache
       await asyncio.to_thread(reclaim_file_cache, browser_tool_paths())
+      return scan is not None and scan.complete
     else:
       log.warning("agent-browser ownership remains unverified chat_id=%s", chat_id)
   except Exception as exc:
     log.warning("agent-browser process cleanup failed chat_id=%s: %s", chat_id, exc)
+  return False
 
 
 # Browser teardown must not hold the queue lock: that lock has independent
@@ -3593,19 +3614,106 @@ async def _close_turn_browser(chat_id: str, run_gen: int | None) -> None:
       and not registry.is_alive(chat_id)
     )
     if owns or stopped:
-      # Shield and JOIN cleanup on cancellation: releasing the gate while a
-      # worker thread still sends signals would endanger the successor.
-      task = asyncio.create_task(_close_browser_session(chat_id))
+      await _join_browser_close(chat_id)
+
+
+async def _join_browser_close(chat_id: str) -> bool:
+  """Run browser teardown to completion; call only under the lifecycle lock.
+
+  Shield and JOIN cleanup on cancellation: releasing the gate while a worker
+  thread still sends signals would endanger the successor.
+  """
+  task = asyncio.create_task(_close_browser_session(chat_id))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    while not task.done():
       try:
         await asyncio.shield(task)
       except asyncio.CancelledError:
-        while not task.done():
-          try:
-            await asyncio.shield(task)
-          except asyncio.CancelledError:
-            continue
-        task.result()
-        raise
+        continue
+    task.result()
+    raise
+
+
+async def reap_unowned_browsers(*, memory_budget_bytes: int | None) -> dict:
+  """Release orphaned chat browsers and enforce the container memory budget.
+
+  A nomination is only a hint. Recheck ownership and measured memory while
+  holding the same lock as turn start; only verified cleanup counts as freed.
+  """
+  log = _get_logger()
+
+  async def measure() -> dict[str, browser_processes.BrowserChatUsage]:
+    return await asyncio.to_thread(browser_processes.browser_usage_by_chat)
+
+  def measured(usage: dict[str, browser_processes.BrowserChatUsage]) -> dict[str, int]:
+    return {chat_id: sample.pss_bytes for chat_id, sample in usage.items()
+            if sample.pss_bytes is not None}
+
+  generation = getattr(registry, 'current_generation', None)
+  usage = await measure()
+  orphans: dict[str, int | None] = {}
+  for chat_id in usage:
+    if registry.is_alive(chat_id):
+      continue
+    nominated_generation = generation(chat_id) if generation else None
+    async with _browser_lifecycle_lock(chat_id):
+      if (registry.is_alive(chat_id)
+          or (generation and generation(chat_id) != nominated_generation)):
+        continue
+      current = await measure()
+      if chat_id not in current:
+        continue
+      before = current[chat_id].pss_bytes
+      closed = await _join_browser_close(chat_id)
+      after = await measure()
+      if closed and chat_id not in after:
+        orphans[chat_id] = before
+        log.warning("agent-browser orphan closed chat_id=%s bytes=%s",
+                    chat_id, before if before is not None else "unknown")
+
+  guarded: dict[str, int] = {}
+  attempted: set[str] = set()
+  while memory_budget_bytes:
+    usage = measured(await measure())
+    if sum(usage.values()) <= memory_budget_bytes:
+      break
+    candidates = sorted(
+      ((chat_id, size) for chat_id, size in usage.items()
+       if chat_id not in attempted), key=lambda item: item[1], reverse=True,
+    )
+    if not candidates:
+      break
+    chat_id, _ = candidates[0]
+    was_alive = registry.is_alive(chat_id)
+    nominated_generation = generation(chat_id) if generation else None
+    async with _browser_lifecycle_lock(chat_id):
+      current = measured(await measure())
+      if sum(current.values()) <= memory_budget_bytes:
+        break
+      current_candidates = sorted(
+        ((owner, size) for owner, size in current.items()
+         if owner not in attempted), key=lambda item: item[1], reverse=True,
+      )
+      # Never let a queued nomination close a successor or a now-smaller chat.
+      if (not current_candidates or current_candidates[0][0] != chat_id
+          or registry.is_alive(chat_id) != was_alive
+          or (generation and generation(chat_id) != nominated_generation)):
+        attempted.add(chat_id)
+        continue
+      before = current.get(chat_id, 0)
+      if before:
+        closed = await _join_browser_close(chat_id)
+        after = await measure()
+        if closed and chat_id not in after:
+          guarded[chat_id] = before
+          log.warning(
+            "agent-browser memory guard closed chat_id=%s bytes=%d budget=%d",
+            chat_id, before, memory_budget_bytes,
+          )
+    attempted.add(chat_id)
+  return {"orphans_closed": orphans, "guard_closed": guarded}
 
 
 async def _terminal_setup_error_cleanup(
@@ -4668,6 +4776,7 @@ async def run_chat(
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
+  setup_failure_settled = False
   try:
     await require_agent_turn_admission(
       get_settings().data_dir,
@@ -4761,30 +4870,44 @@ async def run_chat(
             "(reconciliation will repair)", chat_id, exc_info=True,
           )
     else:
-      bc = get_broadcast(chat_id) if chat_id else None
-      if bc is not None:
-        message = (
-          "This turn failed before the agent could start "
-          f"({type(exc).__name__}). Your message is saved; the full error "
-          "is in the server log."
-        )
-        bc.publish({
-          "type": "error",
-          "message": message,
-        })
-        bc.publish({"type": "done"})
-        bc.mark_completed()
+      # The failure is saved into the transcript, not only broadcast: a live
+      # event alone flashes past and reloads as an unanswered message, leaving
+      # the owner nothing to read or report. Resume retries once it is fixed.
+      message = (
+        "This turn failed before the agent could start "
+        f"({type(exc).__name__}). Your message is saved; "
+        "the full error is in the server log."
+      )
       if chat_id:
-        _publish_chat_run_finished(chat_id)
         try:
-          await _finish_run_strict(
-            chat_id, run_token or "", terminal_status="failed",
+          setup_failure_settled = await _recover_wedged_run_strict(
+            chat_id, run_token or "", message=message,
+            terminal_status="failed",
           )
         except Exception:
           _get_logger().warning(
-            "setup-failure FinishRun did not persist chat_id=%s "
-            "(reconciliation will repair)", chat_id, exc_info=True,
+            "setup-failure error block did not persist chat_id=%s; "
+            "failing the run instead", chat_id, exc_info=True,
           )
+          try:
+            await _finish_run_strict(
+              chat_id, run_token or "", terminal_status="failed",
+            )
+          except Exception:
+            _get_logger().warning(
+              "setup-failure FinishRun did not persist chat_id=%s "
+              "(reconciliation will repair)", chat_id, exc_info=True,
+            )
+      # Persistence may yield to Stop and a successor. The writer fences the
+      # old run's durable changes; fence its live terminal events as well.
+      still_ours = run_gen is None or current_run_generation(chat_id) == run_gen
+      bc = get_broadcast(chat_id) if chat_id else None
+      if bc is not None and still_ours:
+        bc.publish(_pause_note(message))
+        bc.publish({"type": "done"})
+        bc.mark_completed()
+      if chat_id and still_ours:
+        _publish_chat_run_finished(chat_id)
   finally:
     browser_cancelled = None
     sink = get_active_sink(chat_id) if chat_id else None
@@ -4894,7 +5017,10 @@ async def run_chat(
       )
     # Parent progress must not wait on optional summary generation.
     try:
-      if chat_id and disposition in _DELEGATION_SETTLED_DISPOSITIONS:
+      if chat_id and (
+        disposition in _DELEGATION_SETTLED_DISPOSITIONS
+        or setup_failure_settled
+      ):
         from app.delegations import wake_parent_after_child_settled
         await wake_parent_after_child_settled(chat_id)
     except Exception:
@@ -5239,18 +5365,25 @@ async def _run_chat_impl(
   from app.database import SessionLocal
   db = SessionLocal()
   try:
-    return await _run_chat_impl_with_db(
-      messages=messages,
-      chat_id=chat_id,
-      session_id=session_id,
-      provider_id=provider_id,
-      run_gen=run_gen,
-      attachments=attachments,
-      timezone=timezone,
-      viewport=viewport,
-      run_token=run_token,
-      db=db,
-    )
+    with tracing.span("agent.turn", {
+      "mobius.chat_id": chat_id,
+      "mobius.provider": provider_id,
+      "mobius.resumed_session": bool(session_id),
+    }) as turn_span:
+      disposition = await _run_chat_impl_with_db(
+        messages=messages,
+        chat_id=chat_id,
+        session_id=session_id,
+        provider_id=provider_id,
+        run_gen=run_gen,
+        attachments=attachments,
+        timezone=timezone,
+        viewport=viewport,
+        run_token=run_token,
+        db=db,
+      )
+      tracing.annotate(turn_span, {"mobius.disposition": str(disposition)})
+      return disposition
   finally:
     # Several setup paths can raise before reaching their explicit terminal
     # cleanup.  A single outer owner guarantees the request's checkout is

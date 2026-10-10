@@ -30,6 +30,7 @@ from app.delegations import (
   record_result_read_by_parent,
   retry_limit_park,
   serialize_delegation,
+  serialize_delegation_list,
 )
 from app.deps import Principal, get_delegation_principal, reject_cross_site
 from app.resource_access import get_active_chat_or_404
@@ -398,11 +399,7 @@ def list_delegations(
   if parent_chat_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == parent_chat_id)
   rows = query.order_by(models.Delegation.created_at.desc()).offset(offset).limit(limit).all()
-  return {
-    "items": [
-      serialize_delegation(db, row, include_result=False) for row in rows
-    ]
-  }
+  return {"items": serialize_delegation_list(db, rows)}
 
 
 @router.get("/{delegation_id}")

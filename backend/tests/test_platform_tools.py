@@ -371,6 +371,51 @@ def test_goal_report_supplies_completion_keys_without_bloating_progress_updates(
   assert "test:verified" not in settled
 
 
+def test_a_compile_refusal_carries_its_diagnostic_not_just_that_it_failed():
+  control = _control_module()
+  body = json.dumps({"detail": {
+    "code": "compile_failed", "message": "Compilation failed.",
+    "stderr": "[PARSE_ERROR] Unexpected token\n   ╭─[ index.jsx:2:47 ]",
+  }})
+
+  reason = control._refusal_message(body)
+
+  assert reason.startswith("Compilation failed.\n[PARSE_ERROR] Unexpected token")
+  assert "index.jsx:2:47" in reason
+
+
+def test_a_long_compile_refusal_survives_the_http_error_body_read(monkeypatch):
+  import io
+  import urllib.error
+
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://backend.test")
+  monkeypatch.setenv("AGENT_TOKEN", "t")
+  stderr = "\n".join(f"[UNRESOLVED_IMPORT] missing-{i} at index.jsx:{i}:1" for i in range(150))
+  assert len(stderr) > 4000
+  body = json.dumps({"detail": {
+    "code": "compile_failed", "message": "Compilation failed.", "stderr": stderr,
+  }}).encode()
+
+  def refuse(request, timeout=None):
+    raise urllib.error.HTTPError(request.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
+
+  monkeypatch.setattr(control, "urlopen", refuse)
+  with pytest.raises(RuntimeError) as caught:
+    control._agent_api_json("POST", "/api/apps/x/apply")
+
+  text = str(caught.value)
+  assert text.startswith("Refused (422): Compilation failed.\n[UNRESOLVED_IMPORT] missing-0")
+  assert not text.lstrip("Refused (422): ").startswith("{")
+  assert len(text) < 5200
+
+
+def test_only_a_compile_refusal_appends_stderr():
+  control = _control_module()
+  body = json.dumps({"detail": {"code": "other", "message": "Nope.", "stderr": "secret"}})
+  assert control._refusal_message(body) == "Nope."
+
+
 def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):
   control = _control_module()
   monkeypatch.setenv("CHAT_ID", "chat-1")

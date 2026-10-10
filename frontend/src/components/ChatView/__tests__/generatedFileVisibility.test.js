@@ -30,11 +30,15 @@ const { default: DocumentAttachment, markdownCardExcerpt } = await vite.ssrLoadM
 const { default: AssistantReply } = await vite.ssrLoadModule(
   '/src/components/ChatView/AssistantReply.jsx',
 )
+const { assistantReplyGroups } = await vite.ssrLoadModule(
+  '/src/components/ChatView/assistantReplies.js',
+)
 
 after(() => vite.close())
 
 const generatedMessage = {
   role: 'assistant',
+  id: 'assistant-file',
   content: '',
   blocks: [{
     type: 'generated_files',
@@ -269,7 +273,7 @@ for (const isStreaming of [true, false]) {
       status: 'done', input: '', output: '',
     }
     const html = renderToStaticMarkup(createElement(AssistantReply, {
-      replyGroup: { rows: [{ message: generatedMessage, key: 'assistant-file', anchorKey: 'assistant-file', notes: [] }] },
+      replyGroup: assistantReplyGroups([generatedMessage]).get(0),
       activeMirrorMsg: { ...generatedMessage, blocks: [peer, ...rawBlocks] },
       activitySourceBlocks: rawBlocks,
       useDbActivePayload: false,

@@ -26,12 +26,6 @@ export function readStandaloneBoot(doc = globalThis.document) {
   }
 }
 
-export function standaloneAppVersion(app) {
-  return typeof app?.updated_at === 'string' && app.updated_at
-    ? app.updated_at
-    : '0'
-}
-
 export function initiallyOpenStandaloneInstallCard({
   installState, forceOpen = false, dismissed = false,
 }) {

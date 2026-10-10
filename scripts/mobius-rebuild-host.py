@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -48,13 +51,19 @@ REQUEST_VERSIONS = [1, 2]
 # each requested official image only when this number is higher than every
 # worker it has run. Increase it with every change to this file; never lower
 # it. The launcher reads it as text, so keep it a plain literal on one line.
-WORKER_REVISION = 2
+WORKER_REVISION = 10
 # The frozen launcher runs the worker selected here; see offer_worker().
 WORKERS = STATE_DIR / "workers"
 WORKER_INDEX = STATE_DIR / "workers.json"
 WORKER_IN_IMAGE = "/app/platform-baked/scripts/mobius-rebuild-host.py"
 MAX_WORKER_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 4096
+COMPOSE_MUTATION_SECONDS = 300
+TARGET_HEALTH_SECONDS = 600
+ROLLBACK_HEALTH_SECONDS = 600
+FAILED_TARGET_LOG = STATE_DIR / "failed-target.json"
+FAILED_TARGET_LOG_BYTES = 32 * 1024
+FAILED_TARGET_LOG_SECONDS = 5
 _REVISION_LINE = re.compile(rb"^WORKER_REVISION\s*=.*$", re.MULTILINE)
 _REVISION_EXACT = re.compile(rb"^WORKER_REVISION = ([1-9][0-9]{0,5})$")
 
@@ -171,6 +180,8 @@ def write_status(config_value: dict, **fields) -> dict:
         current.update(read_json(STATUS))
     except (OSError, ValueError, json.JSONDecodeError):
         pass
+    if "operation_id" in fields and fields["operation_id"] != current.get("operation_id"):
+        current.update(failure_code=None, failure_detail=None, evidence_capture=None)
     current.update(fields)
     current["handoff"] = HANDOFF_VERSION
     current["request_versions"] = REQUEST_VERSIONS
@@ -184,21 +195,138 @@ def write_status(config_value: dict, **fields) -> dict:
     return current
 
 
+def docker_command(args: list[str], *, timeout: float = 10, check: bool = True,
+                   **kwargs) -> subprocess.CompletedProcess:
+    """Bound Docker and its Compose plugin, including inherited output pipes."""
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(args, timeout)
+    # Files, not pipes: a surviving descendant cannot keep communicate() open.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        with subprocess.Popen(args, stdout=out, stderr=err,
+                              start_new_session=True, **kwargs) as process:
+            try:
+                process.wait(timeout=timeout)
+            except BaseException:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                raise
+            out.seek(0)
+            err.seek(0)
+            result = subprocess.CompletedProcess(
+                args, process.returncode, out.read().decode(errors="replace"),
+                err.read().decode(errors="replace"),
+            )
+    if check:
+        result.check_returncode()
+    return result
+
+
+def _bounded_docker_logs(cid: str) -> tuple[bytes, bytes, bool, bool]:
+    """Keep at most one small prefix of each Docker output stream in total.
+
+    Pipes are drained only until the byte or wall-clock limit; the process
+    group is then killed, including a Docker CLI descendant holding a pipe.
+    A timed-out prefix is still useful evidence, but is always incomplete.
+    """
+    args = ["docker", "logs", "--timestamps", "--tail", "1000", cid]
+    out, err = bytearray(), bytearray()
+    deadline = time.monotonic() + FAILED_TARGET_LOG_SECONDS
+    truncated = False
+    timed_out = False
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    completed = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            for pipe, sink in ((process.stdout, out), (process.stderr, err)):
+                selector.register(pipe, selectors.EVENT_READ, sink)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready = selector.select(remaining)
+                if not ready:
+                    timed_out = True
+                    break
+                for key, _ in ready:
+                    budget = FAILED_TARGET_LOG_BYTES - len(out) - len(err)
+                    if budget <= 0:
+                        truncated = True
+                        break
+                    chunk = os.read(key.fd, min(4096, budget + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        key.data.extend(chunk[:budget])
+                        if len(chunk) > budget or len(out) + len(err) >= FAILED_TARGET_LOG_BYTES:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+        if timed_out or truncated or process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=1)
+        completed = True
+        if process.returncode and not (truncated or timed_out):
+            raise subprocess.CalledProcessError(process.returncode, args)
+        return bytes(out), bytes(err), truncated or timed_out, timed_out
+    finally:
+        if not completed:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=1)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def capture_failed_target(operation: str, cid: str, image: str) -> str:
+    """Best-effort, root-private evidence for this journaled target only."""
+    if not CONTAINER_RE.fullmatch(cid):
+        return "failed"
+    try:
+        try:
+            previous = (read_json(FAILED_TARGET_LOG)
+                        if FAILED_TARGET_LOG.stat().st_size <= 128 * 1024 else {})
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get("operation_id") == operation and previous.get("container_id") == cid:
+            return "saved"  # interrupted rollback replay must not erase evidence
+        stdout, stderr, truncated, timed_out = _bounded_docker_logs(cid)
+        _atomic_json(FAILED_TARGET_LOG, {
+            "operation_id": operation, "container_id": cid, "target_image": image[:128],
+            "captured_at": now(), "truncated": truncated, "timed_out": timed_out,
+            "stdout_b64": base64.b64encode(stdout).decode("ascii"),
+            "stderr_b64": base64.b64encode(stderr).decode("ascii"),
+        })
+        return "saved"
+    except Exception:
+        return "failed"
+
+
 def compose(config_value: dict, *args: str, image: str | None = None,
-            check: bool = True) -> subprocess.CompletedProcess:
+            check: bool = True, timeout: float = 30) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["MOBIUS_IMAGE"] = image or IMAGE
-    return subprocess.run(
+    return docker_command(
         ["docker", "compose", "-p", config_value["project"],
          "-f", str(COMPOSE), "-f", str(OVERRIDE), *args],
-        cwd=CONFIG.parent, env=env, text=True, capture_output=True, check=check,
+        cwd=CONFIG.parent, env=env, check=check, timeout=timeout,
     )
 
 
 def inspect_image(image: str, template: str) -> str:
-    result = subprocess.run(
+    result = docker_command(
         ["docker", "image", "inspect", "--format", template, image],
-        text=True, capture_output=True, check=True,
+        timeout=30,
     )
     return result.stdout.strip()
 
@@ -208,63 +336,121 @@ def app_container(config_value: dict) -> tuple[str, str]:
     cid = result.stdout.strip()
     if not cid:
         raise RuntimeError("the recorded Möbius app container is not running")
-    inspected = subprocess.run(
+    inspected = docker_command(
         ["docker", "container", "inspect", "--format", "{{.Image}}", cid],
-        text=True, capture_output=True, check=True,
+        timeout=30,
     )
     return cid, inspected.stdout.strip()
 
 
 
 
-def wait_healthy(config_value: dict, timeout: int = 180) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = compose(config_value, "ps", "-q", "app", check=False)
-        cid = result.stdout.strip()
-        if cid:
-            probe = subprocess.run(
+def container_health(config_value: dict, timeout: float = 10) -> tuple[str, str, str]:
+    """Re-discover after a stale ID; errors never mean the container is absent.
+
+    Compose can delete/rename containers between discovery and inspect. Retry
+    the whole observation, within the same two-query budget, not the old ID.
+    Multiple candidates are ambiguous until Compose finishes its mutation.
+    """
+    deadline = time.monotonic() + 2 * timeout
+    for attempt in range(3):
+        try:
+            budget = min(timeout, max(0, deadline - time.monotonic()) / 2)
+            if budget <= 0:
+                raise subprocess.TimeoutExpired("Docker container observation", 2 * timeout)
+            result = compose(config_value, "ps", "-a", "-q", "app", timeout=budget)
+            ids = result.stdout.split()
+            if not ids:
+                return "", "", "missing"
+            if len(ids) != 1:
+                raise ValueError("Compose app container identity is ambiguous")
+            cid = ids[0]
+            probe = docker_command(
                 ["docker", "container", "inspect", "--format",
-                 "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", cid],
-                text=True, capture_output=True,
+                 "{{.Image}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", cid],
+                check=True, timeout=min(timeout, max(0, deadline - time.monotonic())),
             )
-            if probe.returncode == 0 and probe.stdout.strip() == "healthy":
+            image, state, *health = probe.stdout.strip().split()
+            return cid, image, (health[0] if state == "running" and health else state)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if attempt == 2 or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
+def wait_healthy(config_value: dict, timeout: int = TARGET_HEALTH_SECONDS) -> bool:
+    """False means not serviceable within budget, not proof of a crashed boot."""
+    deadline = time.monotonic() + timeout
+    probe_failed = False
+    while time.monotonic() < deadline:
+        try:
+            _cid, _image, health = container_health(
+                config_value, timeout=min(10, max(0, deadline - time.monotonic()) / 2),
+            )
+            probe_failed = False
+            if health == "healthy":
                 return True
-        time.sleep(3)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # A transient daemon/Compose query error is not a failed boot.
+            probe_failed = True
+        time.sleep(min(3, max(0, deadline - time.monotonic())))
+    if probe_failed:
+        raise subprocess.TimeoutExpired("Docker health observation", timeout)
     return False
+
+
+class ProvenanceRejected(RuntimeError):
+    """A well-formed observation proves the served image is not acceptable."""
+
+
+class ProvenanceUnconfirmed(RuntimeError):
+    """The served image could not be proved either correct or incorrect."""
 
 
 def verify_served_generation(cid: str, expected_sha: str) -> None:
     """Prove the running container serves the requested immutable image."""
-    result = subprocess.run(
-        ["docker", "exec", cid, "curl", "-fsS",
-         "http://127.0.0.1:8000/api/version"],
-        text=True, capture_output=True,
-    )
+    try:
+        result = docker_command(
+            ["docker", "exec", cid, "curl", "-fsS",
+             "http://127.0.0.1:8000/api/version"],
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ProvenanceUnconfirmed("build provenance could not be observed") from exc
     if result.returncode != 0:
-        raise RuntimeError("the container did not expose build provenance")
+        raise ProvenanceUnconfirmed("build provenance could not be observed")
     try:
         version = json.loads(result.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("the container returned invalid build provenance") from exc
-    if not isinstance(version, dict) or version.get("sha") != expected_sha:
-        raise RuntimeError("the container is not serving the requested image revision")
-    mounts = subprocess.run(
-        ["docker", "container", "inspect", "--format", "{{json .Mounts}}", cid],
-        text=True, capture_output=True, check=True,
-    )
+        raise ProvenanceUnconfirmed("the container returned invalid build provenance") from exc
+    if (not isinstance(version, dict) or not isinstance(version.get("sha"), str)
+            or not SHA_RE.fullmatch(version["sha"])):
+        raise ProvenanceUnconfirmed("the container returned invalid build provenance")
+    if version["sha"] != expected_sha:
+        raise ProvenanceRejected("the container is not serving the requested image revision")
+    try:
+        mounts = docker_command(
+            ["docker", "container", "inspect", "--format", "{{json .Mounts}}", cid],
+            check=True,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ProvenanceUnconfirmed("mount provenance could not be observed") from exc
     try:
         mounted = json.loads(mounts.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("the container returned invalid mount provenance") from exc
+        raise ProvenanceUnconfirmed("the container returned invalid mount provenance") from exc
+    if not isinstance(mounted, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("Destination"), str)
+            for item in mounted):
+        raise ProvenanceUnconfirmed("the container returned invalid mount provenance")
     if any(item.get("Destination") == "/app/runtime" for item in mounted):
-        raise RuntimeError("the container is not using the image's protected runtime")
+        raise ProvenanceRejected("the container is not using the image's protected runtime")
 
 
 def _docker_root() -> Path:
-    result = subprocess.run(
+    result = docker_command(
         ["docker", "info", "--format", "{{.DockerRootDir}}"],
-        text=True, capture_output=True, check=True,
+        timeout=30,
     )
     return Path(result.stdout.strip())
 
@@ -282,11 +468,16 @@ def require_pull_space(current_image: str) -> None:
 def restart_ledger(config_value: dict, cid: str, command: str,
                    operation: str, *, image: str | None = None) -> bool:
     """Run one root ledger command, even when the app is crash-looping."""
+    if command == "rearm-cutover":
+        # Recovery must work even with no runnable container. A timed-out
+        # `docker run` can leave a helper mutating the ledger after its caller
+        # has moved on; rearm synchronously on the host under replace.lock.
+        return rearm_rollback(config_value, operation)
     invocation = ["python3", "-P", "/app/runtime/restart_ledger.py",
                   command, operation]
-    result = subprocess.run(
+    result = docker_command(
         ["docker", "exec", cid, *invocation],
-        text=True, capture_output=True,
+        check=False,
     )
     if result.returncode == 0:
         return True
@@ -295,22 +486,114 @@ def restart_ledger(config_value: dict, cid: str, command: str,
     # A failed replacement may not stay alive long enough for docker exec.
     # The prior verified image carries the same frozen helper; mount only the
     # persistent data root and run no entrypoint or application code.
-    result = subprocess.run(
+    result = docker_command(
         ["docker", "run", "--rm", "--mount",
          f"type=bind,src={config_value['data_dir']},dst=/data",
          "--entrypoint", "python3", image, *invocation[1:]],
-        text=True, capture_output=True,
+        check=False,
     )
     return result.returncode == 0
+
+
+def rearm_rollback(config_value: dict, operation: str, *,
+                   trusted_uid: int = 0, trusted_gid: int = 0,
+                   witness_only: bool = False) -> bool | str:
+    """Rearm v1 only before the journaled rollback container's first start.
+
+    This also refreshes an unconsumed acceptance: the old frozen helper left
+    accepted_at unchanged, so a slow replacement could expire before rollback.
+    The original root receipt still expires after one hour. Missing evidence
+    never grants continuation and cannot be repaired by inventing an ack.
+    """
+    directory = None
+    temporary = f".accepted-{uuid.uuid4().hex}.tmp"
+    try:
+        directory = os.open(config_value["data_dir"] / ".restart-ledger",
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(directory)
+        if info.st_uid != trusted_uid or info.st_gid != trusted_gid or info.st_mode & 0o022:
+            return False
+
+        def read(name: str):
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            except FileNotFoundError:
+                return None
+            try:
+                item = os.fstat(fd)
+                if (not stat.S_ISREG(item.st_mode) or item.st_size > 65536
+                        or item.st_uid != trusted_uid or item.st_gid != trusted_gid
+                        or item.st_mode & 0o022):
+                    raise ValueError("untrusted cutover evidence")
+                raw = os.read(fd, 65537)
+                if len(raw) > 65536:
+                    raise ValueError("oversized cutover evidence")
+                return raw.decode().strip() if name == "boot-id" else json.loads(raw)
+            finally:
+                os.close(fd)
+
+        receipt, boot = read("cutover-receipt.json"), read("boot-id")
+        token = re.compile(r"[A-Za-z0-9._:-]{8,160}")
+        valid = lambda value: isinstance(value, str) and bool(token.fullmatch(value))
+        current = time.time()
+        if (not isinstance(receipt, dict) or receipt.get("version") != 1
+                or receipt.get("action") != "external_cutover"
+                or receipt.get("cutover_id") != operation
+                or not valid(receipt.get("nonce")) or not valid(receipt.get("source_boot_id"))
+                or not valid(boot)
+                or not 0 <= current - float(receipt.get("accepted_at", 0)) + 5 <= 3605):
+            return False
+        accepted, ack = read("accepted.json"), read("ack.json")
+
+        def matches(value):
+            return (isinstance(value, dict) and value.get("version") == 1
+                    and value.get("action") == "external_cutover"
+                    and value.get("cutover_id") == operation
+                    and value.get("nonce") == receipt["nonce"])
+
+        if accepted is not None:
+            if not matches(accepted) or accepted.get("source_boot_id") != boot:
+                return False
+        elif not matches(ack) or ack.get("target_boot_id") != boot:
+            return False
+        if witness_only:
+            # Docker can lose its started metadata on power failure after a
+            # process booted. Its 'created' state alone is NOT proof that the
+            # one-shot ledger authorization remains unconsumed.
+            after = (config_value["data_dir"] / ".restart-ledger").lstat()
+            if accepted is None or (after.st_dev, after.st_ino) != (info.st_dev, info.st_ino):
+                return False
+            return hashlib.sha256(json.dumps([boot, accepted], sort_keys=True).encode()).hexdigest()
+        payload = json.dumps({**receipt, "source_boot_id": boot,
+                              "accepted_at": current}, separators=(",", ":")).encode()
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, "accepted.json", src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+        after = (config_value["data_dir"] / ".restart-ledger").lstat()
+        return (after.st_dev, after.st_ino) == (info.st_dev, info.st_ino)
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return False
+    finally:
+        if directory is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            os.close(directory)
 
 
 def request_drain(config_value: dict, operation: str, cid: str) -> None:
     if not restart_ledger(config_value, cid, "open-cutover", operation):
         raise RuntimeError("the running image does not support safe Host cutover")
-    result = subprocess.run(
+    result = docker_command(
         ["docker", "exec", cid, "python3",
          "/data/platform/backend/scripts/prepare-container-cutover.py", operation],
-        text=True, capture_output=True,
+        check=False, timeout=90,
     )
     if result.returncode != 0:
         raise RuntimeError("the running server could not complete a safe chat drain")
@@ -346,7 +629,7 @@ def record_pulled_image(target_ref: str) -> None:
 
 def discard_pulled_image(target_ref: str) -> None:
     state = _image_state()
-    subprocess.run(["docker", "image", "rm", target_ref], capture_output=True, text=True)
+    docker_command(["docker", "image", "rm", target_ref], check=False, timeout=30)
     _atomic_json(IMAGES, {
         **state,
         "sha_refs": [ref for ref in state["sha_refs"] if ref != target_ref],
@@ -355,16 +638,14 @@ def discard_pulled_image(target_ref: str) -> None:
 
 def retain_images(target_ref: str, rollback_image_id: str | None = None) -> None:
     state = _image_state()
-    for ref in state["sha_refs"]:
-        if ref != target_ref:
-            subprocess.run(["docker", "image", "rm", ref], capture_output=True, text=True)
+    obsolete = [ref for ref in state["sha_refs"] if ref != target_ref]
     old_rollback = state["rollback_image_id"]
     if old_rollback and old_rollback != rollback_image_id:
-        # Non-force removal fails harmlessly if another tag or container still
-        # owns the image; the helper never removes unrelated references.
-        subprocess.run(
-            ["docker", "image", "rm", old_rollback], capture_output=True, text=True,
-        )
+        obsolete.append(old_rollback)
+    if obsolete:
+        # One bounded, non-force removal; references still used by containers
+        # fail harmlessly. Never remove images outside our recorded references.
+        docker_command(["docker", "image", "rm", *obsolete], check=False)
     _atomic_json(IMAGES, {
         "sha_refs": [target_ref],
         "rollback_tag": ROLLBACK_TAG,
@@ -372,27 +653,143 @@ def retain_images(target_ref: str, rollback_image_id: str | None = None) -> None
     })
 
 
+def never_started(cid: str, image: str) -> bool:
+    """A created container is retryable only before its first actual boot."""
+    result = docker_command(["docker", "container", "inspect", "--format",
+                             "{{json .}}", cid])
+    item = json.loads(result.stdout)
+    if not isinstance(item, dict) or not isinstance(item.get("State"), dict):
+        raise ValueError("invalid Docker container state")
+    state = item["State"]
+    return (item.get("Id") == cid and item.get("Image") == image
+            and state.get("Status") == "created"
+            and state.get("StartedAt") == "0001-01-01T00:00:00Z"
+            and item.get("RestartCount") == 0)
+
+
+def prepare_rollback(config_value: dict, transaction: dict) -> None:
+    """Create without booting; persist the exact identity before authorizing it.
+
+    The outer phase deliberately remains rollback_started so an older proven
+    worker invoked by the launcher cannot replay an interrupted candidate's
+    rollback. Only this worker understands the retryable preboot subphases.
+    """
+    previous = transaction["previous_image"]
+    if transaction.get("rollback_stage") == "creating":
+        existing, current, _health = container_health(config_value)
+        if current and current not in {previous, transaction.get("target_image")}:
+            raise RuntimeError("rollback cannot replace an unrecognized image")
+        if current == previous and not never_started(existing, previous):
+            raise RuntimeError("a previous-image boot already exists; creation cannot be replayed")
+        compose(config_value, "up", "--no-start", "--no-build", "--no-deps",
+                "--force-recreate", "app", image=previous,
+                timeout=COMPOSE_MUTATION_SECONDS)
+        cid, current, health = container_health(config_value)
+        if current != previous or health != "created" or not never_started(cid, previous):
+            raise RuntimeError("rollback creation did not produce one unstarted previous-image container")
+        transaction.update(rollback_stage="prepared", rollback_container=cid)
+        write_transaction(transaction)
+    cid = transaction["rollback_container"]
+    if not never_started(cid, previous):
+        return  # a boot may have started; observation, never rearm, owns it
+    first_start = False
+    if transaction.get("rollback_stage") == "prepared":
+        transaction["handoff_rearmed"] = restart_ledger(
+            config_value, cid, "rearm-cutover", transaction["operation_id"], image=previous,
+        )
+        transaction["rollback_authorization"] = rearm_rollback(
+            config_value, transaction["operation_id"], witness_only=True,
+        )
+        # Journal BEFORE starting; a lost response may mean the boot consumed
+        # its authorization. Only a never-started container can retry start.
+        transaction["rollback_stage"] = "starting"
+        write_transaction(transaction)
+        first_start = True
+    witness = transaction.get("rollback_authorization")
+    can_retry = witness and witness == rearm_rollback(
+        config_value, transaction["operation_id"], witness_only=True,
+    )
+    if never_started(cid, previous) and (first_start or can_retry):
+        docker_command(["docker", "start", cid], timeout=COMPOSE_MUTATION_SECONDS)
+
+
 def rollback(config_value: dict, operation: str, expected: str,
              code: str, detail: str, previous_image: str | None = None) -> int:
     """Restore the previous container; a settled outcome retires the
     transaction, while needs_recovery keeps it for the next reconcile.
 
-    With ``previous_image``, the restore counts only when the healthy
-    container runs exactly that image ID."""
+    Only this operation's journal can authorize a restore. The healthy
+    container must run its recorded previous image, never a mutable tag."""
+    transaction = read_transaction()
+    if (transaction is None or transaction["operation_id"] != operation
+            or transaction["expected_sha"] != expected
+            or (previous_image is not None and previous_image != transaction["previous_image"])):
+        raise RuntimeError("rollback does not own the replacement transaction")
+    if transaction.get("outcome"):
+        # A failed status write/unlink after settlement is not a failed boot.
+        write_status(config_value, **transaction["outcome"])
+        clear_transaction()
+        return 0 if transaction["outcome"]["state"] == "succeeded" else 1
+    previous_image = transaction["previous_image"]
+    code = transaction.get("failure_code", code)
+    detail = transaction.get("failure_detail", detail)
+    transaction.update(failure_code=code, failure_detail=detail)
+    write_transaction(transaction)
     write_status(config_value, operation_id=operation, state="verifying",
-                 expected_sha=expected, code=code,
+                 expected_sha=expected, request_nonce=transaction.get("request_nonce"),
+                 code=code,
                  message="Replacement failed; restoring the previous container.")
-    try:
-        cid, _current = app_container(config_value)
-    except Exception:
-        cid = ""
-    handoff_rearmed = restart_ledger(
-        config_value, cid, "rearm-cutover", operation, image=ROLLBACK_TAG,
-    )
-    compose(config_value, "up", "-d", "--no-build", "--no-deps",
-            "--force-recreate", "app", image=ROLLBACK_TAG)
-    if wait_healthy(config_value, 120):
-        cid, current = app_container(config_value)
+    cid, current, health = container_health(config_value)
+    observing = current == previous_image and health in {"healthy", "starting", "unhealthy", "running", "restarting"}
+    if observing and transaction.get("phase") == "replacement_started":
+        # A timed-out daemon request may still be stopping this source. It is
+        # not a rollback boot: marking rollback_started here would strand the
+        # target if the delayed mutation removes the source after this probe.
+        write_status(config_value, state="needs_recovery", code="source_still_running",
+                     message="The source container is still running; waiting for the interrupted replacement to settle.")
+        return 1
+    if not observing:
+        if current and current not in {previous_image, transaction.get("target_image")}:
+            write_status(config_value, state="needs_recovery", code="rollback_wrong_image",
+                         message=f"An unrecognized image is running. Original failure: {detail}"[:300])
+            return 1
+        if transaction.get("phase") == "rollback_started":
+            if transaction.get("rollback_stage") in {"creating", "prepared", "starting"}:
+                if transaction.get("rollback_stage") != "creating" and cid != transaction.get("rollback_container"):
+                    raise RuntimeError("the journaled rollback container is missing or changed")
+                prepare_rollback(config_value, transaction)
+            elif current == previous_image and health == "created" and never_started(cid, previous_image):
+                # Legacy Compose timed out after creation but before start.
+                # Its rearm may already have happened; never repeat it here.
+                witness = rearm_rollback(config_value, operation, witness_only=True)
+                transaction.update(rollback_container=cid, rollback_stage="starting",
+                                   rollback_authorization=witness)
+                write_transaction(transaction)
+                prepare_rollback(config_value, transaction)
+            else:
+                # The rollback may already have consumed its exact receipt.
+                write_status(config_value, state="needs_recovery", code="rollback_failed",
+                             message=f"Rollback is not serviceable: {detail}"[:300])
+                return 1
+        else:
+            # Capture the exact failed target before no-start creation removes it.
+            if current == transaction.get("target_image") and cid:
+                evidence = capture_failed_target(operation, cid, current)
+                try:
+                    write_status(config_value, evidence_capture=evidence)
+                except OSError:
+                    pass
+            docker_command(["docker", "tag", previous_image, ROLLBACK_TAG])
+            transaction.update(phase="rollback_started", rollback_stage="creating")
+            write_transaction(transaction)
+            prepare_rollback(config_value, transaction)
+    else:
+        # Also adopts an old worker's already-running rollback without
+        # replaying rearm or replacing a container that is making progress.
+        transaction["phase"] = "rollback_started"
+        write_transaction(transaction)
+    if wait_healthy(config_value, ROLLBACK_HEALTH_SECONDS):
+        cid, current, health = container_health(config_value)
         if previous_image and current != previous_image:
             write_status(
                 config_value, operation_id=operation, state="needs_recovery",
@@ -401,35 +798,17 @@ def rollback(config_value: dict, operation: str, expected: str,
                          f"image. Original failure: {detail}")[:300],
             )
             return 1
-        handoff_finalized = restart_ledger(
-            config_value, cid, "finalize-cutover", operation,
-            image=ROLLBACK_TAG,
-        )
-        if handoff_finalized:
-            status_code = code
-            message = f"The previous container was restored: {detail}"
-        elif not handoff_rearmed:
-            status_code = "handoff_rearm_failed"
-            message = (
-                "The previous container was restored, but exact active-chat "
-                "continuation could not be re-armed; affected chats may need "
-                f"manual Resume. Original failure: {detail}"
-            )
-        else:
-            status_code = "handoff_finalize_failed"
-            message = (
-                "The previous container was restored, but the Host could not "
-                "verify and retire the exact chat handoff receipt. Check the "
-                f"affected chats. Original failure: {detail}"
-            )
-        clear_transaction()
-        write_status(config_value, operation_id=operation, state="rolled_back",
-                     expected_sha=expected, code=status_code,
-                     message=message[:300])
+        if health != "healthy":
+            write_status(config_value, state="needs_recovery", code="rollback_failed",
+                         message=f"Rollback health changed. Original failure: {detail}"[:300])
+            return 1
+        finish_verified(config_value, transaction, cid, previous_image,
+                        state="rolled_back", code=code,
+                        message=f"The previous container was restored: {detail}")
         return 1
     write_status(config_value, operation_id=operation, state="needs_recovery",
                  expected_sha=expected, code="rollback_failed",
-                 message=f"Replacement and rollback failed: {detail}"[:300])
+                 message=f"Rollback is not yet healthy. Original failure: {detail}"[:300])
     return 1
 
 
@@ -526,8 +905,11 @@ def offer_worker(source: bytes, origin: str) -> str:
 
 
 def seed_worker(source: bytes) -> str:
-    """Install this trusted checkout's worker as the active one, unless a
-    newer worker was already adopted (reinstalling never downgrades)."""
+    """Activate trusted checkout bytes without downgrading or retrying a trial.
+
+    A still-pending exact candidate has never been tried: the launcher removes
+    it before a trial. Only that candidate may be activated at high_water.
+    """
     revision, refusal = _checked(source)
     if refusal:
         return refusal
@@ -537,14 +919,36 @@ def seed_worker(source: bytes) -> str:
     except FileNotFoundError:
         index = {"version": 1, "high_water": 0, "active": None, "candidate": None}
     digest = hashlib.sha256(source).hexdigest()
-    if (index.get("active") or {}).get("sha256") == digest:
+    active = index.get("active") or {}
+    candidate = index.get("candidate") or {}
+    high_water = int(index.get("high_water", 0))
+    if active.get("sha256") == digest:
         return f"current: revision {revision}"
-    if revision <= int(index.get("high_water", 0)) and index.get("active"):
-        return f"kept: a newer worker (revision {index['high_water']}) is installed"
+    if int(active.get("revision", 0)) > revision:
+        return f"kept: a newer worker (revision {active['revision']}) is installed"
+    pending_exact = (
+        revision == high_water
+        and candidate.get("revision") == revision
+        and candidate.get("sha256") == digest
+    )
+    if revision <= high_water and not pending_exact:
+        return (f"rejected: revision {revision} was already tried or superseded; "
+                "install a higher worker revision")
     entry = _worker_entry(source, revision, "checkout")
-    _publish_index({**index, "high_water": revision, "active": entry,
+    _publish_index({**index, "high_water": max(high_water, revision), "active": entry,
                     "candidate": None})
     return f"installed: revision {revision}"
+
+
+def adopt_self() -> int:
+    """The installer's locked seed operation; success means a usable active worker."""
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with LOCK.open("a+") as lock:
+        if os.environ.get("MOBIUS_REBUILD_LOCK_HELD") != "1":
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        outcome = seed_worker(Path(__file__).read_bytes())
+    print(outcome)
+    return 0 if outcome.startswith(("installed:", "current:", "kept:")) else 1
 
 
 def _bounded_output(args: list[str], limit: int, timeout: float = 300) -> bytes:
@@ -586,20 +990,19 @@ def worker_from_image(image_id: str) -> bytes:
     import io
     import tarfile
 
-    created = subprocess.run(
+    created = docker_command(
         ["docker", "create", "--network", "none", "--entrypoint", "/bin/false",
          "--label", "mobius-rebuild.worker-extract=1", image_id],
-        text=True, capture_output=True, check=True, timeout=300,
+        check=True, timeout=30,
     )
     cid = created.stdout.strip()
     try:
         archive = _bounded_output(
             ["docker", "cp", f"{cid}:{WORKER_IN_IMAGE}", "-"],
-            MAX_WORKER_BYTES + 64 * 1024,
+            MAX_WORKER_BYTES + 64 * 1024, timeout=30,
         )
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", cid], capture_output=True,
-                       text=True, timeout=300)
+        docker_command(["docker", "rm", "-f", "-v", cid], check=False, timeout=30)
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
             members = tar.getmembers()
@@ -737,14 +1140,14 @@ def run() -> int:
     image_ref = None
     pulled_recorded = False
     replacement_started = False
+    replacement_verified = False
     lock = LOCK.open("a+")
     try:
         acquire_lock(lock)
     except BlockingIOError:
         lock.close()
-        write_status(config_value, operation_id=operation, state="failed",
-                     expected_sha=expected, code="already_running",
-                     message="Another container rebuild is already running.")
+        # The lock owner owns the shared status too. Leave both its operation
+        # and this still-queued request untouched.
         return 1
     # Everything below, including rollback and transaction settlement after
     # a failure, runs under the lock the installer and reconcile also take.
@@ -790,8 +1193,7 @@ def run() -> int:
             write_status(config_value, operation_id=operation, state="preparing",
                          expected_sha=expected, code=None,
                          message="Downloading and checking the official image.")
-            subprocess.run(["docker", "pull", image_ref], check=True,
-                           text=True, capture_output=True)
+            docker_command(["docker", "pull", image_ref], timeout=3600)
             record_pulled_image(image_ref)
             pulled_recorded = True
             # Bind everything that follows to the exact image this pull
@@ -809,7 +1211,7 @@ def run() -> int:
             if previous == digest:
                 try:
                     verify_served_generation(cid, expected)
-                except RuntimeError as exc:
+                except ProvenanceRejected as exc:
                     write_status(
                         config_value, operation_id=operation, state="failed",
                         expected_sha=expected, code="provenance_failed",
@@ -824,8 +1226,7 @@ def run() -> int:
                     worker_adoption=adopt_from_image(digest),
                 )
                 return 0
-            subprocess.run(["docker", "tag", previous, ROLLBACK_TAG], check=True,
-                           text=True, capture_output=True)
+            docker_command(["docker", "tag", previous, ROLLBACK_TAG], timeout=30)
             transaction = transaction_record(operation, expected, nonce,
                                              previous, digest)
             # From here an interruption can leave chats drained or the app
@@ -836,53 +1237,64 @@ def run() -> int:
                          expected_sha=expected, code=None,
                          message="Rebuilding the container.")
             replacement_started = True
-            subprocess.run(["docker", "tag", digest, TARGET_TAG], check=True,
-                           text=True, capture_output=True)
+            transaction["phase"] = "replacement_started"
+            write_transaction(transaction)
+            docker_command(["docker", "tag", digest, TARGET_TAG], timeout=30)
             compose(config_value, "up", "-d", "--no-build", "--no-deps",
-                    "--force-recreate", "app", image=TARGET_TAG)
+                    "--force-recreate", "app", image=TARGET_TAG,
+                    timeout=COMPOSE_MUTATION_SECONDS)
             write_status(config_value, operation_id=operation, state="verifying",
                          expected_sha=expected, message="Checking the new container.")
             if not wait_healthy(config_value):
                 result = rollback(
                     config_value, operation, expected,
-                    "health_check_failed", "the new container was unhealthy",
+                    "readiness_budget_exhausted",
+                    "the new container was not serviceable within the readiness budget",
                     previous,
                 )
-                discard_pulled_image(image_ref)
+                try:
+                    discard_pulled_image(image_ref)
+                except Exception:
+                    pass  # image cleanup cannot overturn a settled service outcome
                 return result
             cid, current = app_container(config_value)
             if current != digest:
                 raise RuntimeError("the new container does not run the verified image")
             verify_served_generation(cid, expected)
-            handoff_finalized = restart_ledger(
-                config_value, cid, "finalize-cutover", operation,
-                image=digest,
-            )
-            retain_images(image_ref, previous)
-            if handoff_finalized:
-                status_code = None
-                message = "Container rebuilt successfully."
-            else:
-                status_code = "handoff_finalize_failed"
-                message = (
-                    "Container rebuilt successfully, but the Host could not "
-                    "verify and retire the exact chat handoff receipt. Check "
-                    "the affected chats."
-                )
-            clear_transaction()
-            write_status(config_value, operation_id=operation, state="succeeded",
-                         expected_sha=expected, code=status_code,
-                         message=message,
-                         worker_adoption=adopt_from_image(digest))
-            return 0
+            replacement_verified = True
+            settled = finish_verified(config_value, transaction, cid, digest,
+                                      state="succeeded", code=None,
+                                      message="Container rebuilt successfully.")
+            return 0 if settled else 1
+        except ProvenanceUnconfirmed:
+            write_status(config_value, operation_id=operation,
+                         state="needs_recovery" if TRANSACTION.exists() else "failed",
+                         expected_sha=expected, code="observation_unconfirmed",
+                         message="Target provenance could not be observed; no outcome was inferred.")
+            return 1
+        except subprocess.TimeoutExpired:
+            if replacement_started:
+                write_status(config_value, state="needs_recovery", code="observation_timed_out",
+                             message="Docker did not finish in time; the replacement remains recoverable.")
+                return 1
+            write_status(config_value, state="needs_recovery" if TRANSACTION.exists() else "failed",
+                         code="observation_timed_out", message="Docker did not finish in time.")
+            return 1
         except Exception as exc:
             detail = str(exc)[:300]
+            if replacement_verified:
+                write_status(config_value, state="needs_recovery", code="outcome_record_failed",
+                             message="The replacement was verified; its outcome could not be published.")
+                return 1
             if replacement_started and previous and expected:
                 try:
                     result = rollback(config_value, operation, expected,
                                       "replacement_failed", detail, previous)
                     if image_ref and pulled_recorded:
-                        discard_pulled_image(image_ref)
+                        try:
+                            discard_pulled_image(image_ref)
+                        except Exception:
+                            pass  # never retry rollback for optional image cleanup
                     return result
                 except Exception as rollback_exc:
                     detail = f"{detail}; rollback failed: {str(rollback_exc)[:160]}"
@@ -890,10 +1302,17 @@ def run() -> int:
                                  state="needs_recovery", expected_sha=expected,
                                  code="rollback_failed", message=detail[:300])
                     return 1
+            if TRANSACTION.exists():
+                # Drain may have accepted a one-shot boot authorization even
+                # when its response (or the following status write) failed.
+                # The source still running does not prove cancellation; keep
+                # recovery ownership without pretending replacement started.
+                write_status(config_value, operation_id=operation,
+                             state="needs_recovery", expected_sha=expected,
+                             code="replacement_failed", message=detail)
+                return 1
             if image_ref and pulled_recorded:
                 discard_pulled_image(image_ref)
-            # A failure before replacement leaves the running app in place.
-            clear_transaction()
             write_status(config_value, operation_id=operation, state="failed",
                          expected_sha=expected, code="replacement_failed", message=detail)
             return 1
@@ -921,6 +1340,137 @@ def write_transaction(value: dict) -> None:
     )
 
 
+def cutover_boot_consumed(config_value: dict, operation: str, *,
+                          trusted_uid: int = 0, trusted_gid: int = 0) -> bool:
+    """Read-only proof that this boot consumed the exact cutover authorization.
+
+    A receipt alone is inert, but accepted.json can authorize a future boot.
+    Never settle an ambiguous source boot merely because its image is healthy.
+    """
+    path = config_value["data_dir"] / ".restart-ledger"
+    directory = None
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(directory)
+        if (info.st_uid != trusted_uid or info.st_gid != trusted_gid
+                or info.st_mode & 0o022):
+            return False
+
+        def read(name: str) -> bytes:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                item = os.fstat(fd)
+                if (not stat.S_ISREG(item.st_mode) or item.st_size > 65536
+                        or item.st_uid != trusted_uid or item.st_gid != trusted_gid
+                        or item.st_mode & 0o022):
+                    raise ValueError("untrusted cutover evidence")
+                raw = os.read(fd, 65537)
+                if len(raw) > 65536:
+                    raise ValueError("oversized cutover evidence")
+                return raw
+            finally:
+                os.close(fd)
+
+        def accepted_absent() -> bool:
+            try:
+                os.stat("accepted.json", dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            return False
+
+        if not accepted_absent():
+            return False
+        boot = read("boot-id").decode().strip()
+        ack = json.loads(read("ack.json"))
+        token = r"[A-Za-z0-9._:-]{8,160}"
+        if (not isinstance(ack, dict) or ack.get("version") != 1
+                or ack.get("action") != "external_cutover"
+                or ack.get("cutover_id") != operation
+                or ack.get("target_boot_id") != boot
+                or not re.fullmatch(token, boot)
+                or not isinstance(ack.get("nonce"), str)
+                or not re.fullmatch(token, ack["nonce"])
+                or not isinstance(ack.get("source_boot_id"), str)
+                or not re.fullmatch(token, ack["source_boot_id"])
+                or ack.get("source_boot_id") == boot):
+            return False
+        receipt_absent = False
+        try:
+            receipt = json.loads(read("cutover-receipt.json"))
+        except FileNotFoundError:
+            receipt_absent = True  # a prior finalize may already have retired it
+            receipt = None
+        if not receipt_absent and (
+                not isinstance(receipt, dict) or receipt.get("version") != 1
+                or receipt.get("action") != "external_cutover"
+                or receipt.get("cutover_id") != operation
+                or receipt.get("nonce") != ack["nonce"]):
+            return False
+        after = path.lstat()
+        return (accepted_absent() and read("boot-id").decode().strip() == boot
+                and (after.st_dev, after.st_ino) == (info.st_dev, info.st_ino))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    finally:
+        if directory is not None:
+            os.close(directory)
+
+
+def finish_verified(config_value: dict, transaction: dict, cid: str, image: str,
+                    *, state: str, code: str | None, message: str) -> bool:
+    """Commit service success before receipt retirement or optional housekeeping.
+
+    Finalization and the journal cannot be atomic together. A crash in between
+    therefore replays an honest degraded outcome, never authorizes another boot.
+    """
+    if not cutover_boot_consumed(config_value, transaction["operation_id"]):
+        write_status(config_value, state="needs_recovery", code="handoff_boot_unconfirmed",
+                     message="The container is healthy, but this boot has not proven consumption of "
+                             "the exact handoff. Keep the transaction for manual Host recovery.")
+        return False
+    transaction["outcome"] = {
+        "state": state, "code": "handoff_finalize_unconfirmed",
+        "message": ("Exact chat handoff finalization is unconfirmed; check affected chats; "
+                    f"manual Resume may be needed. {message}")[:300],
+        "operation_id": transaction["operation_id"],
+        "expected_sha": transaction["expected_sha"],
+        "request_nonce": transaction.get("request_nonce"),
+        "failure_code": transaction.get("failure_code"),
+        "failure_detail": transaction.get("failure_detail"),
+    }
+    write_transaction(transaction)
+    try:
+        finalized = restart_ledger(config_value, cid, "finalize-cutover",
+                                   transaction["operation_id"], image=image)
+    except Exception:
+        finalized = False
+    if finalized:
+        transaction["outcome"].update(code=code, message=message[:300])
+        write_transaction(transaction)
+    if state == "succeeded":
+        # These are best-effort after the service outcome is durable. Their
+        # failure cannot turn an already verified replacement into a rollback.
+        try:
+            retain_images(f"{IMAGE}:sha-{transaction['expected_sha']}",
+                          transaction["previous_image"])
+            transaction["outcome"]["worker_adoption"] = adopt_from_image(image)
+        except Exception:
+            transaction["outcome"]["worker_adoption"] = "not adopted: image housekeeping failed"
+    settle_transaction(config_value, transaction, **transaction["outcome"])
+    return True
+
+
+def settle_transaction(config_value: dict, transaction: dict, **outcome) -> None:
+    transaction["outcome"] = {
+        **outcome, "operation_id": transaction["operation_id"],
+        "expected_sha": transaction["expected_sha"],
+        "request_nonce": transaction.get("request_nonce"),
+    }
+    write_transaction(transaction)
+    write_status(config_value, **transaction["outcome"])
+    clear_transaction()
+
+
 def clear_transaction() -> None:
     TRANSACTION.unlink(missing_ok=True)
     _fsync_dir(TRANSACTION.parent)
@@ -941,44 +1491,82 @@ def read_transaction() -> dict | None:
 
 
 def recover(config_value: dict, transaction: dict) -> None:
-    """Restore the previous container a worker left mid-replacement, so the
-    app can request the update again."""
+    """Settle this operation, observing an existing boot rather than replaying it."""
     operation = transaction["operation_id"]
     expected = transaction["expected_sha"]
     fields = {"request_nonce": transaction.get("request_nonce")}
+    # Older workers kept the failure only in status. Adopt it only when it
+    # belongs to this journal, never from a later queued request.
+    if "failure_code" not in transaction:
+        try:
+            status = read_json(STATUS)
+        except (OSError, ValueError):
+            status = {}
+        if status.get("operation_id") == operation and status.get("state") == "needs_recovery":
+            transaction.update(failure_code=status.get("code") or "worker_interrupted",
+                               failure_detail=status.get("message") or "the replacement worker stopped")
+            write_transaction(transaction)
     write_status(config_value, operation_id=operation, state="verifying",
-                 expected_sha=expected, code=None, **fields,
+                 expected_sha=expected, code=transaction.get("failure_code"), **fields,
                  message="Recovering an interrupted replacement.")
-    # Restore exactly the journaled previous image, whatever the tag says now.
-    previous = str(transaction.get("previous_image") or "")
-    try:
-        if not previous.startswith("sha256:"):
-            raise RuntimeError("no recorded previous image")
-        subprocess.run(["docker", "tag", previous, ROLLBACK_TAG], check=True,
-                       text=True, capture_output=True, timeout=60)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        write_status(
-            config_value, operation_id=operation, state="needs_recovery",
-            expected_sha=expected, code="rollback_failed", **fields,
-            message="The interrupted replacement could not select the "
-                    "recorded previous image to restore.",
-        )
+    # A completed worker can be interrupted between publishing its outcome
+    # and removing the journal. Reconciliation must not undo that success.
+    outcome = transaction.get("outcome")
+    if outcome:
+        write_status(config_value, **outcome)
+        clear_transaction()
         return
-    rollback(config_value, operation, expected, "worker_interrupted",
-             "the replacement worker stopped before it finished", previous)
+    previous = transaction["previous_image"]
+    try:
+        cid, current, health = container_health(config_value)
+        if transaction.get("phase") != "rollback_started" and current == transaction.get("target_image"):
+            if health in {"starting", "unhealthy", "running", "restarting"}:
+                if wait_healthy(config_value):
+                    cid, current, health = container_health(config_value)
+                else:
+                    rollback(config_value, operation, expected,
+                             "readiness_budget_exhausted",
+                             "the interrupted replacement was not serviceable within the readiness budget",
+                             previous)
+                    return
+            if health == "healthy" and current == transaction["target_image"]:
+                try:
+                    verify_served_generation(cid, expected)
+                except ProvenanceRejected as exc:
+                    rollback(config_value, operation, expected,
+                             "replacement_failed", str(exc)[:300], previous)
+                    return
+                except (ProvenanceUnconfirmed, OSError, ValueError, subprocess.SubprocessError):
+                    write_status(config_value, operation_id=operation,
+                                 state="needs_recovery", expected_sha=expected,
+                                 code="observation_unconfirmed", **fields,
+                                 message="Target provenance could not be observed; recovery is still needed.")
+                    return
+                finish_verified(config_value, transaction, cid, current,
+                                state="succeeded", code=None,
+                                message="Container rebuilt successfully.")
+                return
+        rollback(config_value, operation, expected, "worker_interrupted",
+                 "the replacement worker stopped before it finished", previous)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        write_status(config_value, operation_id=operation, state="needs_recovery",
+                     expected_sha=expected, code="rollback_failed", **fields,
+                     message=f"Recovery could not finish: {str(exc)[:200]}")
 
 
 def reconcile() -> int:
     config_value = config()
-    try:
-        current = read_json(STATUS)
-    except (OSError, ValueError, json.JSONDecodeError):
-        current = None
     with LOCK.open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        # Status and the journal belong to the lock owner. A previous owner
+        # may have settled and cleared the journal before we acquired it.
+        try:
+            current = read_json(STATUS)
+        except (OSError, ValueError, json.JSONDecodeError):
+            current = None
         # A hard power loss can strand the already-claimed request before or
         # after the first status write. Once no worker owns the lock, it is no
         # longer runnable and must not accumulate in the root-controlled area.
@@ -988,14 +1576,14 @@ def reconcile() -> int:
         # Extraction containers are never started; one left by a killed
         # worker only holds a reference to its image.
         try:
-            leftovers = subprocess.run(
+            leftovers = docker_command(
                 ["docker", "ps", "-aq", "--filter",
                  "label=mobius-rebuild.worker-extract=1"],
-                text=True, capture_output=True, timeout=60,
+                check=False, timeout=5,
             ).stdout.split()
             if leftovers:
-                subprocess.run(["docker", "rm", "-f", "-v", *leftovers],
-                               text=True, capture_output=True, timeout=120)
+                docker_command(["docker", "rm", "-f", "-v", *leftovers],
+                               check=False, timeout=5)
         except (OSError, subprocess.SubprocessError):
             pass  # best effort; reconcile's real work follows
         transaction = read_transaction()
@@ -1020,15 +1608,8 @@ if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "reconcile" and os.geteuid() == 0:
         raise SystemExit(reconcile())
     if len(sys.argv) == 2 and sys.argv[1] == "adopt-self" and os.geteuid() == 0:
-        # The installer seeds the launcher with this trusted checkout's worker.
-        STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # The installer holds the replacement lock for its whole installation
-        # and says so; otherwise take it here.
-        with LOCK.open("a+") as lock:
-            if os.environ.get("MOBIUS_REBUILD_LOCK_HELD") != "1":
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            outcome = seed_worker(Path(__file__).read_bytes())
-        print(outcome)
-        raise SystemExit(1 if outcome.startswith("rejected") else 0)
+        # The installer holds the replacement lock for its whole installation;
+        # a standalone invocation takes it inside adopt_self().
+        raise SystemExit(adopt_self())
     print("invalid invocation", file=sys.stderr)
     raise SystemExit(2)

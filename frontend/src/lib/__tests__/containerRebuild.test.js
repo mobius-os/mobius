@@ -51,6 +51,9 @@ test('container rebuild polling survives transient status failures', () => {
   assert.equal(rebuildPollShouldContinue({ state: 'replacing' }), true)
   assert.equal(rebuildPollShouldContinue({ state: 'succeeded' }), false)
   assert.equal(rebuildPollShouldContinue({ state: 'failed' }), false)
+  // Unresolved host ownership is not a running phase: do not spin forever.
+  assert.equal(rebuildPollShouldContinue({ state: 'needs_recovery' }), false)
+  assert.equal(rebuildRequestOutcome({ state: 'needs_recovery' }).terminalFailure, true)
 })
 
 test('container rebuild progress copy stays factual', () => {
@@ -60,7 +63,7 @@ test('container rebuild progress copy stays factual', () => {
   )
   assert.equal(
     rebuildProgressMessage({ state: 'needs_recovery' }),
-    'Möbius could not return to the previous version. Use Recovery in your deployment.',
+    'The replacement needs recovery before another update can start. Check Recovery in your deployment.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'no_change', release_source: 'applied' }),

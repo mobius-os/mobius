@@ -152,7 +152,7 @@ async def fetch_public_url(
       upstream.headers["host"] = host_header
       upstream.extensions["sni_hostname"] = sni_host
       response = await _capped_response(
-        client, upstream, cache_headers=forward_upstream_cache_headers,
+        client, upstream, url, cache_headers=forward_upstream_cache_headers,
       )
   except Exception:
     _record_usage(

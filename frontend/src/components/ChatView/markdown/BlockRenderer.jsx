@@ -6,6 +6,7 @@ import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
 import { appLinkCardFromParagraph } from './appLinkCard.js'
+import { markdownRangeTokens } from './steerMarkdownRange.js'
 import '../markdown.css'
 
 /**
@@ -30,6 +31,7 @@ function tokenize(text) {
  */
 export function ProgressiveMarkdown({
   text,
+  markdownRange,
   isStreaming = false,
   onInternalNav,
   mediaDimensions,
@@ -40,8 +42,8 @@ export function ProgressiveMarkdown({
   // a report can tell "streaming is expensive" from "the transcript is
   // expensive" - those have different fixes.
   const tokens = useMemo(
-    () => groupMarkdownImages(tokenize(text)),
-    [text],
+    () => groupMarkdownImages(markdownRange ? markdownRangeTokens(markdownRange) : tokenize(text)),
+    [text, markdownRange],
   )
 
   return (
@@ -96,6 +98,7 @@ export function ProgressiveMarkdown({
  */
 export function StandardMarkdown({
   text,
+  markdownRange,
   renderFraction,
   onInternalNav,
   mediaDimensions,
@@ -106,8 +109,8 @@ export function StandardMarkdown({
   // message, which the probe surfaces as a burst of calls with no stream
   // running.
   const tokens = useMemo(
-    () => groupMarkdownImages(tokenize(text)),
-    [text],
+    () => groupMarkdownImages(markdownRange ? markdownRangeTokens(markdownRange) : tokenize(text)),
+    [text, markdownRange],
   )
   const fraction = Number(renderFraction)
   const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1

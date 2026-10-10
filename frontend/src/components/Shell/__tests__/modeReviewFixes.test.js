@@ -205,7 +205,7 @@ test('finding 8: appOwnerPaneId returns the synthetic single-world owner for a s
   assert.match(nav, /const appOwnerPaneId = useCallback/)
   assert.match(nav, /return paneModel\.SINGLE_SLOT_PANE/)
   assert.match(nav, /const ownerPaneId = appOwnerPaneId\(ws, appId\)/)
-  assert.match(nav, /if \(ownerPaneId !== paneModel\.SINGLE_SLOT_PANE\) \{\s*\n\s*dispatchWorkspace\(\{ type: 'FOCUS', paneId: ownerPaneId \}\)/)
+  assert.match(nav, /if \(navMeta\.userActivated !== false && ownerPaneId !== paneModel\.SINGLE_SLOT_PANE\) \{\s*\n\s*dispatchWorkspace\(\{ type: 'FOCUS', paneId: ownerPaneId \}\)/)
   assert.equal(paneModel.SINGLE_SLOT_PANE, '__single__')
 })
 

@@ -59,13 +59,19 @@ test('events during a scoped read wait for exactly one follow-up read', async ()
   assert.deepEqual(h.reads.map(read => read.ids), [['a'], ['a', 'c']])
 })
 
-test('a complete read already in flight turns the batch into a fresh complete read', async () => {
-  const h = harness({ fullReadInFlight: () => true })
+test('a complete read in flight defers the batch until it lands, never starting another', async () => {
+  let inFlight = true
+  const h = harness({ fullReadInFlight: () => inFlight })
   h.refresh.request('a')
   h.fireTimer()
   await h.settle()
   assert.equal(h.reads.length, 0)
-  assert.equal(h.refreshedAll, 1)
+  assert.equal(h.refreshedAll, 0, 'replacing it would pile up server list builds')
+  assert.equal(h.timers.length, 1, 'the batch retries after the next interval')
+  h.refresh.request('b')
+  inFlight = false
+  h.fireTimer()
+  assert.deepEqual(h.reads.map(read => read.ids), [['a', 'b']])
 })
 
 test('a complete read that starts and lands during the scoped read supersedes it', async () => {

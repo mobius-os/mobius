@@ -9,7 +9,8 @@ owner or an app-scoped token.
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -23,7 +24,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.deps import authorize_current_owner_or_app_detached, reject_cross_site
-from app.net_utils import validate_url_safe
+from app.net_utils import MAX_REDIRECTS as _MAX_REDIRECTS, validate_url_safe
 from app.pinned_http_clients import PinnedHostClientPool
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
@@ -36,7 +37,8 @@ router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 # convention as _FAVICON_USER_AGENT below.
 _PROXY_USER_AGENT = "Mobius/1.0 (app proxy; +https://github.com/mobius-os/mobius)"
 
-# Hard limit on response size to avoid pulling in huge payloads.
+# Hard limit on response size to avoid pulling in huge payloads. The general
+# proxy preserves its original behavior of returning the first 2 MiB.
 _MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 # httpx's timeout applies to each network read, so a drip-fed body could hold a
 # pooled slot for as long as it keeps sending; this bounds the whole exchange.
@@ -158,7 +160,6 @@ async def close_proxy_clients() -> None:
 # and ordinary root icons share one SSRF-safe loading path.
 _FAVICON_MAX_BYTES = 256 * 1024
 _FAVICON_PAGE_MAX_BYTES = 512 * 1024
-_FAVICON_MAX_REDIRECTS = 5
 _FAVICON_LINK_LIMIT = 8
 _FAVICON_USER_AGENT = "Mobius/1.0 (reference favicon fetch)"
 _FAVICON_CONTENT_TYPES = frozenset((
@@ -188,6 +189,7 @@ class _ExternalRead:
   content_type: str
   final_url: str
   truncated: bool
+  forwarded_headers: dict[str, str] = field(default_factory=dict)
 
 
 class _FaviconLinkParser(HTMLParser):
@@ -259,10 +261,38 @@ def _canonical_root_icon_urls(page_url: str) -> list[str]:
   ]
 
 
+def _fetch_error(url: str, exc: httpx.RequestError) -> HTTPException:
+  if isinstance(exc, httpx.TimeoutException):
+    return HTTPException(504, f"Timeout fetching {url}")
+  return HTTPException(502, f"Failed to fetch {url}: {exc}")
+
+
+async def _read_bounded_body(
+  upstream: httpx.Response, max_bytes: int, url: str,
+) -> bytes:
+  """Return a bounded prefix without waiting for EOF, classifying stream failures."""
+  body = bytearray()
+  try:
+    async for chunk in upstream.aiter_bytes():
+      room = max_bytes - len(body)
+      if room <= 0:
+        break
+      body.extend(chunk[:room])
+      if len(body) >= max_bytes:
+        break
+  except httpx.RequestError as exc:
+    raise _fetch_error(url, exc) from exc
+  return bytes(body)
+
+
 async def _read_external_get(
-  client: httpx.AsyncClient,
+  client: httpx.AsyncClient | PinnedHostClientPool,
   url: str,
   max_bytes: int,
+  *,
+  headers: dict[str, str] | None = None,
+  probe_truncation: bool = True,
+  cache_headers: ResponseCacheHeaders | None = None,
 ) -> _ExternalRead:
   """Read one public URL with a byte cap and SSRF-safe redirect handling.
 
@@ -271,62 +301,63 @@ async def _read_external_get(
   container network after only the first host passed validation.
   """
   current_url = url
-  for hop in range(_FAVICON_MAX_REDIRECTS + 1):
+  for hop in range(_MAX_REDIRECTS + 1):
     pinned_url, host_header, sni_host = await asyncio.to_thread(
       validate_url_safe, current_url,
     )
-    req = client.build_request(
-      "GET",
-      pinned_url,
-      headers={
-        "Accept": "image/*,text/html;q=0.8,*/*;q=0.1",
-        "User-Agent": _FAVICON_USER_AGENT,
-      },
+    lease = (
+      client.lease(host_header, sni_host)
+      if isinstance(client, PinnedHostClientPool) else nullcontext(client)
     )
-    req.headers["host"] = host_header
-    req.extensions["sni_hostname"] = sni_host
-    try:
-      upstream = await client.send(req, stream=True)
-    except httpx.TimeoutException:
-      raise HTTPException(504, f"Timeout fetching {current_url}")
-    except httpx.RequestError as exc:
-      raise HTTPException(502, f"Failed to fetch {current_url}: {exc}")
-    try:
-      if upstream.status_code in _REDIRECT_STATUSES:
-        location = upstream.headers.get("location")
-        if not location:
-          raise HTTPException(
-            502, f"Redirect from {current_url} missing Location header.",
-          )
-        if hop >= _FAVICON_MAX_REDIRECTS:
-          raise HTTPException(
-            502,
-            f"Too many redirects (>{_FAVICON_MAX_REDIRECTS}) "
-            f"starting from {url}",
-          )
-        current_url = urljoin(current_url, location)
-        continue
-
-      body = bytearray()
-      async for chunk in upstream.aiter_bytes():
-        room = max_bytes + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > max_bytes:
-          break
-      return _ExternalRead(
-        body=bytes(body[:max_bytes]),
-        status_code=upstream.status_code,
-        content_type=upstream.headers.get(
-          "content-type", "application/octet-stream",
-        ),
-        final_url=current_url,
-        truncated=len(body) > max_bytes,
+    async with lease as hop_client:
+      req = hop_client.build_request(
+        "GET",
+        pinned_url,
+        headers=headers if headers is not None else {
+          "Accept": "image/*,text/html;q=0.8,*/*;q=0.1",
+          "User-Agent": _FAVICON_USER_AGENT,
+        },
       )
-    finally:
-      await upstream.aclose()
-  raise HTTPException(502, "Favicon redirect resolution failed.")
+      req.headers["host"] = host_header
+      req.extensions["sni_hostname"] = sni_host
+      try:
+        upstream = await hop_client.send(req, stream=True)
+      except httpx.RequestError as exc:
+        raise _fetch_error(current_url, exc) from exc
+      try:
+        if upstream.status_code in _REDIRECT_STATUSES:
+          location = upstream.headers.get("location")
+          if not location:
+            raise HTTPException(
+              502, f"Redirect from {current_url} missing Location header.",
+            )
+          if hop >= _MAX_REDIRECTS:
+            raise HTTPException(
+              502,
+              f"Too many redirects (>{_MAX_REDIRECTS}) "
+              f"starting from {url}",
+            )
+          current_url = urljoin(current_url, location)
+          continue
+
+        body = await _read_bounded_body(
+          upstream, max_bytes + int(probe_truncation), current_url,
+        )
+        return _ExternalRead(
+          body=body[:max_bytes],
+          status_code=upstream.status_code,
+          content_type=upstream.headers.get(
+            "content-type", "application/octet-stream",
+          ),
+          final_url=current_url,
+          truncated=len(body) > max_bytes,
+          forwarded_headers=_response_headers(
+            upstream, len(body) >= max_bytes, cache_headers,
+          ),
+        )
+      finally:
+        await upstream.aclose()
+  raise HTTPException(502, "Redirect resolution failed.")
 
 
 async def _first_supported_icon(
@@ -351,61 +382,64 @@ async def _first_supported_icon(
   return None
 
 
-async def _capped_response(
-  client: httpx.AsyncClient,
-  req: httpx.Request,
-  *,
-  cache_headers: ResponseCacheHeaders | None = None,
-) -> Response:
-  """Sends `req` streaming and reads at most `_MAX_BYTES` into memory. The prior
-  code read the FULL body (`r.content`) before slicing, so a huge or malicious
-  upstream response could exhaust process memory before the cap ever applied.
-  This stops at the cap and drops the rest, and gives up with a 504 once the
-  exchange passes `_EXCHANGE_DEADLINE`, which releases the caller's pool slot."""
-  try:
-    async with asyncio.timeout(_EXCHANGE_DEADLINE):
-      try:
-        r = await client.send(req, stream=True)
-      except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-      try:
-        buf = bytearray()
-        capped = False
-        async for chunk in r.aiter_bytes():
-          # Append only up to the cap so the buffer is STRICTLY bounded by
-          # _MAX_BYTES (extending the whole chunk first could overshoot by a
-          # chunk's worth).
-          room = _MAX_BYTES - len(buf)
-          buf.extend(chunk[:room])
-          if len(buf) >= _MAX_BYTES:
-            capped = True
-            break
-      finally:
-        await r.aclose()
-  except TimeoutError:
-    raise HTTPException(
-      status_code=504,
-      detail=f"Upstream did not finish within {_EXCHANGE_DEADLINE} seconds.",
-    ) from None
+def _response_headers(
+  upstream: httpx.Response,
+  capped: bool,
+  cache_headers: ResponseCacheHeaders | None,
+) -> dict[str, str]:
   headers = {
-    name: r.headers[name]
+    name: upstream.headers[name]
     for name in _FORWARDED_RESPONSE_HEADERS
-    if name in r.headers
+    if name in upstream.headers
   }
   if cache_headers is not None:
-    headers.update(cache_headers(r))
-    if capped and r.status_code == 200:
-      # The body may be only a prefix of the upstream representation. Never
-      # attach its full-body validators or freshness to those bytes.
+    headers.update(cache_headers(upstream))
+    if capped and upstream.status_code == 200:
+      # A bounded prefix must never carry full-body validators or freshness.
       for name in ("etag", "last-modified", "expires"):
         headers.pop(name, None)
       headers["cache-control"] = "no-store"
-  return Response(
-    content=bytes(buf),
-    status_code=r.status_code,
-    headers=headers,
-    media_type=r.headers.get("content-type", "application/octet-stream"),
-  )
+  return headers
+
+
+async def _capped_response(
+  client: httpx.AsyncClient,
+  req: httpx.Request,
+  url: str,
+  *,
+  cache_headers: ResponseCacheHeaders | None = None,
+) -> Response:
+  """Read a bounded prefix within one exchange deadline.
+
+  Errors name the caller's URL, not the DNS-pinned request address. Reaching
+  the cap stops immediately, even if the upstream then stalls without EOF.
+  """
+  try:
+    async with asyncio.timeout(_EXCHANGE_DEADLINE):
+      try:
+        upstream = await client.send(req, stream=True)
+      except httpx.RequestError as exc:
+        raise _fetch_error(url, exc) from exc
+      except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+      try:
+        body = await _read_bounded_body(upstream, _MAX_BYTES, url)
+        return Response(
+          content=body,
+          status_code=upstream.status_code,
+          headers=_response_headers(
+            upstream, len(body) >= _MAX_BYTES, cache_headers,
+          ),
+          media_type=upstream.headers.get(
+            "content-type", "application/octet-stream",
+          ),
+        )
+      finally:
+        await upstream.aclose()
+  except TimeoutError:
+    raise HTTPException(
+      504, f"Upstream did not finish within {_EXCHANGE_DEADLINE} seconds.",
+    ) from None
 
 
 @router.get("/favicon")
@@ -473,26 +507,30 @@ async def proxy_get(
   the SSRF allow/deny checks below, so the mutation-oriented CSRF dependency is
   intentionally not applied here. The POST proxy remains guarded.
 
-  Map tiles and documents are re-read often, so upstream freshness and
-  validators reach the caller's browser as private cache headers, and the
-  browser's own revalidation headers reach upstream to earn a cheap 304.
+  Redirects are independently validated and pinned like app install. Each
+  hop leases its own Host/SNI client; only the final response contributes
+  private cache metadata and the browser's validators reach upstream.
   """
-  pinned_url, host_header, sni_host = await asyncio.to_thread(
-    validate_url_safe, url,
+  headers = {"User-Agent": _PROXY_USER_AGENT}
+  for name in _FORWARDED_CONDITIONAL_HEADERS:
+    if name in request.headers:
+      headers[name] = request.headers[name]
+  try:
+    async with asyncio.timeout(_EXCHANGE_DEADLINE):
+      read = await _read_external_get(
+        _proxy_clients, url, _MAX_BYTES, headers=headers,
+        probe_truncation=False, cache_headers=private_browser_cache_headers,
+      )
+  except TimeoutError:
+    raise HTTPException(
+      504, f"Upstream did not finish within {_EXCHANGE_DEADLINE} seconds.",
+    ) from None
+  return Response(
+    content=read.body,
+    status_code=read.status_code,
+    headers=read.forwarded_headers,
+    media_type=read.content_type,
   )
-  async with _proxy_clients.lease(host_header, sni_host) as client:
-    req = client.build_request("GET", pinned_url)
-    req.headers["host"] = host_header
-    req.headers["user-agent"] = _PROXY_USER_AGENT
-    for name in _FORWARDED_CONDITIONAL_HEADERS:
-      if name in request.headers:
-        req.headers[name] = request.headers[name]
-    # httpcore/anyio require text here. Bytes reach idna2008_resolve(), which
-    # calls .encode() itself and turns every real HTTPS proxy request into 502.
-    req.extensions["sni_hostname"] = sni_host
-    return await _capped_response(
-      client, req, cache_headers=private_browser_cache_headers,
-    )
 
 
 @router.post("", dependencies=[Depends(reject_cross_site)])
@@ -515,4 +553,4 @@ async def proxy_post(
     req.headers["host"] = host_header
     req.headers["user-agent"] = _PROXY_USER_AGENT
     req.extensions["sni_hostname"] = sni_host
-    return await _capped_response(client, req)
+    return await _capped_response(client, req, body.url)

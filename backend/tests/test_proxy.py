@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import Response
 
 from app.net_utils import validate_url_safe
@@ -20,8 +20,18 @@ from app.routes.proxy import (
   _capped_response,
   _declared_favicon_urls,
   _read_external_get,
+  forward_upstream_cache_headers,
 )
 from test_app_fixtures import create_local_app
+
+
+@pytest.fixture(autouse=True)
+def isolated_proxy_pool(monkeypatch):
+  from app.pinned_http_clients import PinnedHostClientPool
+  pool = PinnedHostClientPool()
+  monkeypatch.setattr("app.routes.proxy._proxy_clients", pool)
+  yield
+  asyncio.run(pool.close())
 
 
 # ---------------------------------------------------------------------------
@@ -149,15 +159,16 @@ def test_proxy_get_allows_opaque_app_frame_request(
   }, headers=owner_auth)
   assert token_response.status_code == 200, token_response.text
 
-  def fake_validate_url_safe(url):
+  async def fake_read(
+    _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+  ):
     assert url == "https://example.com/manifest.json"
-    return "https://93.184.216.34/manifest.json", "example.com", "example.com"
+    return _ExternalRead(
+      body=b'{"id":"test"}', status_code=200,
+      content_type="application/json", final_url=url, truncated=False,
+    )
 
-  async def fake_capped_response(_client, _req, **_kwargs):
-    return Response(content=b'{"id":"test"}', media_type="application/json")
-
-  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
-  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  monkeypatch.setattr("app.routes.proxy._read_external_get", fake_read)
   r = client.get(
     "/api/proxy",
     params={"url": "https://example.com/manifest.json"},
@@ -207,7 +218,7 @@ def test_proxy_post_allows_opaque_app_frame_request(
     ),
   )
 
-  async def fake_capped_response(_client, _req, **_kwargs):
+  async def fake_capped_response(_client, _req, _url):
     return Response(content=b"ok", media_type="text/plain")
 
   monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
@@ -249,18 +260,17 @@ def test_proxy_releases_db_connection_before_external_fetch(
   baseline_checked_out = checked_out_connections()
   checked_out = []
 
-  def fake_validate_url_safe(url):
+  async def fake_read(
+    _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+  ):
     assert url == "https://example.com/data"
-    return "https://93.184.216.34/data", "example.com", "example.com"
-
-  async def fake_capped_response(_client, req, **_kwargs):
-    assert req.extensions["sni_hostname"] == "example.com"
-    assert isinstance(req.extensions["sni_hostname"], str)
     checked_out.append(checked_out_connections())
-    return Response(content=b"ok", media_type="text/plain")
+    return _ExternalRead(
+      body=b"ok", status_code=200, content_type="text/plain",
+      final_url=url, truncated=False,
+    )
 
-  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
-  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  monkeypatch.setattr("app.routes.proxy._read_external_get", fake_read)
 
   r = client.get(
     "/api/proxy",
@@ -281,7 +291,7 @@ def test_proxy_post_passes_sni_hostname_as_text(
     assert url == "https://example.com/data"
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, req, **_kwargs):
+  async def fake_capped_response(_client, req, _url):
     assert req.extensions["sni_hostname"] == "example.com"
     assert isinstance(req.extensions["sni_hostname"], str)
     return Response(content=b"ok", media_type="text/plain")
@@ -313,12 +323,22 @@ def test_proxy_sends_identifiable_user_agent(client, owner_token, monkeypatch):
   def fake_validate_url_safe(url):
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, req, **_kwargs):
+  async def fake_capped_response(_client, req, _url):
     seen.append(req.headers.get("user-agent"))
     return Response(content=b"ok", media_type="text/plain")
 
+  async def fake_read(
+    _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+  ):
+    seen.append(headers["User-Agent"])
+    return _ExternalRead(
+      body=b"ok", status_code=200, content_type="text/plain",
+      final_url=url, truncated=False,
+    )
+
   monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
   monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  monkeypatch.setattr("app.routes.proxy._read_external_get", fake_read)
 
   auth = {"Authorization": f"Bearer {owner_token}"}
   r = client.get(
@@ -359,7 +379,10 @@ def test_proxy_forwards_rate_limit_headers():
     async def send(self, req, stream=True):
       return _RateLimitedResponse()
 
-  response = asyncio.run(_capped_response(_Client(), object()))
+  response = asyncio.run(_capped_response(
+    _Client(), httpx.Request("POST", "https://example.com/"),
+    "https://example.com/",
+  ))
   assert response.status_code == 429
   assert response.headers["retry-after"] == "60"
   assert response.headers["x-ratelimit-remaining"] == "0"
@@ -494,7 +517,7 @@ def test_truncated_proxy_body_never_carries_upstream_freshness_or_validators():
 
   for policy in (private_browser_cache_headers, forward_upstream_cache_headers):
     response = asyncio.run(_capped_response(
-      _Client(), object(), cache_headers=policy,
+      _Client(), object(), "https://example.com/", cache_headers=policy,
     ))
     assert len(response.body) == _MAX_BYTES
     assert response.headers["cache-control"] == "no-store"
@@ -512,7 +535,8 @@ def test_proxy_revalidation_returns_an_empty_not_modified_response():
       )
 
   response = asyncio.run(_capped_response(
-    _Client(), object(), cache_headers=private_browser_cache_headers,
+    _Client(), object(), "https://example.com/",
+    cache_headers=private_browser_cache_headers,
   ))
   assert response.status_code == 304
   assert response.body == b""
@@ -524,8 +548,6 @@ def test_proxy_revalidation_returns_an_empty_not_modified_response():
 def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
   client, owner_token, monkeypatch,
 ):
-  from app.routes.proxy import private_browser_cache_headers
-
   hosts = {
     "https://tile.example/1.png": ("https://93.184.216.34/1.png", "tile.example"),
     "https://tile.example/2.png": ("https://93.184.216.34/2.png", "tile.example"),
@@ -538,12 +560,14 @@ def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
     pinned, host = hosts[url]
     return pinned, host, host
 
-  async def fake_capped_response(client_, req, **kwargs):
-    seen.append((client_, req, kwargs))
-    return Response(content=b"png", media_type="image/png")
+  async def fake_send(client_, req, **kwargs):
+    seen.append((client_, req))
+    return _HopUpstream(200, b"png", {
+      "content-type": "image/png", "cache-control": "max-age=60",
+    })
 
   monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
-  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
   auth = {"Authorization": f"Bearer {owner_token}"}
   for url in hosts:
     response = client.get(
@@ -553,7 +577,7 @@ def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
     )
     assert response.status_code == 200, response.text
 
-  (first, first_req, first_kwargs), (second, _, _), (other, _, _) = seen
+  (first, first_req), (second, _), (other, _) = seen
   assert first is second
   assert other is not first
   assert first.follow_redirects is False
@@ -561,7 +585,278 @@ def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
   assert first_req.headers["host"] == "tile.example"
   assert "cookie" not in first_req.headers
   assert "authorization" not in first_req.headers
-  assert first_kwargs == {"cache_headers": private_browser_cache_headers}
+  assert response.headers["cache-control"] == "private, max-age=60"
+  assert response.headers["vary"] == "Authorization"
+
+
+class _HopUpstream:
+  def __init__(self, status_code, body=b"", headers=None):
+    self.status_code = status_code
+    self._body = body
+    self.headers = headers or {}
+    self.closed = False
+
+  async def aiter_bytes(self):
+    yield self._body
+
+  async def aclose(self):
+    self.closed = True
+
+
+def _hop_client(hops):
+  """An httpx.AsyncClient stand-in answering each request with the next hop."""
+  sent = []
+
+  class _Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *exc):
+      return False
+
+    async def aclose(self):
+      pass
+
+    def build_request(self, method, url, headers=None):
+      return httpx.Request(method, url, headers=headers)
+
+    async def send(self, req, stream=True):
+      sent.append(req)
+      return hops[len(sent) - 1]
+
+  return _Client, sent
+
+
+def _pin_every_hop(monkeypatch):
+  validated = []
+
+  def fake_validate(url):
+    validated.append(url)
+    host = urlparse(url).hostname
+    return url.replace(host, "93.184.216.34"), host, host
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate)
+  return validated
+
+
+@pytest.mark.parametrize("headers", [None, {}])
+def test_external_reader_uses_favicon_defaults_only_when_headers_are_unspecified(
+  monkeypatch, headers,
+):
+  _pin_every_hop(monkeypatch)
+  fake_client, sent = _hop_client([_HopUpstream(200, b"ok")])
+  asyncio.run(_read_external_get(
+    fake_client(), "https://example.com/", 1024, headers=headers,
+  ))
+  assert ("accept" in sent[0].headers) == (headers is None)
+  assert ("user-agent" in sent[0].headers) == (headers is None)
+
+
+def test_proxy_get_follows_redirects_like_install(client, owner_token, monkeypatch):
+  """A manifest URL that redirects must preview as it installs."""
+  validated = _pin_every_hop(monkeypatch)
+  fake_client, sent = _hop_client([
+    _HopUpstream(301, headers={
+      "location": "https://cdn.example/mobius.json",
+      "cache-control": "public, max-age=86400", "etag": '"redirect"',
+    }),
+    _HopUpstream(
+      200, b'{"id":"moved"}',
+      {
+        "content-type": "application/json", "x-ratelimit-remaining": "9",
+        "cache-control": "public, max-age=60", "etag": '"final"',
+      },
+    ),
+  ])
+  created = []
+
+  def make_client(**kwargs):
+    assert kwargs["follow_redirects"] is False
+    instance = fake_client()
+    created.append(instance)
+    return instance
+
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", make_client)
+
+  r = client.get(
+    "/api/proxy",
+    params={"url": "https://site.example/mobius.json"},
+    headers={
+      "Authorization": f"Bearer {owner_token}",
+      "If-None-Match": '"previous"', "Cookie": "session=local",
+    },
+  )
+
+  assert r.status_code == 200, r.text
+  assert r.json() == {"id": "moved"}
+  assert r.headers["x-ratelimit-remaining"] == "9"
+  assert validated == [
+    "https://site.example/mobius.json", "https://cdn.example/mobius.json",
+  ]
+  assert len(created) == 2
+  assert created[0] is not created[1]
+  assert r.headers["cache-control"] == "private, max-age=60"
+  assert r.headers["etag"] == '"final"'
+  assert r.headers["vary"] == "Authorization"
+  for req in sent:
+    assert req.headers["if-none-match"] == '"previous"'
+    assert "authorization" not in req.headers
+    assert "cookie" not in req.headers
+  assert sent[1].headers["host"] == "cdn.example"
+  assert sent[1].extensions["sni_hostname"] == "cdn.example"
+
+
+@pytest.mark.parametrize("error, status", [
+  (httpx.ReadTimeout("body stalled"), 504),
+  (httpx.ReadError("connection lost"), 502),
+])
+def test_proxy_get_classifies_mid_stream_failure_and_closes_response(
+  client, owner_token, monkeypatch, error, status,
+):
+  _pin_every_hop(monkeypatch)
+
+  class _FailingUpstream(_HopUpstream):
+    async def aiter_bytes(self):
+      yield b"partial body"
+      raise error
+
+  upstream = _FailingUpstream(200)
+  fake_client, sent = _hop_client([upstream])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  response = client.get(
+    "/api/proxy", params={"url": "https://site.example/mobius.json"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == status, response.text
+  assert "https://site.example/mobius.json" in response.json()["detail"]
+  assert "partial body" not in response.text
+  assert len(sent) == 1
+  assert upstream.closed
+
+
+@pytest.mark.parametrize("private_ip", ["127.0.0.1", "10.0.0.1", "169.254.169.254"])
+def test_proxy_get_rejects_private_redirect_before_sending_second_request(
+  client, owner_token, monkeypatch, private_ip,
+):
+  resolved = []
+
+  def fake_dns(host, *args, **kwargs):
+    resolved.append(host)
+    address = "93.184.216.34" if host == "site.example" else private_ip
+    return [(2, 1, 6, "", (address, 0))]
+
+  monkeypatch.setattr("app.net_utils.socket.getaddrinfo", fake_dns)
+  upstream = _HopUpstream(302, headers={"location": f"http://{private_ip}/private"})
+  fake_client, sent = _hop_client([upstream])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  response = client.get(
+    "/api/proxy", params={"url": "https://site.example/mobius.json"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 400, response.text
+  assert "non-public address" in response.json()["detail"]
+  assert resolved == ["site.example", private_ip]
+  assert len(sent) == 1
+  assert upstream.closed
+
+
+def test_proxy_get_stops_after_the_install_redirect_limit(
+  client, owner_token, monkeypatch,
+):
+  _pin_every_hop(monkeypatch)
+  loop = _HopUpstream(302, headers={"location": "https://site.example/again"})
+  fake_client, sent = _hop_client([loop] * 10)
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  r = client.get(
+    "/api/proxy",
+    params={"url": "https://site.example/start"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert r.status_code == 502
+  assert "Too many redirects" in r.text
+  assert len(sent) == 6
+
+
+def test_proxy_get_truncates_an_oversized_response(
+  client, owner_token, monkeypatch,
+):
+  from app.routes.proxy import _MAX_BYTES
+
+  _pin_every_hop(monkeypatch)
+  fake_client, _ = _hop_client([_HopUpstream(200, b"x" * (_MAX_BYTES + 1), {
+    "cache-control": "public, max-age=3600", "etag": '"complete"',
+  })])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  r = client.get(
+    "/api/proxy",
+    params={"url": "https://site.example/huge.json"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert r.status_code == 200
+  assert r.content == b"x" * _MAX_BYTES
+  assert r.headers["cache-control"] == "no-store"
+  assert "etag" not in r.headers
+
+
+@pytest.mark.parametrize("public_transport", [False, True])
+def test_proxy_post_and_public_transport_truncate_oversized_response(public_transport):
+  from app.routes.proxy import _MAX_BYTES
+
+  class _Client:
+    async def send(self, req, stream=True):
+      return _HopUpstream(200, b"x" * (_MAX_BYTES + 1))
+
+  response = asyncio.run(_capped_response(
+    _Client(), httpx.Request(
+      "GET" if public_transport else "POST", "https://example.com/",
+    ),
+    "https://example.com/",
+    cache_headers=forward_upstream_cache_headers if public_transport else None,
+  ))
+  assert response.status_code == 200
+  assert response.body == b"x" * _MAX_BYTES
+
+
+@pytest.mark.parametrize("public_transport", [False, True])
+@pytest.mark.parametrize("error, status", [
+  (httpx.ReadTimeout("body stalled"), 504),
+  (httpx.ReadError("connection lost"), 502),
+])
+def test_proxy_post_and_public_transport_classify_midstream_failure_and_close(
+  public_transport, error, status,
+):
+  class _FailingUpstream(_HopUpstream):
+    async def aiter_bytes(self):
+      yield b"partial body"
+      raise error
+
+  upstream = _FailingUpstream(200)
+
+  class _Client:
+    async def send(self, req, stream=True):
+      return upstream
+
+  # The request targets the DNS-pinned address; errors name the caller's URL.
+  with pytest.raises(HTTPException) as raised:
+    asyncio.run(_capped_response(
+      _Client(), httpx.Request(
+        "GET" if public_transport else "POST", "https://93.184.216.34/v1",
+      ),
+      "https://example.com/v1",
+      cache_headers=forward_upstream_cache_headers if public_transport else None,
+    ))
+  assert raised.value.status_code == status
+  assert "https://example.com/v1" in raised.value.detail
+  assert "93.184.216.34" not in raised.value.detail
+  assert upstream.closed
 
 
 def test_declared_favicon_urls_accepts_unquoted_and_relative_icon_links():
@@ -830,7 +1125,7 @@ def test_drip_fed_upstream_cannot_hold_a_pool_slot_past_the_deadline(monkeypatch
       with pytest.raises(HTTPException) as exc:
         async with pool.lease("drip.example", "drip.example") as client:
           request = client.build_request("GET", f"http://127.0.0.1:{port}/")
-          await _capped_response(client, request)
+          await _capped_response(client, request, "http://drip.example/")
       assert exc.value.status_code == 504
       assert pool.metrics()["active_requests"] == 0
       async with pool.lease("next.example", "next.example"):
@@ -842,3 +1137,90 @@ def test_drip_fed_upstream_cannot_hold_a_pool_slot_past_the_deadline(monkeypatch
     asyncio.run(asyncio.wait_for(exercise(), timeout=3))
   finally:
     server.shutdown()
+
+
+@pytest.mark.parametrize("consumer", ["get", "post", "public_transport"])
+def test_proxy_returns_exact_cap_without_waiting_for_stalled_upstream(
+  monkeypatch, consumer,
+):
+  from app.routes.proxy import _MAX_BYTES, proxy_get
+
+  _pin_every_hop(monkeypatch)
+
+  class _StalledUpstream(_HopUpstream):
+    async def aiter_bytes(self):
+      yield b"x" * _MAX_BYTES
+      await asyncio.Event().wait()
+
+  upstream = _StalledUpstream(200)
+  fake_client, _ = _hop_client([upstream])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+
+  async def read():
+    if consumer == "get":
+      operation = proxy_get(
+        "https://site.example/body", Request({"type": "http", "headers": []}),
+      )
+    else:
+      operation = _capped_response(
+        fake_client(), httpx.Request(
+          "POST" if consumer == "post" else "GET", "https://site.example/body",
+        ),
+        "https://site.example/body",
+        cache_headers=(
+          forward_upstream_cache_headers if consumer == "public_transport" else None
+        ),
+      )
+    return await asyncio.wait_for(operation, timeout=1)
+
+  response = asyncio.run(read())
+  assert response.status_code == 200
+  assert response.body == b"x" * _MAX_BYTES
+  assert upstream.closed
+
+
+def test_favicon_reader_still_probes_for_truncation(monkeypatch):
+  _pin_every_hop(monkeypatch)
+  upstream = _HopUpstream(200, b"12345")
+  fake_client, _ = _hop_client([upstream])
+
+  result = asyncio.run(_read_external_get(
+    fake_client(), "https://site.example/icon", 4,
+  ))
+
+  assert result.body == b"1234"
+  assert result.truncated
+  assert upstream.closed
+
+
+def test_redirected_proxy_get_deadline_closes_body_and_releases_host_lease(
+  monkeypatch,
+):
+  from app.routes import proxy
+
+  _pin_every_hop(monkeypatch)
+  monkeypatch.setattr(proxy, "_EXCHANGE_DEADLINE", 0.3)
+
+  class StalledBody(_HopUpstream):
+    async def aiter_bytes(self):
+      yield b"prefix"
+      await asyncio.Event().wait()
+
+  redirect = _HopUpstream(302, headers={"location": "https://cdn.example/body"})
+  stalled = StalledBody(200)
+  fake_client, sent = _hop_client([redirect, stalled])
+  monkeypatch.setattr(proxy.httpx, "AsyncClient", lambda **_: fake_client())
+
+  async def exercise():
+    with pytest.raises(HTTPException) as exc:
+      await proxy.proxy_get(
+        "https://site.example/start", Request({"type": "http", "headers": []}),
+      )
+    assert exc.value.status_code == 504
+    assert len(sent) == 2
+    assert redirect.closed and stalled.closed
+    assert proxy._proxy_clients.metrics()["active_requests"] == 0
+    async with proxy._proxy_clients.lease("next.example", "next.example"):
+      pass
+
+  asyncio.run(asyncio.wait_for(exercise(), timeout=2))

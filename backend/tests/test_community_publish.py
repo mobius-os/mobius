@@ -1,10 +1,12 @@
 import base64
+import io
 import json
 import os
 import subprocess
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from app import app_git, community_publish
 from app.community_publish import (
@@ -30,6 +32,12 @@ def _git(repo, *args):
     text=True,
     check=True,
   ).stdout.strip()
+
+
+def _png():
+  output = io.BytesIO()
+  Image.new("RGB", (8, 8), (40, 90, 180)).save(output, format="PNG")
+  return output.getvalue()
 
 
 def _public_file(path, content=b""):
@@ -133,7 +141,7 @@ def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
   (repo / "index.jsx").write_text(
     "export default function App() { return null }\n", encoding="utf-8",
   )
-  (repo / "icon.png").write_bytes(b"icon")
+  (repo / "icon.png").write_bytes(_png())
   (repo / "static" / "store").mkdir(parents=True)
   (repo / "static" / "store" / "screen.png").write_bytes(b"screen")
   (repo / "static" / "runtime").mkdir()
@@ -381,3 +389,199 @@ def test_partial_success_journal_contains_only_bounded_public_state(
   with pytest.raises(CommunityPublicationError) as raised:
     community_publish.write_publication_journal(journal)
   assert raised.value.code == "publication_journal_invalid"
+
+
+def _commit_files(repo, app, files):
+  for path, content in files.items():
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+  _git(repo, "add", "-f", "--", *files)
+  _git(repo, "commit", "-m", "more files")
+  app.source_commit = _git(repo, "rev-parse", "HEAD")
+
+
+def test_snapshot_publishes_file_names_install_accepts(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  names = [
+    "Screenshot (1).png", "café.mp3", "[id].jsx", "a~b.md",
+  ]
+  _commit_files(repo, app, {name: b"ordinary source" for name in names})
+
+  _, files = build_public_snapshot(app)
+
+  assert set(names) <= {item["path"] for item in files}
+
+
+@pytest.mark.parametrize("folder", ["secrets", "credentials"])
+def test_snapshot_refuses_private_directory_names_without_known_secret_content(tmp_path, folder):
+  repo, app, _ = _app_repo(tmp_path)
+  path = f"{folder}/ordinary.txt"
+  _commit_files(repo, app, {path: b"unrecognized private material"})
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+  assert raised.value.code == "sensitive_path"
+  assert path in raised.value.detail
+
+
+def test_snapshot_names_the_path_it_refuses_and_why(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {".github/workflows/ci.yml": b"on: push\n"})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "sensitive_path"
+  assert ".github/workflows/ci.yml" in raised.value.detail
+  assert "token scope" in raised.value.detail
+
+
+def test_snapshot_refuses_control_characters_and_names_the_path(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"bad\nname.js": b"export {}"})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_path"
+  assert "'bad\\nname.js'" in raised.value.detail
+
+
+def test_snapshot_refuses_names_that_collide_on_other_checkouts(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"café.md": b"a", "café.md": b"b"})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_path"
+
+
+def test_content_scan_still_catches_credentials_in_any_directory(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {
+    "config/config.js": b"export const key = 'ghp_" + b"A" * 36 + b"';",
+  })
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
+
+
+@pytest.mark.parametrize("folder", ["config", "settings"])
+def test_content_scan_catches_ascii_credentials_in_invalid_utf8(tmp_path, folder):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {
+    f"{folder}/config.txt": b"\xff\nTOKEN=ghp_" + b"A" * 36,
+  })
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
+
+
+@pytest.mark.parametrize("character", [
+  "\u2028", "\u2029", "\u200e", "\u200f", "\u061c", "\u200b", "\u200c",
+  "\u200d", "\u2060", "\u180e", "\u2062", "\ufeff",
+  "\u00a0", "\u3000", "\u115f", "\u1160", "\u3164", "\uffa0", "\u2800",
+])
+def test_snapshot_refuses_invisible_filename_characters(tmp_path, character):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {f"look{character}alike.js": b"export {}"})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_path"
+
+
+@pytest.mark.parametrize("character", [
+  "\u00ad", "\u034f", "\u0378", "\ue000", "\ud800",
+  "\u17b4", "\u17b5", "\u180b", "\u180c", "\u180d", "\u180f",
+  "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",
+])
+def test_publication_path_refuses_ignorable_and_nonpublic_code_points(character):
+  from app.community_publish import _validate_path
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    _validate_path(f"look{character}alike.js")
+  assert raised.value.code == "invalid_path"
+
+
+@pytest.mark.parametrize("path", [" leading.js", "trailing.js ", "dir /file", "dir/ file"])
+def test_publication_path_refuses_space_padded_segments(path):
+  from app.community_publish import _validate_path
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    _validate_path(path)
+  assert raised.value.code == "invalid_path"
+  assert "leading or trailing spaces" in raised.value.detail
+
+
+def test_publication_path_accepts_visible_unicode_and_internal_spaces():
+  from app.community_publish import _validate_path
+
+  _validate_path("café folder/日本語 [1] e\u0301.js")
+
+
+def test_snapshot_allows_slack_placeholder(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"README.md": b"Set xoxb-your-token-here in the example."})
+
+  _, files = build_public_snapshot(app)
+  assert "README.md" in {item["path"] for item in files}
+
+
+def test_snapshot_applies_the_same_icon_rule_as_apply(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  manifest = json.loads((repo / "mobius.json").read_text())
+  manifest["icon"] = "icon.png"
+  _commit_files(repo, app, {
+    "mobius.json": json.dumps(manifest).encode(),
+    "icon.png": b"not an image",
+  })
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_icon"
+  assert "icon.png" in raised.value.detail
+
+
+@pytest.mark.parametrize("credential", [
+  "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+  "-----BEGIN DSA PRIVATE KEY-----",
+  "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+  "AIza" + "A" * 35,
+  "sk-ant-" + "A" * 20,
+  "sk-proj-" + "A" * 20,
+  "rk_live_" + "A" * 20,
+  "sk_live_" + "A" * 20,
+  "xoxb-1234567890-1234567890-" + "A" * 24,
+])
+def test_snapshot_refuses_additional_recognizable_credential_patterns(
+  tmp_path, credential,
+):
+  repo, app, _ = _app_repo(tmp_path)
+  _commit_files(repo, app, {"config.js": f"const key = '{credential}';".encode()})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "secret_detected"
+  assert credential not in raised.value.detail
+
+
+def test_snapshot_refuses_declared_icon_missing_from_snapshot(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  manifest = json.loads((repo / "mobius.json").read_text())
+  manifest["icon"] = "missing.png"
+  _commit_files(repo, app, {"mobius.json": json.dumps(manifest).encode()})
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "invalid_icon"
+  assert "missing.png" in raised.value.detail

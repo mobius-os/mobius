@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BASE, probeDeletion } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
-import { appVersionKey } from '../../lib/appVersion.js'
+import { appFrameVersion } from '../../lib/appVersion.js'
 import {
   APP_LRU_STORAGE_KEY,
   mergeAppLru,
@@ -46,7 +46,7 @@ export default function useAppFrameCache({
 
   const versionForApp = useCallback((id) => {
     const app = apps.find(row => String(row.id) === String(id))
-    return appVersionKey(app?.updated_at)
+    return appFrameVersion(app)
   }, [apps])
 
   const dropFromWarmLru = useCallback((matches) => {
@@ -116,7 +116,7 @@ export default function useAppFrameCache({
         queryFn: () => appQueries.token.fetch(app.id),
         staleTime: 5 * 60_000,
       })
-      const version = appVersionKey(app.updated_at)
+      const version = appFrameVersion(app)
       const frameRev = (
         typeof document !== 'undefined'
         && document.querySelector('meta[name="mobius-frame-rev"]')?.content

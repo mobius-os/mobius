@@ -1581,3 +1581,36 @@ def test_failed_compaction_clears_the_visible_window(
 
   assert response.status_code == 502
   assert chat_compaction_state.compaction_kind(chat_id) is None
+
+
+@pytest.mark.parametrize("action", ["patch_provider", "provider_switch", "compact"])
+def test_idle_chat_with_open_owner_question_allows_provider_switch_and_compact(
+  client, auth, db, monkeypatch, action,
+):
+  _connect_codex(monkeypatch)
+  messages = [{"role": "user", "content": "Keep this context"}]
+  if action != "patch_provider":
+    messages.append({"role": "assistant", "content": "Which option?"})
+  chat_id = _make_chat_with_messages(client, auth, messages)
+  row = db.get(models.Chat, chat_id)
+  row.provider = "claude"
+  row.pending_question_id = "open-owner-question"
+  db.commit()
+  monkeypatch.setattr(chat_mod, "is_chat_running", lambda cid: False)
+  monkeypatch.setattr("app.questions.is_waiting", lambda cid: cid == chat_id)
+
+  async def summarize(_messages, **_kwargs):
+    return "Preserved context"
+
+  monkeypatch.setattr(compaction, "summarize_chat", summarize)
+  if action == "patch_provider":
+    response = client.patch(
+      f"/api/chats/{chat_id}", headers=auth, json={"provider": "codex"},
+    )
+  elif action == "provider_switch":
+    response = client.post(
+      f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
+    )
+  else:
+    response = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
+  assert response.status_code == 200, response.text

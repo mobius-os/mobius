@@ -525,27 +525,49 @@ export default function QuestionCard({
             </div>}
             {(!completedAction || respondedRestartAction)
               && (!restartAction || writtenRestartAction) && (
-              <div className={`qcard__composer${isOtherSelected || answeredWithOther ? ' qcard__composer--active' : ''}`}>
-                {/* A single answer shows its files inside the box, as the
-                    message composer does; a grouped card shows them once below. */}
-                {!grouped && answerFiles}
-                <CustomAnswerArea
-                  answered={selectionLocked}
-                  canSubmit={canSubmit}
-                  disabled={inactive}
-                  placeholder={writtenRestartAction
-                    ? 'Or tell me what you’d like to do instead…'
-                    : hasOptions ? undefined : 'Type your answer…'}
-                  onChange={text => setOtherText(q.question, text)}
-                  onPasteFiles={platformAction || inactive ? undefined : addAnswerFiles}
-                  onSubmitShortcut={(questionCard) => {
-                    if (canSubmit) handleSubmit(questionCard, null)
-                  }}
-                  question={q.question}
-                  value={selectionLocked
-                    ? writtenAnswer
-                    : (otherTexts[q.question] || '')}
-                />
+              <div className="qcard__answer-row">
+                {/* The paperclip sits left of the last answer box and stays
+                    while the action row does, so Submit, queueing and the
+                    Submitted state never move the card; once the answer is
+                    locked it only stops taking files. */}
+                {qi === questions.length - 1 && !platformAction && (answered || !disabled) && (
+                  <>
+                    <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
+                      disabled={attachLocked}
+                      aria-label="Attach files to your answer"
+                      onChange={e => {
+                        const selected = Array.from(e.target.files || [])
+                        e.target.value = ''
+                        if (!attachLocked) addAnswerFiles(selected)
+                      }} />
+                    <button type="button" className="qcard__attach" aria-label="Attach a photo or file"
+                      title="Attach a photo or file" disabled={attachLocked} onClick={() => fileInputRef.current?.click()}>
+                      <Paperclip width={18} height={18} aria-hidden="true" />
+                    </button>
+                  </>
+                )}
+                <div className={`qcard__composer${isOtherSelected || answeredWithOther ? ' qcard__composer--active' : ''}`}>
+                  {/* A single answer shows its files inside the box, as the
+                      message composer does; a grouped card shows them once below. */}
+                  {!grouped && answerFiles}
+                  <CustomAnswerArea
+                    answered={selectionLocked}
+                    canSubmit={canSubmit}
+                    disabled={inactive}
+                    placeholder={writtenRestartAction
+                      ? 'Or tell me what you’d like to do instead…'
+                      : hasOptions ? undefined : 'Type your answer…'}
+                    onChange={text => setOtherText(q.question, text)}
+                    onPasteFiles={platformAction || inactive ? undefined : addAnswerFiles}
+                    onSubmitShortcut={(questionCard) => {
+                      if (canSubmit) handleSubmit(questionCard, null)
+                    }}
+                    question={q.question}
+                    value={selectionLocked
+                      ? writtenAnswer
+                      : (otherTexts[q.question] || '')}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -553,26 +575,6 @@ export default function QuestionCard({
         })}
       </div>
       {grouped && answerFiles}
-      {/* The attach row lives as long as the action row below it, so Submit,
-          queueing and the Submitted state never move the card; once the
-          answer is locked the row only stops taking files. */}
-      {!platformAction && (answered || !disabled) && (
-        <div className="qcard__attachments">
-          <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
-            disabled={attachLocked}
-            aria-label="Attach files to your answer"
-            onChange={e => {
-              const selected = Array.from(e.target.files || [])
-              e.target.value = ''
-              if (!attachLocked) addAnswerFiles(selected)
-            }} />
-          <button type="button" className="qcard__attach" aria-label="Attach a photo or file"
-            title="Attach a photo or file" disabled={attachLocked} onClick={() => fileInputRef.current?.click()}>
-            <Paperclip width={18} height={18} aria-hidden="true" />
-          </button>
-          <span>Files for {grouped ? 'all answers' : 'this answer'} · attach or paste</span>
-        </div>
-      )}
       {!completedAction && (answered || !disabled) && (
         <>
           {locallyQueued && (

@@ -50,6 +50,7 @@ from app.chat import (
   _finish_run,
   bump_run_generation,
   is_chat_running,
+  is_chat_busy,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
@@ -1587,11 +1588,7 @@ async def patch_chat(
       and latest_message.get("from_provider") == (chat.provider or "claude")
     )
     if provider_changing:
-      if (
-        is_chat_running(chat_id)
-        or chat.pending_messages
-        or has_nonterminal_run(db, chat_id)
-      ):
+      if is_chat_busy(db, chat):
         raise HTTPException(
           status_code=409,
           detail="Chat is busy — finish or stop the current turn before switching.",
@@ -2801,11 +2798,8 @@ async def _compact_chat_locked(
     raise HTTPException(
       status_code=409, detail="This chat already uses that provider."
     )
-  if (
-    is_chat_running(chat_id)
-    or chat.pending_messages
-    or has_running_run(db, chat_id)
-  ):
+  # A provider handoff deliberately supersedes parked continuations.
+  if is_chat_busy(db, chat, run_statuses=("running",)):
     raise HTTPException(
       status_code=409,
       detail="Chat is busy — finish or stop the current turn before switching.",
@@ -2969,11 +2963,7 @@ async def compact_chat(
           "provider; its provider can't be switched."
         ),
       )
-    if (
-      is_chat_running(chat_id)
-      or chat.pending_messages
-      or has_nonterminal_run(db, chat_id)
-    ):
+    if is_chat_busy(db, chat):
       raise HTTPException(
         status_code=409,
         detail="Chat is busy — finish or stop the current turn before compacting.",
@@ -3137,12 +3127,19 @@ class AppChatStart(AppChatCreate):
 
 
 class AppChatPatch(BaseModel):
+  title: str | None = Field(default=None, max_length=500)
+  owner_visible: bool | None = None
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
   effort: schemas.AgentEffort | None = None
   provider: str | None = None
   scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
   scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
+
+  @field_validator("title")
+  @classmethod
+  def _validate_title(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(value, 500, "title")
 
   @field_validator("scope")
   @classmethod
@@ -3264,6 +3261,10 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
   return {
     "id": chat.id,
     "title": chat.title,
+    "title_locked": bool(chat.title_locked),
+    "owner_visible": bool(
+      _coerce_agent_settings(chat.agent_settings_json).get("owner_visible"),
+    ),
     "created_by_app_id": chat.created_by_app_id,
     "created_at": chat.created_at.isoformat() if chat.created_at else None,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
@@ -3271,6 +3272,9 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
     "has_messages": bool(chat.has_messages),
     # A saved owner-input card is waiting: the app can show that its chat
     # needs the owner without reading the transcript.
+    # Identity lets companions replace stale status controls; it exposes no
+    # card contents or answers and grants no additional card access.
+    "pending_question_id": chat.pending_question_id,
     "awaiting_owner": bool(chat.pending_question_id),
     # An agent turn is live now; an app shows this rather than guessing.
     "running": is_chat_running(chat.id),
@@ -3288,11 +3292,9 @@ def _app_chat_started(chat: models.Chat, db: Session) -> bool:
   goal = presented_goal(db, chat.id)
   return bool(
     chat.has_messages
-    or chat.pending_messages
     or chat.pending_question_id
     or chat.session_id
-    or is_chat_running(chat.id)
-    or has_nonterminal_run(db, chat.id)
+    or is_chat_busy(db, chat)
     or (goal and goal.get("status") in {"active", "paused", "completed", "cannot_complete", "cancelled"})
   )
 
@@ -3597,6 +3599,9 @@ async def patch_app_chat(
 ):
   """Updates runtime metadata for a chat owned by the calling app.
 
+  A nonblank title locks the chosen name; owner_visible controls drawer
+  visibility without changing app ownership. Null fields leave state unchanged.
+
   An embedded app may configure its custom base prompt while the chat is still
   empty. Once the first turn starts, the complete platform + installed-app prompt
   is immutable for that chat; changing it requires a new chat.
@@ -3610,6 +3615,8 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    previous_title = chat.title
+    previously_visible = visible_in_owner_drawer(chat)
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id
@@ -3649,11 +3656,9 @@ async def patch_app_chat(
         # the creating app may still correct an empty chat's provider before
         # its first turn. Once work starts, the lifecycle gate below pins it.
         if (
-          is_chat_running(chat_id)
-          or chat.pending_messages
-          or chat.has_messages
+          chat.has_messages
           or chat.session_id
-          or has_nonterminal_run(db, chat_id)
+          or is_chat_busy(db, chat)
         ):
           raise HTTPException(
             status_code=409,
@@ -3676,6 +3681,10 @@ async def patch_app_chat(
         body = body.model_copy(update={"model": selection["model"]})
         chat.provider = body.provider
         chat.session_id = None
+    if body.title is not None:
+      # An explicit app rename has the same title lock as an app-named chat.
+      chat.title = body.title
+      chat.title_locked = True
     _merge_app_chat_settings(
       chat,
       system_prompt=body.system_prompt,
@@ -3683,10 +3692,18 @@ async def patch_app_chat(
       effort=body.effort,
       scope=body.scope,
       scope_label=body.scope_label,
+      owner_visible=body.owner_visible,
     )
     chat.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(chat)
+    # Publish only committed presentation changes, never inferred run/card state.
+    if chat.title != previous_title:
+      get_system_broadcast().publish(renamed_event(chat))
+    if visible_in_owner_drawer(chat) != previously_visible:
+      get_system_broadcast().publish({
+        "type": "chat_visibility_changed", "chatId": str(chat.id),
+      })
     return {
       "ok": True,
       "id": chat.id,

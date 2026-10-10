@@ -34,6 +34,7 @@ import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
+import { markdownRangeSource } from './markdown/steerMarkdownRange.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
@@ -76,7 +77,7 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
     // and cold-rendered blocks intentionally omit source until the whole block
     // is visible; falling back to msg.content here would copy the hidden tail.
     if (markdownByIndex) return markdownByIndex.get(index) ?? ''
-    return msg.content ?? ''
+    return msg.markdown_range ? markdownRangeSource(msg.markdown_range) : msg.content ?? ''
   }
 
   return (
@@ -229,7 +230,7 @@ function MsgContentInner({
     // authoritative completion lost identity across request_user_input. This
     // is render-time as well as reducer-time so already-saved chats self-heal
     // without rewriting partner transcripts.
-    const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content }] : [])
+    const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content, markdown_range: msg.markdown_range }] : [])
     // A legacy compact activity may have sampled out the successful Restart
     // request while retaining earlier failed attempts. Mirror the ordinary
     // tool/card pairing: the latest eligible activity or standalone request
@@ -304,7 +305,8 @@ function MsgContentInner({
         const fullyRendered = !(
           Number.isFinite(coldFraction) && coldFraction > 0 && coldFraction < 1
         )
-        return fullyRendered ? [[String(idx), item.content]] : []
+        return fullyRendered ? [[String(idx), item.markdown_range
+          ? markdownRangeSource(item.markdown_range) : item.content]] : []
       }),
     )
 
@@ -401,12 +403,14 @@ function MsgContentInner({
               ? (isActiveAnswer || block.reply_text_owner
                   ? <ProgressiveMarkdown
                       text={text}
+                      markdownRange={block.markdown_range}
                       isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />
                   : <StandardMarkdown
                       text={text}
+                      markdownRange={block.markdown_range}
                       renderFraction={block._coldRenderFraction}
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
@@ -684,12 +688,14 @@ function MsgContentInner({
             ? (isActiveAnswer
                 ? <ProgressiveMarkdown
                     text={text}
+                    markdownRange={msg.markdown_range}
                     isStreaming={isStreaming}
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />
                 : <StandardMarkdown
                     text={text}
+                    markdownRange={msg.markdown_range}
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)

@@ -5,16 +5,17 @@ from __future__ import annotations
 import hashlib
 import io
 import threading
-import warnings
 from collections import OrderedDict
 
 from PIL import Image
 
+MAX_IMAGE_PIXELS = 32_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-# Pillow's default (~89M pixels) still permits a tiny hostile file to request
-# a very large allocation. App icons never need that headroom.
-Image.MAX_IMAGE_PIXELS = 32_000_000
-MAX_ICON_DIMENSION = 4096
+# The icon pixel ceiling is the only size rule: images within it are scaled
+# down. Author-facing apply and publication reject invalid icons; imported
+# packages instead warn and omit/preserve them for historical compatibility.
+# Install and update-check digests both omit refused icons.
 
 
 class InvalidIcon(ValueError):
@@ -50,23 +51,19 @@ _normalized_lock = threading.Lock()
 
 
 def _normalize_uncached(raw: bytes) -> bytes:
+  too_large = (
+    f"Icon has more than the {MAX_IMAGE_PIXELS // 1_000_000} million pixels "
+    "an icon may have. Use a smaller image; 1024x1024 is plenty."
+  )
   try:
+    # Refuse from the header before load() allocates the pixel buffer. Do not
+    # rely on Pillow's process-global warning filters in concurrent workers.
     image = Image.open(io.BytesIO(raw))
-    # Header dimensions are available before load(), so reject oversized
-    # images before Pillow allocates their decoded pixel buffer.
-    with warnings.catch_warnings():
-      warnings.simplefilter("error", Image.DecompressionBombWarning)
-      width, height = image.size
-      if width > MAX_ICON_DIMENSION or height > MAX_ICON_DIMENSION:
-        raise InvalidIcon(
-          f"Icon dimensions {width}x{height} exceed "
-          f"{MAX_ICON_DIMENSION}x{MAX_ICON_DIMENSION} cap."
-        )
-      image.load()
-  except InvalidIcon:
-    raise
+    if image.width * image.height > MAX_IMAGE_PIXELS:
+      raise Image.DecompressionBombError(too_large)
+    image.load()
   except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-    raise InvalidIcon(f"Icon rejected as decompression bomb: {exc}") from exc
+    raise InvalidIcon(too_large) from exc
   except Exception as exc:
     raise InvalidIcon("Icon is not a valid image.") from exc
 

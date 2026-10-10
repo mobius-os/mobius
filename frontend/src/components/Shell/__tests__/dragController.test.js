@@ -2,12 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   POINTER_SLOP, PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
-  PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
+  PRE_HOLD_MOVE_PX, DRAWER_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
-  flingReleaseVelocity,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -54,9 +53,9 @@ test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => 
 
 test('drawerRowMoveIntent resolves one gesture without competing owners', () => {
   const touchPin = { isTouch: true, pinned: true }
-  assert.equal(drawerRowMoveIntent(4, 4, touchPin), 'pending')
-  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'scroll',
-    'vertical movement before the hold scrolls through the pointer owner')
+  assert.equal(drawerRowMoveIntent(2, 2, touchPin), 'pending')
+  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'yield',
+    'vertical movement before the hold keeps native momentum scrolling')
   assert.equal(drawerRowMoveIntent(9, 0, touchPin), 'yield',
     'horizontal movement before the hold returns to drawer swipe')
   assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true }), 'yield',
@@ -70,30 +69,18 @@ test('drawerRowMoveIntent resolves one gesture without competing owners', () => 
     'mouse rows use ordinary drag slop without a hold')
 })
 
-test('flingReleaseVelocity uses the swipe window, not the decelerating last move', () => {
-  const now = 1000
-  // A real thumb: fast across the window, then a slow crawl right before lifting.
-  const samples = [
-    { t: 940, top: 0 },
-    { t: 956, top: 40 },
-    { t: 972, top: 80 },
-    { t: 988, top: 118 },
-    { t: 998, top: 120 }, // decelerating final move — 2px in 10ms
-  ]
-  const v = flingReleaseVelocity(samples, now)
-  // 120px across 58ms ≈ 2.07 px/ms — the swipe's speed, not the ~0.2 of the crawl
-  // that an EMA of the final move would have reported (which killed the glide).
-  assert.ok(v > 1.5 && v < 2.5, `expected the swipe speed, got ${v}`)
-})
-
-test('flingReleaseVelocity drops a paused or too-short release to zero', () => {
-  const now = 1000
-  // Newest sample is stale (finger rested ~220ms before lifting) → no glide.
-  assert.equal(flingReleaseVelocity([{ t: 700, top: 0 }, { t: 780, top: 200 }], now), 0)
-  assert.equal(flingReleaseVelocity([{ t: 995, top: 10 }], now), 0, 'one sample cannot form a velocity')
-  assert.equal(flingReleaseVelocity([], now), 0)
-  // Two fresh samples spanning under minSpanMs cannot measure a stable speed.
-  assert.equal(flingReleaseVelocity([{ t: 998, top: 10 }, { t: 999, top: 14 }], now), 0)
+test('a slowly starting pinned swipe cancels the hold before native pan slop', () => {
+  assert.equal(drawerRowMoveIntent(0, DRAWER_HOLD_MOVE_PX, {
+    isTouch: true, pinned: true,
+  }), 'pending', 'stationary touch jitter can still become a hold')
+  assert.equal(drawerRowMoveIntent(0, 4, {
+    isTouch: true, pinned: true,
+  }), 'yield', 'early intentional motion must cancel the hold')
+  assert.equal(drawerRowMoveIntent(0, 4, { isTouch: true }), 'pending',
+    'ordinary rows keep the native scroll threshold')
+  assert.equal(drawerRowMoveIntent(0, 6, {
+    isTouch: true, pinned: true, held: true,
+  }), 'reorder', 'a deliberate stationary hold still reorders')
 })
 
 test('releasedInPlace is true only within the release radius', () => {
