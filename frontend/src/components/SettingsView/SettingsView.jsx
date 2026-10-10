@@ -25,6 +25,7 @@ import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import GithubConnection from './GithubConnection.jsx'
+import { useSettingsFocus } from './useSettingsFocus.js'
 import IdentityAccount, { ProfileAvatar } from './identity/IdentityAccount.jsx'
 import { useIdentityQuery } from './identity/identity-client.js'
 import MobiusProviderAccess from './identity/MobiusProviderAccess.jsx'
@@ -444,7 +445,7 @@ export default function SettingsView({
   configuredProvidersRef.current = configuredProviders
 
   const setSetupFocusRef = useCallback((section, node) => {
-    if (node) setupFocusRefs.current[section] = node
+    setupFocusRefs.current[section] = node
   }, [])
 
   useEffect(() => {
@@ -457,27 +458,11 @@ export default function SettingsView({
     setBackgroundDraft(next)
   }, [settingsQuery.data])
 
-  useEffect(() => {
-    const requested = focusTarget?.section
-    if (!requested) return undefined
-    const section = requested === 'models' ? 'ai-providers' : requested
-    if (requested === 'models') setManageModelsProvider('all')
-    let clearTimer = null
-    const raf = requestAnimationFrame(() => {
-      const node = setupFocusRefs.current[section]
-      if (!node) return
-      node.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      node.focus({ preventScroll: true })
-      setAttentionSection(section)
-      clearTimer = setTimeout(() => {
-        setAttentionSection((current) => current === section ? '' : current)
-      }, 1800)
-    })
-    return () => {
-      cancelAnimationFrame(raf)
-      if (clearTimer) clearTimeout(clearTimer)
-    }
-  }, [focusTarget, providerReady])
+  useSettingsFocus({
+    focusTarget, providerReady, selectedProvider, mobiusAccountOpen,
+    setSelectedProvider, setMobiusAccountOpen, setManageModelsProvider,
+    setupFocusRefs, setAttentionSection,
+  })
 
   const modelsForProvider = useCallback((provider) => {
     if (!provider) return []

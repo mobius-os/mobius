@@ -34,6 +34,7 @@ import {
 import { IDENTITY_STYLES } from './identity-styles.js'
 import {
   identityRequest,
+  disconnectIdentity,
   loadIdentity,
   publishIdentity,
   useAvatarSource,
@@ -537,7 +538,7 @@ export function SignInModal({ token, onClose, onSignedIn }) {
   )
 }
 
-function DisconnectModal({ token, onClose, onDisconnected, reconnecting = false }) {
+function DisconnectModal({ queryClient, token, onClose, onDisconnected, reconnecting = false }) {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const keepRef = useRef(null)
@@ -548,7 +549,7 @@ function DisconnectModal({ token, onClose, onDisconnected, reconnecting = false 
     setPending(true)
     setError('')
     try {
-      await identityRequest(token, '/link', { method: 'DELETE' })
+      await disconnectIdentity(queryClient, token)
       onDisconnected()
     } catch (requestError) {
       setError(requestError.status === 502
@@ -2268,13 +2269,27 @@ export default function IdentityAccount({ token }) {
     }
   }, [load, loadRailway, accountMode])
 
+  const signInDialog = signingIn && (
+    <SignInModal
+      token={token}
+      onClose={() => setSigningIn(false)}
+      onSignedIn={next => {
+        setData(next)
+        setSigningIn(false)
+        setReconnecting(false)
+        void loadRailway()
+      }}
+    />
+  )
+
   if (!data && loading) {
-    return <IdentityLoading />
+    return <>{signInDialog}<IdentityLoading /></>
   }
 
   if (!data) {
     return (
       <>
+        {signInDialog}
         <style>{IDENTITY_STYLES}</style>
         <main className="id-root id-root--settings">
           <div className="id-scroll">
@@ -2395,6 +2410,7 @@ export default function IdentityAccount({ token }) {
 
   return (
     <>
+      {signInDialog}
       <style>{IDENTITY_STYLES}</style>
       <main className="id-root id-root--settings">
         <div className="id-scroll">
@@ -2593,18 +2609,6 @@ export default function IdentityAccount({ token }) {
           </div>
         </div>
 
-        {signingIn && (
-          <SignInModal
-            token={token}
-            onClose={() => setSigningIn(false)}
-            onSignedIn={next => {
-              setData(next)
-              setSigningIn(false)
-              setReconnecting(false)
-              void loadRailway()
-            }}
-          />
-        )}
         {(editing || needsHandle) && canEdit && (
           <HandleModal
             current={profile?.handle}
@@ -2615,17 +2619,22 @@ export default function IdentityAccount({ token }) {
         )}
         {disconnecting && mode === 'linked' && (
           <DisconnectModal
+            queryClient={queryClient}
             token={token}
             reconnecting={reconnecting}
             onClose={() => setDisconnecting(false)}
             onDisconnected={() => {
               setDisconnecting(false)
-              if (reconnecting) {
-                void load()
-                setSigningIn(true)
-              } else {
-                void load()
-              }
+              railwaySequenceRef.current += 1
+              railwayConnectAbortRef.current?.abort()
+              setRailway(null)
+              setRailwayError('')
+              setManagingDeployment(null)
+              setManagingRailway(false)
+              setCreatingDeployment(false)
+              setDeletingDeployment(null)
+              planCheckedRef.current = false
+              if (reconnecting) setSigningIn(true)
             }}
           />
         )}

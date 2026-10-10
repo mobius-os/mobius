@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
 
 import {
   IDENTITY_KEY,
   identityRequest,
+  disconnectIdentity,
   loadIdentity,
   publishIdentity,
 } from '../../components/SettingsView/identity/identity-client.js'
@@ -112,4 +113,127 @@ test('an identity service error carries its own message and code', async () => {
     return true
   })
   assert.equal(calls[0].options.headers.Authorization, 'Bearer token')
+})
+
+
+const flush = () => new Promise(resolve => setImmediate(resolve))
+const json = (body, status = 200) => new Response(JSON.stringify(body), { status })
+
+function observeIdentity() {
+  const observer = new QueryObserver(queryClient, {
+    queryKey: IDENTITY_KEY,
+    queryFn: ({ signal }) => identityRequest('token', '', { signal }),
+    staleTime: Infinity,
+    retry: false,
+  })
+  const unsubscribe = observer.subscribe(() => {})
+  return { observer, unsubscribe }
+}
+
+test('queried Railway reads validate nested state without changing the transport URL', async () => {
+  const payload = {
+    railway_access: 'available',
+    connection: { connected: true, account: 'owner@example.com', workspace: 'Example',
+      plan: 'Hobby', deploy_blocked: '', plan_limits: { cpu: 'bad' }, adopt_current: true },
+    instances: [],
+  }
+  serve({ body: payload })
+  const parsed = await identityRequest('token', '/railway?region_options=1')
+  assert.equal(calls[0].url, '/api/identity/railway?region_options=1')
+  assert.equal(parsed.connection.plan_limits, undefined)
+  assert.equal(parsed.connection.adopt_current, undefined)
+  serve({ body: { ...payload, instances: [{ id: 'bad', url: 'javascript:alert(1)' }] } })
+  await assert.rejects(identityRequest('token', '/railway?region_options=1'), /invalid Railway/)
+})
+
+test('confirmed unlink clears linked details and avatar even when the next identity read fails', async () => {
+  queryClient.setQueryData(IDENTITY_KEY, identity('sample'))
+  const avatarKey = [...IDENTITY_KEY, 'avatar', 'https://photos.example/old']
+  queryClient.setQueryData(avatarKey, 'old-blob')
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return options?.method === 'DELETE'
+      ? new Response(null, { status: 204 })
+      : json({ detail: 'Account service unavailable' }, 503)
+  }
+  const watching = observeIdentity()
+  try {
+    await disconnectIdentity(queryClient, 'token')
+    await flush()
+    assert.equal(queryClient.getQueryData(IDENTITY_KEY), undefined)
+    assert.equal(queryClient.getQueryData(avatarKey), undefined)
+    assert.match(queryClient.getQueryState(IDENTITY_KEY).error.message, /unavailable/)
+    assert.equal(calls[0].options.method, 'DELETE')
+    assert.equal(calls[1].url, '/api/identity')
+  } finally { watching.unsubscribe() }
+})
+
+test('confirmed unlink aborts and fences a late pre-delete identity read', async () => {
+  queryClient.setQueryData(IDENTITY_KEY, identity('sample'))
+  let finishOld
+  let oldSignal
+  let reads = 0
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === 'DELETE') return new Response(null, { status: 204 })
+    if (++reads === 1) {
+      oldSignal = options.signal
+      return new Promise(resolve => { finishOld = resolve })
+    }
+    return json({ detail: 'Refresh unavailable' }, 503)
+  }
+  const watching = observeIdentity()
+  try {
+    const oldRead = watching.observer.refetch()
+    await flush()
+    await disconnectIdentity(queryClient, 'token')
+    await flush()
+    assert.equal(oldSignal.aborted, true)
+    finishOld(json(identity('obsolete')))
+    await oldRead
+    await flush()
+    assert.equal(queryClient.getQueryData(IDENTITY_KEY), undefined)
+  } finally { watching.unsubscribe() }
+})
+
+test('a rejected unlink preserves the confirmed linked identity', async () => {
+  const previous = identity('sample')
+  queryClient.setQueryData(IDENTITY_KEY, previous)
+  serve({ status: 502, body: { detail: 'Revocation was not confirmed' } })
+  await assert.rejects(disconnectIdentity(queryClient, 'token'), /not confirmed/)
+  assert.deepEqual(queryClient.getQueryData(IDENTITY_KEY), previous)
+})
+
+test('unlink waits for the complete backend identity rather than inventing an empty signed-out payload', async () => {
+  queryClient.setQueryData(IDENTITY_KEY, identity('sample'))
+  const localIdentity = { ...identity('sample'), account_mode: 'signed_out', profile: null }
+  globalThis.fetch = async (_url, options) => options?.method === 'DELETE'
+    ? new Response(null, { status: 204 }) : json(localIdentity)
+  const watching = observeIdentity()
+  try {
+    await disconnectIdentity(queryClient, 'token')
+    await flush()
+    assert.deepEqual(queryClient.getQueryData(IDENTITY_KEY), localIdentity)
+    assert.equal(queryClient.getQueryData(IDENTITY_KEY).deployments[0].current, true)
+  } finally { watching.unsubscribe() }
+})
+
+test('reconnection supersedes the post-unlink refresh before publishing the new linked identity', async () => {
+  queryClient.setQueryData(IDENTITY_KEY, identity('sample'))
+  let finishRefresh
+  let refreshSignal
+  globalThis.fetch = async (_url, options) => {
+    if (options?.method === 'DELETE') return new Response(null, { status: 204 })
+    refreshSignal = options.signal
+    return new Promise(resolve => { finishRefresh = resolve })
+  }
+  const watching = observeIdentity()
+  try {
+    await disconnectIdentity(queryClient, 'token')
+    await flush()
+    publishIdentity(queryClient, identity('reconnected'))
+    assert.equal(refreshSignal.aborted, true)
+    finishRefresh(json({ ...identity('old'), account_mode: 'signed_out', profile: null }))
+    await flush()
+    assert.equal(profileOf().handle, 'reconnected')
+  } finally { watching.unsubscribe() }
 })

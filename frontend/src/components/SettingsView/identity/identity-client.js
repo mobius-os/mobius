@@ -51,13 +51,14 @@ export async function identityRequest(token, path = '', options = {}) {
       typeof detail?.code === 'string' ? detail.code : '',
     )
   }
-  if (path === '/link/start') return parseLinkAttempt(body)
-  if (path === '/agent' || path === '/agent/trial') return parseAgentAccess(body)
-  if (path === '/railway') return parseRailway(body)
-  if (/^\/railway\/deployments\/[^/]+\/deletion$/.test(path)) {
+  const pathname = path.split(/[?#]/, 1)[0]
+  if (pathname === '/link/start') return parseLinkAttempt(body)
+  if (pathname === '/agent' || pathname === '/agent/trial') return parseAgentAccess(body)
+  if (pathname === '/railway') return parseRailway(body)
+  if (/^\/railway\/deployments\/[^/]+\/deletion$/.test(pathname)) {
     return parseDeletionDiagnosis(body)
   }
-  if (['', '/profile', '/avatar', '/link/complete'].includes(path)) {
+  if (['', '/profile', '/avatar', '/link/complete'].includes(pathname)) {
     return parseIdentity(body)
   }
   return body
@@ -72,8 +73,19 @@ export function loadIdentity(queryClient, token, { force = false } = {}) {
   })
 }
 
+/** A confirmed unlink invalidates linked details even if its next read fails. */
+export async function disconnectIdentity(queryClient, token) {
+  await identityRequest(token, '/link', { method: 'DELETE' })
+  await queryClient.cancelQueries({ queryKey: IDENTITY_KEY })
+  queryClient.removeQueries({ queryKey: AVATAR_KEY })
+  // Leave the cache absent until the backend supplies its full local identity,
+  // including the current deployment. Do not invent a signed-out payload.
+  void queryClient.resetQueries({ queryKey: IDENTITY_KEY, exact: true }).catch(() => {})
+}
+
 /** Record an identity returned by an edit, sign-in, or disconnect. */
 export function publishIdentity(queryClient, next, { avatarChanged = false } = {}) {
+  void queryClient.cancelQueries({ queryKey: IDENTITY_KEY, exact: true })
   queryClient.setQueryData(IDENTITY_KEY, next)
   if (avatarChanged) queryClient.removeQueries({ queryKey: AVATAR_KEY })
 }
