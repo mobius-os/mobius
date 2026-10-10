@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   cacheHitRate,
   formatCacheHitRate,
+  formatTokenCount,
   formatUsageMenuText,
   nonCachedInputTokens,
   usageModelName,
@@ -67,4 +68,14 @@ test('usage model names resolve through the provider-owned registry', () => {
       'not-yet-catalogued': { inputTokens: 1 },
     },
   }, registry, 'claude'), 'Claude Opus 4.8, not-yet-catalogued')
+})
+
+
+test('token counts move to the next unit when rounding reaches it', () => {
+  assert.equal(formatTokenCount(999), '999')
+  assert.equal(formatTokenCount(9_940), '9.9k')
+  assert.equal(formatTokenCount(9_960), '10k')
+  assert.equal(formatTokenCount(999_400), '999k')
+  assert.equal(formatTokenCount(999_600), '1.0M')
+  assert.equal(formatTokenCount(9_960_000), '10M')
 })

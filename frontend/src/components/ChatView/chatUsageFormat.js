@@ -3,15 +3,17 @@
  * One place keeps the progressive-disclosure layers numerically consistent.
  */
 
+// Pick the unit and precision from the ROUNDED value, so 999,600 reads "1.0M"
+// rather than "1000k", and 9,960 reads "10k" like every other value >= 10k.
 export function formatTokenCount(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
-  if (value < 1000) return String(Math.round(value))
-  if (value < 1_000_000) {
-    const thousands = value / 1000
-    return `${thousands.toFixed(thousands < 10 ? 1 : 0)}k`
+  if (Math.round(value) < 1000) return String(Math.round(value))
+  const thousands = value / 1000
+  if (thousands < 999.5) {
+    return `${thousands.toFixed(thousands < 9.95 ? 1 : 0)}k`
   }
   const millions = value / 1_000_000
-  return `${millions.toFixed(millions < 10 ? 1 : 0)}M`
+  return `${millions.toFixed(millions < 9.95 ? 1 : 0)}M`
 }
 
 export function formatCostUsd(value) {
