@@ -60,8 +60,6 @@ _proxy_clients = PinnedHostClientPool()
 
 # Browser freshness the owner proxy will grant at most, whatever upstream says.
 _PROXY_MAX_BROWSER_AGE = 24 * 60 * 60
-# Validators a browser adds itself when revalidating a cached proxy response.
-_FORWARDED_CONDITIONAL_HEADERS = ("if-none-match", "if-modified-since")
 
 ResponseCacheHeaders = Callable[[httpx.Response], dict[str, str]]
 
@@ -94,19 +92,16 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
   `s-maxage` must never reach a shared cache (a CDN in front of Möbius) that
   could replay owner-fetched bytes, and the list of URLs the owner reads, to
   anyone without a token. Freshness is therefore always rewritten to `private`
-  and clamped; upstream `no-store` stays `no-store`; only successful reads and
-  revalidations carry validators. Nothing here is cached server-side.
+  and clamped; upstream `no-store` stays `no-store`. Validators are never
+  exposed: the proxy URL does not bind the origin selected by redirects, so
+  expired reads must fetch again unconditionally. Nothing is cached server-side.
   """
   if upstream.status_code not in (200, 304):
     return {}
   directives = _cache_directives(upstream.headers.get("cache-control", ""))
   if "no-store" in directives:
     return {"cache-control": "no-store"}
-  headers = {
-    name: upstream.headers[name]
-    for name in ("etag", "last-modified")
-    if name in upstream.headers
-  }
+  headers: dict[str, str] = {}
   # Preserve the origin's selection dimensions. In particular, Vary: * can
   # never match a stored response; replacing it with Authorization would make
   # an intentionally unmatchable representation reusable.
@@ -186,7 +181,7 @@ class ProxyPostRequest(BaseModel):
 class _ExternalRead:
   body: bytes
   status_code: int
-  content_type: str
+  content_type: str | None
   final_url: str
   truncated: bool
   forwarded_headers: dict[str, str] = field(default_factory=dict)
@@ -346,9 +341,7 @@ async def _read_external_get(
         return _ExternalRead(
           body=body[:max_bytes],
           status_code=upstream.status_code,
-          content_type=upstream.headers.get(
-            "content-type", "application/octet-stream",
-          ),
+          content_type=upstream.headers.get("content-type"),
           final_url=current_url,
           truncated=len(body) > max_bytes,
           forwarded_headers=_response_headers(
@@ -371,7 +364,8 @@ async def _first_supported_icon(
       # A site may publish a stale, private, malformed, or unavailable icon
       # link. It is data, not authority to weaken the network boundary.
       continue
-    content_type = icon.content_type.split(";", 1)[0].strip().lower()
+    content_type = icon.content_type or "application/octet-stream"
+    content_type = content_type.partition(";")[0].strip().lower()
     if (
       200 <= icon.status_code < 300
       and not icon.truncated
@@ -430,8 +424,9 @@ async def _capped_response(
           headers=_response_headers(
             upstream, len(body) >= _MAX_BYTES, cache_headers,
           ),
-          media_type=upstream.headers.get(
-            "content-type", "application/octet-stream",
+          media_type=(
+            upstream.headers.get("content-type") if upstream.status_code == 304
+            else upstream.headers.get("content-type", "application/octet-stream")
           ),
         )
       finally:
@@ -458,7 +453,8 @@ async def proxy_favicon(
       client, _canonical_root_icon_urls(url),
     )
     if icon is not None:
-      content_type = icon.content_type.split(";", 1)[0].strip().lower()
+      content_type = icon.content_type or "application/octet-stream"
+      content_type = content_type.partition(";")[0].strip().lower()
       return Response(
         content=icon.body,
         media_type=content_type,
@@ -472,7 +468,8 @@ async def proxy_favicon(
     ):
       raise HTTPException(404, "Site icon unavailable.")
 
-    page_type = page.content_type.split(";", 1)[0].strip().lower()
+    page_type = page.content_type or "application/octet-stream"
+    page_type = page_type.partition(";")[0].strip().lower()
     declared = []
     if page_type in ("text/html", "application/xhtml+xml"):
       declared = _declared_favicon_urls(
@@ -484,7 +481,8 @@ async def proxy_favicon(
     ))
     icon = await _first_supported_icon(client, candidates)
     if icon is not None:
-      content_type = icon.content_type.split(";", 1)[0].strip().lower()
+      content_type = icon.content_type or "application/octet-stream"
+      content_type = content_type.partition(";")[0].strip().lower()
       return Response(
         content=icon.body,
         media_type=content_type,
@@ -509,12 +507,10 @@ async def proxy_get(
 
   Redirects are independently validated and pinned like app install. Each
   hop leases its own Host/SNI client; only the final response contributes
-  private cache metadata and the browser's validators reach upstream.
+  private freshness metadata. Browser validators are never forwarded: a cached
+  proxy URL cannot establish which origin will serve its next read.
   """
   headers = {"User-Agent": _PROXY_USER_AGENT}
-  for name in _FORWARDED_CONDITIONAL_HEADERS:
-    if name in request.headers:
-      headers[name] = request.headers[name]
   try:
     async with asyncio.timeout(_EXCHANGE_DEADLINE):
       read = await _read_external_get(
@@ -529,7 +525,10 @@ async def proxy_get(
     content=read.body,
     status_code=read.status_code,
     headers=read.forwarded_headers,
-    media_type=read.content_type,
+    media_type=(
+      read.content_type if read.status_code == 304
+      else read.content_type or "application/octet-stream"
+    ),
   )
 
 

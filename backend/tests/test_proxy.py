@@ -421,8 +421,6 @@ def test_proxy_cache_headers_never_let_a_shared_cache_store_owner_reads():
   }))
   assert tile == {
     "cache-control": "private, max-age=86400",
-    "etag": '"tile-1"',
-    "last-modified": "Wed, 07 Oct 2026 10:00:00 GMT",
     "vary": "Authorization",
   }
   assert private_headers(_upstream(200, {
@@ -433,17 +431,17 @@ def test_proxy_cache_headers_never_let_a_shared_cache_store_owner_reads():
   })) == {"cache-control": "no-store"}
   assert private_headers(_upstream(200, {
     "cache-control": "no-cache", "etag": '"x"',
-  })) == {"cache-control": "private, no-cache", "etag": '"x"', "vary": "Authorization"}
-  # Without explicit freshness nothing is promised beyond revalidation.
+  })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
+  # Without explicit freshness the browser must fetch the resource again.
   assert private_headers(_upstream(200, {"etag": '"x"'})) == {
-    "cache-control": "private, no-cache", "etag": '"x"', "vary": "Authorization",
+    "cache-control": "private, no-cache", "vary": "Authorization",
   }
   assert private_headers(_upstream(200, {"cache-control": "max-age=junk"})) == {
     "cache-control": "private, no-cache", "vary": "Authorization",
   }
   assert private_headers(_upstream(304, {
     "cache-control": "max-age=300", "etag": '"x"',
-  })) == {"cache-control": "private, max-age=300", "etag": '"x"', "vary": "Authorization"}
+  })) == {"cache-control": "private, max-age=300", "vary": "Authorization"}
   assert private_headers(_upstream(500, {
     "cache-control": "max-age=300", "etag": '"x"',
   })) == {}
@@ -458,7 +456,7 @@ def test_proxy_cache_separates_bearer_identities_and_accounts_for_upstream_age()
     "cache-control": "max-age=300", "etag": '"x"', "age": "180",
   }))
   assert fresh == {
-    "cache-control": "private, max-age=120", "etag": '"x"',
+    "cache-control": "private, max-age=120",
     "vary": "Authorization",
   }
   old_date = format_datetime(datetime.now(UTC) - timedelta(seconds=280), usegmt=True)
@@ -539,13 +537,15 @@ def test_proxy_revalidation_returns_an_empty_not_modified_response():
     cache_headers=private_browser_cache_headers,
   ))
   assert response.status_code == 304
+  assert "content-type" not in response.headers
   assert response.body == b""
   assert response.headers["cache-control"] == "private, max-age=60"
-  assert response.headers["etag"] == '"v1"'
+  assert "etag" not in response.headers
+  assert "last-modified" not in response.headers
   assert response.headers["vary"] == "Authorization"
 
 
-def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
+def test_proxy_get_reuses_one_client_per_pinned_host_without_forwarding_validators(
   client, owner_token, monkeypatch,
 ):
   hosts = {
@@ -564,6 +564,7 @@ def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
     seen.append((client_, req))
     return _HopUpstream(200, b"png", {
       "content-type": "image/png", "cache-control": "max-age=60",
+      "etag": '"tile-1"', "last-modified": "yesterday",
     })
 
   monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
@@ -573,20 +574,28 @@ def test_proxy_get_reuses_one_client_per_pinned_host_and_forwards_validators(
     response = client.get(
       "/api/proxy",
       params={"url": url},
-      headers={**auth, "If-None-Match": '"tile-1"', "Cookie": "a=b"},
+      headers={
+        **auth, "If-None-Match": '"tile-1"', "Cookie": "a=b",
+        "If-Modified-Since": "Wed, 01 Oct 2025 00:00:00 GMT",
+      },
     )
     assert response.status_code == 200, response.text
 
+  assert len(seen) == 3
   (first, first_req), (second, _), (other, _) = seen
+  for _, req in seen:
+    assert "if-none-match" not in req.headers
+    assert "if-modified-since" not in req.headers
   assert first is second
   assert other is not first
   assert first.follow_redirects is False
-  assert first_req.headers["if-none-match"] == '"tile-1"'
   assert first_req.headers["host"] == "tile.example"
   assert "cookie" not in first_req.headers
   assert "authorization" not in first_req.headers
   assert response.headers["cache-control"] == "private, max-age=60"
   assert response.headers["vary"] == "Authorization"
+  assert "etag" not in response.headers
+  assert "last-modified" not in response.headers
 
 
 class _HopUpstream:
@@ -652,12 +661,15 @@ def test_external_reader_uses_favicon_defaults_only_when_headers_are_unspecified
   assert ("user-agent" in sent[0].headers) == (headers is None)
 
 
-def test_proxy_get_follows_redirects_like_install(client, owner_token, monkeypatch):
+@pytest.mark.parametrize("destination", ["site.example", "cdn.example"])
+def test_proxy_get_follows_redirects_like_install(
+  client, owner_token, monkeypatch, destination,
+):
   """A manifest URL that redirects must preview as it installs."""
   validated = _pin_every_hop(monkeypatch)
   fake_client, sent = _hop_client([
     _HopUpstream(301, headers={
-      "location": "https://cdn.example/mobius.json",
+      "location": f"https://{destination}/mobius.json",
       "cache-control": "public, max-age=86400", "etag": '"redirect"',
     }),
     _HopUpstream(
@@ -665,6 +677,7 @@ def test_proxy_get_follows_redirects_like_install(client, owner_token, monkeypat
       {
         "content-type": "application/json", "x-ratelimit-remaining": "9",
         "cache-control": "public, max-age=60", "etag": '"final"',
+        "last-modified": "Wed, 01 Oct 2025 00:00:00 GMT",
       },
     ),
   ])
@@ -683,7 +696,9 @@ def test_proxy_get_follows_redirects_like_install(client, owner_token, monkeypat
     params={"url": "https://site.example/mobius.json"},
     headers={
       "Authorization": f"Bearer {owner_token}",
-      "If-None-Match": '"previous"', "Cookie": "session=local",
+      "If-None-Match": '"previous"',
+      "If-Modified-Since": "Wed, 01 Oct 2025 00:00:00 GMT",
+      "Cookie": "session=local",
     },
   )
 
@@ -691,19 +706,88 @@ def test_proxy_get_follows_redirects_like_install(client, owner_token, monkeypat
   assert r.json() == {"id": "moved"}
   assert r.headers["x-ratelimit-remaining"] == "9"
   assert validated == [
-    "https://site.example/mobius.json", "https://cdn.example/mobius.json",
+    "https://site.example/mobius.json", f"https://{destination}/mobius.json",
   ]
-  assert len(created) == 2
-  assert created[0] is not created[1]
+  assert len(created) == (1 if destination == "site.example" else 2)
+  if destination != "site.example":
+    assert created[0] is not created[1]
   assert r.headers["cache-control"] == "private, max-age=60"
-  assert r.headers["etag"] == '"final"'
+  assert "etag" not in r.headers
+  assert "last-modified" not in r.headers
   assert r.headers["vary"] == "Authorization"
   for req in sent:
-    assert req.headers["if-none-match"] == '"previous"'
+    assert "if-none-match" not in req.headers
+    assert "if-modified-since" not in req.headers
     assert "authorization" not in req.headers
     assert "cookie" not in req.headers
-  assert sent[1].headers["host"] == "cdn.example"
-  assert sent[1].extensions["sni_hostname"] == "cdn.example"
+  assert sent[1].headers["host"] == destination
+  assert sent[1].extensions["sni_hostname"] == destination
+
+
+@pytest.mark.parametrize("content_type", [None, "application/json"])
+def test_proxy_get_not_modified_preserves_absent_content_type(
+  client, owner_token, monkeypatch, content_type,
+):
+  validated = _pin_every_hop(monkeypatch)
+  headers = {"etag": '"v1"', "cache-control": "max-age=60"}
+  if content_type is not None:
+    headers["content-type"] = content_type
+  upstream = _HopUpstream(304, headers=headers)
+  fake_client, sent = _hop_client([upstream])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+  response = client.get(
+    "/api/proxy", params={"url": "https://site.example/data"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 304, response.text
+  assert response.content == b""
+  assert response.headers.get("content-type") == content_type
+  assert "etag" not in response.headers
+  assert "last-modified" not in response.headers
+  assert response.headers["cache-control"] == "private, max-age=60"
+  assert validated == ["https://site.example/data"]
+  assert len(sent) == 1
+  assert upstream.closed
+
+
+def test_proxy_get_redirector_cannot_short_circuit_with_final_origin_validator(
+  client, owner_token, monkeypatch,
+):
+  validated = _pin_every_hop(monkeypatch)
+  sent = []
+  upstreams = []
+
+  async def fake_send(client_, req, **kwargs):
+    sent.append(req)
+    if "if-none-match" in req.headers or "if-modified-since" in req.headers:
+      upstream = _HopUpstream(304, headers={"etag": '"old-final"'})
+    elif req.headers["host"] == "site.example":
+      upstream = _HopUpstream(302, headers={
+        "location": "https://new.example/data",
+      })
+    else:
+      upstream = _HopUpstream(200, b"new bytes", {
+        "etag": '"new-final"', "cache-control": "max-age=60",
+      })
+    upstreams.append(upstream)
+    return upstream
+
+  monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+  response = client.get(
+    "/api/proxy", params={"url": "https://site.example/data"},
+    headers={
+      "Authorization": f"Bearer {owner_token}",
+      "If-None-Match": '"old-final"',
+      "If-Modified-Since": "Wed, 01 Oct 2025 00:00:00 GMT",
+    },
+  )
+  assert response.status_code == 200, response.text
+  assert response.content == b"new bytes"
+  assert response.headers["content-type"] == "application/octet-stream"
+  assert "etag" not in response.headers
+  assert validated == ["https://site.example/data", "https://new.example/data"]
+  assert len(sent) == 2
+  assert all(upstream.closed for upstream in upstreams)
 
 
 @pytest.mark.parametrize("error, status", [
