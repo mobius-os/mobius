@@ -787,6 +787,23 @@ def test_local_manifest_icon_is_materialized_with_its_accepted_revision(
   assert client.get(f"/api/apps/{app_id}/icon").status_code == 404
 
 
+def test_local_apply_scales_down_a_large_icon_like_install(client, auth, db):
+  """Apply used to refuse anything over 4096 px that install merely skipped."""
+  from PIL import Image
+  source = _source()
+  output = io.BytesIO()
+  Image.new("RGB", (5000, 4800), (40, 90, 180)).save(output, format="PNG")
+  _declare_icon(source, output.getvalue())
+
+  applied = _apply(client, auth, source)
+
+  assert applied.status_code == 200, applied.text
+  row = db.query(models.App).populate_existing().filter_by(
+    id=applied.json()["app"]["id"],
+  ).one()
+  assert Image.open(io.BytesIO(row.icon_png)).size == (1024, 1024)
+
+
 def test_invalid_local_manifest_icon_keeps_previous_revision(
   client, auth, db,
 ):
@@ -831,6 +848,27 @@ def test_compile_failure_keeps_previous_live_revision(client, auth, db):
   assert row.compiled_path == previous_bundle
   assert "first" in row.jsx_source
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head
+
+
+def test_compile_failure_reports_the_error_and_location_without_colour(client, auth):
+  source = _source()
+  _apply(client, auth, source)
+  # The compiler colours every character of a quoted source line, so one long
+  # line used to push the error header past the response's tail cap.
+  style = ", ".join(f"key{i}: 'value {i}'" for i in range(20))
+  (source / "index.jsx").write_text(
+    "export default function App() {\n"
+    f"  return <div style={{{{{style}}}}}>Hello {{ </div>\n"
+    "}\n"
+  )
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  stderr = failed.json()["detail"]["stderr"]
+  assert "\x1b" not in stderr
+  assert "PARSE_ERROR" in stderr
+  assert "─[ index.jsx:" in stderr
 
 
 def test_invalid_manifest_keeps_previous_live_revision(client, auth, db):
@@ -1162,6 +1200,21 @@ def test_local_manifest_identity_is_immutable(client, auth, db):
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.slug == "demo"
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head
+
+
+def test_local_manifest_identity_uses_stored_address_parser():
+  from types import SimpleNamespace
+
+  source = Path("/apps/local-name")
+  app = SimpleNamespace(manifest_url="https://example.test/app#manifest-id=stored-id")
+  app_apply._validate_local_identity(
+    source, {"id": "stored-id", "name": "Stored"}, app,
+  )
+  app.manifest_url += "&other=fragment"
+  with pytest.raises(app_apply.AppApplyError, match="source-directory name"):
+    app_apply._validate_local_identity(
+      source, {"id": "stored-id", "name": "Stored"}, app,
+    )
 
 
 def test_local_apply_updates_runtime_capabilities_with_source(

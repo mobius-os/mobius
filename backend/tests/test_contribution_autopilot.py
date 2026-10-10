@@ -2,7 +2,7 @@
 
 Two layers:
   - Module (app/contribution_autopilot.py): the claim/lease/round state machine,
-    dedupe/cursor, run_id binding, escalation, round limit, pause/resume.
+    dedupe/cursor, run_id binding, escalation, no round budget, pause/resume.
   - Routes (app/routes/github.py autopilot endpoints): the trust boundary — the
     DB row is the only authorization, a forged ledger block does nothing, agent
     tokens can't forge a claim, status advertises capability.
@@ -404,18 +404,20 @@ def test_sweep_reclamation_survives_its_own_session():
     reader.close()
 
 
-def test_round_limit_escalates(db):
+def test_follow_up_has_no_round_budget(db):
+  """Completed rounds never exhaust a budget; only failed rounds escalate."""
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   row = autopilot.get_row(db, 1, "rec")
-  row.rounds_used = row.max_rounds
+  row.rounds_used = 50
   db.commit()
   v = autopilot.claim_for_round(
     db, 1, "rec", attention_key="k", event_at="2026-08-01T00:00:00Z",
   )
-  assert v["status"] == "escalate" and v["reason"] == "round_limit"
+  assert v["status"] == "granted"
+  assert "max_rounds" not in autopilot.mirror_block(autopilot.get_row(db, 1, "rec"))
 
 
-def test_resume_resets_round_limit_and_close_out(db):
+def test_resume_resets_counters_and_close_out(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   row = autopilot.get_row(db, 1, "rec")
   row.rounds_used = 5

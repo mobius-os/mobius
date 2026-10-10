@@ -854,3 +854,24 @@ def test_cache_advice_failure_never_changes_the_job_outcome(tmp_path, monkeypatc
   assert runner.run() == 0
   log = (data_dir / "cron-logs" / "app-jobs.log").read_text()
   assert "file cache advice failed" in log
+
+
+@pytest.mark.parametrize("configured", [
+  "https://companion.example", "https://companion.example/",
+  "http://localhost:5173/",
+])
+def test_job_context_uses_configured_public_origin_not_request_host(
+  client, owner_token, db, monkeypatch, configured,
+):
+  own = _db_app(db, "configured-origin")
+  token = _token(client, owner_token, own.id)
+  monkeypatch.setattr(get_settings(), "frontend_origin", configured)
+  response = client.get(f"/api/apps/{own.id}/job-context", headers={
+    "Authorization": f"Bearer {token}",
+    "Host": "untrusted.example",
+    "X-Forwarded-Host": "untrusted.example",
+    "X-Forwarded-Proto": "https",
+  })
+  assert response.status_code == 200, response.text
+  assert response.json()["public_origin"] == configured.rstrip("/")
+  assert "untrusted.example" not in json.dumps(response.json())

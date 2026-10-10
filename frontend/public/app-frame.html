@@ -612,8 +612,10 @@
     //      registered before iframe.onLoad fires in the parent).
     //   2. parent (AppCanvas.jsx) posts
     //      {type:'moebius:frame-init', token, themeCss, bg,
-    //       capabilityContract} on
-    //      its iframe.onLoad handler.
+    //       capabilityContract, navLocation, waitForNavigationReady} on
+    //      its iframe.onLoad handler. navLocation is the JSON text this app's
+    //      previous frame reported through window.mobius.nav.setLocation, or
+    //      null; the runtime validates it and exposes it as nav.location.
     //   3. iframe applies theme and requests its compiled module from the
     //      parent. The controlled shell can read the versioned service-worker
     //      cache offline; this opaque frame cannot. The parent transfers only
@@ -649,6 +651,8 @@
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;
+    let currentNavLocation = null;
+    let waitForNavigationReady = false;
     let tokenRefreshPromise = null;
     let tokenRefreshResolve = null;
     let mountedRoot = null;
@@ -1384,6 +1388,8 @@
           appInstanceId: tokenAppInstanceId(currentToken),
           getToken: runtimeToken,
           capabilityContract: currentCapabilityContract,
+          navLocation: currentNavLocation,
+          waitForNavigationReady,
         };
         // Opaque sandboxed frames are intentionally NOT controlled by the
         // shell's service worker. Loading /module directly from here therefore
@@ -1546,6 +1552,8 @@
         acceptToken(msg.token);
         if (initialized) return;
         initialized = true;
+        waitForNavigationReady = msg.waitForNavigationReady === true;
+        currentNavLocation = typeof msg.navLocation === 'string' ? msg.navLocation : null;
         if (typeof window.__mobiusHydrateLocalStorage === 'function') {
           window.__mobiusHydrateLocalStorage(msg.storage);
         }

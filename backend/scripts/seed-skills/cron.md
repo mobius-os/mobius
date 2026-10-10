@@ -73,6 +73,10 @@ curl -fsS \
 ## Key details
 
 - **Credentials:** installable jobs use `$APP_TOKEN`. Never read `/data/service-token.txt` from an app job. App jobs have no agent environment, so they use plain `curl -H "Authorization: Bearer $APP_TOKEN" ...` — `mapi` is for agent-context calls only.
+- **Owner-facing links:** `GET /api/apps/{app_id}/job-context` returns non-secret
+  `public_origin`, the configured frontend origin without a trailing slash.
+  Use it for links back to Möbius, not the job's internal `$API_BASE_URL` or
+  request host. Links still require normal authentication; this grants no access.
 - **Logs:** supervised jobs receive `$APP_JOB_STATE_DIR`; keep app-owned logs there.
 - **A job that launches an agent** (for example a CLI run with `--system-prompt-file`) gives it no chat context: that prompt file is all it gets, so spell out the task fully there.
 - **Storage from a cron script** uses the raw API (`window.mobius.storage` only exists inside a running app). Enumerate, don't probe — see the storage section of `building-apps.md`.

@@ -9,19 +9,18 @@ import { stageComposerHandoff } from '../ChatView/composerDraft.js'
 import RecoveryPanel from '../ErrorBoundary/RecoveryPanel.jsx'
 import useAgentRepair from '../../hooks/useAgentRepair.js'
 import { buildAgentRepairPrompt, errorRecoveryFingerprint } from '../../lib/errorRecovery.js'
-import {
-  isVisualContentOnly,
-  standaloneAppVersion,
-} from '../../lib/standaloneBoot.js'
+import { isVisualContentOnly } from '../../lib/standaloneBoot.js'
+import { appFrameVersion } from '../../lib/appVersion.js'
 import { readableAppDiagnostic } from '../../lib/appDiagnostic.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import {
-  MAX_STANDALONE_HISTORY_ENTRIES,
+  pushStandaloneHistoryEntry,
   readStandaloneHistoryEntries,
   reconcileStandaloneHistory,
   standaloneHistoryState,
 } from '../../lib/standaloneHistory.js'
+import { retireAppEntries } from '../../lib/navHistory.js'
 import StandaloneInstallCard from './StandaloneInstallCard.jsx'
 import './StandaloneApp.css'
 
@@ -60,6 +59,9 @@ export default function StandaloneApp({ initialApp }) {
     catch { return false }
   })
   const navEntriesRef = useRef(readStandaloneHistoryEntries(history.state))
+  // History survives a host reload; document-local ownership deliberately does
+  // not. Share the shell's retirement rule rather than adopting dead requests.
+  const navOwnersRef = useRef(new Map())
   const localPopRef = useRef(false)
   const appChatControllerRef = useRef(null)
   if (!appChatControllerRef.current) {
@@ -81,10 +83,11 @@ export default function StandaloneApp({ initialApp }) {
       return null
     }
     setRemoved(false)
-    if (apply) {
+    // A settings write keeps the frame version, so it applies in place.
+    if (apply || appFrameVersion(current) === appFrameVersion(app)) {
       setApp(current)
       setUpdateAvailable(false)
-    } else if (standaloneAppVersion(current) !== standaloneAppVersion(app)) {
+    } else {
       setUpdateAvailable(true)
     }
     return current
@@ -106,10 +109,9 @@ export default function StandaloneApp({ initialApp }) {
     if (event.type === 'app_deleted') {
       setRemoved(true)
     } else if (['app_updated', 'app_recovered', 'app_preview_ready'].includes(event.type)) {
-      setRemoved(false)
-      setUpdateAvailable(true)
+      void refreshApp().catch(() => {})
     }
-  }, [initialApp.id]), {
+  }, [initialApp.id, refreshApp]), {
     // Reconnect reconciliation is best-effort; the next system event or
     // explicit update tap retries it without leaking a rejected promise.
     onOpen: () => { void refreshApp().catch(() => {}) },
@@ -131,36 +133,31 @@ export default function StandaloneApp({ initialApp }) {
       const result = reconcileStandaloneHistory(
         navEntriesRef.current,
         event.state,
-        { localPopPending: localPopRef.current },
+        { localPopPending: localPopRef.current, registry: navOwnersRef.current },
       )
       navEntriesRef.current = result.entries
       if (result.consumedLocalPop) localPopRef.current = false
       for (const command of result.commands) {
         canvasRef.current?.sendNavigation(command.direction, command.requestId)
       }
+      if (result.skipRetired) history.go(result.direction === 'forward' ? 1 : -1)
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const onNavPush = useCallback((_appId, meta = {}) => {
-    if (navEntriesRef.current.length >= MAX_STANDALONE_HISTORY_ENTRIES) return false
-    const entry = {
-      requestId: typeof meta.requestId === 'string' ? meta.requestId : null,
-      reversible: meta.reversible === true,
-    }
-    navEntriesRef.current.push(entry)
-    try {
-      history.pushState(
-        standaloneHistoryState(history.state, navEntriesRef.current),
-        '',
-        window.location.href,
-      )
-      return true
-    } catch {
-      navEntriesRef.current.pop()
-      return false
-    }
+  const onNavPush = useCallback((appId, meta = {}) => {
+    const next = pushStandaloneHistoryEntry(
+      history, navEntriesRef.current, navOwnersRef.current, appId, meta, window.location.href,
+    )
+    if (!next) return false
+    navEntriesRef.current = next
+    return true
+  }, [])
+
+  const onNavReset = useCallback((appId) => {
+    retireAppEntries(navOwnersRef.current, appId)
+    localPopRef.current = false
   }, [])
 
   const onNavPop = useCallback(() => {
@@ -247,7 +244,8 @@ export default function StandaloneApp({ initialApp }) {
         appId={app.id}
         appName={app.name}
         appSlug={app.slug}
-        version={standaloneAppVersion(app)}
+        version={appFrameVersion(app)}
+        storageGeneration={app.storage_generation}
         offlineCapable={app.offline_capable === true}
         capabilityContract={app.capability_contract || null}
         active
@@ -257,6 +255,7 @@ export default function StandaloneApp({ initialApp }) {
         onImmersive={(_id, value) => setImmersive(value)}
         onNavPush={onNavPush}
         onNavPop={onNavPop}
+        onNavReset={onNavReset}
         onHostRequest={onHostRequest}
         onAppError={captureCrash}
       />

@@ -3033,6 +3033,39 @@ function makeChat({ appId, getToken, storage }) {
 }
 
 //#endregion
+//#region src/lib/appNavLocation.js
+const APP_NAV_LOCATION_MAX_BYTES = 4096;
+function byteLength(text) {
+	return new TextEncoder().encode(text).length;
+}
+/** Encode a location for the wire. null/undefined clears it. Throws on misuse. */
+function encodeNavLocation(value) {
+	if (value === void 0 || value === null) return null;
+	let text;
+	try {
+		text = JSON.stringify(value);
+	} catch (error) {
+		throw new TypeError(`window.mobius.nav.setLocation: the location must be JSON-serializable (${error?.message || error})`);
+	}
+	if (typeof text !== "string" || text === "null") throw new TypeError("window.mobius.nav.setLocation: the location must be JSON-serializable");
+	const bytes = byteLength(text);
+	if (bytes > 4096) throw new RangeError(`window.mobius.nav.setLocation: the location is ${bytes} bytes as JSON; the limit is ${APP_NAV_LOCATION_MAX_BYTES}. Keep ids and view names here and larger state in window.mobius.storage.`);
+	return text;
+}
+/** Return `text` when it is bounded, parseable location JSON, else null. */
+function validNavLocationText(text) {
+	if (typeof text !== "string" || text === "null") return null;
+	if (text.length > 4096) return null;
+	if (byteLength(text) > 4096) return null;
+	try {
+		JSON.parse(text);
+	} catch {
+		return null;
+	}
+	return text;
+}
+
+//#endregion
 //#region src/runtime/navigation.js
 const SPLIT_WIDE_BP = 600;
 const SPLIT_FLICK_VEL = .4;
@@ -3263,7 +3296,11 @@ function makeSplit() {
 		};
 	};
 }
-function makeNav() {
+function makeNav({ location = null, waitForNavigationReady = false } = {}) {
+	let locationText = validNavLocationText(location);
+	let locationReported = false;
+	let navigationReady = !waitForNavigationReady;
+	let navigationFocused = true;
 	const stack = [];
 	const entries = /* @__PURE__ */ new Set();
 	const entriesByRequestId = /* @__PURE__ */ new Map();
@@ -3275,10 +3312,16 @@ function makeNav() {
 			}, window.location.origin);
 		} catch (e) {}
 	}
-	function onForwardMessage(event) {
+	function onHostMessage(event) {
 		if (event.origin !== window.location.origin) return;
 		if (event.source !== window.parent) return;
 		const msg = event.data;
+		if (msg?.type === "moebius:frame-visibility") {
+			navigationFocused = msg.navigationFocused !== false;
+			navigationReady = !waitForNavigationReady || msg.visible === true && msg.navigationReady !== false;
+			if (navigationReady) flushQueue();
+			return;
+		}
 		if (msg?.type !== "moebius:nav-forward" || typeof msg.requestId !== "string") return;
 		const entry = entriesByRequestId.get(msg.requestId);
 		if (!entry || !entry.reversible || entry.done || entry.disposed) {
@@ -3309,7 +3352,11 @@ function makeNav() {
 		}
 		postForwardResult("moebius:nav-forward-ack", msg.requestId);
 	}
-	if (window.parent !== window) window.addEventListener("message", onForwardMessage);
+	if (window.parent !== window) window.addEventListener("message", onHostMessage);
+	function flushQueue(activated = false) {
+		activated ||= [...entries].some((entry) => entry.userActivated && !entry.sent && !entry.done);
+		for (const entry of entries) entry.send?.(activated || entry.userActivated);
+	}
 	function open(label, onBackOrHandlers, onForwardArg) {
 		for (const old of [...entries]) if (!old.active && old.settled) old.dispose?.();
 		const handlers = onBackOrHandlers && typeof onBackOrHandlers === "object" ? onBackOrHandlers : {
@@ -3319,11 +3366,15 @@ function makeNav() {
 		const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const entry = {
 			requestId,
+			userActivated: globalThis.navigator?.userActivation?.isActive === true,
 			owned: false,
 			active: false,
 			done: false,
 			disposed: false,
 			settled: false,
+			sent: false,
+			waitingForFocus: false,
+			send: null,
 			cleanupTimer: null,
 			readyResolve: null,
 			outcomeResolve: null,
@@ -3350,14 +3401,7 @@ function makeNav() {
 				entry.readyResolve = null;
 			}
 		};
-		const timer = setTimeout(() => {
-			entry.done = true;
-			settleOutcome("timeout");
-			entry.cleanupTimer = setTimeout(() => {
-				entry.settled = true;
-				dispose();
-			}, 3e4);
-		}, 5e3);
+		let timer = null;
 		const dispose = () => {
 			if (entry.disposed) return;
 			entry.disposed = true;
@@ -3385,6 +3429,7 @@ function makeNav() {
 			if (!entry.settled) {
 				entry.done = true;
 				settleOutcome("cancelled");
+				if (!entry.sent) dispose();
 				return;
 			}
 			if (!entry.reversible || !entry.settled) dispose();
@@ -3401,6 +3446,14 @@ function makeNav() {
 				return;
 			}
 			if (msg?.requestId !== requestId) return;
+			if (msg.type === "moebius:nav-push-deferred") {
+				clearTimeout(timer);
+				entry.sent = false;
+				entry.waitingForFocus = true;
+				if (entry.done) dispose();
+				else if (navigationFocused) flushQueue();
+				return;
+			}
 			if (msg.type === "moebius:nav-push-ack") {
 				entry.settled = true;
 				clearTimeout(timer);
@@ -3441,19 +3494,33 @@ function makeNav() {
 				}
 			};
 		}
-		try {
-			window.parent.postMessage({
-				type: "moebius:nav-push",
-				label: label || "app-detail",
-				requestId,
-				reversible: entry.reversible
-			}, window.location.origin);
-		} catch (e) {
-			clearTimeout(timer);
-			entry.settled = true;
-			settleOutcome("error");
-			dispose();
-		}
+		entry.send = (activated = entry.userActivated) => {
+			if (!navigationReady || !navigationFocused && entry.waitingForFocus && !activated || entry.sent || entry.done) return;
+			entry.sent = true;
+			timer = setTimeout(() => {
+				entry.done = true;
+				settleOutcome("timeout");
+				entry.cleanupTimer = setTimeout(() => {
+					entry.settled = true;
+					dispose();
+				}, 3e4);
+			}, 5e3);
+			try {
+				window.parent.postMessage({
+					type: "moebius:nav-push",
+					label: label || "app-detail",
+					requestId,
+					reversible: entry.reversible,
+					userActivated: activated
+				}, window.location.origin);
+			} catch (e) {
+				clearTimeout(timer);
+				entry.settled = true;
+				settleOutcome("error");
+				dispose();
+			}
+		};
+		flushQueue(entry.userActivated);
 		return {
 			ready,
 			outcome,
@@ -3462,7 +3529,26 @@ function makeNav() {
 			}
 		};
 	}
-	return { open };
+	function setLocation(value) {
+		const text = encodeNavLocation(value);
+		if (text === locationText && locationReported) return;
+		locationText = text;
+		if (window.parent === window) return;
+		try {
+			window.parent.postMessage({
+				type: "moebius:nav-location",
+				location: text
+			}, window.location.origin);
+			locationReported = true;
+		} catch (e) {}
+	}
+	return {
+		open,
+		setLocation,
+		get location() {
+			return locationText === null ? null : JSON.parse(locationText);
+		}
+	};
 }
 
 //#endregion
@@ -4462,9 +4548,10 @@ let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({
 	authoritativeVersionedReads: true,
 	idleDocument: true,
+	navLocation: true,
 	projects: true
 });
-function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+function init({ appId, appInstanceId = null, getToken, capabilityContract = null, navLocation = null, waitForNavigationReady = false }) {
 	const identityKey = `${String(appId)}:${appInstanceId || "legacy"}`;
 	if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
 		_runtimeContext.tokenRef.current = getToken;
@@ -4522,7 +4609,10 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		signal,
 		capabilities,
 		chat,
-		nav: makeNav(),
+		nav: makeNav({
+			location: navLocation,
+			waitForNavigationReady
+		}),
 		split: makeSplit(),
 		immersive: makeImmersive({ appId }),
 		clipboard: makeClipboard(),

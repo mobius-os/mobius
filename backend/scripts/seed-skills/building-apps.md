@@ -619,7 +619,9 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 ```
 
 The proxy is GET-only, requires the bearer in the header (never a query
-parameter), and truncates bodies at 2,097,152 bytes. Request small renditions,
+parameter), and truncates bodies at 2,097,152 bytes. GET follows up to five
+redirect hops, validating each destination against SSRF rules rather than
+returning upstream 3xx responses as-is. Request small renditions,
 not full-resolution media. A cross-origin `<img src>` cannot attach the bearer,
 so fetch through the proxy and convert the result to a `data:` URL before
 rendering it; the bundled CSP allows `data:` images but not blob object URLs.
@@ -655,6 +657,11 @@ and make the copyable element `user-select: all` so long-press/tap-to-select
 works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
+
+## Managed-app update events
+
+Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
+Events are not replayed, and standalone app pages do not receive them, so retain the ordinary initial load and refresh fallback.
 
 ## Host capabilities (microphone and future device/browser access)
 
@@ -1059,8 +1066,10 @@ target**:
 
 - `owned` — the current AppCanvas host installed it; render the nested view.
 - `rejected` — the shell refused the request, so no back target exists; stay on
-  the current view.
-- `timeout` — shell ownership is unknown. Stay on the current view; the helper
+  the current view. With navigation-ready hosts, a hidden cached frame waits
+  until visible before sending; being hidden alone does not reject the request.
+- `timeout` — shell ownership is unknown after a sent request times out (the
+  visibility wait has no timeout). Stay on the current view; the helper
   keeps the request correlation briefly and removes a late-installed target.
 - `error` — the request could not be sent, so no back target exists; stay on the
   current view.
@@ -1145,7 +1154,7 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 - The host caps pending sentinels at 20 per app. On overflow it responds `{type:'moebius:nav-push-rejected', requestId}` — the helper above rejects its promise, so you simply don't render the nested view. If you bypass the helper, treat a rejection as a hard "stay where you are" and do NOT increment your local counter, or your count drifts above the host's permanently and the next `nav-pop` consumes the wrong sentinel.
 - The `requestId` is optional on the wire (the shell echoes whatever you send), but use a fresh id per push when multiple can be in flight — a stale ack can otherwise resolve a later promise.
 
-**Across app switches:** app-sentinels are preserved across drawer-driven app switches. Nest 2 levels in app A, drawer-tap to app B, and the user gets browser-style back (first back returns to app A showing its nested view, then unwinds app A, last back exits). Your iframe stays mounted in the LRU cache while invisible, so its state is preserved — just respond to `moebius:nav-back` correctly even when currently invisible (by the time it arrives, your iframe is visible again).
+**Across app switches:** app-sentinels are preserved across drawer-driven app switches. Nest 2 levels in app A, drawer-tap to app B, and the user gets browser-style back (first back returns to app A showing its nested view, then unwinds app A, last back exits). Your iframe stays mounted in the LRU cache while invisible, so its state is preserved until the frame is recreated (see *Keep your place across reloads*) — just respond to `moebius:nav-back` correctly even when currently invisible (by the time it arrives, your iframe is visible again).
 
 **Forward restoration:** the runtime retains each reversible entry's handlers.
 After Back it keeps the entry dormant; when browser Forward revisits the same
@@ -1157,3 +1166,40 @@ retires that ghost slot instead of swallowing the next Back. The
 internals: raw-protocol callers remain one-way and must not set `reversible`
 themselves. For multi-level navigation, each level needs its own reversible
 helper closure; labels are diagnostic, not a serialized navigation tree.
+
+### Keep your place across reloads
+
+The shell recreates an app's frame when its code changes (an agent apply or a
+Store update), when the bounded frame cache evicts it, after a crash, and when
+the shell itself reloads. In-memory state, including `nav.open` handlers, is
+gone then. Settings writes (pin, rename, permissions, icon) do not reload it.
+
+An app with nested views reads `window.mobius.nav.location` on start and reports
+its current place with `nav.setLocation(value)`.
+
+- The location is a small JSON value: at most 4 KiB as UTF-8 JSON
+  (`RangeError` above that, `TypeError` for non-JSON). Keep ids and view names
+  in it, and drafts or larger state in `window.mobius.storage`.
+  `setLocation(null)` clears it.
+- Finish asynchronous restoration before reporting: the first report replaces
+  the saved place. Restore outer views before inner views, and cancel a pending
+  restoration if a newer destination arrives or the component unmounts.
+- Restore through the same path as a user action, so a restored nested view
+  calls `nav.open(...)` and Back still works. Treat the saved value as untrusted
+  input: check its ids against loaded data and fall back to the start view.
+  `nav.open` waits for promotion and visibility. Restoration never moves pane
+  focus: reusing the current retired history slot proceeds even in a background
+  pane; adding a history entry waits for pane focus. `ready` and `outcome` can
+  stay pending until that focus arrives, without an ownership timeout running.
+  The timeout runs only while a sent request awaits an ownership reply. Closing
+  an unsent handle cancels it. Mount the app before awaiting restoration; do not
+  add timers to retry it.
+  Restoring several nested levels in the shell can leave inactive browser
+  history slots, requiring extra Back presses after the restored views close.
+- The shell keeps one location per app installation for the current browser
+  tab. It survives a shell reload, not closing the tab, and is cleared on sign
+  out, or when this shell wipes app data or uninstalls the app. Other apps never
+  receive it.
+- Feature-detect with `typeof window.mobius?.nav?.setLocation === 'function'`
+  (or `window.mobius.runtimeFeatures.navLocation`); without it the app starts at
+  its home view as before.

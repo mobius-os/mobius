@@ -6,8 +6,8 @@
  *
  * WHY THIS EXISTS
  * The agent recompiles a mini-app while the owner watches it in the iframe
- * preview. Every successful recompile bumps app.updated_at, which the shell
- * turns into a new `version`. The old design fed `${appId}-${version}` as the
+ * preview. Every successful recompile produces a new bundle, which the shell
+ * sees as a new frame_version `version`. The old design fed `${appId}-${version}` as the
  * iframe React key, so a version bump REMOUNTED the one iframe: the running app
  * blanked to a full-frame spinner and lost all in-app state (form text, scroll,
  * current view) on EVERY ~1s incremental save. The design invariant "a rebuild
@@ -152,10 +152,8 @@ export function reduceSwap(state, event) {
  * function of its (immutable-per-frame) version, React never has to reparent a
  * surviving iframe when a sibling is removed — and reparenting a sandboxed
  * iframe reloads its document, which would throw away the freshly-loaded module
- * mid-swap. Version keys are `appVersionKey(updated_at)` — digit strings — so
- * length-then-lexicographic is also monotonic (longer digit string = larger
- * number), which keeps the newer/incoming frame stacked on top; that ordering
- * is a nicety for the fade, not load-bearing.
+ * mid-swap. Version keys are `appFrameVersion(app)` content digests, so the
+ * order says nothing about which frame is newer; nothing depends on that.
  *
  * @param {string} a @param {string} b @returns {number}
  */

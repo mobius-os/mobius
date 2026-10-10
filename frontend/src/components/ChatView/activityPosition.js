@@ -4,6 +4,12 @@ import { marked } from 'marked'
 import { peerRecordTool, peerTime, storedBlockRange } from './peerTimeline.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { isActivityRunEntry } from './activityGrouping.js'
+import { sliceMarkdownRange } from './markdown/steerMarkdownRange.js'
+
+function sliceTextBlock(block, start, end = block.content.length) {
+  return { ...block, content: block.content.slice(start, end),
+    ...(block.markdown_range ? { markdown_range: sliceMarkdownRange(block.markdown_range, start, end) } : {}) }
+}
 
 // Keep markdown constructs whole. The captured prefix never grows, so its
 // preceding complete block boundary is stable even while the paragraph or code
@@ -296,11 +302,11 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
     for (const note of notesHere) {
       const capturedOffset = Math.max(0, Math.min(entry.item.content.length, (note.display_position.text_offset || 0) - (entry.item.source_text_offset || 0)))
       const next = Math.max(offset, activityTextBoundary(entry.item.content, capturedOffset))
-      if (next > offset) result.push({ ...entry, idx: offset ? `${entry.idx}:after:${offset}` : entry.idx, item: { ...entry.item, content: entry.item.content.slice(offset, next) } })
+      if (next > offset) result.push({ ...entry, idx: offset ? `${entry.idx}:after:${offset}` : entry.idx, item: sliceTextBlock(entry.item, offset, next) })
       result.push(activity(note))
       offset = next
     }
-    if (!notesHere.length || offset < entry.item.content.length) result.push({ ...entry, idx: offset ? `${entry.idx}:after:${offset}` : entry.idx, item: { ...entry.item, content: entry.item.content.slice(offset) } })
+    if (!notesHere.length || offset < entry.item.content.length) result.push({ ...entry, idx: offset ? `${entry.idx}:after:${offset}` : entry.idx, item: sliceTextBlock(entry.item, offset) })
   }
   // An anchor can arrive before its corresponding stream snapshot. Keep it at
   // the recorded boundary, rather than losing it while the snapshot catches up.

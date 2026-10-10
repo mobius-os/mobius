@@ -27,6 +27,7 @@ from app.community_broker import (
 from app.community_publish import (
   CommunityPublicationJournal,
   CommunityPublicationError,
+  accepted_history_contains,
   build_public_snapshot,
   delete_publication_journal,
   list_publication_journals,
@@ -798,10 +799,16 @@ async def _publish_local_source(
         github, "GET", f"/repos/{encoded_repo}/commits/{parent_sha}",
       )
       parent_message = str((parent.get("commit") or {}).get("message") or "")
-      if repository_marker not in parent_message:
+      # A repository is continued only when it is provably this app's: either
+      # an earlier Store publication marked it, or its main branch is already
+      # part of the app's accepted history, so the fast-forward below keeps
+      # everything on GitHub. Anything else is someone else's code.
+      if repository_marker not in parent_message and not await asyncio.to_thread(
+        accepted_history_contains, app, accepted_commit, parent_sha,
+      ):
         raise HTTPException(
           409,
-          "That repository already exists and was not created for this local app. Choose another name.",
+          "That repository already exists, and its latest version is not part of this app's history. Choose another name.",
         )
     else:
       # GitHub rejects every Git Database write while a repository has no
