@@ -361,8 +361,10 @@ def static_asset_entries(value) -> dict[str, str]:
   _fail("Manifest `static_assets` must be an object or array.")
 
 
-# These runtime features can load dependencies beyond the JavaScript import
-# checker. Declared files are protected by package_input_paths/source_files.
+# These runtime features can load dependencies beyond the JavaScript
+# bundle. The contract requires executable entries to be declared, so those
+# files are protected by package_input_paths/source_files. Keep a denylist:
+# an allowlist would reject inert Store metadata without improving the proof.
 # Unknown fields are inert because the platform never reads them; when adding
 # a runtime feature, include it here if it can load undeclared dependencies.
 EXECUTABLE_MANIFEST_FIELDS = frozenset({

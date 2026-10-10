@@ -65,7 +65,7 @@ _RE_DYNAMIC = re.compile(r"""\bimport\s*\(\s*['"]([^'"\n]+)['"]\s*\)""")
 _RE_REQUIRE = re.compile(r"""\brequire\s*\(\s*['"]([^'"\n]+)['"]\s*\)""")
 # Literal template imports have no interpolation; interpolated paths cannot be
 # established statically. URL references also need to ship in fetch installs.
-_RE_TEMPLATE_DYNAMIC = re.compile(r"\bimport\s*\(\s*`([^`$\n]+)`\s*\)")
+_RE_TEMPLATE_DYNAMIC = re.compile(r"\bimport\s*\(\s*`((?![^`\n]*\$\{)[^`\n]+)`\s*\)")
 _RE_MODULE_URL = re.compile(
   r"""\bnew\s+URL\s*\(\s*['"]([^'"\n]+)['"]\s*,\s*import\.meta\.url\s*\)"""
 )

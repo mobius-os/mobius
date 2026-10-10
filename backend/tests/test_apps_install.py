@@ -4319,6 +4319,7 @@ def test_store_update_of_a_resolved_release_finishes_it(
 
 def _publish_clone_files(work: Path, bare: Path, files: dict[str, str]) -> str:
   for rel, text in files.items():
+    (work / rel).parent.mkdir(parents=True, exist_ok=True)
     (work / rel).write_text(text, encoding="utf-8")
   head = _fixture_commit(work, "release")
   subprocess.run(
@@ -4366,16 +4367,17 @@ def _install_readme_fixture(client, auth, tmp_path, app_id, manifest, files=None
   "service", "setup", "schedule", "python", "agent_activities", "tools",
   "project_templates", "model_provider",
 ])
-def test_executable_manifest_features_are_excluded_from_ancillary_resolution(field):
+@pytest.mark.asyncio
+async def test_executable_manifest_features_are_excluded_from_ancillary_resolution(field):
   # Independent list of features the platform executes; the JS-only gate
   # cannot prove their dependency completeness, even if disabled.
   manifest = {
     "id": "runtime-feature", "name": "Runtime", "version": "1.0.0",
     "entry": "index.jsx", "description": "Runtime feature",
   }
-  assert not install._benign_source_complete(
+  assert not await install._kept_local_bundle_unchanged(
     {"index.jsx": b"export default function App() { return null }"},
-    {**manifest, field: None}, {},
+    {**manifest, field: None}, {}, {}, ["README.md"],
   )
 
 
@@ -4440,7 +4442,7 @@ def test_unreadable_local_manifest_protects_every_path():
 ])
 def test_incomplete_source_cannot_auto_keep_ancillary_conflicts(files, declared):
   manifest = {"entry": "index.jsx", "source_files": declared}
-  assert not install._benign_source_complete(files, manifest, {})
+  assert install._source_completeness(files, manifest, {}).errors
 
 
 @pytest.mark.parametrize("module,complete", [
@@ -4450,7 +4452,7 @@ def test_incomplete_source_cannot_auto_keep_ancillary_conflicts(files, declared)
 def test_benign_completeness_checks_actual_static_alias_bytes(module, complete):
   manifest = {"entry": "index.jsx", "static_assets": {"module.js": "art/module.js"}}
   files = {"index.jsx": b"import './static/module.js'"}
-  assert install._benign_source_complete(files, manifest, {"module.js": module}) is complete
+  assert (not install._source_completeness(files, manifest, {"module.js": module}).errors) is complete
 
 
 @pytest.mark.parametrize("runtime", [
@@ -4463,9 +4465,12 @@ def test_benign_completeness_checks_actual_static_alias_bytes(module, complete):
   {"agent_activities": {"build": {"entry": "build.sh"}}},
   {"project_templates": [{"artifact_types": [{"script": "build.sh"}]}]},
 ])
-def test_unchecked_runtime_dependencies_keep_the_resolver_fallback(runtime):
+@pytest.mark.asyncio
+async def test_unchecked_runtime_dependencies_keep_the_resolver_fallback(runtime):
   manifest = {"entry": "index.jsx", **runtime}
-  assert not install._benign_source_complete({"index.jsx": b"export default 1"}, manifest, {})
+  assert not await install._kept_local_bundle_unchanged(
+    {"index.jsx": b"export default 1"}, manifest, {}, {}, ["README.md"],
+  )
 
 
 @pytest.mark.parametrize("declared", [False, True])
@@ -8569,7 +8574,7 @@ def test_update_does_not_keep_an_undeclared_runtime_dependency(
   if bypass_scan:
     # Even if the static scanner misses a dependency, real bundler inputs
     # prevent dropping upstream edits to it.
-    with patch("app.install._benign_source_complete", return_value=True):
+    with patch("app.install._source_completeness", return_value=install.SourceCheckResult()):
       updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
   else:
     updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
@@ -8652,14 +8657,11 @@ def test_stored_address_follows_only_an_installed_permanent_package(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing_dependency", [False, True])
-async def test_ancillary_build_never_materializes_undeclared_parent_paths(
-  tmp_path, missing_dependency,
-):
+async def test_ancillary_build_never_materializes_undeclared_parent_paths(tmp_path):
   import tempfile
 
   manifest = _simple_manifest("safe-bundle")
-  index = JSX + ("\nimport './helper.js';" if missing_dependency else "")
+  index = JSX
   tree = {
     "index.jsx": index.encode(), "../escaped.js": b"must not escape",
     "helper.js": b"export default 1",
@@ -8667,11 +8669,12 @@ async def test_ancillary_build_never_materializes_undeclared_parent_paths(
   temporary_directory = tempfile.TemporaryDirectory
   with patch("app.install.tempfile.TemporaryDirectory", side_effect=lambda **kw:
     temporary_directory(dir=tmp_path, **kw)
-  ), patch("app.install._benign_source_complete", return_value=True):
-    complete = await install._benign_bundle_complete(tree, manifest, {})
-  # A missed static dependency must still use the resolver; a complete package
-  # may keep ancillary edits, but neither path writes the untrusted tree entry.
-  assert complete is not missing_dependency
+  ), patch("app.install._source_completeness", return_value=install.SourceCheckResult()):
+    complete = await install._kept_local_bundle_unchanged(
+      tree, manifest, {}, {}, ["helper.js"],
+    )
+  # Unsafe paths fail closed before either build can escape its root.
+  assert not complete
   assert not (tmp_path / "escaped.js").exists()
 
 
@@ -8721,3 +8724,128 @@ def test_fetch_install_accepts_interpolated_module_url(
       "manifest_url": base + "mobius.json",
     })
   assert installed.status_code == 201, installed.text
+
+
+@pytest.mark.parametrize("shadow", ["extension", "package-main"])
+def test_update_shadowing_outside_declared_package_requires_resolver(
+  client, auth, tmp_path, bypass_url_validation, shadow,
+):
+  manifest = {
+    "id": "shadowing", "name": "Shadowing", "version": "1.0.0",
+    "description": "Dependency conflict", "entry": "index.jsx",
+    "source_files": ["cards.js"],
+  }
+  if shadow == "extension":
+    manifest["source_files"].append("util.jsx")
+    index = CLONE_INDEX_V1 + "\nimport util from './util'; export const u = util;\n"
+    files = {
+      "index.jsx": index, "util.jsx": "export default 'DECLARED';\n",
+      "util.ts": "export default 'BASE';\n",
+    }
+    path, local, upstream = "util.ts", "export default 'LOCAL';\n", "export default 'UPSTREAM';\n"
+  else:
+    manifest["source_files"].extend(["lib/index.js", "lib/local.js", "lib/upstream.js"])
+    index = CLONE_INDEX_V1 + "\nimport util from './lib'; export const u = util;\n"
+    files = {
+      "index.jsx": index, "lib/index.js": "export default 'BASE';\n",
+      "lib/local.js": "export default 'LOCAL';\n",
+      "lib/upstream.js": "export default 'UPSTREAM';\n",
+      "lib/package.json": '{"main":"index.js"}',
+    }
+    path, local, upstream = "lib/package.json", '{"main":"local.js"}', '{"main":"upstream.js"}'
+  base, work, bare, app_id, source_dir = _install_readme_fixture(
+    client, auth, tmp_path, manifest["id"], manifest, files,
+  )
+  (source_dir / path).write_text(local)
+  _publish_clone_files(work, bare, {
+    "mobius.json": json.dumps({**manifest, "version": "2.0.0"}),
+    "index.jsx": index.replace("TITLE_V1", "TITLE_V2"), path: upstream,
+  })
+  updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "conflict"
+  assert (source_dir / path).read_text() == local
+  assert "TITLE_V1" in (source_dir / "index.jsx").read_text()
+
+
+@pytest.mark.parametrize("busy_build", [1, 2])
+def test_ancillary_build_slot_timeout_is_transient_not_a_conflict(
+  client, auth, tmp_path, bypass_url_validation, busy_build,
+):
+  from app.build_admission import BuildLeaseUnavailable
+
+  manifest = {**_simple_manifest("busy-build"), "source_files": ["cards.js"]}
+  base, work, bare, app_id, source_dir = _install_readme_fixture(
+    client, auth, tmp_path, manifest["id"], manifest,
+  )
+  (source_dir / "README.md").write_text("local\n")
+  _publish_clone_files(work, bare, {
+    "mobius.json": json.dumps({**manifest, "version": "2.0.0"}),
+    "README.md": "upstream\n",
+  })
+  compile_jsx = install.compile_jsx
+  builds = 0
+
+  async def busy(*args, **kwargs):
+    nonlocal builds
+    builds += 1
+    if builds == busy_build:
+      raise BuildLeaseUnavailable("busy")
+    return await compile_jsx(*args, **kwargs)
+
+  with patch("app.install.compile_jsx", side_effect=busy):
+    updated = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert updated.status_code == 503, updated.text
+  assert not install.pending_conflict_update_receipt_present(source_dir)
+  assert (source_dir / "README.md").read_text() == "local\n"
+  retried = _press_reviewed_update(client, auth, app_id, bare, base + "mobius.json")
+  assert retried.status_code == 201, retried.text
+  assert retried.json()["mode"] == "update"
+
+
+@pytest.mark.parametrize("operation", ["preview", "install"])
+def test_stored_address_binding_does_not_borrow_another_installed_package(
+  client, auth, bypass_url_validation, operation,
+):
+  base = "https://raw.githubusercontent.com/alice/bound-app/main/"
+  other_base = "https://raw.githubusercontent.com/alice/other-app/main/"
+  manifest = {**_simple_manifest("bound-app"), "package_id": "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"}
+  other = {**_simple_manifest("other-app"), "package_id": "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2f"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    other_base + "mobius.json": (200, json.dumps(other).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    other_base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/alice/bound-app": (200, b'{"id":101,"full_name":"alice/bound-app"}'),
+    "https://api.github.com/repos/alice/other-app": (200, b'{"id":102,"full_name":"alice/other-app"}'),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)), patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ):
+    for source in (base, other_base):
+      installed = client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": source + "mobius.json",
+      })
+      assert installed.status_code == 201, installed.text
+    responses[base + "mobius.json"] = (200, json.dumps(other).encode())
+    result = client.post(f"/api/apps/{operation}", headers=auth, json={
+      "manifest_url": base.rstrip("/") + "#manifest-id=bound-app",
+    })
+  assert result.status_code == 409, result.text
+
+
+@pytest.mark.asyncio
+async def test_ancillary_bundle_comparison_uses_same_root_and_upstream_deletions(tmp_path):
+  manifest = _simple_manifest("compare-bundle")
+  tree = {"index.jsx": JSX.encode(), "README.md": b"owner", "bundle.js": b"source"}
+  entries = []
+
+  async def compile_tree(source, *, source_path, out_path):
+    entries.append(source_path)
+    assert (source_path.parent / "bundle.js").read_bytes() == b"source"
+    assert (source_path.parent / "README.md").exists() is (len(entries) == 1)
+    Path(out_path).write_bytes(b"identical bundle")
+
+  with patch("app.install.compile_jsx", side_effect=compile_tree):
+    assert await install._kept_local_bundle_unchanged(tree, manifest, {}, {}, ["README.md"])
+  assert entries[0] == entries[1]

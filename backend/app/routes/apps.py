@@ -2339,7 +2339,7 @@ async def update_app(
       )
     db.close()
     distribution_candidate = await install.fetch_install_candidate(
-      body.published_manifest_url, db=db,
+      body.published_manifest_url,
     )
 
   async with (

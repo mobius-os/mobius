@@ -38,7 +38,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
@@ -59,6 +59,7 @@ from app import (
   models,
 )
 from app import app_cron
+from app.build_admission import BuildLeaseUnavailable
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import SourceCheckResult, check_app_source
 from app.compiler import (
@@ -1291,51 +1292,56 @@ def _update_package_paths(
   return paths
 
 
-def _benign_source_complete(
+async def _kept_local_bundle_unchanged(
   tree: Mapping[str, bytes], manifest: dict, static_assets: Mapping[str, bytes],
+  upstream: Mapping[str, bytes], kept_local: Sequence[str],
 ) -> bool:
-  """Only consider ancillary retention for source-complete JavaScript packages.
+  """Retain ancillary conflicts only when they cannot change the served bundle.
 
-  Runtime features may load dependencies the JS checker cannot establish.
-  Fields the platform does not execute cannot introduce such dependencies.
+  Compile both alternatives in the same root so generated paths cannot create
+  spurious differences. Non-JavaScript runtimes are not covered by this proof.
+  Source completeness also protects URL references that are not bundle inputs.
   """
   if EXECUTABLE_MANIFEST_FIELDS.intersection(manifest):
     return False
-  return not _source_completeness(tree, manifest, static_assets).errors
-
-
-async def _benign_bundle_complete(
-  tree: Mapping[str, bytes], manifest: dict, static_assets: Mapping[str, bytes],
-) -> bool:
-  """Build from declared package files before retaining ancillary conflicts.
-
-  This extra build runs only for kept-local conflicts, away from live source.
-  An undeclared build dependency fails closed into the resolver path.
-  Static checks also cover URL references that are not bundler module inputs.
-  """
-  if not _benign_source_complete(tree, manifest, static_assets):
+  if _source_completeness(tree, manifest, static_assets).errors:
     return False
   with tempfile.TemporaryDirectory(prefix="mobius-ancillary-check-") as temp:
-    root = Path(temp).resolve()
+    root = Path(temp).resolve() / "source"
     try:
-      declared = {rel: tree[rel] for rel in package_input_paths(manifest)}
-      declared.update({
+      inputs = dict(tree)
+      inputs.update({
         f"static/{dest}": static_assets[dest]
         for dest in static_asset_entries(manifest.get("static_assets"))
       })
-      for rel, data in declared.items():
+      for rel, data in inputs.items():
         path = root / rel
         _assert_within(root, path, f"package input {rel}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-      entry = root / (manifest.get("entry") or "index.jsx")
+      entry = root / manifest["entry"]
+      output = Path(temp) / "bundle.js"
       await compile_jsx(
-        entry.read_text(encoding="utf-8"), source_path=entry,
-        out_path=root / "bundle.js",
+        entry.read_text(encoding="utf-8"), source_path=entry, out_path=output,
       )
+      kept_bundle = output.read_bytes()
+      output.unlink()
+      for rel in kept_local:
+        path = root / rel
+        _assert_within(root, path, f"package input {rel}")
+        if rel in upstream:
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_bytes(upstream[rel])
+        else:
+          path.unlink(missing_ok=True)
+      await compile_jsx(
+        entry.read_text(encoding="utf-8"), source_path=entry, out_path=output,
+      )
+      return kept_bundle == output.read_bytes()
+    except BuildLeaseUnavailable as exc:
+      raise HTTPException(503, "JavaScript builder is busy; retry the update.") from exc
     except (RuntimeError, OSError, UnicodeError, KeyError, HTTPException):
       return False
-    return True
 
 
 def committed_pending_resolution(
@@ -2410,8 +2416,7 @@ def validate_manifest_address(
     return
   if db is not None:
     existing = _find_install_identity_row(
-      db, source_url=manifest_url, manifest_id=manifest["id"],
-      package_id=manifest.get("package_id"),
+      db, source_url=manifest_url, manifest_id=bound_id,
     )
     package_id = existing.package_id if existing is not None else None
   try:
@@ -4868,10 +4873,16 @@ async def _install_candidate(
                 rel: data for rel, data in benign.tree.items()
                 if rel not in _MERGED_NON_SOURCE
               }
-              if benign.kept_local and not await _benign_bundle_complete(
-                resolved_source, manifest, static_assets_fetched,
-              ):
-                resolved_source = None
+              if benign.kept_local:
+                upstream_tree = await asyncio.to_thread(
+                  app_git.read_ref_tree, git_source_dir,
+                  resolved_commit or app_git.UPSTREAM_BRANCH,
+                )
+                if not await _kept_local_bundle_unchanged(
+                  resolved_source, manifest, static_assets_fetched,
+                  upstream_tree, benign.kept_local,
+                ):
+                  resolved_source = None
             if resolved_source is not None and entry_key in resolved_source:
               source_tree = resolved_source
               divergence = "clean_merge"

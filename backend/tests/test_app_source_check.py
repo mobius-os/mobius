@@ -332,3 +332,12 @@ def test_literal_template_module_url_must_be_declared():
     {"index.jsx": "new URL(`./helper.js`, import.meta.url)"}, entry="index.jsx",
   )
   assert [finding.code for finding in result.errors] == ["missing_import"]
+
+
+@pytest.mark.parametrize("reference", [
+  "import(`./helper$.js`)", "new URL(`./helper$.js`, import.meta.url)",
+])
+def test_template_dollar_without_interpolation_is_a_literal_dependency(reference):
+  files = {"index.jsx": reference, "helper$.js": "export default 1"}
+  assert [finding.code for finding in check_app_source(files, entry="index.jsx").errors] == ["undeclared_source"]
+  assert check_app_source(files, entry="index.jsx", source_files=["helper$.js"]).ok
