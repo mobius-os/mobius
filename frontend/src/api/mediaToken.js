@@ -80,6 +80,41 @@ export async function buildMediaUrl(path, chatId) {
 }
 
 /**
+ * Opens a chat file link with a media token that is valid when it is clicked.
+ *
+ * A link can be clicked long after it rendered, when the token in its href has
+ * expired. The tab is reserved inside the click, as popup blockers require, and
+ * pointed at the file once a token is ready; a download starts the same way.
+ * Modified clicks and blocked popups keep the browser's default behaviour.
+ *
+ * @param {MouseEvent} event  the link's click event
+ * @param {string} chatId
+ * @param {string} path  e.g. "/api/chats/{id}/generated-files/{name}"
+ * @param {{ query?: string, download?: string }} [options]
+ *   query: extra parameters starting with "&"; download: save under this name
+ */
+export function openMediaLink(event, chatId, path, { query = '', download } = {}) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const tab = download ? null : window.open('', '_blank')
+  if (!download && !tab) return
+  event.preventDefault()
+  mediaTokenParam(chatId).then((param) => {
+    const url = `${BASE}${path}${param}${param ? query : query.replace(/^&/, '?')}`
+    if (tab) {
+      tab.opener = null
+      tab.location.replace(url)
+      return
+    }
+    const link = document.createElement('a')
+    link.href = url
+    link.download = download
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  })
+}
+
+/**
  * Clears all cached media tokens. Called on logout so tokens don't persist
  * to the next user on a shared device.
  */
