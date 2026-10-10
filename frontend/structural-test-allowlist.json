@@ -15,7 +15,6 @@
     "src/components/ChatView/__tests__/composerTextareaSizing.test.js",
     "src/components/ChatView/__tests__/composerVoiceEditing.test.js",
     "src/components/ChatView/__tests__/contextMenuOrder.test.js",
-    "src/components/ChatView/__tests__/contributionReviewModel.test.js",
     "src/components/ChatView/__tests__/framePipelineQuiescence.test.js",
     "src/components/ChatView/__tests__/goalProgress.test.js",
     "src/components/ChatView/__tests__/imageGallery.test.js",

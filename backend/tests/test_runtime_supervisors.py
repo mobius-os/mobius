@@ -320,12 +320,10 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
   import app.contribution_autopilot as autopilot_module
   import app.contribution_autopilot_recovery as autopilot_recovery_module
   import app.delegations as delegations_module
-  import app.routes.github as github_module
   import app.runtime_supervisors as supervisors_module
 
   broadcast = SystemBroadcast()
   startup_recovered = asyncio.Event()
-  attached_recovered = asyncio.Event()
   lease_recovered = asyncio.Event()
   blocker_recovered = asyncio.Event()
   wake_started = asyncio.Event()
@@ -348,9 +346,6 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
 
   async def recover_unstarted():
     startup_recovered.set()
-
-  async def recover_attached(*_args, **_kwargs):
-    attached_recovered.set()
 
   async def wake_parents(**_kwargs):
     wake_started.set()
@@ -382,9 +377,6 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
     delegations_module, "reconcile_unstarted_delegations", recover_unstarted,
   )
   monkeypatch.setattr(
-    github_module, "reconcile_attached_contribution_work", recover_attached,
-  )
-  monkeypatch.setattr(
     delegations_module, "wake_parents_for_completed_delegations", wake_parents,
   )
   monkeypatch.setattr(autopilot_module, "sweep_expired_leases", sweep)
@@ -394,7 +386,6 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
   await supervisors._start_chat_supervisors()
   await asyncio.wait_for(wake_started.wait(), timeout=1)
   await asyncio.wait_for(startup_recovered.wait(), timeout=1)
-  await asyncio.wait_for(attached_recovered.wait(), timeout=1)
   await asyncio.wait_for(lease_recovered.wait(), timeout=1)
   await asyncio.wait_for(blocker_recovered.wait(), timeout=1)
 

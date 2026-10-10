@@ -118,9 +118,7 @@ ANONYMOUS_CONTRIBUTION_OWNER = "mobius-os"
 class RelaySubmitIn(BaseModel):
   confirm_publication: Literal[True]
   public_identity: Literal["anonymous"] = "anonymous"
-  submitter: Literal["contribute-button", "chat-review-card"] = (
-    "contribute-button"
-  )
+  submitter: Literal["contribute-button"] = "contribute-button"
 
 
 class RelayWithdrawIn(BaseModel):

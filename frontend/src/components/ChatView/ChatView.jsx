@@ -87,13 +87,6 @@ import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
 import ChatNetworkInspector from './ChatNetworkInspector.jsx'
-import {
-  contributionStartFailureOutcome,
-  finishContributionWork,
-  followupContributionWork,
-  prepareContributionWork,
-  updatesContributionWork,
-} from './chatContributionIntent.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
@@ -105,14 +98,6 @@ import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalContinuationHandoff } from './chatHandoffPresentation.js'
 import QueuedMessages from './QueuedMessages.jsx'
-import {
-  chatChangesActionIsCurrent,
-  contributionsForChatQueryKey,
-  refreshChatChangesOverview,
-} from './chatChangesQueries.js'
-import {
-  reviewActionKey,
-} from './contributionReviewModel.js'
 import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
@@ -5015,109 +5000,6 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
-  // Contribution cards and Changes share one semantic in-flight claim set. A
-  // click is claimed synchronously (before React can rerender), while the
-  // server's immutable work envelope owns durable idempotency across reloads,
-  // retries, and the second surface. The source chat never starts a provider
-  // turn for ordinary contribution preparation.
-  const contributionIntentClaimsRef = useRef(new Set())
-
-  const refreshContributionOverview = useCallback((appId) => (
-    refreshChatChangesOverview({
-      queryClient,
-      appId,
-      chatId,
-    })
-  ), [chatId, queryClient])
-
-  const startContributionWork = useCallback(async (
-    key, request, action = null, context = null,
-  ) => {
-    if (!key || contributionIntentClaimsRef.current.has(key)) {
-      return { kind: 'blocked', message: 'That contribution action is already starting.' }
-    }
-    contributionIntentClaimsRef.current.add(key)
-    try {
-      const appId = Number(context?.appId)
-      if (!appId) {
-        return { kind: 'blocked', message: 'The Contribute app is not available.' }
-      }
-      if (action) {
-        const overview = await refreshContributionOverview(appId)
-        // The endpoint repeats this freshness check against authoritative
-        // state. This fast client gate avoids even creating an attached-work
-        // request when the card visibly became obsolete during the tap.
-        if (overview && !chatChangesActionIsCurrent(overview, action)) {
-          return { kind: 'refreshed' }
-        }
-      }
-      const response = await api.contributions.startWork(appId, chatId, request)
-      if (!response.ok) {
-        // A stale/conflicting request is normal reconciliation, not a reason to
-        // wake the source agent. Refresh both contribution records and edits so
-        // the current action replaces it in place.
-        const failure = await response.json().catch(() => null)
-        const overview = await refreshContributionOverview(appId)
-        return contributionStartFailureOutcome({
-          status: response.status,
-          detail: failure?.detail,
-          actionChanged: Boolean(
-            action && overview && !chatChangesActionIsCurrent(overview, action)
-          ),
-        })
-      }
-      const payload = await response.json().catch(() => null)
-      if (payload?.work) {
-        queryClient.setQueryData(
-          contributionsForChatQueryKey(appId, chatId),
-          current => ({ ...(current || {}), work: payload.work }),
-        )
-      }
-      // Records/settlements may have changed during deterministic
-      // reconciliation before a helper was needed. Let the shared projection
-      // catch up without blocking the immediate visible work state above.
-      void refreshContributionOverview(appId)
-      return payload?.work || payload?.settled === true
-        ? { kind: 'accepted' }
-        : { kind: 'unavailable' }
-    } catch {
-      return { kind: 'unavailable' }
-    } finally {
-      contributionIntentClaimsRef.current.delete(key)
-    }
-  }, [chatId, queryClient, refreshContributionOverview])
-
-  const handlePrepareChatChanges = useCallback((revision = '', context = null) => {
-    return startContributionWork(
-      `prepare:${revision || 'current'}`,
-      prepareContributionWork(revision, context?.retryOf),
-      revision ? { kind: 'unsorted', revision } : null,
-      context,
-    )
-  }, [startContributionWork])
-
-  const handleContributeAll = useCallback((revision = '', context = null) => {
-    return startContributionWork(
-      `finish:${revision || 'current'}`,
-      finishContributionWork(revision, context?.retryOf),
-      revision ? { kind: 'workflow', revision } : null,
-      context,
-    )
-  }, [startContributionWork])
-
-  const handleCheckContributionUpdates = useCallback((records, context = null) => {
-    const revision = (Array.isArray(records) ? records : [records])
-      .map(record => reviewActionKey(record))
-      .sort()
-      .join('|')
-    return startContributionWork(
-      `updates:${revision || 'current'}`,
-      updatesContributionWork(records, revision, context?.retryOf),
-      revision ? { kind: 'records', recordKeys: revision.split('|') } : null,
-      context,
-    )
-  }, [startContributionWork])
-
   const handleOpenChanges = useCallback((returnFocus = null) => {
     changesReturnFocusRef.current = returnFocus || document.activeElement
     setShowChanges(true)
@@ -5132,45 +5014,6 @@ export default function ChatView({
     openRequestedChanges()
     return unsubscribe
   }, [chatId, embedded, hidden, handleOpenChanges])
-
-  const handleContributionFollowup = useCallback((record, context = null) => {
-    const revision = reviewActionKey(record)
-    return startContributionWork(
-      `followup:${revision}`,
-      followupContributionWork(record, revision, context?.retryOf),
-      revision ? { kind: 'records', recordKeys: [revision] } : null,
-      context,
-    )
-  }, [startContributionWork])
-
-  const handleStopContributionWork = useCallback(async (_work, context = null) => {
-    const appId = Number(context?.appId)
-    if (!appId) {
-      return { kind: 'blocked', message: 'The Contribute app is not available.' }
-    }
-    try {
-      const response = await api.contributions.stopWork(appId, chatId)
-      const payload = await response.json().catch(() => null)
-      if (!response.ok) {
-        return {
-          kind: response.status >= 400 && response.status < 500
-            ? 'blocked'
-            : 'unavailable',
-          message: String(payload?.detail || '').trim(),
-        }
-      }
-      if (payload?.work) {
-        queryClient.setQueryData(
-          contributionsForChatQueryKey(appId, chatId),
-          current => ({ ...(current || {}), work: payload.work }),
-        )
-      }
-      void refreshContributionOverview(appId)
-      return payload?.stopped === true ? true : { kind: 'refreshed' }
-    } catch {
-      return { kind: 'unavailable' }
-    }
-  }, [chatId, queryClient, refreshContributionOverview])
 
   const chatProvider = chatInfo?.provider || null
   const wasTurnActiveRef = useRef(turnActive)
@@ -6149,12 +5992,6 @@ export default function ChatView({
           chatId={chatId}
           initialEntries={chatDiffEntries}
           onClose={() => setShowChanges(false)}
-          onPrepareChanges={handlePrepareChatChanges}
-          onContributeAll={handleContributeAll}
-          onCheckUpdates={handleCheckContributionUpdates}
-          onOpenApp={onOpenApp}
-          onContinueInChat={handleContributionFollowup}
-          onStopWork={handleStopContributionWork}
           returnFocusRef={changesReturnFocusRef}
         />
       )}
@@ -6398,9 +6235,9 @@ export default function ChatView({
             owner must act on, such as "Connection lost — Retry", earns a place
             in this footer. */}
         <div className="chat__floating-actions">
-          {/* Only short-lived navigation nudges may float over the transcript.
-              Contribution state lives in Changes so it can never cover the
-              composer or an unanswered question. */}
+          {/* Only short-lived navigation nudges may float over the transcript,
+              so nothing persistent can cover the composer or an unanswered
+              question. */}
           {connectionError !== 'disconnected'
             && offscreenControlsVisible && (
             <div className="chat__floating-transients">

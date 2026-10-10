@@ -5019,19 +5019,6 @@ async def run_chat(
       from app.delegations import deliver_results_after_parent_settled
       await deliver_results_after_parent_settled(chat_id)
 
-    # A contribution action pressed while this source turn was active is a
-    # durable accepted job, not a hidden message queued behind the turn. Once
-    # the source settles, revalidate its exact edit revision and start the
-    # attached child automatically (or surface needs_review on drift).
-    try:
-      if chat_id and runtime_settled:
-        from app.routes.github import reconcile_attached_contribution_work
-        await reconcile_attached_contribution_work(chat_id)
-    except Exception:
-      _get_logger().debug(
-        "attached contribution reconcile skipped", exc_info=True,
-      )
-
     if runtime_settled and disposition in _MEMORY_RECLAIM_DISPOSITIONS:
       # Release settled tool/source pages and allocator arenas. Source sweeps
       # protect live mappings and exclude owner data; tool advice may release

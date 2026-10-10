@@ -3229,9 +3229,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         markChatRunState(chatId, false)
         // A saved question or secure-input request can be why the run ended;
         // only its own clear event (or the next run starting) retires it.
-        // Chat edits and their contribution ledger can both settle during an
-        // agent turn. Completion is the shared freshness boundary even when
-        // the chat card was hidden or unmounted while that work ran.
+        // A turn's edits settle with the turn. Completion is the freshness
+        // boundary for Changes even when that chat was hidden or unmounted.
         void invalidateChatChangesQueries(queryClient, chatId)
         // Failure attention is durable and versioned on the run transition.
         // Refresh the compact list rather than guessing from transcript text;
@@ -3273,9 +3272,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     } else if (ev.type === 'delegation_changed') {
       const chatId = ev.chatId
       if (chatId) {
-        // Source-attached contribution work has no parent ChatRun. Its own
-        // lifecycle event is therefore the freshness boundary for Changes.
-        void invalidateChatChangesQueries(queryClient, chatId)
         if (
           ['completed', 'failed', 'needs_review'].includes(String(ev.status || ''))
           && !visibleChatIdsRef.current.has(String(chatId))

@@ -48,37 +48,34 @@ def _source_chat(db, chat_id="unconverted-source"):
   return chat_id
 
 
-def test_recorded_chat_edits_read_an_unconverted_source_on_the_event_loop(db):
+def test_chat_edit_diffs_read_an_unconverted_source(client, owner_token, db):
   chat_id = _source_chat(db)
-
-  async def on_loop():
-    with SessionLocal() as session:
-      return await github_routes._recorded_chat_edits(session, chat_id)
-
-  entries = asyncio.run(on_loop())
-  assert [entry["paths"] for entry in entries] == [["/data/platform/backend/app/demo.py"]]
+  response = client.get(
+    f"/api/chats/{chat_id}/edit-diffs",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200, response.text
+  assert [entry["preview"]["diff"] for entry in response.json()["entries"]] == [
+    EDIT["edit_preview"]["diff"],
+  ]
   assert not _converted(chat_id)
 
 
-def test_contribution_work_for_an_unconverted_source_is_accepted(
-  client, owner_token, db, monkeypatch,
+def test_contribution_source_discovery_reads_an_unconverted_source(
+  client, owner_token, db,
 ):
   auth = {"Authorization": f"Bearer {owner_token}"}
   app_id = create_local_app(client, auth, name="Contribute")["id"]
-  create_local_app(client, auth, name="Subagents")
   chat_id = _source_chat(db)
-  started = []
-
-  async def record_start(*args, **kwargs):
-    started.append(True)
-
-  monkeypatch.setattr(github_routes, "ensure_delegation_started", record_start)
-  response = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/{chat_id}/work",
-    headers=auth, json={"intent": "prepare", "record_ids": []},
+  response = client.get(
+    f"/api/github/contributions/{app_id}/source-chats",
+    headers=auth, params={"project_key": "platform"},
   )
-  assert response.status_code == 202, response.text
-  assert response.json()["work"]["status"] in {"accepted", "starting", "running"}
+  assert response.status_code == 200, response.text
+  assert response.json() == {"chats": [{
+    "chat_id": chat_id, "title": "Source", "last_edit_at": "2026-02-02T02:40:01Z",
+  }]}
+  assert not _converted(chat_id)
 
 
 def test_a_command_that_commits_nothing_never_holds_the_write_lock():

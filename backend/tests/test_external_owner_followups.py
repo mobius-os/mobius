@@ -119,16 +119,6 @@ def _requests(context):
     ("POST", f"/api/apps/{app_id}/recover", None),
     (
       "POST",
-      f"/api/github/contributions/{app_id}/for-chat/missing-chat/work",
-      {"intent": "prepare"},
-    ),
-    (
-      "POST",
-      f"/api/github/contributions/{app_id}/for-chat/missing-chat/work/stop",
-      None,
-    ),
-    (
-      "POST",
       f"/api/github/contributions/{app_id}/missing-record/connect-app",
       None,
     ),
@@ -137,14 +127,12 @@ def _requests(context):
 
 @pytest.mark.parametrize(
   "request_index",
-  range(7),
+  range(5),
   ids=(
     "store-install",
     "conflict-resolver-chat",
     "resolved-update-promotion",
     "app-recovery",
-    "contribution-work-start",
-    "contribution-work-stop",
     "merged-publication-connect",
   ),
 )
@@ -206,7 +194,7 @@ def test_existing_owner_top_level_and_app_authority_still_reaches_routes(
     _requests(context)[0],
     _requests(context)[1],
     _requests(context)[3],
-    _requests(context)[6],
+    _requests(context)[4],
   ]
   for method, path, body in app_allowed_paths:
     response = client.request(method, path, headers=context["app"], json=body)

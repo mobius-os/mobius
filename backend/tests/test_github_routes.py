@@ -3239,10 +3239,10 @@ def test_owner_contribute_button_publishes_a_diverged_ordinary_review(
   assert submitted == [record["id"]]
 
 
-def test_owner_chat_review_can_publish_an_uninstalled_ordinary_review(
+def test_owner_can_publish_an_uninstalled_ordinary_review(
   client, owner_token, monkeypatch,
 ):
-  """Exact chat approval need not install a reviewed PR just to publish it."""
+  """Exact owner approval need not install a reviewed PR just to publish it."""
   _write_token(login="octocat", user_id=42)
   app_id, _app_token_value = _app_token(
     client, owner_token, github_access=True,
@@ -3268,7 +3268,7 @@ def test_owner_chat_review_can_publish_an_uninstalled_ordinary_review(
     f"/api/github/contributions/{app_id}/{record['id']}/submit",
     headers={"Authorization": f"Bearer {owner_token}"},
     json={
-      "submitter": "chat-review-card",
+      "submitter": "contribute-button",
       "publication_stage": "ready",
     },
   )
@@ -3317,7 +3317,7 @@ def test_app_token_publishes_an_uninstalled_ordinary_review(
   client, owner_token, monkeypatch,
 ):
   """Publication reviews the exact reviewed candidate, so an app-token Send
-  publishes an uninstalled ordinary review just as an owner chat would: no
+  publishes an uninstalled ordinary review just as the owner would: no
   caller authority gates it and the reviewed worktree is what publishes."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
@@ -3342,7 +3342,7 @@ def test_app_token_publishes_an_uninstalled_ordinary_review(
     f"/api/github/contributions/{app_id}/{record['id']}/submit",
     headers={"Authorization": f"Bearer {app_token}"},
     json={
-      "submitter": "chat-review-card",
+      "submitter": "contribute-button",
       "publication_stage": "ready",
     },
   )
@@ -5168,10 +5168,10 @@ def test_existing_pr_update_downgrades_a_diverged_successor(
   ) == "uninstalled_publication_candidate"
 
 
-def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
+def test_owner_can_update_an_uninstalled_ordinary_review(
   client, owner_token, monkeypatch,
 ):
-  """Exact chat approval may update its reviewed PR without installing it."""
+  """Exact owner approval may update its reviewed PR without installing it."""
   _write_token(login="octocat", user_id=42)
   app_id, _app_token_value = _app_token(
     client, owner_token, github_access=True,
@@ -5223,7 +5223,7 @@ def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
   response = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
     headers={"Authorization": f"Bearer {owner_token}"},
-    json={"submitter": "chat-review-card"},
+    json={"submitter": "contribute-update-button"},
   )
 
   assert response.status_code == 200, response.text
@@ -13130,157 +13130,6 @@ def test_prepared_pr_update_cannot_start_a_new_autopilot_round(
     session.close()
 
 
-def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
-  client, owner_token, monkeypatch,
-):
-  app_id, app_token = _app_token(
-    client, owner_token, github_access=True,
-  )
-  record_id = "existing-pr-chat-card"
-  record = _prepared_existing_pr_update(app_id, record_id)
-  record["chat_id"] = "chat-existing-update"
-  record["quality_review"]["reviewed_at"] = "2026-08-27T12:34:56Z"
-  _write_contribution(app_id, record_id, record, "reviewed diff")
-  monkeypatch.setattr(
-    github_routes,
-    "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
-      "id": record["id"],
-      "state": "ready",
-      "code": "ready",
-      "message": "Still matches the exact source you reviewed.",
-    },
-  )
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-existing-update",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-
-  assert response.status_code == 200, response.text
-  projected = response.json()["records"][0]
-  assert projected["action"] == "pr_update"
-  assert projected["quality_review_ready"] is True
-  assert projected["review"]["state"] == "ready"
-  assert projected["coverage_at"] == "2026-08-27T12:34:56Z"
-
-
-def test_chat_projection_keeps_an_interrupted_successor_resumable(
-  client, owner_token, monkeypatch,
-):
-  """A durable successor claim stays reviewable after a process restart."""
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  record_id = "existing-pr-successor-card"
-  record = _prepared_merged_parent_successor(app_id, record_id)
-  record.update({
-    "chat_id": "chat-successor-resume",
-    "status": "submitting",
-    "submitter": "contribute-update-button",
-    "submit_started_at": "2026-08-30T22:00:00Z",
-  })
-  _write_contribution(app_id, record_id, record, "reviewed successor diff")
-  inspected = []
-  monkeypatch.setattr(
-    github_routes,
-    "_inspect_prepared_review",
-    lambda current, _diff_path, _github_state: (
-      inspected.append(current["status"])
-      or {
-        "id": current["id"], "state": "ready", "code": "ready",
-        "message": "Still matches the exact source you reviewed.",
-      }
-    ),
-  )
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-successor-resume",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-
-  assert response.status_code == 200, response.text
-  projected = response.json()["records"][0]
-  assert projected["status"] == "submitting"
-  assert projected["action"] == "pr_update"
-  assert projected["successor"] is True
-  assert projected["quality_review_ready"] is True
-  assert projected["review"]["state"] == "ready"
-  assert inspected == ["submitting"]
-
-
-def test_chat_projection_uses_private_review_time_after_the_public_submission(
-  client, owner_token, monkeypatch,
-):
-  app_id, app_token = _app_token(
-    client, owner_token, github_access=True,
-  )
-  record_id = "existing-pr-newer-private-review"
-  record = _prepared_existing_pr_update(app_id, record_id)
-  record["chat_id"] = "chat-private-update"
-  record["submitted_at"] = "2026-08-27T10:00:00Z"
-  record["quality_review"]["reviewed_at"] = "2026-08-27T12:00:00Z"
-  record["updated_at"] = "2026-08-27T13:00:00Z"
-  _write_contribution(app_id, record_id, record, "reviewed diff")
-  monkeypatch.setattr(
-    github_routes,
-    "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
-      "id": record["id"], "state": "ready", "code": "ready",
-      "message": "Still matches the exact source you reviewed.",
-    },
-  )
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-private-update",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-
-  assert response.status_code == 200, response.text
-  # A scheduled metadata write at 13:00 cannot hide edits. The exact-head
-  # review at 12:00 is the latest moment that actually incorporated source.
-  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T12:00:00Z"
-
-
-def test_chat_projection_does_not_let_push_time_cover_post_review_edits(
-  client, owner_token, monkeypatch,
-):
-  app_id, app_token = _app_token(
-    client, owner_token, github_access=True,
-  )
-  record_id = "existing-pr-reviewed-before-push"
-  record = _prepared_existing_pr_update(app_id, record_id)
-  record["chat_id"] = "chat-review-before-push"
-  record["quality_review"]["reviewed_at"] = "2026-08-27T10:00:00Z"
-  record["submitted_at"] = "2026-08-27T12:00:00Z"
-  record["updated_at"] = "2026-08-27T13:00:00Z"
-  _write_contribution(app_id, record_id, record, "reviewed diff")
-  monkeypatch.setattr(
-    github_routes,
-    "_inspect_prepared_review",
-    lambda record, _diff_path, _github_state: {
-      "id": record["id"], "state": "ready", "code": "ready",
-      "message": "Still matches the exact source you reviewed.",
-    },
-  )
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-review-before-push",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-
-  assert response.status_code == 200, response.text
-  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T10:00:00Z"
-
-
-def test_chat_projection_uses_publication_time_only_for_legacy_records():
-  assert github_routes._chat_record_coverage_at({
-    "submitted_at": "2026-08-27T12:00:00Z",
-    "updated_at": "2026-08-27T13:00:00Z",
-  }) == "2026-08-27T12:00:00Z"
-  assert github_routes._chat_record_coverage_at({
-    "updated_at": "2026-08-27T13:00:00Z",
-  }) == ""
-
-
 # --- contribution CI feedback loop (checks refresh + classification) ---
 
 
@@ -13641,661 +13490,6 @@ def _prepared_for_chat(app_id, record_id, chat_id, **overrides):
   return repo, record
 
 
-def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _prepared_for_chat(app_id, "mine", "chat-a")
-  _prepared_for_chat(app_id, "someone-elses", "chat-b")
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  body = r.json()
-  assert [item["id"] for item in body["records"]] == ["mine"]
-  record = body["records"][0]
-  # Everything the card needs to show what would be published, and nothing that
-  # would let it publish anything itself.
-  assert record["title"] == "Reviewed fix"
-  assert record["summary"] == "A plain sentence about the improvement."
-  assert record["body_draft"] == "## Summary\n\nThe exact published text.\n"
-  assert record["files"] == ["index.jsx"]
-  assert record["labels"] == ["bug", "area: ui"]
-  assert record["diff_stat"].startswith("1 file changed")
-  assert record["source_root"] == ""
-  assert record["url"] == ""
-  assert record["review"] == {
-    "id": "mine",
-    "state": "ready",
-    "code": "ready",
-    "message": "Still matches the exact source you reviewed.",
-  }
-  assert "diff_sha256" not in record and "repo_path" not in record
-  assert body["connected"] is True
-  assert body["autopilot_available"] is True
-  # No stored preference means the same default the Contribute app applies.
-  assert body["autopilot_default"] is True
-
-
-def test_for_chat_keeps_one_review_attached_to_every_chat_that_refined_it(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(app_id, "shared-review", "chat-original")
-  record["chat_ids"] = [
-    "chat-original", " chat-refinement ", "chat-refinement", "", 42,
-  ]
-  _write_contribution(app_id, "shared-review", record, "")
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  original = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-original",
-    headers=headers,
-  )
-  refinement = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-refinement",
-    headers=headers,
-  )
-  unrelated = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-unrelated",
-    headers=headers,
-  )
-
-  assert original.status_code == 200, original.text
-  assert refinement.status_code == 200, refinement.text
-  assert unrelated.status_code == 200, unrelated.text
-  assert [item["id"] for item in original.json()["records"]] == ["shared-review"]
-  assert [item["id"] for item in refinement.json()["records"]] == ["shared-review"]
-  assert unrelated.json()["records"] == []
-  # Other chat identities stay private; the projection exposes only the same
-  # publication review and its source-file coverage.
-  assert "chat_ids" not in refinement.json()["records"][0]
-
-
-def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  for index in range(7):
-    _prepared_for_chat(
-      app_id,
-      f"complete-{index}",
-      "chat-complete",
-      status="open",
-      number=index + 1,
-      url=f"https://github.com/mobius-os/app-demo/pull/{index + 1}",
-      updated_at=f"2026-08-27T10:00:0{index}Z",
-    )
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-complete",
-    headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  records = r.json()["records"]
-  assert len(records) == 7
-  assert [record["number"] for record in records] == [7, 6, 5, 4, 3, 2, 1]
-  assert records[0]["url"].endswith("/7")
-
-
-def test_for_chat_coverage_keeps_display_bounded_without_losing_file_41(
-  client, owner_token, db, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(
-    app_id,
-    "wide-review",
-    "chat-wide",
-    status="open",
-    number=41,
-    url="https://github.com/mobius-os/mobius/pull/41",
-  )
-  record["plan"]["source_repo_path"] = "/data/platform"
-  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
-  diff_text = "".join(
-    "\n".join([
-      f"diff --git a/file-{index:02}.js b/file-{index:02}.js",
-      f"--- a/file-{index:02}.js",
-      f"+++ b/file-{index:02}.js",
-      "@@ -1 +1 @@",
-      "-old",
-      "+new",
-      "",
-    ])
-    for index in range(1, 42)
-  )
-  _write_contribution(app_id, "wide-review", record, diff_text)
-  owner_headers = {"Authorization": f"Bearer {owner_token}"}
-
-  lifecycle = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-wide",
-    headers=owner_headers,
-  )
-  assert lifecycle.status_code == 200, lifecycle.text
-  projected = lifecycle.json()["records"][0]
-  assert len(projected["files"]) == 40
-  assert "file-41.js" not in projected["files"]
-
-  coverage = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
-    headers=owner_headers,
-    json={"paths": ["/data/platform/file-41.js", "/private/not-requested.js"]},
-  )
-  assert coverage.status_code == 200, coverage.text
-  assert coverage.json() == {"coverage": [{
-    "path": "/data/platform/file-41.js",
-    "coverage_at": "2026-08-27T12:00:00Z",
-  }]}
-  assert "wide-review" not in coverage.text
-  assert "file-01.js" not in coverage.text
-
-  app_request = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
-    headers={"Authorization": f"Bearer {app_token}"},
-    json={"paths": ["/data/platform/file-41.js"]},
-  )
-  assert app_request.status_code == 403
-
-  async def recorded_edit(_db, requested_chat_id):
-    assert requested_chat_id == "chat-wide"
-    return [{
-      "id": "edit-after-file-40",
-      "ts": "2026-08-27T11:00:00Z",
-      "paths": ["/data/platform/file-41.js"],
-    }]
-
-  monkeypatch.setattr(github_routes, "_recorded_chat_edits", recorded_edit)
-  snapshot = asyncio.run(
-    github_routes._contribution_work_snapshot(db, app_id, "chat-wide")
-  )
-  # The helper freshness check must use complete contribution coverage too;
-  # otherwise this covered edit appears unsorted forever and every click 409s.
-  assert len(snapshot["record_views"][0]["files"]) == 40
-  assert snapshot["unsorted_entries"] == []
-  assert snapshot["unsorted_revision"] == ""
-
-
-def test_for_chat_coverage_rejects_an_unbounded_path_request(client, owner_token):
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  response = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
-    headers={"Authorization": f"Bearer {owner_token}"},
-    json={"paths": [f"/data/platform/file-{index}.js" for index in range(101)]},
-  )
-  assert response.status_code == 400
-  assert response.json()["detail"] == "At most 100 paths are allowed."
-
-
-def test_for_chat_coverage_preserves_repo_relative_a_and_b_directories(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(
-    app_id,
-    "side-prefix-directories",
-    "chat-side-prefix-directories",
-    status="open",
-  )
-  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
-  record["plan"]["source_repo_path"] = "/data/platform"
-  diff_text = "\n".join([
-    "diff --git a/a/foo.js b/a/foo.js",
-    "--- a/a/foo.js",
-    "+++ b/a/foo.js",
-    "@@ -1 +1 @@",
-    "-old a",
-    "+new a",
-    "diff --git a/b/foo.js b/b/foo.js",
-    "--- a/b/foo.js",
-    "+++ b/b/foo.js",
-    "@@ -1 +1 @@",
-    "-old b",
-    "+new b",
-    "",
-  ])
-  _write_contribution(app_id, "side-prefix-directories", record, diff_text)
-
-  response = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/"
-    "chat-side-prefix-directories/coverage",
-    headers={"Authorization": f"Bearer {owner_token}"},
-    json={"paths": [
-      "/data/platform/a/foo.js",
-      "/data/platform/foo.js",
-      "/data/platform/b/foo.js",
-    ]},
-  )
-
-  assert response.status_code == 200, response.text
-  assert response.json() == {"coverage": [
-    {
-      "path": "/data/platform/a/foo.js",
-      "coverage_at": "2026-08-27T12:00:00Z",
-    },
-    {
-      "path": "/data/platform/b/foo.js",
-      "coverage_at": "2026-08-27T12:00:00Z",
-    },
-  ]}
-
-
-def test_for_chat_coverage_never_trusts_a_hostile_record_source_root(
-  client, owner_token,
-):
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(
-    app_id,
-    "hostile-coverage",
-    "chat-hostile",
-    status="open",
-    number=42,
-    url="https://github.com/mobius-os/mobius/pull/42",
-  )
-  record["plan"]["source_repo_path"] = "/data/shared/memory"
-  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
-  _write_contribution(
-    app_id,
-    "hostile-coverage",
-    record,
-    "\n".join([
-      "diff --git a/private.md b/private.md",
-      "--- a/private.md",
-      "+++ b/private.md",
-      "@@ -1 +1 @@",
-      "-old",
-      "+new",
-      "",
-    ]),
-  )
-
-  response = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/chat-hostile/coverage",
-    headers={"Authorization": f"Bearer {owner_token}"},
-    json={"paths": ["/data/shared/memory/private.md"]},
-  )
-  assert response.status_code == 200, response.text
-  assert response.json() == {"coverage": []}
-  assert "hostile-coverage" not in response.text
-
-
-def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
-  client, owner_token, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _prepared_for_chat(
-    app_id,
-    "lock-friendly",
-    "chat-a",
-    status="open",
-    number=58,
-    url="https://github.com/mobius-os/app-demo/pull/58",
-  )
-  held = False
-  real_lock = github_routes.fs_locks.app_storage_lock
-  real_read = github_routes._read_record_tolerant
-
-  @asynccontextmanager
-  async def observed_lock(requested_app_id):
-    nonlocal held
-    async with real_lock(requested_app_id):
-      held = True
-      try:
-        yield
-      finally:
-        held = False
-
-  def assert_unlocked_history_read(path):
-    if path.parent.name == "contributions":
-      assert held is False, "ledger JSON parsing must not hold the writer lock"
-    return real_read(path)
-
-  monkeypatch.setattr(
-    github_routes.fs_locks, "app_storage_lock", observed_lock,
-  )
-  monkeypatch.setattr(
-    github_routes, "_read_record_tolerant", assert_unlocked_history_read,
-  )
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a",
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-
-  assert response.status_code == 200, response.text
-  assert [record["id"] for record in response.json()["records"]] == [
-    "lock-friendly",
-  ]
-
-
-def test_chat_settlements_are_temporal_idempotent_and_owner_written(
-  client, owner_token,
-):
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  headers = {"Authorization": f"Bearer {owner_token}"}
-  url = f"/api/github/contributions/{app_id}/for-chat/chat-a/settle"
-  path = "/data/platform/frontend/src/example.js"
-
-  first = client.post(url, headers=headers, json={
-    "coverage_at": 1_787_800_000_000,
-    "items": [{
-      "path": path,
-      "disposition": "experimental",
-      "summary": "Kept as a local experiment.",
-    }],
-  })
-  assert first.status_code == 200, first.text
-
-  # A delayed retry from an older source snapshot cannot roll the decision
-  # backwards or replace its newer explanation.
-  older = client.post(url, headers=headers, json={
-    "coverage_at": 1_787_700_000_000,
-    "items": [{
-      "path": path,
-      "disposition": "duplicate",
-      "summary": "Stale retry.",
-    }],
-  })
-  assert older.status_code == 200, older.text
-  settlement = older.json()["settlements"][0]
-  assert settlement["coverage_at"] == 1_787_800_000_000
-  assert settlement["disposition"] == "experimental"
-  assert settlement["summary"] == "Kept as a local experiment."
-
-  projected = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert projected.status_code == 200, projected.text
-  assert projected.json()["settlements"] == older.json()["settlements"]
-
-  denied = client.post(
-    url,
-    headers={"Authorization": f"Bearer {app_token}"},
-    json={"coverage_at": 1_787_800_000_000, "items": [{"path": path}]},
-  )
-  assert denied.status_code == 403, denied.text
-
-
-def test_chat_settlements_accept_only_review_worktrees_under_contrib(
-  client, owner_token,
-):
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  headers = {"Authorization": f"Bearer {owner_token}"}
-  url = f"/api/github/contributions/{app_id}/for-chat/chat-a/settle"
-
-  accepted = client.post(url, headers=headers, json={
-    "coverage_at": 1_787_800_000_000,
-    "items": [{
-      "path": "/data/contrib/review-one/worktree/backend/app.py",
-      "disposition": "duplicate",
-      "summary": "Captured by the final review.",
-    }],
-  })
-  assert accepted.status_code == 200, accepted.text
-
-  rejected = client.post(url, headers=headers, json={
-    "coverage_at": 1_787_800_000_000,
-    "items": [{
-      "path": "/data/contrib/review-one/git/config",
-      "disposition": "experimental",
-    }],
-  })
-  assert rejected.status_code == 422, rejected.text
-
-
-def test_chat_action_key_ignores_poll_timestamps_but_changes_with_attention(
-  client, owner_token,
-):
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(
-    app_id, "attention-key", "chat-a", status="open", needs_attention=True,
-    attention={"key": "checks_failed:one", "type": "checks_failed"},
-  )
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  first = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  ).json()["records"][0]["action_key"]
-  record["updated_at"] = "2026-08-27T15:00:00Z"
-  _write_contribution(app_id, "attention-key", record, "")
-  second = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  ).json()["records"][0]["action_key"]
-  assert second == first
-
-  record["attention"] = {"key": "checks_failed:two", "type": "checks_failed"}
-  _write_contribution(app_id, "attention-key", record, "")
-  third = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  ).json()["records"][0]["action_key"]
-  assert third != first
-
-
-def test_chat_action_key_changes_with_successor_authorization(
-  client, owner_token,
-):
-  """Any changed successor mutation invalidates an older confirmation."""
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  record_id = "successor-action-key"
-  record = _prepared_merged_parent_successor(app_id, record_id)
-  record["chat_id"] = "chat-a"
-  _write_contribution(app_id, record_id, record, "reviewed successor diff")
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  first = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  ).json()["records"][0]["action_key"]
-  record["plan"]["successor"]["base_branch"] = "release"
-  _write_contribution(app_id, record_id, record, "reviewed successor diff")
-  second = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  ).json()["records"][0]["action_key"]
-
-  assert second != first
-
-
-def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):
-  diff_path = tmp_path / "review.diff"
-  diff_path.write_text(
-    "diff --git a/real file.jsx b/real file.jsx\n"
-    "--- a/real file.jsx\n"
-    "+++ b/real file.jsx\n"
-    "@@ -1 +1,2 @@\n"
-    " keep\n"
-    "++++ not-a-reviewed-path.jsx\n",
-  )
-
-  assert github_routes._diff_file_paths(diff_path) == ["real file.jsx"]
-
-
-def test_for_chat_reports_local_drift_so_the_card_can_block_send(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  repo, _record = _prepared_for_chat(app_id, "drifted", "chat-a")
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  (repo / "index.jsx").write_text("export default 3\n")
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  review = r.json()["records"][0]["review"]
-  assert review["state"] == "needs_refresh"
-  assert review["code"] == "working_changes"
-  # Read-only: inspecting a review never commits or discards the owner's edit.
-  assert (repo / "index.jsx").read_text() == "export default 3\n"
-
-
-def test_for_chat_keeps_the_sent_lifecycle_with_its_source_chat(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _prepared_for_chat(app_id, "dropped", "chat-a", status="abandoned")
-  _prepared_for_chat(
-    app_id, "already-open", "chat-a", status="open", number=7,
-    url="https://github.com/mobius-os/app-demo/pull/7",
-  )
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  # Abandoned work is gone, while a sent contribution stays attached to the
-  # conversation that created it. Deeper cross-chat history remains Contribute's.
-  records = r.json()["records"]
-  assert [item["id"] for item in records] == ["already-open"]
-  assert records[0]["status"] == "open"
-  assert records[0]["number"] == 7
-  assert records[0]["needs_attention"] is False
-  assert records[0]["review"] is None
-
-
-def test_for_chat_honors_the_owner_s_autopilot_default(client, owner_token):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _prepared_for_chat(app_id, "autopilot-default", "chat-a")
-  settings_path = (
-    Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
-  )
-  atomic_write(settings_path, json.dumps({"autopilot_default": False}))
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  assert r.json()["autopilot_default"] is False
-
-
-def test_for_chat_marks_a_stack_layer_so_chat_never_sends_one_alone(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  _, record = _prepared_for_chat(app_id, "layer-2", "chat-a")
-  record["plan"]["stack"] = {
-    "id": "demo", "name": "Demo stack", "position": 2, "total": 3,
-    "parent_record_id": "layer-1", "base_branch": "stack/demo/01",
-  }
-  _write_contribution(app_id, "layer-2", record, "")
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert r.status_code == 200, r.text
-  item = r.json()["records"][0]
-  assert item["is_stack"] is True
-  assert item["stack"] == {
-    "id": "demo", "name": "Demo stack", "position": 2, "total": 3,
-  }
-  assert "parent_record_id" not in item["stack"]
-  assert "base_branch" not in item["stack"]
-  # A lone stack layer is never preflighted: the complete chain is exposed as a
-  # separate approval unit only when every linked record is available.
-  assert item["review"] is None
-
-
-def test_for_chat_exposes_the_complete_reviewed_stack_as_one_approval_unit(
-  client, owner_token, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  parent_id = "direct-approval-layer-1"
-  child_id = "direct-approval-layer-2"
-  _, parent = _prepared_for_chat(app_id, parent_id, "older-chat")
-  _, child = _prepared_for_chat(app_id, child_id, "chat-a")
-  stack_id = "direct-approval"
-  parent["plan"]["stack"] = {
-    "id": stack_id, "name": "Direct approval", "position": 1, "total": 2,
-    "parent_record_id": "", "base_branch": "main",
-  }
-  child["plan"]["stack"] = {
-    "id": stack_id, "name": "Direct approval", "position": 2, "total": 2,
-    "parent_record_id": parent_id, "base_branch": parent["plan"]["branch"],
-  }
-  _write_contribution(app_id, parent_id, parent, "")
-  _write_contribution(app_id, child_id, child, "")
-  monkeypatch.setattr(
-    github_routes,
-    "_validate_stack_records",
-    lambda records, **_kwargs: [
-      {"record": record}
-      for record in sorted(records, key=github_routes._chat_stack_position)
-    ],
-  )
-  monkeypatch.setattr(
-    github_routes,
-    "_inspect_prepared_review",
-    lambda record, _diff, _state: {
-      "id": record["id"], "state": "ready", "code": "ready",
-      "message": "Still matches the exact source you reviewed.",
-    },
-  )
-  headers = {"Authorization": f"Bearer {owner_token}"}
-
-  response = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-
-  assert response.status_code == 200, response.text
-  body = response.json()
-  assert [record["id"] for record in body["records"]] == [child_id]
-  assert len(body["stack_units"]) == 1
-  unit = body["stack_units"][0]
-  assert unit["id"] == stack_id
-  assert unit["name"] == "Direct approval"
-  assert [record["id"] for record in unit["records"]] == [parent_id, child_id]
-  assert [record["review"]["state"] for record in unit["records"]] == [
-    "ready", "ready",
-  ]
-
-  # Partial publication must not strand the remaining private child in the
-  # other source chat: the public parent still keeps the complete unit here.
-  parent.update({
-    "chat_id": "chat-a", "status": "draft", "number": 7,
-    "url": "https://github.com/mobius-os/mobius/pull/7",
-  })
-  child["chat_id"] = "older-chat"
-  _write_contribution(app_id, parent_id, parent, "")
-  _write_contribution(app_id, child_id, child, "")
-  partial = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
-  )
-  assert partial.status_code == 200, partial.text
-  assert [record["id"] for record in partial.json()["records"]] == [parent_id]
-  assert [record["id"] for record in partial.json()["stack_units"][0]["records"]] == [
-    parent_id, child_id,
-  ]
-
-
-def test_for_chat_requires_the_owner_or_that_app(client, owner_token):
-  _write_token(login="octocat", user_id=42)
-  app_id, _ = _app_token(client, owner_token, github_access=True)
-  other_id, other_token = _app_token(client, owner_token, github_access=True)
-  _prepared_for_chat(app_id, "scoped", "chat-a")
-
-  r = client.get(
-    f"/api/github/contributions/{app_id}/for-chat/chat-a",
-    headers={"Authorization": f"Bearer {other_token}"},
-  )
-  assert r.status_code == 403, r.text
-  assert other_id != app_id
-
-  anon = client.get(f"/api/github/contributions/{app_id}/for-chat/chat-a")
-  assert anon.status_code == 401
-
-
 def test_submit_records_where_the_owner_pressed_send(
   client, owner_token, monkeypatch,
 ):
@@ -14309,23 +13503,30 @@ def test_submit_records_where_the_owner_pressed_send(
     headers={"Authorization": f"Bearer {owner_token}"},
     json={"autopilot": False, "submitter": "not-a-real-surface"},
   )
-  # An unknown surface is rejected by the schema rather than stored.
+  # An unknown surface is rejected by the schema rather than stored. The
+  # retired chat review card is no longer a publication surface.
   assert invalid.status_code == 422, invalid.text
+  retired = client.post(
+    f"/api/github/contributions/{app_id}/provenance/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"autopilot": False, "submitter": "chat-review-card"},
+  )
+  assert retired.status_code == 422, retired.text
 
   def fake_submit(record, _diff_path, **_kwargs):
-    assert record["submitter"] == "chat-review-card"
+    assert record["submitter"] == "contribute-button"
     return "https://github.com/mobius-os/app-demo/pull/17", 17, {}
 
   monkeypatch.setattr(github_routes, "_submit_prepared_pr", fake_submit)
   submitted = client.post(
     f"/api/github/contributions/{app_id}/provenance/submit",
     headers={"Authorization": f"Bearer {owner_token}"},
-    json={"autopilot": False, "submitter": "chat-review-card"},
+    json={"autopilot": False, "submitter": "contribute-button"},
   )
 
   assert submitted.status_code == 200, submitted.text
   record_path, _ = github_routes._record_paths(app_id, "provenance")
-  assert json.loads(record_path.read_text())["submitter"] == "chat-review-card"
+  assert json.loads(record_path.read_text())["submitter"] == "contribute-button"
 
 
 def test_submit_persists_precise_upstream_fetch_failure(

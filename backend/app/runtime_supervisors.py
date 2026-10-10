@@ -385,18 +385,14 @@ class RuntimeSupervisors:
         system_broadcast.unsubscribe(events)
 
     async def delegation_startup_recovery_loop():
-      # Startup admission and source-attached work have their own repair path;
-      # neither can be delayed by a stalled parent wake or SQLite lease sweep.
-      from app.delegations import (
-        reconcile_unstarted_delegations,
-      )
-      from app.routes.github import reconcile_attached_contribution_work
+      # Startup admission has its own repair path; it cannot be delayed by a
+      # stalled parent wake or SQLite lease sweep.
+      from app.delegations import reconcile_unstarted_delegations
 
       while True:
         await asyncio.sleep(DELEGATION_STARTUP_RECOVERY_INTERVAL_SECS)
         try:
           await reconcile_unstarted_delegations()
-          await reconcile_attached_contribution_work()
         except asyncio.CancelledError:
           raise
         except Exception as exc:

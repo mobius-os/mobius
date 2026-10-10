@@ -932,8 +932,8 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
-    /ev\.type === 'delegation_changed'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)[\s\S]*?\['completed', 'failed', 'needs_review'\][\s\S]*?setAttentionChatIds/,
-    'source-attached completion must refresh its parent and mark hidden work for attention',
+    /ev\.type === 'delegation_changed'[\s\S]*?\['completed', 'failed', 'needs_review'\][\s\S]*?setAttentionChatIds/,
+    'helper completion must mark hidden work for attention',
   )
   assert.match(
     shell,

@@ -41,16 +41,17 @@ test('chat context actions follow model selection and continuation policy', () =
 
 
 test('the Brain surfaces only work that needs the owner, never a not-upstream-yet nag', () => {
+  // Changes is informational: read only while the menu shows it, never a badge.
   assert.match(
     composerSource,
-    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatReady && chatId\)/,
+    /useChatChanges\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(open && !embedded && chatReady && chatId\)/,
   )
+  assert.doesNotMatch(composerSource, /composer-popover__row-attention|Needs you/)
   assert.doesNotMatch(composerSource, /hasPendingUpstreamWork|pendingUpstreamWork/)
   assert.doesNotMatch(composerSource, /composer-plus__upstream-warning|composer-plus__attention-diamond/)
   assert.doesNotMatch(composerSource, /TriangleExclamationErrorWarning/)
   assert.doesNotMatch(composerSource, /not upstream yet/i)
   assert.match(composerSource, /composer-plus__activity-dot/)
-  assert.match(composerSource, /changesNeedOwner && \([\s\S]*?composer-popover__row-attention[\s\S]*?Needs you/)
   assert.doesNotMatch(composerSource, /composer-plus__attention-dot/)
   assert.match(chatViewSource, /initialChangeEntries=\{chatDiffEntries\}/)
   assert.doesNotMatch(chatViewSource, /ContributionReviewCard|contrib-card-stack/)
