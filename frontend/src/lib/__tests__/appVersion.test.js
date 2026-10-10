@@ -1,19 +1,32 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { appVersionKey } from '../appVersion.js'
+import { appFrameVersion } from '../appVersion.js'
 
-test('appVersionKey preserves sub-second updated_at precision', () => {
-  const a = '2026-06-04T12:00:00.123456Z'
-  const b = '2026-06-04T12:00:00.987654Z'
+test('appFrameVersion follows frame_version, not updated_at', () => {
+  const app = { frame_version: '0123456789abcdef0123', updated_at: '2026-06-04T12:00:00.1Z' }
 
-  assert.notEqual(appVersionKey(a), appVersionKey(b))
-  assert.equal(appVersionKey(a), a)
+  assert.equal(appFrameVersion(app), '0123456789abcdef0123')
+  assert.equal(
+    appFrameVersion({ ...app, updated_at: '2026-06-04T12:00:09.9Z' }),
+    appFrameVersion(app),
+  )
+  assert.equal(moduleVersionKey(`${appFrameVersion(app)}-a1b2c3d4e5f67890`), app.frame_version)
 })
 
-test('appVersionKey has a stable empty fallback', () => {
-  assert.equal(appVersionKey(null), '0')
-  assert.equal(appVersionKey(''), '0')
+test('appFrameVersion has a stable missing-row fallback', () => {
+  assert.equal(appFrameVersion(undefined), '0')
+  assert.equal(appFrameVersion(null), '0')
+})
+
+test('appFrameVersion preserves updates while the old backend awaits restart', () => {
+  const before = { updated_at: '2026-06-04T12:00:00Z' }
+  const after = { updated_at: '2026-06-04T12:00:09Z' }
+  assert.equal(appFrameVersion(before), before.updated_at)
+  assert.equal(appFrameVersion(after), after.updated_at)
+  assert.notEqual(appFrameVersion(before), appFrameVersion(after))
+  assert.equal(appFrameVersion({ ...after, frame_version: ' ' }), after.updated_at)
+  assert.equal(moduleVersionKey(`${appFrameVersion(after)}-a1b2c3d4e5f67890`), after.updated_at)
 })
 
 import { moduleVersionKey } from '../appVersion.js'

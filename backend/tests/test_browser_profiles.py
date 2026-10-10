@@ -141,6 +141,7 @@ def _fake_browser_process(
   (process / "cmdline").write_bytes(
     f"/usr/local/lib/{executable}\0".encode()
   )
+  (process / "exe").symlink_to(f"/usr/local/lib/{executable}")
   values = {
     "CHAT_ID": chat_id,
     "AGENT_BROWSER_SESSION": session,

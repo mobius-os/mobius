@@ -361,6 +361,18 @@ def static_asset_entries(value) -> dict[str, str]:
   _fail("Manifest `static_assets` must be an object or array.")
 
 
+# These runtime features can load dependencies beyond the JavaScript
+# bundle. The contract requires executable entries to be declared, so those
+# files are protected by package_input_paths/source_files. Keep a denylist:
+# an allowlist would reject inert Store metadata without improving the proof.
+# Unknown fields are inert because the platform never reads them; when adding
+# a runtime feature, include it here if it can load undeclared dependencies.
+EXECUTABLE_MANIFEST_FIELDS = frozenset({
+  "service", "setup", "schedule", "python", "agent_activities", "tools",
+  "project_templates", "model_provider",
+})
+
+
 def package_input_paths(manifest: Mapping) -> Iterator[str]:
   """Yield every repo-relative file declared by a validated manifest.
 
@@ -907,6 +919,10 @@ def validate_manifest_contract(manifest) -> None:
     if path not in (source_files or []):
       _fail(f"Manifest `setup.steps[{index}]` must be listed in `source_files`.")
 
+  tools = manifest.get("tools")
+  if tools is not None:
+    validate_agent_tools(tools, has_service=manifest.get("service") is not None)
+
   agent_activities = manifest.get("agent_activities", {})
   if not isinstance(agent_activities, Mapping):
     _fail("Manifest `agent_activities` must be an object.")
@@ -916,10 +932,7 @@ def validate_manifest_contract(manifest) -> None:
       f"(max {AGENT_ACTIVITIES_COUNT_MAX})."
     )
   declared_sources = set(source_files or []) if isinstance(source_files, list) else set()
-  declared_tools = {
-    tool.get("name") for tool in (manifest.get("tools") or [])
-    if isinstance(tool, Mapping)
-  } if isinstance(manifest.get("tools"), list) else set()
+  declared_tools = {tool["name"] for tool in tools or []}
   activity_entries: set[str] = set()
   activity_tools: set[str] = set()
   for activity_id, activity in agent_activities.items():
@@ -929,7 +942,7 @@ def validate_manifest_contract(manifest) -> None:
     # by a simple shell invocation of one of its source files.
     if isinstance(activity, Mapping) and set(activity) == {"tool", "running_label"}:
       tool = activity.get("tool")
-      if tool not in declared_tools:
+      if not isinstance(tool, str) or tool not in declared_tools:
         _fail(f"Manifest `{field}.tool` must name one of the app's `tools`.")
       if tool in activity_tools:
         _fail("Manifest agent_activities must use distinct tools.")
@@ -1062,10 +1075,6 @@ def validate_manifest_contract(manifest) -> None:
           f"Manifest `skills[{index}]` {entry!r} must list "
           f"`{entry}{FOLDER_SKILL_ENTRY}` in `source_files`."
         )
-
-  tools = manifest.get("tools")
-  if tools is not None:
-    validate_agent_tools(tools, has_service=service is not None)
 
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:

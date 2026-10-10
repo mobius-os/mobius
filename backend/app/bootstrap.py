@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app import models
+from app.manifest_identity import canonical_manifest_identity_key
 from app.install import install_from_manifest
 from app.timeutil import now_naive_utc
 
@@ -180,7 +181,7 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
 
   # Bootstrap uses the same resolver as preview and install so all three paths
   # agree on persisted identities, moved refs, and proven legacy origins.
-  from app.install import _canonical_identity_key, _find_install_identity_row
+  from app.install import _find_install_identity_row
 
   # Decide before installing anything, since installs create app rows.
   try:
@@ -216,7 +217,7 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       # its durable package identity becomes current; a later explicit Store
       # install can therefore revive/update the same row without boot needing
       # to remember the old package forever.
-      predecessor.manifest_url = _canonical_identity_key(
+      predecessor.manifest_url = canonical_manifest_identity_key(
         bootstrap_app.manifest_url, bootstrap_app.manifest_id,
       )
       db.commit()

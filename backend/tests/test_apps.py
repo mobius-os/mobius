@@ -173,6 +173,53 @@ def test_update_app_attaches_distribution_manifest_without_changing_install_iden
   fetch.assert_awaited_once_with(distribution_url)
 
 
+@pytest.mark.parametrize("address_kind", ["plain", "stored", "previous-id", "wrong-id"])
+def test_update_app_distribution_fetch_normalizes_and_binds_stored_addresses(
+  client, auth, db, address_kind,
+):
+  app = create_local_app(
+    client, auth, name="Address probe", description="test",
+    manifest_extra={"previous_id": "previous-app"},
+  )
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  tree = app_git.read_ref_tree(row.source_dir, row.source_commit)
+  manifest = json.loads(tree["mobius.json"])
+  base = "https://example.test/address-probe"
+  bound_id = {
+    "wrong-id": "wrong-app", "previous-id": "previous-app",
+  }.get(address_kind, manifest["id"])
+  address = (
+    base + "/mobius.json" if address_kind == "plain"
+    else base + "#manifest-id=" + bound_id
+  )
+
+  async def fetch_bytes(cli, url, *args, **kwargs):
+    assert url.startswith(base + "/"), url
+    return tree[url.removeprefix(base + "/")]
+
+  with patch("app.install._http_get", new=AsyncMock(side_effect=fetch_bytes)) as fetch:
+    response = client.patch(
+      f"/api/apps/{app['id']}",
+      json={"published_manifest_url": address},
+      headers=auth,
+    )
+
+  assert fetch.await_args_list[0].args[1] == base + "/mobius.json"
+  db.refresh(row)
+  assert row.manifest_url is None
+  if address_kind == "wrong-id":
+    assert response.status_code == 409, response.text
+    assert "no longer the 'wrong-app' app" in response.json()["detail"]
+    assert fetch.await_count == 1
+    assert row.published_manifest_url is None
+  else:
+    assert response.status_code == 200, response.text
+    assert row.published_manifest_url == base + "/mobius.json"
+    assert response.json()["distribution_manifest"] == {
+      "id": manifest["id"], "url": base + "/mobius.json", "kind": "published",
+    }
+
+
 def test_update_app_rejects_distribution_package_that_is_not_the_accepted_revision(
   client, auth, db,
 ):
@@ -361,8 +408,12 @@ def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   assert "apps.icon_override_png AS apps_icon_override_png" not in projection
 
 
+@pytest.mark.parametrize("base", [
+  "https://raw.githubusercontent.com/example/app/main",
+  "https://raw.githubusercontent.com/example/app/main/mobius.json?ref=main",
+])
 def test_list_apps_exposes_one_fetchable_source_manifest_contract(
-  client, auth, db,
+  client, auth, db, base,
 ):
   app = models.App(
     source_dir="/tmp/mobius-tests/source-manifest-contract",
@@ -370,10 +421,7 @@ def test_list_apps_exposes_one_fetchable_source_manifest_contract(
     description="Installed from a published manifest",
     jsx_source="export default function App() { return null }",
     slug="published-app",
-    manifest_url=(
-      "https://raw.githubusercontent.com/example/app/main"
-      "#manifest-id=published-app"
-    ),
+    manifest_url=base + "#manifest-id=published-app",
   )
   db.add(app)
   db.commit()

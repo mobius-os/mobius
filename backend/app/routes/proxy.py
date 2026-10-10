@@ -8,7 +8,7 @@ owner or an app-scoped token.
 """
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
@@ -18,7 +18,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.deps import authorize_current_owner_or_app_detached, reject_cross_site
-from app.net_utils import validate_url_safe
+from app.net_utils import MAX_REDIRECTS as _MAX_REDIRECTS, validate_url_safe
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
@@ -30,9 +30,9 @@ router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 # convention as _FAVICON_USER_AGENT below.
 _PROXY_USER_AGENT = "Mobius/1.0 (app proxy; +https://github.com/mobius-os/mobius)"
 
-# Hard limit on response size to avoid pulling in huge payloads.
+# Hard limit on response size to avoid pulling in huge payloads. The general
+# proxy preserves its original behavior of returning the first 2 MiB.
 _MAX_BYTES = 2 * 1024 * 1024  # 2 MB
-
 # 512 KB — generous for API payloads, prevents memory exhaustion from abuse.
 _MAX_BODY = 512 * 1024
 _FORWARDED_RESPONSE_HEADERS = (
@@ -47,7 +47,6 @@ _FORWARDED_RESPONSE_HEADERS = (
 # and ordinary root icons share one SSRF-safe loading path.
 _FAVICON_MAX_BYTES = 256 * 1024
 _FAVICON_PAGE_MAX_BYTES = 512 * 1024
-_FAVICON_MAX_REDIRECTS = 5
 _FAVICON_LINK_LIMIT = 8
 _FAVICON_USER_AGENT = "Mobius/1.0 (reference favicon fetch)"
 _FAVICON_CONTENT_TYPES = frozenset((
@@ -77,6 +76,7 @@ class _ExternalRead:
   content_type: str
   final_url: str
   truncated: bool
+  forwarded_headers: dict[str, str] = field(default_factory=dict)
 
 
 class _FaviconLinkParser(HTMLParser):
@@ -148,10 +148,37 @@ def _canonical_root_icon_urls(page_url: str) -> list[str]:
   ]
 
 
+def _fetch_error(url: str, exc: httpx.RequestError) -> HTTPException:
+  if isinstance(exc, httpx.TimeoutException):
+    return HTTPException(504, f"Timeout fetching {url}")
+  return HTTPException(502, f"Failed to fetch {url}: {exc}")
+
+
+async def _read_bounded_body(
+  upstream: httpx.Response, max_bytes: int, url: str,
+) -> bytes:
+  """Return a bounded prefix without waiting for EOF, classifying stream failures."""
+  body = bytearray()
+  try:
+    async for chunk in upstream.aiter_bytes():
+      room = max_bytes - len(body)
+      if room <= 0:
+        break
+      body.extend(chunk[:room])
+      if len(body) >= max_bytes:
+        break
+  except httpx.RequestError as exc:
+    raise _fetch_error(url, exc) from exc
+  return bytes(body)
+
+
 async def _read_external_get(
   client: httpx.AsyncClient,
   url: str,
   max_bytes: int,
+  *,
+  headers: dict[str, str] | None = None,
+  probe_truncation: bool = True,
 ) -> _ExternalRead:
   """Read one public URL with a byte cap and SSRF-safe redirect handling.
 
@@ -160,14 +187,14 @@ async def _read_external_get(
   container network after only the first host passed validation.
   """
   current_url = url
-  for hop in range(_FAVICON_MAX_REDIRECTS + 1):
+  for hop in range(_MAX_REDIRECTS + 1):
     pinned_url, host_header, sni_host = await asyncio.to_thread(
       validate_url_safe, current_url,
     )
     req = client.build_request(
       "GET",
       pinned_url,
-      headers={
+      headers=headers if headers is not None else {
         "Accept": "image/*,text/html;q=0.8,*/*;q=0.1",
         "User-Agent": _FAVICON_USER_AGENT,
       },
@@ -176,10 +203,8 @@ async def _read_external_get(
     req.extensions["sni_hostname"] = sni_host
     try:
       upstream = await client.send(req, stream=True)
-    except httpx.TimeoutException:
-      raise HTTPException(504, f"Timeout fetching {current_url}")
     except httpx.RequestError as exc:
-      raise HTTPException(502, f"Failed to fetch {current_url}: {exc}")
+      raise _fetch_error(current_url, exc) from exc
     try:
       if upstream.status_code in _REDIRECT_STATUSES:
         location = upstream.headers.get("location")
@@ -187,35 +212,35 @@ async def _read_external_get(
           raise HTTPException(
             502, f"Redirect from {current_url} missing Location header.",
           )
-        if hop >= _FAVICON_MAX_REDIRECTS:
+        if hop >= _MAX_REDIRECTS:
           raise HTTPException(
             502,
-            f"Too many redirects (>{_FAVICON_MAX_REDIRECTS}) "
+            f"Too many redirects (>{_MAX_REDIRECTS}) "
             f"starting from {url}",
           )
         current_url = urljoin(current_url, location)
         continue
 
-      body = bytearray()
-      async for chunk in upstream.aiter_bytes():
-        room = max_bytes + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > max_bytes:
-          break
+      body = await _read_bounded_body(
+        upstream, max_bytes + int(probe_truncation), current_url,
+      )
       return _ExternalRead(
-        body=bytes(body[:max_bytes]),
+        body=body[:max_bytes],
         status_code=upstream.status_code,
         content_type=upstream.headers.get(
           "content-type", "application/octet-stream",
         ),
         final_url=current_url,
         truncated=len(body) > max_bytes,
+        forwarded_headers={
+          name: upstream.headers[name]
+          for name in _FORWARDED_RESPONSE_HEADERS
+          if name in upstream.headers
+        },
       )
     finally:
       await upstream.aclose()
-  raise HTTPException(502, "Favicon redirect resolution failed.")
+  raise HTTPException(502, "Redirect resolution failed.")
 
 
 async def _first_supported_icon(
@@ -243,26 +268,23 @@ async def _first_supported_icon(
 async def _capped_response(
   client: httpx.AsyncClient,
   req: httpx.Request,
+  url: str,
   *,
   forward_cache_headers: bool = False,
 ) -> Response:
-  """Sends `req` streaming and reads at most `_MAX_BYTES` into memory. The prior
-  code read the FULL body (`r.content`) before slicing, so a huge or malicious
-  upstream response could exhaust process memory before the cap ever applied.
-  This stops at the cap and drops the rest."""
+  """Sends `req` streaming and reads at most `_MAX_BYTES` into memory.
+
+  `url` is the caller's address; `req` targets its DNS-pinned IP, which errors
+  must not show. Reading the full body (`r.content`) before checking would let
+  a huge or malicious upstream exhaust process memory before the cap applied."""
   try:
     r = await client.send(req, stream=True)
+  except httpx.RequestError as exc:
+    raise _fetch_error(url, exc) from exc
   except Exception as exc:
     raise HTTPException(status_code=502, detail=str(exc))
   try:
-    buf = bytearray()
-    async for chunk in r.aiter_bytes():
-      # Append only up to the cap so the buffer is STRICTLY bounded by _MAX_BYTES
-      # (extending the whole chunk first could overshoot by a chunk's worth).
-      room = _MAX_BYTES - len(buf)
-      buf.extend(chunk[:room])
-      if len(buf) >= _MAX_BYTES:
-        break
+    body = await _read_bounded_body(r, _MAX_BYTES, url)
     headers = {
       name: r.headers[name]
       for name in _FORWARDED_RESPONSE_HEADERS
@@ -273,7 +295,7 @@ async def _capped_response(
         if name in r.headers:
           headers[name] = r.headers[name]
     return Response(
-      content=bytes(buf),
+      content=body,
       status_code=r.status_code,
       headers=headers,
       media_type=r.headers.get("content-type", "application/octet-stream"),
@@ -345,18 +367,21 @@ async def proxy_get(
   read-only, requires a bearer token (and therefore a CORS preflight), and keeps
   the SSRF allow/deny checks below, so the mutation-oriented CSRF dependency is
   intentionally not applied here. The POST proxy remains guarded.
+
+  Redirects are followed like app install follows them, with every hop
+  validated and pinned, so a manifest URL that installs also previews.
   """
-  pinned_url, host_header, sni_host = await asyncio.to_thread(
-    validate_url_safe, url,
-  )
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-    req = client.build_request("GET", pinned_url)
-    req.headers["host"] = host_header
-    req.headers["user-agent"] = _PROXY_USER_AGENT
-    # httpcore/anyio require text here. Bytes reach idna2008_resolve(), which
-    # calls .encode() itself and turns every real HTTPS proxy request into 502.
-    req.extensions["sni_hostname"] = sni_host
-    return await _capped_response(client, req)
+    read = await _read_external_get(
+      client, url, _MAX_BYTES, headers={"User-Agent": _PROXY_USER_AGENT},
+      probe_truncation=False,
+    )
+  return Response(
+    content=read.body,
+    status_code=read.status_code,
+    headers=read.forwarded_headers,
+    media_type=read.content_type,
+  )
 
 
 @router.post("", dependencies=[Depends(reject_cross_site)])
@@ -379,4 +404,4 @@ async def proxy_post(
     req.headers["host"] = host_header
     req.headers["user-agent"] = _PROXY_USER_AGENT
     req.extensions["sni_hostname"] = sni_host
-    return await _capped_response(client, req)
+    return await _capped_response(client, req, body.url)

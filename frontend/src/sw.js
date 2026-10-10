@@ -18,7 +18,7 @@
  *     cached, the strategy is cache-first in every connectivity state: the
  *     cached app opens immediately and a background fetch refreshes the cache.
  *     Freshness comes from the versioned frame/module URLs
- *     (`?v=<app.updated_at>` is part of the cache key), so an app update
+ *     (`?v=<app.frame_version>` is part of the cache key), so an app update
  *     naturally becomes a cache miss and loads from the network on its first
  *     open.
  *   - cache:'reload' on the network attempt avoids the 304-no-body trap that
@@ -418,7 +418,7 @@ registerRoute(
 // Frame/module strategy: CACHE-FIRST once cached. A cached app is served
 // instantly and revalidated in the background in every connectivity
 // state. This is safe and fresh enough because AppCanvas includes
-// `?v=<app.updated_at>` in the frame URL and the frame forwards that same
+// `?v=<app.frame_version>` in the frame URL and the frame forwards that same
 // version into the module URL; an app edit changes the cache key and forces a
 // network load for the new version. Stale cached versions are NOT left behind
 // until the bucket is cleared — they are pruned eagerly on the next successful

@@ -34,7 +34,10 @@ import {
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
-import usePaginationLifecycle from './usePaginationLifecycle.js'
+import usePaginationLifecycle, {
+  cancelOlderPageWork,
+  olderPageIsCurrent,
+} from './usePaginationLifecycle.js'
 import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
@@ -191,15 +194,19 @@ import {
   chooseActiveAssistantDataKey,
   findTrailingAssistantPartialIndex,
   streamItemsHaveRenderableContent,
+  streamItemsToAssistantPayload,
 } from './streamPromotion.js'
 import {
   commitAssistantPromotion,
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
+import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
   projectSettledSteerContinuations,
+  projectSteerContinuationMessage,
+  projectActiveSteerPrefix,
   sealedAssistantBeforeSteer,
 } from './steerContinuity.js'
 import {
@@ -1185,6 +1192,7 @@ export default function ChatView({
   // Pagination flag — one compact page at a time. Scroll authority remains in
   // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
+  const olderPageRef = useRef(null)
   const paginationFollowupRafRef = useRef(0)
   const olderHistoryRetryRef = useRef({ timer: 0, attempts: 0 })
   const paginationLifecycleRef = usePaginationLifecycle({
@@ -1195,6 +1203,7 @@ export default function ChatView({
     searchAnchorKey: searchReveal?.anchorKey,
     searchRevealId: searchReveal?.id,
     loadingOlderRef: loadingOlder,
+    pageRef: olderPageRef,
     followupRafRef: paginationFollowupRafRef,
     retryRef: olderHistoryRetryRef,
   })
@@ -3062,6 +3071,15 @@ export default function ChatView({
   // exact visible message (including a nested content part), prepend the rows,
   // and restore that coordinate in the same task before paint. Capturing at
   // request start would be stale whenever touch momentum continues in flight.
+  function cancelOlderPage() {
+    cancelOlderPageWork({
+      pageRef: olderPageRef,
+      loadingOlderRef: loadingOlder,
+      followupRafRef: paginationFollowupRafRef,
+      retryRef: olderHistoryRetryRef,
+    })
+  }
+
   function loadOlderMessages(before = offset, { readerDriven = false } = {}) {
     const el = scrollRef.current
     // A pending quiet retry owns the next attempt, so a failing page cannot
@@ -3069,11 +3087,15 @@ export default function ChatView({
     if (olderHistoryRetryRef.current.timer) return
     if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
+    const page = { frame: 0, cancelled: false, committed: false }
+    olderPageRef.current = page
     const paginationLifecycle = paginationLifecycleRef.current
-    const requestIsCurrent = () => (
-      paginationLifecycleRef.current === paginationLifecycle
-      && !chatIdStaleRef.current
-    )
+    const requestIsCurrent = () => olderPageIsCurrent({
+      page, pageRef: olderPageRef,
+      lifecycle: paginationLifecycle,
+      lifecycleRef: paginationLifecycleRef,
+      chatStale: chatIdStaleRef.current,
+    })
     const paginationRequest = capturePaginationRequest()
     // We deliberately do NOT save the pre-pagination mode to restore later.
     // The user paginated — their intent is now to read older content.
@@ -3082,6 +3104,31 @@ export default function ChatView({
     // them to the bottom, undoing the pagination. Pagination leaves
     // them at the new anchor; the next gesture (or send) writes a
     // fresh mode.
+    const failPage = error => {
+      if (!requestIsCurrent()) return
+      olderPageRef.current = null
+      loadingOlder.current = false
+      // A failed render after a partial page must not retry the original
+      // before-offset and duplicate rows already installed in the window.
+      if (page.committed) {
+        console.error('Older history render stopped after a partial page', error)
+        return
+      }
+      // No retry control: ask again quietly, with backoff, while the reader
+      // still waits at the top for this page.
+      const retry = olderHistoryRetryRef.current
+      retry.timer = setTimeout(() => {
+        retry.timer = 0
+        const scrollEl = scrollRef.current
+        if (paginationLifecycleRef.current === paginationLifecycle
+            && !chatIdStaleRef.current
+            && scrollEl
+            && olderHistoryShouldLoad(scrollEl, { userDriven: true })) {
+          loadOlderMessages(before, { readerDriven })
+        }
+      }, olderHistoryRetryDelayMs(retry.attempts))
+      retry.attempts += 1
+    }
     apiFetch(
       `/chats/${chatId}?limit=20&before=${before}&compact=1`,
       { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
@@ -3100,54 +3147,57 @@ export default function ChatView({
             }
           }
         }
-        // Capture NOW, not before the request: momentum/touch may have moved
-        // the reader while the network was in flight. Commit the page
-        // synchronously and compensate that same coordinate before paint, so
-        // prepended rows never flash and then snap back into place.
-        const paginationAnchor = preparePaginationPrepend(paginationRequest)
         const nextOffset = data.offset || 0
-        flushSync(() => {
-          commitMessages(prev => [...older, ...prev], nextOffset)
-        })
-        restorePaginationPrepend(paginationAnchor)
-        // Keep the network guard raised through the browser's matching scroll
-        // event, then decide whether this same reader-driven prefetch still
-        // needs another bounded page. The controller separately suppresses
-        // only the exact compensation coordinate, never in-flight touch.
-        paginationFollowupRafRef.current = requestAnimationFrame(() => {
-          paginationFollowupRafRef.current = 0
+        const batches = olderHistoryBatches(older, messagesRef.current, nextOffset)
+        let batchIndex = 0
+        const finishPage = () => {
+          // Keep the guard through the scroll event caused by the last exact
+          // compensation, then allow the existing bounded page follow-up.
+          paginationFollowupRafRef.current = requestAnimationFrame(() => {
+            paginationFollowupRafRef.current = 0
+            if (!requestIsCurrent()) return
+            olderPageRef.current = null
+            loadingOlder.current = false
+            const scrollEl = scrollRef.current
+            if (scrollEl && nextOffset > 0 && nextOffset < before
+                && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })) {
+              loadOlderMessages(nextOffset, { readerDriven })
+            }
+          })
+        }
+        if (!batches.length) {
+          // An empty successful page still advances the authoritative window
+          // offset (often to zero). No DOM was inserted, so no anchor repair
+          // is needed, but leaving the old offset would re-request this page.
+          commitMessages(prev => prev, nextOffset)
+          finishPage()
+          return
+        }
+        const renderNext = () => {
           if (!requestIsCurrent()) return
-          loadingOlder.current = false
-          const scrollEl = scrollRef.current
-          if (
-            scrollEl
-            && nextOffset > 0
-            && nextOffset < before
-            && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })
-          ) {
-            loadOlderMessages(nextOffset, { readerDriven })
-          }
-        })
+          const batch = batches[batchIndex++]
+          if (!batch) { finishPage(); return }
+          // Capture NOW, for each batch: momentum can move between paints.
+          // Preserve the exact nested reading anchor in the same pre-paint
+          // transaction as each prepend, never a stale request-start position.
+          const anchor = preparePaginationPrepend(paginationRequest)
+          flushSync(() => {
+            commitMessages(prev => [...batch.rows, ...prev], batch.offset)
+            page.committed = true
+          })
+          restorePaginationPrepend(anchor)
+          if (batchIndex === batches.length) { finishPage(); return }
+          // One frame is allowed to paint before the next synchronous batch.
+          page.frame = requestAnimationFrame(() => {
+            page.frame = requestAnimationFrame(() => {
+              page.frame = 0
+              try { renderNext() } catch (error) { failPage(error) }
+            })
+          })
+        }
+        renderNext()
       })
-      .catch(() => {
-        if (!requestIsCurrent()) return
-        loadingOlder.current = false
-        // No retry control: ask again quietly, with backoff, while the reader
-        // still waits at the top for this page.
-        const retry = olderHistoryRetryRef.current
-        retry.timer = setTimeout(() => {
-          retry.timer = 0
-          const scrollEl = scrollRef.current
-          if (
-            requestIsCurrent()
-            && scrollEl
-            && olderHistoryShouldLoad(scrollEl, { userDriven: true })
-          ) {
-            loadOlderMessages(before, { readerDriven })
-          }
-        }, olderHistoryRetryDelayMs(retry.attempts))
-        retry.attempts += 1
-      })
+      .catch(failPage)
   }
 
   // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
@@ -3237,6 +3287,7 @@ export default function ChatView({
       canPin: pin,
       isFirstUserMsg: isFirstUserMsgAtSubmit,
     })
+    cancelOlderPage()
     // captureSendIntent atomically snapshots current geometry and supersedes
     // the older gesture that positioned it. Any input begun after this point
     // opens fresh reader ownership and still wins normally.
@@ -3982,6 +4033,7 @@ export default function ChatView({
     const questionSubmission = resolvedAnswers
       ? freezeQuestionSubmission(questionSubmissionContext)
       : null
+    if (resolvedAnswers) cancelOlderPage()
     const responseQuestionKey = resolvedAnswers
       ? (questionId
           ? `question_id:${questionId}`
@@ -4796,6 +4848,7 @@ export default function ChatView({
         isFirstUserMsg: isFirstVisibleUserMessage(),
         previousIntent: previousSendIntent,
       })
+      cancelOlderPage()
       rememberSendIntent(steerCid, explicitSteerIntent)
       // Queue-only sends deliberately retain mobile focus. Remember a touch
       // fast-forward's focus/draft now, but do not blur yet: the authoritative
@@ -5774,6 +5827,16 @@ export default function ChatView({
     messages,
     activeSteerContinuationIndex,
   )
+  const activeSteerPrefix = useMemo(() => {
+    if (!showActiveAssistantSurface || !sealedSteerAssistant) return null
+    const source = useDbActivePayload ? activeMirrorMsg : hasLiveAssistantPayload
+      ? { role: 'assistant', id: streamAssistantMessageId || activeAssistantMessageId,
+          ...streamItemsToAssistantPayload(streamItems, { finalize: false }) }
+      : null
+    const continuation = projectSteerContinuationMessage(sealedSteerAssistant, source, { active: activeAssistantIsStreaming })
+    return continuation?.steer_replay?.prefixRange ? { continuationIndex: activeSteerContinuationIndex, continuation } : null
+  }, [showActiveAssistantSurface, sealedSteerAssistant, activeSteerContinuationIndex, useDbActivePayload, activeMirrorMsg,
+    hasLiveAssistantPayload, streamAssistantMessageId, activeAssistantMessageId, streamItems, activeAssistantIsStreaming])
   useLayoutEffect(() => {
     const sourceId = activeMirrorMsg?.id || streamAssistantMessageId || activeAssistantMessageId
     if (showActiveAssistantSurface && sourceId) assistantDisplayKeys.set(sourceId, streamingDataKey)
@@ -5924,12 +5987,17 @@ export default function ChatView({
   // A `/goal ` composer draft keeps the goal visual open while the objective is
   // still being typed (null once the draft is no longer a goal command).
   const draftGoal = draftGoalObjective(input)
-  const displayedMessages = useMemo(
+  const settledMessages = useMemo(
     () => projectSettledSteerContinuations(
       recoveryMessages,
       { preserveHidden: true },
     ),
     [recoveryMessages],
+  )
+  const displayedMessages = useMemo(
+    // The stream may lead its DB mirror; apply its newer parse after history.
+    () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
+    [settledMessages, activeSteerPrefix],
   )
   const peerTimeline = usePeerTimeline(
     chatId,
@@ -5937,12 +6005,17 @@ export default function ChatView({
     !hidden && transcriptPaintable,
     streamItems,
   )
+  const committedReplyGroupsRef = useRef(null)
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0
       ? [...peerTimeline.messages, { role: 'assistant', id: streamAssistantMessageId || activeAssistantMessageId || streamingDataKey, blocks: [] }]
       : peerTimeline.messages,
-    { offset, slots: peerTimeline.slots, activeIndex: showActiveAssistantSurface ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1, activeKey: streamingDataKey, displayKeys: assistantDisplayKeys },
-  ), [peerTimeline.messages, peerTimeline.slots, offset, showActiveAssistantSurface, activeMirrorMsgIdx, streamingDataKey, streamAssistantMessageId, activeAssistantMessageId, messages.length, assistantDisplayKeys])
+    { offset, slots: peerTimeline.slots, activeIndex: showActiveAssistantSurface ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1, activeKey: streamingDataKey, displayKeys: assistantDisplayKeys,
+      previousGroups: committedReplyGroupsRef.current?.chatId === chatId ? committedReplyGroupsRef.current.groups : null },
+  ), [chatId, peerTimeline.messages, peerTimeline.slots, offset, showActiveAssistantSurface, activeMirrorMsgIdx, streamingDataKey, streamAssistantMessageId, activeAssistantMessageId, messages.length, assistantDisplayKeys])
+  useLayoutEffect(() => {
+    committedReplyGroupsRef.current = { chatId, groups: replyGroups }
+  }, [chatId, replyGroups])
   // Activity projection is a transcript-source commit too: peer rows may
   // arrive after the first reveal without changing message count. Keep all
   // source handoffs in the controller's same pre-paint transaction.

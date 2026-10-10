@@ -3633,6 +3633,36 @@ def test_version_only_conflict_resolves_to_upstream(tmp_path):
   assert tree["index.jsx"] == jsx
 
 
+def test_conflict_outside_the_package_keeps_the_local_side(tmp_path):
+  """A conflicting path the caller rules out of the package keeps the local
+  version, a local deletion included; any other path still needs the owner."""
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  _diverge(
+    repo,
+    local_files={"index.jsx": jsx, "notes.md": b"local\n"},
+    upstream_files={
+      "index.jsx": jsx, "notes.md": b"upstream\n", "todo.md": b"upstream\n",
+    },
+    base_files={"index.jsx": jsx, "notes.md": b"base\n", "todo.md": b"base\n"},
+  )
+  (repo / "todo.md").unlink()
+  app_git.commit_local(repo, "local delete")
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert sorted(merge.conflict_paths) == ["notes.md", "todo.md"]
+
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
+  res = app_git.resolve_benign_conflict(
+    repo, merge.conflict_paths, package_paths={"index.jsx"},
+  )
+  assert res is not None
+  assert sorted(res.kept_local) == ["notes.md", "todo.md"]
+  assert res.tree["notes.md"] == b"local\n"
+  assert "todo.md" not in res.tree
+  assert res.tree["index.jsx"] == jsx
+
+
 def test_add_add_manifest_uses_recorded_base_without_shared_history(
   tmp_path,
 ):
@@ -4711,3 +4741,107 @@ def test_worktree_merges_all_go_through_the_index_refreshing_primitive():
         if {"read-tree", "-m", "-u"} <= words:
           offenders.append(f"{source.relative_to(app_dir)}:{call.lineno}")
   assert offenders == []
+
+
+def test_read_blob_rejects_directory_objects(tmp_path):
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  (repo / "notes").mkdir()
+  (repo / "notes" / "readme.md").write_bytes(b"notes\n")
+  app_git.commit_local(repo, "Add notes")
+  assert app_git.read_blob(repo, "main", "notes/readme.md") == b"notes\n"
+  assert app_git.read_blob(repo, "main", "notes") is None
+
+
+def _bare_origin(tmp_path: Path) -> Path:
+  fixture = tmp_path / "origin-work"
+  bare = tmp_path / "origin.git"
+  identity = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid"]
+  env = app_git._git_env(fixture)
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  _write(fixture, "export default function App() { return null; }\n")
+  subprocess.run(["git", *identity, "-C", str(fixture), "add", "."], check=True, env=env)
+  subprocess.run(
+    ["git", *identity, "-C", str(fixture), "commit", "-q", "-m", "fixture"],
+    check=True, env=env,
+  )
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True, env=env,
+  )
+  return bare
+
+
+def test_file_transport_clone_and_fetch_use_the_git_timeout(tmp_path, monkeypatch):
+  bare = _bare_origin(tmp_path)
+  real_popen = subprocess.Popen
+  seen: list[tuple[list[str], object]] = []
+
+  class RecordingProcess(real_popen):
+    def communicate(self, *args, **kwargs):
+      seen.append((list(self.args), kwargs.get("timeout")))
+      return super().communicate(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", RecordingProcess)
+  source = tmp_path / "source"
+  app_git.clone_upstream(source, bare.as_uri(), "main")
+  app_git.fetch_upstream(source, "main")
+
+  assert {"clone", "fetch"} <= {
+    word for cmd, _ in seen for word in cmd if word in ("clone", "fetch")
+  }
+  assert {timeout for _, timeout in seen} == {30}
+
+
+def test_overlong_network_git_surfaces_as_a_timeout(tmp_path, monkeypatch):
+  def fake_run(*args, **kwargs):
+    raise subprocess.TimeoutExpired(args, 30)
+
+  monkeypatch.setattr(app_git, "_run", fake_run)
+  with pytest.raises(app_git.GitTransferTimeout):
+    app_git._run_network(tmp_path, "fetch", "--unshallow", "origin", check=False)
+
+
+def test_timed_out_fetch_releases_lock_and_next_fetch_succeeds(tmp_path, monkeypatch):
+  """Exercise a real subprocess holding a Git lock, not a mocked timeout."""
+  import shlex
+  import shutil
+
+  bare = _bare_origin(tmp_path)
+  source = tmp_path / "source"
+  app_git.clone_upstream(source, bare.as_uri(), "main")
+  lock = source / ".git" / "shallow.lock"
+  marker = tmp_path / "transfer-started"
+  real_git = shutil.which("git")
+  bin_dir = tmp_path / "bin"
+  bin_dir.mkdir()
+  fake_git = bin_dir / "git"
+  fake_git.write_text(
+    "#!/bin/sh\n"
+    f"if [ ! -e {shlex.quote(str(marker))} ]; then\n"
+    f"  touch {shlex.quote(str(marker))} {shlex.quote(str(lock))}\n"
+    f"  trap 'rm -f {shlex.quote(str(lock))}; exit 143' TERM\n"
+    "  sleep 60\n"
+    "fi\n"
+    f"exec {shlex.quote(real_git)} \"$@\"\n"
+  )
+  fake_git.chmod(0o755)
+  monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+  real_run = app_git._run
+  monkeypatch.setattr(
+    app_git, "_run", lambda *args, **kwargs: real_run(*args, timeout=1, **kwargs),
+  )
+
+  with pytest.raises(app_git.GitTransferTimeout):
+    app_git._run_network(source, "fetch", "--depth", "2", "origin")
+  assert marker.exists(), "the timed-out subprocess must have held the lock"
+  assert not lock.exists()
+  assert app_git._run_network(source, "fetch", "--depth", "2", "origin").returncode == 0
+
+
+def test_clone_upstream_places_relative_source_in_requested_directory(tmp_path, monkeypatch):
+  bare = _bare_origin(tmp_path)
+  monkeypatch.chdir(tmp_path)
+  source = Path("apps/source")
+  app_git.clone_upstream(source, bare.as_uri(), "main")
+  assert (source / ".git").is_dir()

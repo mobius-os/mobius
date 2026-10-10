@@ -19,6 +19,9 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
+# Redirect loops stay bounded; every hop must still pass validate_url_safe.
+MAX_REDIRECTS = 5
+
 # Networks the fetcher must never reach. Hitting them from
 # our (network-privileged) backend turns the install endpoint into
 # an SSRF springboard: a malicious manifest URL could probe the

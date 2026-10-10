@@ -62,6 +62,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -103,10 +104,15 @@ _EXCLUDE_END = "# END MOBIUS MANAGED IGNORE RULES"
 _GIT_NAME = "Mobius"
 _GIT_EMAIL = "mobius@localhost"
 
-# Subprocess timeout. App repos are tiny (one source file plus a couple
-# of scripts), so any git op that runs longer than this is wedged, not
-# slow.
+# One wall-clock ceiling for Git subprocesses. Network transfers can run while
+# lifecycle or source locks are held, so even healthy but slow downloads must
+# be bounded to avoid monopolizing those locks.
 _GIT_TIMEOUT = 30
+
+
+class GitTransferTimeout(RuntimeError):
+  """A network Git transfer exceeded its wall-clock ceiling."""
+
 
 # Contribute records a reviewed change as a Git object in the repository that
 # owns the live source.  The pending ref proves the reviewed diff came from a
@@ -141,6 +147,8 @@ class ReconciliationReceipt:
   compatible_paths: tuple[str, ...] = ()
   unresolved_conflict_paths: tuple[str, ...] = ()
   provenance_refs_used: tuple[str, ...] = ()
+  # Ancillary conflicts kept locally, dropping the incoming edit.
+  kept_local_paths: tuple[str, ...] = ()
 
   def as_dict(self) -> dict[str, list[str]]:
     return {
@@ -150,6 +158,7 @@ class ReconciliationReceipt:
       "compatible_paths": list(self.compatible_paths),
       "unresolved_conflict_paths": list(self.unresolved_conflict_paths),
       "provenance_refs_used": list(self.provenance_refs_used),
+      "kept_local_paths": list(self.kept_local_paths),
     }
 
 
@@ -412,10 +421,39 @@ def _run(
     "-C", str(repo),
     *args,
   ]
-  return subprocess.run(
-    cmd, capture_output=True, text=True, timeout=timeout,
-    check=check, env=_git_env(repo, read_only=read_only),
-  )
+  with subprocess.Popen(
+    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    start_new_session=True, env=_git_env(repo, read_only=read_only),
+  ) as process:
+    try:
+      stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+      # Git removes its locks on SIGTERM; stop transport children with it.
+      try:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+          process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+          os.killpg(process.pid, signal.SIGKILL)
+          process.communicate()
+      except ProcessLookupError:
+        pass  # The whole group exited on its own in the meantime.
+      raise
+    if check and process.returncode:
+      raise subprocess.CalledProcessError(process.returncode, cmd, stdout, stderr)
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
+def _run_network(
+  repo: Path, *args: str, check: bool = True,
+) -> subprocess.CompletedProcess:
+  """Run a Git transfer, reporting an overlong command even with check=False."""
+  try:
+    return _run(repo, *args, check=check)
+  except subprocess.TimeoutExpired as exc:
+    raise GitTransferTimeout(
+      f"it ran longer than {_GIT_TIMEOUT} seconds"
+    ) from exc
 
 
 def _run_with_index(
@@ -2112,7 +2150,7 @@ def fetch_origin_commit(
   fetch_args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"]
   if depth is not None:
     fetch_args.extend(("--depth", str(depth)))
-  _run(repo, *fetch_args, "origin", requested)
+  _run_network(repo, *fetch_args, "origin", requested)
   fetched = _resolve_commit(repo, requested)
   if fetched != requested:
     raise RuntimeError("origin returned a different commit")
@@ -2152,7 +2190,7 @@ def fetch_origin_ref(
       raise ValueError("invalid origin ref")
   if origin_url(repo) is None:
     raise RuntimeError("source repository has no origin")
-  _run(
+  _run_network(
     repo, "fetch", "--quiet", "--no-tags", "--depth", str(depth),
     "origin", immutable or requested,
   )
@@ -2662,7 +2700,7 @@ def clone_upstream(
   Returns:
     The checked-out HEAD sha.
   """
-  repo = Path(source_dir)
+  repo = Path(source_dir).resolve()
   if repo.exists() and not repo.is_dir():
     raise RuntimeError(f"source_dir exists and is not a directory: {repo}")
   repo.parent.mkdir(parents=True, exist_ok=True)
@@ -2690,10 +2728,8 @@ def clone_upstream(
         clone_dir, immutable_ref, depth=depth,
       )
     else:
-      cmd = [
-        "git",
-        "-c", f"user.name={_GIT_NAME}",
-        "-c", f"user.email={_GIT_EMAIL}",
+      _run_network(
+        clone_parent,
         # core.symlinks=false: check out any tracked symlink as a PLAIN FILE
         # (the link text as content), never a real filesystem symlink. Catalog
         # repos are untrusted content; a materialized symlink (e.g. `static` ->
@@ -2702,15 +2738,8 @@ def clone_upstream(
         # _assert_within — that guard is skipped for the cloned tree, so the
         # non-symlink checkout is what keeps the clone inside its own dir.
         "-c", "core.symlinks=false",
-        "clone", "-q",
-        "--depth", str(depth),
-        "--branch", ref,
-        repo_url,
-        str(clone_dir),
-      ]
-      subprocess.run(
-        cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-        check=True, env=_git_env(repo),
+        "clone", "-q", "--depth", str(depth), "--branch", ref,
+        repo_url, str(clone_dir),
       )
       remote_ref = f"origin/{ref}"
       _run(clone_dir, "rev-parse", "--verify", remote_ref)
@@ -2766,7 +2795,7 @@ def fetch_upstream(
     The fetched commit and any trusted equal-tree adoption proof.
   """
   repo = Path(source_dir)
-  _run(repo, "fetch", "--depth", "1", "origin", ref)
+  _run_network(repo, "fetch", "--depth", "1", "origin", ref)
   # A branch/tag fetch updates ``origin/<ref>``.  Fetching an immutable commit
   # oid does not create that remote-tracking name; Git records the exact fetched
   # commit only in FETCH_HEAD.  Store updates are commonly review-bound to a
@@ -3330,7 +3359,7 @@ def _restore_shallow_history_if_needed(
     raise RuntimeError(
       f"no merge base between {left} and {right} in shallow repo without origin"
     )
-  fetched = _run(
+  fetched = _run_network(
     repo, "fetch", "--unshallow", "--no-tags", "origin", check=False,
   )
   if fetched.returncode != 0:
@@ -3779,10 +3808,10 @@ _APP_VERSION_RE = re.compile(
 
 
 def read_blob(source_dir: str | Path, ref: str, rel: str) -> bytes | None:
-  """Raw bytes of `rel` at `ref`, or None if the path is absent there."""
+  """Raw blob bytes of `rel` at `ref`, or None for absent/non-file paths."""
   repo = Path(source_dir)
   proc = subprocess.run(
-    ["git", "-C", str(repo), "cat-file", "-p", f"{ref}:{rel}"],
+    ["git", "-C", str(repo), "cat-file", "blob", f"{ref}:{rel}"],
     capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
   )
   return proc.stdout if proc.returncode == 0 else None
@@ -3972,32 +4001,37 @@ class BenignResolution:
   APP_VERSION taken from upstream); `tree_oid` is the merge-tree oid it was built
   from, so the caller can read exec bits off the same tree the clean-merge path
   uses (`read_tree_exec_paths`) rather than approximating from a branch.
+  `kept_local` names conflicting paths outside the package that keep the
+  local version as is.
   """
   tree: dict[str, bytes]
   tree_oid: str
+  kept_local: tuple[str, ...] = ()
 
 
 def resolve_benign_conflict(
   source_dir: str | Path, conflict_paths: list[str],
   *, merge_base: str | None = None,
+  package_paths: set[str] | None = None,
+  incoming: str = UPSTREAM_BRANCH,
 ) -> BenignResolution | None:
-  """Full merged source tree with every BENIGN conflict auto-resolved, or None
-  when any conflicting file carries a genuine overlap.
+  """Reconcile package conflicts or keep local ancillary paths, else None.
 
-  Call only after `merge_upstream` verdicted a conflict. We PROVE each conflict
-  is benign rather than assume it: JSON manifests get a structural three-way
-  merge (serialization drift and disjoint edits reconcile; true overlap does
-  not), and other source files get the narrow APP_VERSION-only line resolution.
-  If every conflicting file resolves, we return the whole merged tree
-  (non-conflict files carry their clean three-way merge; conflicting files carry
-  the reconciled result). If any file still carries a real clash we return None
-  and the caller falls back to the owner-resolver flow. Fail-safe by
-  construction: a genuine local edit is never silently dropped, because a
-  residual conflict aborts the whole attempt.
+  Call after a merge with ``incoming`` reports a conflict. Try each narrow
+  per-file merge first (structural JSON or APP_VERSION-only line resolution).
+  Residual conflicts outside ``package_paths`` retain local bytes/deletions;
+  package conflicts still need the owner-resolver flow. The returned tree
+  includes all clean merges, and ``kept_local`` reports dropped upstream edits.
+  The caller must establish source completeness before accepting kept paths.
 
   Pass ``merge_base`` when the caller's merge verdict used an explicit base
   (a recorded previous release unrelated to the installed history), so this
   proof reasons from the same base.
+
+  If the per-file merge fails, a path outside ``package_paths`` can keep its
+  local version, including a local deletion of a base file. Synthetic conflict
+  paths absent from both local and base trees need the resolver. None protects
+  every path.
   """
   repo = Path(source_dir)
   if not conflict_paths:
@@ -4013,7 +4047,7 @@ def resolve_benign_conflict(
   if merge_base is not None:
     args.extend(("--merge-base", merge_base))
   proc = _run(
-    repo, *args, LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+    repo, *args, LOCAL_BRANCH, incoming, check=False,
   )
   if proc.returncode != 1:
     return None
@@ -4031,27 +4065,40 @@ def resolve_benign_conflict(
   base_ref = merge_base
   if base_ref is None:
     base_proc = _run(
-      repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+      repo, "merge-base", LOCAL_BRANCH, incoming, check=False,
     )
     base_ref = base_proc.stdout.strip() if base_proc.returncode == 0 else ""
   if not base_ref:
     return None
-  resolved: dict[str, bytes] = {}
+  resolved: dict[str, bytes | None] = {}
+  kept_local: list[str] = []
   for rel in merge_conflicts:
     ours = read_blob(repo, LOCAL_BRANCH, rel)
-    theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
-    # A deletion on either side is not a benign shape; leave it to the owner.
-    if ours is None or theirs is None:
-      return None
-    merged = _resolve_benign_conflict_file(
-      rel, read_blob(repo, base_ref, rel), ours, theirs,
+    theirs = read_blob(repo, incoming, rel)
+    base = read_blob(repo, base_ref, rel)
+    merged = (
+      _resolve_benign_conflict_file(rel, base, ours, theirs)
+      if ours is not None and theirs is not None else None
     )
-    if merged is None:
+    if merged is not None:
+      resolved[rel] = merged
+    elif (
+      package_paths is not None and rel not in package_paths
+      and (ours is not None or base is not None)
+    ):
+      resolved[rel] = ours
+      kept_local.append(rel)
+    else:
       return None
-    resolved[rel] = merged
   full = read_merged_tree(repo, tree_oid)
-  full.update(resolved)
-  return BenignResolution(tree=full, tree_oid=tree_oid)
+  for rel, data in resolved.items():
+    if data is None:
+      full.pop(rel, None)
+    else:
+      full[rel] = data
+  return BenignResolution(
+    tree=full, tree_oid=tree_oid, kept_local=tuple(kept_local),
+  )
 
 
 # Smells

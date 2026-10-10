@@ -35,17 +35,32 @@ acquires in reverse, so there is no cycle:
 
     install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
+Batch holders acquire ALL app-storage locks (sorted by id) before ANY source
+lock, then deduplicate sources and acquire them in lexicographic canonical-path
+string order (the same order publication uses).
+Taking app(A) -> source(A) -> app(B) can deadlock a publication holding app(B)
+while waiting on source(A), even if the batch holds the lifecycle lock.
+
 ``shared_skills_lock`` is always innermost. Install sync takes lifecycle then
 shared; uninstall/recover release any source-dir lock before taking shared.
 No shared-skills holder ever acquires a lifecycle, app, or source lock.
 
 Multi-lock holders, all acquiring left-to-right:
 
+  - resolver batches hold lifecycle -> all selected apps -> unique sources.
   - ``delete_app`` holds all three.
   - ``recover_app`` holds lifecycle -> app while it refreshes a stale bundle,
     then may take source and shared-skills locks further inside that span.
   - explicit app source apply holds lifecycle -> app -> source for an existing
     app; first apply holds lifecycle -> source until the new row commits.
+
+Schedule saves and manifest timezone convergence also take lifecycle -> source.
+That outer lock owns the entire choice/declaration/crontab transaction, including
+rollback; a lock around only the crontab write would allow a failed save to undo
+an accepted later choice. Runtime reconciliation already runs under lifecycle
+(recovery/install rollback); startup reconciliation runs before requests serve.
+Blocking cron workers use ``app_cron.run_schedule_mutation`` so cancellation
+cannot release these locks while a worker is still writing.
 
 Single-lock holders: ``write_app_file`` / ``delete_app_file`` take only the
 app lock; the install endpoint takes only the lifecycle lock.

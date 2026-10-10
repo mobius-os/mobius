@@ -34,8 +34,8 @@ test('isMobiusNavState recognizes a tagged state', () => {
 
 test('isMobiusNavState rejects untagged / phantom states', () => {
   // The phantom guard relies on these all being false: undefined is what
-  // the Navigation API returns for a classic-API-only entry, and {} is a
-  // genuine iframe-pushed entry.
+  // the Navigation API returns for a classic-API-only entry; {} is an
+  // untagged top-level state. Child-frame pushState does not change this store.
   assert.equal(isMobiusNavState(undefined), false)
   assert.equal(isMobiusNavState(null), false)
   assert.equal(isMobiusNavState({}), false)
@@ -273,10 +273,10 @@ test('a shell push leaves a reload-safe Forward marker only on its tagged source
     pushNavEntry('nav', { view: 'chat', chatId: 'b' })
     assert.equal(history.calls[1].state.hasShellForward, true)
     assert.equal(history.state.hasShellForward, undefined)
-    history.state = { iframe: true }
+    history.state = { untracked: true }
     const before = history.calls.length
     pushNavEntry('nav', { view: 'chat', chatId: 'c' })
-    assert.equal(history.calls.length, before + 1, 'an iframe phantom is never retagged as shell history')
+    assert.equal(history.calls.length, before + 1, 'an untracked top-level entry is never retagged as shell history')
   } finally {
     clearBrowserMocks()
   }
@@ -383,7 +383,7 @@ test('a shell push after a phantom entry continues from the last tagged cursor',
   const { history } = installBrowserMocks({ withNavigation: false })
   try {
     const tagged = replaceNavEntry('base', '/shell/')
-    history.state = null // descendant frame pushed an untagged joint entry
+    history.state = null // top-level history drifted from shell tracking
     const next = pushNavEntry('nav', null, { currentState: tagged })
     assert.equal(next.index, 1)
     assert.notEqual(next.entryId, tagged.entryId)
@@ -393,7 +393,7 @@ test('a shell push after a phantom entry continues from the last tagged cursor',
 })
 
 test('a phantom entry (written to neither store) stays untagged in both', () => {
-  // Simulate an iframe pushing a classic-API entry the shell did NOT tag:
+  // A classic-API-only top-level entry has no Navigation API mirror:
   // getState() returns undefined, so the guard suppresses it.
   const { navigation } = installBrowserMocks()
   try {

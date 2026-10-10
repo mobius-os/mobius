@@ -17,7 +17,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -39,6 +38,7 @@ from app.compiler import (
   unlink_app_bundle,
 )
 from app.config import get_settings
+from app.manifest_identity import requested_manifest_source
 from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
   PACKAGE_MAX_BYTES,
@@ -478,11 +478,9 @@ def _validate_local_identity(
 ) -> None:
   accepted_ids = {source_dir.name}
   if app is not None and app.manifest_url:
-    accepted_ids.update(
-      value for value in parse_qs(urlsplit(app.manifest_url).fragment).get(
-        "manifest-id", []
-      ) if value
-    )
+    _, bound_id = requested_manifest_source(app.manifest_url)
+    if bound_id is not None:
+      accepted_ids.add(bound_id)
   if manifest["id"] not in accepted_ids:
     raise AppApplyError(
       "manifest_id_mismatch",

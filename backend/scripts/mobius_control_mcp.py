@@ -295,7 +295,12 @@ def _refusal_message(raw: str) -> str:
   except (json.JSONDecodeError, AttributeError):
     return raw.strip()[:1000] or "no reason given"
   if isinstance(detail, dict):
+    diagnostic = detail.get("stderr") if detail.get("code") == "compile_failed" else None
     detail = detail.get("message") or detail.get("code") or json.dumps(detail)
+    if isinstance(diagnostic, str) and diagnostic.strip():
+      # A compile refusal's reason and location live in its sanitized,
+      # server-capped diagnostic; the message alone only says it failed.
+      return f"{str(detail).strip()[:1000]}\n{diagnostic.strip()[:4000]}"
   elif isinstance(detail, list):
     detail = "; ".join(
       " ".join(str(part) for part in (issue.get("loc") or [])[1:]) + ": " + str(issue.get("msg"))
@@ -344,7 +349,9 @@ def _agent_api_json(
     with urlopen(request, timeout=timeout) as response:
       raw = response.read()
   except HTTPError as exc:
-    raw = exc.read().decode("utf-8", errors="replace")[:4000]
+    # Large enough for a whole structured refusal (a compile diagnostic is
+    # ~4 KB plus its envelope); _refusal_message caps what is rendered.
+    raw = exc.read(65536).decode("utf-8", errors="replace")
     raise RuntimeError(
       f"Refused ({exc.code}): {_refusal_message(raw)}"
     ) from exc

@@ -9,7 +9,7 @@ if we ever break compatibility we write a new file activity.v2.jsonl and
 read both):
 
   {"ev":"app_open",       "ts", "app_id", "slug"}
-  {"ev":"app_install",    "ts", "app_id", "slug", "source":"bootstrap|store|url"}
+  {"ev":"app_install",    "ts", "app_id", "slug", "source":"bootstrap|store|url", "kept_local_paths"?:[str]}
   {"ev":"app_uninstall",  "ts", "app_id", "slug"}   # logical (tombstone) delete
   {"ev":"storage_write",  "ts", "app_id", "path", "size_delta"}  # delete = negative delta
   {"ev":"cron_outcome",   "ts", "app_id", "job", "exit_code", "duration_ms"}
