@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -21,7 +22,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from app import app_apply, app_git, install, models
+from app import app_apply, app_git, install, models, transcript_rows
 from app.config import get_settings
 from test_app_fixtures import create_local_app
 
@@ -37,12 +38,25 @@ def _bypass_cron_scaffold():
 
 @pytest.fixture(autouse=True)
 def _stub_resolver_run_chat():
-  """Resolver-chat endpoint tests never want a real agent turn, so stub
-  run_chat to a no-op. A test that needs the real spawn behavior patches over
-  this locally."""
-  async def _noop(*args, **kwargs):
+  """Complete resolver turns without starting a real agent."""
+  async def _noop():
     return None
-  with patch("app.chat.run_chat", new=_noop):
+
+  def _complete_turn(*args, chat_id, run_token, **kwargs):
+    from app.broadcast import remove_broadcast
+    from app.chat import discard_starting
+    from app.chat_writer import FinishRun, get_writer
+
+    # Settle before returning the response so later test-owned run states
+    # cannot race with asynchronous stub cleanup.
+    get_writer().submit(FinishRun(
+      chat_id=chat_id, run_token=run_token,
+    )).result(timeout=5)
+    discard_starting(chat_id)
+    remove_broadcast(chat_id)
+    return _noop()
+
+  with patch("app.chat_start.run_chat", new=_complete_turn):
     yield
 
 
@@ -3413,6 +3427,8 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_clears_receipt(
     app = db.query(App).filter(App.id == app_id).first()
     assert app.version == "1.0.0"
     assert app.jsx_source == JSX_MULTI
+    assert app.conflict_resolver_chat_id is None
+    assert app.conflict_resolver_upstream_commit is None
   finally:
     db.close()
   assert bundle.read_bytes() == old_bundle
@@ -3669,7 +3685,7 @@ def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   async def fake_start_turn(db, chat_id, title, content, provider):
     assert app_git.merge_in_progress(checkout)
     assert str(checkout) in content
-    assert "update to v2.0.0" in content
+    assert "## Click Conflict to v2.0.0" in content
     return True
 
   monkeypatch.setattr(
@@ -3704,6 +3720,725 @@ def test_conflict_resolver_merges_in_private_checkout_before_its_turn(
   assert "AGENT TITLE" in materialized and "UPSTREAM TITLE" in materialized
   assert jsx_file.read_text() == local
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+
+
+def _prepare_conflict_resolver_apps(client, auth, suffixes):
+  apps = []
+  for suffix in suffixes:
+    base = f"https://batch-conflict-{suffix}.test/repo/"
+    manifest = {
+      **MANIFEST_NEWS,
+      "id": f"batch-conflict-{suffix}",
+      "name": f"Batch Conflict {suffix.title()}",
+    }
+    installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+    assert installed.status_code == 201, installed.text
+    app_dir = (
+      Path(get_settings().data_dir) / "apps" / f"batch-conflict-{suffix}"
+    )
+    app_dir.joinpath("index.jsx").write_text(
+      JSX_MULTI.replace("ORIGINAL TITLE", f"LOCAL {suffix.upper()}"),
+    )
+    updated = _update_v2(
+      client,
+      auth,
+      base,
+      {**manifest, "version": "2.0.0"},
+      JSX_MULTI.replace("ORIGINAL TITLE", f"UPSTREAM {suffix.upper()}"),
+    )
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["mode"] == "conflict"
+    apps.append((installed.json()["id"], app_dir, manifest["name"]))
+  return apps
+
+
+def test_conflict_resolver_batch_uses_one_chat_for_every_selected_app(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  # The published Store sends every blocked update in one request. Exercise
+  # real preparation and each recorded upstream version in the seed message.
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  app_ids = [app_id for app_id, _path, _name in apps]
+
+  starts = []
+
+  async def fake_start_turn(db, chat_id, title, content, provider):
+    # Mirrors the real helper's idempotence: only an unstarted chat starts.
+    started = chat_id not in {start["chat_id"] for start in starts}
+    starts.append({"chat_id": chat_id, "content": content})
+    return started
+
+  monkeypatch.setattr(
+    "app.routes.apps._start_conflict_resolver_turn",
+    fake_start_turn,
+  )
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_chat_choice",
+    lambda data_dir, db: {
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
+    },
+  )
+  response = client.post(
+    "/api/apps/conflict-resolver-batch",
+    headers=auth,
+    json={"app_ids": app_ids, "resolution_policy": "preserve_local"},
+  )
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert body["created"] is True
+  assert body["started"] is True
+  assert len(starts) == 1
+  assert starts[0]["chat_id"] == body["chat_id"]
+  for _id, _path, name in apps:
+    assert f"## {name} to v2.0.0" in starts[0]["content"]
+    assert f'python "$SCRIPTS_DIR/resolve_app_update.py" {_path}' in starts[0]["content"]
+  # One real merge per app, each in its private checkout; the served source
+  # directories are never half-merged.
+  assert all(
+    app_git.merge_in_progress(install.pending_update_worktree(path))
+    and not (path / ".git" / "MERGE_HEAD").exists()
+    for _id, path, _name in apps
+  )
+
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    stored = db.query(models.App).filter(models.App.id.in_(app_ids)).all()
+    assert {app.conflict_resolver_chat_id for app in stored} == {
+      body["chat_id"],
+    }
+    resolver = db.get(models.Chat, body["chat_id"])
+    assert resolver.provider == "codex"
+  finally:
+    db.close()
+
+  repeated = client.post(
+    "/api/apps/conflict-resolver-batch",
+    headers=auth,
+    json={"app_ids": [*reversed(app_ids), app_ids[0]]},
+  )
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json() == {
+    "chat_id": body["chat_id"],
+    "created": False,
+    "started": False,
+  }
+  assert [start["chat_id"] for start in starts] == [body["chat_id"]] * 2
+
+
+@pytest.mark.parametrize("running_check", [
+  "running", "parked", "resume_pending", "in_process",
+  "waiting_for_owner", "waiting_in_process", "queued_owner",
+])
+@pytest.mark.parametrize("selection", ["overlap", "subset", "single"])
+def test_conflict_resolver_cannot_displace_a_running_batch(
+  client, auth, bypass_url_validation, monkeypatch, running_check, selection,
+):
+  from app.database import SessionLocal
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
+  ids = [item[0] for item in apps]
+  first = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids[:2]},
+  )
+  assert first.status_code == 200, first.text
+  chat_id = first.json()["chat_id"]
+  running = True
+  with SessionLocal() as db:
+    run = db.query(models.ChatRun).filter_by(chat_id=chat_id).one()
+    run.status = (
+      running_check if running_check in models.NONTERMINAL_RUN_STATUSES else "completed"
+    )
+    if running_check == "waiting_for_owner":
+      db.get(models.Chat, chat_id).pending_question_id = "resolver-owner-question"
+    db.commit()
+  if running_check == "queued_owner":
+    from app.chat_writer import AppendPending, ClearPending, get_writer
+    get_writer().submit(AppendPending(
+      chat_id=chat_id, user_msg={"role": "user", "content": "Please continue", "ts": 1},
+    )).result(timeout=5)
+  monkeypatch.setattr(
+    "app.questions.is_waiting",
+    lambda cid: running_check == "waiting_in_process" and running and cid == chat_id,
+  )
+  monkeypatch.setattr(
+    "app.chat.is_chat_running",
+    lambda cid: running_check == "in_process" and running and cid == chat_id,
+  )
+  with SessionLocal() as db:
+    chat_count = db.query(models.Chat).count()
+    original_bindings = [
+      (db.get(models.App, app_id).conflict_resolver_chat_id,
+       db.get(models.App, app_id).conflict_resolver_upstream_commit)
+      for app_id in ids
+    ]
+
+  # A busy chat is reusable even for a subset, without touching its checkout.
+  exact = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids[:2]},
+  )
+  assert exact.status_code == 200, exact.text
+  assert exact.json() == {"chat_id": chat_id, "created": False, "started": False}
+  selected = ids[1:] if selection == "overlap" else ids[1:2]
+
+  def request():
+    return client.post(
+      f"/api/apps/{selected[0]}/conflict-resolver-chat"
+      if selection == "single" else "/api/apps/conflict-resolver-batch",
+      headers=auth, json={"app_ids": selected} if selection != "single" else {},
+    )
+
+  def cannot_park(*args):
+    pytest.fail("A refused request must not touch a running resolver's checkout")
+
+  with monkeypatch.context() as guard:
+    guard.setattr("app.routes.apps._park_pending_update", cannot_park)
+    blocked = request()
+  if selection != "overlap":
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json() == {"chat_id": chat_id, "created": False, "started": False}
+    return
+  assert blocked.status_code == 409, blocked.text
+  detail = blocked.json()["detail"]
+  assert detail["code"] == "conflict_resolver_running"
+  assert detail["chat_id"] == chat_id
+  assert detail["app_ids"] == ids[:2]
+  assert apps[0][2] in detail["message"]
+  assert "Wait" not in detail["message"]
+  with SessionLocal() as db:
+    assert db.query(models.Chat).count() == chat_count
+    assert [
+      (db.get(models.App, app_id).conflict_resolver_chat_id,
+       db.get(models.App, app_id).conflict_resolver_upstream_commit)
+      for app_id in ids
+    ] == original_bindings
+
+  running = False
+  if running_check == "queued_owner":
+    get_writer().submit(ClearPending(chat_id=chat_id)).result(timeout=5)
+  with SessionLocal() as db:
+    db.query(models.ChatRun).filter_by(chat_id=chat_id).one().status = "completed"
+    db.get(models.Chat, chat_id).pending_question_id = None
+    db.commit()
+  admitted = request()
+  assert admitted.status_code == 200, admitted.text
+  assert admitted.json()["created"] is True
+  assert admitted.json()["chat_id"] != chat_id
+  with SessionLocal() as db:
+    assert db.get(models.App, ids[0]).conflict_resolver_chat_id is None
+    assert all(
+      db.get(models.App, app_id).conflict_resolver_chat_id == admitted.json()["chat_id"]
+      for app_id in selected
+    )
+
+
+def test_conflict_resolver_start_is_serialized_with_overlapping_request(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app import fs_locks
+  from app.database import SessionLocal
+  from app.routes import apps as routes
+  from contextlib import asynccontextmanager
+  from fastapi import HTTPException
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
+  ids = [item[0] for item in apps]
+
+  async def compete():
+    lifecycle = asyncio.Lock()
+    start_entered, release_start, second_attempt = (
+      asyncio.Event(), asyncio.Event(), asyncio.Event(),
+    )
+    starts, running = [], set()
+    attempts = 0
+
+    @asynccontextmanager
+    async def observed_lifecycle():
+      nonlocal attempts
+      attempts += 1
+      if attempts == 2:
+        second_attempt.set()
+      async with lifecycle:
+        yield
+
+    async def start_turn(db, chat_id, *_args):
+      starts.append(chat_id)
+      start_entered.set()
+      await release_start.wait()
+      running.add(chat_id)
+      return True
+
+    monkeypatch.setattr(fs_locks, "install_uninstall_lock", observed_lifecycle)
+    monkeypatch.setattr(routes, "_start_conflict_resolver_turn", start_turn)
+    monkeypatch.setattr("app.run_state.has_run_in", lambda db, cid, statuses: cid in running)
+    monkeypatch.setattr("app.chat.is_chat_running", lambda cid: False)
+    with SessionLocal() as first_db, SessionLocal() as second_db:
+      first = asyncio.create_task(routes._create_conflict_resolver_chat(first_db, ids[:2]))
+      second = None
+      try:
+        await start_entered.wait()
+        assert lifecycle.locked()
+        second = asyncio.create_task(routes._create_conflict_resolver_chat(second_db, ids[1:]))
+        await second_attempt.wait()
+        # Do not expose the newly bound chat as idle to a competing request
+        # while its durable start is still awaiting the writer.
+        assert lifecycle.locked()
+        assert not second.done()
+        assert not install.pending_update_worktree(apps[2][1]).exists()
+        release_start.set()
+        opened = await first
+        with pytest.raises(HTTPException) as blocked:
+          await second
+        assert blocked.value.status_code == 409
+        assert blocked.value.detail["chat_id"] == opened.chat_id
+        assert blocked.value.detail["app_ids"] == ids[:2]
+        assert starts == [opened.chat_id]
+      finally:
+        release_start.set()
+        tasks = [task for task in (first, second) if task is not None]
+        for task in tasks:
+          if not task.done():
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+  asyncio.run(asyncio.wait_for(compete(), timeout=10))
+
+
+def test_clean_store_install_clears_pending_receipt_and_resolver_binding(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app import fs_locks
+  from app.database import SessionLocal
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one",))
+  app_id, app_dir, _name = apps[0]
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  assert install.pending_update_receipt_file(app_dir).exists()
+  drop_worktree = install._drop_pending_update_worktree
+
+  def cleanup_under_source_lock(source_dir):
+    # This callback runs in the cleanup worker, after install released its
+    # materialization lock. Publication must still be excluded here.
+    assert fs_locks.source_dir_lock(str(source_dir)).locked()
+    drop_worktree(source_dir)
+
+  monkeypatch.setattr(install, "_drop_pending_update_worktree", cleanup_under_source_lock)
+  # A later Store release agrees with the owner's local title, so a normal
+  # install supersedes the blocked update without using resolve-update.
+  updated = _update_v2(
+    client, auth, "https://batch-conflict-one.test/repo/",
+    {**MANIFEST_NEWS, "id": "batch-conflict-one", "name": apps[0][2],
+     "version": "3.0.0"},
+    JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL ONE"),
+  )
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert not install.pending_update_receipt_file(app_dir).exists()
+  assert not install.pending_update_worktree(app_dir).exists()
+  with SessionLocal() as db:
+    app = db.get(models.App, app_id)
+    assert app.conflict_resolver_chat_id is None
+    assert app.conflict_resolver_upstream_commit is None
+
+
+@pytest.mark.parametrize("failure", ["commit", "worktree"])
+def test_successful_install_is_not_failed_by_pending_cleanup(
+  client, auth, bypass_url_validation, monkeypatch, failure,
+):
+  from app.database import SessionLocal
+  from sqlalchemy.exc import SQLAlchemyError
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one",))
+  app_id, app_dir, name = apps[0]
+  opened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert opened.status_code == 200, opened.text
+  clear_pending = install.clear_pending_conflict_update
+
+  async def fail_cleanup(db, app):
+    if failure == "commit":
+      with patch.object(db, "commit", side_effect=SQLAlchemyError("cleanup commit failed")):
+        await clear_pending(db, app)
+    else:
+      with patch.object(install, "_drop_pending_update_worktree", side_effect=OSError("cleanup failed")):
+        await clear_pending(db, app)
+
+  monkeypatch.setattr(install, "clear_pending_conflict_update", fail_cleanup)
+  updated = _update_v2(
+    client, auth, "https://batch-conflict-one.test/repo/",
+    {**MANIFEST_NEWS, "id": "batch-conflict-one", "name": name, "version": "3.0.0"},
+    JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL ONE"),
+  )
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert updated.json()["version"] == "3.0.0"
+  assert install.pending_update_worktree(app_dir).exists()
+  with SessionLocal() as db:
+    app = db.get(models.App, app_id)
+    assert app.version == "3.0.0"
+    # The install was committed before this best-effort effect. A failed
+    # cleanup commit rolls back only the attempted resolver unbinding.
+    assert app.conflict_resolver_chat_id == (opened.json()["chat_id"] if failure == "commit" else None)
+
+
+@pytest.mark.parametrize("selection", ["subset", "single", "overlap"])
+def test_conflict_resolver_never_reuses_a_different_batch(
+  client, auth, bypass_url_validation, selection,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
+  app_ids = [app_id for app_id, _path, _name in apps]
+  first = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": app_ids[:2]},
+  )
+  assert first.status_code == 200, first.text
+  original_chat_id = first.json()["chat_id"]
+
+  selected = app_ids[1:] if selection == "overlap" else app_ids[1:2]
+  if selection == "single":
+    response = client.post(
+      f"/api/apps/{selected[0]}/conflict-resolver-chat", headers=auth,
+    )
+  else:
+    response = client.post(
+      "/api/apps/conflict-resolver-batch", headers=auth,
+      json={"app_ids": selected},
+    )
+  assert response.status_code == 200, response.text
+  assert response.json()["created"] is True
+  assert response.json()["chat_id"] != original_chat_id
+
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    assert db.get(models.App, app_ids[0]).conflict_resolver_chat_id is None
+    for app_id in selected:
+      app = db.get(models.App, app_id)
+      assert app.conflict_resolver_chat_id == response.json()["chat_id"]
+      assert app.conflict_resolver_upstream_commit == app.upstream_commit
+    chat = db.get(models.Chat, response.json()["chat_id"])
+    seed = list(transcript_rows.history(chat))[0]["content"]
+    assert apps[0][2] not in seed
+    assert all(apps[app_ids.index(app_id)][2] in seed for app_id in selected)
+
+
+def test_conflict_resolver_batch_does_not_reuse_stale_revision_bindings(
+  client, auth, bypass_url_validation,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  app_ids = [app_id for app_id, _path, _name in apps]
+  first = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": app_ids},
+  )
+  assert first.status_code == 200, first.text
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    db.get(models.App, app_ids[1]).conflict_resolver_upstream_commit = "old-revision"
+    db.commit()
+
+  response = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": app_ids},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["created"] is True
+  assert response.json()["chat_id"] != first.json()["chat_id"]
+
+
+def test_conflict_resolver_validates_all_receipts_before_parking_any_app(
+  client, auth, bypass_url_validation,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  install.pending_update_receipt_file(apps[1][1]).unlink()
+  response = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": [app_id for app_id, _path, _name in apps]},
+  )
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "pending_update_missing"
+  assert response.json()["detail"]["app_id"] == apps[1][0]
+  assert all(
+    not install.pending_update_worktree(path).exists()
+    for _id, path, _name in apps
+  )
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    assert all(
+      db.get(models.App, app_id).conflict_resolver_chat_id is None
+      for app_id, _path, _name in apps
+    )
+
+
+@pytest.mark.parametrize("completion", ["finish", "lost_response", "deleted"])
+def test_conflict_resolver_reuses_remaining_batch_after_app_leaves(
+  client, auth, bypass_url_validation, completion,
+):
+  from app.database import SessionLocal
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  app_ids = [item[0] for item in apps]
+  opened = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": app_ids},
+  )
+  assert opened.status_code == 200, opened.text
+  if completion == "deleted":
+    with SessionLocal() as db:
+      db.get(models.App, app_ids[0]).deleted_at = datetime.now(UTC)
+      db.commit()
+  else:
+    app_dir = apps[0][1]
+    _resolve_in(install.pending_update_worktree(app_dir), {
+      "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"),
+    })
+    base = "https://batch-conflict-one.test/repo/"
+    replay = {
+      base + "index.jsx": (200, JSX_MULTI.replace(
+        "ORIGINAL TITLE", "UPSTREAM ONE",
+      ).encode()),
+      base + "icon.png": (200, _png_bytes()),
+      base + "prompt.md": (200, b"v2 prompt"),
+      base + "fetch.sh": (200, b""),
+    }
+    finished = _finish(client, auth, app_dir, replay)
+    assert finished.status_code == 200, finished.text
+    if completion == "lost_response":
+      # Simulate a finish interrupted after removing its receipt, before
+      # clearing the binding. Its idempotent success path must converge too.
+      with SessionLocal() as db:
+        app = db.get(models.App, app_ids[0])
+        app.conflict_resolver_chat_id = opened.json()["chat_id"]
+        app.conflict_resolver_upstream_commit = app.upstream_commit
+        db.commit()
+      again = _finish(client, auth, app_dir, replay)
+      assert again.status_code == 200, again.text
+    with SessionLocal() as db:
+      app = db.get(models.App, app_ids[0])
+      assert app.conflict_resolver_chat_id is None
+      assert app.conflict_resolver_upstream_commit is None
+
+  retry = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": app_ids[1:]},
+  )
+  assert retry.status_code == 200, retry.text
+  assert retry.json() == {
+    "chat_id": opened.json()["chat_id"], "created": False, "started": False,
+  }
+
+
+@pytest.mark.parametrize("selection", ["overlap", "subset"])
+def test_conflict_resolver_displaced_chat_cannot_be_reused_for_remainder(
+  client, auth, bypass_url_validation, selection,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two", "three"))
+  ids = [item[0] for item in apps]
+  first = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids[:2]},
+  )
+  assert first.status_code == 200, first.text
+  rebound = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids[1:] if selection == "overlap" else ids[1:2]},
+  )
+  assert rebound.status_code == 200, rebound.text
+  remainder = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids[:1]},
+  )
+  assert remainder.status_code == 200, remainder.text
+  assert remainder.json()["created"] is True
+  assert remainder.json()["chat_id"] not in {
+    first.json()["chat_id"], rebound.json()["chat_id"],
+  }
+
+
+@pytest.mark.parametrize("failure", ["live_merge", "no_conflict", "missing_app"])
+def test_conflict_resolver_preconditions_fail_before_any_checkout_is_parked(
+  client, auth, bypass_url_validation, failure,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [item[0] for item in apps]
+  failing_repo = apps[1][1]
+  if failure == "live_merge":
+    app_git._run(
+      failing_repo, "merge", "--no-commit", "--no-ff", "upstream", check=False,
+    )
+    assert app_git.merge_in_progress(failing_repo)
+    code, status = "earlier_resolver_merge", 409
+  elif failure == "no_conflict":
+    base = app_git._run(failing_repo, "merge-base", "main", "upstream").stdout.strip()
+    app_git._run(failing_repo, "reset", "--hard", base)
+    code, status = "conflict_state_changed", 409
+  else:
+    ids[1] = 999999
+    code, status = "app_not_found", 404
+  response = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth,
+    json={"app_ids": ids},
+  )
+  assert response.status_code == status, response.text
+  assert response.json()["detail"]["code"] == code
+  assert response.json()["detail"]["app_id"] == ids[1]
+  assert all(not install.pending_update_worktree(path).exists()
+             for _id, path, _name in apps)
+
+
+def test_conflict_resolver_batch_cannot_deadlock_contribute_publication(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app import fs_locks
+  from app.database import SessionLocal
+  from app.routes import apps as routes
+  from contextlib import asynccontextmanager
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [item[0] for item in apps]
+  storage_lock = fs_locks.app_storage_lock
+
+  async def run_competing_operations():
+    attempting_second_app = asyncio.Event()
+    second_lock = storage_lock(ids[1])
+    source_lock = fs_locks.source_dir_lock(str(apps[0][1]))
+
+    @asynccontextmanager
+    async def observed_storage_lock(app_id):
+      if app_id == ids[1]:
+        attempting_second_app.set()
+      async with storage_lock(app_id):
+        yield
+
+    monkeypatch.setattr(fs_locks, "app_storage_lock", observed_storage_lock)
+
+    async def publish():
+      # Contribute already owns its storage lock, and next needs the first
+      # app's source. The batch must not hold that source while waiting on us.
+      async with second_lock:
+        await attempting_second_app.wait()
+        async with source_lock:
+          pass
+
+    async def start_turn(*args):
+      return False
+
+    monkeypatch.setattr(routes, "_start_conflict_resolver_turn", start_turn)
+    with SessionLocal() as db:
+      publisher = asyncio.create_task(publish())
+      await asyncio.sleep(0)  # publisher owns app B before the batch enters
+      batch = asyncio.create_task(routes._create_conflict_resolver_chat(db, ids))
+      tasks = [publisher, batch]
+      try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+      finally:
+        for task in tasks:
+          task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+  asyncio.run(run_competing_operations())
+
+
+def test_conflict_resolver_batch_deduplicates_and_sorts_canonical_sources(
+  db, tmp_path, monkeypatch,
+):
+  from app import fs_locks
+  from app.routes import apps as routes
+  from contextlib import asynccontextmanager
+
+  # String-path ordering differs from pathlib's component ordering here.
+  first, last = tmp_path / "a-sibling", tmp_path / "a" / "child"
+  first.mkdir()
+  last.mkdir(parents=True)
+  alias = tmp_path / "alias"
+  alias.symlink_to(last, target_is_directory=True)
+  apps = [models.App(
+    name=f"Source {index}", slug=f"source-{index}", source_dir=str(source),
+    upstream_commit="upstream",
+  ) for index, source in enumerate((last, first, alias))]
+  db.add_all(apps)
+  db.commit()
+  ids = [app.id for app in apps]
+  acquired = []
+  storage_lock, source_lock = fs_locks.app_storage_lock, fs_locks.source_dir_lock
+
+  @asynccontextmanager
+  async def storage(app_id):
+    acquired.append(("app", app_id))
+    async with storage_lock(app_id):
+      yield
+
+  @asynccontextmanager
+  async def source(path):
+    acquired.append(("source", path))
+    async with source_lock(path):
+      yield
+
+  async def start_turn(*args):
+    return False
+
+  monkeypatch.setattr(fs_locks, "app_storage_lock", storage)
+  monkeypatch.setattr(fs_locks, "source_dir_lock", source)
+  monkeypatch.setattr(app_git, "is_repo", lambda repo: True)
+  monkeypatch.setattr(routes, "_pending_store_update_receipt", lambda *args: {})
+  monkeypatch.setattr(
+    routes, "_validate_pending_update",
+    lambda *args: routes._PendingUpdatePlan(conflict_paths=[]),
+  )
+  monkeypatch.setattr(routes, "_park_pending_update", lambda *args: [])
+  monkeypatch.setattr(routes, "_upstream_version", lambda *args: "2.0.0")
+  monkeypatch.setattr(routes, "_start_conflict_resolver_turn", start_turn)
+
+  async def create():
+    return await asyncio.wait_for(
+      routes._create_conflict_resolver_chat(db, list(reversed(ids))), timeout=3,
+    )
+
+  result = asyncio.run(create())
+  assert result.created is True
+  assert acquired == [
+    *(("app", app_id) for app_id in sorted(ids)),
+    ("source", str(first)), ("source", str(last)),
+  ]
+
+
+def test_conflict_resolver_partial_parking_is_private_and_retryable(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app.routes import apps as routes
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [item[0] for item in apps]
+  park = routes._park_pending_update
+  fail_once = True
+
+  def fail_second(repo, receipt, merge):
+    nonlocal fail_once
+    if repo == apps[1][1] and fail_once:
+      fail_once = False
+      raise routes._conflict_state_changed()
+    return park(repo, receipt, merge)
+
+  monkeypatch.setattr(routes, "_park_pending_update", fail_second)
+  response = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth, json={"app_ids": ids},
+  )
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["app_id"] == ids[1]
+  assert app_git.merge_in_progress(install.pending_update_worktree(apps[0][1]))
+  assert not install.pending_update_worktree(apps[1][1]).exists()
+  assert all(not app_git.merge_in_progress(repo) for _id, repo, _name in apps)
+  for _id, repo, _name in apps:
+    assert "LOCAL" in repo.joinpath("index.jsx").read_text()
+
+  retry = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth, json={"app_ids": ids},
+  )
+  assert retry.status_code == 200, retry.text
+  assert all(app_git.merge_in_progress(install.pending_update_worktree(repo))
+             for _id, repo, _name in apps)
 
 
 def _resolve_in(checkout: Path, files: dict[str, str]) -> None:
@@ -3775,7 +4510,7 @@ def test_finishing_installs_only_a_committed_resolution(
   assert incomplete.status_code == 409, incomplete.text
   assert incomplete.json()["detail"]["code"] == "resolution_incomplete"
 
-  # Opening the resolver again restarts the abandoned merge.
+  # Reopening an idle resolver restarts its abandoned merge.
   reopened = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
   assert reopened.status_code == 200, reopened.text
   assert app_git.merge_in_progress(checkout)
@@ -3843,6 +4578,32 @@ def _conflicted_app_with_local_file(client, auth, base, slug):
     base + "fetch.sh": (200, b""),
   }
   return app_id, app_dir, replay, upstream
+
+
+def test_resolver_checkout_removed_after_validation_requires_a_fresh_plan(
+  client, auth, bypass_url_validation,
+):
+  from app.database import SessionLocal
+  from app.routes import apps as routes
+  from fastapi import HTTPException
+
+  app_id, repo, _replay = _conflicted_app(
+    client, auth, "https://removed-checkout.test/repo/", "removed-checkout",
+  )
+  with SessionLocal() as db:
+    receipt = routes._pending_store_update_receipt(db.get(models.App, app_id), str(repo))
+  merge = routes._validate_pending_update(repo, receipt)
+  assert merge.checkout is not None  # plan reuses the in-progress merge
+  app_git.remove_overlay_worktree(repo, install.pending_update_worktree(repo))
+  with pytest.raises(HTTPException) as caught:
+    routes._park_pending_update(repo, receipt, merge)
+  assert caught.value.status_code == 409
+  assert caught.value.detail["code"] == "conflict_state_changed"
+  assert not install.pending_update_worktree(repo).exists()
+
+  retry = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  assert retry.status_code == 200, retry.text
+  assert app_git.merge_in_progress(install.pending_update_worktree(repo))
 
 
 def test_files_the_resolver_deletes_stay_deleted(client, auth, bypass_url_validation):
@@ -9015,6 +9776,150 @@ async def test_ancillary_bundle_comparison_uses_same_root_and_upstream_deletions
   with patch("app.install.compile_jsx", side_effect=compile_tree):
     assert await install._kept_local_bundle_unchanged(tree, manifest, {}, {}, ["README.md"])
   assert entries[0] == entries[1]
+
+
+@pytest.mark.parametrize("selection", ["exact", "single"])
+def test_busy_resolver_retry_does_not_recreate_aborted_checkout(
+  client, auth, bypass_url_validation, monkeypatch, selection,
+):
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [item[0] for item in apps]
+  opened = client.post("/api/apps/conflict-resolver-batch", headers=auth,
+                       json={"app_ids": ids})
+  assert opened.status_code == 200, opened.text
+  chat_id = opened.json()["chat_id"]
+  monkeypatch.setattr("app.chat.is_chat_running", lambda cid: cid == chat_id)
+  checkout = install.pending_update_worktree(apps[0][1])
+  app_git.remove_overlay_worktree(apps[0][1], checkout)
+  retry = client.post(
+    "/api/apps/conflict-resolver-batch" if selection == "exact" else
+    f"/api/apps/{ids[0]}/conflict-resolver-chat", headers=auth,
+    json={"app_ids": ids} if selection == "exact" else {},
+  )
+  assert retry.status_code == 200, retry.text
+  assert retry.json() == {"chat_id": chat_id, "created": False, "started": False}
+  assert not checkout.exists()
+
+
+@pytest.mark.parametrize("state", ["idle", "live", "owner_question", "live_question"])
+def test_stale_resolver_binding_blocks_current_revision_only_while_busy(
+  client, auth, bypass_url_validation, monkeypatch, state,
+):
+  from app.database import SessionLocal
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  app_id = apps[0][0]
+  opened = client.post("/api/apps/conflict-resolver-batch", headers=auth,
+                       json={"app_ids": [item[0] for item in apps]})
+  assert opened.status_code == 200, opened.text
+  chat_id = opened.json()["chat_id"]
+  with SessionLocal() as db:
+    db.get(models.App, app_id).conflict_resolver_upstream_commit = "old-revision"
+    if state == "owner_question":
+      db.get(models.Chat, chat_id).pending_question_id = "open-owner-question"
+    db.commit()
+  busy = state != "idle"
+  monkeypatch.setattr("app.chat.is_chat_running", lambda cid: state == "live" and cid == chat_id)
+  monkeypatch.setattr("app.questions.is_waiting", lambda cid: state == "live_question" and cid == chat_id)
+  retry = client.post(f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth)
+  if busy:
+    assert retry.status_code == 409, retry.text
+    detail = retry.json()["detail"]
+    assert detail["chat_id"] == chat_id
+    assert apps[0][2] in detail["message"]
+    assert "earlier update" in detail["message"]
+    assert "open or stop" in detail["message"]
+  else:
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["created"] is True
+    assert retry.json()["chat_id"] != chat_id
+  with SessionLocal() as db:
+    assert db.get(models.App, apps[1][0]).conflict_resolver_chat_id == (
+      chat_id if busy else None
+    )
+
+
+@pytest.mark.parametrize("app_count", [1, 50])
+def test_conflict_resolver_prompt_bounds_paths_and_total_size(app_count):
+  from app.routes import apps as routes
+
+  paths = [f"{i:04}-" + "x" * 250 for i in range(1000)]
+  items = [
+    (models.App(name=f"App {i}"), Path(f"/data/apps/app-{i}"), paths, "2.0")
+    for i in range(app_count)
+  ]
+  prompt = routes._conflict_resolver_prompt(items)
+
+  assert len(prompt) <= routes._CONFLICT_RESOLVER_MAX_PROMPT_CHARS
+  assert "Run `git status` in each private checkout for the complete conflict list." in prompt
+  sections = prompt.split("## ")[1:]
+  assert len(sections) == app_count
+  shown_total = 0
+  for section, (_, repo, _, _) in zip(sections, items):
+    shown = sum(line.startswith("  - ") and "paths omitted" not in line
+                for line in section.splitlines())
+    assert shown <= routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+    assert f"({len(paths) - shown} paths omitted; use git status.)" in section
+    assert f"Finish with: python \"$SCRIPTS_DIR/resolve_app_update.py\" {repo}" in section
+    shown_total += shown
+  if app_count == 1:
+    assert shown_total == routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+  else:
+    assert shown_total < app_count * routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+
+
+def test_conflict_resolver_finish_command_preserves_complete_shell_quoted_path():
+  from app.routes import apps as routes
+
+  repo = Path("/data/owner's apps; $(touch unwanted)/" + "/".join(["x" * 100] * 3))
+  prompt = routes._conflict_resolver_prompt([
+    (models.App(name="App"), repo, [], None),
+  ])
+  command = next(line.removeprefix("Finish with: ") for line in prompt.splitlines()
+                 if line.startswith("Finish with: "))
+  assert len(str(repo)) > 240
+  assert command.endswith(shlex.quote(str(repo)))
+  assert shlex.split(command) == ["python", "$SCRIPTS_DIR/resolve_app_update.py", str(repo)]
+  assert "Nothing left to reconcile; just finish it." in prompt
+
+
+def test_conflict_resolver_prompt_rejects_oversized_metadata_without_truncating_commands():
+  from fastapi import HTTPException
+  from app.routes import apps as routes
+
+  items = [
+    (models.App(name=f"App {i}"), Path("/data/" + "/".join(["x" * 100] * 10) + f"/{i}"), [], None)
+    for i in range(50)
+  ]
+  with pytest.raises(HTTPException) as exc:
+    routes._conflict_resolver_prompt(items)
+  assert exc.value.status_code == 413
+  assert "select fewer apps" in exc.value.detail
+
+
+def test_conflict_resolver_rejects_oversized_prompt_before_parking_any_checkout(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  from app.database import SessionLocal
+  from app.routes import apps as routes
+
+  apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
+  ids = [app_id for app_id, _repo, _name in apps]
+  monkeypatch.setattr(routes, "_CONFLICT_RESOLVER_MAX_PROMPT_CHARS", 1)
+
+  def cannot_park(*args):
+    pytest.fail("Prompt budgeting must reject the batch before any checkout is parked")
+
+  monkeypatch.setattr(routes, "_park_pending_update", cannot_park)
+  rejected = client.post(
+    "/api/apps/conflict-resolver-batch", headers=auth, json={"app_ids": ids},
+  )
+  assert rejected.status_code == 413, rejected.text
+  assert "select fewer apps" in rejected.json()["detail"]
+  assert all(not install.pending_update_worktree(repo).exists()
+             for _app_id, repo, _name in apps)
+  with SessionLocal() as db:
+    assert all(db.get(models.App, app_id).conflict_resolver_chat_id is None
+               for app_id in ids)
 
 
 def test_install_git_network_has_short_lifecycle_ceiling(

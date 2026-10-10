@@ -658,6 +658,11 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Managed-app update events
+
+Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
+Events are not replayed, and standalone app pages do not receive them, so retain the ordinary initial load and refresh fallback.
+
 ## Host capabilities (microphone and future device/browser access)
 
 Shell-mounted mini-apps have an opaque origin by design, so some origin-bound

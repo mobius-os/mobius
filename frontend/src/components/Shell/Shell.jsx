@@ -30,6 +30,7 @@ import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
+import { useManagedAppEvents } from '../../hooks/useManagedAppEvents.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import {
@@ -2954,8 +2955,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       chatsQuery.isFetchedAfterMount, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
+  const [subscribeManagedAppEvents, observeManagedAppEvent] = useManagedAppEvents()
+
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
+    observeManagedAppEvent(ev)
     if (ev.type === 'agent_coordination_message') {
       // Mailbox hints refresh owner views without polling a model inbox.
       const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
@@ -3320,7 +3324,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
-    markStreamingAcknowledged, markStreamingEnd,
+    markStreamingAcknowledged, markStreamingEnd, observeManagedAppEvent,
     onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
     refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
@@ -4925,6 +4929,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}
+              subscribeManagedAppEvents={subscribeManagedAppEvents}
               pendingIntent={appIntents[String(id)] || null}
               immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
                 ? immersiveMode

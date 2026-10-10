@@ -2863,6 +2863,18 @@ def is_chat_running(chat_id: str) -> bool:
   return bc is not None and bc.running
 
 
+def is_chat_busy(
+  db: Session, chat: models.Chat,
+  *, run_statuses: Iterable[str] = models.NONTERMINAL_RUN_STATUSES,
+) -> bool:
+  """Work remains queued, running, or resumable for this chat."""
+  return bool(
+    is_chat_running(chat.id)
+    or chat.pending_messages
+    or run_state.has_run_in(db, chat.id, run_statuses)
+  )
+
+
 def mark_starting(chat_id: str) -> bool:
   """Atomically marks a chat as starting.  Returns False if already active."""
   if is_chat_running(chat_id):

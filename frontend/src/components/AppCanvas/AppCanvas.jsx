@@ -42,6 +42,7 @@ import {
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
+import { useManagedAppFrameForwarding } from '../../hooks/useManagedAppEvents.js'
 import { writeClipboardText } from '../../runtime/clipboard.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
@@ -75,6 +76,12 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      reload (DOM reparenting, browser forced reload) resets the
 //      iframe flag but not parent state, and the re-init must fire or
 //      the iframe sits at its 10s loading-timeout.
+//
+//   Managed app lifecycle: {type: 'moebius:managed-app-event',
+//       event: {type: 'app_updated', appId}}       parent → frame
+//      Every completion is sent to frames with reviewed manage_apps.
+//      appId is always the updated app's id as a string. Apps listen directly
+//      on window; the frame host does not handle or replay this message.
 //
 //   Module broker: {type:'moebius:module-request', requestId, appId, retry}
 //      frame → parent, answered by `moebius:module-result`. Opaque frames are
@@ -330,6 +337,7 @@ function CameraPreviewLayer({ preview }) {
 const AppCanvas = forwardRef(function AppCanvas({
   appId, version = 0, storageGeneration = null, appName, appSlug, offlineCapable = false,
   capabilityContract = null,
+  subscribeManagedAppEvents = null,
   // The shell's applied presentation for this app: full-bleed immersive,
   // status-bar-preserving chrome collapse, or null. One value keeps safe-area
   // forwarding and the runtime echo from observing contradictory booleans.
@@ -671,6 +679,8 @@ const AppCanvas = forwardRef(function AppCanvas({
     // checks on replies plus the frame's parent-origin check on receipt.
     framesRef.current.get(v)?.contentWindow?.postMessage(message, '*')
   }
+
+  useManagedAppFrameForwarding(framesRef, subscribeManagedAppEvents, capabilityContract)
 
   // A host that owns the browser-history cursor may ask the visible app to
   // follow it. Keep exact contentWindow selection here rather than making the

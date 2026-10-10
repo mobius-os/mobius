@@ -35,12 +35,19 @@ acquires in reverse, so there is no cycle:
 
     install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
+Batch holders acquire ALL app-storage locks (sorted by id) before ANY source
+lock, then deduplicate sources and acquire them in lexicographic canonical-path
+string order (the same order publication uses).
+Taking app(A) -> source(A) -> app(B) can deadlock a publication holding app(B)
+while waiting on source(A), even if the batch holds the lifecycle lock.
+
 ``shared_skills_lock`` is always innermost. Install sync takes lifecycle then
 shared; uninstall/recover release any source-dir lock before taking shared.
 No shared-skills holder ever acquires a lifecycle, app, or source lock.
 
 Multi-lock holders, all acquiring left-to-right:
 
+  - resolver batches hold lifecycle -> all selected apps -> unique sources.
   - ``delete_app`` holds all three.
   - ``recover_app`` holds lifecycle -> app while it refreshes a stale bundle,
     then may take source and shared-skills locks further inside that span.

@@ -381,8 +381,13 @@ async def test_revoked_list_derives_pending_stop_after_reload_without_cancelling
     connect._commands.pop(host_id, None)
 
 
-def test_guest_cannot_launch_clean_owner_conflict_resolver(https, auth):
+@pytest.mark.parametrize("route, body", [
+  ("/api/apps/999/conflict-resolver-chat", {}),
+  ("/api/apps/conflict-resolver-batch", {"app_ids": [999]}),
+])
+def test_guest_cannot_launch_clean_owner_conflict_resolver(https, auth, route, body):
   _, token, _ = invite(https)
-  response = https.post("/api/apps/999/conflict-resolver-chat", json={},
+  response = https.post(route, json=body,
                         headers={"Authorization": "Bearer " + token})
   assert response.status_code == 403
+  assert "installation owner" in response.json()["detail"]
