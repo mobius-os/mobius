@@ -115,7 +115,7 @@ test('chat image preview actions use labeled buttons', () => {
   assert.match(attachments, /<ImagePreviewButton/)
   assert.match(composer, /aria-label=\{`Preview \$\{chip\.name\}`\}/)
   assert.match(preview, /aria-label=\{`Open \$\{alt \|\| 'image'\} preview`\}/)
-  assert.match(markdown, /<button[\s\S]*className="md-image-frame"[\s\S]*aria-label=\{`Open \$\{alt \|\| 'image'\} preview`\}/)
+  assert.match(markdown, /<button[\s\S]*className="md-image-frame"[\s\S]*aria-label=\{loadState === 'error' \? `Image unavailable: \$\{alt \|\| 'image'\}` : `Open \$\{alt \|\| 'image'\} preview`\}/)
 })
 
 test('a restored image with no media token stops spinning and exposes its failure', () => {

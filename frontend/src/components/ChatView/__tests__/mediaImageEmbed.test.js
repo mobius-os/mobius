@@ -456,3 +456,25 @@ describe('imageVarsFromDims — server dimensions fix the first layout', () => {
     assert.equal(imageVarsFromDims(0, 100), null, 'invalid dims still yield null')
   })
 })
+
+test('generated-file embeds take the media-scoped auth path and preview disposition', async () => {
+  const href = '/api/chats/generated-chat/generated-files/art.png?preview=true'
+  let called = null
+  const resolved = await resolveExpandableImageSrc(href, async chat => {
+    called = chat
+    return '?token=MEDIA_ONLY'
+  }, 'OWNER_SECRET')
+  assert.equal(called, 'generated-chat')
+  assert.equal(getMediaChatId(href), 'generated-chat')
+  assert.equal(previewSrcForChatMedia(resolved),
+    '/api/chats/generated-chat/generated-files/art.png?token=MEDIA_ONLY&preview=true')
+  assert.ok(!resolved.includes('OWNER_SECRET'))
+})
+
+for (const origin of ['https://example.com', '//example.com']) {
+  test(`external generated image ${origin} never requests local media authorization or a local preview`, () => {
+    const href = `${origin}/api/chats/generated-chat/generated-files/art.png?version=1#view`
+    assert.equal(getMediaChatId(href), null)
+    assert.equal(previewSrcForChatMedia(href), href)
+  })
+}

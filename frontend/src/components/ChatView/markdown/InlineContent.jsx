@@ -225,7 +225,11 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
-// Matches /api/chats/<chat_id>/{uploads,media}/<file>. These paths require a
+export function safeImageHref(href) {
+  return safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+}
+
+// Matches /api/chats/<chat_id>/{uploads,media,generated-files}/<file>. These paths require a
 // short-lived media token on ?token=;
 // the owner JWT must not appear there (it would leak into access logs, history,
 // Referer). Other /api/ paths that appear in markdown images (rare) still get the
@@ -234,7 +238,7 @@ function resolveStaticImageSrc(href) {
   // Returns a URL for non-media API paths (or null for invalid hrefs).
   // Appends the owner token for API paths that aren't upload/generated routes —
   // those use the async ExpandableImage path instead.
-  let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  let src = safeImageHref(href)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     // Embedded-chat bearer material is memory-only and must never enter a URL,
@@ -260,9 +264,10 @@ export function ExpandableImage({
   const [open, setOpen] = useState(false)
   const buttonRef = useRef(null)
   const [resolvedSrc, setResolvedSrc] = useState(null)
+  const [loadState, setLoadState] = useState('loading')
   const historyDismiss = useHistoryDismiss(() => setOpen(false))
 
-  const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  const rawSrc = safeImageHref(href)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
   const previewSrc = resolvedSrc
     ? previewSrcForChatMedia(resolvedSrc)
@@ -272,7 +277,7 @@ export function ExpandableImage({
   // projected into the message response. The URL remains a resource identity,
   // not a layout transport. This value is available on the first render, before
   // token resolution or image bytes, so decode can never resize the frame.
-  const dims = imageDimensionsForHref(rawSrc, mediaDimensions)
+  const dims = imageDimensionsForHref(rawSrc, mediaChatId ? mediaDimensions : null)
   const viewportClientHeight = dims
     ? ((typeof window !== 'undefined'
       && (window.visualViewport?.height || window.innerHeight)) || 800)
@@ -292,12 +297,21 @@ export function ExpandableImage({
     && imageUnreadableForHref(rawSrc, mediaDimensions)
 
   useEffect(() => {
-    if (!rawSrc || dimensionError) { setResolvedSrc(null); return }
+    setResolvedSrc(null)
+    setLoadState('loading')
+    if (!rawSrc || dimensionError) return
     let cancelled = false
     if (mediaChatId) {
       // Media path: fetch a short-lived media token, never the owner JWT in URL.
       mediaTokenParam(mediaChatId).then(param => {
-        if (!cancelled) setResolvedSrc(`${BASE}${new URL(rawSrc, location.origin).pathname}${param}`)
+        if (cancelled) return
+        if (!param) { setLoadState('error'); return }
+        const path = new URL(rawSrc, location.origin).pathname
+        // Generated files serve the original bytes; inline disposition is
+        // required in both the transcript and its expanded viewer.
+        setResolvedSrc(`${BASE}${path}${param}${path.includes('/generated-files/') ? '&preview=true' : ''}`)
+      }, () => {
+        if (!cancelled) setLoadState('error')
       })
     } else {
       // Non-media API path or external URL: use owner token (or no token for external).
@@ -331,10 +345,11 @@ export function ExpandableImage({
         type="button"
         className="md-image-frame"
         style={imageVars || undefined}
-        aria-label={`Open ${alt || 'image'} preview`}
-        disabled={!resolvedSrc}
+        aria-label={loadState === 'error' ? `Image unavailable: ${alt || 'image'}` : `Open ${alt || 'image'} preview`}
+        disabled={!resolvedSrc || loadState !== 'loaded'}
+        aria-busy={loadState === 'loading'}
         onClick={() => {
-          if (!resolvedSrc) return
+          if (!resolvedSrc || loadState !== 'loaded') return
           if (onOpen) onOpen(imageIndex, { href, src: resolvedSrc, alt })
           else {
             historyDismiss.open()
@@ -342,17 +357,21 @@ export function ExpandableImage({
           }
         }}
       >
-        {previewSrc && (
+        {loadState === 'loading' && <span className="md-image-loading" role="status">Loading image…</span>}
+        {loadState === 'error' && <span className="md-image-loading" role="status">Image unavailable</span>}
+        {loadState !== 'error' && previewSrc && (
           <img
             src={previewSrc}
             alt={alt}
             className="md-image"
             loading={loading || 'lazy'}
             decoding="async"
+            onLoad={() => setLoadState('loaded')}
+            onError={() => setLoadState('error')}
           />
         )}
       </button>
-      {!onOpen && open && resolvedSrc && <ChatPanePortal anchorRef={buttonRef}>
+      {!onOpen && open && resolvedSrc && loadState === 'loaded' && <ChatPanePortal anchorRef={buttonRef}>
         <ImageLightbox src={resolvedSrc} alt={alt} onClose={historyDismiss.close} />
       </ChatPanePortal>}
     </>

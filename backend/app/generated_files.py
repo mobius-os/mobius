@@ -361,11 +361,16 @@ def _open_deliverable_file(
     os.close(directory_fd)
 
 
-async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
-  """Freeze, persist, and consume the next batch of completed deliverables."""
+async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> dict[str, str]:
+  """Freeze, persist, and consume a batch; return original->recorded names.
+
+  Native provider artifacts use the receipt to distinguish actual delivery
+  from capacity limits, rejected writes, or an uncertain acknowledgement.
+  """
+  published: dict[str, str] = {}
   capacity = await sink.generated_file_capacity()
   if capacity <= 0:
-    return
+    return published
   names = (await asyncio.to_thread(_inbox_names, data_dir, chat_id))[:capacity]
   for name in names:
     captured = await asyncio.to_thread(_freeze_file, data_dir, chat_id, name)
@@ -384,7 +389,10 @@ async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
     if outcome is PUBLICATION_UNCERTAIN:
       # Do not enqueue a later file behind an unresolved publication: its
       # snapshot cannot yet include the first file's collision-resolved name.
-      return
+      return published
     await asyncio.to_thread(
       _settle_capture, data_dir, chat_id, captured, accepted=bool(outcome),
     )
+    if isinstance(outcome, str) and outcome:
+      published[name] = outcome
+  return published

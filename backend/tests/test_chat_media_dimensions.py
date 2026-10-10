@@ -1,4 +1,7 @@
+import sqlite3
 from unittest.mock import patch
+
+import pytest
 
 from PIL import Image
 
@@ -158,3 +161,92 @@ def test_projection_marks_unreadable_local_images_explicitly(tmp_path):
     f"{prefix}/missing.png": None,
     f"{prefix}/..%2F..%2Fsecret.png": None,
   }
+
+
+def test_projection_sizes_native_and_markdown_generated_images_from_recorded_store(tmp_path, db, chat):
+  from app.models import GeneratedFile
+  from app.generated_files import stored_dir
+
+  base = stored_dir(str(tmp_path), chat.id, create=True)
+  Image.new('RGB', (1536, 1024)).save(base / 'opaque-key', 'PNG')
+  db.add(GeneratedFile(chat_id=chat.id, name='art work.png', path='opaque-key',
+    size=100, mime_type='image/png'))
+  db.commit()
+  href = f'/api/chats/{chat.id}/generated-files/art%20work.png'
+  messages = [
+    {'role': 'assistant', 'blocks': [{'type': 'generated_files', 'files': [{
+      'name': 'art work.png', 'mime_type': 'image/png', 'previewable': True,
+    }]}]},
+    {'role': 'assistant', 'content': f'![art]({href}?preview=true)'},
+  ]
+  projected = project_message_image_dimensions(messages, chat_id=chat.id,
+    data_dir=str(tmp_path), db=db)
+  with patch('app.image_previews.Image.open', side_effect=AssertionError('warm sizing reopened')):
+    assert project_message_image_dimensions(messages, chat_id=chat.id,
+      data_dir=str(tmp_path), db=db) == projected
+  assert all('media_dimensions' not in message for message in messages)
+  assert all(message['media_dimensions'] == {
+    href: {'width': 1536, 'height': 1024},
+  } for message in projected)
+
+
+def test_generated_dimensions_follow_recorded_storage_and_reject_unrecorded_paths(tmp_path, db, chat):
+  from app.models import GeneratedFile
+  from app.generated_files import stored_dir
+
+  base = stored_dir(str(tmp_path), chat.id, create=True)
+  Image.new('RGB', (120, 300)).save(base / 'frozen-key', 'PNG')
+  Image.new('RGB', (500, 500)).save(base / 'unrecorded.png', 'PNG')
+  (base / 'symlink-key').symlink_to(base / 'frozen-key')
+  for name, path in [
+    ('stored.png', 'frozen-key'),
+    ('missing.png', 'missing-key'),
+    ('escape.png', '../outside.png'),
+    ('link.png', 'symlink-key'),
+  ]:
+    db.add(GeneratedFile(chat_id=chat.id, name=name, path=path,
+      size=100, mime_type='image/png'))
+  db.commit()
+  prefix = f'/api/chats/{chat.id}/generated-files'
+  names = ['stored.png', 'missing.png', 'escape.png', 'link.png', 'unrecorded.png']
+  messages = [{'role': 'assistant', 'content': ' '.join(f'![x]({prefix}/{name})' for name in names)}]
+  result = project_message_image_dimensions(messages, chat_id=chat.id,
+    data_dir=str(tmp_path), db=db)[0]['media_dimensions']
+  assert result[f'{prefix}/stored.png'] == {'width': 120, 'height': 300}
+  assert all(result[f'{prefix}/{name}'] is None for name in names[1:])
+
+
+@pytest.mark.parametrize("variable_limit", [None, 999], ids=["native-limit", "legacy-limit"])
+def test_generated_reference_projection_exceeds_sqlite_bind_limit(tmp_path, db, chat, variable_limit):
+  from app.generated_files import stored_dir
+  from app.models import GeneratedFile
+
+  connection = db.connection().connection.driver_connection
+  native_limit = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+  if variable_limit is not None:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, variable_limit)
+  try:
+    limit = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    base = stored_dir(str(tmp_path), chat.id, create=True)
+    Image.new("RGB", (120, 300)).save(base / "opaque-key", "PNG")
+    for name in ["first.png", "last image.png"]:
+      db.add(GeneratedFile(chat_id=chat.id, name=name, path="opaque-key",
+        size=100, mime_type="image/png"))
+    db.flush()
+    prefix = f"/api/chats/{chat.id}/generated-files"
+    # Markdown is not bounded by the 500-row generated-file publication cap.
+    # Exercise the real SQLite connection, including its native build limit.
+    messages = [{"role": "assistant", "content": " ".join([
+      f"![first]({prefix}/first.png)",
+      *(f"![missing]({prefix}/missing-{i}.png)" for i in range(limit)),
+      f"![last]({prefix}/last%20image.png?preview=true)",
+    ])}]
+    result = project_message_image_dimensions(messages, chat_id=chat.id,
+      data_dir=str(tmp_path), db=db)[0]["media_dimensions"]
+    assert len(result) == limit + 2
+    assert result[f"{prefix}/first.png"] == {"width": 120, "height": 300}
+    assert result[f"{prefix}/last%20image.png"] == {"width": 120, "height": 300}
+    assert all(result[f"{prefix}/missing-{i}.png"] is None for i in range(limit))
+    assert "media_dimensions" not in messages[0]
+  finally:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, native_limit)

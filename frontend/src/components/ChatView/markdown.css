@@ -224,6 +224,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
    frame rather than resizing after load. `max-height` caps extreme tall ratios;
    `object-fit:contain` letterboxes inside the stable frame when necessary. */
 .md-image-frame {
+  position: relative;
   display: block;
   width: min(100%, var(--md-image-fit-width, 520px));
   max-width: 100%;
@@ -578,4 +579,17 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 @media (max-width: 32rem) {
   .md-app-card { min-height: 12rem; }
   .md-app-card__visual { height: 7.5rem; min-height: 7.5rem; }
+}
+
+/* Native generated pictures share Markdown's full-size viewer, not upload thumbs. */
+.chat__generated-image { display: block; width: 100%; }
+.chat__attach-images:has(.chat__generated-image) { flex-direction: column; width: 100%; }
+.md-image-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  pointer-events: none;
 }
