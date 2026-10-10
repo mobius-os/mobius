@@ -171,7 +171,8 @@ function Host(){
    if(holdReplacementState&&srcVersion==='v2'&&msg.type==='moebius:app-block-state'){
     replacementStates.push(e);return
    }
-   if(scenario==='failed-unacked'&&window.__loadsByVersion.v1===1&&msg.type==='moebius:app-block-state')msg={...msg,ackNonce:null}
+   if(scenario==='failed-unacked'&&window.__loadsByVersion.v1===1&&msg.type==='moebius:app-block-state'
+     &&window.__deliveries.some(event=>event.load===1&&event.event==='confirm'&&event.nonce===msg.ackNonce))msg={...msg,ackNonce:null}
    if(scenario==='wrong-ack'&&window.__loadsByVersion.v1===2&&!window.__allowAck&&msg.type==='moebius:app-block-state')msg={...msg,checkpointAck:'wrong'}
    if(msg.type==='moebius:app-block-state')window.__states.push(msg)
    ${receiveState}
