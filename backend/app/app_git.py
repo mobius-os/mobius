@@ -3781,7 +3781,8 @@ def read_committed_file(
   env = _git_env(repo, read_only=True)
   try:
     listing = subprocess.run(
-      ["git", "-C", str(repo), "ls-tree", "-l", "-z", commit, "--", rel],
+      ["git", "--literal-pathspecs", "-C", str(repo),
+       "ls-tree", "-l", "-z", commit, "--", rel],
       capture_output=True, timeout=timeout, check=False, env=env,
     )
     if listing.returncode != 0:

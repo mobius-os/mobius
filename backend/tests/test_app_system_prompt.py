@@ -287,6 +287,28 @@ def test_manifest_prompt_no_longer_needs_a_system_flag():
   _validate_manifest(_manifest())
 
 
+@pytest.mark.parametrize("filename", [
+  "rules[1].md", "rules*.md", ":(glob)rules*.md",
+  ":(literal)rules.md",
+])
+def test_accepted_prompt_filename_is_literal_not_a_git_pathspec(db, filename):
+  _validate_manifest(_manifest(system_prompt=filename, source_files=[filename]))
+  source = Path(get_settings().data_dir) / "apps" / "literalprompt"
+  source.mkdir(parents=True)
+  (source / filename).write_text("LITERAL RULE", encoding="utf-8")
+  (source / "rules1.md").write_text("OTHER RULE", encoding="utf-8")
+  (source / "rules.md").write_text("OTHER RULE", encoding="utf-8")
+  db.add(models.App(
+    name="Literal prompt", slug="literalprompt", source_dir=str(source),
+    system_prompt_file=filename, source_commit=_publish(source),
+  ))
+  db.commit()
+
+  composed = compose_system_prompt("BASE", db)
+  assert "LITERAL RULE" in composed
+  assert "OTHER RULE" not in composed
+
+
 def test_symlink_fragment_is_never_read(db, tmp_path):
   secret = tmp_path / "secret.md"
   secret.write_text("HOST SECRET", encoding="utf-8")
