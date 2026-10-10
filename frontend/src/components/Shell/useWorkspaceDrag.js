@@ -1,9 +1,9 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
+import { isHorizontalDrawerSwipe } from '../../lib/drawerLifecycle.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
-  flingReleaseVelocity,
   PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS, DRAG_HOLD_HAPTIC_MS, DRAG_ARM_HAPTIC_MS,
   crossedDrawerExit,
   rootEdgeAllowed,
@@ -73,6 +73,16 @@ function suppressNextSourceClick(sourceEl) {
   return clear
 }
 
+// A held pin reserves the first cancelable touchmove, before native panning
+// takes ownership. The returned release travels with its reorder handoff.
+function reserveHeldTouchPan(source) {
+  const preventHeldPan = event => {
+    if (event.touches.length === 1) event.preventDefault()
+  }
+  source.addEventListener('touchmove', preventHeldPan, { capture: true, passive: false })
+  return () => source.removeEventListener('touchmove', preventHeldPan, true)
+}
+
 export default function useWorkspaceDrag({
   contentElRef,
   sceneInputsRef, // ref → { projection, mode, contentRect }
@@ -114,42 +124,6 @@ export default function useWorkspaceDrag({
     // Without this boundary, an interrupted drag followed quickly by a tap on
     // the same drawer row made the row look dead for up to 400ms.
     let clearPendingSourceClick = null
-
-    // ── Momentum fling for the JS-owned drawer scroll ─────────────────────────
-    // Pinned drawer rows keep touch-action:pinch-zoom so a held pin can be dragged
-    // to reorder, which means the browser never scrolls those rows natively — the
-    // session pans .drawer__scroll 1:1 with the finger instead (onMove below).
-    // Without a fling that 1:1 pan dead-stops the instant the finger lifts, so on a
-    // tall pinned band the whole list reads as "stuck / something stops the scroll."
-    // This carries the release velocity and decelerates on rAF, reproducing native
-    // momentum. It lives at the effect scope so a glide outlives its pointer session
-    // and a fresh press (or unmount) can halt it. Frame-rate independent: velocity
-    // is layout px/ms and decays by exp(-FRICTION·dt), matching iOS-normal feel.
-    let flingRAF = 0
-    const FLING_FRICTION = 0.002 // per-ms velocity decay (≈ 0.998/ms, iOS normal)
-    const FLING_MIN_V = 0.04 // px/ms — below this the glide has visually stopped
-    function stopFling() {
-      if (flingRAF) { cancelAnimationFrame(flingRAF); flingRAF = 0 }
-    }
-    function startFling(el, velocity) {
-      stopFling()
-      if (!el || !Number.isFinite(velocity) || Math.abs(velocity) < FLING_MIN_V) return
-      let v = velocity
-      let last = performance.now()
-      const step = (now) => {
-        flingRAF = 0
-        const dt = Math.min(32, now - last) // clamp a long/background frame
-        last = now
-        const before = el.scrollTop
-        el.scrollTop = before + v * dt
-        // A short delta versus the request means the scroller hit top/bottom.
-        if (Math.abs(el.scrollTop - before) + 0.5 < Math.abs(v * dt)) return
-        v *= Math.exp(-FLING_FRICTION * dt)
-        if (Math.abs(v) < FLING_MIN_V) return
-        flingRAF = requestAnimationFrame(step)
-      }
-      flingRAF = requestAnimationFrame(step)
-    }
 
     function contentBox() {
       return captureLayoutSpace(contentElRef.current)
@@ -333,11 +307,8 @@ export default function useWorkspaceDrag({
       let held = false
       let scrolling = false
       let scrollEl = null
-      let scrollAxis = null
       let scrollSpace = null
-      // Recent {t, top} samples so the lift-off velocity is a short trailing
-      // AVERAGE, not just the final (decelerating) move — see flingReleaseVelocity.
-      let scrollSamples = []
+      let releaseHeldTouchPan = null
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -421,6 +392,11 @@ export default function useWorkspaceDrag({
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
+          // Install the cancelable touch gate only after a stationary hold.
+          // Quick drawer pans keep the browser's compositor-owned fast path.
+          if (sourceKind === 'drawer' && srcEl.hasAttribute('data-pinned-key')) {
+            releaseHeldTouchPan = reserveHeldTouchPan(srcEl)
+          }
           if (navigator.vibrate) { try { navigator.vibrate(DRAG_HOLD_HAPTIC_MS) } catch { /* unsupported */ } }
           holdTimer = setTimeout(() => {
             if (cancelled || cleaned || armed || scrolling) return
@@ -536,23 +512,11 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (scrolling) {
           ev.preventDefault?.()
-          if (scrollEl && scrollAxis === 'x') {
+          if (scrollEl) {
             scrollEl.scrollLeft += clientLengthToLayout(
               previousPoint.x - ev.clientX,
               scrollSpace,
             )
-          } else if (scrollEl && scrollAxis === 'y') {
-            scrollEl.scrollTop += clientLengthToLayout(
-              previousPoint.y - ev.clientY,
-              scrollSpace,
-            )
-            // Sample the real scroll position; the lift handler turns the last
-            // ~110ms of these into a release velocity for the glide.
-            const now = performance.now()
-            scrollSamples.push({ t: now, top: scrollEl.scrollTop })
-            while (scrollSamples.length > 2 && now - scrollSamples[0].t > 110) {
-              scrollSamples.shift()
-            }
           }
           return
         }
@@ -564,20 +528,13 @@ export default function useWorkspaceDrag({
               pinned: srcEl.hasAttribute('data-pinned-key'),
             })
             if (intent === 'pending') return
-            if (intent === 'scroll') {
+            if (intent === 'yield' && isTouch && srcEl.hasAttribute('data-pinned-key')) {
+              // Motion cancels the hold; native vertical panning and the
+              // drawer's horizontal close gesture retain their own streams.
               clearTimeout(holdTimer)
-              scrolling = true
-              scrollEl = srcEl.closest('.drawer__scroll')
-              scrollAxis = 'y'
-              scrollSamples = []
-              ev.preventDefault?.()
-              if (scrollEl) {
-                scrollSpace = captureLayoutSpace(scrollEl)
-                scrollEl.scrollTop += clientLengthToLayout(
-                  start.y - ev.clientY,
-                  scrollSpace,
-                )
-                scrollSamples.push({ t: performance.now(), top: scrollEl.scrollTop })
+              if (dx < 0 && isHorizontalDrawerSwipe(dx, dy)) {
+                cancelled = true
+                cleanup()
               }
               return
             }
@@ -585,8 +542,13 @@ export default function useWorkspaceDrag({
               const handler = drawerGesture()
               ev.preventDefault?.()
               cancelled = true
+              const releasePan = releaseHeldTouchPan
+              releaseHeldTouchPan = null
               cleanup()
-              handler?.beginReorder?.({ pointerId, start, moveEvent: ev })
+              const accepted = handler?.beginReorder?.({
+                pointerId, start, moveEvent: ev, releaseHeldTouchPan: releasePan,
+              })
+              if (!accepted) releasePan?.()
               return
             }
             if (intent === 'workspace') arm()
@@ -612,7 +574,6 @@ export default function useWorkspaceDrag({
                 // Whitespace and close buttons remain native pan-x.
                 scrolling = true
                 scrollEl = srcEl.closest('.shell__tabstrip')
-                scrollAxis = 'x'
                 ev.preventDefault?.()
                 if (scrollEl) {
                   scrollSpace = captureLayoutSpace(scrollEl)
@@ -692,12 +653,6 @@ export default function useWorkspaceDrag({
         }
         if (!armed) {
           if (scrolling) {
-            // Turn the last ~110ms of travel into a release velocity and hand a
-            // still-moving lift to the momentum glide. A finger that paused before
-            // lifting leaves no fresh samples, so it keeps its exact rest position.
-            if (scrollEl && scrollAxis === 'y') {
-              startFling(scrollEl, flingReleaseVelocity(scrollSamples, performance.now()))
-            }
             cleanup({ suppressClick: true })
           } else cleanup()
           return
@@ -766,6 +721,8 @@ export default function useWorkspaceDrag({
         // the preview simply folds away.
         onPreviewBuilder?.(false, { committed })
         clearTimeout(holdTimer)
+        releaseHeldTouchPan?.()
+        releaseHeldTouchPan = null
         if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
         stopAutoScroll()
         window.removeEventListener('pointermove', onMove, true)
@@ -857,9 +814,6 @@ export default function useWorkspaceDrag({
       // stale-session reconciliation so this fresh interaction stays live.
       clearPendingSourceClick?.()
       clearPendingSourceClick = null
-      // Touching the list halts an in-flight momentum glide, the way native
-      // scrolling stops under a finger.
-      stopFling()
       if (activeCleanup) {
         // Pointer ids are routinely REUSED across sequential touch gestures
         // (notably id=1 on mobile). Liveness comes from capture, never identity:
@@ -927,7 +881,6 @@ export default function useWorkspaceDrag({
       window.removeEventListener('pageshow', reconcileStaleSession)
       document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
-      stopFling() // no rAF may outlive the effect
       clearPendingSourceClick?.()
       removeOverlays()
     }

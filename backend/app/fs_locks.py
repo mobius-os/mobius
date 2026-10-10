@@ -54,6 +54,14 @@ Multi-lock holders, all acquiring left-to-right:
   - explicit app source apply holds lifecycle -> app -> source for an existing
     app; first apply holds lifecycle -> source until the new row commits.
 
+Schedule saves and manifest timezone convergence also take lifecycle -> source.
+That outer lock owns the entire choice/declaration/crontab transaction, including
+rollback; a lock around only the crontab write would allow a failed save to undo
+an accepted later choice. Runtime reconciliation already runs under lifecycle
+(recovery/install rollback); startup reconciliation runs before requests serve.
+Blocking cron workers use ``app_cron.run_schedule_mutation`` so cancellation
+cannot release these locks while a worker is still writing.
+
 Single-lock holders: ``write_app_file`` / ``delete_app_file`` take only the
 app lock; the install endpoint takes only the lifecycle lock.
 """

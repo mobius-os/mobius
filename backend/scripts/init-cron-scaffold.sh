@@ -262,11 +262,13 @@ INIT_TMP=""
 trap - EXIT
 echo "wrote $INIT_PATH"
 
+# Finish fallible setup before changing live cron: a rejected save must not
+# report failure after its new cadence is already installed.
+mkdir -p "${DATA_DIR:-/data}/cron-logs"
+
 # 3. Install the entry NOW so the agent doesn't need to wait for a
 #    restart. Reuses the same script so install + replay logic match.
 bash "$INIT_PATH"
-
-mkdir -p "${DATA_DIR:-/data}/cron-logs"
 
 echo
 echo "Done. Verify with: crontab -u mobius -l"

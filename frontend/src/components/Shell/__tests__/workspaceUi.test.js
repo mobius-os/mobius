@@ -723,7 +723,7 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
     'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
-  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-pinned-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
+  assert.doesNotMatch(drawerCss, /\.drawer__row \.drawer__item\[data-pinned-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
   assert.doesNotMatch(
     dragBinding,
@@ -770,7 +770,7 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     /ctxListener = \(ev\) => \{[\s\S]*?preventDefault\(\)[\s\S]*?stopImmediatePropagation\(\)/,
     'touch contextmenu must not bypass the shared hold timer',
   )
-  assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
+  assert.match(dragBinding, /reserveHeldTouchPan\(srcEl\)/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
   assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)
   assert.doesNotMatch(drawer, /pinnedReorderIntent|heldDrawerRowIntent/,

@@ -5910,9 +5910,7 @@ async def autopilot_respond(
   if status == "escalate":
     await _autopilot_escalate_and_notify(
       db, app_id, record_id, owner_id,
-      "Autopilot reached its five-round limit without resolving the reviews."
-      if verdict.get("reason") == "round_limit"
-      else "Autopilot's follow-up rounds keep failing to complete.",
+      "Autopilot's follow-up rounds keep failing to complete.",
     )
     await autopilot.mirror_to_ledger(app_id, record_id)
     return {"status": "escalated", "reason": verdict.get("reason")}

@@ -29,6 +29,7 @@ function AssistantReply({
 }) {
   const timeline = useContext(PeerTimelineContext)
   const positions = timeline?.positions
+  const presentationRows = replyGroup.presentationRows
   const msg = useMemo(() => {
     let source = null
     if (useDbActivePayload) {
@@ -39,22 +40,22 @@ function AssistantReply({
         livePayload.blocks, activeMirrorMsg?.blocks || [], activitySourceBlocks || [],
       )
       source = {
-        ...(activeMirrorMsg || replyGroup.rows[activeRowIndex]?.message || {}),
+        ...(activeMirrorMsg || presentationRows[activeRowIndex]?.message || {}),
         ...livePayload,
         role: 'assistant',
         blocks: carryDurableBlockState(blocks, activeMirrorMsg?.blocks || []),
       }
     }
-    return replyGroup.rows.length > 1 ? source : projectSteerContinuationMessage(
+    return presentationRows.length > 1 ? source : projectSteerContinuationMessage(
       sealedSteerAssistant, source, { active: isStreaming },
     )
   }, [activeMirrorMsg, activitySourceBlocks, hasLivePayload, isStreaming,
-    sealedSteerAssistant, streamItems, useDbActivePayload, replyGroup, activeRowIndex])
+    sealedSteerAssistant, streamItems, useDbActivePayload, presentationRows, activeRowIndex])
 
-  const sourceRows = useMemo(() => replyGroup.rows.map((row, index) => (
-    index === (activeRowIndex >= 0 ? activeRowIndex : replyGroup.rows.length - 1)
+  const sourceRows = useMemo(() => presentationRows.map((row, index) => (
+    index === (activeRowIndex >= 0 ? activeRowIndex : presentationRows.length - 1)
       ? { ...row, message: msg || row.message } : row
-  )), [replyGroup, activeRowIndex, msg])
+  )), [presentationRows, activeRowIndex, msg])
   const proseRows = useMemo(() => presentAssistantReply(sourceRows, {
     activeIndex: isStreaming ? activeRowIndex : -1, positions,
   }), [sourceRows, activeRowIndex, isStreaming, positions])
@@ -62,7 +63,7 @@ function AssistantReply({
     activeIndex: isStreaming ? activeRowIndex : -1, positions,
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
-  const displayTimeline = useMemo(() => ({ ...timeline, positions: activity.positions }), [timeline, activity.positions])
+  const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
@@ -93,7 +94,7 @@ function AssistantReply({
               chatId={chatId}
               messageKey={row.key}
               activityMessageId={row.message.id}
-              activitySourceBlocks={active ? activitySourceBlocks : replyGroup.rows[index].message.blocks}
+              activitySourceBlocks={active ? activitySourceBlocks : presentationRows[index].message.blocks}
               isStreaming={active && isStreaming}
               isActiveAnswer={active}
               isLastMsg={tail && isLastMsg}
