@@ -1650,7 +1650,7 @@ async def _run_codex_sdk_turn(
   # completed item. Retain them only for the lifetime of this turn so a Codex
   # path that omits that aggregate can still publish one authoritative result.
   command_output_deltas: dict[str, list[str]] = {}
-  delivered_image_ids: set[str] = set()
+  captured_image_ids: set[str] = set()
   helper_host = None
   codex_context = (
     sdk["AsyncCodex"](config=config) if helper_host_key is None else None
@@ -2159,7 +2159,7 @@ async def _run_codex_sdk_turn(
           if (
             image_generation_cls is not None
             and isinstance(item, image_generation_cls)
-            and item.id in delivered_image_ids
+            and item.id in captured_image_ids
           ):
             continue  # A repeated completion must not create a second image.
           if (
@@ -2172,13 +2172,14 @@ async def _run_codex_sdk_turn(
               image_name = await asyncio.to_thread(
                 _stage_codex_generated_image, runtime_data_dir, chat_id, item.result,
               )
+              # Capture owns replay identity even if publication cannot yet
+              # acknowledge delivery. The inbox retains the artifact for recovery.
+              captured_image_ids.add(item.id)
               published = await generated_files.publish_inbox_files(
                 bc, data_dir=runtime_data_dir, chat_id=chat_id,
               )
               if image_name not in published:
                 image_delivery_error = "The image was generated, but Möbius could not attach it."
-              else:
-                delivered_image_ids.add(item.id)
             except (OSError, ValueError):
               log.warning("Codex generated-image capture failed chat_id=%s", chat_id, exc_info=True)
               image_delivery_error = "The image was generated, but Möbius could not attach it."

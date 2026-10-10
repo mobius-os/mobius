@@ -5353,15 +5353,17 @@ def test_generated_image_obeys_existing_deliverable_size_limit(tmp_path, monkeyp
     codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', _IMAGE_RESULT)
 
 
-@pytest.mark.parametrize('status,result,expected_files,capacity', [
-  ('completed', _IMAGE_RESULT, 1, 500),
-  ('completed', 'invalid!', 0, 500),
-  ('completed', '', 0, 500),
-  ('failed', _IMAGE_RESULT, 0, 500),
-  ('completed', _IMAGE_RESULT, 0, 0),
+@pytest.mark.parametrize('status,result,expected_files,capacity,publication', [
+  ('completed', _IMAGE_RESULT, 1, 500, 'accepted'),
+  ('completed', 'invalid!', 0, 500, 'accepted'),
+  ('completed', '', 0, 500, 'accepted'),
+  ('failed', _IMAGE_RESULT, 0, 500, 'accepted'),
+  ('completed', _IMAGE_RESULT, 0, 0, 'accepted'),
+  ('completed', _IMAGE_RESULT, 0, 500, 'uncertain'),
+  ('completed', _IMAGE_RESULT, 1, 500, 'committed_uncertain'),
 ])
 def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
-  client, db, auth, chat, monkeypatch, tmp_path, status, result, expected_files, capacity,
+  client, db, auth, chat, monkeypatch, tmp_path, status, result, expected_files, capacity, publication,
 ):
   import base64
   import json
@@ -5392,8 +5394,7 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
     )),
     *_goal_completion_notifications(),
   ]
-  if expected_files:
-    notifications.insert(2, notifications[1])  # Native completion replay.
+  notifications.insert(2, notifications[1])  # Replay even without a delivery receipt.
   thread = _FakeThread('thread-1', _FakeTurnHandle(notifications))
 
   class FakeAsyncCodex:
@@ -5420,10 +5421,22 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
     ChatBroadcast(chat.id), chat.id, run_token='rt-image',
     agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
   )
+  generated_file_capacity = sink.generated_file_capacity
   if capacity == 0:
     async def no_capacity():
       return 0
     monkeypatch.setattr(sink, 'generated_file_capacity', no_capacity)
+  publish_generated_file = sink.publish_generated_file
+  if publication != 'accepted':
+    async def uncertain_publication(event):
+      if publication == 'committed_uncertain':
+        await publish_generated_file(event)
+        # Model late commit settlement after its acknowledgement was lost.
+        generated_files._settle_capture(
+          get_settings().data_dir, chat.id, event, accepted=True,
+        )
+      return generated_files.PUBLICATION_UNCERTAIN
+    monkeypatch.setattr(sink, 'publish_generated_file', uncertain_publication)
   outcome = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
     user_message='Create an image', session_id=None, base_env={}, cwd=str(tmp_path),
     chat_id=chat.id, bc=sink, pending_questions={}, db=None,
@@ -5432,7 +5445,8 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
   tools = [block for block in sink.assistant_blocks if block.get('tool') == 'ImageGen']
   assert len(tools) == 1
   assert tools[0]['tool_use_id'] == 'image-call'
-  assert tools[0]['output_exit_code'] == (0 if expected_files else 1)
+  attached = expected_files and publication == 'accepted'
+  assert tools[0]['output_exit_code'] == (0 if attached else 1)
   assert private_path.read_bytes() == b'do not read this'
   rows = db.query(models.GeneratedFile).filter_by(chat_id=chat.id).all()
   assert len(rows) == expected_files
@@ -5440,9 +5454,20 @@ def test_native_generated_image_reaches_durable_chat_and_authenticated_preview(
   assert str(private_path) not in serialized
   assert _IMAGE_RESULT not in serialized
   pending = generated_files._inbox_names(get_settings().data_dir, chat.id)
-  assert len(pending) == (1 if capacity == 0 else 0)
-  if capacity == 0:
+  recoverable = capacity == 0 or publication == 'uncertain'
+  assert len(pending) == (1 if recoverable else 0)
+  if recoverable:
     assert 'could not attach' in tools[0]['output']
+    # Ordinary inbox recovery must deliver the one retained capture, not lose
+    # it or turn the replay into a second attachment.
+    monkeypatch.setattr(sink, 'publish_generated_file', publish_generated_file)
+    monkeypatch.setattr(sink, 'generated_file_capacity', generated_file_capacity)
+    receipt = asyncio.run(generated_files.publish_inbox_files(
+      sink, data_dir=get_settings().data_dir, chat_id=chat.id,
+    ))
+    assert list(receipt) == pending
+    assert db.query(models.GeneratedFile).filter_by(chat_id=chat.id).count() == 1
+    assert generated_files._inbox_names(get_settings().data_dir, chat.id) == []
   if expected_files:
     row = rows[0]
     res = client.get(
