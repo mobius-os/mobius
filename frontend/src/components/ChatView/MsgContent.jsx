@@ -7,6 +7,7 @@ import {
   mergePositionedActivityEntries,
 } from './activityPosition.js'
 import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {
   activitySummaryTools,
@@ -613,7 +614,12 @@ function MsgContentInner({
     const embeddedImagePaths = new Set(generatedFiles.some(attachmentIsGalleryImage) ? displayBlocks.filter(block => block.type === 'text')
       .flatMap(block => markdownImageHrefs(block.content || block.text || ''))
       .map(href => {
-        try { return new URL(href, 'https://mobius.local').pathname } catch { return null }
+        const src = safeImageHref(href)
+        if (!src) return null
+        try {
+          const url = new URL(src, location.origin)
+          return url.origin === location.origin ? url.pathname : null
+        } catch { return null }
       }) : [])
     const visibleFiles = generatedFiles.filter(file => (!isStreaming || attachmentIsGalleryImage(file))
       && !(attachmentIsGalleryImage(file) && embeddedImagePaths.has(

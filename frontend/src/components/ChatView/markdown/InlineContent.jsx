@@ -225,6 +225,10 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
+export function safeImageHref(href) {
+  return safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+}
+
 // Matches /api/chats/<chat_id>/{uploads,media,generated-files}/<file>. These paths require a
 // short-lived media token on ?token=;
 // the owner JWT must not appear there (it would leak into access logs, history,
@@ -234,7 +238,7 @@ function resolveStaticImageSrc(href) {
   // Returns a URL for non-media API paths (or null for invalid hrefs).
   // Appends the owner token for API paths that aren't upload/generated routes —
   // those use the async ExpandableImage path instead.
-  let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  let src = safeImageHref(href)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     // Embedded-chat bearer material is memory-only and must never enter a URL,
@@ -263,7 +267,7 @@ export function ExpandableImage({
   const [loadState, setLoadState] = useState('loading')
   const historyDismiss = useHistoryDismiss(() => setOpen(false))
 
-  const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  const rawSrc = safeImageHref(href)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
   const previewSrc = resolvedSrc
     ? previewSrcForChatMedia(resolvedSrc)
@@ -273,7 +277,7 @@ export function ExpandableImage({
   // projected into the message response. The URL remains a resource identity,
   // not a layout transport. This value is available on the first render, before
   // token resolution or image bytes, so decode can never resize the frame.
-  const dims = imageDimensionsForHref(rawSrc, mediaDimensions)
+  const dims = imageDimensionsForHref(rawSrc, mediaChatId ? mediaDimensions : null)
   const viewportClientHeight = dims
     ? ((typeof window !== 'undefined'
       && (window.visualViewport?.height || window.innerHeight)) || 800)

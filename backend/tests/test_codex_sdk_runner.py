@@ -5318,8 +5318,8 @@ def test_own_stop_does_not_turn_stale_size_details_into_recovery(monkeypatch):
 
 
 _IMAGE_RESULT = (
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'
-  '/x8AAwMCAO+a3ioAAAAASUVORK5CYII='
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4'
+  '////fwAJ+wP9KobjigAAAABJRU5ErkJggg=='
 )
 
 
@@ -5329,6 +5329,39 @@ def test_generated_image_rejects_invalid_bytes_without_leaving_files(tmp_path, r
 
   with pytest.raises(ValueError):
     codex_sdk_runner._stage_codex_generated_image(str(tmp_path), 'chat', result)
+  assert generated_files._inbox_names(str(tmp_path), 'chat') == []
+
+
+@pytest.mark.parametrize('damage', ['signature', 'truncated', 'checksum', 'pixels', 'zero', 'oversized'])
+def test_generated_image_rejects_malformed_png_before_staging(tmp_path, monkeypatch, damage):
+  import base64
+  import struct
+  import zlib
+  from PIL import Image
+  from app import generated_files
+
+  monkeypatch.setattr(Image, 'MAX_IMAGE_PIXELS', None)
+  content = base64.b64decode(_IMAGE_RESULT)
+  if damage == 'signature':
+    content = content[:8]
+  elif damage == 'truncated':
+    content = content[:-12]
+  elif damage == 'checksum':
+    content = content[:29] + b'\0\0\0\0' + content[33:]
+  elif damage == 'pixels':
+    # Keep chunk framing/checksums valid but make the pixel stream undecodable.
+    payload = b'not a zlib stream'
+    chunk = b'IDAT' + payload
+    content = content[:33] + struct.pack('>I', len(payload)) + chunk + struct.pack('>I', zlib.crc32(chunk)) + content[-12:]
+  else:
+    width = 0 if damage == 'zero' else 32_000_001
+    header = content[12:16] + struct.pack('>II', width, 1) + content[24:29]
+    content = content[:12] + header + struct.pack('>I', zlib.crc32(header)) + content[33:]
+
+  with pytest.raises(ValueError):
+    codex_sdk_runner._stage_codex_generated_image(
+      str(tmp_path), 'chat', base64.b64encode(content).decode(),
+    )
   assert generated_files._inbox_names(str(tmp_path), 'chat') == []
 
 
@@ -5356,6 +5389,7 @@ def test_generated_image_obeys_existing_deliverable_size_limit(tmp_path, monkeyp
 @pytest.mark.parametrize('status,result,expected_files,capacity,publication', [
   ('completed', _IMAGE_RESULT, 1, 500, 'accepted'),
   ('completed', 'invalid!', 0, 500, 'accepted'),
+  ('completed', 'iVBORw0KGgo=', 0, 500, 'accepted'),
   ('completed', '', 0, 500, 'accepted'),
   ('failed', _IMAGE_RESULT, 0, 500, 'accepted'),
   ('completed', _IMAGE_RESULT, 0, 0, 'accepted'),

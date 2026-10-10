@@ -7,13 +7,23 @@ const CHAT_MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(uploads|media|genera
 
 export function getMediaChatId(src) {
   const match = String(src || '').match(CHAT_MEDIA_PATH_RE)
+  if (match?.[2] === 'generated-files') {
+    // Adding generated files to local authorization must not reroute remote
+    // Markdown pictures that previously rendered directly from their host.
+    const origin = globalThis.location?.origin || 'https://mobius.local'
+    try {
+      if (new URL(src, origin).origin !== origin) return null
+    } catch {
+      return null
+    }
+  }
   return match ? match[1] : null
 }
 
 export function previewSrcForChatMedia(src) {
   const value = String(src || '')
   const match = value.match(CHAT_MEDIA_PATH_RE)
-  if (!match) return src
+  if (!match || !getMediaChatId(src)) return src
 
   try {
     const absolute = /^[a-z][a-z0-9+.-]*:/i.test(value)

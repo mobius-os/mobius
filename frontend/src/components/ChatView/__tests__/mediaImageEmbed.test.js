@@ -470,3 +470,11 @@ test('generated-file embeds take the media-scoped auth path and preview disposit
     '/api/chats/generated-chat/generated-files/art.png?token=MEDIA_ONLY&preview=true')
   assert.ok(!resolved.includes('OWNER_SECRET'))
 })
+
+for (const origin of ['https://example.com', '//example.com']) {
+  test(`external generated image ${origin} never requests local media authorization or a local preview`, () => {
+    const href = `${origin}/api/chats/generated-chat/generated-files/art.png?version=1#view`
+    assert.equal(getMediaChatId(href), null)
+    assert.equal(previewSrcForChatMedia(href), href)
+  })
+}

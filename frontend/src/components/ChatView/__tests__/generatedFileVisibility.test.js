@@ -332,3 +332,34 @@ test('an image URL mentioned only in a code example does not hide the actual pic
   }))
   assert.match(html, /chat__generated-image/)
 })
+
+for (const protocol of ['javascript:', 'data:', 'ftp:']) {
+  for (const isStreaming of [true, false]) {
+    test(`rejected ${protocol} Markdown cannot suppress a generated image (${isStreaming})`, () => {
+      const href = `${protocol}/api/chats/chat-generated-file/generated-files/chart.png`
+      const html = renderToStaticMarkup(createElement(MsgContent, {
+        msg: { role: 'assistant', blocks: [
+          { type: 'text', content: `![chart](${href})` },
+          { type: 'generated_files', files: [{ name: 'chart.png', mime_type: 'image/png', previewable: true }] },
+        ] }, chatId: 'chat-generated-file', isStreaming,
+      }))
+      assert.match(html, /chat__generated-image/)
+      assert.equal((html.match(/class="md-image-frame"/g) || []).length, 1)
+    })
+  }
+}
+
+for (const origin of ['http://localhost', 'https://example.com']) {
+  test(`approved ${origin} Markdown preserves distinct image resource identities`, () => {
+    const href = `${origin}/api/chats/chat-generated-file/generated-files/chart.png`
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      msg: { role: 'assistant', blocks: [
+        { type: 'text', content: `![chart](${href}?preview=true)` },
+        { type: 'generated_files', files: [{ name: 'chart.png', mime_type: 'image/png', previewable: true }] },
+      ] }, chatId: 'chat-generated-file', isStreaming: false,
+    }))
+    const external = origin !== globalThis.location.origin
+    assert.equal((html.match(/class="md-image-frame"/g) || []).length, external ? 2 : 1)
+    assert.equal(html.includes('chat__generated-image'), external)
+  })
+}

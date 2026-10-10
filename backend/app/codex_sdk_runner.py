@@ -30,15 +30,19 @@ import base64
 import contextlib
 import concurrent.futures as _cf
 import functools
+import io
 import logging
 import os
 import shutil
 import time
 import uuid
+import warnings
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from PIL import Image, UnidentifiedImageError
 
 from app import generated_files
 from app.codex_sdk_contract import (
@@ -120,6 +124,7 @@ _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
 # How often a running Codex helper row re-reads its child rollout for the
 # owner-facing "currently doing" line. The read is a small tail of one file.
 HELPER_PROGRESS_INTERVAL_S = 3.0
+MAX_GENERATED_IMAGE_PIXELS = 32_000_000
 
 
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
@@ -142,6 +147,25 @@ def _stage_codex_generated_image(data_dir: str, chat_id: str, result: str) -> st
   content = base64.b64decode(result.strip(), validate=True)
   if len(content) > limit or not content.startswith(b"\x89PNG\r\n\x1a\n"):
     raise ValueError("generated image result is not a supported PNG")
+  try:
+    with warnings.catch_warnings():
+      warnings.simplefilter("error", Image.DecompressionBombWarning)
+      with Image.open(io.BytesIO(content)) as image:
+        width, height = image.size
+        if (
+          image.format != "PNG" or width <= 0 or height <= 0
+          or width * height > MAX_GENERATED_IMAGE_PIXELS
+        ):
+          raise ValueError("generated image dimensions exceed the pixel limit")
+        image.verify()
+      # Chunk checksums alone do not prove that the pixel stream decodes.
+      with Image.open(io.BytesIO(content)) as image:
+        image.load()
+  except (
+    Image.DecompressionBombError, Image.DecompressionBombWarning,
+    UnidentifiedImageError, OSError, SyntaxError, ValueError,
+  ) as exc:
+    raise ValueError("generated image result is not a valid bounded PNG") from exc
   directory = generated_files.output_dir(data_dir, chat_id, create=True)
   directory_fd = generated_files._open_directory(directory, create=False)
   name = f"generated-image-{uuid.uuid4().hex}.png"
