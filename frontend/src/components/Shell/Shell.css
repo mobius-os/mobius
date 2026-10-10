@@ -176,6 +176,7 @@
 
 /* Desktop-only quick actions. Declare the closed state outside the media query
    so adding this shared markup can never leak controls into the phone header. */
+.shell__sidebar-close,
 .shell__rail-actions {
   display: none;
 }
@@ -927,8 +928,11 @@
     padding: 0;
   }
 
+  /* The rail has no room for the wordmark or the header actions. A docked
+     sidebar narrower than 280px keeps its actions and drops the wordmark. */
   .shell:not(.shell--drawer-docked) .shell__wordmark,
-  .shell:not(.shell--drawer-docked) .shell__bar-actions {
+  .shell:not(.shell--drawer-docked) .shell__bar-actions,
+  .shell--sidebar-narrow .shell__wordmark {
     display: none;
   }
 

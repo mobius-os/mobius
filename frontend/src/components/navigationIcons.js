@@ -10,6 +10,7 @@ import {
   Folder,
   MagnifyingGlassSearch,
   SettingsSlider,
+  SidebarLeft,
 } from '@openai/apps-sdk-ui/components/Icon'
 import './navigationIcons.css'
 
@@ -28,3 +29,4 @@ export const AppsNavIcon = navigationIcon(Grid)
 export const ProjectsNavIcon = navigationIcon(Folder)
 export const SearchNavIcon = navigationIcon(MagnifyingGlassSearch)
 export const SettingsNavIcon = navigationIcon(SettingsSlider)
+export const SidebarNavIcon = navigationIcon(SidebarLeft)

@@ -10,6 +10,7 @@ import {
   NewChatNavIcon,
   ProjectsNavIcon,
   SettingsNavIcon,
+  SidebarNavIcon,
 } from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -1985,6 +1986,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     closeDrawer,
     openDrawer,
   ])
+  // The Open/Close sidebar buttons hide with the layout they leave, so focus
+  // moves to the logo, the navigation toggle that both layouts keep.
+  const toggleSidebarFromButton = useCallback(() => {
+    handleToggleNavigation()
+    brandButtonRef.current?.focus()
+  }, [handleToggleNavigation])
   useWorkspaceDrag({
     contentElRef,
     sceneInputsRef,
@@ -4535,7 +4542,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
       data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      className={`shell${immersiveActive ? ` shell--barhidden ${immersiveMode === 'bar' ? 'shell--barcollapsed' : 'shell--immersive'}` : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
+      className={`shell${immersiveActive ? ` shell--barhidden ${immersiveMode === 'bar' ? 'shell--barcollapsed' : 'shell--immersive'}` : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}${desktopSidebarReserved && desktopSidebarWidth < 280 ? ' shell--sidebar-narrow' : ''}`}>
       <a
         className="shell__skip-link"
         href="#main-content"
@@ -4635,6 +4642,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           </button>
           <button
             type="button"
+            className="shell__rail-action"
+            aria-label="Open sidebar"
+            title="Open sidebar"
+            onClick={toggleSidebarFromButton}
+          >
+            <SidebarNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
             className={`shell__rail-action shell__rail-action--bottom${activeView === 'settings' ? ' shell__rail-action--active' : ''}`}
             aria-label="Settings shortcut"
             title="Settings"
@@ -4673,6 +4689,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
             updateAvailable={shellUpdateAvailable}
             onUpdateNow={applyShellUpdate}
           />
+          <button
+            type="button"
+            className="shell__rail-action shell__sidebar-close"
+            aria-label="Close sidebar"
+            title="Close sidebar"
+            onClick={toggleSidebarFromButton}
+          >
+            <SidebarNavIcon aria-hidden="true" />
+          </button>
         </div>
       </header>
       {sharedBrowserAccess && <div className="shell__shared-access">
