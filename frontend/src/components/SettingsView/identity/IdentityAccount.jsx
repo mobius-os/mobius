@@ -2508,9 +2508,11 @@ export default function IdentityAccount({ token }) {
                             aria-label={uploading ? 'Uploading profile picture' : 'Change profile picture'}
                             onClick={() => fileRef.current?.click()}
                           >
-                            {uploading
-                              ? <ArrowRotateCw className="id-spin" width={16} />
-                              : <Camera width={16} />}
+                            <span className="id-avatar-edit-badge" aria-hidden="true">
+                              {uploading
+                                ? <ArrowRotateCw className="id-spin" width={16} />
+                                : <Camera width={16} />}
+                            </span>
                           </button>
                           <input
                             ref={fileRef}

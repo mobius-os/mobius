@@ -401,12 +401,23 @@ export const IDENTITY_STYLES = `
   object-fit: cover;
 }
 
-/* Small circular "change photo" badge sitting on the avatar's corner, the way
-   most apps do it — sized to the avatar, not competing with it. */
+/* Keep the small corner badge centered inside a larger touch target. */
 .id-avatar-edit {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
+  right: -11px;
+  bottom: -11px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #17171c;
+  cursor: pointer;
+}
+.id-avatar-edit-badge {
   width: 26px;
   height: 26px;
   display: grid;
@@ -415,12 +426,10 @@ export const IDENTITY_STYLES = `
   border-radius: 50%;
   background: rgba(255, 255, 255, .92);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
-  color: #17171c;
-  cursor: pointer;
   transition: transform .15s ease, background .15s ease;
 }
-.id-avatar-edit:not(:disabled):hover { transform: scale(1.08); background: #fff; }
-.id-avatar-edit:not(:disabled):active { transform: scale(.94); }
+.id-avatar-edit:not(:disabled):hover .id-avatar-edit-badge { transform: scale(1.08); background: #fff; }
+.id-avatar-edit:not(:disabled):active .id-avatar-edit-badge { transform: scale(.94); }
 .id-avatar-edit svg { width: 14px; height: 14px; }
 
 .id-title-row {
@@ -2306,7 +2315,6 @@ export const IDENTITY_STYLES = `
 
 @media (max-width: 430px) {
   .id-avatar { width: 64px; font-size: 24px; }
-  .id-avatar-edit { width: 26px; height: 26px; }
   .id-title { font-size: 20px; }
   .id-email {
     width: 100%;
@@ -2383,9 +2391,11 @@ export const IDENTITY_STYLES = `
   background: rgba(139, 108, 247, .1);
 }
 [data-theme="light"] .settings .id-root--settings .id-avatar-edit {
+  color: #29232f;
+}
+[data-theme="light"] .settings .id-root--settings .id-avatar-edit-badge {
   border-color: #f2edf9;
   background: #fff;
-  color: #29232f;
 }
 
 /* Railway account window, tuned to Settings' type scale and control sizes. */

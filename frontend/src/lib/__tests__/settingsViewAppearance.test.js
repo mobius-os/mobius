@@ -213,6 +213,12 @@ test('Settings detail back button has a 44px touch target and keeps the shared 1
   assert.doesNotMatch(view, />←<\/button>/)
 })
 
+test('profile photo edit keeps a named native button around its decorative badge', () => {
+  const account = readFileSync(new URL('../../components/SettingsView/identity/IdentityAccount.jsx', import.meta.url), 'utf8')
+  assert.match(account, /<button\s+type="button"\s+className="id-avatar-edit"\s+disabled=\{uploading\}\s+aria-label=\{uploading \? 'Uploading profile picture' : 'Change profile picture'\}\s+onClick=\{\(\) => fileRef\.current\?\.click\(\)\}/)
+  assert.match(account, /<span className="id-avatar-edit-badge" aria-hidden="true">/)
+})
+
 test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /claude: 'claude-opus-4-8'/)
   assert.match(view, /codex: 'gpt-5\.6-terra'/)
