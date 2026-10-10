@@ -2,6 +2,7 @@ import {
   forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo,
   useReducer, useRef, useState,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
@@ -91,7 +92,7 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      The host is a fallback for engines that deny clipboard access inside an
 //      opaque frame; source attribution and visibility gate the side effect.
 //
-//   2. {type: 'moebius:frame-mounted', appId}              frame → parent
+//   2. {type: 'moebius:frame-mounted', appId, supportsAppBlocks} frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
 //      stable DOM ref in app-frame.html — NOT right after
 //      `createRoot.render()` returns, which only schedules the render). The
@@ -158,6 +159,9 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      handlers and their resulting React commits have had a chance to run.
 //      AppCanvas keeps the destination covered until that acknowledgement, so
 //      a direct link never flashes the app's home screen first.
+//   6b. moebius:app-block-init/action/state is an optional, source-attributed
+//       transcript view-model session. It does not grant app authority; an old
+//       block negotiates via supportsAppBlocks before any legacy intent is sent.
 //
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
@@ -344,6 +348,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
   pendingIntent = null,
+  blockSession = null, blockEvent = null, onBlockState, onBlockCapability,
   shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
@@ -475,6 +480,23 @@ const AppCanvas = forwardRef(function AppCanvas({
   // an older destination from uncovering a newer handoff.
   const pendingIntentRef = useRef(pendingIntent)
   pendingIntentRef.current = pendingIntent
+  const blockSessionRef = useRef(blockSession)
+  blockSessionRef.current = blockSession
+  const onBlockStateRef = useRef(onBlockState)
+  onBlockStateRef.current = onBlockState
+  const onBlockCapabilityRef = useRef(onBlockCapability)
+  onBlockCapabilityRef.current = onBlockCapability
+  const sentBlockEventRef = useRef(null)
+  // Negotiation belongs to an exact document, including a buffered successor.
+  const blockDocumentsRef = useRef(new Map())
+  const reportedBlockDocumentRef = useRef(null)
+  const [blockDocumentRevision, setBlockDocumentRevision] = useState(0)
+  function publishBlockCapability(v) {
+    const doc = blockDocumentsRef.current.get(v)
+    if (!doc || doc.supported == null || reportedBlockDocumentRef.current === doc) return
+    reportedBlockDocumentRef.current = doc
+    onBlockCapabilityRef.current?.(doc.supported, { version: v, reset: true })
+  }
   const storageHost = useMemo(() => createAppStorageHost({
     appId,
     getCurrentToken: () => hostTokenRef.current,
@@ -563,6 +585,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           framesRef.current.delete(v)
           loadedDocsRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
+          blockDocumentsRef.current.delete(v)
           cache.delete(v)
         }
       }
@@ -709,6 +732,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         bg: eff?.bg ?? theme?.bg,
         storage: readAppFrameStorage(appId, undefined, appSlug),
         capabilityContract,
+        blockSession: blockSessionRef.current,
       },
       '*',
     )
@@ -755,11 +779,13 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (swap.incomingVersion == null) return
     const v = swap.incomingVersion
+    // A mounted successor waiting on active publication ownership is not hung.
+    if (blockDocumentsRef.current.get(v)?.supported != null) return
     const id = setTimeout(() => {
       dispatchSwap({ type: 'incoming-timeout', version: v })
     }, INCOMING_SWAP_TIMEOUT_MS)
     return () => clearTimeout(id)
-  }, [swap.incomingVersion])
+  }, [swap.incomingVersion, blockDocumentRevision])
 
   // Single message listener for BOTH buffered frames. Registered once per appId
   // mount (deliberately minimal deps: it reads live state through refs +
@@ -802,6 +828,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       const srcVersion = attributedFrameVersion(framesRef.current, e.source)
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
 
+      if (msg.type === 'moebius:app-block-state') {
+        if (srcVersion === liveVersionRef.current && blockSessionRef.current?.sessionId === msg.sessionId) {
+          onBlockStateRef.current?.(msg)
+        }
+        return
+      }
+
       if (msg.type === 'moebius:module-request') {
         serveModuleRequest({
           message: msg, source: e.source, appId, frameVersion: srcVersion,
@@ -826,6 +859,14 @@ const AppCanvas = forwardRef(function AppCanvas({
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
+        const doc = blockDocumentsRef.current.get(srcVersion)
+        if (!doc) return
+        doc.supported = msg.supportsAppBlocks === true
+        setBlockDocumentRevision(value => value + 1)
+        if (srcVersion === liveVersionRef.current) publishBlockCapability(srcVersion)
+        // The outgoing document may still own a public attempt or unknown result.
+        // A read-only successor cannot take that ownership by mounting.
+        if (srcVersion !== liveVersionRef.current && blockSessionRef.current?.retain) return
         dispatchSwap({ type: 'frame-mounted', version: srcVersion })
         return
       }
@@ -1292,6 +1333,31 @@ const AppCanvas = forwardRef(function AppCanvas({
     })
   }, [swap.liveLoaded, swap.liveVersion, pendingIntent])
 
+  useLayoutEffect(() => {
+    const incoming = swap.incomingVersion
+    if (incoming != null && !blockSession?.retain
+        && blockDocumentsRef.current.get(incoming)?.supported != null) {
+      dispatchSwap({ type: 'frame-mounted', version: incoming })
+    }
+    publishBlockCapability(swap.liveVersion)
+  }, [swap.liveVersion, swap.incomingVersion, blockSession?.retain, blockDocumentRevision])
+
+  // Inline transcript sessions are optional. Unlike an app intent, init has no
+  // action and is repeated only when a newly promoted document needs it.
+  useEffect(() => {
+    if (!blockSession || !swap.liveLoaded) return
+    postToFrame(swap.liveVersion, { type: 'moebius:app-block-init',
+      sessionId: blockSession.sessionId, actions: blockSession.actions, initialAction: null,
+      checkpoint: blockSession.checkpoint, retain: blockSession.retain,
+      recoveryError: blockSession.recoveryError })
+  }, [swap.liveLoaded, swap.liveVersion, blockSession])
+  useEffect(() => {
+    if (!blockSession || !blockEvent || !swap.liveLoaded || blockEvent.sessionId !== blockSession.sessionId) return
+    if (sentBlockEventRef.current === blockEvent.nonce) return
+    sentBlockEventRef.current = blockEvent.nonce
+    postToFrame(swap.liveVersion, { type: 'moebius:app-block-action', ...blockEvent })
+  }, [swap.liveLoaded, swap.liveVersion, blockSession, blockEvent])
+
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
   // probes /api/health) into the app iframe. The runtime's window.mobius.online
@@ -1621,6 +1687,17 @@ const AppCanvas = forwardRef(function AppCanvas({
         framesRef.current.get(v)?.contentWindow,
       )
       dispatchSwap({ type: 'live-reload', version: v })
+    }
+    // onLoad denotes a new document even if its WindowProxy/version survives.
+    blockDocumentsRef.current.set(v, { supported: null })
+    if (v === liveVersionRef.current && reportedBlockDocumentRef.current) {
+      reportedBlockDocumentRef.current = null
+      // The new document consumes its first init before any later block-init.
+      // Commit the owner's reset now: React batching would otherwise hand over
+      // an idle confirmation's retain flag before its state and event clear.
+      flushSync(() => {
+        onBlockCapabilityRef.current?.(null, { version: v, reset: true })
+      })
     }
     loadedDocsRef.current.add(v)
     sendInit(v)

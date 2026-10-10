@@ -6,6 +6,8 @@ import InlineContent from './InlineContent.jsx'
 import { copyPlainText } from '../messageCopy.js'
 import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
+import AppBlock from './AppBlock.jsx'
+import { appBlockFromToken } from './appBlock.js'
 
 /**
  * Block-level markdown components.
@@ -233,7 +235,10 @@ export function BlockToken({ token, onInternalNav, mediaDimensions }) {
         mediaDimensions={mediaDimensions}
       />
     )
-    case 'code': return <CodeBlock token={token} />
+    case 'code': {
+      const block = appBlockFromToken(token)
+      return block ? <AppBlock block={block} onInternalNav={onInternalNav} /> : <CodeBlock token={token} />
+    }
     case 'table': return (
       <Table
         token={token}

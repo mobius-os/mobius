@@ -492,6 +492,7 @@
 
   <script>
     // Populated by server-side injection in get_frame() — do not rename.
+    var _FRAME_PASSIVE_BLOCK_DIGEST = null;
     var _FRAME_APP_ID = 'unknown'
     var _FRAME_CHAT_ID = ''
 
@@ -612,7 +613,7 @@
     //      registered before iframe.onLoad fires in the parent).
     //   2. parent (AppCanvas.jsx) posts
     //      {type:'moebius:frame-init', token, themeCss, bg,
-    //       capabilityContract} on
+    //       capabilityContract, blockSession} on
     //      its iframe.onLoad handler.
     //   3. iframe applies theme and requests its compiled module from the
     //      parent. The controlled shell can read the versioned service-worker
@@ -649,10 +650,13 @@
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;
+    // Passive context selects an opted-in app entry point without activating an action.
+    let currentBlockSession = null;
     let tokenRefreshPromise = null;
     let tokenRefreshResolve = null;
     let mountedRoot = null;
     let mountedComponent = null;
+    let supportsAppBlocks = false;
     let createRoot = null;
     let createElement = null;
     let Fragment = null;
@@ -958,6 +962,22 @@
 
     async function importBrokeredModule(retry) {
       const bytes = await requestModuleBytes(retry);
+      // A cached frame or racing Apply must not evaluate a different module
+      // under this document's trusted passive admission.
+      if (currentBlockSession) {
+        if (!_FRAME_PASSIVE_BLOCK_DIGEST || !globalThis.crypto?.subtle) {
+          const error = new Error('Passive app sessions are not admitted for this revision.');
+          error.code = 'passive-not-admitted';
+          throw error;
+        }
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        if (actual !== _FRAME_PASSIVE_BLOCK_DIGEST) {
+          const error = new Error('Passive app module revision changed; open the app explicitly.');
+          error.code = 'passive-not-admitted';
+          throw error;
+        }
+      }
       const blob = new Blob([bytes], { type: 'text/javascript' });
       const blobUrl = URL.createObjectURL(blob);
       try {
@@ -1092,7 +1112,10 @@
       mountedRoot.render(
         createElement(Fragment, null,
           createElement(MountSignal),
-          createElement(mountedComponent, { appId: _FRAME_APP_ID, token: currentToken })
+          createElement(mountedComponent, {
+            appId: _FRAME_APP_ID, token: currentToken,
+            ...(supportsAppBlocks ? { blockSession: currentBlockSession } : {})
+          })
         )
       );
     }
@@ -1191,7 +1214,7 @@
       if (!node || window.__frameMounted) return;
       window.__frameMounted = true;
       window.parent.postMessage(
-        { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
+        { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID, supportsAppBlocks },
         window.location.origin
       );
     }
@@ -1369,6 +1392,11 @@
     });
 
     async function loadModule() {
+      if (currentBlockSession && !_FRAME_PASSIVE_BLOCK_DIGEST) {
+        supportsAppBlocks = false;
+        signalFrameMounted(document.getElementById('root'));
+        return;
+      }
       const token = currentToken;
       if (!token) {
         showErr('Configuration error', 'No token received from parent.');
@@ -1433,6 +1461,12 @@
         createElement = compiledRuntime.createElement;
         Fragment = compiledRuntime.Fragment;
         const Component = mod.default;
+        supportsAppBlocks = mod.appBlockSessions === true;
+        // Opt-in metadata admits evaluation, not an unsupported ordinary root.
+        if (currentBlockSession && !supportsAppBlocks) {
+          signalFrameMounted(document.getElementById('root'));
+          return;
+        }
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
           return;
@@ -1446,6 +1480,11 @@
         // and a component that throws during its first render would have already
         // claimed "mounted". See MountSignal.
       } catch (err) {
+        if (currentBlockSession && err?.code === 'passive-not-admitted') {
+          supportsAppBlocks = false;
+          signalFrameMounted(document.getElementById('root'));
+          return;
+        }
         showErr('Failed to load app', err.stack || err.message);
       } finally {
         delete globalThis.__mobiusRuntimeConfig;
@@ -1546,6 +1585,7 @@
         acceptToken(msg.token);
         if (initialized) return;
         initialized = true;
+        currentBlockSession = msg.blockSession || null;
         if (typeof window.__mobiusHydrateLocalStorage === 'function') {
           window.__mobiusHydrateLocalStorage(msg.storage);
         }

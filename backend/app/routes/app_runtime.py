@@ -378,6 +378,12 @@ def get_frame(
 
   html = frame_path.read_text(encoding="utf-8")
 
+  from app.app_capabilities import passive_block_module_digest
+  html = html.replace(
+    "var _FRAME_PASSIVE_BLOCK_DIGEST = null",
+    f"var _FRAME_PASSIVE_BLOCK_DIGEST = {json.dumps(passive_block_module_digest(app))}",
+  )
+
   # Per-app server-side substitution of the app/chat ids the runtime needs.
   html = html.replace(
     "var _FRAME_APP_ID = 'unknown'",

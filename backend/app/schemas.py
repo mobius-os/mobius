@@ -235,6 +235,16 @@ class AppOut(BaseModel):
   system_prompt_file: str | None = None
   chat_log_access: ChatLogAccess = "none"
   capability_contract: dict | None = None
+  runtime_revision: str | None = Field(default=None, exclude=True)
+  source_commit: str | None = Field(default=None, exclude=True)
+
+  @computed_field
+  @property
+  def passive_block_module_digest(self) -> str | None:
+    """Trusted pre-execution admission for this accepted compiled revision."""
+    from app.app_capabilities import passive_block_module_digest
+    return passive_block_module_digest(self)
+
   created_at: datetime
   updated_at: datetime
 
