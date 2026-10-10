@@ -425,6 +425,27 @@ def _validate_running_label(running_label, field: str) -> None:
     _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
 
 
+def service_diagnostics_routes(service: Mapping) -> list[str]:
+  """Reviewed, finite route labels; syntax cannot prove template provenance."""
+  routes = service.get("diagnostics_routes", [])
+  if not isinstance(routes, list) or len(routes) > 128:
+    _fail(
+      "Manifest `service.diagnostics_routes` must be an array of at most "
+      "128 routes."
+    )
+  if not all(
+    isinstance(route, str) and route.startswith("/") and len(route) <= 256
+    for route in routes
+  ):
+    _fail(
+      "Manifest `service.diagnostics_routes` must contain paths of at most "
+      "256 characters."
+    )
+  if len(set(routes)) != len(routes):
+    _fail("Manifest `service.diagnostics_routes` must not contain duplicates.")
+  return sorted(routes)
+
+
 def validate_agent_tools(tools, *, has_service: bool) -> None:
   """Validate the tools an app contributes to every agent run.
 
@@ -964,12 +985,13 @@ def validate_manifest_contract(manifest) -> None:
   service = manifest.get("service")
   if service is not None:
     if not isinstance(service, Mapping) or set(service) - {
-      "id", "aliases", "entry", "access",
+      "id", "aliases", "entry", "access", "diagnostics_routes",
     }:
       _fail(
         "Manifest `service` must contain only `id`, `aliases`, `entry`, "
-        "and `access`."
+        "`access`, and `diagnostics_routes`."
       )
+    service_diagnostics_routes(service)
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
     service_id = service.get("id", mid)

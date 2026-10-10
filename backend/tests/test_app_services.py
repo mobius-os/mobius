@@ -1,6 +1,7 @@
 """Accepted app services own policy; the platform owns their hard boundary."""
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -206,7 +207,7 @@ print(json.dumps({
 
 def _service_app(
   db, *, access="self", slug="service-test", service_id=None, aliases=(),
-  service_bytes=SERVICE,
+  service_bytes=SERVICE, diagnostics_routes=(),
 ):
   source = Path(get_settings().data_dir) / "apps" / slug
   source.mkdir(parents=True)
@@ -222,6 +223,7 @@ def _service_app(
         "entry": "service.py",
         "access": access,
         "protocol": "json-v1",
+        "diagnostics_routes": list(diagnostics_routes),
         "max_request_bytes": 8 * 1024 * 1024,
         "max_response_bytes": 8 * 1024 * 1024,
       },
@@ -635,7 +637,8 @@ def test_http_callers_cannot_reach_the_platforms_tool_lane(client, auth, db, pat
 def test_service_diagnostics_are_local_shape_only(client, auth, db, monkeypatch):
   recorded = []
   monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
-  app = _service_app(db, slug="diagnostic-shape")
+  app = _service_app(db, slug="diagnostic-shape",
+                     diagnostics_routes=["/replies/{post_id}"])
   accepted = runtime_parent(app.id) / app.runtime_revision
   (accepted / "service.py").write_text(
     'import json\nprint(json.dumps({"status":502,"body":{"detail":"private body"},'
@@ -679,3 +682,53 @@ def test_malformed_optional_diagnostics_do_not_break_service(client, auth, db):
   response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
   assert response.status_code == 200
   assert response.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("route", [
+  "/replies/private-id", "/users/12345", "/undeclared/{id}", ["/status"],
+])
+def test_undeclared_route_diagnostics_never_enter_tracing(
+  client, auth, db, monkeypatch, route,
+):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db, diagnostics_routes=["/replies/{post_id}", "/status"])
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  envelope = {"body": {"ok": True}, "diagnostics": {"route": route}}
+  (accepted / "service.py").write_text(f"print({json.dumps(envelope)!r})\n")
+  response = client.get(f"/api/apps/{app.id}/service/replies/private-id", headers=auth)
+  assert response.status_code == 200
+  assert response.json() == {"ok": True}
+  assert {k: v for attrs in recorded for k, v in attrs.items()} == {
+    "mobius.app.slug": "service-test",
+  }
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_static_route_diagnostics_require_an_accepted_declaration(
+  client, auth, db, monkeypatch, declared,
+):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db, diagnostics_routes=["/status"] if declared else [])
+  if not declared:
+    contract = dict(app.capability_contract)
+    contract["service"] = dict(contract["service"])
+    contract["service"].pop("diagnostics_routes")
+    app.capability_contract = contract
+    db.commit()
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  (accepted / "service.py").write_text(
+    'print(\'{"body":{"ok":true},"diagnostics":{"route":"/status"}}\')\n'
+  )
+  # A draft manifest cannot add authority to the accepted runtime contract.
+  (Path(app.source_dir) / "mobius.json").write_text(
+    '{"service":{"diagnostics_routes":["/status"]}}'
+  )
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+  assert response.status_code == 200
+  flattened = {k: v for attrs in recorded for k, v in attrs.items()}
+  assert flattened == {
+    "mobius.app.slug": "service-test",
+    **({"mobius.service.route": "/status"} if declared else {}),
+  }

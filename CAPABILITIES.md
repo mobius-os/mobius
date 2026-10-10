@@ -160,6 +160,12 @@ the same time can touch the same state, the app must
 provide its own file or database locking.
 A response may optionally include `diagnostics` for local tracing:
 `{"route":"/replies/{post_id}","error_type":"HTTPStatusError","upstream_status":404}`.
+Declare the finite, code-authored route templates in the manifest service:
+`"diagnostics_routes": ["/replies/{post_id}", "/status"]`. The accepted capability
+contract freezes this allowlist; only exact matches are traced. Without a
+declaration, route diagnostics are ignored. Declarations must contain at most
+128 distinct paths, each at most 256 characters, and are reviewed source, not
+request-derived data. A path-shaped string alone cannot prove it is a template.
 Use the matched code-authored route template, never the concrete request path;
 use exception class names, never messages or tracebacks. Do not include request
 values, content, credentials, or resource IDs. Only these bounded shape fields

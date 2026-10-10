@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import models
-from app.app_capabilities import contract_and_digest
+from app.app_capabilities import contract_and_digest, contract_from_app_state
 from app.app_capabilities import contract_with_runtime_capabilities
 from app.app_capabilities import diff_contracts
 from app.app_capabilities import normalize_runtime_capabilities
@@ -845,3 +845,36 @@ def test_job_secret_permission_is_reviewed_normalized_and_omission_revokes():
   assert contract_from_app_state(app)['data']['job_secret_read'] == ['tg-1', 'tg-2']
   revoked = contract_from_app_state(app, contract_permissions={})
   assert 'job_secret_read' not in revoked['data']
+
+
+def test_service_diagnostic_routes_are_bound_and_preserved_in_accepted_contract():
+  from types import SimpleNamespace
+
+  manifest = _manifest(
+    source_files=["memory-core.md", "service.py"],
+    service={"entry": "service.py", "diagnostics_routes": ["/status", "/replies/{post_id}"]},
+  )
+  validate_manifest_contract(manifest)
+  contract, digest = contract_and_digest(manifest)
+  assert contract["service"]["diagnostics_routes"] == ["/replies/{post_id}", "/status"]
+  app = SimpleNamespace(capability_contract=contract)
+  projected = contract_from_app_state(app)
+  assert projected["service"] == contract["service"]
+  manifest["service"]["diagnostics_routes"] = ["/status"]
+  assert contract_and_digest(manifest)[1] != digest
+  assert contract["service"]["diagnostics_routes"] == ["/replies/{post_id}", "/status"]
+
+
+@pytest.mark.parametrize("routes", [
+  None, "/status", {}, [None], [[]], ["status"], ["/status", "/status"],
+  ["/" + "x" * 256], [f"/route-{index}" for index in range(129)],
+])
+def test_service_diagnostic_route_declaration_is_bounded(routes):
+  manifest = _manifest(
+    source_files=["memory-core.md", "service.py"],
+    service={"entry": "service.py", "diagnostics_routes": routes},
+  )
+  with pytest.raises(ManifestContractError, match="service.diagnostics_routes"):
+    validate_manifest_contract(manifest)
+  with pytest.raises(ManifestContractError, match="service.diagnostics_routes"):
+    contract_and_digest(manifest)
