@@ -109,7 +109,11 @@ _DELIVERY_TIMEOUT_SECONDS = 10
 
 
 def send_push(subscription_info: dict, payload: dict) -> bool:
-  """Send a Web Push notification. Returns True on success, False on gone."""
+  """Send a Web Push notification. Returns True on success, False on gone.
+
+  Push services report an expired subscription as 410 Gone or 404 Not Found
+  (FCM's answer for stale subscriptions); both mean the subscription is dead.
+  """
   if _vapid is None:
     raise RuntimeError("VAPID not initialized — call init_vapid() first")
   # Startup and suppressed notifications do not need the delivery stack.
@@ -131,7 +135,7 @@ def send_push(subscription_info: dict, payload: dict) -> bool:
     )
     return True
   except WebPushException as e:
-    if e.response is not None and e.response.status_code == 410:
+    if e.response is not None and e.response.status_code in (404, 410):
       return False
     logger.error("Web Push failed: %s", e)
     raise

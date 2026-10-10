@@ -85,10 +85,15 @@ def test_send_push_loads_delivery_dependency_and_preserves_arguments(monkeypatch
   ]
 
 
-def test_send_push_returns_false_when_subscription_is_gone(monkeypatch):
+@pytest.mark.parametrize("status_code", [404, 410])
+def test_send_push_returns_false_when_subscription_is_gone(
+  monkeypatch, status_code,
+):
+  # Push services report an expired subscription as 410 Gone or, as FCM does
+  # for stale ones, 404 Not Found. Both mean delete it; neither is retryable.
   error = FakeWebPushException(
     "subscription is gone",
-    response=SimpleNamespace(status_code=410),
+    response=SimpleNamespace(status_code=status_code),
   )
 
   def fake_webpush(**_kwargs):
