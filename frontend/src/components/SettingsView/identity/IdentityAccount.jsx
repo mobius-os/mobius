@@ -614,7 +614,7 @@ function DisconnectModal({ queryClient, token, onClose, onDisconnected, reconnec
   )
 }
 
-function Deployments({
+export function Deployments({
   token,
   items,
   railway,
@@ -650,9 +650,10 @@ function Deployments({
   )
   const deployments = [...items]
   for (const instance of railway?.instances || []) {
+    const origin = deploymentOrigin(instance.url)
     if (!deployments.some(item => (
       item.id === instance.id
-      || deploymentOrigin(item.url) === deploymentOrigin(instance.url)
+      || (origin && deploymentOrigin(item.url) === origin)
     ))) {
       deployments.push({
         id: instance.id,

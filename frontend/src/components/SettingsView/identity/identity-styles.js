@@ -2342,9 +2342,22 @@ export const IDENTITY_STYLES = `
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .id-spin { animation: none; }
-  .id-provider { transition: none; }
-  .id-model-details > summary svg { transition: none; }
+  .id-root *,
+  .id-root *::before,
+  .id-root *::after,
+  .id-modal-backdrop *,
+  .id-modal-backdrop *::before,
+  .id-modal-backdrop *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .id-avatar-edit:not(:disabled):hover .id-avatar-edit-badge,
+  .id-avatar-edit:not(:disabled):active .id-avatar-edit-badge,
+  .id-handle-btn:active,
+  .id-btn:not(:disabled):active,
+  .id-provider:not(:disabled):hover {
+    transform: none;
+  }
 }
 
 /* mobius-ui:CenteredRail v1 */
@@ -2477,5 +2490,14 @@ export const IDENTITY_STYLES = `
     white-space: nowrap;
     font-size: 13px;
   }
+}
+
+@media (max-width: 640px), (any-pointer: coarse) {
+  .settings .id-root--settings .id-connection-close,
+  .settings .id-root--settings .id-connection-plan-actions .id-btn,
+  .settings .id-root--settings .id-connection-footer .id-btn {
+    min-height: 44px;
+  }
+  .settings .id-root--settings .id-connection-fact .id-select { height: 44px; }
 }
 `
