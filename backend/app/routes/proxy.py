@@ -15,6 +15,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from math import ceil
 from urllib.parse import urljoin, urlparse
+from urllib.request import parse_http_list
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -74,7 +75,7 @@ def forward_upstream_cache_headers(upstream: httpx.Response) -> dict[str, str]:
 
 def _cache_directives(value: str) -> dict[str, str]:
   directives: dict[str, str] = {}
-  for part in value.split(","):
+  for part in parse_http_list(value):
     name, _, argument = part.strip().partition("=")
     if name:
       name = name.strip().lower()

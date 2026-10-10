@@ -371,6 +371,21 @@ def _upstream(status, headers):
   return httpx.Response(status, headers=headers, content=b"")
 
 
+def test_proxy_cache_headers_do_not_treat_quoted_extension_text_as_directives():
+  from app.routes.proxy import private_browser_cache_headers
+
+  for value in (
+    'foo="x,max-age=86400"',
+    r'foo="x\",max-age=86400"',
+  ):
+    assert private_browser_cache_headers(_upstream(200, {
+      "cache-control": value,
+    })) == {"cache-control": "private, no-cache", "vary": "Authorization"}
+  assert private_browser_cache_headers(_upstream(200, {
+    "cache-control": 'foo="x,no-store,max-age=86400", max-age=60',
+  })) == {"cache-control": "private, max-age=60", "vary": "Authorization"}
+
+
 def test_proxy_cache_headers_never_let_a_shared_cache_store_owner_reads():
   from app.routes.proxy import private_browser_cache_headers as private_headers
 
