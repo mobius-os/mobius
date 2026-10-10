@@ -817,6 +817,10 @@ export default function useNavigation({
     const ws = workspaceStateRef.current.ws
     const ownerPaneId = appOwnerPaneId(ws, appId)
     if (ownerPaneId == null) return false
+    // Restoring a background split must not steal focus or grow history.
+    // The runtime holds non-activated requests until the host reports focus.
+    if (navMeta.userActivated === false && ownerPaneId !== paneModel.SINGLE_SLOT_PANE
+        && ownerPaneId !== ws.focusedPaneId) return false
     const ownerKey = ownerKeyOf(ownerPaneId, appId)
     if ((appSentinelCountsRef.current.get(ownerKey) || 0) >= MAX_APP_SENTINELS) return false
     // Focus the visible owner pane (design §5: an app gesture focuses its pane).

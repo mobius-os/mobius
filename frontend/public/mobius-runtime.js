@@ -3300,6 +3300,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 	let locationText = validNavLocationText(location);
 	let locationReported = false;
 	let navigationReady = !waitForNavigationReady;
+	let navigationFocused = true;
 	const stack = [];
 	const entries = /* @__PURE__ */ new Set();
 	const entriesByRequestId = /* @__PURE__ */ new Map();
@@ -3316,6 +3317,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 		if (event.source !== window.parent) return;
 		const msg = event.data;
 		if (msg?.type === "moebius:frame-visibility") {
+			navigationFocused = msg.navigationFocused !== false;
 			navigationReady = !waitForNavigationReady || msg.visible === true && msg.navigationReady !== false;
 			if (navigationReady) for (const entry of entries) entry.send?.();
 			return;
@@ -3360,6 +3362,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 		const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const entry = {
 			requestId,
+			userActivated: globalThis.navigator?.userActivation?.isActive === true,
 			owned: false,
 			active: false,
 			done: false,
@@ -3479,7 +3482,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			};
 		}
 		entry.send = () => {
-			if (!navigationReady || entry.sent || entry.done) return;
+			if (!navigationReady || !navigationFocused && !entry.userActivated || entry.sent || entry.done) return;
 			entry.sent = true;
 			timer = setTimeout(() => {
 				entry.done = true;
@@ -3494,7 +3497,8 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 					type: "moebius:nav-push",
 					label: label || "app-detail",
 					requestId,
-					reversible: entry.reversible
+					reversible: entry.reversible,
+					userActivated: entry.userActivated
 				}, window.location.origin);
 			} catch (e) {
 				clearTimeout(timer);

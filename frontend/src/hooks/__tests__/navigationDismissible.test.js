@@ -241,7 +241,7 @@ test('Forward shortcut refuses an iframe-owned physical cursor', async () => {
 })
 
 async function mountNavigation(engine, {
-  tab = { kind: 'chat', id: 'c1' }, workspace = null, frames = null, dragActiveRef = { current: false },
+  tab = { kind: 'chat', id: 'c1' }, workspace = null, frames = null, dispatchWorkspace = () => {}, dragActiveRef = { current: false },
 } = {}) {
   globalThis.window = engine.win
   globalThis.location = engine.win.location
@@ -271,13 +271,13 @@ async function mountNavigation(engine, {
     const mounted = renderHook(useNavigation, {
       workspace: ws,
       workspaceStateRef,
-      dispatchWorkspace: () => {},
+      dispatchWorkspace,
       visiblePaneIds: new Set(Object.keys(ws.panes)),
       blobValid: true,
       replaceImplicitBootTab: false,
       dragActiveRef,
     })
-    return { ...mounted, workspace: ws }
+    return { ...mounted, workspace: ws, workspaceStateRef }
   } finally {
     console.error = consoleError
   }
@@ -726,3 +726,29 @@ test('restoration does not overwrite an iframe-created physical entry above a re
   assert.equal(engine.depth, depth + 2, 'the actual physical cursor, not a remembered tag, determines reuse')
   mounted.unmount()
 })
+
+for (const activated of [false, true]) {
+  test(`background split ${activated ? 'user gesture focuses' : 'restoration waits for'} its app pane`, async () => {
+    const paneModel = await import('../../components/Shell/paneModel.js')
+    const engine = sessionHistory()
+    let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'c1' }])
+    ws = paneModel.splitPaneWithTab(ws, { kind: 'app', id: '119' }, {
+      paneId: 'p0', edge: 'right', focus: false,
+    })
+    ws = { ...ws, viewMode: 'panes' }
+    const actions = []
+    const mounted = await mountNavigation(engine, { workspace: ws, dispatchWorkspace: action => actions.push(action) })
+    const depth = engine.depth
+    const meta = { requestId: 'restored', userActivated: activated }
+    assert.equal(mounted.result.current.appNavPush(119, meta), activated)
+    assert.equal(engine.depth, depth + Number(activated))
+    assert.equal(ws.focusedPaneId, 'p0')
+    assert.deepEqual(actions.filter(action => action.type === 'FOCUS'), activated ? [{ type: 'FOCUS', paneId: 'p1' }] : [])
+    if (!activated) {
+      mounted.workspaceStateRef.current.ws = paneModel.focusPane(ws, 'p1')
+      assert.equal(mounted.result.current.appNavPush(119, meta), true)
+      assert.equal(engine.depth, depth + 1, 'the deferred restoration can own history after focus')
+    }
+    mounted.unmount()
+  })
+}

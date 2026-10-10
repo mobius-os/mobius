@@ -304,9 +304,11 @@ export function makeNav({
 } = {}) {
   let locationText = validNavLocationText(location)
   let locationReported = false
-  // Opted-in hosts declare when this document is promoted and visible. Older
+  // Opted-in hosts declare when this document is promoted, visible and focused.
+  // Activated requests can use a visible background pane; restoration waits. Older
   // shells and published hosts keep immediate sends with the ownership timeout.
   let navigationReady = !waitForNavigationReady
+  let navigationFocused = true
   const stack = []
   const entries = new Set()
   const entriesByRequestId = new Map()
@@ -325,7 +327,8 @@ export function makeNav({
     if (event.source !== window.parent) return
     const msg = event.data
     if (msg?.type === 'moebius:frame-visibility') {
-      // Only opted-in hosts promise to resend readiness after promotion.
+      // Only opted-in hosts promise to resend readiness after promotion/focus.
+      navigationFocused = msg.navigationFocused !== false
       navigationReady = !waitForNavigationReady
         || (msg.visible === true && msg.navigationReady !== false)
       if (navigationReady) {
@@ -382,6 +385,7 @@ export function makeNav({
     const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const entry = {
       requestId,
+      userActivated: globalThis.navigator?.userActivation?.isActive === true,
       owned: false,
       active: false,
       done: false,
@@ -521,7 +525,8 @@ export function makeNav({
       }
     }
     entry.send = () => {
-      if (!navigationReady || entry.sent || entry.done) return
+      if (!navigationReady || (!navigationFocused && !entry.userActivated)
+          || entry.sent || entry.done) return
       entry.sent = true
       timer = setTimeout(() => {
         // Ownership is unknown on timeout: the shell may have installed the
@@ -541,6 +546,7 @@ export function makeNav({
             label: label || 'app-detail',
             requestId,
             reversible: entry.reversible,
+            userActivated: entry.userActivated,
           },
           window.location.origin,
         )

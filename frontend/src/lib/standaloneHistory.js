@@ -1,12 +1,18 @@
 import { isCurrentRetiredAppEntry, isRetiredAppEntry } from './navHistory.js'
 
 const MAX_STANDALONE_HISTORY_ENTRIES = 40
+let anonymousEntrySequence = 0
+
+function ownershipKey(entry) {
+  return entry?.requestId ?? entry?.ownershipId
+}
 
 function normalizeEntry(value) {
   if (!value || typeof value !== 'object') return null
   return {
     requestId: typeof value.requestId === 'string' ? value.requestId : null,
     reversible: value.reversible === true,
+    ...(typeof value.ownershipId === 'string' ? { ownershipId: value.ownershipId } : {}),
   }
 }
 
@@ -67,6 +73,9 @@ export function pushStandaloneHistoryEntry(history, entries, registry, appId, me
   if (!reuse && entries.length >= MAX_STANDALONE_HISTORY_ENTRIES) return null
   const entry = {
     requestId: typeof meta.requestId === 'string' ? meta.requestId : null,
+    ...(typeof meta.requestId !== 'string' ? {
+      ownershipId: `anonymous-${Date.now()}-${++anonymousEntrySequence}`,
+    } : {}),
     reversible: meta.reversible === true,
   }
   const next = reuse ? [...entries.slice(0, -1), entry] : [...entries, entry]
@@ -75,7 +84,14 @@ export function pushStandaloneHistoryEntry(history, entries, registry, appId, me
   } catch {
     return null
   }
-  registry.set(entry.requestId, { appId: String(appId), status: 'live' })
+  // A new push truncates Forward. Only the retained stack can still own
+  // closures. Anonymous legacy requests get a host-owned identity, separate
+  // from the optional runtime correlation id.
+  const retained = new Set(next.map(ownershipKey).filter(id => id != null))
+  for (const id of registry.keys()) {
+    if (!retained.has(id)) registry.delete(id)
+  }
+  registry.set(ownershipKey(entry), { appId: String(appId), status: 'live' })
   return next
 }
 
@@ -102,13 +118,13 @@ export function reconcileStandaloneHistory(
         consumedLocalPop = true
         continue
       }
-      if (!registry || !isRetiredAppEntry(registry.get(entry?.requestId))) {
+      if (!registry || !isRetiredAppEntry(registry.get(ownershipKey(entry)))) {
         commands.push({ direction: 'back', requestId: entry?.requestId ?? null })
       }
     }
   } else if (entries.length > current.length) {
     for (const entry of entries.slice(current.length)) {
-      if (!registry || !isRetiredAppEntry(registry.get(entry?.requestId))) {
+      if (!registry || !isRetiredAppEntry(registry.get(ownershipKey(entry)))) {
         commands.push({ direction: 'forward', requestId: entry?.requestId ?? null })
       }
     }
@@ -116,7 +132,7 @@ export function reconcileStandaloneHistory(
 
   const direction = entries.length > current.length ? 'forward' : 'back'
   const skipRetired = registry !== null && entries.length > 0
-    && isRetiredAppEntry(registry.get(entries.at(-1)?.requestId))
+    && isRetiredAppEntry(registry.get(ownershipKey(entries.at(-1))))
   return { entries, commands, consumedLocalPop, direction, skipRetired }
 }
 

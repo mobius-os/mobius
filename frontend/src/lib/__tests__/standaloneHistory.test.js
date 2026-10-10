@@ -166,3 +166,21 @@ test('a rejected standalone history write cannot register a live owner', () => {
   assert.equal(pushStandaloneHistoryEntry(history, [], registry, 81, entry('new')), null)
   assert.equal(registry.size, 0)
 })
+
+test('anonymous standalone requests have distinct ownership keys and a new branch prunes Forward owners', () => {
+  const history = sessionHistory()
+  const registry = new Map()
+  let entries = pushStandaloneHistoryEntry(history, [], registry, 81)
+  entries = pushStandaloneHistoryEntry(history, entries, registry, 81)
+  assert.equal(registry.size, 2)
+  assert.notEqual(entries[0].ownershipId, entries[1].ownershipId)
+  assert.deepEqual(reconcileStandaloneHistory(entries, standaloneHistoryState({}, []), { registry }).commands,
+    [{ direction: 'back', requestId: null }, { direction: 'back', requestId: null }])
+  entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('old'))
+  history.back()
+  entries = readStandaloneHistoryEntries(history.state)
+  entries = pushStandaloneHistoryEntry(history, entries, registry, 81, entry('new'))
+  assert.equal(registry.has('old'), false)
+  assert.equal(registry.has('new'), true)
+  assert.equal(entries.length, 3)
+})

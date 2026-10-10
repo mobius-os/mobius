@@ -1136,12 +1136,14 @@ const AppCanvas = forwardRef(function AppCanvas({
         // visible. It may retire an entry it already owns, but it must never
         // install a NEW top-level history entry while off-screen. Gate on
         // VISIBLE (active tab of any visible pane), not focused — a background
-        // split's app is still interactive (contract §3.3.6). The shell's own
-        // isVisibleApp re-checks pane ownership as the authority.
+        // split's app is still interactive (contract §3.3.6). The runtime defers
+        // non-activated restoration until focus; the shell hook re-checks both
+        // pane ownership and focus as the authority.
         const ok = visibleRef.current ? onNavPush?.(appId, {
           requestId: msg.requestId,
           label: msg.label,
           reversible: msg.reversible === true,
+          userActivated: msg.userActivated,
         }) : false
         // Echo the iframe's optional requestId on both ack and reject so the app
         // can correlate when multiple nav-pushes are in flight. Apps that don't
@@ -1419,9 +1421,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, {
       type: 'moebius:frame-visibility',
       visible,
+      // Non-activated restoration waits for focus, independently of paint.
+      navigationFocused: activeRef.current,
       // A chat handoff can keep pixels foreground after logical navigation ends.
       navigationReady: visible && visibleRef.current
-        && v === liveVersionRef.current && swap.liveLoaded,
+        && v === liveVersionRef.current && swap.liveLoaded
+        && frameNavRef.current.get(v)?.mounted === true,
     })
   }
 
@@ -1452,7 +1457,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, visible, swap.liveVersion, swap.liveLoaded])
+  }, [frameVisible, visible, active, swap.liveVersion, swap.liveLoaded])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then
@@ -1687,12 +1692,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     sendShellShortcuts(v)
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
-    // here; even a live document waits for its mounted signal. Promotion re-sends
-    // via the mount/promotion effect above. Interactivity is a
+    // here. Live documents get their real painted visibility immediately;
+    // navigation still waits for the mounted signal. Interactivity is a
     // separate gate (drawer-open momentum cancel); its "painted" argument tracks
     // `frameVisible` post active->visible split, its enabled argument tracks
     // `interactive` (focused pane, drawer-aware).
-    sendVisibility(v, false)
+    sendVisibility(v, v === liveVersionRef.current && frameVisibleRef.current)
     sendInteractivity(
       v,
       v === liveVersionRef.current ? interactiveRef.current : false,

@@ -1220,3 +1220,41 @@ test('hosts without readiness opt-in still send and time out without visibility 
     globalThis.clearTimeout = previousClearTimeout
   }
 })
+
+test('background restoration waits for pane focus without starting an ownership timeout', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav({ waitForNavigationReady: true })
+    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+    const handle = nav.open('restored')
+    assert.equal(parent.messages.length, 0)
+    window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: true })
+    const push = parent.messages.at(-1).data
+    assert.equal(push.userActivated, false)
+    assert.equal(push.label, 'restored')
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.equal(await handle.ready, true)
+    handle.close()
+  })
+})
+
+test('an activated background-pane request still waits for promotion, not focus', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userActivation: { isActive: true } } })
+  try {
+    await withFakeWindow(async ({ window, parent }) => {
+      const nav = makeNav({ waitForNavigationReady: true })
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: false, navigationFocused: false })
+      const handle = nav.open('clicked')
+      assert.equal(parent.messages.length, 0)
+      window.emit({ type: 'moebius:frame-visibility', visible: true, navigationReady: true, navigationFocused: false })
+      const push = parent.messages.at(-1).data
+      assert.equal(push.userActivated, true)
+      window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+      assert.equal(await handle.ready, true)
+      handle.close()
+    })
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'navigator', previous)
+    else delete globalThis.navigator
+  }
+})
