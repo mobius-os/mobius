@@ -284,12 +284,18 @@
   gap: 0;
 }
 
+/* Projects spans the whole row like Apps, so its hover and selected wash
+   include the + button that sits above its right end. */
 .drawer__item--projects {
+  grid-row: 1;
+  grid-column: 1 / -1;
   min-width: 0;
   font-weight: 500;
 }
 
 .drawer__projects-add {
+  grid-row: 1;
+  grid-column: 2;
   width: 42px;
 }
 
@@ -477,7 +483,8 @@
    navigated AWAY from. Matches the @openai/apps-sdk-ui convention
    used across their components. */
 @media (hover: hover) and (pointer: fine) {
-  .drawer__item:hover {
+  .drawer__item:hover,
+  .drawer__projects-nav:hover .drawer__item--projects {
     color: var(--text);
     background: var(--surface);
   }
