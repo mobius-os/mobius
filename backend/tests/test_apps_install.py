@@ -9174,3 +9174,42 @@ def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
 def test_git_source_error_without_failure_has_no_leading_space():
   error = install.git_source_error("The app was not changed.", RuntimeError("unavailable"))
   assert error.detail["message"] == "The app was not changed."
+
+
+@pytest.mark.asyncio
+async def test_ancillary_source_check_and_tree_writes_leave_event_loop(monkeypatch):
+  import threading
+
+  event_loop_thread = threading.get_ident()
+  manifest = _simple_manifest("threaded-ancillary")
+  tree = {"index.jsx": JSX.encode(), "README.md": b"owner"}
+  checked = []
+  writes = []
+  entries = []
+  write_bytes = Path.write_bytes
+
+  def check_source(*args):
+    checked.append(threading.get_ident())
+    return install.SourceCheckResult()
+
+  def record_write(path, data):
+    if path.name != "bundle.js":
+      writes.append(threading.get_ident())
+    return write_bytes(path, data)
+
+  async def compile_tree(source, *, source_path, out_path):
+    assert threading.get_ident() == event_loop_thread
+    entries.append(source_path)
+    expected = b"owner" if len(entries) == 1 else b"upstream"
+    assert (source_path.parent / "README.md").read_bytes() == expected
+    Path(out_path).write_bytes(b"identical bundle")
+
+  monkeypatch.setattr(install, "_source_completeness", check_source)
+  monkeypatch.setattr(Path, "write_bytes", record_write)
+  monkeypatch.setattr(install, "compile_jsx", compile_tree)
+  assert await install._kept_local_bundle_unchanged(
+    tree, manifest, {}, {"README.md": b"upstream"}, ["README.md"],
+  )
+  assert len(checked) == 1 and checked[0] != event_loop_thread
+  assert len(writes) == 3 and all(thread != event_loop_thread for thread in writes)
+  assert len(entries) == 2 and entries[0] == entries[1]

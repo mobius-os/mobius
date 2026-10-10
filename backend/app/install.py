@@ -1325,11 +1325,16 @@ async def _kept_local_bundle_unchanged(
   """
   if EXECUTABLE_MANIFEST_FIELDS.intersection(manifest):
     return False
-  if _source_completeness(tree, manifest, static_assets).errors:
+  source_check = await asyncio.to_thread(
+    _source_completeness, tree, manifest, static_assets,
+  )
+  if source_check.errors:
     return False
   with tempfile.TemporaryDirectory(prefix="mobius-ancillary-check-") as temp:
     root = Path(temp).resolve() / "source"
-    try:
+    output = Path(temp) / "bundle.js"
+
+    def write_kept_tree() -> str:
       inputs = dict(tree)
       inputs.update({
         f"static/{dest}": static_assets[dest]
@@ -1340,11 +1345,9 @@ async def _kept_local_bundle_unchanged(
         _assert_within(root, path, f"package input {rel}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-      entry = root / manifest["entry"]
-      output = Path(temp) / "bundle.js"
-      await compile_jsx(
-        entry.read_text(encoding="utf-8"), source_path=entry, out_path=output,
-      )
+      return entry.read_text(encoding="utf-8")
+
+    def write_upstream_alternative() -> tuple[bytes, str]:
       kept_bundle = output.read_bytes()
       output.unlink()
       for rel in kept_local:
@@ -1355,10 +1358,15 @@ async def _kept_local_bundle_unchanged(
           path.write_bytes(upstream[rel])
         else:
           path.unlink(missing_ok=True)
-      await compile_jsx(
-        entry.read_text(encoding="utf-8"), source_path=entry, out_path=output,
-      )
-      return kept_bundle == output.read_bytes()
+      return kept_bundle, entry.read_text(encoding="utf-8")
+
+    try:
+      entry = root / manifest["entry"]
+      source = await asyncio.to_thread(write_kept_tree)
+      await compile_jsx(source, source_path=entry, out_path=output)
+      kept_bundle, source = await asyncio.to_thread(write_upstream_alternative)
+      await compile_jsx(source, source_path=entry, out_path=output)
+      return kept_bundle == await asyncio.to_thread(output.read_bytes)
     except BuildLeaseUnavailable as exc:
       raise HTTPException(503, "JavaScript builder is busy; retry the update.") from exc
     except (RuntimeError, OSError, UnicodeError, KeyError, HTTPException):
