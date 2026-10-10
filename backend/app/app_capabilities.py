@@ -595,6 +595,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     aliases = list(service.get("aliases") or [])
     if aliases:
       accepted_service["aliases"] = aliases
+    if "public_requests_per_minute" in service:
+      accepted_service["public_requests_per_minute"] = service["public_requests_per_minute"]
     contract["service"] = accepted_service
   return contract
 

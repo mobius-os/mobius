@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
+from limits import RateLimitItemPerMinute
+from limits.storage import MemoryStorage
+from limits.strategies import FixedWindowRateLimiter
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -19,6 +23,23 @@ from app.storage_io import read_capped_body
 
 router = APIRouter(tags=["app-services"])
 _limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
+# The anonymous door counts each caller per public service, against that
+# service's accepted allowance (60 a minute unless its manifest declares more).
+_public_window = FixedWindowRateLimiter(MemoryStorage())
+
+
+def _admit_public_request(request: Request, app: models.App | None, service: dict) -> None:
+  allowance = RateLimitItemPerMinute(app_services.public_requests_per_minute(service))
+  caller = get_remote_address(request)
+  bucket = str(app.id) if app is not None else "unknown"
+  if _public_window.hit(allowance, caller, bucket):
+    return
+  reset_at, _ = _public_window.get_window_stats(allowance, caller, bucket)
+  raise HTTPException(
+    429,
+    f"Rate limit exceeded: {allowance.amount} per 1 minute",
+    headers={"Retry-After": str(max(1, int(reset_at - time.time()) + 1))},
+  )
 
 
 def _reject_json_constant(value: str):
@@ -184,7 +205,6 @@ async def shared_app_service(
   "/api/app-services/{slug}/{path:path}",
   methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
-@_limiter.limit("60/minute")
 async def public_app_service(
   slug: str,
   path: str,
@@ -192,9 +212,15 @@ async def public_app_service(
   db: Session = Depends(get_db),
 ):
   app = _service_app(db, slug)
-  if app is None:
-    raise HTTPException(404, "Public app service not found.")
-  app_services.service_contract(app, access="public")
+  try:
+    if app is None:
+      raise HTTPException(404, "Public app service not found.")
+    service = app_services.service_contract(app, access="public")
+  except HTTPException:
+    # Probes of missing or non-public services share one default bucket.
+    _admit_public_request(request, None, {})
+    raise
+  _admit_public_request(request, app, service)
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")

@@ -243,7 +243,11 @@ platform-maintenance skill for setup guidance. No UI or ad-hoc install capture.
 Same-app calls use `/api/apps/{app_id}/service/{path}`. An app can expose a
 reviewed service to other installed apps at `/api/services/{service_id}/{path}`
 by setting `access` to `apps`, or additionally expose anonymous calls at
-`/api/app-services/{service_id}/{path}` by setting it to `public`. `service.id`
+`/api/app-services/{service_id}/{path}` by setting it to `public`. Each
+anonymous caller may make 60 requests a minute to one public service; a public
+service whose product needs a faster cadence (a live multiplayer room) may
+declare `service.public_requests_per_minute`, from 60 to 600, which the owner
+accepts with the rest of its capability contract. `service.id`
 is the stable public contract and does not change when the app's display name,
 manifest `id`, repository, or installed slug changes. These are explicit
 install-time grants and do not widen the service app token's accepted

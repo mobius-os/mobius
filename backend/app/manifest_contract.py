@@ -42,6 +42,11 @@ PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# Anonymous requests a minute one caller may make to one public app service.
+# A public service may declare more, up to the cap, when its product needs a
+# faster cadence (a live multiplayer room); the owner accepts it on apply.
+PUBLIC_SERVICE_REQUESTS_PER_MINUTE = 60
+PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX = 600
 SERVICE_ALIASES_MAX = 4
 AGENT_TOOLS_MAX = 16
 AGENT_TOOL_DESCRIPTION_MAX = 2000
@@ -977,11 +982,11 @@ def validate_manifest_contract(manifest) -> None:
   service = manifest.get("service")
   if service is not None:
     if not isinstance(service, Mapping) or set(service) - {
-      "id", "aliases", "entry", "access",
+      "id", "aliases", "entry", "access", "public_requests_per_minute",
     }:
       _fail(
         "Manifest `service` must contain only `id`, `aliases`, `entry`, "
-        "and `access`."
+        "`access`, and `public_requests_per_minute`."
       )
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
@@ -1018,6 +1023,23 @@ def validate_manifest_contract(manifest) -> None:
       )
     if service.get("access", "self") not in {"self", "apps", "public"}:
       _fail("Manifest `service.access` must be `self`, `apps`, or `public`.")
+    if "public_requests_per_minute" in service:
+      allowance = service["public_requests_per_minute"]
+      if service.get("access", "self") != "public":
+        _fail(
+          "Manifest `service.public_requests_per_minute` applies only to a "
+          "service with `access: public`."
+        )
+      if (
+        isinstance(allowance, bool) or not isinstance(allowance, int)
+        or not PUBLIC_SERVICE_REQUESTS_PER_MINUTE
+        <= allowance <= PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX
+      ):
+        _fail(
+          "Manifest `service.public_requests_per_minute` must be an integer "
+          f"from {PUBLIC_SERVICE_REQUESTS_PER_MINUTE} to "
+          f"{PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX}."
+        )
 
   # The app's own Python environment (app_python_env). Apply and install
   # check that the listed file exists in the accepted tree.

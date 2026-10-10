@@ -83,6 +83,21 @@ def service_contract(app, *, access: str) -> dict:
   return service
 
 
+def public_requests_per_minute(service: dict) -> int:
+  """One anonymous caller's per-minute allowance for this accepted public service."""
+  from app.manifest_contract import (
+    PUBLIC_SERVICE_REQUESTS_PER_MINUTE,
+    PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX,
+  )
+  value = service.get("public_requests_per_minute", PUBLIC_SERVICE_REQUESTS_PER_MINUTE)
+  if isinstance(value, bool) or not isinstance(value, int):
+    return PUBLIC_SERVICE_REQUESTS_PER_MINUTE
+  return max(
+    PUBLIC_SERVICE_REQUESTS_PER_MINUTE,
+    min(PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX, value),
+  )
+
+
 def request_actor(db, principal, caller=None) -> dict:
   """Who is calling an app's service, as the request's `actor` states it.
 

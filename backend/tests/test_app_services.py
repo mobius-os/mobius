@@ -630,3 +630,75 @@ def test_http_callers_cannot_reach_the_platforms_tool_lane(client, auth, db, pat
     json={"arguments": {}, "call": {"chat_id": "forged"}},
   )
   assert response.status_code == 404
+
+
+# --- Public request allowance --------------------------------------------------
+
+def _public_manifest(**service) -> dict:
+  return {
+    "id": "live-room", "name": "Live room", "version": "0.1.0",
+    "description": "A multiplayer room.", "entry": "index.jsx",
+    "permissions": {}, "source_files": ["service.py"],
+    "service": {"entry": "service.py", "access": "public", **service},
+  }
+
+
+def test_public_service_may_declare_a_capped_request_allowance():
+  from app.app_capabilities import contract_from_manifest
+  from app.manifest_contract import ManifestContractError, validate_manifest_contract
+
+  manifest = _public_manifest(public_requests_per_minute=480)
+  validate_manifest_contract(manifest)
+  service = contract_from_manifest(manifest)["service"]
+  assert service["public_requests_per_minute"] == 480
+  assert app_services.public_requests_per_minute(service) == 480
+  assert app_services.public_requests_per_minute({"access": "public"}) == 60
+
+  for bad in (59, 601, 120.0, True, "120"):
+    with pytest.raises(ManifestContractError, match="public_requests_per_minute"):
+      validate_manifest_contract(_public_manifest(public_requests_per_minute=bad))
+  private = _public_manifest(public_requests_per_minute=120)
+  private["service"]["access"] = "self"
+  with pytest.raises(ManifestContractError, match="only to a service with `access: public`"):
+    validate_manifest_contract(private)
+
+
+def test_public_door_counts_each_caller_per_service_against_its_allowance():
+  from app.routes import app_services as routes
+
+  def request(host):
+    return SimpleNamespace(client=SimpleNamespace(host=host), headers={}, scope={})
+
+  quiet = SimpleNamespace(id=9101)
+  live = SimpleNamespace(id=9102)
+  for _ in range(60):
+    routes._admit_public_request(request("198.51.100.7"), quiet, {"access": "public"})
+  with pytest.raises(HTTPException) as refused:
+    routes._admit_public_request(request("198.51.100.7"), quiet, {"access": "public"})
+  assert refused.value.status_code == 429
+  assert int(refused.value.headers["Retry-After"]) >= 1
+
+  # Another service keeps its own count, and may have accepted a larger allowance.
+  for _ in range(300):
+    routes._admit_public_request(
+      request("198.51.100.7"), live, {"access": "public", "public_requests_per_minute": 300},
+    )
+  with pytest.raises(HTTPException):
+    routes._admit_public_request(
+      request("198.51.100.7"), live, {"access": "public", "public_requests_per_minute": 300},
+    )
+  # Another caller is counted apart.
+  routes._admit_public_request(request("198.51.100.8"), quiet, {"access": "public"})
+
+
+def test_public_door_counts_probes_of_non_public_services(client, db, monkeypatch):
+  from limits.storage import MemoryStorage
+  from limits.strategies import FixedWindowRateLimiter
+  from app.routes import app_services as routes
+
+  monkeypatch.setattr(routes, "_public_window", FixedWindowRateLimiter(MemoryStorage()))
+  _service_app(db, slug="private-probe")
+  for _ in range(30):
+    assert client.get("/api/app-services/private-probe/status").status_code == 404
+    assert client.get("/api/app-services/missing-probe/status").status_code == 404
+  assert client.get("/api/app-services/private-probe/status").status_code == 429
