@@ -318,6 +318,32 @@ def _accepted_commit(app: models.App, repo: Path) -> str:
   return resolved
 
 
+def accepted_history_contains(
+  app: models.App, accepted_commit: str, commit: str,
+) -> bool:
+  """Whether ``commit`` is the accepted revision or one of its ancestors.
+
+  An existing GitHub repository whose main branch is already part of this
+  app's own source history (for example, the repository the owner first
+  developed or installed it from) can be continued by a fast-forward commit
+  without discarding anything on GitHub. An unknown object or unrelated
+  history is not contained.
+  """
+  if not _OID.fullmatch(commit) or not _OID.fullmatch(accepted_commit):
+    return False
+  repo = Path(app.source_dir)
+  if not repo.is_dir() or not app_git.is_repo(repo):
+    return False
+  result = subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, accepted_commit],
+    capture_output=True,
+    timeout=30,
+    check=False,
+    env=app_git._git_env(repo),
+  )
+  return result.returncode == 0
+
+
 def _validate_path(path: str) -> None:
   pure = PurePosixPath(path)
   parts = pure.parts

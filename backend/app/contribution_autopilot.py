@@ -13,7 +13,8 @@ The lifecycle, per (app_id, record_id):
   /respond  ─▶  claim (state=responding, fresh run_id, 45-min lease) ─▶ spawn round
   agent  ─▶  /update (validated push) / /reply ─▶ /complete ─▶ idle, round logged
   crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it
-  2 consecutive stale/failed rounds, or five-round limit reached ─▶ escalate
+  2 consecutive stale/failed rounds ─▶ escalate (there is no round budget:
+  follow-up continues while rounds keep completing)
   escalate ─▶ blocked + human_required warning, claim revoked but grant retained
   fresh reviewed repair + cleared warning ─▶ recovery returns the grant to idle
   merged / closed ─▶ close_out, autopilot ends
@@ -51,7 +52,6 @@ log = logging.getLogger("mobius.contribution_autopilot")
 
 # One round may hold the claim this long before the sweep treats it as crashed.
 LEASE_SECONDS = 45 * 60
-DEFAULT_MAX_ROUNDS = 5
 # Two consecutive non-productive rounds (stale lease or failed spawn) escalate.
 FAILURE_ESCALATION_THRESHOLD = 2
 # Cap the mirrored/audit round log so a record can't grow without bound.
@@ -92,7 +92,6 @@ def stamp_grant(
   target_head_repository: str | None = None,
   target_branch: str | None = None,
   target_repo_path: str | None = None,
-  max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> models.ContributionAutopilot:
   """Idempotent grant upsert — the ONLY authorization autopilot consults.
 
@@ -115,7 +114,6 @@ def stamp_grant(
       target_branch=target_branch,
       target_repo_path=target_repo_path,
       state="idle",
-      max_rounds=max_rounds,
       rounds_json=[],
       created_at=now,
       updated_at=now,
@@ -320,7 +318,7 @@ def claim_for_round(
     - ``"blocked"``: an escalation still awaits a reviewed resolution.
     - ``"duplicate"``: this attention was already handled or is in flight.
     - ``"busy"``: a live (non-expired) round holds the claim.
-    - ``"escalate"`` (+ ``reason``): five-round limit reached — caller escalates.
+    - ``"escalate"`` (+ ``reason``): repeated failed rounds — caller escalates.
 
   A crashed round (expired lease) is reclaimed here: its stale round is logged
   and the failure counter advanced before the fresh claim is taken.
@@ -358,8 +356,6 @@ def claim_for_round(
       # request arrived. Preserve the same escalation verdict as inline reclaim
       # instead of granting an unbounded sequence of crash/retry rounds.
       return {"status": "escalate", "reason": "stale_rounds"}
-    if row.rounds_used >= row.max_rounds:
-      return {"status": "escalate", "reason": "round_limit"}
 
     now = now_naive_utc()
     run_id = uuid.uuid4().hex
@@ -384,8 +380,6 @@ def claim_for_round(
         models.ContributionAutopilot.state == "idle",
         cursor_match,
         key_match,
-        models.ContributionAutopilot.rounds_used
-        < models.ContributionAutopilot.max_rounds,
       )
       .values(
         state="responding",
@@ -708,7 +702,6 @@ def mirror_block(row: models.ContributionAutopilot) -> dict:
     "granted_at": row.granted_at.isoformat() if row.granted_at else None,
     "state": row.state,
     "rounds_used": int(row.rounds_used or 0),
-    "max_rounds": int(row.max_rounds or DEFAULT_MAX_ROUNDS),
     "last_round": last,
     "rounds": rounds,
     "ignored_event_urls": list(row.ignored_event_urls_json or []),

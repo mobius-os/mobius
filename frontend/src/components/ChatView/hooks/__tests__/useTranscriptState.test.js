@@ -55,6 +55,22 @@ test('an authoritative view activation does not republish the query cache', () =
   assert.equal(queryClient.writes, 0)
 })
 
+test('an empty successful history page advances offset without replacing visible rows', () => {
+  const rows = [{ role: 'user', id: 'visible' }]
+  const queryClient = queryClientWith({ messages: rows, offset: 20 })
+  const { result } = renderHook(useTranscriptState, {
+    cacheKey: ['chat-messages', 7], cached: queryClient.value, queryClient,
+  })
+
+  result.current.commitMessages(prev => prev, 0)
+
+  assert.equal(result.current.messages, rows)
+  assert.equal(result.current.messagesRef.current, rows)
+  assert.equal(result.current.offset, 0)
+  assert.equal(result.current.offsetRef.current, 0)
+  assert.equal(queryClient.value.offset, 0)
+})
+
 test('structurally identical commits still publish but avoid replacing view state', () => {
   const first = [{ role: 'user', content: 'same', ts: 1 }]
   const queryClient = queryClientWith({ messages: first, offset: 0 })

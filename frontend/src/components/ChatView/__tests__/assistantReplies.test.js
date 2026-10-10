@@ -9,6 +9,40 @@ const carrier = (kind = 'peer_message', extras = {}) => ({ role: 'user', hidden:
 const rows = messages => assistantReplyGroups(messages).get(0).rows
 const text = row => row.message.blocks.filter(b => b.type === 'text').map(b => b.content).join('')
 
+test('history prepend retains settled reply projection inputs at stable absolute keys', () => {
+ const old = { role: 'assistant', id: 'older', content: 'Older' }
+ const current = [assistant('First'), carrier(), assistant('First continued', 1)]
+ const beforeGroups = assistantReplyGroups(current, { offset: 10 })
+ const before = beforeGroups.get(0)
+ const after = assistantReplyGroups([old, ...current], {
+  offset: 9, previousGroups: beforeGroups,
+ }).get(1)
+ assert.notEqual(after, before, 'current physical indices belong to the new page')
+ assert.deepEqual(after.rows.map(row => row.index), [1, 3])
+ assert.deepEqual(after.rows.map(row => row.key), before.rows.map(row => row.key))
+ assert.equal(after.presentationRows, before.presentationRows)
+
+ const changed = assistantReplyGroups([old, current[0], current[1], { ...current[2], content: 'Changed' }], {
+  offset: 9, previousGroups: new Map([[1, after]]),
+ }).get(1)
+ assert.notEqual(changed.presentationRows, before.presentationRows,
+  'a changed saved reply must recompute its displayed content')
+
+ const withNotes = assistantReplyGroups([old, ...current], {
+  offset: 9, previousGroups: new Map([[1, after]]),
+  slots: new Map([[2, [{ id: 'peer-note' }]]]),
+ }).get(1)
+ assert.notEqual(withNotes.presentationRows, after.presentationRows,
+  'a newly projected peer boundary must not reuse an old reply layout')
+
+ const active = assistantReplyGroups([old, ...current], {
+  offset: 9, previousGroups: new Map([[1, after]]), activeIndex: 3,
+  activeKey: 'live-row-key',
+ }).get(1)
+ assert.notEqual(active.presentationRows, after.presentationRows,
+  'a live-to-saved display key handoff must not reuse the old anchor')
+})
+
 for (const provider of ['claude', 'codex', 'mobius', 'responses']) {
  test(`${provider}: an exact replay continues the original paragraph across a hidden cut`, () => {
   const messages = [assistant('This sentence continues;', 0, { provider }), carrier('delegation_result'), assistant('This sentence continues; without an artificial paragraph boundary.', 1, { provider })]
