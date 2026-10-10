@@ -1315,7 +1315,8 @@ async def _benign_bundle_complete(
   if not _benign_source_complete(tree, manifest, static_assets):
     return False
   with tempfile.TemporaryDirectory(prefix="mobius-ancillary-check-") as temp:
-    root = Path(temp)
+    # Bundler inputs are resolved paths; compare against the resolved root.
+    root = Path(temp).resolve()
     for rel, data in {**tree, **{
       f"static/{dest}": data for dest, data in static_assets.items()
     }}.items():
