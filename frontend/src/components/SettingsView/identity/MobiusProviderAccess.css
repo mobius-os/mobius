@@ -1,0 +1,18 @@
+/* Compact model-access details shared with the native Settings provider row. */
+.settings-mobius-access { display: grid; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.settings-mobius-access__visibility, .settings-mobius-access__row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.settings-mobius-access__visibility > span { display: grid; gap: 3px; min-width: 0; }
+.settings-mobius-access__visibility strong, .settings-mobius-access__row strong { font-weight: 500; }
+.settings-mobius-access__visibility small, .settings-mobius-access__row > span, .settings-mobius-access__note { color: var(--muted); }
+.settings-mobius-access__visibility input { flex: 0 0 18px; width: 18px; height: 18px; appearance: auto; -webkit-appearance: checkbox; accent-color: var(--accent); }
+.settings-mobius-access__note { margin: 0; line-height: 1.45; }
+.settings-mobius-access__action { justify-self: start; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.settings-mobius-access__prices { border-top: 1px solid var(--border); padding-top: 9px; }
+.settings-mobius-access__prices summary { cursor: pointer; }
+.settings-mobius-access__prices > div { display: grid; gap: 8px; padding-top: 10px; }
+.settings-mobius-access__price { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.settings-mobius-access__price strong { font-weight: 500; }
+.settings-mobius-access__price span, .settings-mobius-access__prices small { color: var(--muted); }
+.settings-mobius-access__error { margin: 0; color: var(--danger); }
+.settings-mobius-access__error button { color: inherit; border: 0; background: none; cursor: pointer; text-decoration: underline; }
+@container settings (max-width: 400px) { .settings-mobius-access__price { display: grid; gap: 3px; } }

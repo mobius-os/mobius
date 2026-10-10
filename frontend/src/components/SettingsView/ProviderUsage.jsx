@@ -9,6 +9,7 @@ import {
   clampUsagePercent,
   formatResetExpiry,
   formatUsagePercent,
+  formatUsageObservedAt,
   formatUsageReset,
   redeemOutcomeMessage,
   soonestResetExpiry,
@@ -169,6 +170,8 @@ export default function ProviderUsage({
   snapshot,
   loading = false,
   failed = false,
+  refreshing = false,
+  onRefresh = null,
   onRedeemReset = null,
   redeeming = false,
   redeemResult = null,
@@ -192,6 +195,10 @@ export default function ProviderUsage({
   const ready = snapshot?.state === 'ready' && windows.length > 0
   const bankedResets = onRedeemReset ? bankedResetCredits(snapshot) : null
   const claudeResets = onRedeemClaudeReset ? claudeResetCredits(snapshot) : null
+  const checkedAt = formatUsageObservedAt(snapshot?.observed_at)
+  const freshnessLabel = checkedAt
+    ? `${failed ? 'Could not refresh · ' : snapshot?.stale ? 'Last available reading · ' : ''}${checkedAt}`
+    : failed ? 'Could not refresh' : 'Time unavailable'
 
   return (
     <span id={id} className="provider-usage">
@@ -226,9 +233,6 @@ export default function ProviderUsage({
           {snapshot?.credit_balance && (
             <span className="provider-usage__credit">{snapshot.credit_balance}</span>
           )}
-          {snapshot?.stale && (
-            <span className="provider-usage__credit">Last available reading</span>
-          )}
         </span>
       ) : (
         <span className="provider-usage__unavailable">Usage unavailable</span>
@@ -256,6 +260,10 @@ export default function ProviderUsage({
         busy={extraUsageBusy}
         result={extraUsageResult}
       />
+      <span className="provider-usage__freshness">
+        <span>{freshnessLabel}</span>
+        {onRefresh && <button type="button" className="provider-usage__redeem provider-usage__redeem--ghost" onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>}
+      </span>
     </span>
   )
 }

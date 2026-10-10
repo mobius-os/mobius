@@ -26,6 +26,8 @@ const REACT_SHIM = new URL(
 const REACT_SHIMMED_MODULES = [
   '/components/AppIcon.jsx',
   '/components/SettingsView/GithubConnection.jsx',
+  '/components/SettingsView/useSettingsFocus.js',
+  '/components/SettingsView/identity/IdentityAccount.jsx',
   '/components/Shell/useAppIntentNavigation.js',
   '/components/Shell/useShellUpdateController.js',
   '/components/Shell/useVisibleAppPresence.js',
@@ -68,7 +70,7 @@ export async function load(url, context, nextLoad) {
     const path = fileURLToPath(url)
     const raw = await readFile(path, 'utf8')
     const patched = raw
-      .replace(/import\.meta\.env\.BASE_URL/g, "'/'")
+      .replace(/import\.meta\.env(?:\?)?\.BASE_URL/g, JSON.stringify(process.env.MOBIUS_TEST_BASE_URL || '/'))
       .replace(/import\.meta\.env\.MODE/g, "'test'")
       .replace(/import\.meta\.env\.DEV/g, 'false')
       .replace(/import\.meta\.env\.PROD/g, 'false')

@@ -3,14 +3,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { settingsQueries } from '../../hooks/queries.js'
+import ProviderUsage from '../../components/SettingsView/ProviderUsage.jsx'
 import {
   clampUsagePercent,
   formatPlanStatus,
   formatUsagePercent,
   formatTrialTimeLeft,
   formatUsageReset,
+  formatUsageObservedAt,
   visibleUsageWindows,
 } from '../../components/SettingsView/providerUsage.js'
 
@@ -104,6 +108,33 @@ test('connected plan status uses the compact green-disclosure copy', () => {
   assert.equal(formatPlanStatus('Pro plan'), 'Plan: Pro')
   assert.equal(formatPlanStatus('API billing'), 'Plan: API billing')
   assert.equal(formatPlanStatus(''), 'Plan: Unknown')
+  assert.equal(formatPlanStatus('Self Serve Business Prolite plan'), 'Plan: Business')
+})
+
+test('usage freshness renders a verified reading time, stale state, and refresh action', () => {
+  assert.equal(formatUsageObservedAt('bad date'), '')
+  const snapshot = {
+    state: 'ready',
+    windows: [{ id: 'weekly', label: 'Weekly', used_percent: 27 }],
+    observed_at: '2026-10-06T09:07:01Z',
+    stale: true,
+  }
+  const html = renderToStaticMarkup(createElement(ProviderUsage, {
+    id: 'provider-usage-codex', snapshot, onRefresh: () => {},
+  }))
+  assert.match(html, /Last available reading · Checked/)
+  assert.match(html, />Refresh<\/button>/)
+  const refreshing = renderToStaticMarkup(createElement(ProviderUsage, {
+    id: 'provider-usage-codex', snapshot, refreshing: true, onRefresh: () => {},
+  }))
+  assert.match(refreshing, /disabled=""[^>]*>Refreshing…<\/button>/)
+  const unavailable = renderToStaticMarkup(createElement(ProviderUsage, {
+    id: 'provider-usage-claude', failed: true, onRefresh: () => {},
+  }))
+  assert.match(unavailable, /Could not refresh/)
+  assert.doesNotMatch(unavailable, /Time unavailable/)
+  assert.match(settingsView, /onRefresh=\{\(\) => codexUsageQuery\.refetch\(\)\}/)
+  assert.match(settingsView, /onRefresh=\{\(\) => claudeUsageQuery\.refetch\(\)\}/)
 })
 
 test('usage percentages are bounded and retain useful precision', () => {
@@ -151,18 +182,12 @@ test('only four valid allowance windows are rendered', () => {
   assert.deepEqual(windows.map(window => window.id), ['a', 'b', 'c', 'd'])
 })
 
-test('Claude and Codex usage disclosures stay independently expandable', () => {
-  assert.match(settingsView, /expandedUsage\.codex/)
-  assert.match(settingsView, /expandedUsage\.claude/)
-  assert.match(
-    settingsView,
-    /setExpandedUsage\(prev => \(\{ \.\.\.prev, codex: !prev\.codex \}\)\)/,
-  )
-  assert.match(
-    settingsView,
-    /setExpandedUsage\(prev => \(\{ \.\.\.prev, claude: !prev\.claude \}\)\)/,
-  )
-  assert.doesNotMatch(settingsView, /expandedUsage === '(?:codex|claude)'/)
+test('dedicated provider pages fetch only their own usage', () => {
+  assert.match(settingsView, /selectedProvider === 'codex'/)
+  assert.match(settingsView, /selectedProvider === 'claude'/)
+  assert.match(settingsView, /selectedProvider && selectedProvider !== row\.provider \? null/)
+  assert.match(settingsView, /snapshot=\{codexUsageQuery\.data\}/)
+  assert.match(settingsView, /snapshot=\{claudeUsageQuery\.data\}/)
 })
 
 test('expanded usage shares aligned columns without tall cards', () => {
