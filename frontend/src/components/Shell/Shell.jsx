@@ -1,5 +1,6 @@
 import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListReconciliation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
+import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -3106,7 +3107,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Refresh server truth before warming or placing. app_updated/app_created
       // remain lifecycle refreshes; app_preview_ready is the explicit
       // build-session action that reveals either a new app or an updated one.
-      // `updated_at` drives the iframe live-swap; the chat-artifact query above
+      // `frame_version` drives the iframe live-swap; the chat-artifact query above
       // owns the durable Icon Drop and unread-dot state.
       Promise.all([
         invalidateShellListCache('apps'),
@@ -4414,6 +4415,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
     // follows the workspace to its recent tab or collapsed sibling; no global demote.
     retireAppHistory(id, 'deleted')
+    clearAppNavLocation(id)
     tombstoneRoute('app', id)
     const sid = String(id)
     dropFromWarmLru(cid => String(cid) === sid)
@@ -4435,9 +4437,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // Wipes an app's stored data back to empty while KEEPING it installed —
   // a separate, additive action from deleteApp (which tombstones the whole
   // app). Lives here, like deleteApp, so it has access to notifyShell and
-  // refreshApps. The app STAYS in the list; refreshApps picks up the bumped
-  // updated_at, which rotates versionForApp's cache-buster so an open iframe
-  // remounts against its now-empty storage — no manual cache eviction.
+  // refreshApps. The app STAYS in the list; refreshApps picks up the new
+  // storage generation in frame_version, which rotates versionForApp's
+  // cache-buster so an open iframe remounts against its now-empty storage —
+  // no manual cache eviction.
   async function deleteAppData(id) {
     let res
     try {
@@ -4459,6 +4462,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // retire the old frame's physical history — its replacement starts with an
     // empty internal nav stack (contract §4.1.5) — and drop any warm-only frame.
     retireAppHistory(id, 'data-reset')
+    clearAppNavLocation(id)
     const sid = String(id)
     dropFromWarmLru(cid => String(cid) === sid)
     clearAppFrameStorage(id)
@@ -4916,6 +4920,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               interactive={appRuntimeVisible
                 && !modalDrawerOpen && !modeBeatActive}
               version={versionForApp(id)}
+              storageGeneration={app?.storage_generation}
               appName={app?.name}
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}

@@ -13,6 +13,8 @@ import {
   liveAppToken, resolveLatchedToken,
 } from '../../lib/appToken.js'
 import { createAppStorageHost } from '../../lib/appStorageHost.js'
+import { validNavLocationText } from '../../lib/appNavLocation.js'
+import { readAppNavLocation, writeValidatedAppNavLocation } from '../../lib/appNavLocationStore.js'
 import {
   cacheAppToken, readAppFrameStorage, readCachedAppToken,
   isSharedVirtualStorageKey,
@@ -65,7 +67,7 @@ function appFrameRequestUrl(appId, version, frameRev) {
 // the opaque origin `null` and are attributed to an exact mounted contentWindow.
 //
 //   1. {type: 'moebius:frame-init', token, themeCss, bg,
-//       capabilityContract}                                parent → frame
+//       capabilityContract, navLocation}                   parent → frame
 //      Fired by `sendInit()` below — on iframe.onLoad AND whenever the
 //      token query resolves (covers the case where the iframe loaded
 //      before the token was ready). Idempotent — the frame's own
@@ -126,10 +128,21 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      scrim but synchronously cancels any Android compositor scroll already in
 //      flight. Hidden/incoming frames receive false too.
 //
-// Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-ack` /
+//   3c. {type: 'moebius:frame-visibility', visible, navigationReady} parent → frame
+//      visible keeps painted frames foreground during shell handoffs;
+//      navigationReady requires a mounted, promoted, logically visible frame.
+//
+// Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
 // `onMessage` handler. These wire the iframe's own back-stack into
 // the shell's pushState so device-back unwinds in-app routes first.
+//
+// Navigation location: {type:'moebius:nav-location', location} frame → parent
+//      The live frame reports its current place as bounded JSON text (or null).
+//      The shell keeps it per app and installation (lib/appNavLocationStore.js)
+//      and returns it as frame-init's navLocation to the next frame of the same
+//      app, so a code update, eviction, crash or shell reload keeps the place.
+//      It is app data: validated and stored as text, never evaluated.
 //
 //   4. {type: 'moebius:immersive', value, appId}            frame → parent
 //      The app asks the shell to hide its chrome (top bar) so the canvas
@@ -207,7 +220,7 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //
 // Why token-free frame URL: `GET /api/apps/{id}/frame?v={version}` is
 // unauthenticated. Token arrives via postMessage so the long-lived JWT
-// never appears in frame history; `v` is the app.updated_at cache buster
+// never appears in frame history; `v` is the app's frame_version cache buster
 // that prevents the offline-app service-worker cache from serving an old
 // frame/module after an app update.
 // =================================================================
@@ -287,8 +300,9 @@ function CameraPreviewLayer({ preview }) {
   )
 }
 
-// `version` is bumped by Shell when an `app_updated` event arrives for this
-// app (a recompile advanced app.updated_at). Rather than remount the one iframe
+// `version` changes when Shell's refreshed app row carries a new frame_version:
+// a new compiled bundle, runtime declarations or storage generation, never a
+// mere settings write. Rather than remount the one iframe
 // on every bump — which blanked the running preview to a full-frame spinner and
 // dropped all in-app state on each ~1s agent save — we DOUBLE-BUFFER the swap:
 // keep the current frame visible and load the new version in a hidden frame
@@ -314,7 +328,7 @@ function CameraPreviewLayer({ preview }) {
 // well within the server-side validity window. The token is app-scoped (keyed
 // by appId server-side), so it is identical for both buffered versions.
 const AppCanvas = forwardRef(function AppCanvas({
-  appId, version = 0, appName, appSlug, offlineCapable = false,
+  appId, version = 0, storageGeneration = null, appName, appSlug, offlineCapable = false,
   capabilityContract = null,
   // The shell's applied presentation for this app: full-bleed immersive,
   // status-bar-preserving chrome collapse, or null. One value keeps safe-area
@@ -526,6 +540,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // listener is live and it can receive frame-init/theme/insets. Per frame,
   // because the two buffered frames finish loading independently.
   const loadedDocsRef = useRef(new Set())
+  // Bind each frame to the app row that supplied its version, not the independently
+  // refreshed token. Each document also keeps its pre-promotion report.
+  const frameNavRef = useRef(new Map())
   // version -> last immersive request ({ value, mode }) that frame declared.
   // Recorded for every frame, including a hidden incoming one whose real-time post
   // is withheld (only the visible frame drives chrome live). On a swap we replay
@@ -542,9 +559,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     const cache = refCbCacheRef.current
     let cb = cache.get(v)
     if (!cb) {
+      const instanceId = storageGeneration
       cb = (el) => {
-        if (el) framesRef.current.set(v, el)
-        else {
+        if (el) {
+          framesRef.current.set(v, el)
+          frameNavRef.current.set(v, { instanceId })
+        } else {
           // AppCanvas can temporarily render a service/loading surface without
           // unmounting itself. Ref removal is the exhaustive boundary for the
           // exact live document, including those non-component teardown paths.
@@ -562,6 +582,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           if (v === liveVersionRef.current) onNavReset?.(appId)
           framesRef.current.delete(v)
           loadedDocsRef.current.delete(v)
+          frameNavRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
           cache.delete(v)
         }
@@ -704,11 +725,13 @@ const AppCanvas = forwardRef(function AppCanvas({
     win.postMessage(
       {
         type: 'moebius:frame-init',
+        waitForNavigationReady: true,
         token,
         themeCss: eff?.css ?? theme?.css,
         bg: eff?.bg ?? theme?.bg,
         storage: readAppFrameStorage(appId, undefined, appSlug),
         capabilityContract,
+        navLocation: readAppNavLocation(appId, frameNavRef.current.get(v)?.instanceId),
       },
       '*',
     )
@@ -727,7 +750,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   // or recompiles. This makes a first online open sufficient for the next
   // offline reload; the module travels separately through the parent broker.
   useEffect(() => {
-    // `0` is appVersionKey's missing-row sentinel while the app list restores;
+    // `0` is appFrameVersion's missing-row sentinel while the app list restores;
     // warming it could race the real version and evict the correct cache key.
     if (!appId || version === '0') return
     void requestAppCodeWarm({
@@ -826,6 +849,8 @@ const AppCanvas = forwardRef(function AppCanvas({
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
+        const nav = frameNavRef.current.get(srcVersion)
+        if (nav) nav.mounted = true
         dispatchSwap({ type: 'frame-mounted', version: srcVersion })
         return
       }
@@ -891,6 +916,23 @@ const AppCanvas = forwardRef(function AppCanvas({
         frameImmersiveRef.current.set(srcVersion, { value, mode })
         if (srcVersion === liveVersionRef.current && activeRef.current) {
           onImmersive?.(appId, value, mode)
+        }
+        return
+      }
+
+      // Reports become authoritative only after mounting and promotion. Bind
+      // writes to this document's init, never a token rotated while it runs.
+      if (msg.type === 'moebius:nav-location') {
+        const nav = frameNavRef.current.get(srcVersion)
+        if (!nav) return
+        const location = validNavLocationText(msg.location)
+        if (msg.location !== null && location === null) return
+        if (srcVersion === liveVersionRef.current && nav.mounted) {
+          writeValidatedAppNavLocation(appId, nav.instanceId, location)
+          // A live report can arrive before the promotion effect flushes.
+          delete nav.location
+        } else {
+          nav.location = location
         }
         return
       }
@@ -1094,18 +1136,21 @@ const AppCanvas = forwardRef(function AppCanvas({
         // visible. It may retire an entry it already owns, but it must never
         // install a NEW top-level history entry while off-screen. Gate on
         // VISIBLE (active tab of any visible pane), not focused — a background
-        // split's app is still interactive (contract §3.3.6). The shell's own
-        // isVisibleApp re-checks pane ownership as the authority.
+        // split's app is still interactive (contract §3.3.6). The shell permits
+        // background restoration only when it reuses the retired current slot.
         const ok = visibleRef.current ? onNavPush?.(appId, {
           requestId: msg.requestId,
           label: msg.label,
           reversible: msg.reversible === true,
+          userActivated: msg.userActivated,
         }) : false
         // Echo the iframe's optional requestId on both ack and reject so the app
         // can correlate when multiple nav-pushes are in flight. Apps that don't
         // pass a requestId get undefined back (backwards compatible).
         const requestId = msg.requestId
-        if (ok === false) {
+        if (ok === 'deferred') {
+          e.source.postMessage({ type: 'moebius:nav-push-deferred', requestId }, '*')
+        } else if (ok === false) {
           // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the app so it
           // can correct its own bookkeeping — otherwise its count drifts above
           // the shell's and the next nav-pop pops a sentinel it never owned,
@@ -1210,6 +1255,7 @@ const AppCanvas = forwardRef(function AppCanvas({
 
   // Clear this app's pending nav-sentinels when the VISIBLE frame stops
   // representing the same browsing context. That happens on:
+  //   - document reload (retired in handleFrameLoad before re-init)
   //   - AppCanvas unmount (LRU eviction, logout)
   //   - a SWAP (swap.liveVersion advances → the old frame, with its internal
   //     nav stack, unmounts and a fresh frame starting at 0 takes over)
@@ -1373,7 +1419,16 @@ const AppCanvas = forwardRef(function AppCanvas({
   // (swap.liveVersion change), so a freshly-promoted frame immediately learns
   // whether it is foreground.
   function sendVisibility(v, visible) {
-    postToFrame(v, { type: 'moebius:frame-visibility', visible })
+    postToFrame(v, {
+      type: 'moebius:frame-visibility',
+      visible,
+      // Restoration that needs a new history entry waits for pane focus.
+      navigationFocused: activeRef.current,
+      // A chat handoff can keep pixels foreground after logical navigation ends.
+      navigationReady: visible && visibleRef.current
+        && v === liveVersionRef.current && swap.liveLoaded
+        && frameNavRef.current.get(v)?.mounted === true,
+    })
   }
 
   function sendInteractivity(v, enabled, frameIsVisible = frameVisibleRef.current) {
@@ -1395,10 +1450,15 @@ const AppCanvas = forwardRef(function AppCanvas({
 
   useEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
+      const nav = frameNavRef.current.get(swap.liveVersion)
+      if (swap.liveLoaded && nav?.mounted && 'location' in nav) {
+        writeValidatedAppNavLocation(appId, nav.instanceId, nav.location)
+        delete nav.location
+      }
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, swap.liveVersion])
+  }, [frameVisible, visible, active, swap.liveVersion, swap.liveLoaded])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then
@@ -1610,6 +1670,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     // re-init below then runs the fresh document's handshake (this is exactly
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
+      if (v === liveVersionRef.current) onNavReset?.(appId)
       retireFrameMediaSession(v)
       if (accountLinkRef.current?.source === framesRef.current.get(v)?.contentWindow) {
         clearAccountLinkRegistration()
@@ -1622,6 +1683,8 @@ const AppCanvas = forwardRef(function AppCanvas({
       )
       dispatchSwap({ type: 'live-reload', version: v })
     }
+    const instanceId = frameNavRef.current.get(v)?.instanceId
+    frameNavRef.current.set(v, { instanceId })
     loadedDocsRef.current.add(v)
     sendInit(v)
     sendOnlineStatus(v)
@@ -1630,12 +1693,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     sendShellShortcuts(v)
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
-    // here; the live frame gets the real visible verdict. Promotion re-sends
-    // via the [frameVisible, swap.liveVersion] effect above. Interactivity is a
+    // here. Live documents get their real painted visibility immediately;
+    // navigation still waits for the mounted signal. Interactivity is a
     // separate gate (drawer-open momentum cancel); its "painted" argument tracks
     // `frameVisible` post active->visible split, its enabled argument tracks
     // `interactive` (focused pane, drawer-aware).
-    sendVisibility(v, v === liveVersionRef.current ? frameVisibleRef.current : false)
+    sendVisibility(v, v === liveVersionRef.current && frameVisibleRef.current)
     sendInteractivity(
       v,
       v === liveVersionRef.current ? interactiveRef.current : false,

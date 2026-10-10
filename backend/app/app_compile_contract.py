@@ -1,5 +1,6 @@
 """Mini-app compile contract shared by the compiler and local validator."""
 
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -48,12 +49,45 @@ COMPILED_RUNTIME_ABI = 1
 # compiled-runtime change that remains host-compatible. Keep ABI for actual
 # host/runtime incompatibilities: a revision-only rollout is safe while the
 # live checkout and backend process briefly run different generations.
-COMPILED_RUNTIME_ARTIFACT_REVISION = 8
+COMPILED_RUNTIME_ARTIFACT_REVISION = 9
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
   f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
   f"artifact-revision:{COMPILED_RUNTIME_ARTIFACT_REVISION} */"
 )
+
+
+def app_frame_version(app) -> str:
+  """Derive the frame reload key from an App row or its AppOut projection.
+
+  A frame runs one content-addressed bundle (its file name carries the
+  SHA-256, and the compile banner carries the runtime revision), initialized
+  with the accepted runtime declarations and published asset tree, and bound
+  to one storage generation.
+  Ordinary row writes such as a pin, rename, icon, or permission change touch
+  none of these, so the shell keeps the running frame and the app keeps its
+  place. The published tree revision includes /app-assets: static-app updates
+  must reload even when their wrapper bundle stays unchanged. The raw nonce is
+  not exposed by this key (app-scoped JWTs separately carry it as app_nonce).
+  """
+  runtime = (
+    app.capability_contract.get("runtime")
+    if isinstance(app.capability_contract, Mapping) else None
+  )
+  identity = json.dumps(
+    [
+      Path(app.compiled_path or "").name, runtime or {}, app.token_nonce or "",
+      app.runtime_revision or "",
+    ],
+    sort_keys=True,
+    separators=(",", ":"),
+  )
+  return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def app_storage_generation(token_nonce: str | None) -> str:
+  """Non-secret installation identity for binding saved client-side state."""
+  return hashlib.sha256((token_nonce or "").encode("utf-8")).hexdigest()[:20]
 
 
 def runtime_inject_path() -> Path:

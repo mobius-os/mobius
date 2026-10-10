@@ -787,6 +787,23 @@ def test_local_manifest_icon_is_materialized_with_its_accepted_revision(
   assert client.get(f"/api/apps/{app_id}/icon").status_code == 404
 
 
+def test_local_apply_scales_down_a_large_icon_like_install(client, auth, db):
+  """Apply used to refuse anything over 4096 px that install merely skipped."""
+  from PIL import Image
+  source = _source()
+  output = io.BytesIO()
+  Image.new("RGB", (5000, 4800), (40, 90, 180)).save(output, format="PNG")
+  _declare_icon(source, output.getvalue())
+
+  applied = _apply(client, auth, source)
+
+  assert applied.status_code == 200, applied.text
+  row = db.query(models.App).populate_existing().filter_by(
+    id=applied.json()["app"]["id"],
+  ).one()
+  assert Image.open(io.BytesIO(row.icon_png)).size == (1024, 1024)
+
+
 def test_invalid_local_manifest_icon_keeps_previous_revision(
   client, auth, db,
 ):
