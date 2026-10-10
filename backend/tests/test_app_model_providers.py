@@ -196,3 +196,26 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   assert providers.provider_of_model("deepseek-next") is None
   with pytest.raises(ValueError, match="not installed"):
     providers.get_provider(provider_id)
+
+
+def test_app_provider_sync_reads_only_the_contract_not_app_source_or_icons(db):
+  """The registry sync runs about once a second; loading full App rows pulled
+  every app's source and icon (megabytes) just to read the contract."""
+  from sqlalchemy import event
+  from app.database import engine
+
+  statements: list[str] = []
+
+  def record(_conn, _cursor, statement, *_args):
+    statements.append(statement)
+
+  event.listen(engine, "before_cursor_execute", record)
+  try:
+    providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  finally:
+    event.remove(engine, "before_cursor_execute", record)
+  app_reads = [sql for sql in statements if "FROM apps" in sql]
+  assert app_reads, statements
+  for sql in app_reads:
+    assert "jsx_source" not in sql and "icon_png" not in sql, sql
+    assert "capability_contract" in sql

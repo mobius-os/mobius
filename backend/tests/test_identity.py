@@ -316,7 +316,7 @@ def test_identity_member_since_preserves_the_owners_original_calendar_date(
 
 
 def test_linked_agent_access_and_trial_activation_are_proxied_without_credentials(
-  client, auth, account_service,
+  client, auth, account_service, monkeypatch,
 ):
   granted = _link_account(client, auth)
   seen = []
@@ -339,8 +339,14 @@ def test_linked_agent_access_and_trial_activation_are_proxied_without_credential
     return 200, remote
 
   account_service(handler)
+  from app.routes import identity as identity_routes
+  forgotten = []
+  monkeypatch.setattr(identity_routes, "mobius_account_changed", lambda: forgotten.append(True))
   status = client.get("/api/identity/agent", headers=granted)
+  assert forgotten == []
   activation = client.post("/api/identity/agent/trial", headers=granted)
+  # Activated credit must not hide behind a held zero balance.
+  assert forgotten == [True]
 
   assert status.status_code == activation.status_code == 200
   assert status.json() == {"agent_access": "available", **remote}
@@ -1465,3 +1471,14 @@ def test_linked_profile_mutation_uses_the_authoritative_response_once(
     "https://www.mobius.you/api/account/v1/identity/profile",
     {"handle": "new_handle"},
   )]
+
+
+def test_unlinking_drops_held_mobius_account_reads(client, auth, monkeypatch):
+  """Unlink can change the broker identity, so held account reads must not outlive it."""
+  from app.routes import identity as identity_routes
+
+  calls = []
+  monkeypatch.setattr(identity_routes, "mobius_account_changed", lambda: calls.append(1))
+  response = client.delete("/api/identity/link", headers=auth)
+  assert response.status_code == 204
+  assert calls == [1]

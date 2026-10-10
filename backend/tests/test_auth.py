@@ -168,15 +168,20 @@ def test_managed_web_login_enrolls_the_local_model_identity(monkeypatch, db):
 
   monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
   monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  monkeypatch.setattr(
+    auth_routes, "mobius_account_changed", lambda: calls.append("forget held account reads"),
+  )
 
   response = asyncio.run(auth_routes._complete_mobius_web_login(
     db, {}, "authorization-code",
   ))
 
   assert response.headers["location"] == "/shell/?mobius_login=1"
+  # The new link must not be hidden behind a held "not linked" identity read.
   assert calls == [
     ("GET", "/identity", None),
     ("POST", "/identity/enroll", {"receipt": "header.payload.signature"}),
+    "forget held account reads",
   ]
 
 
@@ -748,7 +753,9 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
     "spendable_units": 500,
     "grants": [{"amount": 500, "expires_at": "2026-12-31"}],
   }
-  monkeypatch.setattr(providers.PROVIDERS["mobius"], "check_auth", lambda data_dir: None)
+  # Patch the class: restoring an inherited method on the shared instance
+  # leaves a bound attribute that shadows later class-level auth tests.
+  monkeypatch.setattr(MobiusProvider, "check_auth", lambda self, data_dir: None)
   monkeypatch.setattr(MobiusProvider, "trial_status", lambda self: balance)
 
   # The owner sees the trial balance.

@@ -978,6 +978,7 @@ from pathlib import Path
 
 from app.codex_login_parse import banner_has_code, parse_login_banner
 from app.runtime_identity import broker_request as _mobius_broker_request
+from app.providers import mobius_account_changed
 
 _codex_login_procs: dict[str, asyncio.subprocess.Process] = {}
 _codex_login_status: dict[str, str] = {}  # "complete" | "failed"
@@ -1278,9 +1279,13 @@ async def _complete_mobius_enrollment(
   ):
     return _mobius_enroll_error_redirect()
 
-  await _mobius_broker_request(
-    "POST", "/identity/enroll", {"receipt": receipt}
-  )
+  try:
+    await _mobius_broker_request(
+      "POST", "/identity/enroll", {"receipt": receipt}
+    )
+  finally:
+    # Even an uncertain enroll outcome may have linked the runtime.
+    mobius_account_changed()
   # The conditional update preserves the same no-rebind invariant if the
   # owner row changes while the external enrollment request is in flight.
   updated = db.query(models.Owner).filter(
@@ -1406,9 +1411,12 @@ async def _complete_mobius_web_login(
     ):
       return _mobius_login_error_redirect()
   else:
-    enrolled = await _mobius_broker_request(
-      "POST", "/identity/enroll", {"receipt": receipt}
-    )
+    try:
+      enrolled = await _mobius_broker_request(
+        "POST", "/identity/enroll", {"receipt": receipt}
+      )
+    finally:
+      mobius_account_changed()
     if (
       enrolled.get("linked") is not True
       or not secrets.compare_digest(

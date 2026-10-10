@@ -64,7 +64,7 @@ _file_receipt.touch()
 # created when missing, so a real build is never clobbered.
 from pathlib import Path as _Path
 
-_static = _Path(__file__).resolve().parents[1] / "static"
+_static = _Path(_tmp) / "static"
 # The warm publisher validates emitted JavaScript with a checked-in Node
 # script. Production uses /data/platform/frontend; host CI must point at the
 # checkout under test before importing app.frontend_watcher.
@@ -418,6 +418,10 @@ def fresh_db():
   # test seeing an earlier test's immutable artifact for the same numeric id.
   for _sub in ("apps", "app-secrets", "app-runtime", "app-envs", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
+  # The shared Möbius provider holds broker identity/balance reads briefly;
+  # one test's linked account must not answer the next test's auth check.
+  from app.providers import mobius_account_changed as _forget_mobius_reads
+  _forget_mobius_reads()
 
   # Installed apps' model-provider declarations are projected into the
   # process-global provider registry, and that projection is read-throttled

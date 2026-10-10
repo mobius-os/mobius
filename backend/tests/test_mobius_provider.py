@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 
 from app import providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
@@ -18,6 +20,48 @@ def _provider():
     ],
   })
   return provider
+
+
+def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
+  monkeypatch,
+):
+  from contextlib import contextmanager
+  from app import runtime_identity
+
+  provider = _provider()
+  copying = threading.Event()
+  resume = threading.Event()
+  original_copy = providers.copy.deepcopy
+
+  class Client:
+    def get(self, _route):
+      return self
+
+    def raise_for_status(self):
+      pass
+
+    def json(self):
+      return {"linked": False}
+
+  @contextmanager
+  def broker_client(**_kwargs):
+    yield Client()
+
+  def paused_copy(value, *args, **kwargs):
+    if isinstance(value, dict) and value == {"linked": False}:
+      copying.set()
+      assert resume.wait(3)
+    return original_copy(value, *args, **kwargs)
+
+  monkeypatch.setattr(runtime_identity, "broker_client", broker_client)
+  monkeypatch.setattr(providers.copy, "deepcopy", paused_copy)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    future = pool.submit(provider._identity)
+    assert copying.wait(3)
+    provider.forget_account_reads()
+    resume.set()
+    assert future.result(timeout=3) == {"linked": False}
+  assert "/identity" not in provider._held_reads
 
 
 def test_trial_provider_requires_linked_broker(monkeypatch, tmp_path):
@@ -120,3 +164,163 @@ def test_subscription_never_becomes_an_implicit_connected_default(monkeypatch):
 
   assert providers.authenticated_provider_ids("/data") == []
   assert providers.resolve_default_provider("/data", "claude") == "claude"
+
+
+class _FakeBroker:
+  """Counts broker GETs; each response comes from `answers[route]`."""
+
+  def __init__(self, answers):
+    self.answers = answers
+    self.calls: list[str] = []
+    self.during_call = None
+
+  def client(self, *, timeout):
+    broker = self
+
+    class _Response:
+      def __init__(self, route):
+        self.route = route
+
+      def raise_for_status(self):
+        value = broker.answers[self.route]
+        if isinstance(value, Exception):
+          raise value
+
+      def json(self):
+        return broker.answers[self.route]
+
+    class _Client:
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *_exc):
+        return False
+
+      def get(self, route):
+        broker.calls.append(route)
+        if broker.during_call:
+          broker.during_call()
+        return _Response(route)
+
+    return _Client()
+
+
+def _broker(monkeypatch, answers):
+  from app import runtime_identity
+  broker = _FakeBroker(answers)
+  monkeypatch.setattr(runtime_identity, "broker_client", broker.client)
+  return broker
+
+
+def test_trial_balance_is_held_between_status_reads_and_dropped_when_account_changes(monkeypatch):
+  provider = _provider()
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 0}})
+
+  assert provider.trial_status() == {"spendable_units": 0}
+  assert provider.trial_status() == {"spendable_units": 0}
+  assert broker.calls == ["/v1/balance"]
+
+  # Activating credit (or linking) must be visible on the very next read.
+  broker.answers["/v1/balance"] = {"spendable_units": 500}
+  providers.mobius_account_changed()
+  assert provider.trial_status() == {"spendable_units": 500}
+  assert broker.calls == ["/v1/balance", "/v1/balance"]
+
+
+def test_balance_hold_expires(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 1}})
+  provider.trial_status()
+  held_at, value = provider._held_reads["/v1/balance"]
+  provider._held_reads["/v1/balance"] = (
+    held_at - provider.BALANCE_HOLD_SECONDS - 1, value,
+  )
+  provider.trial_status()
+  assert broker.calls == ["/v1/balance", "/v1/balance"]
+
+
+def test_identity_link_is_held_briefly_but_a_sign_in_is_seen_at_once(monkeypatch, tmp_path):
+  provider = _provider()
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  broker = _broker(monkeypatch, {"/identity": {"linked": False}})
+  data_dir = str(tmp_path)
+
+  assert provider.check_auth(data_dir) is not None
+  assert provider.check_auth(data_dir) is not None
+  assert broker.calls == ["/identity"]
+
+  broker.answers["/identity"] = {"linked": True}
+  providers.mobius_account_changed()
+  assert provider.check_auth(data_dir) is None
+
+
+def test_failed_identity_read_is_never_held(monkeypatch, tmp_path):
+  """A transient broker error must not pin the account as unlinked."""
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/identity": RuntimeError("broker down")})
+  assert provider.check_auth(str(tmp_path)) is not None
+  broker.answers["/identity"] = {"linked": True}
+  assert provider.check_auth(str(tmp_path)) is None
+  assert broker.calls == ["/identity", "/identity"]
+
+
+def test_balance_read_in_flight_when_account_changes_is_not_held(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 0}})
+  broker.during_call = provider.forget_account_reads
+  assert provider.trial_status() == {"spendable_units": 0}
+  assert "/v1/balance" not in provider._held_reads
+
+
+def test_held_balance_cannot_be_mutated_by_a_caller(monkeypatch):
+  provider = _provider()
+  _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
+  provider.trial_status()["spendable_units"] = 0
+  assert provider.trial_status() == {"spendable_units": 3}
+
+
+def test_unchanged_declaration_preserves_identity_and_balance_holds(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {
+    "/identity": {"linked": True}, "/v1/balance": {"spendable_units": 3},
+  })
+  provider._identity()
+  provider.trial_status()
+  generation = provider._held_generation
+
+  # App synchronization reloads equal JSON into a distinct object.
+  provider.set_declaration(provider.app_id, json.loads(json.dumps(provider.declaration)))
+
+  assert provider._held_generation == generation
+  assert provider._identity() == {"linked": True}
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert broker.calls == ["/identity", "/v1/balance"]
+
+
+def test_unchanged_declaration_preserves_in_flight_account_read(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
+  broker.during_call = lambda: provider.set_declaration(
+    provider.app_id, json.loads(json.dumps(provider.declaration)),
+  )
+
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert provider.trial_status() == {"spendable_units": 3}
+  assert broker.calls == ["/v1/balance"]
+
+
+def test_changed_declaration_or_app_discards_account_holds(monkeypatch):
+  provider = _provider()
+  broker = _broker(monkeypatch, {"/v1/balance": {"spendable_units": 3}})
+  provider.trial_status()
+  declaration = json.loads(json.dumps(provider.declaration))
+  declaration["name"] = "Updated provider"
+  provider.set_declaration(provider.app_id, declaration)
+  provider.trial_status()
+  provider.set_declaration(provider.app_id + 1, declaration)
+  provider.trial_status()
+  provider.set_declaration(None, None)
+
+  assert broker.calls == ["/v1/balance"] * 3
+  assert provider._held_reads == {}

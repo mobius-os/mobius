@@ -11,6 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app import models, providers, transcript_rows
 from app.chat_start import start_programmatic_chat_turn
@@ -343,8 +344,9 @@ async def delegation_capabilities(
     return value if isinstance(value, dict) else {}
 
   connections = {}
-  for provider_id, provider in providers.PROVIDERS.items():
-    error = provider.check_auth(get_settings().data_dir)
+  # check_auth may be a broker round trip (Möbius); keep it off the loop.
+  for provider_id, provider in list(providers.PROVIDERS.items()):
+    error = await run_in_threadpool(provider.check_auth, get_settings().data_dir)
     connections[provider_id] = {
       "configured": error is None,
       "authenticated": error is None,

@@ -21,6 +21,7 @@ an app-owned setup UI, not another platform runner or picker branch.
 
 import asyncio
 import base64
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
@@ -972,13 +973,27 @@ class MobiusProvider(BaseProvider):
   runtime_kind = "codex_sdk"
   switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
 
+  # Account reads sit on every provider-status and auth decision, and the
+  # balance is a remote round trip (0.3-0.8 s). Successful reads are held
+  # briefly; forget_account_reads() drops them whenever this runtime links an
+  # account or activates credit, so a sign-in is visible at once. Failures are
+  # never held: a transient broker error must not pin "not linked".
+  IDENTITY_HOLD_SECONDS = 5.0
+  BALANCE_HOLD_SECONDS = 60.0
+
   def __init__(self):
     self.declaration: dict[str, Any] | None = None
     self.app_id: int | None = None
+    self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
+    self._held_generation = 0
+    self._held_lock = threading.Lock()
 
   def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
+    if self.app_id == app_id and self.declaration == declaration:
+      return
     self.app_id = app_id
     self.declaration = declaration
+    self.forget_account_reads()
     self.name = declaration["name"] if declaration else "Möbius"
     self.switch_efforts = (
       frozenset(
@@ -999,23 +1014,44 @@ class MobiusProvider(BaseProvider):
     # implementation model names. The context cap also bounds trial exposure.
     return Path(__file__).with_name("responses_codex_template.json").resolve()
 
-  def _identity(self) -> dict[str, Any]:
-    from app.runtime_identity import broker_client
-    with broker_client(timeout=3.0) as client:
-      response = client.get("/identity")
-      response.raise_for_status()
-      value = response.json()
-    return value if isinstance(value, dict) else {}
+  def forget_account_reads(self) -> None:
+    """Drop held identity and balance reads, including reads in flight."""
+    with self._held_lock:
+      self._held_generation += 1
+      self._held_reads.clear()
 
-  def trial_status(self) -> dict[str, Any]:
+  def _held_broker_read(
+    self, route: str, *, hold_seconds: float, timeout: float,
+  ) -> dict[str, Any]:
+    with self._held_lock:
+      held = self._held_reads.get(route)
+      if held is not None and time.monotonic() - held[0] < hold_seconds:
+        return copy.deepcopy(held[1])
+      generation = self._held_generation
     from app.runtime_identity import broker_client
-    with broker_client(timeout=5.0) as client:
-      response = client.get("/v1/balance")
+    with broker_client(timeout=timeout) as client:
+      response = client.get(route)
       response.raise_for_status()
       value = response.json()
     if not isinstance(value, dict):
-      raise ValueError("invalid trial status")
+      raise ValueError(f"invalid broker response for {route}")
+    # A read that started before forget_account_reads() may describe the
+    # previous account state; serve it to its own caller but never hold it.
+    copied = copy.deepcopy(value)
+    with self._held_lock:
+      if generation == self._held_generation:
+        self._held_reads[route] = (time.monotonic(), copied)
     return value
+
+  def _identity(self) -> dict[str, Any]:
+    return self._held_broker_read(
+      "/identity", hold_seconds=self.IDENTITY_HOLD_SECONDS, timeout=3.0,
+    )
+
+  def trial_status(self) -> dict[str, Any]:
+    return self._held_broker_read(
+      "/v1/balance", hold_seconds=self.BALANCE_HOLD_SECONDS, timeout=5.0,
+    )
 
   def check_auth(self, data_dir: str) -> str | None:
     if not self.declaration:
@@ -1191,6 +1227,17 @@ PROVIDERS: dict[str, BaseProvider] = {
 
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
+
+def mobius_account_changed() -> None:
+  """Call after this runtime links an account or changes its credit.
+
+  Drops the Möbius provider's held identity and balance reads so the next
+  status or auth check asks the broker instead of serving the old account.
+  """
+  mobius = PROVIDERS["mobius"]
+  if isinstance(mobius, MobiusProvider):
+    mobius.forget_account_reads()
+
 _app_provider_ids: set[str] = set()
 _app_provider_sync_at = 0.0
 
@@ -1211,12 +1258,16 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     from app import models
     from app.database import SessionLocal
     with SessionLocal() as db:
-      rows = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
+      # Only the contract column: full App rows carry source and icon blobs
+      # (megabytes across installs) and this runs about once a second.
+      rows = db.query(models.App.id, models.App.capability_contract).filter(
+        models.App.deleted_at.is_(None)
+      ).all()
       declarations = [
-        (row.id, row.capability_contract["model_provider"])
-        for row in rows
-        if isinstance(row.capability_contract, dict)
-        and isinstance(row.capability_contract.get("model_provider"), dict)
+        (app_id, contract["model_provider"])
+        for app_id, contract in rows
+        if isinstance(contract, dict)
+        and isinstance(contract.get("model_provider"), dict)
       ]
   except Exception as exc:
     _model_registry_log.warning("app model registry read failed: %s", exc)
@@ -2042,6 +2093,50 @@ def _fresh_model_entries(
   return None
 
 
+# Background catalog refreshes, one per provider at most. Held here so the
+# event loop's weak task references cannot drop a refresh mid-flight.
+_model_refresh_tasks: dict[str, asyncio.Task] = {}
+
+
+def _served_model_entries(
+  data_dir: str, provider_id: str,
+) -> list[dict[str, Any]] | None:
+  """Any cached catalog, refreshing an expired one in the background.
+
+  Stale-while-revalidate: an expired catalog is still the best answer for
+  this caller (the refresh is a CLI subprocess or remote call, ~1 s), so only
+  a provider with no cached catalog at all makes its caller wait. The
+  provider's registry lock still admits one refresh at a time, and
+  forget_provider_models takes that lock, so a refresh begun under an old
+  sign-in cannot outlive the sign-in change.
+  """
+  cached = _model_registry_cache.get(provider_id)
+  if cached is None:
+    return None
+  if time.monotonic() - cached[0] >= _MODEL_CACHE_TTL_SECONDS:
+    running = _model_refresh_tasks.get(provider_id)
+    if (running is None or running.done()) and provider_id in _model_registry_locks:
+      task = asyncio.create_task(
+        _fetch_model_entries(data_dir, provider_id),
+        name=f"model-catalog-refresh:{provider_id}",
+      )
+      _model_refresh_tasks[provider_id] = task
+      task.add_done_callback(
+        lambda done, pid=provider_id: _model_refresh_finished(pid, done)
+      )
+  return cached[1]
+
+
+def _model_refresh_finished(provider_id: str, task: asyncio.Task) -> None:
+  if _model_refresh_tasks.get(provider_id) is task:
+    del _model_refresh_tasks[provider_id]
+  if not task.cancelled() and task.exception() is not None:
+    _model_registry_log.warning(
+      "background model refresh failed for %s: %s",
+      provider_id, task.exception(),
+    )
+
+
 async def _fetch_model_entries(
   data_dir: str, provider_id: str, *, force_refresh: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -2069,7 +2164,9 @@ async def list_models(
 ) -> dict[str, list[dict[str, Any]]]:
   """Returns `{provider_id: [{id, label, provider, available}, ...]}`.
 
-  Cache TTL is 5 minutes per provider. On upstream failure for a
+  Cache TTL is 5 minutes per provider; an expired catalog is served
+  at once while one background refresh replaces it, so only a provider
+  with no cached catalog blocks its caller. On upstream failure for a
   given provider we serve KNOWN_MODELS for THAT provider (the live
   data from the other provider still flows). `force_refresh=True`
   bypasses the cache — used by the manage-models modal's refresh
@@ -2081,15 +2178,15 @@ async def list_models(
 
   sync_app_model_providers(data_dir, force=force_refresh)
 
-  # Serve hot reads (cache hit + not forced) without ever taking a
-  # lock — concurrent callers in the steady-state hit the cache
-  # directly. Only cache misses go through _fetch_model_entries.
+  # Serve cached reads (fresh or stale, unless forced) without taking a
+  # lock. Only providers with no catalog go through _fetch_model_entries
+  # on this request.
   result: dict[str, list[dict[str, Any]]] = {}
   cold: list[str] = []
   for provider_id in PROVIDERS:
     if not provider_selectable(data_dir, provider_id):
       continue
-    hit = _fresh_model_entries(provider_id, force_refresh=force_refresh)
+    hit = None if force_refresh else _served_model_entries(data_dir, provider_id)
     if hit is not None:
       result[provider_id] = hit
     else:
@@ -2110,11 +2207,11 @@ async def list_models(
 
 
 async def model_supports_effort(data_dir: str, model: str | None) -> bool:
-  """Read Claude's capability without refreshing unrelated providers.
+  """Use a current Claude capability at execution, not a stale picker row.
 
-  A cold or expired Claude cache refreshes only Claude, so a saved live-only
-  effortless model works before its picker opens. Fresh entries answer a turn
-  without I/O; Codex and app-provider discovery never belongs here.
+  Display lists may be stale-while-revalidate, but a saved effort sent to a
+  newly effortless model is rejected by Claude. Refresh only this provider
+  when its catalog has expired; unrelated discovery never belongs here.
   """
   if not model:
     return True

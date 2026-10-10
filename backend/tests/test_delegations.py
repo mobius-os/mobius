@@ -3499,3 +3499,33 @@ def test_a_wake_run_started_under_an_earlier_id_still_attaches(db):
     source_work_id="root-old-basis-orphan", activity_id=delegation_id,
   )).result(timeout=5)
   assert isinstance(attached, StartContinuationAttached)
+
+
+def test_delegation_capabilities_checks_provider_auth_off_the_event_loop(
+  client, auth, monkeypatch,
+):
+  """Möbius check_auth is a synchronous broker call (3 s timeout); a stalled
+  broker must not freeze every other request on the loop."""
+  import threading
+  from app import providers
+
+  loop_threads = []
+  auth_threads = []
+
+  async def fake_models(_data_dir):
+    loop_threads.append(threading.get_ident())
+    return {}
+
+  def check_auth(_self, _data_dir):
+    auth_threads.append(threading.get_ident())
+    return None
+
+  monkeypatch.setattr("app.routes.delegations.providers.list_models", fake_models)
+  # Patch the classes: undoing an instance patch leaves the bound original in
+  # the instance dict, which would shadow later class-level patches.
+  for provider in providers.PROVIDERS.values():
+    monkeypatch.setattr(type(provider), "check_auth", check_auth)
+  response = client.get("/api/delegations/capabilities", headers=auth)
+  assert response.status_code == 200, response.text
+  assert auth_threads and loop_threads
+  assert loop_threads[0] not in auth_threads

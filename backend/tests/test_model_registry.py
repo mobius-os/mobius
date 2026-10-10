@@ -234,22 +234,10 @@ async def test_effort_support_uses_claude_cache_without_turn_time_discovery(monk
   assert await providers.model_supports_effort("/data", None) is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cache_age", [None, 10_000])
-async def test_effort_support_fetches_only_claude_when_cache_is_cold_or_expired(
-  monkeypatch, tmp_path, cache_age,
-):
-  monkeypatch.setattr(providers, "_model_registry_cache", {})
-  if cache_age is not None:
-    monkeypatch.setitem(providers._model_registry_cache, "claude", (
-      time.monotonic() - cache_age,
-      [{"id": "claude-live-no-effort", "effort_levels": ["low"]}],
-    ))
-  calls = []
-
+def _only_claude_discovery(monkeypatch, calls, answer):
   async def claude_models(_data_dir):
     calls.append("claude")
-    return [{"id": "claude-live-no-effort", "effort_levels": []}]
+    return answer
 
   async def other_models(_data_dir):
     pytest.fail("a Claude turn must not fetch another provider")
@@ -262,12 +250,98 @@ async def test_effort_support_fetches_only_claude_when_cache_is_cold_or_expired(
   monkeypatch.setattr(providers, "list_models", lambda *_a, **_kw: pytest.fail(
     "a Claude turn must not list all providers"
   ))
+
+
+@pytest.mark.asyncio
+async def test_effort_support_fetches_only_claude_when_cache_is_cold(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+  calls = []
+  _only_claude_discovery(
+    monkeypatch, calls, [{"id": "claude-live-no-effort", "effort_levels": []}],
+  )
   data_dir = str(tmp_path)
   assert await providers.model_supports_effort(data_dir, "claude-live-no-effort") is False
   assert await providers.model_supports_effort(data_dir, "claude-live-no-effort") is False
   assert calls == ["claude"]
   assert await providers.model_supports_effort(data_dir, "claude-haiku-4-5-20251001") is False
   assert await providers.model_supports_effort(data_dir, "claude-opus-4-8") is True
+
+
+@pytest.mark.asyncio
+async def test_effort_support_waits_for_fresh_claude_capability_at_execution(
+  monkeypatch, tmp_path,
+):
+  """A stale picker row cannot make execution send rejected saved effort."""
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+  monkeypatch.setattr(providers, "_model_refresh_tasks", {})
+  monkeypatch.setitem(providers._model_registry_cache, "claude", (
+    time.monotonic() - 10_000,
+    [{"id": "claude-live-no-effort", "effort_levels": ["low"]}],
+  ))
+  calls = []
+  _only_claude_discovery(
+    monkeypatch, calls, [{"id": "claude-live-no-effort", "effort_levels": []}],
+  )
+  data_dir = str(tmp_path)
+  assert await providers.model_supports_effort(data_dir, "claude-live-no-effort") is False
+  assert calls == ["claude"]
+
+
+@pytest.mark.asyncio
+async def test_expired_model_list_is_served_without_waiting_while_one_refresh_runs(
+  monkeypatch, tmp_path,
+):
+  """Stale-while-revalidate: callers of an expired catalog never wait on the
+  ~1 s discovery subprocess, and concurrent callers start one refresh."""
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+  monkeypatch.setattr(providers, "_model_refresh_tasks", {})
+  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  monkeypatch.setattr(providers, "provider_selectable", lambda _d, pid: pid == "codex")
+  stale = [{"id": "gpt-old", "label": "Old"}]
+  monkeypatch.setitem(
+    providers._model_registry_cache, "codex", (time.monotonic() - 10_000, stale),
+  )
+  release = asyncio.Event()
+  calls = []
+
+  async def slow_codex_models(_data_dir):
+    calls.append("codex")
+    await release.wait()
+    return [{"id": "gpt-new", "label": "New"}]
+
+  monkeypatch.setattr(providers.PROVIDERS["codex"], "fetch_models", slow_codex_models)
+  data_dir = str(tmp_path)
+
+  first, second = await asyncio.wait_for(asyncio.gather(
+    providers.list_models(data_dir), providers.list_models(data_dir),
+  ), timeout=1.0)
+  assert first["codex"] == stale and second["codex"] == stale
+  await asyncio.sleep(0)
+  assert calls == ["codex"]
+
+  release.set()
+  await providers._model_refresh_tasks["codex"]
+  fresh = await providers.list_models(data_dir)
+  assert [row["id"] for row in fresh["codex"]] == ["gpt-new"]
+  assert calls == ["codex"]
+
+
+@pytest.mark.asyncio
+async def test_model_list_with_no_catalog_waits_for_discovery(monkeypatch, tmp_path):
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+  monkeypatch.setattr(providers, "_model_refresh_tasks", {})
+  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  monkeypatch.setattr(providers, "provider_selectable", lambda _d, pid: pid == "codex")
+
+  async def codex_models(_data_dir):
+    return [{"id": "gpt-new", "label": "New"}]
+
+  monkeypatch.setattr(providers.PROVIDERS["codex"], "fetch_models", codex_models)
+  result = await providers.list_models(str(tmp_path))
+  assert [row["id"] for row in result["codex"]] == ["gpt-new"]
+  assert providers._model_refresh_tasks == {}
 
 
 def test_mobius_effort_scale_uses_the_public_product_model():

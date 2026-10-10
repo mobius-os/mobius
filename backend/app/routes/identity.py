@@ -36,6 +36,7 @@ from app.deps import (
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
+from app.providers import mobius_account_changed
 from app.runtime_identity import (
   broker_async_client,
   broker_request as runtime_identity_broker_request,
@@ -729,7 +730,11 @@ async def activate_agent_trial(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
   db: Session = Depends(get_db),
 ):
-  remote = await _agent_remote(db, owner.id, "POST")
+  try:
+    remote = await _agent_remote(db, owner.id, "POST")
+  finally:
+    # Activation may have granted credit even when its response is lost.
+    mobius_account_changed()
   if remote is None:
     raise HTTPException(409, "Sign in to activate Möbius model access.")
   return {"agent_access": "available", **remote}
@@ -1560,6 +1565,9 @@ async def complete_link(
       raise HTTPException(
         502, "Your account signed in, but trial activation could not finish. Please try again."
       ) from exc
+    finally:
+      # Even an uncertain enroll outcome may have linked the runtime.
+      mobius_account_changed()
     if (
       enrolled.get("linked") is not True
       or enrolled.get("subject") != identity_subject
@@ -1596,6 +1604,15 @@ async def delete_link(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
   db: Session = Depends(get_db),
 ):
+  try:
+    return await _delete_link(owner, db)
+  finally:
+    # Like enroll, the link may change at the broker even when a later step
+    # fails, so held account reads are dropped unconditionally.
+    mobius_account_changed()
+
+
+async def _delete_link(owner: models.Owner, db: Session):
   if get_settings().mobius_sso_enabled:
     raise HTTPException(409, "Managed Möbius accounts cannot be unlinked here.")
   link = _linked_row(db, owner.id)
