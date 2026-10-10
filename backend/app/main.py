@@ -434,7 +434,7 @@ async def _parent_is_file_handler(_request: Request, exc: ParentIsFile):
 # but FastAPI buffers the WHOLE body for Pydantic-parsed endpoints (e.g. a
 # create with a huge jsx_source) before validation — an unbounded body there
 # could OOM the memory-tight host (Codex review round-9 #4, round-10 #5). The
-# cap sits ABOVE every legitimate route limit (storage 50 MB, uploads 20 MB) so
+# cap sits ABOVE legitimate route limits (including chat uploads at 50 MiB) so
 # it only ever stops abuse.
 _MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 

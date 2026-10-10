@@ -213,6 +213,34 @@ def test_service_is_an_explicit_reviewed_runtime_not_an_implicit_import_hook(ser
       ))
 
 
+def test_service_transfer_ceiling_is_reviewed_and_defaults_closed():
+  base = _manifest(source_files=["service.py"], service={"entry": "service.py"})
+  default, _ = contract_and_digest(base)
+  enlarged = dict(base, service={"entry": "service.py", "max_bytes": 60 * 1024 * 1024})
+  granted, _ = contract_and_digest(enlarged)
+  assert granted["service"]["max_request_bytes"] == 60 * 1024 * 1024
+  assert granted["service"]["max_response_bytes"] == 60 * 1024 * 1024
+  assert diff_contracts(default, granted)["widens"] is True
+  assert diff_contracts(granted, default)["widens"] is False
+  for value in (True, False, 0, -1, 60 * 1024 * 1024 + 1, 1.5, "62914560", None):
+    with pytest.raises(ManifestContractError, match="service.max_bytes"):
+      validate_manifest_contract(dict(base, service={"entry": "service.py", "max_bytes": value}))
+
+
+def test_service_revocation_never_restores_an_absent_transfer_ceiling():
+  manifest = _manifest(source_files=["service.py"],
+                       service={"entry": "service.py", "max_bytes": 1024})
+  capped, _ = contract_and_digest(manifest)
+  revoked = {key: value for key, value in capped.items() if key != "service"}
+  assert diff_contracts(capped, revoked)["widens"] is False
+
+  # Removing only the explicit ceiling keeps the service granted and restores
+  # its larger default; unlike revocation, that does require owner review.
+  legacy = dict(capped, service={key: value for key, value in capped["service"].items()
+                               if key not in {"max_request_bytes", "max_response_bytes"}})
+  assert diff_contracts(capped, legacy)["widens"] is True
+
+
 def test_agent_activities_bind_only_declared_source_commands():
   manifest = _manifest(
     source_files=["memory-core.md", "lookup.py"],

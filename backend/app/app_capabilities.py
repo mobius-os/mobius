@@ -589,8 +589,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "entry": service["entry"],
       "access": service.get("access", "self"),
       "protocol": "json-v1",
-      "max_request_bytes": SERVICE_REQUEST_MAX_BYTES,
-      "max_response_bytes": SERVICE_REQUEST_MAX_BYTES,
+      "max_request_bytes": service.get("max_bytes", SERVICE_REQUEST_MAX_BYTES),
+      "max_response_bytes": service.get("max_bytes", SERVICE_REQUEST_MAX_BYTES),
     }
     aliases = list(service.get("aliases") or [])
     if aliases:
@@ -708,6 +708,9 @@ def contract_from_app_state(
       }
       if accepted_service.get("aliases"):
         service["aliases"] = list(accepted_service["aliases"])
+      accepted_limit = accepted_service.get("max_request_bytes", SERVICE_REQUEST_MAX_BYTES)
+      if accepted_limit != SERVICE_REQUEST_MAX_BYTES:
+        service["max_bytes"] = accepted_limit
   if isinstance(service, dict):
     manifest["service"] = service
   if model_provider is _PRESERVE_ACCEPTED:
@@ -920,6 +923,14 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     return not isinstance(before, list) or not isinstance(after, list) or any(
       item not in before for item in after
     )
+  if path in {"service.max_request_bytes", "service.max_response_bytes"}:
+    if not any(key.startswith("service.") for key in after_leaves):
+      return False  # Complete revocation cannot restore a transfer allowance.
+    # Service transfer is a reviewed ceiling, not an unordered declaration.
+    # A legacy accepted service without these fields had the 8 MiB default.
+    old = SERVICE_REQUEST_MAX_BYTES if before is None else before
+    new = SERVICE_REQUEST_MAX_BYTES if after is None else after
+    return type(old) is not int or type(new) is not int or new > old
   for capability_id, definition in RUNTIME_CAPABILITY_DEFINITIONS.items():
     prefix = f"runtime.{capability_id}."
     if not path.startswith(prefix):

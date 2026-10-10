@@ -7,6 +7,9 @@ import { persistComposerDraft, readComposerDraft } from '../composerDraft.js'
 function setup(t, initialFiles = []) {
   const calls = []
   t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (url.endsWith('/upload-limits')) {
+      return Promise.resolve({ ok: true, json: async () => ({ max_bytes: 50 * 1024 * 1024 }) })
+    }
     if (options.method === 'DELETE') {
       calls.push({ url, options })
       return Promise.resolve({ ok: true })
@@ -18,6 +21,71 @@ function setup(t, initialFiles = []) {
 }
 const record = name => ({ name, size: 3, mime_type: 'text/plain', status: 'done' })
 const uploadedFile = () => new File(['abc'], 'local.txt', { type: 'text/plain' })
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+for (const action of ['remove', 'unmount']) {
+  test(`${action} during limit discovery never starts an upload`, async t => {
+    let resolveLimit
+    let posts = 0
+    t.mock.method(globalThis, 'fetch', (url, options) => {
+      if (url.endsWith('/upload-limits')) return new Promise(resolve => { resolveLimit = resolve })
+      if (options.method === 'POST') posts++
+      return Promise.resolve({ok: true, json: async () => [record('server.txt')]})
+    })
+    const hook = renderHook(() => useFileUpload({ chatId: 'chat' }))
+    const pending = hook.result.current.addFiles([uploadedFile()])
+    await tick()
+    if (action === 'remove') hook.result.current.removeFile(hook.result.current.files[0].id)
+    else hook.unmount()
+    resolveLimit({ok: true, json: async () => ({max_bytes: 50 * 1024 * 1024})})
+    await pending
+    assert.equal(posts, 0)
+    if (action === 'remove') hook.unmount()
+  })
+}
+
+test('failed limit discovery stays visible and a new selection can retry it', async t => {
+  let checks = 0
+  let posts = 0
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/upload-limits')) return ++checks === 1
+      ? {ok: false}
+      : {ok: true, json: async () => ({max_bytes: 50 * 1024 * 1024})}
+    if (options.method === 'POST') posts++
+    return {ok: true, json: async () => [record('server.txt')]}
+  })
+  const hook = renderHook(() => useFileUpload({ chatId: 'chat' }))
+  await hook.result.current.addFiles([uploadedFile()])
+  assert.match(hook.result.current.files[0].error, /Could not check upload limit/)
+  assert.equal(posts, 0)
+  await hook.result.current.addFiles([uploadedFile()])
+  assert.equal(checks, 2)
+  assert.equal(posts, 1)
+  hook.unmount()
+})
+
+test('picker and paste share preflight: oversized originals never POST', async t => {
+  const { hook, calls } = setup(t)
+  const tooLarge = uploadedFile()
+  Object.defineProperty(tooLarge, 'size', { value: 50 * 1024 * 1024 + 1 })
+  await hook.result.current.addFiles([tooLarge])
+  assert.equal(calls.length, 0)
+  assert.equal(hook.result.current.files[0].status, 'error')
+  assert.match(hook.result.current.files[0].error, /50 MiB upload limit/)
+  hook.unmount()
+})
+
+test('the exact server-advertised file limit remains eligible for upload', async t => {
+  const { hook, calls } = setup(t)
+  const atLimit = uploadedFile()
+  Object.defineProperty(atLimit, 'size', { value: 50 * 1024 * 1024 })
+  const pending = hook.result.current.addFiles([atLimit])
+  await tick()
+  assert.equal(calls.length, 1)
+  calls[0].resolve({ ok: true, json: async () => [record('server.txt')] })
+  await pending
+  hook.unmount()
+})
 
 test('discard asks the server to drop every held draft, once', t => {
   const { hook, calls } = setup(t, [record('unused.txt'), record('accepted.txt')])
@@ -34,6 +102,7 @@ for (const action of ['remove', 'discard']) {
   test(`${action} during upload discards late success using server metadata`, async t => {
     const { hook, calls } = setup(t)
     const pending = hook.result.current.addFiles([uploadedFile()])
+    await tick()
     if (action === 'remove') hook.result.current.removeFile(hook.result.current.files[0].id)
     else hook.result.current.discardFiles()
     assert.equal(calls.length, 1)
@@ -48,6 +117,7 @@ for (const action of ['remove', 'discard']) {
 test('navigation/unmount preserves completed drafts but discards orphaned late success', async t => {
   const { hook, calls } = setup(t, [record('draft.txt')])
   const pending = hook.result.current.addFiles([uploadedFile()])
+  await tick()
   hook.unmount()
   calls[0].resolve({ ok: true, json: async () => [record('server.txt')] })
   await pending
@@ -59,6 +129,7 @@ test('navigation/unmount preserves completed drafts but discards orphaned late s
 test('server metadata replaces browser guesses', async t => {
   const { hook, calls } = setup(t)
   const pending = hook.result.current.addFiles([uploadedFile()])
+  await tick()
   calls[0].resolve({ ok: true, json: async () => [record('server.txt')] })
   await pending
   assert.equal(hook.result.current.files[0].name, 'server.txt')
@@ -74,6 +145,7 @@ test('removing an attachment restored from a saved draft still discards it on th
   }
   const { hook, calls } = setup(t)
   const pending = hook.result.current.addFiles([uploadedFile()])
+  await tick()
   calls[0].resolve({ ok: true, json: async () => [record('server.txt')] })
   await pending
   persistComposerDraft('chat', '', hook.result.current.files, storage)

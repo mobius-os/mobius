@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,11 +19,9 @@ from app.storage_io import read_capped_body
 
 
 router = APIRouter(tags=["app-services"])
+# Total body-read lifetime, separate from the unchanged 15-second execution timeout.
+SERVICE_BODY_TIMEOUT_SECONDS = 120
 _limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
-
-
-def _reject_json_constant(value: str):
-  raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _response(status: int, body, headers: dict[str, str], media_type: str | None):
@@ -75,7 +74,10 @@ def _service_app(db: Session, service_id: str) -> models.App | None:
   )
 
 
-async def _envelope(request: Request, path: str, *, public: bool, actor: dict) -> dict:
+async def _envelope(
+  request: Request, path: str, *, public: bool, actor: dict,
+  max_bytes: int, admission: app_services.ServiceExchangeAdmission,
+) -> dict:
   # `tools/` belongs to the platform's agent-tool lane (app_tools.call_app_tool),
   # whose `call` a service trusts as the moment an agent called it. An HTTP
   # caller never reaches it, so a frame cannot forge a tool call.
@@ -85,15 +87,22 @@ async def _envelope(request: Request, path: str, *, public: bool, actor: dict) -
     or segments[:1] == ["tools"]
   ):
     raise HTTPException(404, "App service path not found.")
-  raw = await read_capped_body(
-    request,
-    app_services.MAX_REQUEST_BYTES,
-    too_large="App service request is too large.",
-  )
+  try:
+    async with asyncio.timeout(SERVICE_BODY_TIMEOUT_SECONDS):
+      raw = await read_capped_body(
+        request,
+        max_bytes,
+        too_large="App service request is too large.",
+      )
+  except TimeoutError as exc:
+    raise HTTPException(408, "App service request body timed out.") from exc
+  # Only the anonymous ingress share is released. The raw body remains owned
+  # by the same total exchange reservation through decoding and invocation.
+  admission.finish_ingress()
   body = None
   if raw:
     try:
-      body = json.loads(raw, parse_constant=_reject_json_constant)
+      body = await admission.decode(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
       raise HTTPException(400, "App service requests must contain JSON.") from exc
   return {
@@ -129,20 +138,22 @@ async def authenticated_app_service(
   app = live_app_or_404(db, app_id)
   if principal.app_id is not None and principal.app_id != app.id:
     raise HTTPException(403, "An app can invoke only its own service.")
-  app_services.service_contract(app, access="self")
-  envelope = await _envelope(
-    request, path, public=False,
-    actor=app_services.request_actor(
-      db, principal, app if principal.app_id is not None else None,
-    ),
-  )
-  db.expunge(app)
-  db.expunge(principal.owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    app, principal.owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  service = app_services.service_contract(app, access="self")
+  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
+    envelope = await _envelope(
+      request, path, public=False,
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+      actor=app_services.request_actor(
+        db, principal, app if principal.app_id is not None else None,
+      ),
+    )
+    db.expunge(app)
+    db.expunge(principal.owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      app, principal.owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)
 
 
 @router.api_route(
@@ -166,18 +177,20 @@ async def shared_app_service(
   if principal.app_id is not None and caller is None:
     raise HTTPException(403, "Calling app is unavailable.")
   required = "self" if principal.app_id in {None, target.id} else "apps"
-  app_services.service_contract(target, access=required)
-  envelope = await _envelope(
-    request, path, public=False,
-    actor=app_services.request_actor(db, principal, caller),
-  )
-  db.expunge(target)
-  db.expunge(principal.owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    target, principal.owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  service = app_services.service_contract(target, access=required)
+  with app_services.ServiceExchangeAdmission(app_services.service_max_bytes(service)) as admission:
+    envelope = await _envelope(
+      request, path, public=False,
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+      actor=app_services.request_actor(db, principal, caller),
+    )
+    db.expunge(target)
+    db.expunge(principal.owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      target, principal.owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)
 
 
 @router.api_route(
@@ -194,15 +207,21 @@ async def public_app_service(
   app = _service_app(db, slug)
   if app is None:
     raise HTTPException(404, "Public app service not found.")
-  app_services.service_contract(app, access="public")
+  service = app_services.service_contract(app, access="public")
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
-  envelope = await _envelope(request, path, public=True, actor={"scope": "public"})
-  db.expunge(app)
-  db.expunge(owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    app, owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
+  with app_services.ServiceExchangeAdmission(
+    app_services.service_max_bytes(service), public_ingress=True,
+  ) as admission:
+    envelope = await _envelope(
+      request, path, public=True, actor={"scope": "public"},
+      max_bytes=app_services.service_max_bytes(service), admission=admission,
+    )
+    db.expunge(app)
+    db.expunge(owner)
+    db.close()
+    status, body, headers, media_type = await app_services.invoke_service(
+      app, owner, envelope, admission=admission,
+    )
+    return _response(status, body, headers, media_type)

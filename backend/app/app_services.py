@@ -14,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import codecs
 import contextlib
+import io
 import json
 import logging
 import os
 import re
 import signal
+import sys
 import weakref
 from datetime import timedelta
 from pathlib import Path
@@ -30,7 +33,7 @@ from app import app_python_env, auth, models, service_preload
 from app.applied_app_runtime import AppliedRuntimeUnavailable, hold_runtime, runtime_root
 from app.browser_access import BrowserLineage, require_live
 from app.config import get_settings
-from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
+from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES, SERVICE_TRANSFER_MAX_BYTES
 
 
 log = logging.getLogger(__name__)
@@ -63,6 +66,214 @@ _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
 )
 
 
+# This is an exchange allocation budget, not another transfer grant. It is
+# shared by every lane and held through the execution queue and response
+# handoff. Exhaustion never queues an already-buffered/decoded payload.
+MAX_JSON_STRUCTURE = 262_144
+MAX_JSON_DEPTH = 64
+MAX_JSON_DECODE_COST = 320 * 1024 * 1024
+MAX_ADMITTED_EXCHANGE_COST = 512 * 1024 * 1024
+MAX_PUBLIC_INGRESS_COST = 192 * 1024 * 1024
+_admitted_exchange_cost = 0
+_public_ingress_cost = 0
+_JSON_RESOURCE_MARKS = re.compile(r'["\\{}\[\],:]')
+# Disjoint alternatives consume string content in native, bounded chunks,
+# including escaped quotes/backslashes. This only finds the end of a string;
+# stdlib JSON still validates escapes and syntax. Never loop per escape in Python.
+_JSON_STRING_CONTENT = re.compile(r'(?:[^"\\]+|\\[\s\S])*')
+_JSON_WIDE_TEXT = re.compile(r'[^\x00-\xff]')
+_JSON_ASTRAL_TEXT = re.compile(r'[^\x00-\uffff]')
+
+
+def _json_text_width(text: str, start: int = 0, end: int | None = None) -> int:
+  end = len(text) if end is None else end
+  return (
+    4 if _JSON_ASTRAL_TEXT.search(text, start, end) else
+    2 if _JSON_WIDE_TEXT.search(text, start, end) else 1
+  )
+
+
+class ServiceExchangeAdmission:
+  """Own request/response materialization, retained backlog and response handoff.
+
+  The lexical scan measures resources only; stdlib JSON remains the sole
+  syntax/value parser. Incremental stdlib text decoding and fixed-size scan
+  chunks avoid constructing either the JSON tree or a full Unicode copy first.
+  Estimates deliberately overcount duplicate keys, escapes and shared values.
+  Three transfer ceilings cover simultaneous raw, pipe/buffer and encoder
+  copies. Request and response decoded costs are added, never substituted.
+  After request materialization its transient Unicode decode copy is gone;
+  retain() charges the surviving envelope before execution. The response's
+  decode/encode estimate stays held through HTTP rendering or tool handoff.
+  """
+
+  def __init__(self, max_bytes: int, *, public_ingress: bool = False):
+    self.max_bytes = max_bytes
+    self.public_ingress = public_ingress
+    self.cost = 0
+    self.request_cost = 0
+    self.response_cost = 0
+
+  def __enter__(self):
+    self._reserve(3 * self.max_bytes)
+    return self
+
+  def __exit__(self, *_):
+    global _admitted_exchange_cost
+    self.finish_ingress()
+    _admitted_exchange_cost -= self.cost
+    self.cost = 0
+    self.request_cost = 0
+    self.response_cost = 0
+
+  def finish_ingress(self):
+    """Transfer a completed public read without releasing its total reservation."""
+    global _public_ingress_cost
+    if self.public_ingress:
+      _public_ingress_cost -= self.cost
+      self.public_ingress = False
+
+  def _reserve(self, cost: int, *, direction: str = "request"):
+    global _admitted_exchange_cost, _public_ingress_cost
+    # No await between checking and reserving: all callers run on the owning
+    # event loop, including HTTP, policy and agent-tool invocations.
+    if _admitted_exchange_cost - self.cost + cost > MAX_ADMITTED_EXCHANGE_COST:
+      self._reject(direction, "admission budget is exhausted")
+    if self.public_ingress:
+      if _public_ingress_cost - self.cost + cost > MAX_PUBLIC_INGRESS_COST:
+        self._reject(direction, "public ingress budget is exhausted")
+      _public_ingress_cost += cost - self.cost
+    _admitted_exchange_cost += cost - self.cost
+    self.cost = cost
+
+  def _reject(self, direction: str, detail: str):
+    raise HTTPException(502 if direction == "response" else 413, f"App service {direction} {detail}.")
+
+  def _decoded_cost(self, cost: int, *, direction: str = "request"):
+    if cost > MAX_JSON_DECODE_COST:
+      self._reject(direction, "decoded resource limit exceeded")
+    request_cost = cost if direction == "request" else self.request_cost
+    response_cost = cost if direction == "response" else self.response_cost
+    self._reserve(3 * self.max_bytes + request_cost + response_cost, direction=direction)
+    self.request_cost = request_cost
+    self.response_cost = response_cost
+
+  async def decode(self, raw: bytes):
+    return await self._decode(raw, direction="request")
+
+  async def decode_response(self, raw: bytes):
+    return await self._decode(raw, direction="response")
+
+  async def _decode(self, raw: bytes, *, direction: str):
+    if not raw and direction == "request":
+      return None
+    decoder = codecs.getincrementaldecoder(json.detect_encoding(raw))("surrogatepass")
+    in_string = False
+    pending_escape = False
+    string_length = 0
+    string_width = 1
+    text_length = 0
+    text_width = 1
+    structures = 0
+    depth = 0
+    decoded_cost = 0
+    cost = 64
+    for start in range(0, len(raw), 64 * 1024):
+      # Bound uninterrupted scan work, not the media allowance. This yields
+      # only while the raw body/stdio remains owned by the exchange lease.
+      # It also makes scans cancellable without an unkillable worker thread.
+      await asyncio.sleep(0)
+      chunk = decoder.decode(raw[start:start + 64 * 1024], final=start + 64 * 1024 >= len(raw))
+      text_length += len(chunk)
+      # Measure Unicode width in C over bounded spans, not one Python
+      # iteration per scalar character. A Unicode caption must not inflate
+      # the separate ASCII base64 string sharing its final scan chunk.
+      text_width = max(text_width, _json_text_width(chunk))
+      last = 0
+      while last < len(chunk):
+        if in_string:
+          # A final backslash can escape the first character of the next
+          # incremental text chunk (also for UTF-16/32 inputs).
+          if pending_escape:
+            string_length += 1
+            last += 1
+            pending_escape = False
+            if last == len(chunk):
+              break
+          end = _JSON_STRING_CONTENT.match(chunk, last).end()
+          string_length += end - last
+          string_width = max(string_width, _json_text_width(chunk, last, end))
+          if chunk.find("\\", last, end) != -1:
+            # Raw escape characters at width four conservatively cover any
+            # decoded Unicode value without interpreting or rewriting it.
+            string_width = 4
+          if end == len(chunk):
+            break
+          if chunk[end] == "\\":
+            # Only an unpaired terminal backslash stops the content matcher.
+            pending_escape = True
+            string_length += 1
+            string_width = 4
+          else:
+            in_string = False
+            decoded_cost += 64 + string_length * string_width
+          last = end + 1
+          continue
+        mark = _JSON_RESOURCE_MARKS.search(chunk, last)
+        if mark is None:
+          break
+        index = mark.start()
+        char = mark.group()
+        if char == '"':
+          in_string = True
+          string_length = 0
+          string_width = 1
+          structures += 1
+        elif char in "{[":
+          depth += 1
+          structures += 1
+        elif char in "}]":
+          depth -= 1
+        elif char in ",:":
+          structures += 1
+        if structures > MAX_JSON_STRUCTURE or depth > MAX_JSON_DEPTH:
+          self._reject(direction, "structural resource limit exceeded")
+        last = index + 1
+      # 256 bytes per structural mark covers container entries, scalar
+      # objects and allocator overhead even for densely nested empty objects.
+      cost = decoded_cost + structures * 256 + text_length * text_width + 64
+      if in_string:
+        cost += 64 + string_length * string_width
+      if cost > MAX_JSON_DECODE_COST:
+        self._reject(direction, "decoded resource limit exceeded")
+    self._decoded_cost(cost, direction=direction)
+    return json.loads(raw, parse_constant=_reject_json_constant)
+
+  def retain(self, value):
+    """Apply the same resource boundary to already-materialized tool/policy JSON."""
+    nodes = 0
+    cost = 0
+
+    def visit(item, depth):
+      nonlocal nodes, cost
+      nodes += 1
+      if nodes > MAX_JSON_STRUCTURE or depth > MAX_JSON_DEPTH:
+        raise HTTPException(413, "App service request structural resource limit exceeded.")
+      cost += 256 + sys.getsizeof(item)
+      if cost > MAX_JSON_DECODE_COST:
+        raise HTTPException(413, "App service request decoded resource limit exceeded.")
+      if isinstance(item, dict):
+        for key, child in item.items():
+          visit(key, depth + 1)
+          visit(child, depth + 1)
+      elif isinstance(item, (list, tuple)):
+        for child in item:
+          visit(child, depth + 1)
+
+    visit(value, 0)
+    self._decoded_cost(cost)
+
+
 def _reject_json_constant(value: str):
   raise ValueError(f"invalid JSON constant: {value}")
 
@@ -80,7 +291,52 @@ def service_contract(app, *, access: str) -> dict:
   entry = service.get("entry")
   if not isinstance(entry, str) or not entry.endswith(".py"):
     raise HTTPException(503, "Accepted app service declaration is invalid.")
+  service_max_bytes(service)
   return service
+
+
+def service_max_bytes(service: dict) -> int:
+  """The one reviewed serialized request/response ceiling, including old grants."""
+  request_limit = service.get("max_request_bytes", SERVICE_REQUEST_MAX_BYTES)
+  response_limit = service.get("max_response_bytes", SERVICE_REQUEST_MAX_BYTES)
+  if (
+    type(request_limit) is not int or type(response_limit) is not int
+    or request_limit != response_limit
+    or not 1 <= request_limit <= SERVICE_TRANSFER_MAX_BYTES
+  ):
+    raise HTTPException(503, "Accepted app service transfer limit is invalid.")
+  return request_limit
+
+
+def _reject_oversize_json_strings(value, max_bytes: int) -> None:
+  """Reject a scalar before JSONEncoder can materialize its entire escaped form.
+
+  Structural overhead and the sum of small scalars are still counted by the
+  streaming encoder. Six UTF-8 bytes per character is a safe upper bound for
+  one JSON string character with ensure_ascii=False.
+  """
+  if isinstance(value, str):
+    if len(value) > max_bytes:
+      raise HTTPException(413, "App service request is too large.")
+    if len(value) * 6 + 2 <= max_bytes:
+      return
+    size = 2  # JSON quotes
+    for start in range(0, len(value), 64 * 1024):
+      # The standard encoder's escaping, applied in bounded slices, has the
+      # same result for a string regardless of where it is split.
+      part = json.encoder.encode_basestring(value[start:start + 64 * 1024])
+      size += len(part[1:-1].encode("utf-8"))
+      if size > max_bytes:
+        raise HTTPException(413, "App service request is too large.")
+    if size > max_bytes:
+      raise HTTPException(413, "App service request is too large.")
+  elif isinstance(value, dict):
+    for key, item in value.items():
+      _reject_oversize_json_strings(key, max_bytes)
+      _reject_oversize_json_strings(item, max_bytes)
+  elif isinstance(value, (list, tuple)):
+    for item in value:
+      _reject_oversize_json_strings(item, max_bytes)
 
 
 def request_actor(db, principal, caller=None) -> dict:
@@ -220,7 +476,7 @@ def _response_headers(value, *, public: bool) -> dict[str, str]:
 
 async def _run_spawned(
   python: str, entry: Path, environment: dict[str, str], request_bytes: bytes,
-  timeout_seconds: float,
+  timeout_seconds: float, max_stdout: int = MAX_RESPONSE_BYTES,
 ) -> tuple[bytes, bytes, int]:
   """Run one request in a fresh interpreter; return (stdout, stderr, exit code)."""
   try:
@@ -261,7 +517,7 @@ async def _run_spawned(
   assert process.stdin is not None
   assert process.stdout is not None
   assert process.stderr is not None
-  stdout_task = asyncio.create_task(_read_bounded(process.stdout, MAX_RESPONSE_BYTES))
+  stdout_task = asyncio.create_task(_read_bounded(process.stdout, max_stdout))
   stderr_task = asyncio.create_task(_read_bounded(process.stderr, MAX_ERROR_BYTES))
   write_task = asyncio.create_task(_write_request(process.stdin, request_bytes))
   try:
@@ -318,18 +574,61 @@ async def invoke_service(
   app, owner, request_envelope: dict, *,
   timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
   lane: str | None = None,
+  admission: ServiceExchangeAdmission | None = None,
+) -> tuple[int, object, dict[str, str], str | None]:
+  service = service_contract(app, access="public" if request_envelope.get("public") is True else "self")
+  boundary = (
+    contextlib.nullcontext(admission) if admission is not None
+    else ServiceExchangeAdmission(service_max_bytes(service))
+  )
+  browser = _actor_browser(request_envelope.get("actor") or {})
+  grant_id = browser.grant_id if browser is not None else None
+  try:
+    with boundary as admitted:
+      # HTTP admission already covers decoding. Also account for the envelope
+      # metadata and impose the same structural boundary on non-HTTP callers.
+      admitted.retain(request_envelope)
+      return await _invoke_admitted_service(
+        app, owner, request_envelope, timeout_seconds=timeout_seconds, lane=lane,
+        admission=admitted,
+      )
+  finally:
+    # Attribution includes cooperative response scanning, not just execution.
+    # Revocation must still cancel a result that has not been handed off.
+    if grant_id is not None:
+      calls = _browser_calls.get(grant_id)
+      if calls is not None:
+        calls.discard(asyncio.current_task())
+        if not calls:
+          _browser_calls.pop(grant_id, None)
+
+
+async def _invoke_admitted_service(
+  app, owner, request_envelope: dict, *,
+  timeout_seconds: float = SERVICE_TIMEOUT_SECONDS,
+  lane: str | None = None,
+  admission: ServiceExchangeAdmission,
 ) -> tuple[int, object, dict[str, str], str | None]:
   public = request_envelope.get("public") is True
   service = service_contract(app, access="public" if public else "self")
+  max_bytes = service_max_bytes(service)
   try:
-    request_bytes = json.dumps(
-      request_envelope, ensure_ascii=False, separators=(",", ":"),
-      allow_nan=False,
-    ).encode("utf-8")
+    _reject_oversize_json_strings(request_envelope, max_bytes)
+    # Tool calls bypass HTTP body admission. Bound their serialization too,
+    # rather than building an arbitrarily large complete request first.
+    buffer = io.BytesIO()
+    size = 0
+    for part in json.JSONEncoder(
+      ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    ).iterencode(request_envelope):
+      encoded = part.encode("utf-8")
+      size += len(encoded)
+      if size > max_bytes:
+        raise HTTPException(413, "App service request is too large.")
+      buffer.write(encoded)
+    request_bytes = buffer.getvalue()
   except (TypeError, ValueError, RecursionError) as exc:
     raise HTTPException(400, "App service request contains invalid JSON data.") from exc
-  if len(request_bytes) > MAX_REQUEST_BYTES:
-    raise HTTPException(413, "App service request is too large.")
 
   # A service owns its persistence semantics. Serialize one app's private
   # requests so simple file-backed services do not need a platform-specific
@@ -380,7 +679,7 @@ async def invoke_service(
         try:
           outcome = await service_preload.run(
             host, environment, request_bytes, timeout_seconds=timeout_seconds,
-            max_stdout=MAX_RESPONSE_BYTES, max_stderr=MAX_ERROR_BYTES,
+            max_stdout=max_bytes, max_stderr=MAX_ERROR_BYTES,
           )
         except service_preload.PreloadUnavailable:
           pass
@@ -390,7 +689,7 @@ async def invoke_service(
           raise HTTPException(502, "App service failed before accepting its request.") from exc
       if outcome is None:
         outcome = await _run_spawned(
-          python, entry, environment, request_bytes, timeout_seconds,
+          python, entry, environment, request_bytes, timeout_seconds, max_bytes,
         )
       stdout, stderr, returncode = outcome
       if returncode != 0:
@@ -399,16 +698,11 @@ async def invoke_service(
         raise HTTPException(502, "App service failed.")
   finally:
     pin.close()
-    if grant_id is not None:
-      calls = _browser_calls.get(grant_id)
-      if calls is not None:
-        calls.discard(task)
-        if not calls:
-          _browser_calls.pop(grant_id, None)
   try:
-    response = json.loads(stdout, parse_constant=_reject_json_constant)
+    response = await admission.decode_response(stdout)
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
     raise HTTPException(502, "App service returned invalid JSON.") from exc
+  _validate_browser_call(owner, browser)
   if not isinstance(response, dict) or set(response) - {
     "status", "body", "body_base64", "headers", "media_type",
   }:
@@ -439,7 +733,7 @@ async def invoke_service(
       body = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as exc:
       raise HTTPException(502, "App service returned invalid binary data.") from exc
-    if len(body) > MAX_RESPONSE_BYTES:
+    if len(body) > max_bytes:
       raise HTTPException(502, "App service returned too much binary data.")
     return status, body, headers, media_type
   if media_type is not None:

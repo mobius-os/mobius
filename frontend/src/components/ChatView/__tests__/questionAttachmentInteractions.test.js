@@ -56,7 +56,8 @@ test('pasting into question two uses one card tray, upload gates submit, and sub
   let finishAnswer
   let posted
   let uploads = 0
-  globalThis.fetch = () => {
+  globalThis.fetch = url => {
+    if (url.endsWith('/upload-limits')) return Promise.resolve({ ok: true, json: async () => ({ max_bytes: 50 * 1024 * 1024 }) })
     uploads += 1
     return new Promise(resolve => { finishUpload = resolve })
   }
@@ -68,6 +69,7 @@ test('pasting into question two uses one card tray, upload gates submit, and sub
     assert.equal(submit(card.result.current).props.disabled, true)
     const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
     const uploading = editor(card.result.current, 'Second?').props.onPasteFiles([file])
+    await tick()
     assert.equal(uploads, 1)
     assert.equal(chips(card.result.current).props.files.length, 1)
     assert.equal(submit(card.result.current).props.disabled, true)
@@ -117,6 +119,26 @@ test('all drops belong to the visible chat overlay, never hidden card geometry',
   } finally { card.unmount() }
 })
 
+test('an oversized answer image stays an error chip without starting an upload', async () => {
+  const originalFetch = globalThis.fetch
+  let posts = 0
+  globalThis.fetch = (url, options) => {
+    if (url.endsWith('/upload-limits')) return Promise.resolve({ ok: true, json: async () => ({ max_bytes: 50 * 1024 * 1024 }) })
+    if (options?.method === 'POST') posts += 1
+    throw new Error('An oversized image must not be posted')
+  }
+  const card = renderHook(QuestionCard, {
+    chatId: 'large-answer-chat', questionId: 'large-answer-card', questions: questions.slice(0, 1),
+  })
+  try {
+    const image = new File(['GIF89a'], 'large.gif', { type: 'image/gif' })
+    Object.defineProperty(image, 'size', { value: 50 * 1024 * 1024 + 1 })
+    await editor(card.result.current, 'First?').props.onPasteFiles([image])
+    assert.equal(posts, 0)
+    assert.equal(chips(card.result.current).props.files[0].status, 'error')
+  } finally { card.unmount(); globalThis.fetch = originalFetch }
+})
+
 test('a streamed answer receipt keeps card-level attachments for cross-tab rendering', () => {
   const receipt = questionAnswerPatch({ 'First?': 'Attached 1 file' }, {
     attachments: [{ name: 'notes.txt', size: 5, mime_type: 'text/plain' }],
@@ -149,6 +171,7 @@ test('a failed upload does not block submit, and remote settlement safely discar
   const card = renderHook(QuestionCard, props)
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options })
+    if (url.endsWith('/upload-limits')) return { ok: true, json: async () => ({ max_bytes: 50 * 1024 * 1024 }) }
     return options.method === 'DELETE' ? { ok: true } : { ok: false, text: async () => 'Failed' }
   }
   try {
@@ -222,6 +245,7 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
   const originalFetch = globalThis.fetch
   let uploads = 0
   globalThis.fetch = (url, options) => {
+    if (url.endsWith('/upload-limits')) return Promise.resolve({ ok: true, json: async () => ({ max_bytes: 50 * 1024 * 1024 }) })
     if (options?.method === 'POST') uploads += 1
     return new Promise(() => {})
   }
@@ -231,6 +255,7 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
   try {
     const many = Array.from({ length: 21 }, (_, i) => new File(['x'], `f${i}.txt`))
     editor(card.result.current, 'First?').props.onPasteFiles(many)
+    await tick()
     assert.equal(chips(card.result.current).props.files.length, 20)
     assert.equal(uploads, 1, 'uploads run one at a time')
     const error = find(card.result.current, node => node.props?.className === 'qcard__submit-error')

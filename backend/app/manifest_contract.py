@@ -42,6 +42,7 @@ PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+SERVICE_TRANSFER_MAX_BYTES = 60 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
 AGENT_TOOLS_MAX = 16
 AGENT_TOOL_DESCRIPTION_MAX = 2000
@@ -964,11 +965,11 @@ def validate_manifest_contract(manifest) -> None:
   service = manifest.get("service")
   if service is not None:
     if not isinstance(service, Mapping) or set(service) - {
-      "id", "aliases", "entry", "access",
+      "id", "aliases", "entry", "access", "max_bytes",
     }:
       _fail(
         "Manifest `service` must contain only `id`, `aliases`, `entry`, "
-        "and `access`."
+        "`access`, and `max_bytes`."
       )
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
@@ -1005,6 +1006,11 @@ def validate_manifest_contract(manifest) -> None:
       )
     if service.get("access", "self") not in {"self", "apps", "public"}:
       _fail("Manifest `service.access` must be `self`, `apps`, or `public`.")
+    max_bytes = service["max_bytes"] if "max_bytes" in service else SERVICE_REQUEST_MAX_BYTES
+    if type(max_bytes) is not int or not 1 <= max_bytes <= SERVICE_TRANSFER_MAX_BYTES:
+      _fail(
+        "Manifest `service.max_bytes` must be an integer from 1 byte to 60 MiB."
+      )
 
   # The app's own Python environment (app_python_env). Apply and install
   # check that the listed file exists in the accepted tree.

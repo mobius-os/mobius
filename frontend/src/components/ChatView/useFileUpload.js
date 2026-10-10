@@ -33,6 +33,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
   // In-flight uploads the caller already gave up on (removed, discarded or
   // unmounted): their late success is discarded instead of shown.
   const discardedIds = useRef(new Set())
+  const uploadLimitRef = useRef(null)
   const onFilesChangeRef = useRef(onFilesChange)
   onFilesChangeRef.current = onFilesChange
 
@@ -85,8 +86,45 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     }))
     commitFiles(prev => [...prev, ...newChips])
 
+    // Ask the owning upload route for its effective limit. A server override
+    // may lower it, so a client-side literal would mislead the picker.
+    if (uploadLimitRef.current?.chatId !== chatId) {
+      uploadLimitRef.current = {
+        chatId,
+        promise: fetch(`${BASE}/api/chats/${chatId}/upload-limits`, {
+          headers: getAuthHeaders(),
+        }).then(async res => {
+          if (!res.ok) throw new Error('Could not check upload limit. Try again.')
+          const maxBytes = (await res.json()).max_bytes
+          if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+            throw new Error('Upload limit is unavailable. Try again.')
+          }
+          return maxBytes
+        }),
+      }
+    }
+    let maxBytes
+    try {
+      maxBytes = await uploadLimitRef.current.promise
+    } catch (error) {
+      uploadLimitRef.current = null
+      for (const chip of newChips) discardedIds.current.delete(chip.id)
+      commitFiles(prev => prev.map(c => newChips.some(chip => chip.id === c.id)
+        ? { ...c, status: 'error', error: error.message } : c))
+      return
+    }
+
     for (let i = 0; i < newChips.length; i++) {
       const chip = newChips[i]
+      // Removal during limit discovery happens before any upload has started.
+      if (discardedIds.current.delete(chip.id)) continue
+      if (fileList[i].size > maxBytes) {
+        commitFiles(prev => prev.map(c => c.id === chip.id ? {
+          ...c, status: 'error',
+          error: `${chip.name} exceeds the ${Math.floor(maxBytes / (1024 * 1024))} MiB upload limit.`,
+        } : c))
+        continue
+      }
       try {
         // Can't use apiFetch here: multipart requires the browser to set
         // Content-Type with the boundary, which apiFetch overrides with JSON.
@@ -98,7 +136,9 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
           body: fd,
         })
         if (!res.ok) {
-          const msg = await res.text().catch(() => 'Upload failed')
+          const body = await res.text().catch(() => '')
+          let msg = body || 'Upload failed'
+          try { msg = JSON.parse(body).detail || msg } catch { /* plain response */ }
           commitFiles(prev => prev.map(c =>
             c.id === chip.id ? { ...c, status: 'error', error: msg } : c
           ))

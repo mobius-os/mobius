@@ -193,14 +193,12 @@ async def read_capped_body(
       declared = None
     if declared is not None and declared > cap:
       raise HTTPException(status_code=413, detail=too_large)
-  chunks: list[bytes] = []
-  total = 0
+  body = bytearray()
   async for chunk in request.stream():
-    total += len(chunk)
-    if total > cap:
+    if len(body) + len(chunk) > cap:
       raise HTTPException(status_code=413, detail=too_large)
-    chunks.append(chunk)
-  return b"".join(chunks)
+    body.extend(chunk)
+  return bytes(body)
 
 
 def app_dir_usage(app_dir: Path) -> int:

@@ -28,6 +28,59 @@ def test_upload_single_file(client, db, auth, chat):
   assert chat.uploads[0]["name"] == "hello.txt"
 
 
+def test_upload_limit_reports_reliable_effective_cap(client, auth, chat):
+  import os
+  from app.routes.uploads import _MAX_UPLOAD_BYTES
+  from app.main import _MAX_REQUEST_BODY_BYTES
+  res = client.get(f"/api/chats/{chat.id}/upload-limits", headers=auth)
+  assert res.status_code == 200
+  assert res.json() == {"max_bytes": _MAX_UPLOAD_BYTES}
+  assert _MAX_UPLOAD_BYTES <= 50 * 1024 * 1024
+  if "MAX_UPLOAD_MB" not in os.environ:
+    assert _MAX_UPLOAD_BYTES == 50 * 1024 * 1024
+  assert _MAX_REQUEST_BODY_BYTES == 64 * 1024 * 1024
+  assert _MAX_REQUEST_BODY_BYTES - _MAX_UPLOAD_BYTES >= 14 * 1024 * 1024
+
+
+def test_original_file_limit_is_inclusive(client, auth, chat, monkeypatch):
+  import sys
+  for mod in list(sys.modules.values()):
+    if getattr(mod, "__name__", "") == "app.routes.uploads":
+      monkeypatch.setattr(mod, "_MAX_UPLOAD_BYTES", 1024, raising=False)
+  endpoint = next((r.endpoint for r in client.app.routes
+                   if getattr(r, "path", None) == "/api/chats/{chat_id}/uploads"
+                   and "POST" in getattr(r, "methods", set())), None)
+  if endpoint is not None:
+    monkeypatch.setitem(endpoint.__globals__, "_MAX_UPLOAD_BYTES", 1024)
+  advertised = client.get(f"/api/chats/{chat.id}/upload-limits", headers=auth)
+  assert advertised.json() == {"max_bytes": 1024}
+  fit = client.post(f"/api/chats/{chat.id}/uploads", headers=auth,
+                    files=[("files", ("fit.png", io.BytesIO(b"x" * 1024), "image/png"))])
+  assert fit.status_code == 200
+  too_large = client.post(f"/api/chats/{chat.id}/uploads", headers=auth,
+                          files=[("files", ("large.png", io.BytesIO(b"x" * 1025), "image/png"))])
+  assert too_large.status_code == 413
+
+
+def test_animated_20_mib_gif_round_trips_exact_original(client, auth, chat):
+  animation = io.BytesIO()
+  Image.new("RGB", (2, 2), "red").save(
+    animation, "GIF", save_all=True,
+    append_images=[Image.new("RGB", (2, 2), "blue")], duration=[80, 90],
+  )
+  original = animation.getvalue() + b"\0" * (20 * 1024 * 1024 - len(animation.getvalue()))
+  uploaded = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("moving.gif", io.BytesIO(original), "image/gif"))],
+    headers=auth,
+  )
+  assert uploaded.status_code == 200, uploaded.text
+  served = client.get(f"/api/chats/{chat.id}/uploads/moving.gif", headers=auth)
+  assert served.content == original
+  with Image.open(io.BytesIO(served.content)) as image:
+    assert image.n_frames == 2
+
+
 def test_upload_files_rejects_cross_site_request(client, auth, chat):
   data = io.BytesIO(b"hello world")
   cross = client.post(
@@ -108,6 +161,17 @@ def test_serve_uploaded_file(client, db, auth, chat):
   )
   assert res.status_code == 200
   assert res.content == b"secret"
+
+
+def test_upload_named_limit_remains_served_as_original(client, auth, chat):
+  uploaded = client.post(
+    f"/api/chats/{chat.id}/uploads", headers=auth,
+    files=[("files", ("limit", io.BytesIO(b"original"), "application/octet-stream"))],
+  )
+  assert uploaded.status_code == 200
+  served = client.get(f"/api/chats/{chat.id}/uploads/limit", headers=auth)
+  assert served.status_code == 200
+  assert served.content == b"original"
 
 
 def test_serve_uploaded_image_preview_without_touching_original(
