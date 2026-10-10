@@ -302,31 +302,51 @@ MAX_QUESTION_ATTACHMENTS = 20
 
 
 def _canonical_question_attachments(
-  chat: models.Chat, attachments: list[dict] | None,
+  chat: models.Chat, attachments: list[dict] | None, card: dict | None = None,
 ) -> list[dict] | None:
-  """Resolve card-level file references once, before either answer path writes."""
+  """Resolve an answer's file references once, before either answer path writes.
+
+  Each file may name the `question` it answers, so the card can show it under
+  that answer. A tag must name one of the card's questions; untagged files
+  (older clients) stay card-level.
+  """
   if not attachments:
     return None
   if len(attachments) > MAX_QUESTION_ATTACHMENTS:
     raise HTTPException(
       status_code=422,
-      detail=f"Attach at most {MAX_QUESTION_ATTACHMENTS} files to one answer.",
+      detail=f"Attach at most {MAX_QUESTION_ATTACHMENTS} files to one card.",
     )
   uploads = {entry.get("name"): entry for entry in (chat.uploads or [])}
-  canonical: dict[str, dict] = {}
+  card_questions = (
+    {q.get("question") for q in card.get("questions") or []} if card else None
+  )
+  canonical: dict[tuple[str, str | None], dict] = {}
   for attachment in attachments:
     name = attachment.get("name") if isinstance(attachment, dict) else None
+    question = attachment.get("question") if isinstance(attachment, dict) else None
+    if question is not None and (
+      not isinstance(question, str)
+      or (card_questions is not None and question not in card_questions)
+    ):
+      raise HTTPException(
+        status_code=422,
+        detail=f"{name if isinstance(name, str) and name else 'An attached file'} is attached to a question this card does not ask.",
+      )
     entry = uploads.get(name) if isinstance(name, str) and name else None
     if not entry or not _safe_upload_path(entry.get("path"), get_settings().data_dir):
       raise HTTPException(
         status_code=409,
         detail=f"{name if isinstance(name, str) and name else 'An attached file'} is no longer available. Remove it and attach it again.",
       )
-    # Same shape as composer attachments: the file is addressed by name.
-    canonical.setdefault(name, {
+    # The upload is addressed by name, but each question association is a
+    # distinct answer reference. Repeated references to one association can
+    # still be collapsed without dropping the file from another answer.
+    canonical.setdefault((name, question), {
       "name": name,
       "size": entry.get("size", 0),
       "mime_type": entry.get("mime_type", "application/octet-stream"),
+      **({"question": question} if question is not None else {}),
     })
   return list(canonical.values())
 
@@ -1080,7 +1100,9 @@ async def _send_message_impl(
         body = _confine_agent_card_answer(body, saved_card)
         agent_exact_retry = _is_exact_agent_card_retry(body, saved_card)
       body = body.model_copy(update={
-        "attachments": _canonical_question_attachments(chat, body.attachments),
+        "attachments": _canonical_question_attachments(
+          chat, body.attachments, saved_card,
+        ),
       })
       try:
         quiet_answer = bool(saved_card and questions.closes_without_reply(

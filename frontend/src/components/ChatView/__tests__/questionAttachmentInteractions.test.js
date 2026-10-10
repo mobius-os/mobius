@@ -3,6 +3,7 @@ import { after, test } from 'node:test'
 import { createServer } from 'vite'
 import { createFileDragHandlers } from '../dragUpload.js'
 import { questionAnswerPatch, questionAnswersReady } from '../questionSubmission.js'
+import { questionDraftKey, writeQuestionDraft, readQuestionDraft } from '../questionDraft.js'
 
 // Exercise the component's event handlers and actual upload hook without a DOM.
 // Only these two modules use the existing hook harness; children remain React
@@ -23,7 +24,7 @@ const vite = await createServer({
       if (id === 'question-card-hooks') return '\0question-card-hooks'
     },
     load(id) {
-      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null;`
+      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => globalThis.__questionLocalAnswers || null;`
     },
   }],
 })
@@ -43,14 +44,16 @@ function find(tree, predicate) {
 }
 const submit = tree => find(tree, node => node.props?.className === 'qcard__submit')
 const editor = (tree, question) => find(tree, node => node.props?.question === question)
-const chips = tree => find(tree, node => Array.isArray(node.props?.files))
+const chipSets = tree => elements(tree).filter(node => Array.isArray(node.props?.files))
+const chips = (tree, index = 0) => chipSets(tree)[index]
+const sentSets = tree => elements(tree).filter(node => Array.isArray(node.props?.attachments))
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const questions = [
   { question: 'First?', options: [{ label: 'A' }] },
   { question: 'Second?', multiSelect: true, options: [{ label: 'B' }] },
 ]
 
-test('pasting into question two uses one card tray, upload gates submit, and submission locks all attachment edits', async () => {
+test('pasting into question two keeps the file with that answer, upload gates submit, and submission locks all attachment edits', async () => {
   const originalFetch = globalThis.fetch
   let finishUpload
   let finishAnswer
@@ -69,31 +72,32 @@ test('pasting into question two uses one card tray, upload gates submit, and sub
     const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
     const uploading = editor(card.result.current, 'Second?').props.onPasteFiles([file])
     assert.equal(uploads, 1)
-    assert.equal(chips(card.result.current).props.files.length, 1)
+    assert.equal(chips(card.result.current, 0).props.files.length, 0)
+    assert.equal(chips(card.result.current, 1).props.files.length, 1)
     assert.equal(submit(card.result.current).props.disabled, true)
     assert.equal(editor(card.result.current, 'Second?').props.canSubmit, false)
     editor(card.result.current, 'Second?').props.onSubmitShortcut(null)
     assert.equal(posted, undefined)
-    assert.equal(elements(card.result.current).filter(node => node.props?.['aria-label'] === 'Files for all answers').length, 1)
+    assert.equal(elements(card.result.current).filter(node => node.props?.['aria-label'] === 'Files for this answer').length, 2)
     finishUpload({ ok: true, json: async () => [{ name: 'notes.txt', size: 5, mime_type: 'text/plain' }] })
     await uploading
-    // A grouped card still needs every question answered; the file is context.
+    // The file answers question two only; question one still needs its own.
     assert.equal(submit(card.result.current).props.disabled, true)
     editor(card.result.current, 'First?').props.onChange('first answer')
-    editor(card.result.current, 'Second?').props.onChange('second answer')
     assert.equal(submit(card.result.current).props.disabled, false)
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
     assert.equal(posted[1]['First?'], 'first answer')
-    assert.equal(posted[1]['Second?'], 'second answer')
-    assert.deepEqual(posted[3].attachments, [{ name: 'notes.txt', size: 5, mime_type: 'text/plain' }])
+    assert.equal(posted[1]['Second?'], 'Attached 1 file')
+    assert.equal(posted[0], '- First?: first answer\n- Second?: Attached 1 file\n  Files: notes.txt')
+    assert.deepEqual(posted[3].attachments, [{ name: 'notes.txt', size: 5, mime_type: 'text/plain', question: 'Second?' }])
     assert.equal(submit(card.result.current).props.disabled, true)
-    assert.equal(chips(card.result.current).props.disabled, true)
+    assert.equal(chips(card.result.current, 1).props.disabled, true)
     assert.equal(editor(card.result.current, 'Second?').props.onPasteFiles, undefined)
     assert.equal(find(card.result.current, node => node.props?.type === 'file').props.disabled, true)
     finishAnswer(true)
     await tick()
     assert.equal(submit(card.result.current).props.children, 'Submitted')
-    assert.deepEqual(find(card.result.current, node => node.props?.attachments).props.attachments.map(f => f.name), ['notes.txt'])
+    assert.deepEqual(sentSets(card.result.current).map(set => set.props.attachments.map(f => f.name)), [[], ['notes.txt']])
   } finally { card.unmount(); globalThis.fetch = originalFetch }
 })
 
@@ -155,9 +159,9 @@ test('a failed upload does not block submit, and remote settlement safely discar
     editor(card.result.current, 'First?').props.onChange('first answer')
     editor(card.result.current, 'Second?').props.onChange('second answer')
     await editor(card.result.current, 'Second?').props.onPasteFiles([new File(['a'], 'a.txt')])
-    assert.equal(chips(card.result.current).props.files[0].status, 'error')
+    assert.equal(chips(card.result.current, 1).props.files[0].status, 'error')
     assert.equal(submit(card.result.current).props.disabled, false)
-    chips(card.result.current).props.onRemove(chips(card.result.current).props.files[0].id)
+    chips(card.result.current, 1).props.onRemove(chips(card.result.current, 1).props.files[0].id)
     globalThis.fetch = async (url, options) => {
       calls.push({ url, options })
       return { ok: true, json: async () => [{ name: 'unsent.txt', size: 1, mime_type: 'text/plain' }] }
@@ -175,16 +179,107 @@ test('files answer a single-question card for empty single, multi-select and oth
   for (const answer of [undefined, [], '__other__', ['__other__']]) {
     const selected = { 'First?': answer }
     assert.equal(questionAnswersReady(single, selected, {}, []), false)
-    assert.equal(questionAnswersReady(single, selected, {}, [{ name: 'answer.txt' }]), true)
+    assert.equal(questionAnswersReady(single, selected, {}, [{ name: 'answer.txt', group: 'First?' }]), true)
+    assert.equal(questionAnswersReady(single, selected, {}, [{ name: 'legacy.txt' }]), true)
   }
 })
 
 
-test('files never stand in for unanswered questions on a grouped card', () => {
-  const file = [{ name: 'answer.txt' }]
+test('files answer only the question they were attached to', () => {
+  const file = [{ name: 'answer.txt', group: 'Second?' }]
   assert.equal(questionAnswersReady(questions, {}, {}, file), false)
-  assert.equal(questionAnswersReady(questions, { 'First?': 'Yes' }, {}, file), false)
-  assert.equal(questionAnswersReady(questions, { 'First?': 'Yes', 'Second?': 'No' }, {}, file), true)
+  assert.equal(questionAnswersReady(questions, { 'Second?': 'No' }, {}, file), false)
+  assert.equal(questionAnswersReady(questions, { 'First?': 'Yes' }, {}, file), true)
+  assert.equal(questionAnswersReady(questions, { 'First?': 'Yes' }, {}, [{ name: 'legacy.txt' }]), false)
+})
+
+
+test('legacy card-level files stay visible outside answer boxes after submission', () => {
+  const card = renderHook(QuestionCard, {
+    chatId: 'legacy-chat', questionId: 'legacy-card', questions,
+    answeredMap: { 'First?': 'A', 'Second?': 'B' },
+    attachments: [{ name: 'old.txt', size: 3, mime_type: 'text/plain' }],
+  })
+  try {
+    assert.deepEqual(sentSets(card.result.current).map(set => set.props.attachments.map(f => f.name)), [[], [], ['old.txt']])
+  } finally { card.unmount() }
+})
+
+test('restored shared draft files cannot answer a blank grouped question, but remain shared when sent', async () => {
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) || null },
+    setItem(key, value) { this.values.set(key, value) },
+    removeItem(key) { this.values.delete(key) },
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
+  const key = questionDraftKey('legacy-draft', 'legacy-q', questions)
+  writeQuestionDraft(key, { answers: { 'First?': 'A' }, otherTexts: {}, files: [
+    { name: 'shared.txt', size: 1, mime_type: 'text/plain', status: 'done' },
+  ] }, storage)
+  let posted
+  const card = renderHook(QuestionCard, { chatId: 'legacy-draft', questionId: 'legacy-q', questions,
+    onAnswer: async (...args) => { posted = args; return true } })
+  try {
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.deepEqual(chipSets(card.result.current).map(set => set.props.files.map(f => f.name)), [[], [], ['shared.txt']])
+    assert.equal(readQuestionDraft(key, storage).files[0].group, undefined)
+    editor(card.result.current, 'Second?').props.onChange('B')
+    assert.equal(submit(card.result.current).props.disabled, false)
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    await tick()
+    assert.equal(posted[1]['Second?'], 'B')
+    assert.deepEqual(posted[3].attachments, [{ name: 'shared.txt', size: 1, mime_type: 'text/plain' }])
+    assert.deepEqual(sentSets(card.result.current).map(set => set.props.attachments.map(f => f.name)), [[], [], ['shared.txt']])
+  } finally {
+    card.unmount()
+    if (original) Object.defineProperty(globalThis, 'localStorage', original)
+    else delete globalThis.localStorage
+  }
+})
+
+test('queued legacy card-level files remain shared after reload', () => {
+  globalThis.__questionLocalAnswers = [{
+    chatId: 'legacy-queue',
+    body: { question_id: 'legacy-q', answers: { 'First?': 'A', 'Second?': 'B' },
+      attachments: [{ name: 'queued.txt', size: 1, mime_type: 'text/plain' }] },
+  }]
+  const card = renderHook(QuestionCard, { chatId: 'legacy-queue', questionId: 'legacy-q', questions })
+  try {
+    assert.deepEqual(sentSets(card.result.current).map(set => set.props.attachments.map(f => f.name)), [[], [], ['queued.txt']])
+    assert.equal(submit(card.result.current).props.disabled, true)
+  } finally { card.unmount(); delete globalThis.__questionLocalAnswers }
+})
+
+test('the model-facing answer prose names a reused upload under each tagged question', async () => {
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) || null },
+    setItem(key, value) { this.values.set(key, value) },
+    removeItem(key) { this.values.delete(key) },
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
+  const key = questionDraftKey('same-upload', 'same-card', questions)
+  writeQuestionDraft(key, { answers: {}, otherTexts: {}, files: [
+    { name: 'same.txt', group: 'First?', size: 1, mime_type: 'text/plain', status: 'done' },
+    { name: 'same.txt', group: 'Second?', size: 1, mime_type: 'text/plain', status: 'done' },
+  ] }, storage)
+  let posted
+  const card = renderHook(QuestionCard, { chatId: 'same-upload', questionId: 'same-card', questions,
+    onAnswer: async (...args) => { posted = args; return true } })
+  try {
+    assert.equal(submit(card.result.current).props.disabled, false)
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    await tick()
+    assert.equal(posted[0], '- First?: Attached 1 file\n  Files: same.txt\n- Second?: Attached 1 file\n  Files: same.txt')
+    assert.deepEqual(posted[3].attachments.map(file => file.question), ['First?', 'Second?'])
+  } finally {
+    card.unmount()
+    if (original) Object.defineProperty(globalThis, 'localStorage', original)
+    else delete globalThis.localStorage
+  }
 })
 
 
@@ -234,6 +329,6 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
     assert.equal(chips(card.result.current).props.files.length, 20)
     assert.equal(uploads, 1, 'uploads run one at a time')
     const error = find(card.result.current, node => node.props?.className === 'qcard__submit-error')
-    assert.equal(error.props.children, 'Attach at most 20 files to one answer.')
+    assert.equal(error.props.children, 'Attach at most 20 files to one card.')
   } finally { card.unmount(); globalThis.fetch = originalFetch }
 })

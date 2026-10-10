@@ -11,11 +11,12 @@ const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
-test('the paperclip is an icon left of the last answer box, not a row below', () => {
+test('every answer has its own paperclip, an icon left of its box', () => {
   const single = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'clip', questionId: 'clip-q', questions: [{ question: 'Anything else?', options: [] }],
   }))
-  assert.match(single, /class="qcard__answer-row"><input[^>]*class="qcard__file-input"[^>]*\/><button[^>]*class="qcard__attach"[\s\S]*?<\/button><div class="qcard__composer/)
+  assert.match(single, /class="qcard__answer-row"><button[^>]*class="qcard__attach"[\s\S]*?<\/button><div class="qcard__composer/)
+  assert.equal((single.match(/class="qcard__file-input"/g) || []).length, 1)
   assert.doesNotMatch(single, /attach or paste/)
   const grouped = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'clip', questionId: 'clip-g', questions: [
@@ -23,8 +24,8 @@ test('the paperclip is an icon left of the last answer box, not a row below', ()
       { question: 'Second?', options: [] },
     ],
   }))
-  assert.equal((grouped.match(/class="qcard__attach"/g) || []).length, 1)
-  assert.ok(grouped.indexOf('class="qcard__attach"') > grouped.indexOf('Second?'))
+  assert.equal((grouped.match(/class="qcard__answer-row"><button[^>]*class="qcard__attach"/g) || []).length, 2)
+  assert.equal((grouped.match(/class="qcard__file-input"/g) || []).length, 1)
 })
 
 test('a file-only question answer can submit and ordinary cards offer upload', () => {
@@ -44,7 +45,7 @@ test('a file-only question answer can submit and ordinary cards offer upload', (
       chatId: 'file-only', questionId: 'file-only-q', questions,
     }))
     assert.match(html, /Attach a photo or file/)
-    assert.match(html, /class="qcard__submit"[^>]*>Submit</)
+    assert.match(html, /class="qcard__submit">Submit</)
     assert.equal((html.match(/aria-label="Files for this answer"/g) || []).length, 1)
     const submitted = renderToStaticMarkup(createElement(QuestionCard, {
       chatId: 'file-only', questionId: 'file-only-q', questions,
@@ -53,6 +54,7 @@ test('a file-only question answer can submit and ordinary cards offer upload', (
     }))
     assert.match(submitted, /aria-label="Files for this answer"/)
     assert.match(submitted, /chat__attachments/)
+    assert.doesNotMatch(submitted, /Shared card files/)
     // The attach row stays with the Submitted action row, so answering never
     // moves the card; it only stops taking files.
     assert.match(submitted, /class="qcard__attach"[^>]*disabled=""/)

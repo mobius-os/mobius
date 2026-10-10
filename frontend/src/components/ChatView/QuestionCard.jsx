@@ -26,7 +26,7 @@ import FileChips from './FileChips.jsx'
 import Attachments from './Attachments.jsx'
 import { pastedFiles, filePasteNeedsDefaultPrevented } from './pasteUpload.js'
 import { Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
+import { fileBelongsToQuestion, resolveQuestionAnswer, questionAnswersReady, questionOptionSubmission } from './questionSubmission.js'
 import {
   isRestartCardAction,
   restartCardSelectedOptions,
@@ -184,13 +184,19 @@ export default function QuestionCard({
   const preparedSubmissionRef = useRef(null)
   const fileInputRef = useRef(null)
   const initialFilesRef = useRef(null)
-  if (initialFilesRef.current === null) initialFilesRef.current = readQuestionDraft(draftKey).files
+  // Tagged files belong to their answer. Older untagged draft files were
+  // card-level; the old paperclip's position did not establish ownership.
+  if (initialFilesRef.current === null) {
+    initialFilesRef.current = readQuestionDraft(draftKey).files
+  }
+  const attachTargetRef = useRef(null)
   const { files, addFiles, removeFile, clearFiles, discardFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
   const readyFiles = files.filter(file => file.status === 'done')
-  function addAnswerFiles(list) {
+  // The limit covers the whole card, matching the server's per-submission cap.
+  function addAnswerFiles(list, question) {
     const room = MAX_ANSWER_FILES - files.length
-    if (list.length > room) setSubmitError(`Attach at most ${MAX_ANSWER_FILES} files to one answer.`)
-    return room > 0 ? addFiles(list.slice(0, room)) : Promise.resolve()
+    if (list.length > room) setSubmitError(`Attach at most ${MAX_ANSWER_FILES} files to one card.`)
+    return room > 0 ? addFiles(list.slice(0, room), question) : Promise.resolve()
   }
   // Like the composer: wait for uploads in flight; a failed one shows its
   // error on the chip and is simply not sent.
@@ -312,11 +318,16 @@ export default function QuestionCard({
     preparedSubmissionRef.current = null
     const resolved = {}
     const lines = questions.map(q => {
+      const own = readyFiles.filter(file => fileBelongsToQuestion(file.group, q.question, questions.length))
       const val = resolveQuestionAnswer(answers[q.question], otherTexts[q.question])
-        || (questions.length === 1 && readyFiles.length ? `Attached ${readyFiles.length} file${readyFiles.length === 1 ? '' : 's'}` : '')
+        || (own.length ? `Attached ${own.length} file${own.length === 1 ? '' : 's'}` : '')
       resolved[q.question] = val
-      return `- ${q.question}: ${val.replace(/\n/g, '\n  ')}`
+      const filesLine = own.length ? `\n  Files: ${own.map(file => file.name).join(', ')}` : ''
+      return `- ${q.question}: ${val.replace(/\n/g, '\n  ')}${filesLine}`
     })
+    const answerAttachments = readyFiles.map(({ name, size, mime_type, group }) => ({
+      name, size, mime_type, ...(group != null ? { question: group } : {}),
+    }))
     setSubmitError('')
     setSubmitting(true)
     try {
@@ -324,14 +335,14 @@ export default function QuestionCard({
         lines.join('\n'),
         resolved,
         questionId,
-        { questionCard, preparedSubmission, attachments: readyFiles.map(({ name, size, mime_type }) => ({ name, size, mime_type })), ...questionOptionSubmission(questions, answers) },
+        { questionCard, preparedSubmission, attachments: answerAttachments, ...questionOptionSubmission(questions, answers) },
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
       if (accepted === false || accepted?.status === 'locally_queued' || accepted?.status === 'locally_settled') {
         if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
       } else {
-        setSubmitted({ answers: resolved, attachments: readyFiles })
+        setSubmitted({ answers: resolved, attachments: answerAttachments })
         clearFiles()
       }
     } catch (error) {
@@ -362,13 +373,21 @@ export default function QuestionCard({
   if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'
     ? 'Confirming answer…' : 'Queued on this device'
 
-  const answerFiles = platformAction ? null : (
-    <div className="qcard__answer-files" role="group" aria-label={grouped ? 'Files for all answers' : 'Files for this answer'}>
+  // Files sit inside their answer box. On grouped cards, older untagged files
+  // stay in a shared lane; only a single-question card can own them unambiguously.
+  const sentAttachments = attachments || localAnswer?.body?.attachments || submitted?.attachments || []
+  const answerFiles = question => platformAction ? null : (
+    <div className="qcard__answer-files" role="group" aria-label="Files for this answer">
       {selectionLocked
-        ? <Attachments attachments={attachments || localAnswer?.body?.attachments || submitted?.attachments} chatId={chatId} />
-        : <FileChips files={files} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
+        ? <Attachments attachments={sentAttachments.filter(file => fileBelongsToQuestion(file.question, question, questions.length))} chatId={chatId} />
+        : <FileChips files={files.filter(file => fileBelongsToQuestion(file.group, question, questions.length))} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
     </div>
   )
+  const sharedFiles = grouped
+    ? (selectionLocked
+      ? sentAttachments.filter(file => file.question == null)
+      : files.filter(file => file.group == null))
+    : []
 
   return (
     <div
@@ -526,30 +545,22 @@ export default function QuestionCard({
             {(!completedAction || respondedRestartAction)
               && (!restartAction || writtenRestartAction) && (
               <div className="qcard__answer-row">
-                {/* The paperclip sits left of the last answer box and stays
-                    while the action row does, so Submit, queueing and the
-                    Submitted state never move the card; once the answer is
-                    locked it only stops taking files. */}
-                {qi === questions.length - 1 && !platformAction && (answered || !disabled) && (
-                  <>
-                    <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
-                      disabled={attachLocked}
-                      aria-label="Attach files to your answer"
-                      onChange={e => {
-                        const selected = Array.from(e.target.files || [])
-                        e.target.value = ''
-                        if (!attachLocked) addAnswerFiles(selected)
-                      }} />
-                    <button type="button" className="qcard__attach" aria-label="Attach a photo or file"
-                      title="Attach a photo or file" disabled={attachLocked} onClick={() => fileInputRef.current?.click()}>
-                      <Paperclip width={18} height={18} aria-hidden="true" />
-                    </button>
-                  </>
+                {/* Each answer has its own paperclip on the left of its box.
+                    It stays while the action row does, so Submit, queueing
+                    and the Submitted state never move the card; once the
+                    answer is locked it only stops taking files. */}
+                {!platformAction && (answered || !disabled) && (
+                  <button type="button" className="qcard__attach"
+                    aria-label={grouped ? `Attach a photo or file to your answer to: ${q.question}` : 'Attach a photo or file'}
+                    title="Attach a photo or file" disabled={attachLocked} onClick={() => {
+                      attachTargetRef.current = q.question
+                      fileInputRef.current?.click()
+                    }}>
+                    <Paperclip width={18} height={18} aria-hidden="true" />
+                  </button>
                 )}
                 <div className={`qcard__composer${isOtherSelected || answeredWithOther ? ' qcard__composer--active' : ''}`}>
-                  {/* A single answer shows its files inside the box, as the
-                      message composer does; a grouped card shows them once below. */}
-                  {!grouped && answerFiles}
+                  {answerFiles(q.question)}
                   <CustomAnswerArea
                     answered={selectionLocked}
                     canSubmit={canSubmit}
@@ -558,7 +569,7 @@ export default function QuestionCard({
                       ? 'Or tell me what you’d like to do instead…'
                       : hasOptions ? undefined : 'Type your answer…'}
                     onChange={text => setOtherText(q.question, text)}
-                    onPasteFiles={platformAction || inactive ? undefined : addAnswerFiles}
+                    onPasteFiles={platformAction || inactive ? undefined : pasted => addAnswerFiles(pasted, q.question)}
                     onSubmitShortcut={(questionCard) => {
                       if (canSubmit) handleSubmit(questionCard, null)
                     }}
@@ -574,7 +585,24 @@ export default function QuestionCard({
         )
         })}
       </div>
-      {grouped && answerFiles}
+      {!platformAction && sharedFiles.length > 0 && (
+        <div className="qcard__shared-files" role="group" aria-label="Shared card files">
+          <div className="qcard__shared-files-label">Shared files · not assigned to a question</div>
+          {selectionLocked
+            ? <Attachments attachments={sharedFiles} chatId={chatId} />
+            : <FileChips files={sharedFiles} onRemove={removeFile} chatId={chatId} disabled={submitting || disabled} />}
+        </div>
+      )}
+      {!platformAction && (answered || !disabled) && (
+        <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
+          disabled={attachLocked}
+          aria-label="Attach files to your answer"
+          onChange={e => {
+            const selected = Array.from(e.target.files || [])
+            e.target.value = ''
+            if (!attachLocked && attachTargetRef.current) addAnswerFiles(selected, attachTargetRef.current)
+          }} />
+      )}
       {!completedAction && (answered || !disabled) && (
         <>
           {locallyQueued && (

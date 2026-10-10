@@ -8,16 +8,19 @@ export function resolveQuestionAnswer(answer, otherText) {
   return answer || ''
 }
 
+/** An untagged legacy file has an unambiguous answer only on a single-question card. */
+export function fileBelongsToQuestion(tag, question, questionCount) {
+  return tag === question || (questionCount === 1 && tag == null)
+}
+
 /**
- * Card-level files can stand in for the answer only on a single-question card.
- * On a grouped card every question needs its own answer, so a file never
- * claims to have answered questions it says nothing about.
+ * Every question needs its own answer: text, a choice, or files belonging to
+ * that question. Untagged legacy files count only when there is one question.
  */
 export function questionAnswersReady(questions, answers, otherTexts, files) {
-  const filesAnswer = questions.length === 1 && files.length > 0
   return questions.every(question => (
     Boolean(resolveQuestionAnswer(answers[question.question], otherTexts[question.question]))
-    || filesAnswer
+    || files.some(file => fileBelongsToQuestion(file.group, question.question, questions.length))
   ))
 }
 

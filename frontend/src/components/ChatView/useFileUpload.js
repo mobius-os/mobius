@@ -7,7 +7,7 @@ import { getAuthHeaders, BASE } from '../../api/client.js'
  * @param {{ chatId: string, initialFiles?: Array }} options
  * @returns {{
  *   files: Array,
- *   addFiles: (fileList: File[]) => Promise<void>,
+ *   addFiles: (fileList: File[], group?: string) => Promise<void>,
  *   removeFile: (id: string) => void,
  *   discardFiles: () => void,
  *   clearFiles: (opts?: {revoke?: boolean}) => void,
@@ -24,6 +24,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     objectUrl: file.objectUrl || null,
     status: file.status || 'done',
     error: file.error || null,
+    group: file.group,
   }))
   const [files, setFiles] = useState(() => normalizedInitialFiles)
   // Keep a ref in sync so the unmount cleanup can revoke object URLs
@@ -71,11 +72,14 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     }).catch(() => {})
   }, [chatId])
 
-  const addFiles = useCallback(async (fileList) => {
+  // `group` is an opaque caller label kept on each chip, so one upload list
+  // can serve several targets (a Question Box keeps each answer's files).
+  const addFiles = useCallback(async (fileList, group) => {
     if (!fileList.length) return
 
     const newChips = fileList.map(f => ({
       id: crypto.randomUUID(),
+      group,
       name: f.name,
       size: f.size,
       mime_type: f.type,
