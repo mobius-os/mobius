@@ -907,10 +907,10 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
     parked.root_run_id = parked.id
     parked.goal_objective = "Finish the durable Goal"
     parked.goal_id = parked.id
-    parked.goal_plan_json = {
+    plan = {
       "tasks": [{"id": "finish", "status": "running"}],
     }
-    persist_goal_fixture(setup_db, parked)
+    persist_goal_fixture(setup_db, parked, plan=plan)
     setup_db.commit()
   first = client.post(
     f"/api/chats/{cid}/messages",

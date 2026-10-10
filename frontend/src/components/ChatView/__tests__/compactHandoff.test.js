@@ -11,7 +11,7 @@ const { default: WaitingCard } = await vite.ssrLoadModule('/src/components/ChatV
 const { default: ProgressRail } = await vite.ssrLoadModule('/src/components/ChatView/ProgressRail.jsx')
 const { default: GoalHistoryCard } = await vite.ssrLoadModule('/src/components/ChatView/GoalHistoryCard.jsx')
 const { WaitCard } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
-const goal = { id: 'goal-a', revision: 4, objective: 'Verify release', status: 'paused', pause_reason: 'deferred', hold_reason: 'Paid verification was deferred.', handoff: { kind: 'none' } }
+const goal = { id: 'goal-a', revision: 4, objective: 'Verify release', status: 'paused', resumable: true, pause_reason: 'deferred', hold_reason: 'Paid verification was deferred.', handoff: { kind: 'none' } }
 
 test('a held Goal uses the existing expandable panel with one continuation action', () => {
   const handoff = goalContinuationHandoff(goal)
@@ -24,6 +24,7 @@ test('a held Goal uses the existing expandable panel with one continuation actio
   assert.match(html, /aria-expanded="false"/)
   assert.match(html, /chat__panel-chevron/)
   assert.doesNotMatch(html, /chat__handoff|role="alert"/)
+  assert.equal(goalContinuationHandoff({ ...goal, resumable: false }), null)
 })
 
 test('details explain action scope without changing the action', () => {
@@ -140,10 +141,15 @@ test('helper, condition and resource handoffs all use the established bordered W
     assert.match(html, /aria-expanded="false"/)
     assert.doesNotMatch(html, /class="chat__handoff|Next move and details/)
   }
-  const helper = render(h(WaitingChip, { backgroundHelpers: { count: 1, items: [] } }))
+  const helper = render(h(WaitingChip, {
+    backgroundHelpers: { count: 1, items: [] },
+    handoff: { kind: 'automatic', reason: 'helpers' },
+  }))
   assert.match(helper, /Waiting on 1 helper/)
   assert.doesNotMatch(helper, /Waiting · Waiting/)
   assert.match(helper, /aria-label="Expand helper waiting details: Waiting on 1 helper — resumes automatically"/)
+  const unowned = render(h(WaitingChip, { backgroundHelpers: { count: 1, items: [] } }))
+  assert.doesNotMatch(unowned, /resumes automatically/)
 })
 
 test('Waiting panel preserves expanded evidence, action errors and disabled state', () => {

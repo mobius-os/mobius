@@ -103,6 +103,19 @@ def create_chat(**fields) -> models.Chat:
 log = logging.getLogger("moebius.chat.writer")
 
 
+
+def _publish_goal_runtime_changed(db, chat_id: str) -> None:
+  """Invalidate committed lifecycle state at its direct and immutable owners."""
+  from app.goal_plans import publish_goal_changed, publish_plan_for_delegation
+  helper = db.query(models.Delegation).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first()
+  if helper is not None:
+    publish_plan_for_delegation(db, helper)
+  else:
+    publish_goal_changed(chat_id)
+
+
 def _name_chat_from_first_message(chat: models.Chat, content: object) -> None:
   """Apply the first-message fallback without overriding an owner rename."""
   if not chat.title_locked:
@@ -2501,6 +2514,7 @@ class ChatWriterActor:
     )
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
+    _publish_goal_runtime_changed(db, cmd.chat_id)
     return True
 
   def _resolve_platform_restart_card(
@@ -2706,6 +2720,7 @@ class ChatWriterActor:
       ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
       WAKE_ELIGIBLE_RUN_STATUSES,
       activity_continuation_delivery_source_work_id,
+      delegation_source_work_filter,
     )
     source_work_id = activity_continuation_delivery_source_work_id(
       db, cmd.chat_id, cmd.run_token,
@@ -2723,7 +2738,7 @@ class ChatWriterActor:
       ]
       if source_work_id is not None:
         ownership_filters.append(
-          models.Delegation.parent_root_run_id == source_work_id,
+          delegation_source_work_filter(source_work_id),
         )
       # The context holds these exact results. Each must be a settled run of
       # its helper that has not already been delivered. A helper reopened
@@ -2847,7 +2862,7 @@ class ChatWriterActor:
     envelope = run.activity_delivery_json
     if not isinstance(envelope, dict):
       return
-    from app.delegations import ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+    from app.delegations import ACTIVITY_DELIVERY_FINALIZE_ATOMIC, delegation_source_work_filter
     if (
       envelope.get("delivery_contract")
       != ACTIVITY_DELIVERY_FINALIZE_ATOMIC
@@ -2870,7 +2885,7 @@ class ChatWriterActor:
       if not isinstance(source_work_id, str) or not source_work_id:
         raise _PersistFailed("Finalize: malformed activity delivery scope")
       ownership_filters.append(
-        models.Delegation.parent_root_run_id == source_work_id,
+        delegation_source_work_filter(source_work_id),
       )
     matching = db.query(models.Delegation.id).filter(
       *ownership_filters,
@@ -3580,6 +3595,8 @@ class ChatWriterActor:
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
+    if goal_id is not None:
+      _publish_goal_runtime_changed(db, cmd.chat_id)
     # This run_token now owns the in-process handoff fence.
     self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
@@ -3976,6 +3993,8 @@ class ChatWriterActor:
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartContinuation did not persist")
+    if goal_id is not None:
+      _publish_goal_runtime_changed(db, cmd.chat_id)
     self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
@@ -3998,6 +4017,8 @@ class ChatWriterActor:
       _parent_wake_continuation_root,
       current_result_undelivered,
       derived_status,
+      delegation_goal_id,
+      delegation_source_work_filter,
       parent_wake_blocker,
     )
     from app.models import ChatRun
@@ -4010,7 +4031,7 @@ class ChatWriterActor:
     trigger = db.query(models.Delegation).filter(
       models.Delegation.id == cmd.activity_id,
       models.Delegation.parent_chat_id == cmd.chat_id,
-      models.Delegation.parent_root_run_id == cmd.source_work_id,
+      delegation_source_work_filter(cmd.source_work_id),
       models.Delegation.notify_parent_on_complete.is_(True),
       current_result_undelivered(),
       models.Delegation.cancelled_at.is_(None),
@@ -4094,8 +4115,9 @@ class ChatWriterActor:
     if blocker is not None:
       db.rollback()
       return StartContinuationBlocked(blocker)
-    goal_id = source.goal_id if source is not None else None
-    goal_objective = source.goal_objective if goal_id else None
+    goal_id = delegation_goal_id(db, trigger)
+    goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+    goal_objective = goal.objective if goal is not None else None
 
     existing = transcript_rows.read_all(db, chat)
     try:
@@ -4169,9 +4191,21 @@ class ChatWriterActor:
     if latest is None or latest[0] != run.id:
       db.rollback()
       return GoalPromotionRejected("run_not_current")
-    if run.goal_objective not in (None, cmd.objective):
+    current_goal = db.get(models.ChatGoal, run.goal_id) if run.goal_id else None
+    terminal = {"completed", "cannot_complete", "cancelled"}
+    if run.goal_id and (current_goal is None or current_goal.chat_id != cmd.chat_id):
+      db.rollback()
+      return GoalPromotionRejected("goal_not_open")
+    replacing = current_goal is not None and current_goal.status in terminal
+    if current_goal is not None and not replacing and (
+      current_goal.objective != cmd.objective
+      or cmd.resume_goal_id not in (None, current_goal.id)
+    ):
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
+    if current_goal is not None and current_goal.status not in terminal | {"open"}:
+      db.rollback()
+      return GoalPromotionRejected("attempt_was_stopped")
 
     if cmd.resume_goal_id is not None:
       target = db.get(models.ChatGoal, cmd.resume_goal_id)
@@ -4210,10 +4244,15 @@ class ChatWriterActor:
         and outstanding.id != run.goal_id):
       db.rollback()
       return GoalPromotionRejected("unfinished_goal_exists")
-    goal_id = cmd.resume_goal_id or run.goal_id or run.id
-    if run.goal_id is not None and run.goal_id != goal_id:
+    goal_id = cmd.resume_goal_id or (
+      current_goal.id if current_goal is not None and not replacing else uuid.uuid4().hex
+    )
+    if replacing and db.query(models.ChatGoal.id).filter(
+      models.ChatGoal.chat_id == cmd.chat_id,
+      models.ChatGoal.status == "open", models.ChatGoal.id != goal_id,
+    ).first() is not None:
       db.rollback()
-      return GoalPromotionRejected("different_goal_active")
+      return GoalPromotionRejected("unfinished_goal_exists")
     goal_was_missing = db.get(models.ChatGoal, goal_id) is None
     goal = db.get(models.ChatGoal, goal_id)
     reopening = goal is not None and goal.status == "stopped"
@@ -4222,8 +4261,8 @@ class ChatWriterActor:
       if cmd.resume_goal_id is not None else None
     ))
     identity_changed = (
-      run.goal_objective is None
-      or run.goal_id is None
+      run.goal_objective != cmd.objective
+      or run.goal_id != goal_id
     )
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
@@ -4231,8 +4270,11 @@ class ChatWriterActor:
       raise _PersistFailed("PromoteRunToGoal did not persist")
     if not identity_changed and not goal_was_missing and not reopening:
       db.rollback()
+    else:
+      _publish_goal_runtime_changed(db, cmd.chat_id)
     return {
       "objective": cmd.objective,
+      "goal_id": goal_id,
       "root_run_id": root_id,
       "run_id": run.id,
       "state": "promoted" if identity_changed else "active",
@@ -4288,6 +4330,7 @@ class ChatWriterActor:
         run.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("ClearPresentedGoal did not persist")
+    _publish_goal_runtime_changed(db, cmd.chat_id)
     return {"status": "cleared", "goal_id": goal_id}
 
   def _settle_secure_input(self, db, cmd: SettleSecureInput) -> dict:
@@ -5028,7 +5071,7 @@ class ChatWriterActor:
     from app.continuations import continues_logical_root
     from app.run_state import (
       goal_identity_for_run_start,
-      product_result_continuation_root,
+      queued_continuation_root,
     )
     goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
@@ -5047,7 +5090,7 @@ class ChatWriterActor:
       .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
       .first()
     )
-    causal_root = product_result_continuation_root(
+    causal_root = queued_continuation_root(
       db, cmd.chat_id, agent_pending,
     )
     root_run_id = (
@@ -5132,10 +5175,8 @@ class ChatWriterActor:
     ).first() is not None:
       return None
     from app.delegations import _self_resuming_helper_rows
-    from app.goal_plans import goal_attempt_root_ids
-    helper_roots = goal_attempt_root_ids(db, chat.id, goal.id)
     if any(
-      row.parent_root_run_id in helper_roots
+      row.goal_id == goal.id
       for row, _status in _self_resuming_helper_rows(db, {chat.id})
     ):
       return None
@@ -5229,6 +5270,8 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed(failure_message)
     self._run_token_owner[chat.id] = run.id
+    if run.goal_id is not None:
+      _publish_goal_runtime_changed(db, chat.id)
 
   def _cancel_pending(self, db, cmd: CancelPending) -> dict:
     """Remove the queued message whose `cid` matches; return the remainder.
@@ -5327,10 +5370,13 @@ class ChatWriterActor:
     pending = list(chat.pending_messages or [])
     from app.continuations import (
       DELEGATION_RESULT_MESSAGE_KIND,
+      helper_answer_question_id,
       is_retired_goal_handoff,
     )
 
     def preserved_carrier(message: object) -> bool:
+      if isinstance(message, dict) and helper_answer_question_id(message):
+        return True
       return bool(
         isinstance(message, dict)
         and message.get("hidden")
@@ -5452,6 +5498,7 @@ class ChatWriterActor:
     count = _cancel_activation_owners(db, chat)
     if not _commit_or_rollback(db):
       raise _PersistFailed("PrepareChatStop did not persist")
+    _publish_goal_runtime_changed(db, cmd.chat_id)
     return count
 
   @staticmethod
@@ -5608,6 +5655,8 @@ class ChatWriterActor:
         changed = True
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("FinishRun did not persist")
+    if changed:
+      _publish_goal_runtime_changed(db, cmd.chat_id)
     if not cmd.run_token or owner == cmd.run_token:
       self._run_token_owner.pop(cmd.chat_id, None)
     return None

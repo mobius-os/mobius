@@ -133,6 +133,7 @@ export default function ProgressRail({
           onAction={item.actionLabel ? onActionItem : undefined}
         />
       ))}
+      {items.map(item => item.notice && <div key={`${item.key}-notice`} className="chat__progress-notice">{item.notice}</div>)}
       {detailItem && detailItem.details}
       {errorItem && (
         <div className="chat__progress-error" role="alert">

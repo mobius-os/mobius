@@ -113,6 +113,9 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   chat_ids = sorted(chat_id_set)
 
   if delegation_ids:
+    db.query(models.DelegationQuestion).filter(
+      models.DelegationQuestion.delegation_id.in_(delegation_ids),
+    ).delete(synchronize_session=False)
     db.query(models.Delegation).filter(
       models.Delegation.id.in_(delegation_ids),
     ).delete(synchronize_session=False)

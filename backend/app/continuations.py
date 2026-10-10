@@ -57,25 +57,65 @@ def recovery_attempted(db, run, *, reason: str) -> bool:
   an attempt happened, only that another automatic attempt is not justified.
   """
   from app import models
+  goal_id = run.goal_id if run is not None else None
   seen = set()
   while run is not None:
     if run.id in seen:
       return True
     seen.add(run.id)
     control = run.continuation_json or {}
-    if control.get("reason") == reason:
-      return True
     if control.get("reason") == "manual":
       return False
+    saved_goal_id = control.get("goal_id")
+    if "goal_id" in control and saved_goal_id is not None and saved_goal_id != goal_id:
+      # A terminal Goal may finish and mint its successor inside one physical
+      # settlement turn. The immutable carrier, not the rebound run, owns that
+      # earlier allowance. Unknown or nonterminal identities stay fail-closed.
+      if saved_goal_id is not None and not isinstance(saved_goal_id, str):
+        return True
+      previous_goal = db.get(models.ChatGoal, saved_goal_id) if saved_goal_id else None
+      current_goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+      proven_boundary = (
+        current_goal is not None and current_goal.chat_id == run.chat_id
+        and previous_goal is not None and previous_goal.chat_id == run.chat_id
+        and previous_goal.status in {"completed", "cannot_complete", "cancelled"}
+      )
+      return not proven_boundary
+    if control.get("reason") == reason:
+      return True
     predecessor = control.get("supersedes_run_token")
     if not predecessor:
       return False
     previous = db.get(models.ChatRun, predecessor)
-    if previous is None or previous.chat_id != run.chat_id or previous.goal_id != run.goal_id:
+    if previous is None or previous.chat_id != run.chat_id:
       return True
+    if previous.goal_id != goal_id:
+      # Explicit Goal-less origin plus an actual Goal-less predecessor proves
+      # promotion; a NULL hint alone cannot bypass this Goal's earlier pass.
+      current_goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+      return not ("goal_id" in control and saved_goal_id is None
+                  and previous.goal_id is None and current_goal is not None
+                  and current_goal.chat_id == run.chat_id)
     run = previous
   return False
 
+
+
+HELPER_ANSWER_REASON = "helper_answer"
+HELPER_ANSWER_CID_PREFIX = "helper-answer:"
+
+def helper_answer_question_id(message: Mapping[str, Any] | None) -> str | None:
+  """The question id a queued or admitted helper-answer row carries, if any."""
+  if not (
+    isinstance(message, Mapping)
+    and message.get("kind") == "continuation"
+    and message.get("continuation_reason") == HELPER_ANSWER_REASON
+  ):
+    return None
+  cid = message.get("cid")
+  if not isinstance(cid, str) or not cid.startswith(HELPER_ANSWER_CID_PREFIX):
+    return None
+  return cid.removeprefix(HELPER_ANSWER_CID_PREFIX) or None
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""
@@ -84,8 +124,12 @@ def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
     bool(message.get("hidden")), kind, message.get("source_work_id"),
   )
   # Each product row already coalesces its own domain batch and owns one
-  # independent delivery latch. Never merge two such durable receipts.
-  if kind in PRODUCT_RESULT_MESSAGE_KINDS:
+  # independent delivery latch. Never merge two such durable receipts. A
+  # queued helper answer is its question's one reserved run, never a batch.
+  if (
+    kind in PRODUCT_RESULT_MESSAGE_KINDS
+    or helper_answer_question_id(message) is not None
+  ):
     return (*key, message.get("cid"))
   return key
 
@@ -93,7 +137,15 @@ def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
 def product_result_run_token(
   chat_id: str, message: Mapping[str, Any],
 ) -> str | None:
-  """Return one stable physical identity for a queued product result."""
+  """Return one stable physical identity for a queued product result.
+
+  A helper answer queued behind its helper's running turn is promoted under
+  its question's reserved run id, exactly as a direct start would create it.
+  """
+  question_id = helper_answer_question_id(message)
+  if question_id is not None:
+    from app.delegations import helper_answer_run_id
+    return helper_answer_run_id(chat_id, question_id)
   kind = message.get("kind")
   source_work_id = message.get("source_work_id")
   cid = message.get("cid")
@@ -158,6 +210,9 @@ def continuation_actor_label(message: Mapping[str, Any] | None) -> str:
   reason = continuation_reason(message)
   if reason == "manual":
     return "Manual continuation"
+  if reason == "helper_answer":
+    # delegations.HELPER_ANSWER_REASON: the parent agent's correlated answer.
+    return "Parent answer"
   return f"Automatic continuation ({reason})"
 
 

@@ -71,6 +71,8 @@ def promote_goal(objective: str) -> dict:
     not isinstance(payload, dict)
     or payload.get("objective") != objective
     or payload.get("state") not in {"promoted", "active"}
+    or not isinstance(payload.get("goal_id"), str)
+    or not payload["goal_id"]
     or not isinstance(payload.get("root_run_id"), str)
     or payload.get("run_id") != run_id
   ):

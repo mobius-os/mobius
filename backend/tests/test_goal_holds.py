@@ -14,7 +14,7 @@ from app.schema_migrations import _add_goal_hold
 
 def make_goal(db, chat):
   goal = models.ChatGoal(id="held-goal", chat_id=chat.id, objective="Entire outcome",
-                         checkpoint="Partial evidence", next_action="Verify rest")
+                         next_action="Verify rest")
   db.add(goal)
   db.commit()
   return goal
@@ -35,7 +35,7 @@ def test_hold_is_durable_and_retry_does_not_replace_original_intent(db, chat, ac
   assert goal.status == "stopped" and goal.revision == 1
   assert not stage_goal_hold(goal, cause="stop", actor="owner", source_id="retry")
   assert goal_hold(goal) == first and goal.revision == 1
-  assert goal.checkpoint == "Partial evidence" and goal.next_action == "Verify rest"
+  assert goal.next_action == "Verify rest"
   assert goal.result is None and goal.completed_at is None
   assert project_goal(goal)["hold"] == first
 

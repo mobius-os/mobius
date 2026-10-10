@@ -6,6 +6,7 @@ from tests.goal_fixtures import goal_run as make_goal_run
 
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -716,3 +717,60 @@ def test_claudes_step_text_arriving_after_its_start_is_shown(db, monkeypatch):
 
   assert delegations_mod.helper_current_activity(child_id) == {"tool": "Bash", "summary": "npm test"}
   assert published == [parent_id, parent_id]
+
+
+def test_ask_parent_is_a_delegated_only_tool_bound_to_the_helpers_own_delegation(monkeypatch):
+  from app import platform_tools
+
+  assert "ask_parent" in platform_tools.expected_control_tool_names(top_level=False)
+  assert "ask_parent" not in platform_tools.expected_control_tool_names(top_level=True)
+
+  control = _control(monkeypatch, CHAT_ID="child-1", MOBIUS_DELEGATION_ID="del-7")
+  receipt = {"question_id": "q-1", "status": "asked", "note": "End your turn now."}
+  calls = _capture_api(control, monkeypatch, {"/api/delegations/del-7/questions": receipt})
+  assert control._call_ask_parent({"question": " Which DB? ", "options": ["a", "b"]}) == receipt
+  assert calls == [(
+    "POST", "/api/delegations/del-7/questions",
+    {"question": "Which DB?", "options": ["a", "b"]},
+  )]
+  # A receipt bound to the live run is shaped like the shared turn-end receipt,
+  # which the provider's post-tool end hook recognizes.
+  ending = {**receipt, "turn_end_id": "end-1"}
+  _capture_api(control, monkeypatch, {"/api/delegations/del-7/questions": ending})
+  shaped = json.loads(control._call_ask_parent({"question": "Which DB?"}))
+  assert shaped == {**ending, "state": "turn_end"}
+  # Provider receipt decoding is covered with the shared receipt module's
+  # protocol tests; this boundary owns the exact MCP response shape.
+  with pytest.raises(ValueError):
+    control._call_ask_parent({"question": "x", "helper": "someone"})
+  with pytest.raises(ValueError):
+    control._call_ask_parent({"question": "x", "options": "a"})
+
+  top_level = _control(monkeypatch, CHAT_ID="parent-1", MOBIUS_RUN_TOKEN="run-1")
+  denied = top_level._call_tool({"name": "ask_parent", "arguments": {"question": "x"}})
+  assert denied["isError"] is True
+
+
+def test_message_agent_answers_an_exact_question_and_reports_an_attached_retry(monkeypatch):
+  control = _control(monkeypatch, CHAT_ID="parent-1")
+  listed = {"items": [_row(id="del-q", task_key="migrate", status="needs_input",
+                           question={"id": "q-1", "question": "Which DB?", "options": []})]}
+  answered = {"value": False}
+
+  def reply(_payload):
+    return _row(id="del-q", status="running", already_answered=answered["value"])
+
+  calls = _capture_api(control, monkeypatch, {
+    "/api/delegations?parent_chat_id=parent-1": listed,
+    "/api/delegations/del-q/messages": reply,
+  })
+  assert control._call_list_agents({})["helpers"][0]["question"]["id"] == "q-1"
+  first = control._call_message_agent({"helper": "migrate", "message": "sqlite", "question_id": "q-1"})
+  assert ("POST", "/api/delegations/del-q/messages",
+          {"message": "sqlite", "question_id": "q-1"}) in calls
+  assert first["note"].startswith("Answer delivered")
+  answered["value"] = True
+  again = control._call_message_agent({"helper": "migrate", "message": "sqlite", "question_id": "q-1"})
+  assert "nothing new started" in again["note"]
+  with pytest.raises(ValueError):
+    control._call_message_agent({"helper": "migrate", "message": "x", "question_id": " "})

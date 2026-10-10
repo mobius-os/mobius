@@ -21,29 +21,20 @@ function taskMeta(task, tasksById) {
 }
 
 function delegationMeta(node) {
-  const provider = node.provider === 'claude'
-    ? 'Claude'
-    : node.provider === 'codex'
-      ? 'Codex'
-      : null
   const state = node.status === 'completed'
     ? 'Complete'
     : node.status === 'paused'
-      ? 'Paused'
+      ? 'On hold'
       : ['starting', 'running', 'resuming'].includes(node.status)
         ? 'In progress'
         : node.status === 'cancelled'
           ? 'Cancelled'
           : node.status === 'stopped'
             ? 'Stopped'
+          : node.status === 'needs_input'
+            ? 'Needs an answer'
             : 'Needs review'
-  return [provider, state].filter(Boolean).join(' · ')
-}
-
-function delegationTitle(node) {
-  return String(node.task_key || '')
-    .replace(/[._-]+/g, ' ')
-    .replace(/^./, letter => letter.toUpperCase())
+  return state
 }
 
 function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
@@ -72,7 +63,7 @@ function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
 export default function GoalPlanDetails({ plan, holdReason = null }) {
   const reason = typeof holdReason === 'string' ? holdReason.trim() : ''
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
-  if (!tasks.length && !reason) return null
+  if (!tasks.length && !plan?.delegations?.length && !reason) return null
   const tasksById = new Map(tasks.map(task => [task.id, task]))
   const delegations = Array.isArray(plan?.delegations) ? plan.delegations : []
   // Each helper records the plan task it works on (plan_task) when it starts;
@@ -95,7 +86,7 @@ export default function GoalPlanDetails({ plan, holdReason = null }) {
   const renderDelegation = (node, depth = 0) => (
     <GoalPlanRow
       key={node.id}
-      title={delegationTitle(node)}
+      title={node.title || 'Helper work'}
       status={node.status}
       depth={depth}
       meta={delegationMeta(node)}

@@ -102,6 +102,7 @@ def owed_wait_results(
     models.ChatWait.kind != "platform_activation",
     _FIRED_UNDELIVERED,
   ).order_by(models.ChatWait.created_at.asc()).all()
+  rows = [row for row in rows if not _closed_wait_goal(db, row)]
   notices = [
     notice for notice in (
       _compose_resume_notice(row, _OUTCOMES[row.status]) for row in rows
@@ -140,6 +141,17 @@ _OUTPUT_TAIL_BYTES = _OUTPUT_TAIL * 4
 _RESULT_MAX = 3000
 _OUTCOMES = {"met": "met", "expired": "deadline_expired", "failed": "check_failed"}
 _RESUME_RETRY = ".retry"
+
+def _closed_wait_goal(db: Session, row: models.ChatWait) -> bool:
+  """Never hand an old Goal's Wait to a later Goal on the same run."""
+  if row.goal_id is None:
+    # NULL is unowned (including ambiguous old rows), never the creating
+    # run's current Goal. The result may be delivered only as Goal-less work.
+    return False
+  goal = db.get(models.ChatGoal, row.goal_id)
+  # Missing ownership is ambiguous, not an invitation to adopt the current
+  # Goal. Only an established open Goal may receive an ordinary wake.
+  return goal is None or goal.chat_id != row.chat_id or goal.status != "open"
 
 # Cancellation is synchronous at the API/chat-lifecycle boundary while checks
 # run in the supervisor's event loop. A None PID reserves an admission while
@@ -254,10 +266,18 @@ def declare_wait(
     )
 
   deadline_at = now + timedelta(seconds=deadline)
+  source = (
+    db.query(models.ChatRun).filter(
+      models.ChatRun.id == created_by_run_id,
+      models.ChatRun.chat_id == chat_id,
+    ).first() if created_by_run_id else None
+  )
   row = models.ChatWait(
     id=uuid.uuid4().hex,
     chat_id=chat_id,
     created_by_run_id=created_by_run_id,
+    root_run_id=(source.root_run_id or source.id) if source else None,
+    goal_id=source.goal_id if source else None,
     description=description[:500],
     condition_owner=(
       condition_owner or ("Time" if kind == "timer" else "External system")
@@ -761,10 +781,12 @@ def safe_startup_writer_orphan(
     if row.created_by_run_id is not None else None
   )
   expected_root = (
-    (source.root_run_id or source.id)
-    if source is not None else physical.id
+    row.root_run_id or ((source.root_run_id or source.id)
+    if source is not None and row.goal_id is None else physical.id)
   )
   if (physical.root_run_id or physical.id) != expected_root:
+    return False
+  if not activation and _closed_wait_goal(db, row):
     return False
   outcome = _OUTCOMES[row.status]
   if activation:
@@ -824,6 +846,10 @@ async def _deliver_resume(row_id: str) -> bool:
     chat_id = row.chat_id
     outcome = _OUTCOMES[row.status]
     activation = row.kind == "platform_activation"
+    if not activation and _closed_wait_goal(db, row):
+      row.resume_delivered_at = now_naive_utc()
+      db.commit()
+      return False
     if activation:
       from app.platform_restart import activation_notice
       content = activation_notice(
@@ -869,9 +895,9 @@ async def _deliver_resume(row_id: str) -> bool:
       # the result latches it; until then each next turn carries it.
       return False
     root_run_id = (
-      row.root_run_id if activation else
+      row.root_run_id if row.root_run_id is not None else
       (source.root_run_id or source.id)
-      if source is not None else (
+      if source is not None and row.goal_id is None else (
         resume_run_id
         if (
           existing_resume is not None
@@ -1175,17 +1201,10 @@ def outstanding_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWai
 
 
 def _goal_waits(db: Session, chat_id: str, goal_id: str):
-  """Waits declared by any attempt of one Goal in this chat."""
-  from sqlalchemy import func
-
-  return db.query(models.ChatWait).join(
-    models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
-  ).filter(
-    models.ChatRun.chat_id == chat_id,
+  """Immutable Wait affinity; migration backfills only proven old ownership."""
+  return db.query(models.ChatWait).filter(
     models.ChatWait.chat_id == chat_id,
-    func.coalesce(
-      models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
-    ) == goal_id,
+    models.ChatWait.goal_id == goal_id,
   )
 
 

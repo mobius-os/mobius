@@ -26,7 +26,7 @@ def work(db, chat, *, attempt_status="running", task_status="running"):
 
 
 @pytest.mark.parametrize("status", ["failed", "interrupted", "completed", "parked"])
-@pytest.mark.parametrize("message", ["continue", "continue please", "please continue"])
+@pytest.mark.parametrize("message", ["continue", "continue please", "please continue", "keep going please"])
 def test_attempt_outcome_does_not_lose_goal(db, chat, status, message):
   goal, run = work(db, chat, attempt_status=status)
   assert presented_goal(db, chat.id)["status"] == "paused"
@@ -50,7 +50,7 @@ def test_completed_tasks_are_not_implicit_goal_completion(db, chat):
   goal, run = work(db, chat, task_status="completed")
   assert goal.status == "open"
   assert presented_goal(db, chat.id)["status"] == "active"
-  update_goal_record(db, run, goal, 1, complete="Verified deployment and collaboration")
+  update_goal_record(db, run, goal, 1, complete=True)
   assert goal.status == "completed"
   assert presented_goal(db, chat.id)["status"] == "completed"
 
@@ -62,15 +62,15 @@ def test_completion_cannot_race_scope_change(db, chat):
     {"id":"collab","title":"Collaboration","status":"pending","depends_on":[]},
   ])
   with pytest.raises(GoalPlanError):
-    update_goal_record(db, run, goal, 1, complete="Stale verification")
+    update_goal_record(db, run, goal, 1, complete=True)
   assert goal.status == "open"
 
 
-def test_checkpoint_is_durable(db, chat):
+def test_next_action_is_durable(db, chat):
   goal, run = work(db, chat)
-  update_goal_record(db, run, goal, 1, checkpoint="Implemented half", next_action="Verify peers")
+  update_goal_record(db, run, goal, 1, next_action="Verify peers")
   db.expire_all()
-  assert goal.checkpoint == "Implemented half"
+  assert "checkpoint" not in resume_context(db, run.id)
   assert "Verify peers" in resume_context(db, run.id)
 
 
@@ -129,7 +129,8 @@ def test_migration_preserves_intent_and_is_idempotent(
   _durable_goal_records(engine)
   _add_goal_hold(engine)
   with engine.connect() as c:
-    rows=c.execute(select(models.ChatGoal.__table__)).mappings().all()
+    rows=c.execute(select(*(column for column in models.ChatGoal.__table__.columns
+                        if column.name != "completion_run_id"))).mappings().all()
     assert len(rows)==1
     assert rows[0]["status"]==expected
     assert rows[0]["objective"]=="Entire audit"
@@ -159,8 +160,8 @@ def test_writer_duplicate_attempt_does_not_create_twice(db, chat):
   assert db.query(models.ChatRun).filter_by(id="exact-next").count() == 1
 
 
-@pytest.mark.parametrize("complete", [True, "Verified result"])
-def test_exact_completion_retry_is_idempotent(db, chat, complete):
+def test_exact_completion_retry_is_idempotent(db, chat):
+  complete = True
   goal, run = work(db, chat, task_status="completed")
   first = update_goal_record(db, run, goal, 1, complete=complete)
   second = update_goal_record(db, run, goal, 1, complete=complete)
@@ -176,7 +177,7 @@ def test_stop_racing_stale_completion_keeps_obligation_stopped(db, chat):
                               terminal_status="stopped")).result(timeout=5)
   # Deliberately retain the stale ORM snapshot from before Stop.
   with pytest.raises(GoalPlanConflict):
-    update_goal_record(db, run, goal, 1, complete="Late completion")
+    update_goal_record(db, run, goal, 1, complete=True)
   db.expire_all()
   assert db.get(models.ChatGoal, goal.id).status == "stopped"
 
@@ -238,14 +239,14 @@ def test_api_branch_add_and_completion_fence(client, db, chat):
 def test_dismissing_completed_goal_keeps_verified_outcome(db, chat):
   from app.chat_writer import ClearPresentedGoal, get_writer
   goal, run = work(db, chat, task_status="completed")
-  update_goal_record(db, run, goal, 1, complete="Verified entire outcome")
+  update_goal_record(db, run, goal, 1, complete=True)
   receipt = get_writer().submit(ClearPresentedGoal(
     chat_id=chat.id, expected_goal_id=goal.id, preserve_execution=True,
   )).result(timeout=5)
   assert receipt["status"] == "cleared"
   db.expire_all()
   assert goal.status == "completed"
-  assert goal.result == "Verified entire outcome"
+  assert goal.result is None
   assert run.status == "running"
   assert presented_goal(db, chat.id) is None
 
@@ -256,7 +257,7 @@ def test_corrupt_plan_cannot_complete_and_full_replace_repairs_it(db, chat):
   db.commit()
 
   with pytest.raises(GoalPlanError, match="unreadable"):
-    update_goal_record(db, run, goal, 1, complete="Must not silently complete")
+    update_goal_record(db, run, goal, 1, complete=True)
   assert goal.status == "open"
 
   repaired = replace_plan(
@@ -267,7 +268,7 @@ def test_corrupt_plan_cannot_complete_and_full_replace_repairs_it(db, chat):
     }],
   )
   assert repaired["summary"]["can_complete"] is True
-  update_goal_record(db, run, goal, 2, complete="Verified repaired plan")
+  update_goal_record(db, run, goal, 2, complete=True)
   assert goal.status == "completed"
 
 
@@ -280,7 +281,7 @@ def test_malformed_task_status_remains_repairable(db, chat, status):
   assert serialize_plan(db, run, goal) is None
   assert presented_goal(db, chat.id)["status"] == "active"
   with pytest.raises(GoalPlanError, match="unreadable"):
-    update_goal_record(db, run, goal, 2, complete="Cannot complete malformed work")
+    update_goal_record(db, run, goal, 2, complete=True)
   assert goal.status == "open"
 
   with pytest.raises(GoalPlanError, match="invalid status"):
@@ -293,5 +294,5 @@ def test_malformed_task_status_remains_repairable(db, chat, status):
   with pytest.raises(GoalPlanConflict, match="changed"):
     replace_plan(db, physical=run, root=goal, expected_revision=1, tasks=repaired_tasks)
   replace_plan(db, physical=run, root=goal, expected_revision=2, tasks=repaired_tasks)
-  update_goal_record(db, run, goal, 3, complete="Verified repaired work")
+  update_goal_record(db, run, goal, 3, complete=True)
   assert goal.status == "completed"

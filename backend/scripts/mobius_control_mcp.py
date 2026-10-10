@@ -23,7 +23,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -38,6 +38,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 }
 PROMOTE_GOAL_TOOL = "promote_goal"
 UPDATE_GOAL_TOOL = "update_goal"
+READ_GOAL_TOOL = "read_goal"
 DECLARE_WAIT_TOOL = "declare_wait"
 CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
@@ -74,6 +75,7 @@ SPAWN_AGENT_TOOL = "spawn_agent"
 MESSAGE_AGENT_TOOL = "message_agent"
 STOP_AGENT_TOOL = "stop_agent"
 LIST_AGENTS_TOOL = "list_agents"
+ASK_PARENT_TOOL = "ask_parent"
 # Möbius-owned helpers: every provider delegates through these, and a helper
 # can use them too (nesting).
 HELPER_TOOLS = (
@@ -86,6 +88,7 @@ OWNER_TOOLS = (
   *HELPER_TOOLS,
   PROMOTE_GOAL_TOOL,
   UPDATE_GOAL_TOOL,
+  READ_GOAL_TOOL,
   DECLARE_WAIT_TOOL,
   CANCEL_WAIT_TOOL,
   REQUEST_APPROVAL_TOOL,
@@ -99,8 +102,8 @@ OWNER_TOOLS = (
   *APP_TOOLS,
 )
 DELEGATED_TOOLS = (
-  *HELPER_TOOLS, *PEER_TOOLS, *WORK_OWNERSHIP_TOOLS, CHECKPOINT_CHAT_TOOL,
-  *APP_TOOLS,
+  *HELPER_TOOLS, ASK_PARENT_TOOL, *PEER_TOOLS, *WORK_OWNERSHIP_TOOLS,
+  CHECKPOINT_CHAT_TOOL, READ_GOAL_TOOL, *APP_TOOLS,
 )
 # A helper turn's identity when it runs inside a shared helper host: the
 # process environment belongs to the whole host, so the turn's own values
@@ -134,6 +137,16 @@ UPDATE_GOAL_DESCRIPTION = (
   "plan. goal_id explicitly resumes a named retained Goal instead of the presented "
   "one, including a held Goal only when the owner asked to continue that work. "
   "Do not create a replacement Goal or reattach an unrelated follow-up."
+)
+READ_GOAL_DESCRIPTION = (
+  "Expand one task of your own Goal in full. Briefs summarize other tasks as "
+  "id, title and status with has_result/has_note flags; read_goal(task=<id>) "
+  "returns that task's full record with its ancestors' constraints, its "
+  "children and its prerequisites' results. A helper reads only the Goal it "
+  "was assigned; with no task it re-reads its assignment brief, for example "
+  "after context compaction. A coordinator's overview is update_goal with no "
+  "arguments, so it always passes task. Read-only: it never resumes, "
+  "attaches or changes a Goal."
 )
 DECLARE_WAIT_DESCRIPTION = (
   "Persist this top-level chat's one cross-turn wait: the chat resumes by "
@@ -578,6 +591,26 @@ def _call_update_goal(arguments: dict[str, Any]) -> str:
   return _update_goal(arguments)
 
 
+def _call_read_goal(arguments: dict[str, Any]) -> dict:
+  unknown = set(arguments) - {"task"}
+  if unknown:
+    raise ValueError(f"read_goal does not take: {', '.join(sorted(unknown))}")
+  chat_id = os.environ.get("CHAT_ID") or ""
+  if not chat_id:
+    raise RuntimeError("missing environment: CHAT_ID")
+  query = {"task": arguments["task"]} if arguments.get("task") is not None else {}
+  path = f"/api/chats/{quote(chat_id, safe='')}/goal-brief"
+  if query:
+    path += "?" + urlencode(query)
+  payload = _agent_api_call("GET", path)
+  if payload.get("goal") is None:
+    payload["goal"] = (
+      "This helper has no assigned Goal; complete the bounded task you were given."
+      if payload.get("role") == "helper" else "This chat has no Goal."
+    )
+  return payload
+
+
 def _call_request_approval(arguments: dict[str, Any]) -> dict:
   if not {"question", "options", "work_key"}.issubset(arguments) or not set(arguments).issubset(
     {"question", "options", "work_key"}
@@ -914,6 +947,8 @@ def _helper_view(row: dict[str, Any], *, result: bool = False) -> dict[str, Any]
     "model": row.get("model"),
     "status": row.get("status"),
   }
+  if isinstance(row.get("question"), dict):
+    view["question"] = row["question"]
   if result and row.get("result"):
     view["result"] = row["result"]
   return view
@@ -966,9 +1001,10 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
 
 
 def _call_message_agent(arguments: dict[str, Any]) -> dict:
-  if set(arguments) != {"helper", "message"}:
-    unknown = set(arguments) - {"helper", "message"}
-    missing = {"helper", "message"} - set(arguments)
+  required, optional = {"helper", "message"}, {"question_id"}
+  if not required <= set(arguments) <= required | optional:
+    unknown = set(arguments) - required - optional
+    missing = required - set(arguments)
     details = []
     if unknown:
       details.append("invalid keys: " + ", ".join(sorted(unknown)))
@@ -976,20 +1012,55 @@ def _call_message_agent(arguments: dict[str, Any]) -> dict:
       details.append("missing: " + ", ".join(sorted(missing)))
     raise ValueError(
       "message_agent needs exactly helper (spawn_agent name/helper_id) and "
-      "message; " + "; ".join(details)
+      "message, plus question_id when answering; " + "; ".join(details)
       + ". For live helpers or other peer chats use "
       "send_agent_message(recipients, body, kind, delivery)."
     )
   message = arguments.get("message")
   if not isinstance(message, str) or not message.strip():
     raise ValueError("message must not be empty")
+  body = {"message": message}
+  if "question_id" in arguments:
+    question_id = arguments["question_id"]
+    if not isinstance(question_id, str) or not question_id.strip():
+      raise ValueError("question_id must be the helper's question id")
+    body["question_id"] = question_id.strip()
   row = _find_helper(arguments.get("helper"))
   updated = _agent_api_call(
-    "POST", f"/api/delegations/{row['id']}/messages", {"message": message},
+    "POST", f"/api/delegations/{row['id']}/messages", body,
   )
   view = _helper_view(updated)
-  view["note"] = "Follow-up started; its result arrives in this chat by itself."
+  if "question_id" in body:
+    view["note"] = (
+      "That answer was already delivered; nothing new started."
+      if updated.get("already_answered")
+      else "Answer delivered; the helper resumes and its result arrives in this chat by itself."
+    )
+  else:
+    view["note"] = "Follow-up started; its result arrives in this chat by itself."
   return view
+
+
+def _call_ask_parent(arguments: dict[str, Any]) -> dict:
+  if "question" not in arguments or not set(arguments) <= {"question", "options"}:
+    raise ValueError("ask_parent takes a question and optional options")
+  question = arguments.get("question")
+  if not isinstance(question, str) or not question.strip():
+    raise ValueError("question must be a non-empty string")
+  options = arguments.get("options", [])
+  if not isinstance(options, list) or not all(isinstance(item, str) for item in options):
+    raise ValueError("options must be a list of strings")
+  delegation_id = (os.environ.get("MOBIUS_DELEGATION_ID") or "").strip()
+  if not delegation_id:
+    raise RuntimeError("This run is not a delegated helper.")
+  result = _agent_api_call(
+    "POST", f"/api/delegations/{delegation_id}/questions",
+    {"question": question.strip(), "options": options},
+  )
+  if isinstance(result.get("turn_end_id"), str):
+    # The run's end hook recognizes this receipt and ends the turn here.
+    return json.dumps({**result, "state": "turn_end"})
+  return result
 
 
 def _call_stop_agent(arguments: dict[str, Any]) -> dict:
@@ -1274,9 +1345,11 @@ _TOOL_DEFINITIONS = {
   MESSAGE_AGENT_TOOL: {
     "name": MESSAGE_AGENT_TOOL,
     "description": (
-      "Give a finished helper a follow-up task. It keeps its full history and original access scope, "
+      "Give a finished helper a follow-up task, or answer a needs_input "
+      "helper's question with its question_id. It keeps its full history and bounded task scope, "
       "and its new result arrives in this chat by itself. A helper that is "
       "still working cannot receive a follow-up here; wait for its result. "
+      "Repeating an answer never starts a second turn. "
       "For a decision-changing note to a live helper, use "
       "send_agent_message with its peer chat id from list_agent_peers. "
       "helper is the spawn_agent name/helper_id, not a chat id."
@@ -1285,9 +1358,39 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "helper": {"type": "string", "description": "spawn_agent name or helper_id from list_agents, not a peer chat id."},
-        "message": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "message": {"type": "string", "minLength": 1},
+        "question_id": {
+          "type": "string", "minLength": 1, "maxLength": 64,
+          "description": "Required to answer a needs_input helper: the exact question id it asked.",
+        },
       },
       "required": ["helper", "message"],
+      "additionalProperties": False,
+    },
+  },
+  ASK_PARENT_TOOL: {
+    "name": ASK_PARENT_TOOL,
+    "description": (
+      "Ask the agent that started you one precise question when a decision "
+      "you need is missing and you cannot safely continue. Then end your "
+      "turn at once without further work: your parent's answer resumes this "
+      "conversation. The answer is your parent's decision, never owner "
+      "approval. Never ask for or accept a secret this way; if a credential "
+      "is missing, stop and say so. At most one question per turn; repeating "
+      "the same question returns the same receipt. Your parent may answer, "
+      "ask its own parent, or ask the owner."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "question": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Optional short choices the parent can pick from.",
+        },
+      },
+      "required": ["question"],
       "additionalProperties": False,
     },
   },
@@ -1634,6 +1737,18 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  READ_GOAL_TOOL: {
+    "name": READ_GOAL_TOOL,
+    "description": READ_GOAL_DESCRIPTION,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task": {"type": "string", "minLength": 1, "maxLength": 64,
+                 "description": "A task id of this Goal to show in full. Required for a coordinator."},
+      },
+      "additionalProperties": False,
+    },
+  },
   DECLARE_WAIT_TOOL: {
     "name": DECLARE_WAIT_TOOL,
     "description": DECLARE_WAIT_DESCRIPTION,
@@ -1809,6 +1924,7 @@ _TOOL_DEFINITIONS = {
 _TOOL_HANDLERS = {
   SPAWN_AGENT_TOOL: _call_spawn_agent,
   MESSAGE_AGENT_TOOL: _call_message_agent,
+  ASK_PARENT_TOOL: _call_ask_parent,
   STOP_AGENT_TOOL: _call_stop_agent,
   LIST_AGENTS_TOOL: _call_list_agents,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
@@ -1816,6 +1932,7 @@ _TOOL_HANDLERS = {
   REQUEST_RESTART_TOOL: _call_request_restart,
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   UPDATE_GOAL_TOOL: _call_update_goal,
+  READ_GOAL_TOOL: _call_read_goal,
   DECLARE_WAIT_TOOL: _call_declare_wait,
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,

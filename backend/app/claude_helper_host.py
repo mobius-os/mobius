@@ -136,6 +136,7 @@ class HelperTurn:
   api_error: tuple[str, str] | None = None
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
+  goal_brief_refresh: Any | None = None
   started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
@@ -292,9 +293,31 @@ class ClaudeHelperHost(Host):
       self._turn_by_tool_use[tool_use_id] = turn
     return _allow(spec)
 
+  async def pre_compact(self, input_data, tool_use_id, context) -> dict:
+    del tool_use_id, context
+    agent = input_data.get("agent_id")
+    turns = ([self._turn_by_agent.get(agent)] if agent
+             else list(self._turn_by_dispatch.values()))
+    for turn in turns:
+      if turn is not None and turn.goal_brief_refresh is not None and turn.started.is_set() and not turn.done.is_set():
+        turn.goal_brief_refresh.mark_compacted()
+    return {}
+
   async def post_tool_use(self, input_data, tool_use_id, context) -> dict:
     """A SendMessage the host could not deliver fails its turn at once."""
-    if input_data.get("agent_id") or input_data.get("tool_name") != "SendMessage":
+    agent = input_data.get("agent_id")
+    if agent:
+      turn = self._turn_by_agent.get(agent)
+      if turn is None or not turn.started.is_set() or turn.done.is_set():
+        return {}
+      if _records_own_question(input_data, turn.sink):
+        return {"continue_": False, "stopReason": "The helper's question is recorded; its parent's answer resumes it."}
+      if turn.goal_brief_refresh is None:
+        return {}
+      brief = await turn.goal_brief_refresh.take()
+      return ({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": brief}}
+              if brief else {})
+    if input_data.get("tool_name") != "SendMessage":
       return {}
     turn = self._turn_by_tool_use.get(tool_use_id or "")
     response = input_data.get("tool_response")
@@ -519,6 +542,23 @@ class ClaudeHelperHost(Host):
         await self._client.stop_task(turn.agent_id)
 
 
+def _records_own_question(input_data: dict, sink) -> bool:
+  """Whether this tool result is the helper's own recorded ask_parent question."""
+  from app.owner_card_receipts import turn_end_receipt_id
+  from app.platform_tools import ASK_PARENT_TOOL_NAME, CONTROL_SERVER_NAME
+
+  # Bash is the supported script fallback and emits the same receipt.
+  # The sink, not the command text, owns this exact turn-ending question.
+  if (input_data.get("hook_event_name") == "PostToolUseFailure"
+      or input_data.get("tool_name") not in {
+        f"mcp__{CONTROL_SERVER_NAME}__{ASK_PARENT_TOOL_NAME}", "Bash",
+      }):
+    return False
+  receipt_id = turn_end_receipt_id(input_data.get("tool_response"))
+  ends_turn = getattr(sink, "ends_turn", None)
+  return receipt_id is not None and callable(ends_turn) and bool(ends_turn(receipt_id))
+
+
 def _message_text(message) -> str:
   return "".join(
     block.text for block in getattr(message, "content", None) or []
@@ -675,7 +715,8 @@ def _host_options(
       stderr=capture_stderr,
       hooks={
         "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
-        "PostToolUse": [HookMatcher(matcher="SendMessage", hooks=[host.post_tool_use])],
+        "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
+        "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
       },
       extra_args={"settings": json.dumps({"disableWorkflows": True})},
     )
@@ -706,6 +747,7 @@ async def run_claude_host_turn(
   connector_plan,
   helper_host_key: HostKey,
   data_dir: str,
+  goal_brief_refresh=None,
 ) -> dict:
   """Run one delegated Claude helper turn inside its parent's shared host."""
   from app.process_groups import RUN_MARKER_ENV, terminate_run_processes
@@ -741,6 +783,7 @@ async def run_claude_host_turn(
       spec={"to": agent_id, "summary": dispatch_id, "message": user_message},
       sink=bc, env_file=env_file, agent_id=agent_id,
       launch_tool_use_id=launch_tool_use_id,
+      goal_brief_refresh=goal_brief_refresh,
     )
   else:
     # A first turn may spawn; a lost provider agent must not replay work.
@@ -758,7 +801,7 @@ async def run_claude_host_turn(
       }
     turn = HelperTurn(
       dispatch_id=dispatch_id, kind="spawn", spec=spawn_spec(user_message),
-      sink=bc, env_file=env_file,
+      sink=bc, env_file=env_file, goal_brief_refresh=goal_brief_refresh,
     )
 
   factory = _host_options(

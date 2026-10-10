@@ -1,13 +1,17 @@
 """Goal trees preserve helper truth without one latest-run read per node."""
 
 from contextlib import contextmanager
+import json
 from datetime import datetime, timedelta
 
 from app.chat_writer import create_chat
+from app.transcript_rows import replace_all
 import pytest
-from sqlalchemy import event
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import sessionmaker
 
-from app import delegations, goal_plans, models
+from app import delegations, goal_plans, models, transcript_rows
+from app.database import Base
 from app.database import SessionLocal
 from tests.goal_fixtures import goal_run
 
@@ -135,7 +139,7 @@ def test_goal_tree_read_count_is_independent_of_helper_width(db, chat, width):
   db.add(physical)
   db.flush()
   for index in range(width):
-    _helper(db, parent_id, f"wide-{index}", status="running")
+    _helper(db, parent_id, f"wide-{index}", status="running", goal_id="goal")
   db.commit()
   with SessionLocal() as cold:
     physical = cold.get(models.ChatRun, "goal-root")
@@ -144,12 +148,13 @@ def test_goal_tree_read_count_is_independent_of_helper_width(db, chat, width):
       tree = goal_plans._delegation_tree(cold, physical, root)
     assert len(tree) == width
     assert {node["status"] for node in tree} == {"running"}
-    # Goal attempt roots, direct children, descendant frontier, then statuses.
-    assert len(statements) == 4
+    # Direct children, descendant frontier, then statuses: immutable Goal
+    # ownership no longer needs a run-root lookup.
+    assert len(statements) == 3
     assert not any("chats.messages" in sql for sql in statements)
 
 
-def test_nested_tree_keeps_latest_task_attempt(db, chat):
+def test_nested_tree_keeps_latest_task_attempt_and_can_show_all_attempts(db, chat):
   parent_id = chat.id
   physical = goal_run(
     db, id="goal-root", root_run_id="goal-root", chat_id=parent_id, status="running",
@@ -157,7 +162,7 @@ def test_nested_tree_keeps_latest_task_attempt(db, chat):
   )
   db.add(physical)
   db.flush()
-  old = _helper(db, parent_id, "old", status="failed")
+  old = _helper(db, parent_id, "old", status="failed", goal_id="goal")
   old.task_key = "audit"
   old.created_at = datetime(2026, 10, 2, 12)
   db.add(models.ChatRun(
@@ -167,10 +172,12 @@ def test_nested_tree_keeps_latest_task_attempt(db, chat):
   ))
   current = _helper(
     db, parent_id, "current", status="completed", root_id="resumed-root",
+    goal_id="goal",
   )
   current.task_key = "audit"
   current.created_at = old.created_at + timedelta(seconds=1)
-  child = _helper(db, current.child_chat_id, "nested", status="resume_pending")
+  child = _helper(db, current.child_chat_id, "nested", status="resume_pending",
+                  goal_id="goal")
   db.commit()
   physical = db.get(models.ChatRun, "goal-root")
   root = db.get(models.ChatGoal, "goal")
@@ -179,3 +186,86 @@ def test_nested_tree_keeps_latest_task_attempt(db, chat):
   assert current_tree[0]["status"] == "completed"
   assert current_tree[0]["children"][0]["id"] == child.id
   assert current_tree[0]["children"][0]["status"] == "resuming"
+  all_tree = goal_plans._delegation_tree(db, physical, root, all_attempts=True)
+  assert [node["id"] for node in all_tree] == [old.id, current.id]
+
+
+@pytest.mark.parametrize('width', [1, 24])
+@pytest.mark.parametrize('status', ['running', 'needs_review', 'needs_input'])
+def test_per_turn_helper_context_batches_status_reads_and_keeps_questions(
+  db, chat, width, status,
+):
+  parent_id = chat.id
+  db.add(models.ChatRun(id='goal-root', root_run_id='goal-root',
+                       chat_id=parent_id, provider='codex', status='running'))
+  for index in range(width):
+    key = f'context-{index}'
+    row = _helper(db, parent_id, key,
+                  status={'needs_review': 'failed', 'needs_input': 'completed'}.get(status, status))
+    if status == 'needs_review':
+      replace_all(db, db.get(models.Chat, row.child_chat_id), [{
+        'id': f'run-{key}', 'role': 'assistant', 'blocks': [{'type': 'error',
+        'message': delegations.REVIEW_REQUIRED_MARKER + ': Review retained work'}]}])
+    if status == 'needs_input':
+      db.add(models.DelegationQuestion(id=f'q-{key}', delegation_id=row.id,
+          child_chat_id=row.child_chat_id, root_run_id=f'run-{key}',
+          asking_run_id=f'run-{key}', answer_run_id=f'answer-{key}',
+          question='Which option?', options_json=['one', 'two']))
+  db.commit()
+  with SessionLocal() as cold:
+    with _selects(cold) as statements:
+      items = delegations.own_helper_statuses(cold, parent_id, 'goal-root')
+    assert len(items) == width
+    assert {item['status'] for item in items} == {status}
+    assert len(statements) <= (3 if status == 'running' else 4)
+    if status != 'needs_review':
+      assert not any('chats.messages' in statement for statement in statements)
+    if status == 'needs_input':
+      assert all(item['question']['question'] == 'Which option?' for item in items)
+
+
+def test_batch_assistant_reader_prefers_unconverted_legacy_over_stale_rows(db, chat):
+  converted = {'id': 'converted-run', 'role': 'assistant', 'result': 'Row report'}
+  stale = {'id': 'legacy-run', 'role': 'assistant', 'result': 'Stale row report'}
+  previous = {'id': 'legacy-run', 'role': 'assistant', 'result': 'Legacy report'}
+  legacy_chat = create_chat(id='mixed-legacy', title='Legacy', messages=[stale])
+  db.add(legacy_chat)
+  db.flush()
+  replace_all(db, chat, [converted])
+  db.commit()
+  # Simulate a previous-image write: the trigger removes this chat's marker,
+  # making its new legacy bytes authoritative while its old rows remain.
+  db.execute(text('UPDATE chats SET messages = :body WHERE id = :id'), {
+    'body': json.dumps([previous]), 'id': legacy_chat.id,
+  })
+  db.commit()
+  chat_id, legacy_id = chat.id, legacy_chat.id
+  with _selects(db) as statements:
+    bodies = transcript_rows.assistant_bodies_by_chat(db, [chat_id, legacy_id])
+  assert bodies == {chat_id: [converted], legacy_id: [previous]}
+  assert len(statements) == 1
+
+
+def test_batch_assistant_reader_never_names_dropped_legacy_column(tmp_path):
+  from app.schema_migrations import _add_transcript_rows, _create_chat_search_tables
+  other = create_engine(f"sqlite:///{tmp_path / 'release2-helpers.db'}")
+  Base.metadata.create_all(other)
+  with other.begin() as conn:
+    conn.exec_driver_sql('ALTER TABLE chats DROP COLUMN messages')
+  _create_chat_search_tables(other)
+  _add_transcript_rows(other)
+  Session = sessionmaker(bind=other)
+  with Session() as db:
+    chat = create_chat(id='no-legacy-helper', title='Helper', messages=[
+      {'id': 'run', 'role': 'assistant', 'result': 'Row report'},
+    ])
+    db.add(chat)
+    db.commit()
+    chat_id = chat.id
+    with _selects(db) as statements:
+      assert transcript_rows.assistant_bodies_by_chat(db, [chat_id]) == {
+        chat_id: [{'id': 'run', 'role': 'assistant', 'result': 'Row report'}],
+      }
+    assert len(statements) == 1
+    assert all('chats.messages' not in statement for statement in statements)
+  other.dispose()

@@ -34,6 +34,21 @@ def _recoverable_result_goal(
   return goal.objective, goal.id
 
 
+def _wait_result_row(db, chat_id, message):
+  """Resolve a saved notice to immutable ownership, never the run's new Goal."""
+  from app.continuations import PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND
+  prefix = ("activation-result-" if message.get("kind") == PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND
+            else "wait-result-")
+  cid = message.get("cid")
+  if not isinstance(cid, str) or not cid.startswith(prefix):
+    return None
+  wait_id = cid.removeprefix(prefix).removesuffix(".retry")
+  return db.query(models.ChatWait).filter(
+    models.ChatWait.id == wait_id, models.ChatWait.chat_id == chat_id,
+    models.ChatWait.created_by_run_id == message.get("source_work_id"),
+  ).first()
+
+
 def goal_identity_for_run_start(db, chat_id, message):
   """Resolve explicit intent and exact delivery identity, never attempt outcome."""
   from app.continuations import (
@@ -45,7 +60,7 @@ def goal_identity_for_run_start(db, chat_id, message):
   content = str(message.get("content") or "")
   objective = goal_objective(content)
   if objective is not None:
-    return objective, str(uuid.uuid4())
+    return objective, uuid.uuid4().hex
   reason = continuation_reason(message)
   kind = message.get("kind")
   if is_continuation_message(message) and "goal_id" in message:
@@ -57,11 +72,20 @@ def goal_identity_for_run_start(db, chat_id, message):
   exact_goal_id = None
   if kind == DELEGATION_RESULT_MESSAGE_KIND:
     exact_goal_id = message.get("source_work_id")
-  elif kind in {WAIT_RESULT_MESSAGE_KIND, PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
-                PEER_MESSAGE_WAKE_KIND}:
-    source_id = message.get("source_work_id")
-    source = db.get(models.ChatRun, source_id) if source_id else None
-    return _recoverable_result_goal(db, chat_id, source)
+  elif kind in {WAIT_RESULT_MESSAGE_KIND, PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND}:
+    wait = _wait_result_row(db, chat_id, message)
+    goal = db.get(models.ChatGoal, wait.goal_id) if wait is not None and wait.goal_id else None
+    if goal is not None and goal.chat_id == chat_id and goal.status == "open":
+      return goal.objective, goal.id
+    return None, None
+  elif kind == PEER_MESSAGE_WAKE_KIND:
+    # New peer carriers retain the exact Goal, including an explicit NULL.
+    # Uncorrelated old carriers cannot prove ownership after source rebinding.
+    goal_id = message.get("goal_id")
+    goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+    if goal is not None and goal.chat_id == chat_id and goal.status == "open":
+      return goal.objective, goal.id
+    return None, None
   if exact_goal_id:
     goal = db.get(models.ChatGoal, exact_goal_id)
     if goal is not None and goal.chat_id == chat_id and goal.status == "open":
@@ -100,27 +124,51 @@ def goal_identity_for_run_start(db, chat_id, message):
   return goal.objective, goal.id
 
 
-def product_result_continuation_root(
+def queued_continuation_root(
   db: Session,
   chat_id: str,
   message: Mapping[str, Any] | None,
 ) -> str | None:
-  """Resolve queued result data to the work that produced it, not queue tail."""
+  """Resolve queued results and saved answers to their exact originating work."""
   if not isinstance(message, Mapping):
     return None
   from app.continuations import (
     DELEGATION_RESULT_MESSAGE_KIND,
     WAIT_RESULT_MESSAGE_KIND,
+    helper_answer_question_id,
     product_result_run_token,
   )
 
+  if message.get("kind") == WAIT_RESULT_MESSAGE_KIND:
+    wait = _wait_result_row(db, chat_id, message)
+    if wait is not None and wait.root_run_id:
+      root = db.query(models.ChatRun.id).filter(
+        models.ChatRun.id == wait.root_run_id, models.ChatRun.chat_id == chat_id,
+      ).first()
+      return wait.root_run_id if root is not None else None
+    return product_result_run_token(chat_id, message)
+
+  question_id = helper_answer_question_id(message)
+  if question_id is not None:
+    # A parent's queued answer resumes exactly its question's asking root.
+    root_run_id = db.query(models.DelegationQuestion.root_run_id).filter(
+      models.DelegationQuestion.id == question_id,
+      models.DelegationQuestion.child_chat_id == chat_id,
+    ).scalar()
+    if root_run_id is None or db.query(models.ChatRun.id).filter(
+      models.ChatRun.chat_id == chat_id, models.ChatRun.id == root_run_id,
+    ).first() is None:
+      return None
+    return root_run_id
   kind = message.get("kind")
   source_work_id = message.get("source_work_id")
   physical_result_id = product_result_run_token(chat_id, message)
   if not isinstance(source_work_id, str) or not source_work_id:
     return physical_result_id if kind == WAIT_RESULT_MESSAGE_KIND else None
   query = db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id)
-  if kind == WAIT_RESULT_MESSAGE_KIND:
+  if kind == WAIT_RESULT_MESSAGE_KIND or (
+    kind == "continuation" and message.get("continuation_reason") == "question_answer"
+  ):
     source = query.filter(models.ChatRun.id == source_work_id).first()
   elif kind == DELEGATION_RESULT_MESSAGE_KIND:
     source = query.filter(

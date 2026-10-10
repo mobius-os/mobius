@@ -3,6 +3,7 @@
 from tests.goal_fixtures import goal_run as make_goal_run
 
 import pytest
+from datetime import UTC, datetime
 
 from app import models
 from app.chat_writer import AppendPending, Barrier, PromotePending, get_writer
@@ -235,12 +236,19 @@ def test_result_recovers_origin_goal_while_latest_physical_is_recoverable(
     goal_objective="Ship it", goal_id="recoverable-result-goal-id",
   ))
   db.commit()
+  if kind == "wait_result":
+    db.add(models.ChatWait(id="recoverable-wait", chat_id=chat.id,
+      created_by_run_id=source_work_id, goal_id="recoverable-result-goal-id",
+      root_run_id=source_work_id, kind="timer", status="met", description="Saved wait",
+      deadline_at=datetime.now(UTC), next_check_at=datetime.now(UTC)))
+    db.commit()
 
   assert goal_identity_for_run_start(db, chat.id, {
     "content": "current controller result",
     "kind": kind,
     "hidden": True,
     "source_work_id": source_work_id,
+    "cid": "wait-result-recoverable-wait",
   }) == ("Ship it", "recoverable-result-goal-id")
 
 
@@ -377,6 +385,7 @@ def test_stopped_unplanned_goal_stays_resumable_after_ordinary_turns(db, chat):
     "resumable": True,
     "pause_reason": "unknown",
     "handoff": {"kind": "recovery", "reason": "unknown_stop"},
+    "plan": None,
   }
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "continue"},
@@ -426,6 +435,7 @@ def test_new_goal_remains_visible_after_the_previous_identity_was_dismissed(
     "status": "active",
     "resumable": False,
     "handoff": {"kind": "working", "reason": None},
+    "plan": None,
   }
   assert latest_provider_goal_is_dismissed(db, chat.id) is False
 

@@ -15,6 +15,9 @@ from typing import Any
 CONTROL_SERVER_NAME = "mobius_control"
 GOAL_TOOL_NAME = "promote_goal"
 UPDATE_GOAL_TOOL_NAME = "update_goal"
+# Result-bearing read of this agent's own scoped Goal brief, for coordinators
+# and helpers alike.
+READ_GOAL_TOOL_NAME = "read_goal"
 WAIT_TOOL_NAME = "declare_wait"
 CANCEL_WAIT_TOOL_NAME = "cancel_wait"
 APPROVAL_TOOL_NAME = "request_approval"
@@ -33,6 +36,9 @@ SPAWN_AGENT_TOOL_NAME = "spawn_agent"
 MESSAGE_AGENT_TOOL_NAME = "message_agent"
 STOP_AGENT_TOOL_NAME = "stop_agent"
 LIST_AGENTS_TOOL_NAME = "list_agents"
+# Delegated-only: a helper asks its own parent one correlated question per run.
+# Only a top-level chat turns a question into an owner card.
+ASK_PARENT_TOOL_NAME = "ask_parent"
 # Möbius-owned helpers replace the providers' built-in helper tools for every
 # agent, including helpers themselves (nesting).
 HELPER_TOOL_NAMES = (
@@ -53,6 +59,7 @@ OWNER_CONTROL_TOOL_NAMES = (
   *HELPER_TOOL_NAMES,
   GOAL_TOOL_NAME,
   UPDATE_GOAL_TOOL_NAME,
+  READ_GOAL_TOOL_NAME,
   WAIT_TOOL_NAME,
   CANCEL_WAIT_TOOL_NAME,
   APPROVAL_TOOL_NAME,
@@ -66,8 +73,9 @@ OWNER_CONTROL_TOOL_NAMES = (
   *APP_BUILD_TOOL_NAMES,
 )
 DELEGATED_CONTROL_TOOL_NAMES = (
-  *HELPER_TOOL_NAMES, *PEER_TOOL_NAMES, *WORK_OWNERSHIP_TOOL_NAMES,
-  CHECKPOINT_CHAT_TOOL_NAME, *APP_BUILD_TOOL_NAMES,
+  *HELPER_TOOL_NAMES, ASK_PARENT_TOOL_NAME, *PEER_TOOL_NAMES,
+  *WORK_OWNERSHIP_TOOL_NAMES, CHECKPOINT_CHAT_TOOL_NAME, READ_GOAL_TOOL_NAME,
+  *APP_BUILD_TOOL_NAMES,
 )
 CONTROL_TOOL_NAMES = (*OWNER_CONTROL_TOOL_NAMES, *PEER_TOOL_NAMES)
 # Above app_tools.TOOL_TIMEOUT_SECONDS and the control server's own HTTP wait,
@@ -102,12 +110,14 @@ def _control_script() -> str:
 def expected_control_tool_names(
   *, top_level: bool, coordination_enabled: bool = True,
 ) -> tuple[str, ...]:
-  """Tools the local server advertises for this agent authority level."""
+  """Tools available at this authority level."""
   if not top_level:
-    return DELEGATED_CONTROL_TOOL_NAMES
-  if coordination_enabled:
-    return CONTROL_TOOL_NAMES
-  return OWNER_CONTROL_TOOL_NAMES
+    names = DELEGATED_CONTROL_TOOL_NAMES
+  elif coordination_enabled:
+    names = CONTROL_TOOL_NAMES
+  else:
+    names = OWNER_CONTROL_TOOL_NAMES
+  return names
 
 
 def claude_control_servers(*, enabled: bool) -> dict[str, dict[str, Any]]:

@@ -10,6 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 
 from app import models, providers, transcript_rows
@@ -18,11 +19,16 @@ from app.database import get_db
 from app.config import get_settings
 from app.delegations import (
   ACTIVE_DELEGATION_STATUSES,
+  AWAITING_INPUT_DELEGATION_STATUSES,
+  QuestionRejected,
+  ask_parent_question,
   DelegationIntent,
   cancel_delegation_execution,
   claim_inline_delegation_observation,
   create_or_attach_delegation,
   derived_status,
+  delegation_goal_id,
+  delegation_source_work_filter,
   ensure_delegation_started,
   normalize_cwd,
   parent_root_run_id,
@@ -160,6 +166,15 @@ async def submit_or_attach(
   owner_app_id = parent_delegation.app_id if parent_delegation else body.app_id
   parent = get_active_chat_or_404(db, body.parent_chat_id)
   root_id = parent_root_run_id(db, parent.id, require_active=True)
+  active_run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == parent.id,
+    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+  ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+  goal_id = active_run.goal_id if active_run is not None else None
+  effective_goal_id = (
+    (delegation_goal_id(db, parent_delegation) if parent_delegation else None)
+    or goal_id
+  )
   if root_id is None:
     raise HTTPException(
       status_code=409,
@@ -171,7 +186,11 @@ async def submit_or_attach(
   if body.app_id is None and parent_delegation is None:
     previous = db.query(models.Delegation).filter(
       models.Delegation.parent_chat_id == parent.id,
-      models.Delegation.parent_root_run_id == root_id,
+      or_(models.Delegation.parent_root_run_id == root_id,
+          and_(models.Delegation.goal_id.is_(None),
+               models.Delegation.parent_root_run_id == effective_goal_id)),
+      delegation_source_work_filter(effective_goal_id or root_id),
+      models.Delegation.source_work_id.is_(None),
       models.Delegation.task_key == body.task_key,
     ).first()
     if previous is not None:
@@ -229,6 +248,15 @@ async def submit_or_attach(
         )
     parent = get_active_chat_or_404(db, body.parent_chat_id)
     current_root_id = parent_root_run_id(db, parent.id, require_active=True)
+    current_run = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == parent.id,
+      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+    current_goal_id = current_run.goal_id if current_run is not None else None
+    current_effective_goal_id = (
+      (delegation_goal_id(db, parent_delegation) if parent_delegation else None)
+      or current_goal_id
+    )
     if current_root_id is None:
       raise HTTPException(
         status_code=409,
@@ -236,13 +264,17 @@ async def submit_or_attach(
       )
     # Ownership and its lifecycle lock were selected for this logical root.
     # Never carry them into a newer run that began while admission waited.
-    if current_root_id != root_id:
+    if current_root_id != root_id or current_effective_goal_id != effective_goal_id:
       raise HTTPException(
         status_code=409,
         detail="The parent chat run changed during delegation admission.",
       )
     existing = db.query(models.Delegation).filter(
-      models.Delegation.parent_root_run_id == root_id,
+      or_(models.Delegation.parent_root_run_id == root_id,
+          and_(models.Delegation.goal_id.is_(None),
+               models.Delegation.parent_root_run_id == effective_goal_id)),
+      delegation_source_work_filter(effective_goal_id or root_id),
+      models.Delegation.source_work_id.is_(None),
       models.Delegation.task_key == body.task_key,
     ).first()
     # Omitted cwd means "attach wherever this exact task already runs". This
@@ -264,6 +296,7 @@ async def submit_or_attach(
       app_id=owner_app_id,
       parent_chat_id=parent.id,
       parent_root_run_id=root_id,
+      goal_id=effective_goal_id,
       task_key=body.task_key,
       goal_task_id=goal_task_id,
       prompt=body.prompt,
@@ -490,7 +523,7 @@ async def cancel_delegation(
 ):
   row = _row_for_principal(db, delegation_id, principal)
   status, _, _ = derived_status(db, row, load_result=False)
-  if status in ACTIVE_DELEGATION_STATUSES:
+  if status in ACTIVE_DELEGATION_STATUSES | AWAITING_INPUT_DELEGATION_STATUSES:
     if not await cancel_delegation_execution(row.id):
       raise HTTPException(
         status_code=409,
@@ -507,6 +540,9 @@ async def cancel_delegation(
 
 class DelegationMessage(BaseModel):
   message: str = Field(min_length=1, max_length=200_000)
+  # Correlates an answer with the helper's exact question; required while the
+  # helper is waiting, so a retried answer can never become a fresh follow-up.
+  question_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("message")
   @classmethod
@@ -528,14 +564,22 @@ async def message_delegation(
   principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
-  """Give a settled helper a follow-up turn with its history intact.
+  """Give a settled helper a follow-up turn, or answer its exact question.
 
-  Only the helper's own parent chat may message it. The follow-up is the
+  Only the helper's own parent chat may message it. A follow-up is the
   helper's next user turn; its result reaches the parent exactly like the
   first one (live into a running parent turn, or by waking it). That result
   is a new child run, so it is owed without resetting any delivery record.
   A helper that is still working is refused rather than interrupted: the
   parent waits for its result or stops it.
+
+  An answer (``question_id``) resumes the asking root through its one
+  reserved run. Repeating the same answer attaches to that run; a different
+  answer to an answered question is refused, never run as a second turn.
+  While the helper is still running another turn of the asking root, the
+  newest question's answer is accepted as that reserved run's queued row and
+  starts when the turn ends (``answer_queued``). Every admission fact is reread under the child's transition lock, which
+  cancellation and recovery share.
   """
   row = _row_for_principal(db, delegation_id, principal)
   _require_guest_child_lineage(row, principal)
@@ -543,46 +587,240 @@ async def message_delegation(
     raise HTTPException(
       status_code=403, detail="Only the helper's parent chat may message it.",
     )
-  status, _, _ = derived_status(db, row, load_result=False)
-  if status == "cancelled":
-    raise HTTPException(status_code=409, detail="This helper was stopped.")
-  if status == "interrupted" or row.scope != "write":
-    raise HTTPException(status_code=409, detail="This helper cannot resume; start a new helper.")
-  if status in ACTIVE_DELEGATION_STATUSES:
-    raise HTTPException(
-      status_code=409,
-      detail=(
-        "The helper is still working. Wait for its result before a follow-up; "
-        "for a decision-changing note now, use send_agent_message(recipients, body) "
-        "with its peer chat id from list_agent_peers."
-      ),
-    )
   from app import chat_queue
   from app.chat_start import start_programmatic_chat_turn
+  from app.delegations import (
+    answer_may_queue,
+    committed_answer_content,
+    helper_answer_content,
+    open_questions,
+    queue_helper_answer,
+    question_view,
+    start_helper_answer,
+  )
+  already_answered = False
+  answer_queued = False
+
+  async def start_answer(row, question, content) -> None:
+    row.notify_parent_on_complete = True
+    db.commit()
+    started = await start_helper_answer(
+      row, question, content, _transition_lock_held=True,
+    )
+    # A committed answer whose task creation failed is still delivered:
+    # delegation recovery reschedules that exact run.
+    db.rollback()
+    if not started and committed_answer_content(db, question) != content:
+      raise HTTPException(
+        status_code=409,
+        detail="The helper could not resume with this answer now; retry shortly.",
+      )
+
   async with chat_queue.get_transition_lock(row.child_chat_id):
     db.rollback()
     row = _row_for_principal(db, delegation_id, principal)
     _require_guest_child_lineage(row, principal)
-    if row.cancelled_at is not None or row.interrupted_at is not None or row.scope != "write":
+    status, run, _ = derived_status(db, row, load_result=False)
+    if status == "cancelled":
+      raise HTTPException(status_code=409, detail="This helper was stopped.")
+    if status == "interrupted" or row.scope != "write":
       raise HTTPException(status_code=409, detail="This helper cannot resume; start a new helper.")
-    row.notify_parent_on_complete = True
-    db.commit()
-    started = await start_programmatic_chat_turn(
-      chat_id=row.child_chat_id,
-      title=f"Delegation · {row.task_key}",
-      content=body.message,
-      provider=row.provider,
-      initiated_by_app_id=row.app_id,
-    )
-  if not started:
-    raise HTTPException(
-      status_code=409, detail="The helper could not start a follow-up turn now.",
-    )
+    awaited = open_questions(db, [(row, run)]).get(row.id)
+    if body.question_id is None and awaited is not None:
+      raise _question_refusal(
+        "question_id_required",
+        f"The helper is waiting for an answer to question_id {awaited.id}; "
+        "answer it with message_agent(helper, message, question_id).",
+        question=question_view(awaited),
+      )
+    if body.question_id is not None:
+      question = db.query(models.DelegationQuestion).filter(
+        models.DelegationQuestion.id == body.question_id,
+        models.DelegationQuestion.delegation_id == row.id,
+      ).first()
+      if question is None:
+        raise _question_refusal(
+          "question_not_found", "This helper has no such question.", 404,
+        )
+      content = helper_answer_content(question, body.message)
+      committed = committed_answer_content(db, question)
+      if committed is not None:
+        if committed != content:
+          raise _question_refusal(
+            "question_already_answered",
+            "This question was already answered with a different answer; "
+            "that answer stands. Send a new instruction after the helper "
+            "settles, or stop it.",
+          )
+        # The same answer again: attach to (or recover) its one run.
+        await start_helper_answer(
+          row, question, content, _transition_lock_held=True,
+        )
+        already_answered = True
+      elif awaited is not None and awaited.id == question.id:
+        await start_answer(row, question, content)
+      else:
+        # The helper is running another turn of the asking root (e.g. its own
+        # child's result woke it). Accept the answer as the reserved run's
+        # queued row; that turn's drain starts it the moment it settles, so
+        # the question never re-opens and the parent is not woken again.
+        if answer_may_queue(db, row, run, question):
+          row.notify_parent_on_complete = True
+          db.commit()
+          answer_queued = await queue_helper_answer(
+            row, question, content, observed_run_id=run.id,
+          )
+        if not answer_queued:
+          # The run settled between the reads: the question may now be open.
+          db.rollback()
+          row = _row_for_principal(db, delegation_id, principal)
+          status, run, _ = derived_status(db, row, load_result=False)
+          awaited = open_questions(db, [(row, run)]).get(row.id)
+          if awaited is None or awaited.id != question.id:
+            newer = db.query(models.DelegationQuestion.id).filter(
+              models.DelegationQuestion.delegation_id == row.id,
+              models.DelegationQuestion.created_at > question.created_at,
+            ).first() is not None
+            reason = (
+              "the helper asked a newer question; answer that one"
+              if newer else
+              "the helper is running a different turn, so this question "
+              "is closed; wait for its result"
+              if status in ACTIVE_DELEGATION_STATUSES
+              else f"the helper is {status}"
+            )
+            raise _question_refusal(
+              "question_not_open",
+              f"Question {question.id} is not awaiting an answer: {reason}. "
+              "Nothing was saved.",
+            )
+          await start_answer(row, question, content)
+    else:
+      if status in ACTIVE_DELEGATION_STATUSES:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The helper is still working. Wait for its result before a follow-up; "
+            "for a decision-changing note now, use send_agent_message(recipients, body) "
+            "with its peer chat id from list_agent_peers."
+          ),
+        )
+      row.notify_parent_on_complete = True
+      db.commit()
+      started = await start_programmatic_chat_turn(
+        chat_id=row.child_chat_id,
+        title=f"Delegation · {row.task_key}",
+        content=body.message,
+        provider=row.provider,
+        initiated_by_app_id=row.app_id,
+      )
+      if not started:
+        raise HTTPException(
+          status_code=409, detail="The helper could not start a follow-up turn now.",
+        )
   db.rollback()
   row = _row_for_principal(db, delegation_id, principal)
   publish_parent_waiting_changed(row.parent_chat_id)
-  return serialize_delegation(db, row, include_result=False)
+  payload = serialize_delegation(db, row, include_result=False)
+  if body.question_id is not None:
+    payload["question_id"] = body.question_id
+    payload["already_answered"] = already_answered
+    payload["answer_queued"] = answer_queued
+    if answer_queued:
+      payload["note"] = (
+        "The helper is finishing another turn of the same task. Your answer "
+        "is saved and starts as soon as that turn ends; do not resend it."
+      )
+  return payload
 
+
+
+@router.post(
+  "/{delegation_id}/questions",
+  dependencies=[Depends(reject_cross_site)],
+)
+def ask_parent(
+  delegation_id: str,
+  body: DelegationQuestionAsk,
+  principal: Principal = Depends(get_delegation_principal),
+  db: Session = Depends(get_db),
+):
+  """Record the calling helper run's one question for its parent.
+
+  Only the helper's own run-bound bearer may ask, once per physical run.
+  The receipt is stable for an exact retry. Nothing is delivered until the
+  run ends: the settled run is the result the parent is woken with.
+  """
+  if (
+    principal.delegation_id != delegation_id
+    or not isinstance(principal.run_id, str) or not principal.run_id
+  ):
+    raise HTTPException(
+      status_code=403, detail="Only the helper's own running turn may ask its parent.",
+    )
+  row = db.query(models.Delegation).filter(
+    models.Delegation.id == delegation_id,
+    models.Delegation.child_chat_id == principal.chat_id,
+  ).first()
+  if row is None:
+    raise HTTPException(
+      status_code=403, detail="Only the helper's own running turn may ask its parent.",
+    )
+  try:
+    question = ask_parent_question(
+      db, row, asking_run_id=principal.run_id,
+      question=body.question, options=body.options,
+    )
+  except QuestionRejected as exc:
+    raise _question_refusal(exc.code, str(exc), exc.status) from exc
+  receipt = {
+    "question_id": question.id,
+    "helper_id": row.id,
+    "status": "asked",
+    "note": (
+      "Question recorded for your parent. End your turn now without "
+      "further work; its answer resumes this conversation."
+    ),
+  }
+  # Like a confirmed closing save, a recorded question is a turn-ending
+  # result: the asking run's own end hook stops the turn on this receipt, so
+  # no further model request is made. Only the exact live run can end itself.
+  from app.chat_event_sink import get_active_sink
+  sink = get_active_sink(row.child_chat_id)
+  if sink is not None and sink.run_token == principal.run_id:
+    receipt["turn_end_id"] = sink.record_turn_end()
+  return receipt
+
+
+class DelegationQuestionAsk(BaseModel):
+  question: str = Field(min_length=1, max_length=200_000)
+  options: list[str] = Field(default_factory=list, max_length=16)
+
+  @field_validator("question")
+  @classmethod
+  def _clean_question(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("question must not be empty")
+    return value
+
+  @field_validator("options")
+  @classmethod
+  def _clean_options(cls, values: list[str]) -> list[str]:
+    cleaned = [value.strip() for value in values]
+    if any(not value for value in cleaned):
+      raise ValueError("options must not be empty")
+    if any(len(value) > 200_000 for value in cleaned):
+      raise ValueError("options must be at most 200000 characters")
+    return cleaned
+
+
+def _question_refusal(
+  code: str, detail: str, status: int = 409, **extra,
+) -> HTTPException:
+  return HTTPException(
+    status_code=status, detail={"code": code, "message": detail, **extra},
+  )
 
 async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str]:
   """Cascade an explicit parent Stop without affecting restart draining."""

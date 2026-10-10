@@ -47,6 +47,7 @@ def test_promotion_posts_one_typed_request_without_message_text(monkeypatch):
       "state": "promoted",
       "objective": "Finish every stage and verify the result",
       "root_run_id": "run-1",
+      "goal_id": "goal-1",
       "run_id": "run-1",
     })
 
@@ -70,6 +71,7 @@ def test_promotion_accepts_an_idempotent_active_response(monkeypatch):
     "state": "active",
     "objective": "Ship and verify",
     "root_run_id": "run-1",
+      "goal_id": "goal-1",
     "run_id": "run-1",
   }))
 
@@ -83,6 +85,7 @@ def test_promotion_rejects_a_response_for_another_run(monkeypatch):
     "state": "promoted",
     "objective": "Ship and verify",
     "root_run_id": "run-1",
+      "goal_id": "goal-1",
     "run_id": "newer-run",
   }))
 

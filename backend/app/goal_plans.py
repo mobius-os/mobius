@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import logging
 import re
 from typing import Any
 
 from sqlalchemy import func, or_, update
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm import Session, defer, load_only
 
 from app import models
 from app.chat_message_identity import assistant_message_run_id
 
 
-# The Goal tool's names across providers. A transcript row carrying one is
-# flagged so Goal placement reads only those bodies (transcript_rows).
+_LOG = logging.getLogger(__name__)
+
+
+# Task IDs are stable 64-character protocol keys, not prose budgets.
 UPDATE_GOAL_TOOLS = frozenset({
   "mobius_control:update_goal", "mcp__mobius_control__update_goal",
 })
@@ -180,25 +184,29 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
 
   visiting: set[str] = set()
   visited: set[str] = set()
-
-  def visit_completion_prerequisites(task_id: str) -> None:
-    if task_id in visited:
-      return
-    if task_id in visiting:
-      raise GoalPlanError(
-        "goal-plan dependencies and parentage must not form a completion cycle"
-      )
-    visiting.add(task_id)
-    prerequisites = (
-      by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])
-    )
-    for prerequisite in prerequisites:
-      visit_completion_prerequisites(prerequisite)
-    visiting.remove(task_id)
-    visited.add(task_id)
-
   for task in tasks:
-    visit_completion_prerequisites(task["id"])
+    start = task["id"]
+    if start in visited:
+      continue
+    # Explicit frames keep dependency validation independent of recursion
+    # depth within the bounded plan.
+    stack = [(start, False)]
+    while stack:
+      task_id, leaving = stack.pop()
+      if leaving:
+        visiting.remove(task_id)
+        visited.add(task_id)
+        continue
+      if task_id in visited:
+        continue
+      if task_id in visiting:
+        raise GoalPlanError(
+          "goal-plan dependencies and parentage must not form a completion cycle"
+        )
+      visiting.add(task_id)
+      stack.append((task_id, True))
+      stack.extend((dependency, False) for dependency in reversed(
+        by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])))
 
   def effective_dependencies(task_id: str) -> list[str]:
     """Return direct dependencies plus those inherited from parent groups."""
@@ -292,11 +300,28 @@ def helper_plan_task(
   helper joins the plan's current focus: the one running leaf task. With no
   Goal, no plan, or several running leaves the helper stays unfiled rather
   than guessing among them.
+
+  A delegated chat that owns no Goal works on the Goal its delegation chain
+  is assigned to (goal_assignment): an explicit task is checked against that
+  plan and must lie within the helper's own assigned branch (the task itself
+  or one beneath it), and an omitted one stays unfiled so the new helper
+  inherits its parent's branch instead of the whole plan's focus.
   """
   rows = active_goal_rows(db, chat_id)
-  tasks = list(((rows[1].plan_json or {}) if rows else {}).get("tasks") or [])
+  goal = rows[1] if rows else None
+  assignment = goal_assignment(db, chat_id) if goal is None else None
+  if assignment is not None:
+    goal = assignment.goal
+  tasks = list(((goal.plan_json or {}) if goal is not None else {}).get("tasks") or [])
   if requested is not None:
     ids = [str(task.get("id")) for task in tasks]
+    if assignment is not None and assignment.plan_task is not None:
+      # A branch helper splits only its own branch, as its brief is scoped.
+      parent_of = {str(task.get("id")): task.get("parent_id") for task in tasks}
+      ids = [
+        task_id for task_id in ids
+        if _within_branch(task_id, assignment.plan_task, parent_of)
+      ]
     if requested not in ids:
       known = ", ".join(ids) if ids else "none (no active Goal plan)"
       raise GoalPlanError(
@@ -304,12 +329,89 @@ def helper_plan_task(
         f"plan tasks: {known}"
       )
     return requested
+  if assignment is not None:
+    return None
   running = {
     str(task.get("id")): task for task in tasks if task.get("status") == "running"
   }
   parents = {str(task.get("parent_id")) for task in running.values()}
   leaves = [task_id for task_id in running if task_id not in parents]
   return leaves[0] if len(leaves) == 1 else None
+
+
+def _within_branch(task_id: str, branch: str, parent_of: dict) -> bool:
+  """Whether ``task_id`` is ``branch`` or nested beneath it."""
+  seen: set[str] = set()
+  current: str | None = task_id
+  while current is not None and current not in seen:
+    if current == branch:
+      return True
+    seen.add(current)
+    parent = parent_of.get(current)
+    current = str(parent) if parent is not None else None
+  return False
+
+
+@dataclass(frozen=True)
+class GoalAssignment:
+  """The exact Goal and plan task one delegated chat works on.
+
+  ``plan_task`` is None when no delegation in the chain was filed under a
+  task, or when the filed task is no longer in the plan
+  (``plan_task_missing``); the helper then reads the Goal overview.
+  """
+
+  goal: models.ChatGoal
+  delegation_id: str
+  helper: str
+  plan_task: str | None
+  plan_task_missing: bool
+  depth: int
+
+
+def goal_assignment(db: Session, chat_id: str) -> GoalAssignment | None:
+  """Resolve immutable Goal ownership and the nearest filed task in a chain.
+
+  Historical rows whose parent root is exactly a Goal id remain readable.
+  Other NULL ownership is ambiguous after A→B and is never guessed from a
+  mutable run link. App/source-owned work is not Goal work.
+  """
+  row = db.query(models.Delegation).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first()
+  if row is None:
+    return None
+  chain = [row]
+  while True:
+    parent = db.query(models.Delegation).filter(
+      models.Delegation.child_chat_id == chain[-1].parent_chat_id,
+    ).first()
+    if parent is None:
+      break
+    if any(parent.id == seen.id for seen in chain):
+      return None
+    chain.append(parent)
+  if any(link.app_id is not None or link.source_work_id is not None for link in chain):
+    return None
+  anchored = {link.goal_id for link in chain if link.goal_id is not None}
+  if len(anchored) > 1:
+    return None
+  top = chain[-1]
+  root_id = top.parent_root_run_id
+  goal = db.get(models.ChatGoal, anchored.pop()) if anchored else db.get(models.ChatGoal, root_id)
+  if goal is None or goal.chat_id != top.parent_chat_id:
+    return None
+  filed = next((link.goal_task_id for link in chain if link.goal_task_id), None)
+  plan_ids = {
+    task.get("id") for task in ((goal.plan_json or {}).get("tasks") or [])
+    if isinstance(task, dict)
+  } if isinstance(goal.plan_json, dict) else set()
+  missing = filed is not None and filed not in plan_ids
+  return GoalAssignment(
+    goal=goal, delegation_id=row.id, helper=row.task_key,
+    plan_task=None if missing else filed, plan_task_missing=missing,
+    depth=len(chain),
+  )
 
 
 def _presented_goal_attempts(db: Session, chat_ids):
@@ -373,16 +475,6 @@ def presented_deferred_goals(db: Session, chat_ids) -> dict[str, dict]:
   return result
 
 
-def goal_attempt_root_ids(db: Session, chat_id: str, goal_id: str) -> set[str]:
-  """Exact helper-owning roots across all attempts of one durable Goal."""
-  return {goal_id} | {
-    str(root_id or run_id)
-    for root_id, run_id in db.query(models.ChatRun.root_run_id, models.ChatRun.id).filter(
-      models.ChatRun.chat_id == chat_id, models.ChatRun.goal_id == goal_id,
-    ).all()
-  }
-
-
 def _delegation_tree(
   db: Session, physical: models.ChatRun, root: models.ChatGoal,
   *, all_attempts: bool = False,
@@ -390,10 +482,16 @@ def _delegation_tree(
   """Project durable immediate-child ownership without copying transcripts."""
   from app.delegations import delegation_statuses
 
-  run_ids = goal_attempt_root_ids(db, physical.chat_id, root.id)
+  # Only the historical overloaded Goal-id root is immutable evidence for
+  # NULL ownership. A physical root may later be rebound to another Goal.
+  legacy_ids = {root.id}
   root_rows = db.query(models.Delegation).filter(
     models.Delegation.parent_chat_id == physical.chat_id,
-    models.Delegation.parent_root_run_id.in_(run_ids),
+    models.Delegation.app_id.is_(None),
+    models.Delegation.source_work_id.is_(None),
+    or_(models.Delegation.goal_id == root.id,
+        (models.Delegation.goal_id.is_(None))
+        & models.Delegation.parent_root_run_id.in_(legacy_ids)),
   ).order_by(models.Delegation.created_at.asc()).all()
   # A resumed Goal may delegate the same plan task again from a newer physical
   # run. Only the latest attempt is current execution; older attempts remain in
@@ -407,6 +505,10 @@ def _delegation_tree(
   while frontier:
     child_rows = db.query(models.Delegation).filter(
       models.Delegation.parent_chat_id.in_(frontier),
+      models.Delegation.app_id.is_(None),
+      models.Delegation.source_work_id.is_(None),
+      or_(models.Delegation.goal_id == root.id,
+          models.Delegation.goal_id.is_(None)),
     ).order_by(models.Delegation.created_at.asc()).all()
     frontier = []
     latest_by_owner_and_task = {
@@ -422,17 +524,44 @@ def _delegation_tree(
   statuses = delegation_statuses(db, roots + [
     child for children in children_by_parent.values() for child in children
   ])
+  from app.delegations import open_questions
+  waiting = [row for row in roots + [
+    child for children in children_by_parent.values() for child in children
+  ] if statuses[row.id] == "needs_input"]
+  waiting_runs = []
+  if waiting:
+    ranked = db.query(
+      models.ChatRun.id.label("run_id"),
+      func.row_number().over(
+        partition_by=models.ChatRun.chat_id,
+        order_by=(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()),
+      ).label("position"),
+    ).filter(models.ChatRun.chat_id.in_([row.child_chat_id for row in waiting])).subquery()
+    latest = {run.chat_id: run for run in db.query(models.ChatRun).join(
+      ranked, ranked.c.run_id == models.ChatRun.id,
+    ).filter(ranked.c.position == 1).all()}
+    waiting_runs = [(row, latest.get(row.child_chat_id)) for row in waiting]
+  questions = open_questions(db, waiting_runs)
+  raw_plan = root.plan_json if isinstance(root.plan_json, dict) else {}
+  titles = {task.get("id"): task.get("title") for task in
+    (raw_plan.get("tasks") or []) if isinstance(task, dict)}
 
   def project(row: models.Delegation, seen: set[str]) -> dict[str, Any]:
     if row.id in seen:
-      return {"id": row.id, "task_key": row.task_key, "status": "failed", "children": []}
+      return {"id": row.id, "task_key": row.task_key, "plan_task": row.goal_task_id,
+              "title": titles.get(row.goal_task_id), "provider": row.provider,
+              "status": "failed", "question": None, "children": []}
     children = children_by_parent.get(row.child_chat_id, [])
     return {
       "id": row.id,
       "task_key": row.task_key,
       "plan_task": row.goal_task_id,
+      "title": titles.get(row.goal_task_id),
       "provider": row.provider,
       "status": statuses[row.id],
+      "question": ({"id": questions[row.id].id, "text": questions[row.id].question,
+                    "options": list(questions[row.id].options_json or [])}
+                   if row.id in questions else None),
       "children": [project(child, seen | {row.id}) for child in children],
     }
 
@@ -442,29 +571,32 @@ def _delegation_tree(
 def publish_plan_for_delegation(
   db: Session, row: models.Delegation,
 ) -> None:
-  """Refresh the root Goal when any locally-owned descendant changes state."""
-  top = row
-  seen = {row.id}
-  while True:
-    parent = db.query(models.Delegation).filter(
-      models.Delegation.child_chat_id == top.parent_chat_id,
-    ).first()
-    if parent is None:
-      break
-    if parent.id in seen:
-      return
-    seen.add(parent.id)
-    top = parent
-  rows = active_goal_rows(db, top.parent_chat_id)
-  if rows is None:
+  """Invalidate the Goal owner and this helper's direct parent after a commit."""
+  if row.app_id is not None or row.source_work_id is not None:
     return
-  plan = serialize_plan(db, *rows)
-  if plan is None:
+  publish_goal_changed(row.parent_chat_id)
+  if row.goal_id is not None:
+    owner = db.query(models.ChatGoal.chat_id).filter(
+      models.ChatGoal.id == row.goal_id,
+    ).scalar()
+    if owner and owner != row.parent_chat_id:
+      publish_goal_changed(owner)
     return
-  from app.broadcast import get_broadcast
-  broadcast = get_broadcast(top.parent_chat_id)
-  if broadcast is not None and broadcast.running:
-    broadcast.publish({"type": "goal_plan_updated", "plan": plan})
+  assignment = goal_assignment(db, row.child_chat_id)
+  if assignment is not None and assignment.goal.chat_id != row.parent_chat_id:
+    publish_goal_changed(assignment.goal.chat_id)
+
+
+def publish_goal_changed(chat_id: str) -> None:
+  """Post-commit runtime invalidation; the system channel survives idle turns."""
+  try:
+    from app.broadcast import get_system_broadcast
+    get_system_broadcast().publish({
+      "type": "chat_wait_changed", "chatId": chat_id, "chat_id": chat_id,
+      "source": "goal",
+    })
+  except Exception:
+    _LOG.exception("Goal invalidation failed for chat %s", chat_id)
 
 
 def _active_helper_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -565,7 +697,7 @@ def serialize_plan(
       ready.append(task["id"])
   return {
     "version": 1,
-    "goal_id": physical.goal_id,
+    "goal_id": root.id,
     "root_run_id": physical.root_run_id or physical.id,
     "objective": root.objective,
     "revision": int(root.revision or 0),
@@ -613,7 +745,7 @@ def _goal_presentation(
   else:
     status = "paused"
   presentation = {
-    "id": physical.goal_id or root.id,
+    "id": root.id,
     "revision": int(root.revision or 0),
     "objective": root.objective,
     "status": status,
@@ -629,6 +761,7 @@ def _goal_presentation(
     else:
       presentation["pause_reason"] = hold["actor"] if hold else "unknown"
   presentation["handoff"] = _goal_handoff(db, physical, root)
+  presentation["plan"] = plan
   return presentation
 
 
@@ -672,8 +805,9 @@ def _goal_handoff(db: Session, physical: models.ChatRun, goal: models.ChatGoal) 
   if any(wait.get("resume_blocker") == "owner_input" for wait in waits):
     return {"kind": "blocked", "reason": "other_work"}
   from app.delegations import _self_resuming_helper_rows
-  roots = goal_attempt_root_ids(db, goal.chat_id, goal.id)
-  helper_count = sum(row.parent_root_run_id in roots
+  roots = {goal.id}
+  helper_count = sum(row.goal_id == goal.id or (
+    row.goal_id is None and row.parent_root_run_id in roots)
     for row, _status in _self_resuming_helper_rows(db, {goal.chat_id}))
   from app.chat import continuation_handoff_for_chat
   park = continuation_handoff_for_chat(db, goal.chat_id) if owns_chat_attempt else none
@@ -699,7 +833,8 @@ def paused_goal_run(db: Session, chat_id: str) -> models.ChatRun | None:
   return rows[0]
 
 
-def _goal_completion_anchor(messages, run_ids, result, status="completed"):
+def _goal_completion_anchor(messages, run_ids, result, status="completed",
+                            *, max_timestamp_ms=None, require_exact_result=False):
   """Locate the successful terminal receipt, never a refused attempt.
 
   Modern tool rows carry exact execution identity. Historical provider input
@@ -709,16 +844,21 @@ def _goal_completion_anchor(messages, run_ids, result, status="completed"):
   from app.goals import cannot_complete_result
   if status != "completed" and (not isinstance(result, str) or not result):
     return None
+  if require_exact_result and not isinstance(result, str):
+    return None
   for index in range(len(messages) - 1, -1, -1):
     message = messages[index]
     if not isinstance(message, dict) or message.get("role") != "assistant":
+      continue
+    if (max_timestamp_ms is not None
+        and isinstance(message.get("ts"), (int, float))
+        and message["ts"] > max_timestamp_ms + 1000):
       continue
     if assistant_message_run_id(message.get("id")) not in run_ids:
       continue
     for block in reversed(message.get("blocks") or []):
       if (not isinstance(block, dict) or block.get("type") != "tool"
-          or block.get("tool") not in UPDATE_GOAL_TOOLS
-          or block.get("status") != "done"
+          or block.get("tool") not in UPDATE_GOAL_TOOLS or block.get("status") != "done"
           or block.get("output_exit_code") != 0 or not block.get("tool_use_id")):
         continue
       raw = block.get("input")
@@ -731,14 +871,15 @@ def _goal_completion_anchor(messages, run_ids, result, status="completed"):
         # server receipt can. A plain read must never become the anchor.
         field = {"completed": "complete", "cannot_complete": "cannot_complete",
                  "cancelled": "cancel"}.get(status)
-        if (field and re.search(rf"(?:^|, ){field}=", raw)
+        if (not require_exact_result and field and re.search(rf"(?:^|, ){field}=", raw)
             and f"Goal {status}, revision " in str(block.get("output") or "")):
           return index, block["tool_use_id"]
       else:
         terminal_value = (args.get("complete") if status == "completed" else
                           args.get("cancel") if status == "cancelled" else
                           args.get("cannot_complete")) if isinstance(args, dict) else None
-        if ((status == "completed" and terminal_value is True and result is None)
+        if ((not require_exact_result and status == "completed"
+             and terminal_value is True and result is None)
             or (isinstance(terminal_value, str) and terminal_value == result)
             or (status == "cannot_complete" and isinstance(terminal_value, dict)
                 and all(isinstance(terminal_value.get(key), str) for key in
@@ -769,29 +910,37 @@ def terminal_goal_summaries_by_message_index(
   move a resumed Goal's card onto an earlier answer. Plans and handoffs for
   off-page Goals are never hydrated.
   """
-  goal_rows = (
-    db.query(models.ChatRun)
-    .options(load_only(
-      models.ChatRun.id,
-      models.ChatRun.chat_id,
-      models.ChatRun.goal_id,
-      models.ChatRun.root_run_id,
-      models.ChatRun.goal_objective,
-      models.ChatRun.status,
-      models.ChatRun.started_at,
-      models.ChatRun.ended_at,
-    ))
-    .filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.goal_objective.isnot(None),
-    )
-    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-    .all()
-  )
+  goals = db.query(models.ChatGoal).options(defer(models.ChatGoal.plan_json)).filter(
+    models.ChatGoal.chat_id == chat_id,
+    models.ChatGoal.status.in_(("completed", "cannot_complete", "cancelled")),
+  ).order_by(models.ChatGoal.created_at.asc(), models.ChatGoal.id.asc()).all()
+  goal_rows = db.query(models.ChatRun).options(load_only(
+    models.ChatRun.id, models.ChatRun.chat_id, models.ChatRun.goal_id,
+    models.ChatRun.root_run_id, models.ChatRun.goal_objective,
+    models.ChatRun.status, models.ChatRun.started_at, models.ChatRun.ended_at,
+  )).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc()).all()
   grouped: dict[str, list[models.ChatRun]] = {}
+  by_run = {row.id: row for row in goal_rows}
+  goals_by_completion_run: dict[str, set[str]] = {}
+  completion_receipt_counts: dict[tuple, int] = {}
+  for goal in goals:
+    if goal.completion_run_id:
+      goals_by_completion_run.setdefault(goal.completion_run_id, set()).add(goal.id)
+      receipt_key = (goal.completion_run_id, goal.status, goal.result)
+      completion_receipt_counts[receipt_key] = completion_receipt_counts.get(receipt_key, 0) + 1
   for row in goal_rows:
-    identity = row.goal_id or row.root_run_id or row.id
-    grouped.setdefault(identity, []).append(row)
+    if row.goal_id is not None:
+      grouped.setdefault(row.goal_id, []).append(row)
+
+  positions = dict(db.query(
+    models.ChatActivityPosition.event_id, models.ChatActivityPosition.position,
+  ).filter(
+    models.ChatActivityPosition.chat_id == chat_id,
+    models.ChatActivityPosition.event_id.in_(
+      [f"goal-outcome:{goal.id}" for goal in goals]),
+  ).all()) if goals else {}
 
   assistant_rows: list[tuple[int, int, object]] = []
   for index, message in enumerate(messages):
@@ -809,56 +958,89 @@ def terminal_goal_summaries_by_message_index(
     return round(value.timestamp() * 1000)
 
   projected: dict[int, list[dict[str, Any]]] = {}
-  for identity, rows in grouped.items():
-    latest = rows[-1]
-    if latest.ended_at is None:
+  for root in goals:
+    identity = root.id
+    rows = grouped.get(identity, [])
+    legacy_rebound = not rows and root.completion_run_id is None
+    if legacy_rebound:
+      # Historical Goals sometimes used the execution root as their id.
+      # A later rebind can remove the last mutable run.goal_id link, but the
+      # physical root is still an exact old-data anchor for this Goal's time.
+      rows = [row for row in goal_rows
+        if (row.root_run_id or row.id) == identity
+        and (root.completed_at is None or row.started_at <= root.completed_at)]
+    completion_run = by_run.get(root.completion_run_id) if root.completion_run_id else None
+    latest = completion_run or (rows[-1] if rows else None)
+    if latest is None:
       continue
     started_at = min(
       (row.started_at for row in rows if row.started_at is not None),
-      default=None,
+      default=root.created_at or latest.started_at,
     )
+    ended_at = root.completed_at or latest.ended_at
     started_ms = epoch_ms(started_at)
-    ended_ms = epoch_ms(latest.ended_at)
+    ended_ms = epoch_ms(ended_at)
     if started_ms is None or ended_ms is None:
       continue
-    # Modern assistant segments carry the exact physical-run identity. Prefer
-    # it so clock skew cannot attach a Goal card to an unrelated answer. The
-    # bounded timestamp fallback is reserved for genuinely id-less legacy rows.
-    candidate_index = next((
-      index for index in range(len(messages) - 1, -1, -1)
-      if isinstance(messages[index], dict)
-      and messages[index].get("role") == "assistant"
-      and assistant_message_run_id(messages[index].get("id")) == latest.id
-    ), None)
-    if candidate_index is None:
-      candidate_index = next((
-        index for index, ts, message_id in reversed(assistant_rows)
-        if message_id is None
-        and started_ms - 1000 <= ts <= ended_ms + 1000
-      ), None)
-    physical, root = _goal_rows_for_physical(db, latest)
-    anchor = _goal_completion_anchor(
-      messages, {row.id for row in rows}, root.result, root.status,
-    ) if root.status in {"completed", "cannot_complete", "cancelled"} else None
-    if anchor is not None:
-      candidate_index = anchor[0]
-    if (
-      candidate_index is None
-      or candidate_index < message_start
-      or (message_end is not None and candidate_index >= message_end)
-    ):
+    position_key = f"goal-outcome:{identity}"
+    has_immutable_position = position_key in positions
+    position = positions.get(position_key)
+    candidate_index = None
+    anchor = None
+    if isinstance(position, dict):
+      message_id = position.get("assistant_message_id")
+      candidate_index = next((index for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "assistant"
+        and message_id is not None and message.get("id") == message_id), None)
+      block_key = position.get("block_key")
+      if candidate_index is not None and isinstance(block_key, str) and block_key.startswith("tool:"):
+        anchor = (candidate_index, block_key.removeprefix("tool:"))
+    shared_completion_run = (root.completion_run_id is not None
+      and len(goals_by_completion_run.get(root.completion_run_id, ())) > 1)
+    rebound_without_position = (root.completion_run_id is not None
+      and completion_run is not None and completion_run.goal_id != identity)
+    ambiguous_run = shared_completion_run or rebound_without_position
+    if (not has_immutable_position and shared_completion_run
+        and completion_receipt_counts.get(
+          (root.completion_run_id, root.status, root.result), 0) > 1):
+      # Matching receipt arguments cannot distinguish two identical outcomes
+      # on one physical run. Never attribute the later Goal's receipt to A.
       continue
-    plan = serialize_plan(db, physical, root)
-    presentation = _goal_presentation(db, physical, root, plan)
-    if presentation["status"] not in {"completed", "cannot_complete", "cancelled"}:
+    if not has_immutable_position:
+      # An immutable frontier stays authoritative even if its message is
+      # unavailable. Only its absence permits a legacy receipt or segment.
+      # Migrated rows can know the completion run but lack an immutable outcome
+      # position. A rebound/shared run needs an exact result-bearing receipt;
+      # an unqualified success could belong to the other Goal.
+      receipt_runs = ({root.completion_run_id} if root.completion_run_id
+                      else {row.id for row in rows})
+      anchor = _goal_completion_anchor(
+        messages, receipt_runs, root.result, root.status,
+        max_timestamp_ms=ended_ms if legacy_rebound else None,
+        require_exact_result=ambiguous_run,
+      )
+      if anchor is not None:
+        candidate_index = anchor[0]
+      elif not ambiguous_run:
+        # Without a receipt, use the run's last segment. A rebound run cannot
+        # safely use this fallback because the segment may belong to B.
+        candidate_index = next((index for index in range(len(messages) - 1, -1, -1)
+          if isinstance(messages[index], dict)
+          and messages[index].get("role") == "assistant"
+          and assistant_message_run_id(messages[index].get("id")) == latest.id), None)
+        if candidate_index is None:
+          candidate_index = next((index for index, ts, message_id in reversed(assistant_rows)
+            if message_id is None and started_ms - 1000 <= ts <= ended_ms + 1000), None)
+    if (candidate_index is None or candidate_index < message_start
+        or (message_end is not None and candidate_index >= message_end)):
       continue
+    plan = serialize_plan(db, latest, root)
+    presentation = _goal_presentation(db, latest, root, plan)
     projected.setdefault(candidate_index, []).append({
       **presentation,
-      "id": identity,
-      "started_at": started_at.isoformat() if started_at else None,
-      "completed_at": latest.ended_at.isoformat(),
+      "started_at": started_at.isoformat(),
+      "completed_at": ended_at.isoformat(),
       "duration_seconds": max(0, round((ended_ms - started_ms) / 1000)),
-      "plan": plan,
       **({"completion_tool_use_id": anchor[1]} if anchor else {}),
     })
   return projected
@@ -932,6 +1114,7 @@ def replace_plan(
   plan = serialize_plan(db, physical, root)
   if plan is None:  # pragma: no cover - the write above guarantees a document
     raise RuntimeError("goal plan disappeared after commit")
+  publish_goal_changed(root.chat_id)
   return plan
 
 

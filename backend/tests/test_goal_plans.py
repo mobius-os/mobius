@@ -119,8 +119,9 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("summarized", [False, True])
 @pytest.mark.parametrize("complete", [True, "Verified exact result"])
+@pytest.mark.parametrize("migrated", [False, True])
 def test_completed_card_stays_at_successful_completion_not_later_segment(
-  client, owner_token, db, compact, summarized, complete,
+  client, owner_token, db, compact, summarized, complete, migrated,
 ):
   auth = {"Authorization": f"Bearer {owner_token}"}
   base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -140,7 +141,8 @@ def test_completed_card_stays_at_successful_completion_not_later_segment(
     {"type": "text", "content": "Later prose"},
   ]
   messages = [
-    {"role": "assistant", "id": "anchor-run", "blocks": blocks},
+    {"role": "assistant", "id": "anchor-run", "blocks": blocks,
+     "ts": int((base + timedelta(seconds=60)).timestamp() * 1000)},
     {"role": "user", "content": "follow-up"},
     {"role": "assistant", "id": "anchor-run:assistant:1", "content": "Later segment"},
   ]
@@ -154,6 +156,8 @@ def test_completed_card_stays_at_successful_completion_not_later_segment(
   goal = db.get(models.ChatGoal, "anchor-goal")
   goal.status = "completed"
   goal.result = complete if isinstance(complete, str) else None
+  if migrated:
+    goal.completion_run_id = "anchor-run"  # 0086 backfill has no outcome position.
   db.commit()
 
   payload = client.get(f"/api/chats/{chat_id}?limit=20&compact={str(compact).lower()}", headers=auth).json()
@@ -346,19 +350,15 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
       headers=agent_auth,
     )
     assert promoted.status_code == 200, promoted.text
-    assert promoted.json() == {
-      "objective": "Repair every defect and verify the suite",
-      "root_run_id": "ordinary-run",
-      "run_id": "ordinary-run",
-      "state": "promoted",
-    }
-    assert [
-      event["type"] for event in broadcast.event_log
-    ] == ["goal_activated"]
+    assert promoted.json()["state"] == "promoted"
+    assert promoted.json()["goal_id"]
+    assert promoted.json()["root_run_id"] == "ordinary-run"
+    assert promoted.json()["run_id"] == "ordinary-run"
+    assert [event["type"] for event in broadcast.event_log] == ["goal_activated"]
     db.expire_all()
     run = db.query(models.ChatRun).filter(models.ChatRun.id == "ordinary-run").one()
     assert run.goal_objective == "Repair every defect and verify the suite"
-    assert run.goal_id == "ordinary-run"
+    assert run.goal_id == promoted.json()["goal_id"]
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
     assert all(
       "/goal" not in str(message.get("content", ""))
@@ -378,11 +378,9 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
       .filter(models.ChatRun.id == "ordinary-run")
       .one()
       .goal_id
-      == "ordinary-run"
+      == promoted.json()["goal_id"]
     )
-    assert [
-      event["type"] for event in broadcast.event_log
-    ] == ["goal_activated"]
+    assert [event["type"] for event in broadcast.event_log] == ["goal_activated"]
     conflict = client.post(
       f"/api/chats/{chat_id}/goal",
       json={"objective": "Do something else"},
@@ -436,8 +434,7 @@ def test_resuming_goal_publishes_activation_only_for_attachment_transition(
     )
     assert attached.status_code == 200, attached.text
     assert attached.json()["goal"]["id"] == "active-goal"
-    activations = [e for e in broadcast.event_log if e["type"] == "goal_activated"]
-    assert len(activations) == 1
+    assert len([event for event in broadcast.event_log if event["type"] == "goal_activated"]) == 1
 
     already_active = _update(
       client, db, chat_id,
@@ -445,8 +442,7 @@ def test_resuming_goal_publishes_activation_only_for_attachment_transition(
       run_id="active-run",
     )
     assert already_active.status_code == 200, already_active.text
-    activations = [e for e in broadcast.event_log if e["type"] == "goal_activated"]
-    assert len(activations) == 1
+    assert len([event for event in broadcast.event_log if event["type"] == "goal_activated"]) == 1
   finally:
     broadcast_mod.remove_broadcast(chat_id)
 
@@ -611,6 +607,7 @@ def test_idle_goal_lifecycle_is_stable_while_exact_handoffs_are_projected(db, ch
     "id": "idle-goal-id", "revision": 0, "objective": "Ship it", "status": "paused",
     "resumable": True,
     "handoff": {"kind": "none", "reason": None},
+    "plan": None,
   }
   assert presented_goal(db, chat.id) == expected
 
@@ -952,7 +949,7 @@ def test_promotion_creates_intent_without_rewriting_prior_attempts(
     "logical-root": None,
     "physical-resume": "Finish the resumed migration",
   }
-  assert db.get(models.ChatGoal, "physical-resume").objective == "Finish the resumed migration"
+  assert db.get(models.ChatGoal, promoted.json()["goal_id"]).objective == "Finish the resumed migration"
 
 
 def test_goal_promotion_commit_failure_is_loud_and_atomic(
@@ -1035,7 +1032,7 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
 
 
 def test_identical_plan_write_is_a_cas_noop_and_stale_writer_conflicts(
-  client, owner_token, db,
+  client, owner_token, db, monkeypatch,
 ):
   """Rewriting the same plan cannot mint a new Goal rollover allowance.
 
@@ -1049,11 +1046,14 @@ def test_identical_plan_write_is_a_cas_noop_and_stale_writer_conflicts(
   goal = db.get(models.ChatGoal, "goal-1")
   tasks = [{"id": "audit", "title": "Run the audit", "status": "running"}]
 
+  invalidated = []
+  monkeypatch.setattr("app.goal_plans.publish_goal_changed", invalidated.append)
   created = replace_plan(db, physical=run, root=goal, expected_revision=0, tasks=tasks)
   assert created["revision"] == 1
 
   identical = replace_plan(db, physical=run, root=goal, expected_revision=1, tasks=tasks)
   assert identical["revision"] == 1
+  assert invalidated == [chat_id]
 
   with pytest.raises(GoalPlanConflict):
     replace_plan(db, physical=run, root=goal, expected_revision=0, tasks=tasks)
@@ -1301,7 +1301,7 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   db.add_all([child_b, child_x])
   db.flush()
   common = {
-    "app_id": app.id, "provider": "codex", "model": None,
+    "app_id": None, "provider": "codex", "model": None,
     "effort": None, "scope": "write", "cwd": "/data",
     "prompt_sha256": hashlib.sha256(b"").hexdigest(),
   }
@@ -1309,12 +1309,12 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
     models.Delegation(
       id="delegation-b", parent_chat_id=chat_id,
       parent_root_run_id="goal-root", task_key="review-b", goal_task_id="b",
-      child_chat_id="child-b", **common,
+      child_chat_id="child-b", goal_id="goal-1", **common,
     ),
     models.Delegation(
       id="delegation-x", parent_chat_id="child-b",
       parent_root_run_id="child-b-run", task_key="x", child_chat_id="child-x",
-      **common,
+      goal_id="goal-1", **common,
     ),
     make_goal_run(db,
       id="child-b-run", root_run_id="child-b-run", chat_id="child-b",
@@ -1332,14 +1332,30 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   # while it works, b does not count as complete.
   assert plan["delegations"] == [{
     "id": "delegation-b", "task_key": "review-b", "plan_task": "b",
+    "title": "Do B", "question": None,
     "provider": "codex", "status": "running", "children": [{
       "id": "delegation-x", "task_key": "x", "plan_task": None,
+      "title": None, "question": None,
       "provider": "codex", "status": "running", "children": [],
     }],
   }]
   assert plan["summary"]["completed"] == 0
   assert plan["summary"]["can_complete"] is False
   assert plan["summary"]["completion_blockers"] == ["review-b", "x"]
+
+  db.get(models.ChatRun, "child-b-run").status = "completed"
+  db.add(models.DelegationQuestion(
+    id="saved-question", delegation_id="delegation-b", child_chat_id="child-b",
+    root_run_id="child-b-run", asking_run_id="child-b-run",
+    answer_run_id="reserved-answer", question="Which release?",
+    options_json=["Stable", "Beta"],
+  ))
+  db.commit()
+  waiting = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()["plan"]
+  assert waiting["delegations"][0]["status"] == "needs_input"
+  assert waiting["delegations"][0]["question"] == {
+    "id": "saved-question", "text": "Which release?", "options": ["Stable", "Beta"],
+  }
 
 
 def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
@@ -1365,7 +1381,7 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
   db.add_all([old_child, new_child])
   db.flush()
   common = {
-    "app_id": app.id, "provider": "codex", "model": None,
+    "app_id": None, "provider": "codex", "model": None,
     "effort": None, "scope": "write", "cwd": "/data",
     "prompt_sha256": hashlib.sha256(b"").hexdigest(),
   }
@@ -1380,13 +1396,13 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
       id="old-attempt", parent_chat_id=chat_id,
       parent_root_run_id="goal-root", task_key="audit", goal_task_id="audit",
       child_chat_id=old_child.id, created_at=now - timedelta(minutes=1),
-      **common,
+      goal_id="goal-1", **common,
     ),
     models.Delegation(
       id="new-attempt", parent_chat_id=chat_id,
       parent_root_run_id="resumed-goal-run", task_key="audit", goal_task_id="audit",
       child_chat_id=new_child.id, created_at=now,
-      **common,
+      goal_id="goal-1", **common,
     ),
     make_goal_run(db,
       id="old-attempt-run", root_run_id="old-attempt-run",
@@ -1508,9 +1524,229 @@ def test_helper_without_a_goal_is_unfiled_and_cannot_name_a_task(db):
     helper_plan_task(db, "plain-chat", "r2")
 
 
-def test_a_task_note_may_run_to_a_thousand_characters():
+def test_a_task_note_preserves_full_text_within_its_bound():
   from app.goal_plans import GoalPlanError, normalize_tasks
 
   assert normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1000}])[0]["note"] == "n" * 1000
   with pytest.raises(GoalPlanError, match="at most 1000 characters"):
     normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1001}])
+
+
+def test_runtime_goal_embeds_plan_and_idle_invalidation(client, owner_token, db, monkeypatch):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  emitted = []
+  monkeypatch.setattr("app.broadcast.get_system_broadcast", lambda: type(
+    "Bus", (), {"publish": lambda self, event: emitted.append(event)})())
+  saved = _update(client, db, chat_id, {"tasks": [
+    {"id": "one", "title": "First step", "status": "running"},
+  ]})
+  assert saved.status_code == 200, saved.text
+  assert emitted[-1] == {"type": "chat_wait_changed", "chatId": chat_id,
+                         "chat_id": chat_id, "source": "goal"}
+  runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth)
+  assert runtime.status_code == 200, runtime.text
+  goal = runtime.json()["goal"]
+  assert goal["id"] == "goal-1"
+  assert goal["plan"] == saved.json()["plan"]
+  assert set(goal) == {"id", "revision", "objective", "status", "resumable",
+                       "handoff", "plan"}
+
+
+def test_history_uses_goal_identity_and_position_after_same_run_rebind(db, client, owner_token):
+  from app.goal_plans import terminal_goal_summaries_by_message_index
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post("/api/chats", json={"title": "Two outcomes"}, headers=auth).json()["id"]
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  messages = [
+    {"role": "assistant", "id": "same-run", "content": "A done", "ts": int(base.timestamp() * 1000)},
+    {"role": "assistant", "id": "same-run:assistant:1", "content": "B done",
+     "ts": int((base + timedelta(seconds=2)).timestamp() * 1000)},
+  ]
+  run = make_goal_run(db, id="same-run", root_run_id="same-run", chat_id=chat_id,
+                      status="completed", provider="codex", goal_objective="A",
+                      goal_id="goal-A", started_at=base, ended_at=base + timedelta(seconds=3))
+  db.add(run)
+  db.flush()
+  a = db.get(models.ChatGoal, "goal-A")
+  a.status = "completed"
+  a.completed_at = base + timedelta(seconds=1)
+  a.completion_run_id = run.id
+  b = models.ChatGoal(id="goal-B", chat_id=chat_id, objective="B", status="completed",
+                      created_at=base + timedelta(seconds=1),
+                      completed_at=base + timedelta(seconds=3), completion_run_id=run.id)
+  db.add(b)
+  run.goal_id = "goal-B"
+  run.goal_objective = "B"
+  db.add_all([
+    models.ChatActivityPosition(chat_id=chat_id, event_id="goal-outcome:goal-A",
+                                position={"assistant_message_id": "same-run", "block_index": 0}),
+    models.ChatActivityPosition(chat_id=chat_id, event_id="goal-outcome:goal-B",
+                                position={"assistant_message_id": "same-run:assistant:1", "block_index": 0}),
+  ])
+  db.commit()
+  cards = terminal_goal_summaries_by_message_index(db, chat_id, messages)
+  assert [card["id"] for card in cards[0]] == ["goal-A"]
+  assert [card["id"] for card in cards[1]] == ["goal-B"]
+  assert terminal_goal_summaries_by_message_index(db, chat_id, messages,
+    message_start=1, message_end=2).keys() == {1}
+
+
+@pytest.mark.parametrize("results", [("A result", "B result"), (None, None), ("Same", "Same")])
+def test_migrated_shared_run_without_position_matches_only_exact_goal_receipt(
+  db, client, owner_token, results,
+):
+  from app.goal_plans import terminal_goal_summaries_by_message_index
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post("/api/chats", json={"title": "Rebound receipts"}, headers=auth).json()["id"]
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  def receipt(result, call):
+    return {"type": "tool", "tool": "mobius_control:update_goal",
+            "input": json.dumps({"complete": result}), "output": "Goal completed",
+            "status": "done", "output_exit_code": 0, "tool_use_id": call}
+  messages = [
+    {"role": "assistant", "id": "same-run", "blocks": [receipt(results[0] if results[0] is not None else True, "a-call")],
+     "ts": int((base + timedelta(seconds=60)).timestamp() * 1000)},
+    {"role": "assistant", "id": "same-run:assistant:1",
+     "blocks": [receipt(results[1] if results[1] is not None else True, "b-call")],
+     "ts": int((base + timedelta(seconds=61)).timestamp() * 1000)},
+  ]
+  run = make_goal_run(db, id="same-run", root_run_id="same-run", chat_id=chat_id,
+                      status="completed", provider="codex", goal_objective="A",
+                      goal_id="goal-A", started_at=base, ended_at=base + timedelta(seconds=3))
+  db.add(run)
+  db.flush()
+  a = db.get(models.ChatGoal, "goal-A")
+  a.status = "completed"
+  a.result = results[0]
+  a.completed_at = base + timedelta(seconds=1)
+  a.completion_run_id = run.id
+  b = models.ChatGoal(id="goal-B", chat_id=chat_id, objective="B", status="completed",
+                      result=results[1], created_at=base + timedelta(seconds=1),
+                      completed_at=base + timedelta(seconds=3), completion_run_id=run.id)
+  db.add(b)
+  run.goal_id = "goal-B"
+  run.goal_objective = "B"
+  db.commit()
+  cards = terminal_goal_summaries_by_message_index(db, chat_id, messages)
+  if results[0] == results[1]:
+    assert cards == {}  # No immutable position or distinguishable receipt.
+    return
+  assert cards[0][0]["id"] == "goal-A"
+  assert cards[0][0]["completion_tool_use_id"] == "a-call"
+  assert cards[1][0]["id"] == "goal-B"
+  assert cards[1][0]["completion_tool_use_id"] == "b-call"
+
+
+def test_shared_run_missing_position_message_does_not_use_legacy_receipt(
+  db, client, owner_token,
+):
+  from app.goal_plans import terminal_goal_summaries_by_message_index
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post("/api/chats", json={"title": "Missing frontier message"},
+                        headers=auth).json()["id"]
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  run = make_goal_run(db, id="shared-run", root_run_id="shared-run", chat_id=chat_id,
+                      status="completed", provider="codex", goal_objective="A",
+                      goal_id="goal-A", started_at=base, ended_at=base + timedelta(seconds=3))
+  db.add(run)
+  db.flush()
+  a = db.get(models.ChatGoal, "goal-A")
+  a.status = "completed"
+  a.result = "A result"
+  a.completed_at = base + timedelta(seconds=1)
+  a.completion_run_id = run.id
+  db.add(models.ChatGoal(id="goal-B", chat_id=chat_id, objective="B", status="completed",
+                         result="B result", created_at=base + timedelta(seconds=1),
+                         completed_at=base + timedelta(seconds=3), completion_run_id=run.id))
+  run.goal_id = "goal-B"
+  run.goal_objective = "B"
+  db.add_all([
+    models.ChatActivityPosition(chat_id=chat_id, event_id="goal-outcome:goal-A",
+                                position={"assistant_message_id": "missing-message",
+                                          "block_key": "tool:real-a-call"}),
+    models.ChatActivityPosition(chat_id=chat_id, event_id="goal-outcome:goal-B",
+                                position={"assistant_message_id": "shared-run:assistant:1",
+                                          "block_key": "tool:b-call"}),
+  ])
+  db.commit()
+  messages = [
+    {"role": "assistant", "id": "shared-run", "blocks": [{
+      "type": "tool", "tool": "mobius_control:update_goal",
+      "input": json.dumps({"complete": "A result"}), "output": "Goal completed",
+      "status": "done", "output_exit_code": 0, "tool_use_id": "legacy-a-call",
+    }], "ts": int(base.timestamp() * 1000)},
+    {"role": "assistant", "id": "shared-run:assistant:1", "content": "B done",
+     "ts": int((base + timedelta(seconds=2)).timestamp() * 1000)},
+  ]
+  cards = terminal_goal_summaries_by_message_index(db, chat_id, messages)
+  assert 0 not in cards
+  assert [card["id"] for card in cards[1]] == ["goal-B"]
+  assert cards[1][0]["completion_tool_use_id"] == "b-call"
+
+
+def test_plan_preserves_bounded_input_contract():
+  from app.goal_plans import GoalPlanError, normalize_tasks
+  import pytest
+  tasks = [{"id": f"t{i}", "title": "T" * 161, "status": "pending"}
+           for i in range(66)]
+  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
+  tasks[-1]["note"] = "N" * 1001
+  tasks[-1]["result"] = "R" * 1001
+  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
+    normalize_tasks(tasks)
+  tasks = tasks[:64]
+  with pytest.raises(GoalPlanError, match="at most 160 characters"):
+    normalize_tasks(tasks)
+  tasks = [{**task, "title": "Task"} for task in tasks]
+  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
+  with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
+    normalize_tasks(tasks)
+  tasks[-1]["depends_on"] = []
+  tasks[-1]["note"] = "N" * 1001
+  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
+    normalize_tasks(tasks)
+
+
+def test_maximum_bounded_dependency_chain_is_valid():
+  from app.goal_plans import normalize_tasks
+  tasks = [{"id": f"t{i}", "title": "Task", "status": "pending",
+            "depends_on": [f"t{i-1}"] if i else []} for i in range(64)]
+  assert len(normalize_tasks(tasks)) == 64
+
+
+def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
+  db, client, owner_token, monkeypatch,
+):
+  from app.goal_plans import publish_plan_for_delegation
+  auth, owner = _active_goal(client, owner_token, db)
+  db.add_all([
+    create_chat(id="middle-helper-chat", title="Middle", messages=[]),
+    create_chat(id="leaf-helper-chat", title="Leaf", messages=[]),
+  ])
+  db.flush()
+  row = models.Delegation(
+    id="leaf-helper", parent_chat_id="middle-helper-chat",
+    parent_root_run_id="middle-run", task_key="leaf", goal_id="goal-1",
+    child_chat_id="leaf-helper-chat", provider="codex", scope="write",
+    cwd="/data", prompt_sha256="0" * 64,
+  )
+  db.add(row)
+  db.commit()
+  emitted = []
+  monkeypatch.setattr("app.broadcast.get_system_broadcast", lambda: type(
+    "Bus", (), {"publish": lambda self, event: emitted.append(event)})())
+  publish_plan_for_delegation(db, row)
+  assert {event["chatId"] for event in emitted} == {"middle-helper-chat", owner}
+  assert len(emitted) == 2
+  assert all(event["source"] == "goal" for event in emitted)
+  direct = models.Delegation(
+    id="direct-helper", parent_chat_id=owner,
+    parent_root_run_id="goal-root", task_key="direct", goal_id="goal-1",
+    child_chat_id="middle-helper-chat", provider="codex", scope="write",
+    cwd="/data", prompt_sha256="0" * 64,
+  )
+  db.add(direct)
+  db.commit()
+  emitted.clear()
+  publish_plan_for_delegation(db, direct)
+  assert [event["chatId"] for event in emitted] == [owner]

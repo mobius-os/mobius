@@ -92,7 +92,8 @@ export function normalizeGoalPresentation(goal) {
     ...(Number.isInteger(goal.revision) ? { revision: goal.revision } : {}),
     objective,
     status: goal.status,
-    resumable: goal.status === 'paused',
+    resumable: goal.resumable === true,
+    ...(goal.plan ? { plan: goal.plan } : {}),
     ...(goal.status === 'paused' && ['owner', 'agent', 'unknown', 'deferred'].includes(goal.pause_reason)
       ? { pause_reason: goal.pause_reason } : {}),
     ...(goal.status === 'paused' && goal.pause_reason === 'deferred' && typeof goal.hold_reason === 'string'
@@ -125,6 +126,7 @@ export function goalStatusLabel(goal) {
 /** Pause provenance never removes manual recovery; actual chat conflicts do. */
 export function canResumeGoal(goal, { turnActive, hasPendingQuestion, chatHandoff } = {}) {
   return goal?.status === 'paused'
+    && goal.resumable === true
     && !turnActive
     && !hasPendingQuestion
     && !['automatic', 'owner_input'].includes(goal.handoff?.kind)

@@ -637,7 +637,7 @@ class _CardBus(_ChatBus):
 
   question_id = "card-9"
 
-  def has_continuation_card(self, question_id: str) -> bool:
+  def ends_turn(self, question_id: str) -> bool:
     return question_id == self.question_id
 
 

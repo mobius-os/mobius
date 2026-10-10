@@ -17,6 +17,7 @@ from app.agent_coordination import (
   serialize_messages,
 )
 from app.delegations import (
+  AWAITING_INPUT_DELEGATION_STATUSES,
   TERMINAL_DELEGATION_STATUSES,
   derived_status,
   helper_current_activity,
@@ -136,7 +137,7 @@ def _helper_row_events(
       # Without a run, a source-reported "completed" is not terminal evidence;
       # of the no-run overrides only needs_review settles a helper.
       status = "starting"
-    settled = status in TERMINAL_DELEGATION_STATUSES
+    settled = status in (TERMINAL_DELEGATION_STATUSES | AWAITING_INPUT_DELEGATION_STATUSES)
     stable_id = running_helper_activity_id(row.id)
     started = run.started_at if run is not None and run.started_at else row.created_at
     events.append((ActivityCursor(row.created_at, stable_id), {
@@ -152,7 +153,7 @@ def _helper_row_events(
       "activity": None if settled else helper_current_activity(row.child_chat_id),
       "status": status,
       "child_chat_id": row.child_chat_id,
-      "source_work_id": row.parent_root_run_id,
+      "source_work_id": row.goal_id or row.parent_root_run_id,
       "consumption": _helper_consumption(row, run) if settled else "unknown",
     }))
   return events

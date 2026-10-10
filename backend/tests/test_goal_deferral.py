@@ -145,7 +145,7 @@ def test_deferral_does_not_drop_an_owed_helper_result_from_an_earlier_attempt(db
                        goal_id=goal.id, status="completed"))
   db.commit()
   monkeypatch.setattr(delegations, "_self_resuming_helper_rows", lambda *args: [
-    (SimpleNamespace(id="owed-result", parent_root_run_id="earlier-root"), "completed"),
+    (SimpleNamespace(id="owed-result", parent_root_run_id="earlier-root", goal_id=goal.id), "completed"),
   ])
   with pytest.raises(GoalPlanError, match="helper:owed-result"):
     update_goal_record(db, run, goal, goal.revision, defer=REASON)
@@ -167,7 +167,7 @@ def test_settlement_cannot_hide_an_older_live_helper_behind_a_newer_finished_att
     db.flush()
     db.add(models.ChatRun(id="child-run-" + label, chat_id=child.id, status=status))
     db.add(models.Delegation(id="helper-" + label, parent_chat_id=chat.id,
-      parent_root_run_id=root, child_chat_id=child.id, task_key="verify", goal_task_id="verify",
+      parent_root_run_id=root, goal_id=goal.id, child_chat_id=child.id, task_key="verify", goal_task_id="verify",
       provider="codex", scope="read", cwd="/data", prompt_sha256="0" * 64,
       notify_parent_on_complete=False, created_at=started))
   db.commit()
@@ -238,7 +238,8 @@ def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recov
   from app.routes import chats_stream
   from tests.test_owner_approvals import _ask, _answer, _finish
   original = approval_run[0].run_token
-  submit(PromoteRunToGoal(chat_id=chat.id, run_token=original, objective="Verify the paid test"))
+  promoted = submit(PromoteRunToGoal(chat_id=chat.id, run_token=original, objective="Verify the paid test"))
+  goal_id = promoted["goal_id"]
   qid = _ask(client, chat, approval_run).json()["question_id"]
   _finish(chat, approval_run[0])
   scheduled = []
@@ -247,10 +248,10 @@ def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recov
   assert response.status_code == 202, response.text
   db.expire_all()
   successor = db.query(models.ChatRun).filter_by(chat_id=chat.id, status="running").one()
-  assert successor.goal_id == original and len(scheduled) == 1
+  assert successor.goal_id == goal_id and len(scheduled) == 1
   # The normal card answer woke an agent. It can finish authorized independent
   # work, then record its reasoned deferral; the option label performs no hold.
-  assert db.get(models.ChatGoal, original).status == "open"
+  assert db.get(models.ChatGoal, goal_id).status == "open"
   deferred = _update(client, db, chat.id, {"defer": REASON}, run_id=successor.id)
   assert deferred.status_code == 200, deferred.text
   db.expire_all()
@@ -262,7 +263,7 @@ def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recov
   _finish(chat, sink)
   db.expire_all()
   assert successor.status == "completed" and len(scheduled) == 1
-  assert db.get(models.ChatGoal, original).status == "stopped"
+  assert db.get(models.ChatGoal, goal_id).status == "stopped"
   assert chat.pending_question_id is None
   blocks = [b for m in transcript_rows.history(chat) for b in m.get("blocks", [])]
   assert len([b for b in blocks if b.get("type") == "question"]) == 1

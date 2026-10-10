@@ -1776,11 +1776,16 @@ def test_wait_resume_reconnects_declaring_runs_goal(client, owner_token, db):
     goal_id="goal-wait-1",
   ))
   db.commit()
+  wait = _command_wait(
+    db, chat_id=chat_id, description="Gate", command="true",
+    created_by_run_id="wait-goal-run",
+  )
 
   objective, goal_id = goal_identity_for_run_start(db, chat_id, {
     "role": "user",
     "content": "wait done",
     "kind": WAIT_RESULT_MESSAGE_KIND,
+    "cid": f"wait-result-{wait.id}",
     "source_work_id": "wait-goal-run",
   })
   assert objective == "Land the gate PR"
@@ -2347,3 +2352,63 @@ def test_wait_route_accepts_typed_check_but_rejects_mixed_execution(client, owne
   for extra in ({'command': 'true'}, {'delay_secs': 60}, {'deadline_secs': None},
                 {'github_checks': {'repository': 'owner/repo', 'pull_request': 7}}):
     assert client.post('/api/chat-waits', json={**payload, **extra}, headers=auth).status_code == 422
+
+
+@pytest.mark.parametrize("closed_status", ["completed", "stopped", "cancelled"])
+def test_wait_snapshot_cannot_follow_rebound_run_to_new_goal(
+  client, owner_token, db, monkeypatch,
+  closed_status,
+):
+  chat_id = _owner_chat(client, owner_token)
+  goal_a = models.ChatGoal(
+    id="wait-snapshot-a", chat_id=chat_id, objective="A", status="open",
+  )
+  run = models.ChatRun(
+    id="wait-snapshot-run", root_run_id="wait-snapshot-root",
+    chat_id=chat_id, status="completed", provider="claude",
+    goal_id=goal_a.id, goal_objective="A",
+  )
+  db.add_all([goal_a, run])
+  db.commit()
+  row = _command_wait(
+    db, chat_id=chat_id, description="A's gate", command="true",
+    created_by_run_id=run.id,
+  )
+  assert (row.goal_id, row.root_run_id) == (goal_a.id, "wait-snapshot-root")
+
+  goal_a.status = closed_status
+  goal_b = models.ChatGoal(
+    id="wait-snapshot-b", chat_id=chat_id, objective="B", status="open",
+  )
+  db.add(goal_b)
+  run.goal_id = goal_b.id
+  run.goal_objective = "B"
+  row.status = "met"
+  row.met_at = now_naive_utc()
+  db.commit()
+  starts = _capture_starts(monkeypatch, running=False)
+
+  assert chat_waits_mod._goal_waits(db, chat_id, goal_a.id).count() == 1
+  assert chat_waits_mod._goal_waits(db, chat_id, goal_b.id).count() == 0
+  assert asyncio.run(chat_waits_mod._deliver_resume(row.id)) is False
+  assert starts == []
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is not None
+  text, ids = chat_waits_mod.owed_wait_results(db, chat_id, "")
+  assert text == "" and ids == ()
+
+
+def test_unowned_wait_never_counts_toward_creators_later_goal(db, chat):
+  from datetime import timedelta
+  goal = models.ChatGoal(id="later-goal", chat_id=chat.id, objective="Later",
+    created_at=chat.created_at - timedelta(seconds=1))
+  run = models.ChatRun(id="plain-creator", root_run_id="plain-creator", chat_id=chat.id,
+    goal_id=goal.id, status="completed")
+  db.add_all([goal, run]); db.commit()
+  # An explicitly Goal-less snapshot stays Goal-less even when both its time
+  # and mutable creator link would have made the old fallback select B.
+  row = models.ChatWait(id="plain-snapshot", chat_id=chat.id, created_by_run_id=run.id,
+    goal_id=None, root_run_id=run.id, kind="timer", status="armed", description="Plain work",
+    deadline_at=now_naive_utc(), next_check_at=now_naive_utc())
+  db.add(row); db.commit()
+  assert chat_waits_mod._goal_waits(db, chat.id, goal.id).count() == 0

@@ -36,7 +36,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  DateTime, Text, bindparam, delete, event, func, insert, inspect, select, text, update,
+  DateTime, Text, LargeBinary, and_, bindparam, case, cast, delete, event, func, insert, inspect, literal, or_, select, text, update,
 )
 from sqlalchemy.orm import Session, object_session
 
@@ -739,6 +739,49 @@ class History(Sequence):
 
   def __reversed__(self):
     return (body for _seq, body in self.items_reversed())
+
+
+def assistant_bodies_by_chat(db, chat_ids) -> dict[str, list[dict]]:
+  """Batch assistant bodies, newest first, respecting each chat's cutover marker.
+
+  Failed-helper status projections must not issue a transcript SELECT per child.
+  Converted chats read only assistant rows; an unconverted chat reads its
+  authoritative legacy bytes, never stale rows left from an earlier cutover.
+  The CASE avoids loading the legacy column for converted chats; after the
+  next release drops that column, the authoritative-row path never names it.
+  """
+  ids = list(dict.fromkeys(chat_ids))
+  if not ids:
+    return {}
+  authority = rows_are_authority(db)
+  state = models.ChatTranscriptState
+  message = models.ChatMessage
+  converted = or_(literal(authority), state.chat_id.is_not(None))
+  legacy = (
+    literal(None) if authority else case(
+      (state.chat_id.is_(None), cast(models.Chat.legacy_messages, LargeBinary)),
+      else_=None,
+    )
+  )
+  rows = db.execute(
+    select(models.Chat.id, legacy, message.seq, message.body)
+    .outerjoin(state, state.chat_id == models.Chat.id)
+    .outerjoin(message, and_(
+      message.chat_id == models.Chat.id,
+      message.role == "assistant",
+      converted,
+    ))
+    .where(models.Chat.id.in_(ids))
+    .order_by(models.Chat.id, message.seq.desc())
+  )
+  result: dict[str, list[dict]] = {chat_id: [] for chat_id in ids}
+  for chat_id, raw, seq, body in rows:
+    if raw is not None:
+      result[chat_id] = [item for item in reversed(_parse_legacy(raw)[0])
+                         if isinstance(item, dict) and item.get("role") == "assistant"]
+    elif seq is not None and isinstance(body, dict):
+      result[chat_id].append(body)
+  return result
 
 
 def history(chat) -> History:

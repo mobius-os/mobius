@@ -37,8 +37,8 @@ export function WaitCard({ wait, expanded, onToggle, onCancel, onRevealRecovery 
   )
 }
 
-function HelperCard({ backgroundHelpers, expanded, onToggle }) {
-  const presentation = helperPresentation(backgroundHelpers)
+function HelperCard({ backgroundHelpers, handoff, expanded, onToggle }) {
+  const presentation = helperPresentation(backgroundHelpers, handoff)
   return (
     <WaitingCard
       expanded={expanded}
@@ -47,7 +47,7 @@ function HelperCard({ backgroundHelpers, expanded, onToggle }) {
       title={presentation.tasks.length ? presentation.tasks.join(', ') : undefined}
       text={presentation.summary}
       stateLabel={null}
-      meta="resumes automatically"
+      meta={presentation.automatic ? 'resumes automatically' : null}
       rows={[
         {
           label: 'Waiting on',
@@ -56,7 +56,7 @@ function HelperCard({ backgroundHelpers, expanded, onToggle }) {
             : 'Background helper work',
         },
         { label: 'Owner', value: presentation.owner },
-        { label: 'Wake-up', value: 'This chat resumes when they finish' },
+        { label: 'Next', value: presentation.automatic ? 'This chat resumes when they finish' : 'Waiting for the next step' },
         { label: 'Agent usage', value: presentation.usage },
       ]}
     />
@@ -112,6 +112,7 @@ export default function WaitingChip({
       {helperCount > 0 && (
         <HelperCard
           backgroundHelpers={backgroundHelpers}
+          handoff={handoff}
           expanded={expandedKey === 'helpers'}
           onToggle={() => toggle('helpers')}
         />

@@ -356,6 +356,7 @@ class ChatGoal(Base):
   checkpoint = Column(Text, nullable=True)
   next_action = Column(Text, nullable=True)
   result = Column(Text, nullable=True)
+  completion_run_id = Column(String(64), nullable=True, index=True)
   created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
   completed_at = Column(DateTime, nullable=True)
 
@@ -446,12 +447,8 @@ class ChatRun(Base):
   # question checkpoint. Explicit /goal starts mint a new identity; genuine
   # continuations inherit it.
   goal_id = Column(String(64), nullable=True, index=True, default=None)
-  # Frozen pre-0059 snapshots retained for upgrade/backup history only.
-  # Runtime plans and outcomes live solely on ChatGoal.
-  goal_plan_json = Column(JSON, nullable=True, default=None)
-  goal_plan_revision = Column(
-    Integer, nullable=False, default=0, server_default="0"
-  )
+  # Historical plan columns remain in existing databases, but have no runtime
+  # mapping: plans and outcomes live solely on ChatGoal.
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.
@@ -531,10 +528,12 @@ class Delegation(Base):
 
   __tablename__ = "delegations"
   __table_args__ = (
-    UniqueConstraint(
-      "parent_root_run_id", "task_key",
-      name="uq_delegations_parent_root_task",
-    ),
+    Index("uq_delegations_goal_root_task", "parent_root_run_id", "goal_id",
+          "task_key", unique=True, sqlite_where=text("goal_id IS NOT NULL"),
+          postgresql_where=text("goal_id IS NOT NULL")),
+    Index("uq_delegations_no_goal_root_task", "parent_root_run_id",
+          "task_key", unique=True, sqlite_where=text("goal_id IS NULL"),
+          postgresql_where=text("goal_id IS NULL")),
   )
 
   id = Column(String(64), primary_key=True)
@@ -548,6 +547,9 @@ class Delegation(Base):
   # audit history can outlive an unusual run-row repair without orphaning the
   # child chat or weakening the idempotency key.
   parent_root_run_id = Column(String(64), nullable=False, index=True)
+  # Immutable ownership snapshot at spawn; nested helpers inherit this ID.
+  # NULL legacy ambiguity must never attach to a later Goal.
+  goal_id = Column(String(64), nullable=True, index=True)
   # Snapshot the spawning physical run's browser initiator. A logical Goal can
   # span later physical turns with different human participants.
   # Upgraded databases may also keep a retired, unused browser_grant_epoch.
@@ -616,6 +618,34 @@ class Delegation(Base):
   source_work_active_chat_id = Column(
     String(64), nullable=True, unique=True, index=True
   )
+
+
+class DelegationQuestion(Base):
+  """One helper's correlated question to its parent; immutable after insert.
+
+  A physical child run may ask at most once (``asking_run_id`` is unique), so
+  a retried ask returns this same receipt. ``answer_run_id`` is reserved up
+  front: the parent's answer starts exactly that deterministic continuation
+  run, so the run's existence is the durable proof the question was answered
+  and a retried answer can only attach to it. Whether the question is still
+  open is derived from the child's runs (see ``delegations.open_question``),
+  never stored. Rows reference their Delegation by value, like
+  ``Delegation.parent_root_run_id``, so a fallback platform that does not map
+  this table can still purge delegations.
+  """
+
+  __tablename__ = "delegation_questions"
+
+  id = Column(String(64), primary_key=True)
+  delegation_id = Column(String(64), nullable=False, index=True)
+  child_chat_id = Column(String(64), nullable=False)
+  # Logical root of the asking run; restart continuations keep it.
+  root_run_id = Column(String(64), nullable=False)
+  asking_run_id = Column(String(64), nullable=False, unique=True)
+  answer_run_id = Column(String(64), nullable=False, unique=True)
+  question = Column(Text, nullable=False)
+  options_json = Column(JSON, nullable=False, default=list)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
 class ChatWait(Base):

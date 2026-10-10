@@ -123,7 +123,7 @@ def test_each_provider_receives_durable_goal_on_fresh_or_resumed_session(
   ))
   prompt = captured["user_message"]
   for expected in ["ORIGINAL_OUTCOME_SENTINEL", "UNFINISHED_DEPLOYMENT",
-                   "UNFINISHED_IDENTITY", "VERIFIED_PROGRESS_SENTINEL",
+                   "UNFINISHED_IDENTITY",
                    "NEXT_ACTION_SENTINEL", "original-obligation"]:
     assert expected in prompt
   assert prompt.count("<mobius_goal>") == 1

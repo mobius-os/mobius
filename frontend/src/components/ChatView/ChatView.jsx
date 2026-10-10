@@ -99,6 +99,8 @@ import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
+import GoalHelperQuestions from './GoalHelperQuestions.jsx'
+import { goalHelpers, helpersOutsideGoal } from './goalHelpers.js'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import AssistantReply from './AssistantReply.jsx'
@@ -5938,10 +5940,14 @@ export default function ChatView({
   // Goal ownership comes from explicit run boundaries and authoritative
   // runtime reconciliation, never a momentary browser transport signal.
   const visibleGoalObjective = activeGoalObjective
+  const progressGoal = currentProgressGoal(goalPresentation, { turnActive })
+  const progressPlan = progressGoal?.plan || planForGoal(activeGoalPlan, progressGoal)
+  const goalOwnedHelpers = goalHelpers({ plan: progressPlan })
+  const separateBackgroundHelpers = helpersOutsideGoal(backgroundHelpers, { plan: progressPlan })
   const progressRail = progressRailViewModel(
-    currentProgressGoal(goalPresentation, { turnActive }),
+    progressGoal,
     buildPhaseRail,
-    planForGoal(activeGoalPlan, goalPresentation),
+    progressPlan,
   ).map(item => {
     if (item.key !== 'goal') return item
     // The Goal step owns a two-tap clear affordance and the plan details.
@@ -5973,10 +5979,12 @@ export default function ChatView({
         actionDisabled: providerSwitching || goalResumeState.pending || goalResumeState.unavailable,
         actionError: goalResumeState.error,
       } : {}),
+      ...(goalOwnedHelpers.some(node => node.status === 'needs_input' && node.question?.text)
+        ? { notice: <GoalHelperQuestions helpers={goalOwnedHelpers} /> } : {}),
       icon: <Flag width={14} height={14} aria-hidden="true" />,
-      ...(planForGoal(activeGoalPlan, goalPresentation) || goalPresentation?.hold_reason || continuationHandoff
+      ...(progressPlan || goalPresentation?.hold_reason || continuationHandoff
         ? { details: <GoalPlanDetails
-            plan={planForGoal(activeGoalPlan, goalPresentation)}
+            plan={progressPlan}
             holdReason={continuationHandoff
               ? `${continuationHandoff.description} ${continuationHandoff.boundary}`
               : goalPresentation?.hold_reason}
@@ -6369,10 +6377,10 @@ export default function ChatView({
               </li>
             )
           })()}
-          {!hasPendingQuestion && !turnActive && (armedWaits.length > 0 || backgroundHelpers.count > 0 || resourcePause || modelCapacityPause || pendingLimitPark) && <li className="chat__handoff-slot" data-key="current-waiting-handoff">
+          {!hasPendingQuestion && !turnActive && (armedWaits.length > 0 || separateBackgroundHelpers.count > 0 || resourcePause || modelCapacityPause || pendingLimitPark) && <li className="chat__handoff-slot" data-key="current-waiting-handoff">
             <WaitingChip
               waits={armedWaits}
-              backgroundHelpers={backgroundHelpers}
+              backgroundHelpers={separateBackgroundHelpers}
               resourcePause={resourcePause || (modelCapacityPause || pendingLimitPark ? pendingResumeBlock : null)}
               handoff={serverHandoff}
               onCancel={handleCancelWait}

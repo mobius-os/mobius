@@ -55,6 +55,7 @@ const SETTLED = {
   failed: ['failed', 'Failed'],
   needs_review: ['failed', 'Needs review'],
   interrupted: ['failed', 'Interrupted'],
+  needs_input: ['running', 'Needs an answer'],
 }
 
 /* A helper's one row, from launch to result: its name, provider and model,
@@ -69,7 +70,7 @@ export function HelperRow({ event, chatId, onInternalNav }) {
   const paused = event.status === 'paused'
   const live = useElapsed(event.started_at, working && !paused)
   const [dot, outcome] = working
-    ? [paused ? 'failed' : 'running', paused ? 'Paused' : helperStep(event) || 'Working']
+    ? [paused ? 'failed' : 'running', paused ? 'On hold' : helperStep(event) || 'Working']
     : SETTLED[event.status] || ['failed', 'Stopped']
   const elapsed = working
     ? live
@@ -105,7 +106,7 @@ export function HelperRow({ event, chatId, onInternalNav }) {
       chatId={chatId}
       taskId={event.delegation_id}
       name={name}
-      status={working ? (paused ? 'stopped' : 'running') : dot === 'done' ? 'done' : event.status === 'failed' ? 'failed' : 'stopped'}
+      status={working ? (paused ? 'stopped' : 'running') : dot === 'done' ? 'done' : event.status === 'failed' ? 'failed' : event.status === 'needs_input' ? 'waiting' : 'stopped'}
       host={rowRef.current?.closest('.chat')}
       onClose={() => setOpen(false)}
       onInternalNav={onInternalNav}

@@ -400,3 +400,17 @@ async def test_programmatic_start_releases_the_claim_when_cancelled(monkeypatch)
   assert state.removed_broadcasts == []
   assert state.scheduled == []
   assert state.system_events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goal_id", ["original-goal", None])
+async def test_peer_wake_captures_goal_identity_including_goal_less_snapshot(monkeypatch, goal_id):
+  state = _install_start_fakes(monkeypatch)
+  assert await chat_start.start_programmatic_chat_turn(
+    chat_id="chat-1", title="Peer message", content="Saved peer note",
+    provider="claude", hidden=True, message_kind="peer_message",
+    source_work_id="physical-source", goal_id=goal_id,
+  )
+  command = state.writer.commands[0]
+  assert command.user_msg["goal_id"] == goal_id
+  assert command.user_msg["source_work_id"] == "physical-source"

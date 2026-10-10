@@ -105,7 +105,7 @@ def test_legacy_goal_resume_after_unrelated_turn_reuses_original_checklist(db, c
   assert goal.status == "open" and goal.hold_json is None and goal.revision == 5
   assert goal.plan_json["tasks"][0]["id"] == "verify"
   assert db.query(models.ChatGoal).count() == 1
-  update_goal_record(db, successor, goal, goal.revision, complete="Original outcome verified")
+  update_goal_record(db, successor, goal, goal.revision, complete=True)
   assert goal.status == "completed"
 
 
@@ -256,7 +256,7 @@ def test_agent_can_reconcile_named_legacy_goal_without_creating_a_replacement(cl
   headers = {"Authorization":"Bearer "+create_agent_token(chat.id, owner.username, owner.token_epoch, run_id="current")}
   path = f"/api/chats/{chat.id}/goal/update"
   assert client.post(path, headers=headers, json={"next_action":"Verify"}).status_code == 409
-  result = client.post(path, headers=headers, json={"goal_id":goal.id, "complete":"Original outcome independently verified"})
+  result = client.post(path, headers=headers, json={"goal_id":goal.id, "complete":True})
   assert result.status_code == 200, result.text
   db.expire_all()
   assert goal.status == "completed" and goal.objective == "The entire promised outcome"

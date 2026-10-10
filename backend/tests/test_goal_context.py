@@ -32,7 +32,9 @@ def test_leaf_focus_keeps_ancestor_contracts_siblings_and_cross_branch_dependenc
   assert [t["id"] for t in view["ancestors"]] == ["audit", "build"]
   assert view["ancestors"][0]["completion_condition"] == "Verify ALL branches"
   assert view["ancestors"][1]["note"] == "Preserve user data"
-  assert {t["id"] for t in view["siblings"]} == {"external", "other", "sibling"}
+  # A sibling that is also a prerequisite is listed once, with its evidence.
+  assert {t["id"] for t in view["siblings"]} == {"other", "sibling"}
+  assert view["dependencies"][0]["id"] == "external"
   assert view["dependencies"][0]["result"] == "Dependency evidence"
   assert "DO_NOT_INJECT_DESCENDANT" not in json.dumps(view)
   assert view["totals"]["pending"] == 3
@@ -52,16 +54,19 @@ def test_explicit_navigation_and_parent_verification_evidence():
   g = goal([task("parent"), task("done", "parent", "completed", result="Verified child"),
             task("blocked", "parent", "blocked", note="Need external permission")])
   view = project_goal(g, "parent")
-  assert view["children"][0]["result"] == "Verified child"
+  # A settled child is a flag; expanding it returns the evidence in full.
+  assert view["children"][0]["has_result"] is True and "result" not in view["children"][0]
+  assert project_goal(g, "done")["task"]["result"] == "Verified child"
   assert view["children"][1]["note"] == "Need external permission"
   with pytest.raises(ValueError):
     project_goal(g, "missing")
 
 
-def test_unplanned_goal_retains_outcome_and_checkpoint():
+def test_unplanned_goal_retains_coordinator_checkpoint_without_leaking_to_helper():
   view = project_goal(goal([]))
   assert view["objective"] == "Entire approved outcome"
   assert view["checkpoint"] == "Verified progress"
+  assert "checkpoint" not in project_goal(goal([]), role="helper")
   assert view["focus"] is None
 
 

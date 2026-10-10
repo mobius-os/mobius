@@ -36,7 +36,7 @@ def goal_run(db, **kwargs):
   return models.ChatRun(**kwargs)
 
 
-def persist_goal_fixture(db, run, *, status="open"):
+def persist_goal_fixture(db, run, *, status="open", plan=None, revision=0):
   """Explicitly seed the obligation for tests that assemble an attempt in steps."""
   goal = db.get(models.ChatGoal, run.goal_id)
   if goal is None:
@@ -44,10 +44,7 @@ def persist_goal_fixture(db, run, *, status="open"):
                           objective=run.goal_objective)
     db.add(goal)
   goal.status = status
-  if run.goal_plan_json is not None:
-    goal.plan_json = run.goal_plan_json
-    goal.revision = run.goal_plan_revision or 0
-  # New attempts do not own plan snapshots.
-  run.goal_plan_json = None
-  run.goal_plan_revision = 0
+  if plan is not None:
+    goal.plan_json = plan
+    goal.revision = revision
   return goal

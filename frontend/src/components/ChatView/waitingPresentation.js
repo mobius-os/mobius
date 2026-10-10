@@ -31,12 +31,6 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-function helperTaskLabel(taskKey) {
-  return String(taskKey || '')
-    .replace(/[._-]+/g, ' ')
-    .replace(/^./, letter => letter.toUpperCase())
-}
-
 export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
 
 export function isResourcePause(block) {
@@ -143,16 +137,17 @@ export function waitPresentation(wait) {
   }
 }
 
-export function helperPresentation(backgroundHelpers) {
+export function helperPresentation(backgroundHelpers, handoff = null) {
   const count = Number(backgroundHelpers?.count) || 0
   const tasks = (backgroundHelpers?.items || [])
-    .map(item => helperTaskLabel(item?.task_key))
+    .map(item => item?.title || 'Helper work')
     .filter(Boolean)
   return {
     count,
     tasks,
     summary: `Waiting on ${count} ${count === 1 ? 'helper' : 'helpers'}`,
     owner: `${count} ${count === 1 ? 'helper agent' : 'helper agents'}`,
-    usage: 'Helpers use their own turns · no separate monitor is polling',
+    automatic: handoff?.kind === 'automatic',
+    usage: 'Usage unknown',
   }
 }

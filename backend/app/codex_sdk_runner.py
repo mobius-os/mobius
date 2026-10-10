@@ -30,6 +30,9 @@ import contextlib
 import concurrent.futures as _cf
 import functools
 import logging
+import tomllib
+import shlex
+import json
 import os
 import shutil
 import time
@@ -167,6 +170,104 @@ def _codex_config_overrides() -> list[str]:
   overrides.append("features.goals=false")
   overrides += CODEX_NATIVE_HELPERS_OFF
   return overrides
+
+
+def _codex_owner_card_hook_override() -> str:
+  """Hold saved-card/question tools at a hook until our turn interrupt is acked.
+
+  PostToolUse's continue:false substitutes tool feedback; it does not end
+  Codex's model loop. The synchronous hook instead rendezvous with the
+  run-bound card owner before Codex can start its next model request.
+  """
+  import sys
+  script = Path(__file__).resolve().parents[1] / "scripts" / "codex_owner_card_hook.py"
+  command = shlex.join([sys.executable, str(script)])
+  matcher = "^(Bash|mcp__mobius_control__.*)$"
+  return (
+    'hooks.PostToolUse=[{matcher=' + json.dumps(matcher)
+    + ',hooks=[{type="command",command=' + json.dumps(command)
+    + ',timeout=15}]}]'
+  )
+
+
+def _codex_goal_brief_hook_override() -> str:
+  """Restore the Goal brief in the same turn, right after Codex compacts.
+
+  Codex runs SessionStart hooks matching source "compact" after compaction,
+  including automatic compaction mid-turn, and gives their additionalContext
+  to the immediate continuation request. The hook adds no model call. Its
+  spill limit is off so the brief stays inline, as at turn start.
+  """
+  import sys
+  script = Path(__file__).resolve().parents[1] / "scripts" / "codex_goal_brief_hook.py"
+  command = shlex.join([sys.executable, str(script)])
+  return (
+    'hooks.SessionStart=[{matcher="^compact$",hooks=[{type="command",command='
+    + json.dumps(command) + ',timeout=15,additionalContextLimit=0}]}]'
+  )
+
+
+def _codex_platform_hook_overrides() -> list[str]:
+  """Both owner cards and delegated questions end their producing turn."""
+  return [_codex_goal_brief_hook_override(), _codex_owner_card_hook_override()]
+
+
+async def _codex_platform_hook_thread_config(
+  codex, sdk, cwd, config, hook_overrides, *, optional=(),
+):
+  """Trust only our platform hooks, for this thread, without config writes.
+
+  Codex owns the definition hash. Read it instead of duplicating its hashing
+  algorithm, and match each exact invocation-owned definition before granting
+  that hash session-scoped trust. Other discovered hooks keep their own trust.
+  Codex never runs an untrusted hook, so trust is what installs one for the
+  thread. ``hook_overrides`` must be found (owner cards end top-level turns);
+  an ``optional`` hook (the Goal brief restore) that cannot be discovered is
+  left untrusted, and the turn runs without in-turn restore.
+  """
+  try:
+    listing = await control_client(codex).request(
+      "hooks/list", {"cwds": [cwd]}, response_model=sdk["HooksListResponse"],
+    )
+  except Exception:
+    if hook_overrides:
+      raise
+    log.warning("Codex hook discovery failed; no in-turn Goal brief restore",
+                exc_info=True)
+    return config
+  # Newer SDKs wrap each hook variant in HookMetadata.root; older ones
+  # expose the command hook directly.
+  discovered = [
+    getattr(hook, "root", hook)
+    for entry in listing.data for hook in entry.hooks
+  ]
+  state = {}
+  required = set(hook_overrides)
+  for override in [*hook_overrides, *optional]:
+    ((event, groups),) = tomllib.loads(override)["hooks"].items()
+    expected = groups[0]
+    wire_event = event[0].lower() + event[1:]
+    matches = [
+      hook for hook in discovered
+      if _enum_wire_value(hook.source) == "sessionFlags"
+      and _enum_wire_value(hook.handler_type) == "command"
+      and _enum_wire_value(hook.event_name) == wire_event
+      and hook.command == expected["hooks"][0]["command"]
+      and hook.matcher == expected["matcher"]
+      and hook.timeout_sec == expected["hooks"][0]["timeout"]
+    ]
+    if len(matches) != 1:
+      if override in required:
+        raise RuntimeError(f"Codex did not discover the platform {event} hook.")
+      log.warning("Codex did not discover the platform %s hook; skipping it", event)
+      continue
+    state[matches[0].key] = {"trusted_hash": matches[0].current_hash}
+  from copy import deepcopy
+  result = deepcopy(config or {})
+  # Thread config uses CLI dotted paths; replacing the whole hooks table
+  # would erase the definitions installed by the launch flags.
+  result["hooks.state"] = state
+  return result
 
 
 def _codex_app_server_launch_args(
@@ -555,8 +656,10 @@ class ActiveCodexTurn:
     sink: Any | None = None,
     run_marker: str | None = None,
     shared_host: bool = False,
+    goal_brief_refresh: Any | None = None,
   ):
     self.chat_id = chat_id
+    self._goal_brief_refresh = goal_brief_refresh
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
@@ -588,6 +691,7 @@ class ActiveCodexTurn:
     # never clears the pending queue or bumps the chat generation, because the
     # chat is meant to resume from the owner's answer.
     self._owner_card_requested = False
+    self._owner_card_interrupt_task: asyncio.Task[None] | None = None
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -609,6 +713,24 @@ class ActiveCodexTurn:
   @property
   def interrupt_requested(self) -> bool:
     return self._interrupt_requested
+
+  async def goal_brief_after_compaction(self, thread_id: str) -> str:
+    """The fresh brief for this thread's post-compaction hook.
+
+    Codex runs the hook only after it compacts, so the call is itself the
+    compaction signal: mark the need and take it, once per compaction. If the
+    hook fails, the next turn's brief and read_goal cover it.
+    """
+    if (
+      str(getattr(self.thread, "id", "")) != thread_id
+      or self._finished.done()
+      or self._interrupt_requested
+    ):
+      raise LookupError("This Codex turn does not own that thread or is ending.")
+    if self._goal_brief_refresh is None:
+      return ""
+    self._goal_brief_refresh.mark_compacted()
+    return await self._goal_brief_refresh.take()
 
   @property
   def owner_card_requested(self) -> bool:
@@ -638,13 +760,20 @@ class ActiveCodexTurn:
     ):
       return None
     self._owner_card_requested = True
-    return self._interrupt_after_owner_card()
+    self._owner_card_interrupt_task = asyncio.create_task(self._interrupt_after_owner_card())
+    return self.wait_for_owner_card_end()
+
+  async def wait_for_owner_card_end(self) -> None:
+    """A post-tool hook also joins an interrupt the receipt already started."""
+    if self._owner_card_interrupt_task is not None:
+      await asyncio.shield(self._owner_card_interrupt_task)
 
   async def _interrupt_after_owner_card(self) -> None:
     try:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex owner-card interrupt raised: %s", exc)
+      raise
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
@@ -943,6 +1072,7 @@ def _sdk_imports() -> dict[str, Any]:
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
     ImageViewThreadItem,
+    HooksListResponse,
     ItemCompletedNotification,
     ItemGuardianApprovalReviewCompletedNotification,
     ItemGuardianApprovalReviewStartedNotification,
@@ -982,6 +1112,7 @@ def _sdk_imports() -> dict[str, Any]:
     ),
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
+    "HooksListResponse": HooksListResponse,
     "ApprovalMode": ApprovalMode,
     "AsyncCodex": AsyncCodex,
     "CodexConfig": CodexConfig,
@@ -1401,6 +1532,7 @@ async def _run_codex_sdk_turn(
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
+  goal_brief_refresh=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1549,6 +1681,7 @@ async def _run_codex_sdk_turn(
   config_overrides.extend(
     get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
   )
+  config_overrides.extend(_codex_platform_hook_overrides())
   # Keep the app-server in its own process group for turn-end cleanup.
   launch_args = _codex_app_server_launch_args(
     codex_bin,
@@ -1575,6 +1708,8 @@ async def _run_codex_sdk_turn(
     from app import helper_hosts
     host_env, turn_env = helper_hosts.split_env(env)
     host_env[helper_hosts.HOST_MARKER_ENV] = helper_hosts.host_marker(helper_host_key.digest)
+    thread_env_links = Path(runtime_data_dir) / "run" / "codex-thread-env" / helper_host_key.digest
+    host_env[helper_hosts.THREAD_ENV_LINKS_ENV] = str(thread_env_links)
     config_kwargs["env"] = host_env
     turn_env_file = helper_hosts.TurnEnvFile(
       Path(turn_env.get("TMPDIR") or runtime_data_dir),
@@ -1713,6 +1848,19 @@ async def _run_codex_sdk_turn(
       # its sole joiner and shields that join before reaping the group.
       if entry_cancel is not None:
         raise entry_cancel
+      # Launch flags define every platform hook (a shared helper host is
+      # keyed without per-turn facts); this thread trusts only the ones it
+      # uses. Every turn needs its recorded-result end hook; a lazy Goal
+      # refresher also covers coordinator promotion after provider entry.
+      required_hooks = [_codex_owner_card_hook_override()]
+      brief_hooks = (
+        [_codex_goal_brief_hook_override()] if goal_brief_refresh is not None else []
+      )
+      if required_hooks or brief_hooks:
+        connector_thread_config = await _codex_platform_hook_thread_config(
+          codex, sdk, cwd, connector_thread_config, required_hooks,
+          optional=brief_hooks,
+        )
       # Keep the old request_user_input bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1819,6 +1967,8 @@ async def _run_codex_sdk_turn(
         resumed=session_id is not None,
       )
 
+      if turn_env_file is not None:
+        turn_env_file.link_thread(thread_env_links, str(thread.id))
       current_session_id = thread.id
       if abort_requested():
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
@@ -1900,6 +2050,7 @@ async def _run_codex_sdk_turn(
         sink=bc,
         run_marker=base_env.get(RUN_MARKER_ENV),
         shared_host=helper_host is not None,
+        goal_brief_refresh=goal_brief_refresh,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -2477,6 +2628,7 @@ async def run_codex_sdk_turn(
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
+  goal_brief_refresh=None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2513,6 +2665,7 @@ async def run_codex_sdk_turn(
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
       helper_host_key=helper_host_key,
+      goal_brief_refresh=goal_brief_refresh,
     )
   finally:
     ownership.release()

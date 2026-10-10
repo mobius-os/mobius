@@ -6328,6 +6328,212 @@ def _repair_transcript_derived_rows(eng) -> None:
     )
 
 
+def _goal_execution_identity(eng) -> None:
+  """Atomically snapshot legacy schema and ownership under the writer lock."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  with eng.connect() as conn:
+    sqlite = eng.dialect.name == "sqlite"
+    foreign_keys = None
+    try:
+      if sqlite:
+        # SQLite's deferred BEGIN does not protect SELECTs or schema DDL.
+        # Disable FK enforcement before BEGIN for the lossless table rebuild;
+        # every schema read, copy and ownership write then shares one lock.
+        foreign_keys = conn.exec_driver_sql("PRAGMA foreign_keys").scalar()
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+      else:
+        conn.begin()
+      inspector = sa_inspect(conn)
+      tables = set(inspector.get_table_names())
+      if not {"chat_goals", "delegations"}.issubset(tables):
+        conn.rollback()
+        return
+      for table, name in (("chat_goals", "completion_run_id"), ("delegations", "goal_id")):
+        if name not in {column["name"] for column in inspector.get_columns(table)}:
+          conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} VARCHAR(64) NULL"))
+
+      if sqlite:
+        # Preserve every historical column, row, explicit index and trigger.
+        original = conn.exec_driver_sql(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='delegations'"
+        ).scalar()
+        changed, count = re.subn(
+          r",?\s*CONSTRAINT\s+uq_delegations_parent_root_task\s+UNIQUE\s*"
+          r"\(\s*parent_root_run_id\s*,\s*task_key\s*\)",
+          "", original, count=1, flags=re.IGNORECASE,
+        )
+        if count:
+          objects = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='delegations' "
+            "AND type IN ('index','trigger') AND sql IS NOT NULL"
+          ).scalars().all()
+          columns = ", ".join(
+            '"' + row[1].replace('"', '""') + '"'
+            for row in conn.exec_driver_sql("PRAGMA table_info(delegations)")
+          )
+          changed, renamed = re.subn(
+            r'^(CREATE\s+TABLE\s+)("?delegations"?)',
+            r'\1delegations__0086', changed, count=1, flags=re.IGNORECASE,
+          )
+          if renamed != 1:
+            raise RuntimeError("Cannot identify delegations table declaration")
+          conn.exec_driver_sql(changed)
+          conn.exec_driver_sql(
+            f"INSERT INTO delegations__0086 ({columns}) SELECT {columns} FROM delegations"
+          )
+          conn.exec_driver_sql("DROP TABLE delegations")
+          conn.exec_driver_sql("ALTER TABLE delegations__0086 RENAME TO delegations")
+          for sql in objects:
+            conn.exec_driver_sql(sql)
+      else:
+        conn.execute(text(
+          "ALTER TABLE delegations DROP CONSTRAINT IF EXISTS uq_delegations_parent_root_task"
+        ))
+
+      conn.execute(text("CREATE TABLE IF NOT EXISTS goal_identity_0086_snapshot ("
+                        "record_kind VARCHAR(16), delegation_id VARCHAR(64), "
+                        "goal_id VARCHAR(64), PRIMARY KEY (record_kind, delegation_id))"))
+      first_snapshot = conn.execute(text(
+        "SELECT 1 FROM goal_identity_0086_snapshot "
+        "WHERE record_kind='migration' AND delegation_id='0086'"
+      )).first() is None
+      if first_snapshot:
+        goals = [dict(row) for row in conn.execute(text(
+          "SELECT id, chat_id, status FROM chat_goals"
+        )).mappings()]
+        runs = [dict(row) for row in conn.execute(text(
+          "SELECT id, root_run_id, chat_id, goal_id FROM chat_runs"
+        )).mappings()]
+        rows = [dict(row) for row in conn.execute(text(
+          "SELECT id, parent_chat_id, parent_root_run_id, child_chat_id, "
+          "app_id, source_work_id, goal_id FROM delegations"
+        )).mappings()]
+        goals_by_chat = {}
+        for goal in goals:
+          goals_by_chat.setdefault(goal["chat_id"], set()).add(goal["id"])
+        runs_by_chat_root = {}
+        for run in runs:
+          chat, goal_id = run["chat_id"], run["goal_id"]
+          if goal_id and goal_id in goals_by_chat.get(chat, ()):
+            for root in {run["root_run_id"], run["id"]}:
+              runs_by_chat_root.setdefault((chat, root), set()).add(goal_id)
+        owned = {row["id"]: row["goal_id"] for row in rows if row["goal_id"]}
+        # Exact same-chat historical root=Goal ID is authoritative. Otherwise a
+        # root's runs must establish precisely one Goal in that parent chat.
+        from collections import deque
+
+        eligible = {row["id"]: row for row in rows
+                    if not row["app_id"] and not row["source_work_id"]}
+        by_child_chat = {}
+        for row in eligible.values():
+          by_child_chat.setdefault(row["child_chat_id"], []).append(row["id"])
+        children = {id_: [] for id_ in eligible}
+        remaining_parents = {}
+        for id_, row in eligible.items():
+          parents = by_child_chat.get(row["parent_chat_id"], ())
+          remaining_parents[id_] = len(parents)
+          for parent in parents:
+            children[parent].append(id_)
+        ready = deque(id_ for id_, count in remaining_parents.items() if count == 0)
+        parent_goals = {id_: set() for id_ in eligible}
+        inferred = []
+        while ready:
+          id_ = ready.popleft()
+          row = eligible[id_]
+          chat, root = row["parent_chat_id"], row["parent_root_run_id"]
+          parents = parent_goals[id_]
+          direct = {root} if root in goals_by_chat.get(chat, ()) else set()
+          candidates = direct or runs_by_chat_root.get((chat, root), set()) or parents
+          if not row["goal_id"] and len(candidates) == 1 and (
+              not parents or candidates == parents):
+            goal_id = next(iter(candidates))
+            owned[id_] = goal_id
+            inferred.append({"id": id_, "goal": goal_id})
+          for child in children[id_]:
+            if id_ in owned:
+              parent_goals[child].add(owned[id_])
+            remaining_parents[child] -= 1
+            if remaining_parents[child] == 0:
+              ready.append(child)
+        # Unprocessed nodes are cycles or descend from cycles, so their
+        # ancestry cannot establish ownership. Snapshot every row regardless.
+        # Stage the inferred map in one statement, not one UPDATE per helper.
+        # The staging primary key keeps each ownership lookup indexed.
+        if inferred:
+          conn.execute(text("CREATE TEMPORARY TABLE goal_identity_0086_inferred ("
+                            "id VARCHAR(64) PRIMARY KEY, goal_id VARCHAR(64))"))
+          projection = ("SELECT key, value FROM json_each(:ownership)" if sqlite else
+                        "SELECT key, value FROM jsonb_each_text(CAST(:ownership AS jsonb))")
+          conn.execute(text("INSERT INTO goal_identity_0086_inferred (id, goal_id) " + projection),
+                       {"ownership": json.dumps({row["id"]: row["goal"] for row in inferred})})
+          conn.execute(text(
+            "UPDATE delegations SET goal_id=(SELECT i.goal_id "
+            "FROM goal_identity_0086_inferred i WHERE i.id=delegations.id) "
+            "WHERE goal_id IS NULL AND id IN (SELECT id FROM goal_identity_0086_inferred)"
+          ))
+          conn.execute(text("DROP TABLE goal_identity_0086_inferred"))
+        # NULL records are completed examination, never future inference work.
+        conn.execute(text(
+          "INSERT INTO goal_identity_0086_snapshot (record_kind, delegation_id, goal_id) "
+          "SELECT 'delegation', id, goal_id FROM delegations"
+        ))
+        if "chat_waits" in tables:
+          conn.execute(text(
+            "UPDATE chat_waits SET goal_id=COALESCE(goal_id, "
+            "(SELECT r.goal_id FROM chat_runs r WHERE r.id=chat_waits.created_by_run_id "
+            "AND r.chat_id=chat_waits.chat_id)), "
+            "root_run_id=(SELECT COALESCE(r.root_run_id,r.id) FROM chat_runs r "
+            "WHERE r.id=chat_waits.created_by_run_id AND r.chat_id=chat_waits.chat_id) "
+            "WHERE root_run_id IS NULL AND created_by_run_id IS NOT NULL "
+            "AND kind IN ('command','timer','github_checks')"
+          ))
+        conn.execute(text(
+          # UPDATE FROM probes the Goal primary key once per grouped run;
+          # a correlated CTE lookup can scan every completion for each Goal.
+          "UPDATE chat_goals SET completion_run_id=c.run FROM "
+          "(SELECT goal_id, chat_id, MIN(id) AS run FROM chat_runs "
+          "WHERE goal_id IS NOT NULL GROUP BY goal_id, chat_id HAVING COUNT(*)=1) c "
+          "WHERE chat_goals.id=c.goal_id AND chat_goals.chat_id=c.chat_id "
+          "AND chat_goals.completion_run_id IS NULL "
+          "AND chat_goals.status IN ('completed','cannot_complete','cancelled')"
+        ))
+        # The marker and every schema/backfill write commit together.
+        conn.execute(text(
+          "INSERT INTO goal_identity_0086_snapshot (record_kind, delegation_id, goal_id) "
+          "VALUES ('migration', '0086', NULL)"
+        ))
+      else:
+        # Retry does no Python full-data reads/indexing under the writer lock.
+        # New runtime rows retain their saved ownership, including NULL.
+        conn.execute(text(
+          "INSERT INTO goal_identity_0086_snapshot (record_kind, delegation_id, goal_id) "
+          "SELECT 'delegation', d.id, d.goal_id FROM delegations d WHERE NOT EXISTS "
+          "(SELECT 1 FROM goal_identity_0086_snapshot s "
+          "WHERE s.record_kind='delegation' AND s.delegation_id=d.id)"
+        ))
+      for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_chat_goals_completion_run_id "
+        "ON chat_goals (completion_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_delegations_goal_id ON delegations (goal_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_delegations_goal_root_task "
+        "ON delegations (parent_root_run_id, goal_id, task_key) WHERE goal_id IS NOT NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_delegations_no_goal_root_task "
+        "ON delegations (parent_root_run_id, task_key) WHERE goal_id IS NULL",
+      ):
+        conn.execute(text(statement))
+      conn.commit()
+    except BaseException:
+      conn.rollback()
+      raise
+    finally:
+      if foreign_keys is not None:
+        conn.exec_driver_sql(f"PRAGMA foreign_keys={int(foreign_keys)}")
+        conn.commit()
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -6434,6 +6640,7 @@ _SCHEMA_MIGRATIONS = (
   ("0083_swap_chat_note_sections", _swap_chat_note_sections),
   ("0086_drop_chat_note_backup", _drop_chat_note_backup),
   ("0087_transcript_rows", _add_transcript_rows),
+  ("0086_goal_execution_identity", _goal_execution_identity),
 )
 
 

@@ -21,6 +21,12 @@ from app.chat_writer import (
 from app.codex_sdk_runner import _codex_config_overrides
 from app.delegations import (
   RunPolicy,
+  DelegationIntent,
+  create_or_attach_delegation,
+  delegation_source_work_id,
+  delegation_source_work_filter,
+  activity_continuation_delivery_source_work_id,
+  own_helper_statuses,
   background_helper_chat_ids,
   delegation_execution_token,
   derived_status,
@@ -535,14 +541,14 @@ def test_single_mode_submit_accepts_old_write_but_never_upgrades_old_read(
   assert len(starts) == 2
 
 
-def test_goal_identity_is_the_delegation_idempotency_parent(db, chat):
+def test_physical_root_is_the_delegation_parent(db, chat):
   db.add(make_goal_run(db,
     id="goal-physical", root_run_id="logical-before-restart",
     chat_id=chat.id, status="running", provider="codex",
     goal_objective="Ship", goal_id="stable-goal",
   ))
   db.commit()
-  assert parent_root_run_id(db, chat.id, require_active=True) == "stable-goal"
+  assert parent_root_run_id(db, chat.id, require_active=True) == "logical-before-restart"
 
 
 def test_submit_records_the_plan_task_and_refuses_an_unknown_one(
@@ -962,6 +968,7 @@ def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
   transcript_rows.replace_all(object_session(child), child, [
     {"role": "user", "content": "Make the bounded edit."},
     {
+      "id": "child-run",
       "role": "assistant",
       "blocks": [{
         "type": "error",
@@ -1096,7 +1103,7 @@ def _seed_delegation(
   child_id = f"child-{suffix}"
   messages = [{"role": "user", "content": "Do the bounded task."}]
   if result_blocks is not None:
-    messages.append({"role": "assistant", "blocks": result_blocks})
+    messages.append({"id": f"child-run-{suffix}", "role": "assistant", "blocks": result_blocks})
   db.add(create_chat(
     id=child_id, title="Child", messages=messages,
     provider="claude", created_by_app_id=app.id,
@@ -1127,6 +1134,39 @@ def _seed_delegation(
     ))
   db.commit()
   return parent_id, child_id, delegation_id
+
+
+def test_completed_helper_delivery_is_bounded_and_drains_in_batches(db):
+  from app import delegations as delegations_mod
+  limit = delegations_mod.WAKE_NOTICE_DELEGATION_LIMIT
+  parent_id = None
+  ids = []
+  for index in range(limit + 1):
+    parent_id, _child, delegation_id = _seed_delegation(
+      db, suffix=f"bounded-wake-{index}", parent_id=parent_id,
+      parent_root_id="bounded-root",
+      result_blocks=[{"type": "text", "content": "R" * 5000}],
+    )
+    ids.append(delegation_id)
+
+  first = delegations_mod.available_delegation_results(db, parent_id)
+  assert len(first) == limit
+  assert len(delegations_mod._wake_eligible_rows_for_parent(
+    db, parent_id, "bounded-root",
+  )) == limit
+  delivery = delegations_mod.build_delegation_result_context(
+    db, parent_id,
+  )
+  assert len(delivery.results) == limit
+  assert delivery.text.count('"result_truncated":true') == limit
+  assert "R" * 3001 not in delivery.text
+
+  for row in first:
+    row.delivered_run_id = f"child-run-{row.id.removeprefix('delegation-')}"
+  db.commit()
+  assert [row.id for row in delegations_mod.available_delegation_results(
+    db, parent_id,
+  )] == [ids[-1]]
 
 
 def test_background_helper_projection_owns_waiting_until_parent_wake(
@@ -3499,3 +3539,91 @@ def test_a_wake_run_started_under_an_earlier_id_still_attaches(db):
     source_work_id="root-old-basis-orphan", activity_id=delegation_id,
   )).result(timeout=5)
   assert isinstance(attached, StartContinuationAttached)
+
+
+def test_long_question_and_result_are_durable_but_automatic_notice_is_bounded(db):
+  from app.routes.delegations import DelegationQuestionAsk, DelegationSubmit
+  from app import delegations as delegations_mod
+  question = "Question detail " * 800
+  report = "Full report " * 800
+  assert DelegationQuestionAsk(question=question).question == question.strip()
+  assert DelegationSubmit(parent_chat_id="parent", task_key="report",
+                          prompt=report, provider="codex").prompt == report.strip()
+  _parent, _child, delegation_id = _seed_delegation(
+    db, suffix="full-result", result_blocks=[{"type": "text", "content": report}],
+  )
+  row = db.get(models.Delegation, delegation_id)
+  notice = delegations_mod._compose_wake_notice(
+    db, [row], delegations_mod.settled_result_run_ids(db, [row.id]),
+  )
+  assert report.strip() not in notice
+  assert '"result_truncated":true' in notice
+  assert report[:delegations_mod._WAKE_RESULT_MAX] in notice
+  assert "GET /api/delegations/<id>?include_history=true" in notice
+  payload = delegations_mod.serialize_delegation(db, row)
+  assert payload["result"] == report.strip()
+  assert "result_truncated" not in payload
+
+
+def test_same_task_key_can_be_reused_by_a_new_goal_on_one_physical_run(db, chat):
+  run = make_goal_run(db, id="one-run", root_run_id="one-run",
+                      chat_id=chat.id, status="running", provider="codex",
+                      goal_id="goal-A")
+  db.add(run)
+  db.commit()
+  base = dict(app_id=None, parent_chat_id=chat.id,
+              parent_root_run_id="one-run", task_key="research",
+              prompt="Full task", provider="codex", model=None,
+              effort=None, cwd="/data")
+  a, attached = create_or_attach_delegation(db, DelegationIntent(**base, goal_id="goal-A"))
+  assert not attached and a.goal_id == "goal-A"
+  run.goal_id = "goal-B"
+  db.commit()
+  b, attached = create_or_attach_delegation(db, DelegationIntent(**base, goal_id="goal-B"))
+  assert not attached and b.id != a.id
+  assert b.parent_root_run_id == a.parent_root_run_id == "one-run"
+  assert delegation_source_work_id(a) == "goal-A"
+  assert delegation_source_work_id(b) == "goal-B"
+  assert [r.id for r in db.query(models.Delegation).filter(
+    delegation_source_work_filter("goal-A")
+  ).all()] == [a.id]
+  assert [item["id"] for item in own_helper_statuses(db, chat.id, "one-run")] == [b.id]
+  assert activity_continuation_delivery_source_work_id(
+    db, chat.id, "one-run",
+  ) == "goal-B"
+  for row in (a, b):
+    db.add(make_goal_run(db, id=f"child-{row.id}",
+      root_run_id=f"child-{row.id}", chat_id=row.child_chat_id,
+      status="completed", provider="codex"))
+  old_goal = db.get(models.ChatGoal, "goal-A")
+  old_goal.status = "completed"
+  old_goal.completion_run_id = "one-run"
+  db.commit()
+  from app import delegations as delegations_mod
+  assert [row.id for row in delegations_mod._wake_eligible_rows_for_parent(
+    db, chat.id, "goal-B",
+  )] == [b.id]
+  assert delegations_mod.parent_wake_blocker(
+    db, chat.id, "goal-A", "one-run",
+  )[0] == "goal_closed"
+
+
+def test_legacy_goal_root_resolves_its_completion_run_after_rebind(db):
+  from app import delegations as delegations_mod
+  parent_id, _child, delegation_id = _seed_delegation(
+    db, suffix="legacy-rebound", parent_root_id="goal-A",
+  )
+  db.add(make_goal_run(db, id="physical-A-then-B",
+    root_run_id="physical-A-then-B", chat_id=parent_id,
+    status="completed", provider="codex", goal_id="goal-B"))
+  db.add(models.ChatGoal(
+    id="goal-A", chat_id=parent_id, objective="Earlier task",
+    status="completed", completion_run_id="physical-A-then-B",
+  ))
+  db.commit()
+  assert delegations_mod._parent_wake_continuation_root(
+    db, parent_id, "goal-A",
+  ) == "physical-A-then-B"
+  assert delegations_mod.parent_wake_blocker(
+    db, parent_id, "goal-A", "physical-A-then-B",
+  )[0] == "goal_closed"

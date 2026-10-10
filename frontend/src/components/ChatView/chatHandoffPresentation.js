@@ -3,10 +3,11 @@ import { canResumeGoal, goalStatusLabel } from './goalProgress.js'
 
 const TERMINAL_GOALS = new Set(['completed', 'cannot_complete', 'cancelled'])
 
-export function currentProgressGoal(goal, { turnActive = false } = {}) {
+export function currentProgressGoal(goal, { turnActive = false, continuingGoalId = null } = {}) {
   if (!goal || TERMINAL_GOALS.has(goal.status)) return null
   // A retained hold is history while an unrelated owner request is running.
-  if (turnActive && goal.status === 'paused') return null
+  const waiting = ['automatic', 'owner_input'].includes(goal.handoff?.kind)
+  if (turnActive && goal.status === 'paused' && !waiting && continuingGoalId !== goal.id) return null
   return goal
 }
 

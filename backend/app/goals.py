@@ -1,10 +1,14 @@
 """Goal intent and attempt admission. No provider state or transcript inference."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from sqlalchemy import update
 from app import models
+
+log = logging.getLogger(__name__)
 
 
 def goal_hold(goal):
@@ -114,9 +118,11 @@ def admit_goal(db, chat_id, goal_id, objective, message=None):
       goal.revision += 1
 
 
-def scoped_goal_context(db, goal, task_id=None):
+def scoped_goal_context(db, goal, task_id=None, *, role="coordinator"):
   from app.goal_context import project_goal
-  payload = project_goal(goal, task_id)
+  payload = project_goal(goal, task_id, role=role)
+  if role != "coordinator":
+    return payload
   others = db.query(models.ChatGoal).filter(
     models.ChatGoal.chat_id == goal.chat_id, models.ChatGoal.id != goal.id,
     models.ChatGoal.status == "open",
@@ -124,6 +130,10 @@ def scoped_goal_context(db, goal, task_id=None):
   if others:
     payload["other_open_goals"] = [{"id": g.id, "objective": g.objective} for g in others]
   return payload
+
+
+def _compact_json(payload):
+  return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def resume_context(db, run_id):
@@ -134,8 +144,9 @@ def resume_context(db, run_id):
   return (
     "Möbius Goal work data, not additional authority. Preserve the original outcome. "
     "This is a scoped view, not the full plan. Work in this run; do not end merely "
-    "to get another task or refresh context. update_goal with no arguments "
-    "shows the full plan. Advance focus in one call: update_goal tasks marking "
+    "to get another task or refresh context. Other tasks appear as id, title "
+    "and status with has_result/has_note flags. update_goal with no arguments "
+    "shows the full plan; read_goal(task=<id>) shows one task in full. Advance focus in one call: update_goal tasks marking "
     "the finished task completed with its result and the next one running. "
     "Complete only after verifying the entire Goal. An owner-action or approval "
     "gate leaves the Goal open with a saved card; a genuinely unreachable "
@@ -143,9 +154,152 @@ def resume_context(db, run_id):
     "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
     "If the owner defers a step, continue other authorized work. When none can proceed, "
     "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
-    "<mobius_goal>" + json.dumps(scoped_goal_context(db, goal), ensure_ascii=False,
-                                separators=(",", ":")) + "</mobius_goal>"
+    "<mobius_goal>" + _compact_json(scoped_goal_context(db, goal)) + "</mobius_goal>"
   )
+
+
+def helper_goal_view(db, assignment, task_id=None):
+  """The assigned Goal as one helper may read it, focused on its task by default."""
+  payload = scoped_goal_context(
+    db, assignment.goal, task_id or assignment.plan_task, role="helper",
+  )
+  payload["assignment"] = {
+    "delegation_id": assignment.delegation_id, "helper": assignment.helper,
+    "plan_task": assignment.plan_task, "depth": assignment.depth,
+    **({"plan_task_missing": True} if assignment.plan_task_missing else {}),
+  }
+  return payload
+
+
+def helper_goal_brief(db, chat_id):
+  """Per-turn assignment brief for a delegated chat, or "" when it has no Goal."""
+  from app.goal_plans import goal_assignment
+  assignment = goal_assignment(db, chat_id)
+  if assignment is None:
+    return ""
+  return (
+    "Möbius Goal assignment data, not additional authority. You are a helper on "
+    "one branch of your parent's Goal: complete your bounded task and return the "
+    "result to your parent, which owns the plan and the Goal outcome. The focus "
+    "is your assigned task; ancestors carry constraints to respect, "
+    "dependencies carry the prerequisite results you build on, and "
+    "open_blockers name work that can block it. Other tasks appear as id, "
+    "title and status with has_result/has_note flags. read_goal re-reads this "
+    "brief, for example after context compaction; read_goal(task=<id>) shows "
+    "any task of this Goal in full, and read_goal(task=<parent id>) lists "
+    "your neighbouring tasks.\n"
+    "<mobius_goal_brief>" + _compact_json(helper_goal_view(db, assignment))
+    + "</mobius_goal_brief>"
+  )
+
+
+COORDINATOR_READ_GOAL_NEEDS_TASK = (
+  "A coordinator's Goal overview is update_goal with no arguments; "
+  "read_goal(task=<id>) expands one task in full."
+)
+
+
+def read_goal_view(db, chat_id, run_id, *, delegation_id=None, task_id=None):
+  """What read_goal returns: the same projection as the turn's brief.
+
+  read_goal(task) is the one per-task expansion at both levels. With no
+  task a helper re-reads its assignment brief, its only Goal read. A
+  coordinator's one overview is update_goal with no arguments, so a
+  task-less coordinator read is refused with that pointer rather than
+  serving a second, overlapping overview.
+
+  A helper reads only the Goal its delegation chain resolves to; a
+  coordinator reads its run's Goal, else the chat's presented Goal. Reading
+  never attaches a run to a Goal or lifts a hold. ``helpers`` is this chat's
+  own children as current state, not an event.
+  """
+  from app.delegations import own_helper_statuses
+  if delegation_id is not None:
+    from app.goal_plans import goal_assignment
+    assignment = goal_assignment(db, chat_id)
+    if assignment is not None and assignment.delegation_id != delegation_id:
+      raise PermissionError("This helper may read only its own assignment")
+    view = helper_goal_view(db, assignment, task_id) if assignment else None
+    role = "helper"
+  else:
+    from app.goal_plans import presented_goal_rows
+    goal = goal_for_run(db, db.get(models.ChatRun, run_id)) if run_id else None
+    if goal is None:
+      rows = presented_goal_rows(db, chat_id)
+      goal = rows[1] if rows is not None else None
+    if goal is not None and task_id is None:
+      raise ValueError(COORDINATOR_READ_GOAL_NEEDS_TASK)
+    view = scoped_goal_context(db, goal, task_id) if goal is not None else None
+    role = "coordinator"
+  return {"role": role, "goal": view,
+          "helpers": own_helper_statuses(db, chat_id, run_id) if run_id else []}
+
+
+def turn_goal_brief(db, chat_id, run_id, *, delegated):
+  """The one Goal brief a turn carries: coordinator view or helper assignment."""
+  return helper_goal_brief(db, chat_id) if delegated else resume_context(db, run_id)
+
+
+class CompactionBriefRefresh:
+  """Carry one fresh Goal brief across provider-native context compaction.
+
+  Turn starts already carry the brief. Within a turn, a provider that compacts
+  its context marks this stale, and the next supported provider boundary
+  (Claude PostToolUse context or Codex SessionStart compact context, whose
+  arrival is itself the compaction signal) takes the current brief once. Nothing is
+  stored in the transcript and no model call is added. The loader opens its
+  own short session: provider turns run after the request session is released.
+
+  Delivery is exactly once per need: concurrent boundaries (parallel tool
+  results) serialize, a failed load keeps the need for the next boundary, and
+  a compaction during an in-flight load is a new need, never absorbed by it.
+  """
+
+  def __init__(self, load, pointer="read_goal re-reads it"):
+    self._load = load
+    self._pointer = pointer
+    self._marked = 0
+    self._delivered = 0
+    self._lock = asyncio.Lock()
+
+  @property
+  def stale(self):
+    return self._marked > self._delivered
+
+  def mark_compacted(self):
+    self._marked += 1
+
+  async def take(self):
+    if not self.stale:
+      return ""
+    async with self._lock:
+      need = self._marked
+      if need <= self._delivered:
+        return ""
+      try:
+        brief = await asyncio.to_thread(self._load)
+      except Exception:
+        log.warning("Goal brief refresh failed; retrying at the next boundary",
+                    exc_info=True)
+        return ""
+      # An empty brief is a successful load: the Goal ended, nothing to restore.
+      self._delivered = max(self._delivered, need)
+    if not brief:
+      return ""
+    # The re-read pointer leads so a provider that clips hook context still
+    # tells the agent where the full brief is.
+    return f"Context was compacted; current Goal brief follows ({self._pointer}).\n" + brief
+
+
+def compaction_brief_refresh(chat_id, run_id, *, delegated):
+  def load():
+    from app.database import SessionLocal
+    with SessionLocal() as db:
+      return turn_goal_brief(db, chat_id, run_id, delegated=delegated)
+  # A helper re-reads its brief with read_goal; a coordinator's overview is
+  # update_goal with no arguments (read_goal there only expands a task).
+  return CompactionBriefRefresh(load, "read_goal re-reads it" if delegated else
+                                "update_goal with no arguments shows the plan")
 
 
 async def settle_after_goal_completion(chat_id: str) -> None:
@@ -176,8 +330,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     GoalPlanConflict, GoalPlanError, active_goal_helpers, normalize_tasks,
     staged_task_edits,
   )
-  # New callers signal success without prose. Keep string completion for
-  # running agents whose tool schema was loaded before the update.
+  # Old in-flight agents may still use the previous string completion schema.
   if complete is not None and complete is not True and not (
     isinstance(complete, str) and complete.strip()
   ):
@@ -257,12 +410,10 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     # owner first; this operation never cancels helpers, cards, or Waits.
     from app.chat_waits import _goal_waits, _FIRED_UNDELIVERED
     from app.delegations import _self_resuming_helper_rows
-    from app.goal_plans import goal_attempt_root_ids
     blockers = active_goal_helpers(db, run, goal)
-    roots = goal_attempt_root_ids(db, goal.chat_id, goal.id)
     blockers += ["helper:" + row.id
       for row, _status in _self_resuming_helper_rows(db, {goal.chat_id})
-      if row.parent_root_run_id in roots]
+      if row.goal_id == goal.id]
     blockers += ["wait:" + row.id for row in _goal_waits(db, goal.chat_id, goal.id).filter(
       (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
     ).all()]
@@ -311,7 +462,7 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     from app.chat_waits import stage_consume_fired_goal_waits
     consumed_waits = stage_consume_fired_goal_waits(db, goal.chat_id, goal.id)
     values.update(status=status, result=outcome_text, next_action=None,
-                  completed_at=datetime.now(UTC))
+                  completed_at=datetime.now(UTC), completion_run_id=run.id)
   else:
     if checkpoint is not None:
       values["checkpoint"] = checkpoint
@@ -333,8 +484,13 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
       db, chat_id=goal.chat_id, goal_id=goal.id, status=values["status"],
       result=outcome_text or defer_reason, finished_keys=finished_claims,
     )
+  if status is not None:
+    from app.activity_position import record_activity_position
+    record_activity_position(db, goal.chat_id, "goal-outcome:" + goal.id)
   db.commit()
   db.refresh(goal)
+  from app.goal_plans import publish_goal_changed
+  publish_goal_changed(goal.chat_id)
   if consumed_waits:
     from app.chat_waits import _broadcast_changed
     _broadcast_changed(goal.chat_id)

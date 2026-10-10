@@ -186,6 +186,7 @@ test('durable Goal presentation survives terminal runtime states', () => {
 test('who moves next comes from the exact Goal handoff, never an obsolete wait field', () => {
   assert.deepEqual(normalizeGoalPresentation({
     id: 'goal-1', objective: 'Finish the review', status: 'paused',
+    resumable: true,
     wait_kind: 'monitor',
   }), {
     id: 'goal-1', objective: 'Finish the review', status: 'paused',
@@ -197,7 +198,7 @@ test('who moves next comes from the exact Goal handoff, never an obsolete wait f
 
 test('ordinary turns retain settled Goals while Resume reactivates a pause', () => {
   const paused = {
-    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
+    id: 'goal-1', objective: 'Finish the migration', status: 'paused', resumable: true,
   }
   assert.deepEqual(
     goalPresentationAtRunStart('ordinary question', [], paused),
@@ -296,7 +297,7 @@ test('retained pauses survive unrelated cards, working turns, reconnect and manu
     ['deferred', 'On hold', { kind: 'none', reason: null }],
     [undefined, 'Interrupted', undefined],
   ]) {
-    let goal = normalizeGoalPresentation({ id: 'retained', revision: 7, objective: 'Ship it', status: 'paused', pause_reason, handoff })
+    let goal = normalizeGoalPresentation({ id: 'retained', revision: 7, objective: 'Ship it', status: 'paused', resumable: true, pause_reason, handoff })
     for (const chat of [
       { turnActive: false, hasPendingQuestion: true, chatHandoff: 'owner_input' },
       { turnActive: false, chatHandoff: 'automatic' },
@@ -328,7 +329,7 @@ test('retained pauses survive unrelated cards, working turns, reconnect and manu
 test('deliberate deferral preserves its explanation without implying an error or an owner question', () => {
   const held = normalizeGoalPresentation({
     id: 'original', revision: 8, objective: 'Verify the original outcome',
-    status: 'paused', pause_reason: 'deferred', hold_reason: 'Owner deferred the remaining tests.',
+    status: 'paused', resumable: true, pause_reason: 'deferred', hold_reason: 'Owner deferred the remaining tests.',
     handoff: { kind: 'none', reason: null },
   })
   const hydrated = goalPresentationFromRuntime({ running: false, goal: held })
@@ -354,7 +355,8 @@ test('Resume respects exact Goal waits and terminal outcomes without requiring a
     assert.equal(canResumeGoal({ status, pause_reason: 'owner' }), false)
   }
   assert.equal(canResumeGoal(null), false)
-  assert.equal(canResumeGoal({ status: 'paused', pause_reason: 'unknown' }), true)
+  assert.equal(canResumeGoal({ status: 'paused', resumable: true, pause_reason: 'unknown' }), true)
+  assert.equal(canResumeGoal({ status: 'paused', pause_reason: 'unknown' }), false)
 })
 
 test('a fetched plan never crosses Goal identity even when its revision is newer', () => {
@@ -362,7 +364,7 @@ test('a fetched plan never crosses Goal identity even when its revision is newer
   const old = { goal_id: 'a', root_run_id: 'root-a', revision: 99, tasks: [{ id: 'stale' }] }
   assert.equal(planForGoal(old, goal), null)
   assert.equal(planForGoal({ ...old, goal_id: 'b' }, goal)?.goal_id, 'b')
-  assert.match(chatView, /planForGoal\(activeGoalPlan, goalPresentation\)/)
+  assert.match(chatView, /planForGoal\(activeGoalPlan, progressGoal\)/)
 })
 
 test('stale plan data cannot show tasks after the active goal has ended', () => {
