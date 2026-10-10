@@ -15,6 +15,7 @@ import copy
 import concurrent.futures as _cf
 import functools
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -84,6 +85,14 @@ class _CachedProviderUsage:
   consecutive_refusals: int = 0
 
 
+@dataclass
+class _ProviderUsagePublication:
+  latest_probe: int = 0
+  # Successful readings and sequential disconnects supersede older successes;
+  # an advisory failure alone cannot discard a concurrent successful reading.
+  authoritative_probe: int = 0
+
+
 class ProviderUsageRefused(RuntimeError):
   """The provider rate-limited the usage read itself (not the chat)."""
 
@@ -103,7 +112,8 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
 _provider_usage_locks: dict[tuple[tuple[str, str], asyncio.AbstractEventLoop], asyncio.Lock] = {}
 _provider_usage_generation: dict[tuple[str, str], int] = {}
-_provider_usage_probe: dict[tuple[str, str], object] = {}
+_provider_usage_publication: dict[tuple[str, str], _ProviderUsagePublication] = {}
+_provider_usage_probe_ids = itertools.count(1)
 # Invalidation is called from sync auth endpoints as well as async readers.
 # asyncio.Lock only coalesces probes; this lock protects the authority check
 # and publication across threads/event loops.
@@ -1368,9 +1378,11 @@ async def read_provider_usage(
     # not let that older response repopulate the cache after sign-in cleared it.
     for attempt in range(2):
       with _provider_usage_authority_lock:
-        generation = _provider_usage_generation.get(key, 0)
-        probe = object()
-        _provider_usage_probe[key] = probe
+        current_generation = _provider_usage_generation.get(key, 0)
+        if generation != current_generation:
+          prior = None
+        generation = current_generation
+        probe = next(_provider_usage_probe_ids)
       refusals = 0
       try:
         snapshot = await _provider_snapshot(provider_id, data_dir)
@@ -1398,9 +1410,15 @@ async def read_provider_usage(
         unavailable = copy.deepcopy(snapshot)
         unavailable["stale"] = False
       with _provider_usage_authority_lock:
-        if _provider_usage_probe.get(key) is not probe:
-          # A later probe on another loop owns publication. Do not retry an
-          # older refusal or disconnect over its successful observation.
+        publication = _provider_usage_publication.setdefault(
+          key, _ProviderUsagePublication(),
+        )
+        if probe < (
+          publication.authoritative_probe if ready is not None
+          else publication.latest_probe
+        ):
+          # Starting another read is not an observation. Only a published
+          # result can supersede this probe, and failures cannot erase success.
           if ready is not None and staged is not None:
             staged.unlink(missing_ok=True)
           return _held_usage(key) or _unavailable(
@@ -1411,9 +1429,36 @@ async def read_provider_usage(
             staged.unlink(missing_ok=True)
           prior = None
           continue
+        current = _provider_usage_cache.get(key)
+        if (
+          ready is None and current is not None and current is not prior
+          and _stale_reading_is_servable(current, now)
+        ):
+          # This read started before the successful fill. Its failure,
+          # including a concurrent auth check, cannot revoke that observation.
+          held = _held_usage(key)
+          if not force_refresh or (held is not None and not current.stale):
+            publication.latest_probe = max(publication.latest_probe, probe)
+            current.next_check_at = max(current.next_check_at, next_check_at)
+            current.consecutive_refusals = refusals
+            # Extended holds remain subject to the stale/reset bounds.
+            current.stale = current.stale or held is None or bool(refusals)
+            fallback = held or copy.deepcopy(current.snapshot)
+            if not force_refresh:
+              fallback["stale"] = current.stale
+            return fallback
+        if (
+          ready is not None and probe < publication.latest_probe
+          and current is not None and current.consecutive_refusals
+        ):
+          next_check_at = max(next_check_at, current.next_check_at)
+          refusals = current.consecutive_refusals
+        publication.latest_probe = max(publication.latest_probe, probe)
         if ready is not None:
+          publication.authoritative_probe = probe
           _provider_usage_cache[key] = _CachedProviderUsage(
             observed_at=now, next_check_at=next_check_at, snapshot=ready,
+            stale=bool(refusals), consecutive_refusals=refusals,
           )
           if staged is not None:
             try:
@@ -1423,6 +1468,7 @@ async def read_provider_usage(
               log.debug("%s usage reading not persisted", provider_id, exc_info=True)
           return copy.deepcopy(ready)
         if snapshot.get("state") == "disconnected":
+          publication.authoritative_probe = probe
           _provider_usage_cache.pop(key, None)
           _last_reading_path(data_dir, provider_id).unlink(missing_ok=True)
           return snapshot

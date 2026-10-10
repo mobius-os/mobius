@@ -2489,3 +2489,330 @@ def test_restart_restoration_cannot_replace_a_concurrent_success(
   assert result["stale"] is True
   assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == result
   assert path.read_bytes() == persisted
+
+
+@pytest.mark.parametrize("newer_state", ["unavailable", "refused", "disconnected"])
+@pytest.mark.parametrize("force_refresh", [False, True])
+@pytest.mark.parametrize("invalidation", [None, "auth", "allowance"])
+def test_ready_cross_loop_probe_survives_a_later_started_failure(
+  monkeypatch, tmp_path, newer_state, force_refresh, invalidation,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  older_started = threading.Event()
+  newer_started = threading.Event()
+  finish_older = threading.Event()
+  finish_newer = threading.Event()
+  calls = []
+
+  async def snapshot(_provider_id, _data_dir):
+    calls.append(threading.get_ident())
+    if len(calls) == 1:
+      older_started.set()
+      assert await asyncio.to_thread(finish_older.wait, 5)
+      return {**WEEKLY_READY, "credit_balance": "ready"}
+    newer_started.set()
+    assert await asyncio.to_thread(finish_newer.wait, 5)
+    if newer_state == "refused":
+      raise provider_usage.ProviderUsageRefused("codex", None)
+    return {**WEEKLY_READY, "state": newer_state}
+
+  def read():
+    return asyncio.run(provider_usage.read_provider_usage(
+      "codex", data_dir, force_refresh=force_refresh,
+    ))
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    older = pool.submit(read)
+    try:
+      assert older_started.wait(5)
+      newer = pool.submit(read)
+      assert newer_started.wait(5)
+      finish_older.set()
+      ready = older.result(timeout=5)
+      assert ready["state"] == "ready"
+      path = provider_usage._last_reading_path(data_dir, "codex")
+      persisted = path.read_bytes()
+      if invalidation is not None:
+        invalidate = (
+          provider_usage.forget_provider_usage if invalidation == "auth"
+          else provider_usage.provider_allowance_changed
+        )
+        invalidate("codex", data_dir)
+        assert not path.exists()
+      finish_newer.set()
+      result = newer.result(timeout=5)
+    finally:
+      finish_older.set()
+      finish_newer.set()
+
+  if invalidation is not None:
+    assert len(calls) == 3
+    assert result["state"] == (
+      "disconnected" if newer_state == "disconnected" else "unavailable"
+    )
+    assert not path.exists()
+  else:
+    assert len(calls) == 2
+    assert result == {**ready, "stale": newer_state == "refused" and not force_refresh}
+    assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == {
+      **ready, "stale": newer_state == "refused",
+    }
+    assert path.read_bytes() == persisted
+    assert json.loads(persisted)["snapshot"]["credit_balance"] == "ready"
+    if newer_state == "refused":
+      cached = provider_usage._provider_usage_cache[
+        provider_usage._cache_key("codex", data_dir)
+      ]
+      assert cached.next_check_at >= cached.observed_at + 60
+      assert cached.consecutive_refusals == 1
+      cached.snapshot["windows"][0]["resets_at"] = "2000-01-01T00:00:00Z"
+      assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir))[
+        "state"
+      ] == "unavailable"
+  assert list(path.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("failure_state", ["unavailable", "refused", "disconnected"])
+def test_completed_failure_only_revokes_an_older_success_on_disconnect(
+  monkeypatch, tmp_path, failure_state,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  started = threading.Event()
+  resume = threading.Event()
+  calls = []
+
+  async def snapshot(_provider_id, _data_dir):
+    calls.append(threading.get_ident())
+    if len(calls) == 1:
+      started.set()
+      assert await asyncio.to_thread(resume.wait, 5)
+      return WEEKLY_READY
+    if failure_state == "refused":
+      raise provider_usage.ProviderUsageRefused("codex", None)
+    return {**WEEKLY_READY, "state": failure_state}
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    older = pool.submit(lambda: asyncio.run(
+      provider_usage.read_provider_usage("codex", data_dir)
+    ))
+    try:
+      assert started.wait(5)
+      failure = asyncio.run(provider_usage.read_provider_usage("codex", data_dir))
+      assert failure["state"] == (
+        "disconnected" if failure_state == "disconnected" else "unavailable"
+      )
+      if failure_state == "refused":
+        refused_until = provider_usage._provider_usage_cache[
+          provider_usage._cache_key("codex", data_dir)
+        ].next_check_at
+    finally:
+      resume.set()
+    result = older.result(timeout=5)
+
+  path = provider_usage._last_reading_path(data_dir, "codex")
+  assert len(calls) == 2
+  if failure_state == "disconnected":
+    assert result["state"] != "ready"
+    assert not path.exists()
+  else:
+    assert result["state"] == "ready"
+    assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == {
+      **result, "stale": failure_state == "refused",
+    }
+    assert json.loads(path.read_bytes())["snapshot"] == result
+    if failure_state == "refused":
+      cached = provider_usage._provider_usage_cache[
+        provider_usage._cache_key("codex", data_dir)
+      ]
+      assert cached.next_check_at >= refused_until
+      assert cached.consecutive_refusals == 1
+
+
+@pytest.mark.asyncio
+async def test_sequential_disconnect_clears_a_successful_reading(monkeypatch, tmp_path):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  answers = [WEEKLY_READY, {**WEEKLY_READY, "state": "disconnected"}]
+
+  async def snapshot(_provider_id, _data_dir):
+    return answers.pop(0)
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  assert (await provider_usage.read_provider_usage("codex", data_dir))["state"] == "ready"
+  result = await provider_usage.read_provider_usage("codex", data_dir, force_refresh=True)
+  assert result["state"] == "disconnected"
+  assert provider_usage._cache_key("codex", data_dir) not in provider_usage._provider_usage_cache
+  assert not provider_usage._last_reading_path(data_dir, "codex").exists()
+
+
+@pytest.mark.parametrize("expiry", ["age", "reset"])
+@pytest.mark.parametrize("force_refresh", [False, True])
+def test_concurrent_success_is_not_held_past_usage_bounds(
+  monkeypatch, tmp_path, expiry, force_refresh,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  older_started = threading.Event()
+  newer_started = threading.Event()
+  finish_older = threading.Event()
+  finish_newer = threading.Event()
+  calls = []
+
+  async def snapshot(_provider_id, _data_dir):
+    calls.append(threading.get_ident())
+    if len(calls) == 1:
+      older_started.set()
+      assert await asyncio.to_thread(finish_older.wait, 5)
+      return WEEKLY_READY
+    newer_started.set()
+    assert await asyncio.to_thread(finish_newer.wait, 5)
+    return provider_usage._unavailable()
+
+  def read():
+    return asyncio.run(provider_usage.read_provider_usage(
+      "codex", data_dir, force_refresh=force_refresh,
+    ))
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    older = pool.submit(read)
+    try:
+      assert older_started.wait(5)
+      newer = pool.submit(read)
+      assert newer_started.wait(5)
+      finish_older.set()
+      assert older.result(timeout=5)["state"] == "ready"
+      cached = provider_usage._provider_usage_cache[
+        provider_usage._cache_key("codex", data_dir)
+      ]
+      if expiry == "age":
+        cached.observed_at -= provider_usage._PROVIDER_USAGE_STALE_SECONDS + 1
+      else:
+        cached.snapshot["windows"][0]["resets_at"] = "2000-01-01T00:00:00Z"
+      finish_newer.set()
+      result = newer.result(timeout=5)
+    finally:
+      finish_older.set()
+      finish_newer.set()
+
+  assert len(calls) == 2
+  assert result["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("failure_state", ["unavailable", "refused", "disconnected"])
+@pytest.mark.parametrize("force_refresh", [False, True])
+def test_delayed_cross_loop_failure_keeps_only_bounded_nonforced_success(
+  monkeypatch, tmp_path, failure_state, force_refresh,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  older_started = threading.Event()
+  newer_started = threading.Event()
+  finish_older = threading.Event()
+  finish_newer = threading.Event()
+  calls = []
+
+  async def snapshot(_provider_id, _data_dir):
+    calls.append(threading.get_ident())
+    if len(calls) == 1:
+      older_started.set()
+      assert await asyncio.to_thread(finish_older.wait, 5)
+      return WEEKLY_READY
+    newer_started.set()
+    assert await asyncio.to_thread(finish_newer.wait, 5)
+    if failure_state == "refused":
+      raise provider_usage.ProviderUsageRefused("codex", None)
+    return {**WEEKLY_READY, "state": failure_state}
+
+  def read():
+    return asyncio.run(provider_usage.read_provider_usage(
+      "codex", data_dir, force_refresh=force_refresh,
+    ))
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", snapshot)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    older = pool.submit(read)
+    try:
+      assert older_started.wait(5)
+      newer = pool.submit(read)
+      assert newer_started.wait(5)
+      finish_older.set()
+      ready = older.result(timeout=5)
+      # The fresh hold has expired, but neither stale ceiling nor reset has.
+      provider_usage._provider_usage_cache[
+        provider_usage._cache_key("codex", data_dir)
+      ].next_check_at = 0
+      finish_newer.set()
+      result = newer.result(timeout=5)
+    finally:
+      finish_older.set()
+      finish_newer.set()
+
+  assert len(calls) == 2
+  if force_refresh:
+    assert result["state"] != "ready"
+  else:
+    assert result == {**ready, "stale": True}
+    assert asyncio.run(provider_usage.read_provider_usage("codex", data_dir)) == result
+    assert json.loads(provider_usage._last_reading_path(data_dir, "codex").read_bytes())[
+      "snapshot"
+    ] == ready
+
+
+@pytest.mark.parametrize("invalidation", ["auth", "allowance"])
+@pytest.mark.parametrize("failure_state", ["unavailable", "refused"])
+@pytest.mark.asyncio
+async def test_invalidation_before_probe_start_cannot_reuse_the_previous_account(
+  monkeypatch, tmp_path, invalidation, failure_state,
+):
+  from app import provider_usage
+
+  data_dir = str(tmp_path)
+  key = provider_usage._cache_key("codex", data_dir)
+
+  async def success(_provider_id, _data_dir):
+    return WEEKLY_READY
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", success)
+  await provider_usage.read_provider_usage("codex", data_dir)
+  provider_usage._provider_usage_cache[key].next_check_at = 0
+  invalidate = (
+    provider_usage.forget_provider_usage if invalidation == "auth"
+    else provider_usage.provider_allowance_changed
+  )
+
+  class Generations(dict):
+    reads = 0
+
+    def get(self, lookup, default=None):
+      self.reads += 1
+      if self.reads == 2:
+        # Schedule invalidation after prior capture, before the probe adopts
+        # its generation. Real auth endpoints take the same authority lock.
+        invalidate("codex", data_dir)
+      return super().get(lookup, default)
+
+  monkeypatch.setattr(
+    provider_usage, "_provider_usage_generation",
+    Generations(provider_usage._provider_usage_generation),
+  )
+
+  async def failure(_provider_id, _data_dir):
+    if failure_state == "refused":
+      raise provider_usage.ProviderUsageRefused("codex", None)
+    return provider_usage._unavailable()
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", failure)
+  result = await provider_usage.read_provider_usage("codex", data_dir)
+  assert result["state"] == "unavailable"
+  assert provider_usage._provider_usage_cache[key].snapshot["state"] == "unavailable"
+  assert not provider_usage._last_reading_path(data_dir, "codex").exists()
