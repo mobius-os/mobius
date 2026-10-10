@@ -186,6 +186,7 @@ function Host(){
   addEventListener('message',receive);return()=>removeEventListener('message',receive)
  },[])
  window.__state=sessionState;window.__event=blockEvent;window.__swap=swap;window.__frames=framesRef.current;window.__documents=blockDocumentsRef.current
+ window.blockEventRefForTest=()=>blockEventRef.current
  window.__act=event=>dispatchBlockEvent(key,event)
  window.__reload=()=>framesRef.current.get(swap.liveVersion).contentWindow.location.reload()
  window.__version=()=>dispatchSwap({type:'version',version:'v2'})
@@ -219,13 +220,20 @@ window.runWorkspaceChecks=async()=>{
    check('old frame lifetime is bounded',window.__frames.size===1&&window.__documents.size===1)
    return {status:'pass',scenario,checks,sends:window.__sends}
   }
-  const genuine=['busy','busy-swap','unknown','partial-stack','partial-batch','failed-unacked','unsupported','wrong-ack'].includes(scenario)
+  const genuine=['busy','busy-swap','unknown','partial-stack','partial-batch','failed-unacked','unsupported','wrong-ack','double-confirm'].includes(scenario)
   if(genuine||['idle','cancel','unacked','unacked-swap'].includes(scenario)){
    window.__act('activate');await wait(()=>window.__state?.actions[0]?.confirming)
   }
   if(genuine){
-   window.__act('confirm');const expected=scenario==='partial-batch'?2:1
+   window.__act('confirm');
+   if(scenario==='double-confirm'){
+    const first=blockEventRefForTest();
+    window.__act('confirm');window.__act('cancel');window.__act('activate');
+    check('same-turn clicks cannot overwrite the reserved Confirm',first?.event==='confirm'&&blockEventRefForTest()===first);
+   }
+   const expected=scenario==='partial-batch'?2:1
    await wait(()=>window.__sends===expected&&window.__state?.checkpoint)
+   if(scenario==='double-confirm')check('only one Confirm reaches the app',window.__deliveries.filter(event=>event.event==='confirm').length===1)
    if(!['busy','busy-swap'].includes(scenario))await wait(()=>!window.__state?.actions[0]?.busy)
   }
   if(scenario==='cancel'){window.__act('cancel');await wait(()=>!window.__state?.actions[0]?.confirming&&!window.__state?.retain)}
@@ -298,6 +306,46 @@ window.runWorkspaceChecks=async()=>{
  }catch(error){return {status:'fail',scenario,error:error.stack,state:window.__state,event:window.__event,swap:window.__swap,inits:window.__inits,sends:window.__sends,checks}}
 }
 `
+// Mount the real transcript component against a one-shot canvas fixture. An
+// unsupported passive document never mounts its ordinary view after init;
+// only a fresh canvas lifetime may do so, just like app-frame.html.
+const fallbackFixture = `
+import React,{lazy,Suspense,useCallback,useEffect,useMemo,useRef,useState} from 'react'
+import {createRoot} from 'react-dom/client'
+import {inlineBlockState,inlineBlockStateUpdate,inlineSessionRetained,inlineBlockDocumentReset} from './frontend/src/components/ChatView/markdown/appBlock.js'
+import {passiveAppBlockAllowed} from './frontend/src/lib/passiveAppBlocks.js'
+import useAppBlockCapability from './frontend/src/components/ChatView/hooks/useAppBlockCapability.js'
+const Branch=()=>null,ChevronDown=()=>null,ChevronRight=()=>null
+const sharedBrowserShellHref=value=>value
+const appQueries={list:{useQuery:()=>({data:[{id:80,slug:'fixture',name:'Fixture',capability_contract:{runtime:{'chat.blocks.passive':{version:1}}},passive_block_module_digest:'a'.repeat(64)}]})}}
+window.__mounts=[]
+function OneShotCanvas({blockSession,onBlockCapability}){
+ const [passive]=useState(()=>Boolean(blockSession))
+ useEffect(()=>{window.__mounts.push(passive?'passive':'view')},[])
+ return <iframe title="Fixture" src={'/fallback-child.html?mode='+(passive?'passive':'view')}
+ onLoad={()=>{if(passive)onBlockCapability(false)}}/>
+}
+const AppCanvas=lazy(()=>Promise.resolve({default:OneShotCanvas}))
+${block.split('\n').filter(line=>!line.startsWith('import ')&&!line.startsWith('const AppCanvas =')).join('\n').replace('export default function AppBlock','function AppBlock').replaceAll('export function ','function ')}
+createRoot(document.getElementById('root')).render(<AppBlock block={{app:'fixture',title:'Saved item',intent:'view:a',href:'/shell/?app=fixture',inline:true,height:480,items:[],facts:[],action:{intent:'action:a',label:'Open action'}}}/>)
+window.runWorkspaceChecks=async()=>{
+ const wait=condition=>new Promise((resolve,reject)=>{const deadline=Date.now()+5000;function check(){if(condition())resolve();else if(Date.now()>deadline)reject(Error('Fallback timed out: '+JSON.stringify(window.__mounts)));else setTimeout(check,10)}check()})
+ const checks=[]
+ try{
+  await wait(()=>document.querySelector('.md-app-block__action'))
+  document.querySelector('.md-app-block__action').click()
+  await wait(()=>document.querySelector('iframe')?.contentDocument?.body?.textContent==='Ordinary app view')
+  if(JSON.stringify(window.__mounts)!==JSON.stringify(['passive','view']))throw Error('Fallback reused or repeatedly mounted a document')
+  checks.push('unsupported negotiation remounts and renders the ordinary view')
+  if(!document.querySelector('.md-app-block__view iframe'))throw Error('Fallback remained hidden')
+  checks.push('ordinary view is visible and negotiation has ended')
+  document.querySelector('.md-app-block__action').click()
+  await wait(()=>!document.querySelector('iframe'))
+  checks.push('fallback view still closes normally')
+  return {status:'pass',scenario:'fallback',checks}
+ }catch(error){return {status:'fail',scenario:'fallback',error:error.stack,mounts:window.__mounts,checks}}
+}
+`
 const require = createRequire(join(frontendModules,'package.json'))
 const {rolldown} = await import(pathToFileURL(require.resolve('rolldown')).href)
 async function bundle(entry,base){
@@ -308,6 +356,7 @@ const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inl
 const html=code=>'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+csp+'"><div id="root"></div><script>'+code+'</script>'
 const childHtml=html(await bundle(childEntry,appRoot))
 const hostHtml=html(await bundle(fixture,root))
+const fallbackHtml=html(await bundle(fallbackFixture,root))
 
 async function chromiumPath() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
@@ -352,13 +401,13 @@ async function main(){
  const temporary=await mkdtemp(join(tmpdir(),'inline-document-reload-browser-'))
  let browser,server
  try{
-  server=createServer((request,response)=>{response.setHeader('Content-Type','text/html');response.end(request.url.startsWith('/child.html')?childHtml:hostHtml)})
+  server=createServer((request,response)=>{response.setHeader('Content-Type','text/html');response.end(request.url.startsWith('/fallback-child.html') ? '<!doctype html><body>'+(request.url.endsWith('mode=view')?'Ordinary app view':'')+'</body>' : request.url.includes('case=fallback') ? fallbackHtml : request.url.startsWith('/child.html') ? childHtml : hostHtml)})
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
   const origin='http://127.0.0.1:'+server.address().port
   browser=spawn(await chromiumPath(),['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--disable-component-update','--disable-sync','--disable-default-apps','--disable-extensions','--no-first-run','--no-default-browser-check','--no-proxy-server','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--remote-debugging-pipe','--user-data-dir='+join(temporary,'profile'),'about:blank'],{stdio:['ignore','ignore','pipe','pipe','pipe']})
   browser.stderr.resume()
   const protocol=cdp(browser),reports=[]
-  const scenarios=process.env.INLINE_RELOAD_CASES?.split(',')||['idle','cancel','busy','unknown','partial-stack','partial-batch','failed-unacked','unacked','unacked-swap','missing','invalid','oversized','unsupported','wrong-ack','version','busy-swap']
+  const scenarios=process.env.INLINE_RELOAD_CASES?.split(',')||['idle','cancel','busy','unknown','partial-stack','partial-batch','failed-unacked','unacked','unacked-swap','missing','invalid','oversized','unsupported','wrong-ack','version','busy-swap','double-confirm','fallback']
   for(const viewport of [{name:'desktop',width:1280,height:900},{name:'phone',width:390,height:844}])for(const scenario of scenarios){
    const {targetId}=await protocol.send('Target.createTarget',{url:'about:blank'})
    const {sessionId}=await protocol.send('Target.attachToTarget',{targetId,flatten:true})

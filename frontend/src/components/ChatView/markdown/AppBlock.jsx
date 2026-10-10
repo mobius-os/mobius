@@ -67,7 +67,7 @@ export function PullSnapshot({ block, pull, href, open, action, session, compact
 
 /** A deliberate confirmation step presents the app's complete frozen action,
  *  not the possibly stale or mismatched transcript snapshot above it. */
-export function InlineConfirmation({ state, competingBusy, onConfirm, onCancel }) {
+export function InlineConfirmation({ state, competingBusy, awaitingAck = false, onConfirm, onCancel }) {
   if (!state) return null
   return <div className="md-app-block__confirmation">
     <strong>Confirm current changes</strong>
@@ -76,8 +76,8 @@ export function InlineConfirmation({ state, competingBusy, onConfirm, onCancel }
       <dl>{item.facts.map((fact, j) => <div key={j}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
     </li>)}</ul> : <p role="status">{state.note}</p>}
     <div className="md-app-block__controls">
-      <button type="button" className="md-app-block__cancel" disabled={competingBusy} onClick={onCancel}>Not now</button>
-      <button type="button" className="md-app-block__action" disabled={state.disabled || competingBusy}
+      <button type="button" className="md-app-block__cancel" disabled={competingBusy || awaitingAck} onClick={onCancel}>Not now</button>
+      <button type="button" className="md-app-block__action" disabled={state.disabled || competingBusy || awaitingAck}
         onClick={onConfirm}>Confirm</button>
     </div>
   </div>
@@ -102,7 +102,7 @@ export default function AppBlock({ block, onInternalNav }) {
   const retained = inlineSessionRetained(sessionState, blockEvent)
   const viewIntentRef = useRef(viewIntent)
   viewIntentRef.current = viewIntent
-  const negotiating = !isSession && canExpand && viewIntent !== null && passiveAllowed
+  const negotiating = !isSession && canExpand && viewIntent !== null && passiveAllowed && legacyMode !== 'view'
   // Scalar handover dependencies prevent a state/init echo loop: the parser
   // copies envelopes on every message even when their observational data agrees.
   const checkpointId = sessionState?.checkpoint?.id ?? null
@@ -133,13 +133,21 @@ export default function AppBlock({ block, onInternalNav }) {
     const safe = inlineBlockState(message, sessionId, allowedKeys)
     if (safe) {
       setSessionState(previous => inlineBlockStateUpdate(previous, safe))
-      if (!safe.checkpointInvalid) setBlockEvent(event => safe.ackNonce === event?.nonce ? null : event)
+      if (!safe.checkpointInvalid && safe.ackNonce === blockEventRef.current?.nonce) {
+        blockEventRef.current = null
+        setBlockEvent(null)
+      }
     }
   }, [sessionId, allowedKeys])
   const actionState = key => sessionState?.actions.find(item => item.key === key)
   const competingBusy = sessionState?.actions.some(item => item.busy)
+  const awaitingAck = blockEvent !== null
   const dispatchBlockEvent = useCallback((key, event) => {
+    // Reserve the event before React commits: another click cannot overwrite
+    // the nonce whose exact acknowledgement releases this control.
+    if (blockEventRef.current) return
     const message = { sessionId, key, event, nonce: crypto.randomUUID() }
+    blockEventRef.current = message
     rememberBlockEvent(message)
     setBlockEvent(message)
   }, [sessionId, rememberBlockEvent])
@@ -151,6 +159,7 @@ export default function AppBlock({ block, onInternalNav }) {
       // during the next render, after blockEventRef has already become null.
       const previousEvent = blockEventRef.current
       setSessionState(previous => inlineBlockDocumentReset(previous, previousEvent))
+      blockEventRef.current = null
       setBlockEvent(null) // old-document Confirm nonce cannot be replayed
     }
     if (isSession) {
@@ -199,7 +208,7 @@ export default function AppBlock({ block, onInternalNav }) {
       if (state.hidden) return null
       if (state.confirming) return <span className="md-app-block__pending">Review below</span>
       return <span className="md-app-block__controls">
-        <button type="button" className="md-app-block__action" disabled={state?.disabled || competingBusy}
+        <button type="button" className="md-app-block__action" disabled={state?.disabled || competingBusy || awaitingAck}
           title={state?.label || target.label}
           aria-busy={state?.busy || undefined}
           onClick={() => dispatchBlockEvent(target.intent, 'activate')}>
@@ -212,7 +221,7 @@ export default function AppBlock({ block, onInternalNav }) {
     : null
   const action = actionButton(block.action)
   const confirming = sessionState?.actions.find(item => item.confirming)
-  const confirmation = <InlineConfirmation state={confirming} competingBusy={competingBusy}
+  const confirmation = <InlineConfirmation state={confirming} competingBusy={competingBusy} awaitingAck={awaitingAck}
     onCancel={() => dispatchBlockEvent(confirming.key, 'cancel')}
     onConfirm={() => dispatchBlockEvent(confirming.key, 'confirm')} />
   const toggle = canExpand && app && !isSession && legacyMode !== 'inline'
@@ -227,7 +236,7 @@ export default function AppBlock({ block, onInternalNav }) {
       onBlockState={onBlockState} onBlockCapability={onBlockCapability} onHostRequest={hostRequest} /></Suspense>
   </div> : canExpand && app && pending && (!isSession || !passiveAllowed || blockSupported === false) && <div className={legacyMode === 'view' ? 'md-app-block__view' : 'md-app-block__session-host'}
     style={legacyMode === 'view' ? { height: block.height } : undefined} aria-hidden={legacyMode !== 'view' ? 'true' : undefined} inert={legacyMode !== 'view' ? '' : undefined}>
-    <Suspense fallback={legacyMode === 'view' ? <p role="status">Opening details…</p> : null}><AppCanvas key={viewIntent} appId={app.id} appName={app.name} appSlug={app.slug}
+    <Suspense fallback={legacyMode === 'view' ? <p role="status">Opening details…</p> : null}><AppCanvas key={`${legacyMode === 'view' ? 'view' : 'session'}:${viewIntent}`} appId={app.id} appName={app.name} appSlug={app.slug}
       version={app.updated_at || 0} offlineCapable={app.offline_capable} capabilityContract={app.capability_contract || app.capabilities}
       active={false} visible={legacyMode === 'view'} interactive={legacyMode === 'view'} pendingIntent={legacyMode === 'view' && !delivered ? pending : null}
       blockSession={legacyMode === 'view' ? null : blockSession} blockEvent={legacyMode === 'view' ? null : blockEvent} onBlockState={onBlockState} onBlockCapability={onBlockCapability}

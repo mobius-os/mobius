@@ -361,3 +361,38 @@ test('passive module drift settles as unsupported without an ordinary mount', as
   assert.deepEqual(result.reports, [false])
   assert.deepEqual(result.errors, [])
 })
+
+
+test('only the reserved event exact acknowledgement releases same-turn action dispatch', async () => {
+  const { inlineBlockState, inlineBlockStateUpdate } = await import('../../components/ChatView/markdown/appBlock.js')
+  const block = readFileSync(new URL('../../components/ChatView/markdown/AppBlock.jsx', import.meta.url), 'utf8')
+  const start = block.indexOf('  const onBlockState = useCallback(')
+  const end = block.indexOf('  const onBlockCapability = useCallback(', start)
+  const events = []
+  let state = null
+  const scope = {
+    sessionId: 'live', allowedKeys: new Set(['send:a']), blockEventRef: { current: null },
+    inlineBlockState, inlineBlockStateUpdate, sessionState: null, blockEvent: null,
+    crypto, useCallback: fn => fn, rememberBlockEvent() {},
+    setBlockEvent: event => events.push(event),
+    setSessionState: update => { state = update(state) },
+  }
+  const { dispatch, observe } = new Function('scope', `with(scope) { ${block.slice(start, end)};
+    return { dispatch: dispatchBlockEvent, observe: onBlockState } }`)(scope)
+  const report = fields => observe({ type: 'moebius:app-block-state', sessionId: 'live', actions: [], ...fields })
+  dispatch('send:a', 'confirm')
+  const first = scope.blockEventRef.current
+  dispatch('send:a', 'confirm')
+  assert.equal(events.length, 1)
+  report({ ackNonce: 'not-the-reserved-nonce' })
+  dispatch('send:a', 'cancel')
+  assert.equal(events.length, 1)
+  report({ ackNonce: first.nonce, checkpoint: { id: '', data: 'malformed' } })
+  dispatch('send:a', 'confirm')
+  assert.equal(events.length, 1)
+  report({ ackNonce: first.nonce })
+  assert.equal(scope.blockEventRef.current, null)
+  dispatch('send:a', 'cancel')
+  assert.equal(events.at(-1).event, 'cancel')
+  assert.notEqual(events.at(-1).nonce, first.nonce)
+})

@@ -160,3 +160,13 @@ test('unknown inline apps are click-open, never imported for passive capability 
   assert.match(html, />Open action<\/button>/)
   assert.doesNotMatch(html, /md-app-block__session-host|Loading…/)
 })
+
+
+test('an event awaiting acknowledgement locks confirmation and cancellation together', () => {
+  const html = renderToStaticMarkup(createElement(InlineConfirmation, {
+    state: { confirmation: [{ title: 'Current target', facts: [] }], disabled: false },
+    competingBusy: false, awaitingAck: true,
+  }))
+  assert.match(html, /class="md-app-block__action" disabled=""/)
+  assert.match(html, /class="md-app-block__cancel" disabled=""/)
+})
