@@ -345,3 +345,17 @@ test('focus and restored-page signals repair expired health even without visibil
   assert.equal(h.connections.length, 2)
   assert.equal(h.connections[0].signal.aborted, true)
 })
+
+test('a remounted stream runs its open reconciliation again', async t => {
+  let opens = 0
+  const h = await connectionHarness(t, { onOpen: () => { opens += 1 } })
+  assert.equal(opens, 1)
+  h.hook.unmount()
+  const { default: useSystemEventStream } = await import('../../../hooks/useSystemEventStream.js')
+  const remount = renderHook(useSystemEventStream, () => {}, {
+    onOpen: () => { opens += 1 },
+  })
+  await h.flush()
+  assert.equal(opens, 2)
+  remount.unmount()
+})

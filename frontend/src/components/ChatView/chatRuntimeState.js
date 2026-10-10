@@ -337,6 +337,45 @@ export function shouldRepairRuntimeStream({
   return connectionError !== 'retrying'
 }
 
+/**
+ * Cadence of the active-turn runtime fallback read. A chat stream that is
+ * demonstrably delivering already carries run, question, steer, and
+ * queue-promotion events, so it keeps only a slow safety read. "Demonstrably"
+ * means a body read within one server keepalive (30 s) plus grace: a
+ * half-open socket can stay `isStreaming` with no error indefinitely, and in
+ * that state this read is the only recovery, so it must stay fast. Without a
+ * proven stream, the read is also how a dropped stream is reattached and how a
+ * queued turn the server starts between streams is discovered.
+ */
+export const RUNTIME_SAFETY_POLL_MS = 15_000
+export const RUNTIME_STREAM_FRESH_MS = 35_000
+
+export function runtimeFastPollMs({ hasQueue = false } = {}) {
+  return hasQueue ? 1000 : 3000
+}
+
+export function runtimeStreamProvenHealthy({
+  isStreaming = false,
+  connectionError = null,
+  lastReadAt = 0,
+  now = Date.now(),
+} = {}) {
+  return Boolean(isStreaming && !connectionError && lastReadAt > 0
+    && now - lastReadAt < RUNTIME_STREAM_FRESH_MS)
+}
+
+export function runtimeFallbackPollMs({
+  hasQueue = false,
+  isStreaming = false,
+  connectionError = null,
+  lastReadAt = 0,
+  now = Date.now(),
+} = {}) {
+  return runtimeStreamProvenHealthy({ isStreaming, connectionError, lastReadAt, now })
+    ? RUNTIME_SAFETY_POLL_MS
+    : runtimeFastPollMs({ hasQueue })
+}
+
 export function runtimeSnapshot(value = {}) {
   const revision = value.runtime_revision ?? value.runtimeRevision
   if (!Number.isSafeInteger(revision) || revision < 0) return null

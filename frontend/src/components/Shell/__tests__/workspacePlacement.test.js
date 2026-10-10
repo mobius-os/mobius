@@ -819,3 +819,9 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
     'open chats and durable running chats reconcile even when run events were missed')
   assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{\s*onOpen: reconcileSystemStateOnOpen[,\s]/)
 })
+
+test('event-fed caches are invalidated on every stream open alongside durable app reconciliation', () => {
+  const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*?\.\.\.invalidateEventFedCaches\(queryClient\),\s*reconcileDeletedAppIdentities\(\)\.then\(\(\) => refreshApps\(/)
+  assert.doesNotMatch(shellSource, /invalidateRestoredEventFedCaches|PAGE_LOADED_AT/)
+})

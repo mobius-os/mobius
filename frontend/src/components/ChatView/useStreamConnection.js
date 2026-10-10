@@ -2117,5 +2117,9 @@ export default function useStreamConnection(chatId, {
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
+    // Last body read (keepalives included) on the current controller; 0 until
+    // the first read. Callers use it to tell a delivering stream from a
+    // half-open one that still reports isStreaming.
+    lastReadAtRef,
   }
 }

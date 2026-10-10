@@ -1,4 +1,5 @@
 import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListReconciliation.js'
+import { invalidateEventFedCaches } from './eventFedCaches.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
@@ -71,7 +72,6 @@ import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import {
-  invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
 } from '../ChatView/chatActivityQueries.js'
 import {
@@ -3341,13 +3341,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
-      modelQueries.registry.invalidate(queryClient),
-      authQueries.provider.statuses.invalidate(queryClient),
-      appSourceQueries.invalidate(queryClient),
-      chatAppArtifactQueries.invalidateAll(queryClient),
-      invalidateAllChatActivity(queryClient),
-      queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
-      queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
+      ...invalidateEventFedCaches(queryClient),
       reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
     ])
     await reconcileDeletedChatIdentities()
