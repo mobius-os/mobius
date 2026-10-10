@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -8602,3 +8603,61 @@ def test_stale_resolver_binding_blocks_current_revision_only_while_busy(
     assert db.get(models.App, apps[1][0]).conflict_resolver_chat_id == (
       chat_id if busy else None
     )
+
+
+@pytest.mark.parametrize("app_count", [1, 50])
+def test_conflict_resolver_prompt_bounds_paths_and_total_size(app_count):
+  from app.routes import apps as routes
+
+  paths = [f"{i:04}-" + "x" * 250 for i in range(1000)]
+  items = [
+    (models.App(name=f"App {i}"), Path(f"/data/apps/app-{i}"), paths, "2.0")
+    for i in range(app_count)
+  ]
+  prompt = routes._conflict_resolver_prompt(items)
+
+  assert len(prompt) <= routes._CONFLICT_RESOLVER_MAX_PROMPT_CHARS
+  assert "Run `git status` in each private checkout for the complete conflict list." in prompt
+  sections = prompt.split("## ")[1:]
+  assert len(sections) == app_count
+  shown_total = 0
+  for section, (_, repo, _, _) in zip(sections, items):
+    shown = sum(line.startswith("  - ") and "paths omitted" not in line
+                for line in section.splitlines())
+    assert shown <= routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+    assert f"({len(paths) - shown} paths omitted; use git status.)" in section
+    assert f"Finish with: python \"$SCRIPTS_DIR/resolve_app_update.py\" {repo}" in section
+    shown_total += shown
+  if app_count == 1:
+    assert shown_total == routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+  else:
+    assert shown_total < app_count * routes._CONFLICT_RESOLVER_MAX_PATHS_PER_APP
+
+
+def test_conflict_resolver_finish_command_preserves_complete_shell_quoted_path():
+  from app.routes import apps as routes
+
+  repo = Path("/data/owner's apps; $(touch unwanted)/" + "/".join(["x" * 100] * 3))
+  prompt = routes._conflict_resolver_prompt([
+    (models.App(name="App"), repo, [], None),
+  ])
+  command = next(line.removeprefix("Finish with: ") for line in prompt.splitlines()
+                 if line.startswith("Finish with: "))
+  assert len(str(repo)) > 240
+  assert command.endswith(shlex.quote(str(repo)))
+  assert shlex.split(command) == ["python", "$SCRIPTS_DIR/resolve_app_update.py", str(repo)]
+  assert "Nothing left to reconcile; just finish it." in prompt
+
+
+def test_conflict_resolver_prompt_rejects_oversized_metadata_without_truncating_commands():
+  from fastapi import HTTPException
+  from app.routes import apps as routes
+
+  items = [
+    (models.App(name=f"App {i}"), Path("/data/" + "/".join(["x" * 100] * 10) + f"/{i}"), [], None)
+    for i in range(50)
+  ]
+  with pytest.raises(HTTPException) as exc:
+    routes._conflict_resolver_prompt(items)
+  assert exc.value.status_code == 413
+  assert "select fewer apps" in exc.value.detail
