@@ -3059,6 +3059,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // copy, or a stale one, of a chat archived elsewhere.
       if (ev.chatId) refreshChatRows(ev.chatId)
       void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'chat_visibility_changed') {
+      // Membership comes from the scoped owner read, including an absent row
+      // when a companion hides its chat. Absence is not deletion evidence.
+      if (ev.chatId) refreshChatRows(ev.chatId)
     } else if (ev.type === 'chat_renamed') {
       // The committed event carries the exact changed row fields. Apply those
       // in place so renaming one chat cannot parse and reconcile all hundreds

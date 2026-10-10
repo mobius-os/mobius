@@ -889,6 +889,15 @@ class ActiveCodexTurn:
     return True
 
 
+_CODEX_MISSING_SESSION_PREFIXES = ("thread not found:", "no rollout found")
+
+
+def _codex_session_missing(exc: BaseException) -> bool:
+  """True when Codex rejected a thread id because it no longer exists."""
+  message = str(getattr(exc, "message", exc))
+  return message.startswith(_CODEX_MISSING_SESSION_PREFIXES)
+
+
 async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
   """Read a persisted goal before thread/resume can auto-start it."""
   response = await client.request(
@@ -1765,21 +1774,21 @@ async def _run_codex_sdk_turn(
           if persisted_goal is not None:
             await goal_client.thread_goal_clear(session_id)
         except sdk["InvalidRequestError"] as exc:
-          if not str(getattr(exc, "message", exc)).startswith("thread not found:"):
+          if not _codex_session_missing(exc):
             raise
 
-      if session_id is None:
-        thread = await codex.thread_start(
-          approval_mode=approval_mode,
-          sandbox=_sandbox,
-          base_instructions=base_instructions,
-          developer_instructions="",
-          config=connector_thread_config,
-          cwd=cwd,
-          model=model,
-          personality=sdk["Personality"].none,
-        )
-      else:
+      thread_options = dict(
+        approval_mode=approval_mode,
+        sandbox=_sandbox,
+        base_instructions=base_instructions,
+        developer_instructions="",
+        config=connector_thread_config,
+        cwd=cwd,
+        model=model,
+        personality=sdk["Personality"].none,
+      )
+      thread = None
+      if session_id is not None:
         # Resume parses the thread's persisted history, which can include
         # subAgentActivity items. The SDK's generated ThreadItem union models
         # that variant natively (openai-codex rust-v0.145.0-alpha.13+), so
@@ -1787,17 +1796,23 @@ async def _run_codex_sdk_turn(
         # _resume_codex_thread wrapper caught and worked around. Möbius uses only
         # the returned handle's id + turn() (it never re-renders resumed
         # history), so a native parse is a straight pass-through here.
-        thread = await codex.thread_resume(
-          session_id,
-          approval_mode=approval_mode,
-          sandbox=_sandbox,
-          base_instructions=base_instructions,
-          developer_instructions="",
-          config=connector_thread_config,
-          cwd=cwd,
-          model=model,
-          personality=sdk["Personality"].none,
-        )
+        try:
+          thread = await codex.thread_resume(session_id, **thread_options)
+        except sdk["InvalidRequestError"] as exc:
+          # Codex rejects a thread whose rollout file is gone (cleaned up to
+          # reclaim disk, or a phantom id). That is a lost session, not a
+          # failed turn: start a fresh thread, and the id-mismatch handling
+          # below reseeds it from the chat's own transcript (or, for a
+          # delegated write run, stops for review) exactly as when Codex
+          # itself hands back a different thread.
+          if not _codex_session_missing(exc):
+            raise
+          log.warning(
+            "Codex session %s has no rollout for chat %s; starting a fresh "
+            "thread", session_id, chat_id,
+          )
+      if thread is None:
+        thread = await codex.thread_start(**thread_options)
       record_memory_checkpoint_once(
         "codex_first_thread_ready",
         chat_id=chat_id,

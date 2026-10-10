@@ -14,6 +14,7 @@ function args(chatId, refs) {
     searchAnchorKey: null,
     searchRevealId: null,
     loadingOlderRef: refs.loading,
+    pageRef: refs.page,
     followupRafRef: refs.followup,
     retryRef: refs.retry,
   }
@@ -30,6 +31,7 @@ test('a chat-switch layout commit retires old pagination before passive cleanup'
   try {
     const refs = {
       loading: { current: true },
+      page: { current: null },
       followup: { current: 41 },
       retry: { current: { timer: 0, attempts: 0 } },
     }

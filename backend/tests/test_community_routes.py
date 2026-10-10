@@ -1032,6 +1032,186 @@ async def test_local_app_update_only_fast_forwards_its_managed_main(
   assert update_ref == {"sha": "e" * 40, "force": False}
 
 
+def _existing_repository_github(github_calls):
+  async def fake_github(client, method, path, *, body=None, allow_not_found=False):
+    github_calls.append((method, path, body))
+    if path == "/user":
+      return {"id": 77, "login": "octo-owner"}, 200
+    if path == "/repos/octo-owner/pocket-list":
+      return {
+        "full_name": "octo-owner/pocket-list",
+        "private": False,
+        "owner": {"id": 77},
+      }, 200
+    if path.endswith("/git/ref/heads/main"):
+      return {"object": {"sha": "d" * 40}}, 200
+    if path.endswith("/commits/" + "d" * 40):
+      return {"commit": {"message": "Hand-made commit"}}, 200
+    if path.endswith("/git/blobs"):
+      return {"sha": "1" * 40}, 201
+    if path.endswith("/git/trees"):
+      return {"sha": "b" * 40}, 201
+    if path.endswith("/git/commits"):
+      return {"sha": "e" * 40}, 201
+    if method == "PATCH" and path.endswith("/git/refs/heads/main"):
+      return {"object": {"sha": body["sha"]}}, 200
+    raise AssertionError((method, path, body, allow_not_found))
+  return fake_github
+
+
+def _patch_existing_repository_publication(monkeypatch, github_calls, *, in_history):
+  class Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_):
+      return None
+
+  @asynccontextmanager
+  async def source_lock(_):
+    yield
+
+  async def fake_broker(method, path, **kwargs):
+    return {"issuer": "https://www.mobius.you", "subject": "user_owner"}, 200, {}
+
+  async def fake_prepare(body, key, *, local_app_id=""):
+    return {
+      "github": {
+        "repository": body.repository,
+        "commit_sha": "f" * 40,
+        "manifest_path": body.manifest_path,
+      },
+      "local_app_id": local_app_id,
+    }, key
+
+  async def fake_host(*_args, **_kwargs):
+    return SimpleNamespace(status_code=201, headers={})
+
+  history_checks = []
+
+  def fake_history(app, accepted_commit, commit):
+    history_checks.append((app.id, accepted_commit, commit))
+    return in_history
+
+  monkeypatch.setattr(community.github_auth, "get_token", lambda: "local-only-token")
+  monkeypatch.setattr(community.community_broker, "request", fake_broker)
+  monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
+  monkeypatch.setattr(
+    community, "build_public_snapshot",
+    lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
+  )
+  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
+  monkeypatch.setattr(
+    community, "_github_json",
+    _existing_repository_github(github_calls),
+  )
+  monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
+  monkeypatch.setattr(community, "_request", fake_host)
+  monkeypatch.setattr(community, "accepted_history_contains", fake_history)
+  return history_checks
+
+
+@pytest.mark.asyncio
+async def test_existing_repository_from_the_apps_own_history_is_continued(
+  monkeypatch, db,
+):
+  github_calls = []
+  _local_app(db)
+  history_checks = _patch_existing_repository_publication(
+    monkeypatch, github_calls, in_history=True,
+  )
+
+  await community.publish_local_app_to_github(
+    community.PublishLocalGitHubAppIn(
+      app_id=42, repository_name="pocket-list", confirm_source_public=True,
+    ),
+    db,
+    "owner",
+    "store:publish-local:000000000004",
+  )
+
+  assert history_checks == [(42, "a" * 40, "d" * 40)]
+  source_commit = next(
+    body for method, path, body in github_calls
+    if method == "POST" and path.endswith("/git/commits")
+  )
+  update_ref = next(
+    body for method, path, body in github_calls
+    if method == "PATCH" and path.endswith("/git/refs/heads/main")
+  )
+  assert source_commit["parents"] == ["d" * 40]
+  assert (
+    community._local_repository_marker(
+      issuer="https://www.mobius.you",
+      subject="user_owner",
+      repository="octo-owner/pocket-list",
+      local_app_id="app:42:pocket-list",
+    ) in source_commit["message"]
+  )
+  assert update_ref == {"sha": "e" * 40, "force": False}
+
+
+@pytest.mark.asyncio
+async def test_existing_repository_outside_the_apps_history_is_refused(
+  monkeypatch, db,
+):
+  github_calls = []
+  _local_app(db)
+  _patch_existing_repository_publication(
+    monkeypatch, github_calls, in_history=False,
+  )
+
+  with pytest.raises(HTTPException) as caught:
+    await community.publish_local_app_to_github(
+      community.PublishLocalGitHubAppIn(
+        app_id=42, repository_name="pocket-list", confirm_source_public=True,
+      ),
+      db,
+      "owner",
+      "store:publish-local:000000000005",
+    )
+
+  assert caught.value.status_code == 409
+  assert "not part of this app's history" in str(caught.value.detail)
+  assert not any(method != "GET" for method, _, _ in github_calls)
+
+
+def test_accepted_history_contains_only_ancestors_of_the_accepted_revision(tmp_path):
+  import subprocess
+
+  repo = tmp_path / "app"
+  repo.mkdir()
+
+  def git(*args):
+    return subprocess.run(
+      ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+      env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    ).stdout.strip()
+
+  git("init", "-q", "-b", "main")
+  (repo / "a.txt").write_text("one")
+  git("add", "a.txt")
+  git("commit", "-qm", "one")
+  first = git("rev-parse", "HEAD")
+  (repo / "a.txt").write_text("two")
+  git("commit", "-qam", "two")
+  accepted = git("rev-parse", "HEAD")
+  git("checkout", "-q", "--orphan", "other")
+  (repo / "a.txt").write_text("unrelated")
+  git("commit", "-qam", "unrelated")
+  unrelated = git("rev-parse", "HEAD")
+  git("checkout", "-q", "main")
+
+  app = SimpleNamespace(source_dir=str(repo))
+  assert community_publish.accepted_history_contains(app, accepted, first)
+  assert community_publish.accepted_history_contains(app, accepted, accepted)
+  assert not community_publish.accepted_history_contains(app, first, accepted)
+  assert not community_publish.accepted_history_contains(app, accepted, unrelated)
+  assert not community_publish.accepted_history_contains(app, accepted, "0" * 40)
+
+
 @pytest.mark.asyncio
 async def test_install_receipt_keeps_exact_revision_available(monkeypatch):
   captured = {}

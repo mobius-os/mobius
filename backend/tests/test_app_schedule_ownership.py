@@ -1,11 +1,14 @@
 """Owner timezone and schedule provenance across app updates."""
 
+import os
 from pathlib import Path
 
+import pytest
 from sqlalchemy.orm import Session
 
-from app import app_cron
+from app import app_cron, app_git, models
 from app.app_cron import ScheduleChoice
+from app.config import get_settings
 
 
 def test_owner_timezone_is_recorded_validated_and_readable(client, auth):
@@ -178,3 +181,161 @@ def test_declaration_without_provenance_is_never_adopted_as_the_owners():
   _write_zone_declaration(9115, "memory", "Asia/Tokyo", "30 5 * * *")
 
   assert app_cron.owner_schedule_to_keep(9115, "30 5 * * *", "fetch.sh") is None
+
+
+def test_rollback_restores_the_prior_choice_when_registration_fails():
+  _owner_daily(9116)
+  prior = app_cron.read_schedule_choice(9116)
+
+  with pytest.raises(RuntimeError, match="registration failed"):
+    with app_cron.schedule_choice_rollback(9116):
+      app_cron.record_schedule_choice(9116, ScheduleChoice(
+        source="owner", cron="0 3 * * *", job="fetch.sh",
+      ))
+      raise RuntimeError("registration failed")
+
+  assert app_cron.read_schedule_choice(9116) == prior
+
+
+def test_rollback_leaves_no_provenance_where_there_was_none():
+  with app_cron.schedule_choice_rollback(9117):
+    app_cron.record_schedule_choice(9117, ScheduleChoice(
+      source="owner", cron="0 3 * * *", job="fetch.sh",
+    ))
+  assert app_cron.read_schedule_choice(9117) is not None
+
+  with pytest.raises(RuntimeError, match="registration failed"):
+    with app_cron.schedule_choice_rollback(9118):
+      app_cron.record_schedule_choice(9118, ScheduleChoice(
+        source="owner", cron="0 3 * * *", job="fetch.sh",
+      ))
+      raise RuntimeError("registration failed")
+
+  assert app_cron.read_schedule_choice(9118) is None
+
+
+@pytest.fixture
+def scheduled_app(db):
+  """One installed app whose accepted revision carries a job script."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "schedule-rollback"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  app = models.App(
+    name="Schedule rollback", description="", slug="schedule-rollback",
+    source_dir=str(source_dir), jsx_source="export default () => null",
+    token_nonce="schedule-rollback-nonce",
+  )
+  db.add(app)
+  db.flush()
+  app_git.ensure_repo(source_dir)
+  app_git.commit_local(source_dir, "Accept schedule fixture")
+  app.source_commit = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  from app.applied_app_runtime import prepare_runtime, publish_runtime
+  publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
+  db.commit()
+  return app
+
+
+def test_a_schedule_save_that_failed_is_never_applied_by_a_later_update(
+  client, auth, scheduled_app, monkeypatch,
+):
+  """The owner was told the save failed, so no update may adopt that time."""
+  def refuse(*_args, **_kwargs):
+    raise app_cron.CronInfrastructureError(500, "Could not save schedule.")
+
+  monkeypatch.setattr(app_cron, "register_cron", refuse)
+
+  response = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "15 7 * * *", "job": "fetch.sh"}, headers=auth,
+  )
+
+  assert response.status_code == 500, response.text
+  assert app_cron.read_schedule_choice(scheduled_app.id) is None
+  assert app_cron.owner_schedule_to_keep(
+    scheduled_app.id, "0 6 * * *", "fetch.sh",
+  ) is None
+
+
+def _fake_crontab(tmp_path: Path, monkeypatch) -> Path:
+  """A crontab whose reads work and whose writes fail while ``fail`` exists."""
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  state = tmp_path / "crontab.txt"
+  state.write_text("")
+  fail = tmp_path / "crontab-fail"
+  crontab = fake_bin / "crontab"
+  crontab.write_text(
+    "#!/bin/sh\n"
+    f"state={state}\n"
+    "if [ \"$1\" = \"-u\" ]; then shift 2; fi\n"
+    "case \"$1\" in\n"
+    "  -l) [ -f \"$state\" ] && cat \"$state\" || exit 1 ;;\n"
+    f"  -) [ -e {fail} ] && exit 1; cat > \"$state\" ;;\n"
+    "  *) exit 2 ;;\n"
+    "esac\n",
+  )
+  crontab.chmod(0o755)
+  monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+  monkeypatch.setenv("MOBIUS_ALLOW_TEST_CRON", "1")
+  app_base = tmp_path / "apps"
+  for slug in ("rollback-real", "rollback-fresh"):
+    (app_base / slug).mkdir(parents=True)
+  monkeypatch.setenv("MOBIUS_APP_BASE", str(app_base))
+  monkeypatch.delenv("MOBIUS_TEST_RUNTIME", raising=False)
+  return fail
+
+
+def test_rollback_restores_the_durable_declaration_when_only_the_live_write_fails(
+  tmp_path, monkeypatch,
+):
+  """The real scaffold writes init-cron.sh before the live crontab, so a
+  failed live write leaves the new declaration unless the rollback undoes it."""
+  fail = _fake_crontab(tmp_path, monkeypatch)
+  app_id = 9119
+  job = tmp_path / "fetch.sh"
+  job.write_text("#!/bin/sh\n", encoding="utf-8")
+  init_path = app_cron.schedule_state_dir(app_id) / "init-cron.sh"
+
+  def save(cron: str) -> None:
+    with app_cron.schedule_choice_rollback(app_id):
+      app_cron.record_schedule_choice(app_id, ScheduleChoice(
+        source="owner", cron=cron, job="fetch.sh",
+      ))
+      app_cron.register_cron("rollback-real", cron, job, app_id)
+
+  save("0 6 * * *")
+  kept_choice = app_cron.read_schedule_choice(app_id)
+  kept_init = init_path.read_bytes()
+  assert "0 6 * * *" in kept_init.decode()
+
+  fail.touch()
+  with pytest.raises(app_cron.CronInfrastructureError):
+    save("7 15 * * *")
+
+  assert app_cron.read_schedule_choice(app_id) == kept_choice
+  assert init_path.read_bytes() == kept_init
+
+  # First-ever save that fails leaves neither file behind.
+  with pytest.raises(app_cron.CronInfrastructureError):
+    with app_cron.schedule_choice_rollback(9120):
+      app_cron.record_schedule_choice(9120, ScheduleChoice(
+        source="owner", cron="7 15 * * *", job="fetch.sh",
+      ))
+      app_cron.register_cron("rollback-fresh", "7 15 * * *", job, 9120)
+  assert app_cron.read_schedule_choice(9120) is None
+  assert not (app_cron.schedule_state_dir(9120) / "init-cron.sh").exists()
+
+
+def test_a_failing_rollback_never_replaces_the_original_error(monkeypatch):
+  def broken(*_args, **_kwargs):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(app_cron, "_restore_schedule_file", broken)
+
+  with pytest.raises(RuntimeError, match="registration failed"):
+    with app_cron.schedule_choice_rollback(9121):
+      app_cron.record_schedule_choice(9121, ScheduleChoice(
+        source="owner", cron="0 3 * * *", job="fetch.sh",
+      ))
+      raise RuntimeError("registration failed")

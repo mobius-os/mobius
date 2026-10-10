@@ -2068,6 +2068,8 @@ class ContributionAutopilot(Base):
     String(64), ForeignKey("chats.id"), nullable=True, default=None
   )
   rounds_used = Column(Integer, nullable=False, default=0)
+  # Retired: follow-up has no round budget. Kept only because existing
+  # databases declare it NOT NULL; nothing reads it.
   max_rounds = Column(Integer, nullable=False, default=5)
   # Consecutive non-productive rounds (stale/failed); 2 in a row auto-escalates.
   consecutive_failures = Column(Integer, nullable=False, default=0)

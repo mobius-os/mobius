@@ -833,6 +833,27 @@ def test_compile_failure_keeps_previous_live_revision(client, auth, db):
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head
 
 
+def test_compile_failure_reports_the_error_and_location_without_colour(client, auth):
+  source = _source()
+  _apply(client, auth, source)
+  # The compiler colours every character of a quoted source line, so one long
+  # line used to push the error header past the response's tail cap.
+  style = ", ".join(f"key{i}: 'value {i}'" for i in range(20))
+  (source / "index.jsx").write_text(
+    "export default function App() {\n"
+    f"  return <div style={{{{{style}}}}}>Hello {{ </div>\n"
+    "}\n"
+  )
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  stderr = failed.json()["detail"]["stderr"]
+  assert "\x1b" not in stderr
+  assert "PARSE_ERROR" in stderr
+  assert "─[ index.jsx:" in stderr
+
+
 def test_invalid_manifest_keeps_previous_live_revision(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)

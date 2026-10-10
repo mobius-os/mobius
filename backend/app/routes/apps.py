@@ -23,8 +23,8 @@ from sqlalchemy.orm import Session, defer
 from app import chat_writer
 from app import transcript_rows
 from app import (
-  activity, app_activity, app_apply, app_badge, app_capability_acceptance, app_git,
-  app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  activity, app_activity, app_apply, app_badge, app_capability_acceptance, app_cron,
+  app_git, app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
   icon_cache, models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
@@ -52,6 +52,7 @@ from app.storage_io import (
   require_parent_folders,
   rmtree_strict as _rmtree_strict,
 )
+from app.terminal_output import readable_output
 from app.app_capabilities import (
   contract_and_digest, contract_from_manifest, diff_contracts,
 )
@@ -616,7 +617,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     resolved_source = _resolve_app_source_dir(app_source_dir)
     async with fs_locks.source_dir_lock(str(resolved_source)):
       if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
-        await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+        await app_cron.run_schedule_mutation(
+          _drop_cron_and_rmtree, resolved_source,
+        )
   except Exception:
     log.exception(
       "Hard-deleted app %s but could not remove its retired source tree",
@@ -1880,9 +1883,11 @@ async def apply_app_source(
         "code": "compile_failed",
         "message": str(exc),
       }
-      stderr = exc.stderr.strip()
+      # Strip colour before capping: escape codes inflate the text several
+      # times over, so a raw tail can lose the error line and its location.
+      stderr = readable_output(exc.stderr, limit=4000)
       if stderr:
-        detail["stderr"] = stderr[-4000:]
+        detail["stderr"] = stderr
       raise HTTPException(status_code=422, detail=detail) from exc
 
   async with fs_locks.install_uninstall_lock():
@@ -2906,7 +2911,7 @@ async def delete_app(
     try:
       resolved_source = _resolve_app_source_dir(app_source_dir)
       async with fs_locks.source_dir_lock(str(resolved_source)):
-        await asyncio.to_thread(_drop_cron_only, resolved_source)
+        await app_cron.run_schedule_mutation(_drop_cron_only, resolved_source)
     except Exception:
       log.exception(
         "App %s was deleted but its source cron could not be disabled",
@@ -3134,7 +3139,9 @@ async def recover_app(
     try:
       resolved_source = _resolve_app_source_dir(app_source_dir)
       async with fs_locks.source_dir_lock(str(resolved_source)):
-        await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
+        await app_cron.run_schedule_mutation(
+          _reenable_init_cron_replay, resolved_source,
+        )
     except Exception:
       log.exception(
         "App %s was recovered but its cron declaration could not be restored",
@@ -3151,7 +3158,7 @@ async def recover_app(
         cron_db.close()
 
     try:
-      _cron_count, _cron_warnings, _cron_infrastructure_ready = await asyncio.to_thread(
+      _cron_count, _cron_warnings, _cron_infrastructure_ready = await app_cron.run_schedule_mutation(
         _reconcile_recovered_cron,
       )
       if _cron_count:
