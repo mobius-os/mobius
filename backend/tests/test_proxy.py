@@ -206,7 +206,7 @@ def test_proxy_post_allows_opaque_app_frame_request(
     ),
   )
 
-  async def fake_capped_response(_client, _req):
+  async def fake_capped_response(_client, _req, _url):
     return Response(content=b"ok", media_type="text/plain")
 
   monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
@@ -277,7 +277,7 @@ def test_proxy_post_passes_sni_hostname_as_text(
     assert url == "https://example.com/data"
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, req):
+  async def fake_capped_response(_client, req, _url):
     assert req.extensions["sni_hostname"] == "example.com"
     assert isinstance(req.extensions["sni_hostname"], str)
     return Response(content=b"ok", media_type="text/plain")
@@ -309,7 +309,7 @@ def test_proxy_sends_identifiable_user_agent(client, owner_token, monkeypatch):
   def fake_validate_url_safe(url):
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, req):
+  async def fake_capped_response(_client, req, _url):
     seen.append(req.headers.get("user-agent"))
     return Response(content=b"ok", media_type="text/plain")
 
@@ -365,6 +365,7 @@ def test_proxy_forwards_rate_limit_headers():
 
   response = asyncio.run(_capped_response(
     _Client(), httpx.Request("POST", "https://example.com/"),
+    "https://example.com/",
   ))
   assert response.status_code == 429
   assert response.headers["retry-after"] == "60"
@@ -569,6 +570,7 @@ def test_proxy_post_and_public_transport_truncate_oversized_response(public_tran
     _Client(), httpx.Request(
       "GET" if public_transport else "POST", "https://example.com/",
     ),
+    "https://example.com/",
     forward_cache_headers=public_transport,
   ))
   assert response.status_code == 200
@@ -594,14 +596,18 @@ def test_proxy_post_and_public_transport_classify_midstream_failure_and_close(
     async def send(self, req, stream=True):
       return upstream
 
+  # The request targets the DNS-pinned address; errors name the caller's URL.
   with pytest.raises(HTTPException) as raised:
     asyncio.run(_capped_response(
       _Client(), httpx.Request(
-        "GET" if public_transport else "POST", "https://example.com/",
+        "GET" if public_transport else "POST", "https://93.184.216.34/v1",
       ),
+      "https://example.com/v1",
       forward_cache_headers=public_transport,
     ))
   assert raised.value.status_code == status
+  assert "https://example.com/v1" in raised.value.detail
+  assert "93.184.216.34" not in raised.value.detail
   assert upstream.closed
 
 
@@ -788,6 +794,7 @@ def test_proxy_returns_exact_cap_without_waiting_for_stalled_upstream(
         fake_client(), httpx.Request(
           "POST" if consumer == "post" else "GET", "https://site.example/body",
         ),
+        "https://site.example/body",
         forward_cache_headers=consumer == "public_transport",
       )
     return await asyncio.wait_for(operation, timeout=1)

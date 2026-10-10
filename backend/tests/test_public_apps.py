@@ -206,7 +206,7 @@ def test_public_fetch_enforces_path_query_contract_and_exact_app_token(
 
   clients = []
 
-  async def fake_response(_client, _request, **_kwargs):
+  async def fake_response(_client, _request, _url, **_kwargs):
     clients.append(_client)
     return Response(
       b"ok", media_type="text/plain", headers={"Cache-Control": "max-age=60"},

@@ -268,21 +268,23 @@ async def _first_supported_icon(
 async def _capped_response(
   client: httpx.AsyncClient,
   req: httpx.Request,
+  url: str,
   *,
   forward_cache_headers: bool = False,
 ) -> Response:
   """Sends `req` streaming and reads at most `_MAX_BYTES` into memory.
 
-  Reading the full body (`r.content`) before checking would let a huge or
-  malicious upstream exhaust process memory before the cap applied."""
+  `url` is the caller's address; `req` targets its DNS-pinned IP, which errors
+  must not show. Reading the full body (`r.content`) before checking would let
+  a huge or malicious upstream exhaust process memory before the cap applied."""
   try:
     r = await client.send(req, stream=True)
   except httpx.RequestError as exc:
-    raise _fetch_error(str(req.url), exc) from exc
+    raise _fetch_error(url, exc) from exc
   except Exception as exc:
     raise HTTPException(status_code=502, detail=str(exc))
   try:
-    body = await _read_bounded_body(r, _MAX_BYTES, str(req.url))
+    body = await _read_bounded_body(r, _MAX_BYTES, url)
     headers = {
       name: r.headers[name]
       for name in _FORWARDED_RESPONSE_HEADERS
@@ -402,4 +404,4 @@ async def proxy_post(
     req.headers["host"] = host_header
     req.headers["user-agent"] = _PROXY_USER_AGENT
     req.extensions["sni_hostname"] = sni_host
-    return await _capped_response(client, req)
+    return await _capped_response(client, req, body.url)

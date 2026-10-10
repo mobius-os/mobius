@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Mapping
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -863,7 +863,10 @@ class _PackageDownload:
     data = self._files.get(rel)
     if data is None:
       try:
-        data = await _http_get(self._client, self._raw_base + rel, remaining)
+        # Declared names are literal paths; encode them (e.g. `%`, spaces).
+        data = await _http_get(
+          self._client, self._raw_base + quote(rel), remaining,
+        )
       except HTTPException as exc:
         if exc.status_code != 413:
           raise

@@ -1954,6 +1954,25 @@ def test_install_rejects_decompression_bomb_icon(client, auth, bypass_url_valida
 
 
 @pytest.mark.asyncio
+async def test_package_download_encodes_literal_declared_names(monkeypatch):
+  """Declared names are literal paths; HTTP installs must request them encoded."""
+  requested = []
+
+  async def fake_get(_client, url, _max_bytes, _hops=0):
+    requested.append(url)
+    return b"x"
+
+  monkeypatch.setattr(install, "_http_get", fake_get)
+  download = install._PackageDownload(object(), "https://raw.example/app/")
+  await download.read("assets/100%.png")
+  await download.read("a b.js")
+  assert requested == [
+    "https://raw.example/app/assets/100%25.png",
+    "https://raw.example/app/a%20b.js",
+  ]
+
+
+@pytest.mark.asyncio
 async def test_http_get_passes_sni_hostname_as_text(monkeypatch):
   """The live httpcore/anyio stack requires str, not pre-encoded bytes."""
   from app import install
