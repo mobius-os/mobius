@@ -354,12 +354,15 @@ clear_stale_browser_profile_lock() {
     # not establish profile ownership: verify the exact browser root and its
     # user-data-dir before retaining the lock. Unreadable process state is
     # uncertain, so leave the lock untouched rather than risk a live profile.
-    if python3 - "$owner_pid" "$AGENT_BROWSER_PROFILE" <<'PYOWNER'
+    if python3 - "$owner_pid" "$AGENT_BROWSER_PROFILE" \
+      "$(dirname "${BASH_SOURCE[0]}")/.." <<'PYOWNER'
 import os
 from pathlib import Path
 import sys
 
-pid, profile = sys.argv[1:]
+pid, profile, backend = sys.argv[1:]
+sys.path.insert(0, backend)
+from app.browser_processes import BROWSER_EXECUTABLES
 try:
   args = (Path('/proc') / pid / 'cmdline').read_bytes().split(b'\0')
 except FileNotFoundError:
@@ -369,7 +372,7 @@ except OSError:
 args = [a.decode('utf-8', errors='surrogateescape') for a in args if a]
 if not args:
   raise SystemExit(1)
-browser = Path(args[0]).name in {'chrome', 'chromium', 'chromium-browser'}
+browser = Path(args[0]).name in BROWSER_EXECUTABLES
 directory = next((arg.split('=', 1)[1] for arg in args
                   if arg.startswith('--user-data-dir=')), None)
 if directory is None and '--user-data-dir' in args:

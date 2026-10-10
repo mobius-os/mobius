@@ -522,6 +522,19 @@ def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
   assert "theming.md" in visual
 
 
+def test_visual_testing_explains_full_chrome_is_unavailable_on_small_servers():
+  repo = Path(__file__).resolve().parents[2]
+  visual = (
+    repo / "backend" / "scripts" / "seed-skills" / "visual-testing.md"
+  ).read_text(encoding="utf-8")
+
+  assert "**headless shell**" in visual
+  assert "cat /sys/fs/cgroup/memory.max" in visual
+  assert "**Below 2 GiB\n(2147483648), do not start it:**" in visual
+  assert 'AGENT_BROWSER_EXECUTABLE_PATH="$FULL_CHROME"' in visual
+  assert 'AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-full"' in visual
+
+
 def test_visual_testing_selector_guidance_requires_observed_evidence():
   repo = Path(__file__).resolve().parents[2]
   visual = (

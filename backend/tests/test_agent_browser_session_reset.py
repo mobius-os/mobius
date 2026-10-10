@@ -38,6 +38,18 @@ def test_exact_profile_includes_helpers_but_not_foreign_profile(tmp_path):
   assert scan.targets == frozenset({RESET.BrowserSessionTarget("owned")})
 
 
+def test_default_headless_shell_tree_is_owned_like_chrome(tmp_path):
+  profile = str(tmp_path / "profile")
+  shell = "/opt/agent-browser/browsers/headless-shell/chrome-headless-shell"
+  _write_process(tmp_path, 100, args=("/opt/agent-browser-linux-x64",),
+                 environment={"AGENT_BROWSER_PROFILE": profile, "AGENT_BROWSER_SESSION": "owned"})
+  _write_process(tmp_path, 101, ppid=100, args=(shell, f"--user-data-dir={profile}"))
+  _write_process(tmp_path, 102, ppid=101, args=(shell, "--type=renderer"))
+  scan = RESET.scan_browser_processes(profile=profile, proc_root=tmp_path)
+  assert scan.complete
+  assert _pids(scan) == [100, 101, 102]
+
+
 @pytest.mark.parametrize("kind", ["daemon", "browser"])
 def test_ambiguous_profile_ownership_is_never_guessed(tmp_path, kind):
   profile = str(tmp_path / "profile")

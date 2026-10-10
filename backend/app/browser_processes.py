@@ -15,8 +15,11 @@ import time
 PROC_ROOT = Path('/proc')
 PF_KTHREAD = 0x00200000  # Linux /proc/<pid>/stat field 9.
 DAEMONS = frozenset({'agent-browser-linux-x64', 'agent-browser-linux-arm64'})
-BROWSERS = frozenset({'chrome', 'chromium', 'chromium-browser',
-                     'chrome_crashpad_handler', 'crashpad_handler'})
+# Every browser executable the image can launch for agent-browser, including
+# the default Chrome for Testing headless shell (see Dockerfile).
+BROWSER_EXECUTABLES = frozenset({'chrome', 'chrome-headless-shell', 'chromium',
+                                 'chromium-browser'})
+BROWSERS = BROWSER_EXECUTABLES | {'chrome_crashpad_handler', 'crashpad_handler'}
 
 
 class SessionResetError(RuntimeError):

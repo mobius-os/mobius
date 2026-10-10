@@ -129,9 +129,42 @@ Take fewer, purposeful captures rather than many near-identical ones.
 A timed-out `--current-page` capture cleans up its poisoned browser but cannot
 restore injected CSS or unsaved page state; prepare that state again explicitly.
 
+## Which browser runs
+
+On amd64 images agent-browser uses Chrome for Testing's **headless shell** by
+default: Chrome's rendering engine without the full browser, light enough for
+a 1 GB server. It covers the screenshot tool, app frames, snapshots, clicks,
+scripts, PDF output, offline mode, and tabs. arm64 images use Debian's
+Chromium instead.
+
+Full Chrome stays installed for what only it does: browser extensions and
+full-browser features such as its built-in PDF viewer. It needs roughly
+500 MB on top of the server and agents, so check the container limit first
+with `cat /sys/fs/cgroup/memory.max` (`max` means unlimited). **Below 2 GiB
+(2147483648), do not start it:** it thrashes memory, times out, and slows
+every other chat. Tell the owner plainly that the task needs full Chrome,
+how much memory their server has, that full Chrome needs about 500 MB of it,
+and that raising the server's memory to 2 GB would make it possible. Keep
+using the default browser for everything else. If the owner still asks you
+to try, warn once, then proceed.
+
+Use full Chrome in its own session and throwaway profile, so the default
+session keeps its identity, and close it when done:
+
+```bash
+FULL_CHROME="$(ls -d /opt/agent-browser/browsers/chrome-*/chrome | head -n 1)"
+full() {
+  AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-full" \
+  AGENT_BROWSER_PROFILE="$TMPDIR/full-chrome-profile" \
+  AGENT_BROWSER_EXECUTABLE_PATH="$FULL_CHROME" agent-browser "$@"
+}
+full open <url>
+full close   # if it hangs: python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "$TMPDIR/full-chrome-profile"
+```
+
 ## Close the browser session when you are done
 
-`agent-browser` leaves a full Chrome tree alive after the turn. Close the
+`agent-browser` leaves its browser process tree alive after the turn. Close the
 session in the same turn you finish visual work; do not retain it in case of a
 follow-up. If it cannot close cleanly, name the profile
 (`/data/agent-browser-profiles/chat-<chat-id>`) for the next agent. When graceful close fails, use

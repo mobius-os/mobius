@@ -266,17 +266,48 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   for package in ("jq", "ripgrep", "sqlite3", "unzip"):
     assert re.search(rf"\b{package}\b", apt_layer)
   # The image-owned agent-browser config registers nothing a workspace could
-  # extend: empty on amd64, and only the image's own Chromium on arm64.
+  # extend: it names only a browser the image itself installed.
   config_layer = dockerfile[
     dockerfile.index("RUN install -d -m 0755 /app"):
     dockerfile.index("chmod 0644 /app/agent-browser-config.json")
   ]
   assert "printf '{\"executablePath\": \"/usr/bin/chromium\"}\\n';" in config_layer
-  assert "printf '{}\\n';" in config_layer
   assert "fi > /app/agent-browser-config.json" in config_layer
   assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
+
+
+def test_amd64_agents_default_to_the_headless_shell_matching_full_chrome():
+  """A 1 GB container cannot start full Chrome; the lean shell must be default.
+
+  Full Chrome stays installed for full-browser features, so the shell is
+  downloaded for exactly the version `agent-browser install` fetched and is
+  kept out of agent-browser's own `chrome-*` discovery.
+  """
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  shell = "/browsers/headless-shell/chrome-headless-shell"
+  install_layer = dockerfile[
+    dockerfile.index("# System deps and global npm packages"):
+    dockerfile.index("# tectonic is a server-side subprocess")
+  ]
+  assert "agent-browser install" in install_layer
+  assert '[ "$#" -eq 1 ]' in install_layer
+  assert (
+    "chrome-for-testing-public/${chrome_version}/linux64/"
+    "chrome-headless-shell-linux64.zip"
+  ) in install_layer
+  assert f'/root/.agent-browser{shell} --version' in install_layer
+  assert 'grep -F "$chrome_version"' in install_layer
+
+  config_layer = dockerfile[
+    dockerfile.index("RUN install -d -m 0755 /app"):
+    dockerfile.index("chmod 0644 /app/agent-browser-config.json")
+  ]
+  assert (
+    f"printf '{{\"executablePath\": \"/opt/agent-browser{shell}\"}}\\n';"
+  ) in config_layer
+  assert "printf '{}\\n';" not in config_layer
 
 
 def test_tectonic_release_is_verified_for_supported_image_architectures():

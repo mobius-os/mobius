@@ -354,16 +354,19 @@ def test_recycled_local_profile_lock_pid_is_cleared(tmp_path: Path):
   )
 
 
-def test_live_local_chromium_profile_lock_is_preserved(tmp_path: Path):
+@pytest.mark.parametrize("browser", ["chrome", "chrome-headless-shell"])
+def test_live_local_chromium_profile_lock_is_preserved(tmp_path: Path, browser):
   profile = tmp_path / "browser-profile"
   owner = subprocess.Popen(
-    ["bash", "-c", "exec -a chrome python3 -c 'import time; time.sleep(30)' "
+    ["bash", "-c", f"exec -a {browser} python3 -c 'import time; time.sleep(30)' "
      '"--user-data-dir=$1"', "bash", str(profile)],
   )
   try:
     # Wait for exec to replace bash so the lock target names the live browser.
     for _ in range(100):
-      if (Path("/proc") / str(owner.pid) / "cmdline").read_bytes().startswith(b"chrome\0"):
+      if (Path("/proc") / str(owner.pid) / "cmdline").read_bytes().startswith(
+        f"{browser}\0".encode()
+      ):
         break
       time.sleep(0.01)
     result, output, marker, _ = _run_helper(
@@ -413,7 +416,7 @@ def test_unreadable_profile_owner_state_does_not_authorize_lock_removal(monkeypa
     raise PermissionError("cannot inspect process")
 
   monkeypatch.setattr(Path, "read_bytes", unreadable)
-  monkeypatch.setattr(sys, "argv", ["-", "123", "/tmp/profile"])
+  monkeypatch.setattr(sys, "argv", ["-", "123", "/tmp/profile", str(SCRIPT.parents[1])])
   with pytest.raises(SystemExit) as stopped:
     exec(compile(probe, str(SCRIPT), "exec"), {})
   assert stopped.value.code == 0  # retain the lock when ownership is unknown
