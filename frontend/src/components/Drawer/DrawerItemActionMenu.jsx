@@ -9,7 +9,7 @@ import {
   consumeMenuClick,
   finishMenuPress,
 } from './menuPointerOwnership.js'
-import { Archive, Pin, PinFilled, Unarchive } from '@openai/apps-sdk-ui/components/Icon'
+import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
@@ -303,20 +303,6 @@ export default function DrawerItemActionMenu({
                   <span>{pinned ? 'Unpin' : 'Pin'}</span>
                 </button>
               )}
-              {onArchive && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="drawer__item-action-item drawer__item-action-item--icon"
-                  // The row moves sections, so focus cannot return to it.
-                  onClick={() => run(onArchive, { restoreFocus: false })}
-                >
-                  {archived
-                    ? <Unarchive width={15} height={15} aria-hidden="true" />
-                    : <Archive width={15} height={15} aria-hidden="true" />}
-                  <span>{archived ? 'Restore' : 'Archive'}</span>
-                </button>
-              )}
               <button
                 type="button"
                 role="menuitem"
@@ -366,6 +352,17 @@ export default function DrawerItemActionMenu({
                 </button>
               )}
               <div className="drawer__item-action-separator" role="separator" />
+              {onArchive && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="drawer__item-action-item"
+                  // The row moves sections, so focus cannot return to it.
+                  onClick={() => run(onArchive, { restoreFocus: false })}
+                >
+                  {archived ? 'Restore' : 'Archive'}
+                </button>
+              )}
               <button
                 type="button"
                 role="menuitem"

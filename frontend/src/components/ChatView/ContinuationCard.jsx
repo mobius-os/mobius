@@ -10,6 +10,7 @@ export default function ContinuationCard({ msg }) {
     ? 'Continuing Goal'
     : manual ? 'Resumed manually' : 'Resumed automatically'
   const subtitle = {
+    manual: 'Interrupted work continued',
     restart: 'Server restarted — continuing automatically',
     usage_limit: 'Retry check due — trying the provider again',
     memory: 'Memory freed up — continuing automatically',

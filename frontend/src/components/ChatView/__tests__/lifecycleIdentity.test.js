@@ -97,3 +97,11 @@ test('provider-limit continuation reports a retry without promising availability
  assert.match(html, /Retry check due — trying the provider again/)
  assert.doesNotMatch(html, /[Uu]sage available|[Ll]imit (has )?reset|[Qq]uota restored/)
 })
+
+// Manual and automatic recovery each leave one durable product notice.
+test('manual continuation records interrupted work without another pause card', () => {
+ const html = render(h(Resume, { msg: { continuation_reason: 'manual' } }))
+ assert.match(html, /Resumed manually/)
+ assert.match(html, /Interrupted work continued/)
+ assert.doesNotMatch(html, /Paused · Continued|automatically|>Resume</)
+})

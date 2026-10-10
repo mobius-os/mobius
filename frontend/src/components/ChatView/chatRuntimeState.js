@@ -62,11 +62,9 @@ export function chatEntryFrame({
 }
 
 /**
- * Project a completed resume as one product event instead of leaving the old
- * actionable pause beside its continuation marker. The durable transcript is
- * untouched; only the render projection drops the resumable tail block that
- * the following continuation has superseded. Runtime and stream identity can
- * confirm the successor before its transcript row has been hydrated.
+ * A confirmed continuation replaces its actionable pause with one resume notice.
+ * The durable transcript is untouched. Runtime and stream identity can confirm
+ * the successor before its transcript row has been hydrated.
  */
 export function supersedeResumedPauseBlocks(messages, {
   running = false,

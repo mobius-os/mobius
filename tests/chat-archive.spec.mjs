@@ -61,6 +61,12 @@ test('Archive, Archived, open-chat Restore and Undo keep the same transcript and
   const row = page.locator(`[data-drawer-key="chat:${id}"]`)
   await expect(row).toBeVisible()
   await row.click({ button: 'right' })
+  const menu = page.getByRole('menu')
+  expect(await menu.locator('[role="menuitem"], [role="separator"]').evaluateAll(
+    elements => elements.map(element => element.getAttribute('role') === 'separator'
+      ? 'separator' : element.textContent.trim()),
+  )).toEqual(['Pin', 'Copy name', 'Rename', 'separator', 'Archive', 'Delete'])
+  await expect(menu.getByRole('menuitem', { name: 'Archive', exact: true }).locator('svg')).toHaveCount(0)
   await page.getByRole('menuitem', { name: 'Archive', exact: true }).click()
   await expect(surface.getByRole('region', { name: 'Archived chat' })).toBeVisible()
   await expect.poll(async () => (await readRow()).archived_at).not.toBeNull()
