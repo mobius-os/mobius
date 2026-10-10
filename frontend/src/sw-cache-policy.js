@@ -295,7 +295,7 @@ export function isCacheableOpaqueEmbedDocument(response) {
 }
 
 // PURE: should appCodeHandler serve the CACHED copy first (instant) vs go to
-// network? Only frame/module routes are versioned by app.updated_at, so their
+// network? Only frame/module routes are versioned by app.frame_version, so their
 // cached key proves it is the requested app revision. A standalone navigation
 // keeps the stable `/apps/<slug>/` URL across app updates; serving that cache
 // first can boot an obsolete module on the first reopen and miss the update SSE
@@ -378,7 +378,7 @@ export function shouldFallBackToCacheOnError(status, hasCached) {
 // version than the one we just stored.
 //
 // Why this is precise (not a heuristic): AppCanvas pins the frame/module
-// URL with `?v=<app.updated_at>`, and that `?v=` is part of the cache key
+// URL with `?v=<app.frame_version>`, and that `?v=` is part of the cache key
 // (token/`_`/`install` are stripped, but `v` is kept — it's the freshness
 // discriminator). So every edit of an app leaves a fresh entry behind under
 // a new `?v=` while the OLD versioned entry lingers, unreachable forever

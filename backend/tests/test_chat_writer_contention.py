@@ -1889,7 +1889,8 @@ def test_stale_finish_run_cannot_clear_successor_question(actor):
   assert chat["active_assistant_message_id"] is None
 
 
-def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
+@pytest.mark.parametrize("terminal_status", ["interrupted", "failed"])
+def test_stale_wedged_recovery_cannot_clobber_new_run(actor, terminal_status):
   """A delayed recovery for run A must not alter run B's marker or history."""
   _seed_chat(messages=[])
   _await(actor.submit(StartTurn(
@@ -1908,6 +1909,7 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
   result = _await(actor.submit(RecoverWedgedRun(
     chat_id="c1",
     run_token="old-run",
+    terminal_status=terminal_status,
     interruption_block={
       "type": "error", "message": "old recovery", "resumable": True,
     },
@@ -1918,8 +1920,49 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
   assert chat["running_status"] == "running"
   assert chat["active_assistant_message_id"] == "new-run"
   assert [message["content"] for message in chat["messages"]] == ["old", "new"]
+  # StartTurn already retired the predecessor; a late recovery cannot rewrite it.
   assert _load_run("old-run")["status"] == "interrupted"
   assert _load_run("new-run")["status"] == "running"
+
+
+def test_failed_wedged_recovery_commits_resumable_error_with_failed_run(actor):
+  """Setup failure closes the child as failed with its Resume error atomically."""
+  _seed_chat(messages=[], pending=[{"role": "user", "content": "later", "ts": 10}])
+  _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="setup-run",
+    user_msg={"role": "user", "content": "start", "ts": 1, "cid": "start"},
+    title_source="start",
+  )))
+  assert _await(actor.submit(RecoverWedgedRun(
+    chat_id="c1", run_token="setup-run", terminal_status="failed",
+    interruption_block={
+      "type": "error", "message": "Setup failed.", "resumable": True,
+    },
+  ))) is True
+
+  chat = _load_chat()
+  assert _load_run("setup-run")["status"] == "failed"
+  assert chat["running_status"] is None
+  assert chat["pending_messages"] == [{"role": "user", "content": "later", "ts": 10}]
+  assert chat["messages"][-1]["blocks"][-1] == {
+    "type": "error", "message": "Setup failed.", "resumable": True,
+  }
+
+
+def test_failed_wedged_recovery_rejects_invalid_error_without_closing_run(actor):
+  _seed_chat(messages=[])
+  _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="setup-run",
+    user_msg={"role": "user", "content": "start", "ts": 1, "cid": "start"},
+    title_source="start",
+  )))
+  with pytest.raises(Exception, match="requires an error block"):
+    _await(actor.submit(RecoverWedgedRun(
+      chat_id="c1", run_token="setup-run", terminal_status="failed",
+      interruption_block={"type": "text", "content": "not an error"},
+    )))
+  assert _load_run("setup-run")["status"] == "running"
+  assert len(_load_chat()["messages"]) == 1
 
 
 def test_append_pending_bumps_colliding_ts(actor):

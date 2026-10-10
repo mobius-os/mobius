@@ -9,6 +9,11 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.icon_assets import MAX_IMAGE_PIXELS
+
+# Preserve the 32 MP warning / 64 MP refusal regardless of icon import order.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
 
 PREVIEW_MAX_EDGE = 1024
 PREVIEW_WEBP_QUALITY = 72

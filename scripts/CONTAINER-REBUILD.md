@@ -154,7 +154,9 @@ under the updater's lock, that the target is an official release that ships this
 bridge and is newer than the running image and the source's official package
 declarations, that no update is prepared or parked, and that the helper is
 idle. The helper drains chats, replaces only
-the container, and restores the previous container if the new one is unhealthy.
+the container, and attempts to restore the previous container if the new one is
+unhealthy. If exact restoration cannot be confirmed, the host retains the
+transaction and reports `needs_recovery`; the request is not safely retryable.
 
 The new image's boot transaction serves the unchanged source only after proving
 from the image's own history that none of that source's official Python
@@ -209,11 +211,17 @@ and performs a real replacement there.
 Before it drains the running app, a worker records the replacement in
 `/var/lib/mobius-rebuild/transaction.json`: operation, nonce, and previous
 image ID. Compose starts the verified image through a helper-owned tag pointed
-at its ID (`mobius-rebuild-target`). If a worker is interrupted, `reconcile`
-(after the run and at boot) restores exactly the recorded previous image with
-the usual re-armed chat handoff, so the app can request the update again. The
-record is removed only when the healthy container is that image; otherwise the
-status reads `needs_recovery`. A new request waits until the record is settled.
+at its ID (`mobius-rebuild-target`). The worker currently on `main` attempts to
+restore the recorded previous image after an interrupted replacement; that
+attempt can fail and leave the journal and `needs_recovery` status in place.
+The separately reviewed controller migration (#1745) is intended to first
+observe whether the journaled target actually completed, retain an ambiguous
+journal even if a container is healthy, and report a durable but handoff-degraded
+service outcome without reversing it. Those newer behaviors apply only after
+that controller is integrated and installed; this document does not claim they
+run on the current helper. In either case, the app must preserve unresolved
+status and binding, refuse retry and cancellation, and not mask it with an
+unrelated queued inbox file. A new request waits until the journal is settled.
 Failure handling, rollback and settlement run under the replacement lock that
 the installer and `reconcile` also take. The record's schema is shared by every
 worker revision.
@@ -240,8 +248,9 @@ stop an older official application image from being deployed.
 The app writes one fixed `request.json` into the persistent `/data` inbox. A
 root-owned `systemd.path` unit starts a one-shot worker; durable status is
 mirrored back into `/data` for polling without a host process or network
-handshake. A boot-time one-shot reconciles any active status left behind by a
-host power loss. The request contains only the expected 40-character upstream
+handshake. A boot-time one-shot attempts to reconcile interrupted transactions
+left by a host power loss; failed recovery remains visible for operator action.
+The request contains only the expected 40-character upstream
 SHA and, from request version 2, an app-generated nonce that the helper echoes
 as `request_nonce` in its status, so the app can tell its exact replacement's
 outcome from any earlier one. It is claimed atomically on the same persistent

@@ -87,8 +87,8 @@ def test_seed_installs_the_checkout_worker_and_never_downgrades(state):
   assert host.seed_worker(worker(1)) == "installed: revision 1"
   assert host.seed_worker(worker(1)) == "current: revision 1"
   assert host.offer_worker(worker(3), IMAGE_ID).startswith("offered: revision 3")
-  # Reinstalling from an older checkout keeps the newer offered worker.
-  assert host.seed_worker(worker(2)).startswith("kept")
+  # A superseded checkout cannot claim the still-old active worker was upgraded.
+  assert host.seed_worker(worker(2)).startswith("rejected")
   assert _index(state)["candidate"]["revision"] == 3
   assert host.seed_worker(worker(4, "def broken(:")).startswith("rejected")
 
@@ -273,8 +273,8 @@ def _fake_docker(monkeypatch, archive: bytes) -> list:
     calls.append(args)
     return subprocess.CompletedProcess(args, 0, "c" * 64 if args[1] == "create" else "", "")
 
-  monkeypatch.setattr(host.subprocess, "run", run)
-  monkeypatch.setattr(host, "_bounded_output", lambda args, limit: (
+  monkeypatch.setattr(host, "docker_command", run)
+  monkeypatch.setattr(host, "_bounded_output", lambda args, limit, **kwargs: (
     calls.append(args) or (archive if len(archive) <= limit else
                            (_ for _ in ()).throw(RuntimeError("too large")))
   ))
@@ -353,6 +353,7 @@ TXN = {
 
 @pytest.fixture
 def journal(tmp_path, monkeypatch):
+  monkeypatch.setattr(host, "cutover_boot_consumed", lambda *_a, **_k: True)
   monkeypatch.setattr(host, "TRANSACTION", tmp_path / "transaction.json")
   host.write_transaction(TXN)
   writes, rollbacks = [], []
@@ -365,18 +366,21 @@ def journal(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("healthy,running", [
-  (True, TXN["previous_image"]),  # stopped before the new container started
-  (True, IMAGE_ID),  # the new container was running when the worker stopped
-  (False, IMAGE_ID),  # the new container never became healthy
+  (True, TXN["previous_image"]),
+  (True, IMAGE_ID),
+  (False, IMAGE_ID),
 ])
-def test_recovery_restores_the_previous_container(journal, monkeypatch, healthy, running):
-  _writes, rollbacks = journal
-  monkeypatch.setattr(host.subprocess, "run", lambda args, **_k: None)  # docker tag
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: healthy)
-  monkeypatch.setattr(host, "app_container", lambda _c: ("cid", running))
+def test_recovery_settles_healthy_target_instead_of_undoing_it(journal, monkeypatch, healthy, running):
+  writes, rollbacks = journal
+  monkeypatch.setattr(host, "container_health", lambda _c: ("cid", running, "healthy" if healthy else "dead"))
   host.recover({}, host.read_transaction())
-  assert rollbacks and rollbacks[0][3] == "worker_interrupted"
-  assert rollbacks[0][5] == TXN["previous_image"]
+  if healthy and running == IMAGE_ID:
+    assert not rollbacks
+    assert writes[-1]["state"] == "succeeded"
+    assert host.read_transaction() is None
+  else:
+    assert rollbacks and rollbacks[0][3] == "worker_interrupted"
+    assert rollbacks[0][5] == TXN["previous_image"]
 
 
 def test_a_new_request_waits_for_an_interrupted_replacement(tmp_path, monkeypatch):
@@ -415,22 +419,20 @@ def test_extraction_is_bounded_while_reading():
   assert time.monotonic() - started < 10
 
 
-def test_recovery_restores_the_journaled_previous_image(journal, monkeypatch):
-  tagged = []
-  monkeypatch.setattr(host.subprocess, "run", lambda args, **_k: tagged.append(args))
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: False)
+def test_recovery_passes_the_journaled_previous_image(journal, monkeypatch):
+  _writes, rollbacks = journal
+  monkeypatch.setattr(host, "container_health", lambda _c: ("", "", "missing"))
   host.recover({}, host.read_transaction())
-  assert ["docker", "tag", TXN["previous_image"], host.ROLLBACK_TAG] in tagged
+  assert rollbacks[0][5] == TXN["previous_image"]
 
 
-def test_recovery_never_restores_an_unconfirmed_previous_image(journal, monkeypatch):
+def test_recovery_never_restores_when_docker_state_is_unknown(journal, monkeypatch):
   writes, rollbacks = journal
 
-  def failing_tag(args, **_kwargs):
-    raise subprocess.CalledProcessError(1, args)
+  def failing_probe(_config):
+    raise subprocess.TimeoutExpired("docker", 10)
 
-  monkeypatch.setattr(host.subprocess, "run", failing_tag)
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: False)
+  monkeypatch.setattr(host, "container_health", failing_probe)
   host.recover({}, host.read_transaction())
   assert not rollbacks
   assert writes[-1]["state"] == "needs_recovery"
@@ -440,18 +442,18 @@ def test_recovery_never_restores_an_unconfirmed_previous_image(journal, monkeypa
 def test_a_healthy_rollback_to_the_wrong_image_is_not_settled(tmp_path, monkeypatch):
   monkeypatch.setattr(host, "TRANSACTION", tmp_path / "transaction.json")
   host.write_transaction(TXN)
+  monkeypatch.setattr(host, "wait_healthy", lambda *a: True)
+  monkeypatch.setattr(host, "cutover_boot_consumed", lambda *_a, **_k: True)
   writes = []
   monkeypatch.setattr(host, "write_status", lambda _c, **fields: writes.append(fields))
   monkeypatch.setattr(host, "restart_ledger", lambda *a, **k: True)
-  monkeypatch.setattr(host, "compose", lambda *a, **k: None)
-  monkeypatch.setattr(host, "wait_healthy", lambda *a: True)
-  monkeypatch.setattr(host, "app_container", lambda _c: ("cid", "sha256:" + "e" * 64))
+  monkeypatch.setattr(host, "container_health", lambda _c: ("cid", "sha256:" + "e" * 64, "healthy"))
   assert host.rollback({}, TXN["operation_id"], TXN["expected_sha"], "x", "y",
                        TXN["previous_image"]) == 1
   assert writes[-1]["state"] == "needs_recovery"
   assert writes[-1]["code"] == "rollback_wrong_image"
   assert host.read_transaction() is not None
-  monkeypatch.setattr(host, "app_container", lambda _c: ("cid", TXN["previous_image"]))
+  monkeypatch.setattr(host, "container_health", lambda _c: ("cid", TXN["previous_image"], "healthy"))
   host.rollback({}, TXN["operation_id"], TXN["expected_sha"], "x", "y",
                 TXN["previous_image"])
   assert writes[-1]["state"] == "rolled_back" and host.read_transaction() is None
@@ -495,3 +497,83 @@ def test_a_revision_one_worker_can_still_recover_this_journal(tmp_path, monkeypa
   ))
   assert revision1.read_transaction() is not None
   assert host.read_transaction() is not None
+
+
+def test_trusted_install_activates_exact_pending_candidate_before_reconcile(state, monkeypatch):
+  host.seed_worker(worker(2))
+  host.offer_worker(worker(3), IMAGE_ID)
+  assert host.seed_worker(worker(3)) == "installed: revision 3"
+  index = _index(state)
+  assert index["high_water"] == 3
+  assert index["active"]["revision"] == 3
+  assert index["candidate"] is None
+  assert _run_launcher(monkeypatch, {3: (0, None, None)}, "reconcile")[1] == [(3, "reconcile")]
+
+
+def test_same_revision_other_bytes_cannot_replace_pending_candidate(state):
+  host.seed_worker(worker(2))
+  host.offer_worker(worker(3), IMAGE_ID)
+  before = _index(state)
+  assert host.seed_worker(worker(3, "print('different')")).startswith("rejected:")
+  assert _index(state) == before
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_trusted_install_cannot_retry_a_removed_trial_candidate(state, monkeypatch, interrupted):
+  _with_candidate(state)
+
+  def inside_trial():
+    # The trial removes the candidate before any candidate code runs.
+    assert _index(state)["candidate"] is None
+    assert host.seed_worker(worker(2)).startswith("rejected:")
+    if interrupted:
+      raise KeyboardInterrupt
+
+  if interrupted:
+    with pytest.raises(KeyboardInterrupt):
+      _run_launcher(monkeypatch, {2: (1, None, inside_trial)})
+  else:
+    _run_launcher(monkeypatch, {2: (1, {"state": "failed"}, inside_trial)})
+  before = _index(state)
+  assert host.seed_worker(worker(2)).startswith("rejected:")
+  assert _index(state) == before
+  assert before["active"]["revision"] == 1
+  assert before["high_water"] == 2
+
+
+def test_current_or_genuinely_newer_active_worker_keeps_newer_offer(state):
+  host.seed_worker(worker(3))
+  host.offer_worker(worker(5), IMAGE_ID)
+  before = _index(state)
+  assert host.seed_worker(worker(3)) == "current: revision 3"
+  assert host.seed_worker(worker(2)) == "kept: a newer worker (revision 3) is installed"
+  assert host.seed_worker(worker(4)).startswith("rejected:")
+  assert _index(state) == before
+
+
+def test_same_revision_different_active_bytes_are_not_a_newer_installed_worker(state):
+  host.seed_worker(worker(3))
+  before = _index(state)
+  assert host.seed_worker(worker(3, "print('different')")).startswith("rejected:")
+  assert _index(state) == before
+
+
+@pytest.mark.parametrize("revision,expected", [(2, 1), (3, 0), (None, 1)])
+def test_adopt_self_exit_status_cannot_claim_rejected_upgrade_succeeded(
+  state, monkeypatch, capsys, revision, expected,
+):
+  host.seed_worker(worker(1))
+  host.offer_worker(worker(3), IMAGE_ID)
+  source = state / "checkout-worker.py"
+  source.write_bytes(worker(revision))
+  monkeypatch.setattr(host, "__file__", str(source))
+  monkeypatch.setattr(host, "LOCK", state / "replace.lock")
+  assert host.adopt_self() == expected
+  output = capsys.readouterr().out
+  if expected:
+    assert not output.startswith(("installed:", "kept:", "current:"))
+    assert _index(state)["active"]["revision"] == 1
+    assert _index(state)["candidate"]["revision"] == 3
+  else:
+    assert output.startswith("installed: revision 3")
+    assert _index(state)["active"]["revision"] == 3

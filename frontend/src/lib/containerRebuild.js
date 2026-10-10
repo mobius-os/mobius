@@ -50,7 +50,7 @@ export function rebuildProgressMessage(status) {
     case 'rolled_back':
       return 'The update did not start correctly, so Möbius restored its previous system image.'
     case 'needs_recovery':
-      return 'Möbius could not return to the previous version. Use Recovery in your deployment.'
+      return 'The replacement needs recovery before another update can start. Check Recovery in your deployment.'
     default:
       return ''
   }

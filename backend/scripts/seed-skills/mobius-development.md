@@ -82,6 +82,11 @@ reason to hide or skip validation. Inside Möbius:
 
 - run `scripts/test.sh --fast` for the cheap hermetic contracts and
   `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
+- keep memory bounded: the container shares one memory limit with every
+  running chat. Build the shell only through `npm run build` (it caps the heap
+  and takes the build lock); never call `vite` directly. Frontend tests run one
+  worker by default (`MOBIUS_TEST_CONCURRENCY`, about 550 MB each); raise it
+  only when nothing else is running, and never run test suites in parallel;
 - if the worktree runner says the checkout lock differs from the image runtime,
   treat those results as useful but not dependency-authoritative and use a
   lock-matched environment or hosted checks for that contract; and

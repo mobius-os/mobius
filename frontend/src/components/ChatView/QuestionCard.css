@@ -241,8 +241,16 @@
   transform-origin: center;
 }
 
-.qcard__composer {
+/* The paperclip sits beside the answer box, as in the message composer. */
+.qcard__answer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
   margin-top: 10px;
+  min-width: 0;
+}
+.qcard__composer {
+  flex: 1;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -429,27 +437,11 @@
   overflow-wrap: anywhere;
 }
 
-.qcard__attachments {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.qcard--grouped .qcard__attachments {
-  margin-inline: 16px;
-  margin-bottom: 12px;
-}
-/* A grouped card's shared files sit once, at card level, above the attach row. */
+/* A grouped card's shared files sit once, at card level, below the answers. */
 .qcard--grouped > .qcard__answer-files {
   padding: 12px 16px 0;
 }
 @media (max-width: 560px) {
-  .qcard--grouped .qcard__attachments {
-    margin-inline: 14px;
-  }
   .qcard--grouped > .qcard__answer-files {
     padding-inline: 14px;
   }

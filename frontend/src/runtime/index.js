@@ -49,8 +49,16 @@
 //     handle.setGuidance(text), and handle.destroy(). See the
 //     "Agent-chat embed" block below.
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
+//     Restoration never moves focus. Reusing a retired slot can proceed in a
+//     promoted, visible background pane; new history entries wait for focus,
+//     leaving ready/outcome pending without an ownership timeout.
 //     outcome distinguishes host ownership from request failures; see
 //     building-apps.md.
+//   window.mobius.nav.setLocation(value)         -> reports the app's current place
+//     (JSON, <= 4 KiB as UTF-8; null clears) for its next frame.
+//   window.mobius.nav.location                   -> the place this app's previous
+//     frame reported (code update, eviction, crash or shell reload) or the
+//     latest setLocation value; null when there is none.
 //   window.mobius.immersive.toggle() / set(hidden) -> hides/shows the Möbius top
 //     bar so an app with its own header takes the full pane (no two toolbars).
 //     .hidden getter, .subscribe(cb), and .holdToToggle(el) (long-press an
@@ -176,10 +184,14 @@ let _runtimeContext = null
 export const runtimeFeatures = Object.freeze({
   authoritativeVersionedReads: true,
   idleDocument: true,
+  navLocation: true,
   projects: true,
 })
 
-export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
+export function init({
+  appId, appInstanceId = null, getToken, capabilityContract = null, navLocation = null,
+  waitForNavigationReady = false,
+}) {
   const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
   if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
     // Hosts may replace their token broker after a refresh. Keep one runtime and
@@ -241,7 +253,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     signal,
     capabilities,
     chat,
-    nav: makeNav(),
+    nav: makeNav({ location: navLocation, waitForNavigationReady }),
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),

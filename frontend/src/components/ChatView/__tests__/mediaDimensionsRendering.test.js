@@ -99,7 +99,7 @@ test('(a) stream promotion keeps known sizes and frames newer images', () => {
 test('(b) a live reply over a sized partial frames newly streamed images', () => {
   const partial = assistant(oldText, { media_dimensions: { [A]: sizeA } })
   const html = renderToStaticMarkup(createElement(AssistantReply, {
-    replyGroup: { rows: [{ message: partial, key: 'run', anchorKey: 'run', notes: [] }] },
+    replyGroup: assistantReplyGroups([partial]).get(0),
     activeMirrorMsg: partial,
     activitySourceBlocks: partial.blocks,
     useDbActivePayload: false,

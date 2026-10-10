@@ -55,6 +55,8 @@ export const DRAG_HOLD_HAPTIC_MS = 8
 export const DRAG_ARM_HAPTIC_MS = 10
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
+// Cancel a pinned hold before a slowly starting native swipe becomes a drag.
+export const DRAWER_HOLD_MOVE_PX = 3
 // After a touch lift, a release that never moved past this is not a drop; the
 // menu opens from the hold timer while still held, never from this release.
 export const RELEASE_IN_PLACE_PX = 5
@@ -119,9 +121,9 @@ export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   return 'scroll'
 }
 
-// The drawer row's one held gesture has three outcomes. Before a pinned touch
-// hold, vertical movement scrolls the list through the same pointer owner while
-// a horizontal move yields to drawer swipe; unpinned rows keep native scrolling.
+// The drawer row's one held gesture has three outcomes. Before a touch hold,
+// vertical movement belongs to native scrolling and horizontal movement to
+// drawer swipe. Only a stationary hold may reserve the pin's drag stream.
 // Afterwards (or immediately for a mouse), vertical movement reorders a pin and
 // outward movement lifts the row into the workspace. Keeping this classification
 // pure prevents the menu, reorder and workspace branches from growing separate
@@ -131,10 +133,12 @@ export function drawerRowMoveIntent(dx, dy, {
   isTouch = false,
   pinned = false,
 } = {}) {
-  const limit = isTouch && !held ? PRE_HOLD_MOVE_PX : POINTER_SLOP
+  const limit = isTouch && !held
+    ? (pinned ? DRAWER_HOLD_MOVE_PX : PRE_HOLD_MOVE_PX)
+    : POINTER_SLOP
   if (hypot(dx, dy) <= limit) return 'pending'
   if (isTouch && !held) {
-    return pinned && Math.abs(dy) > Math.abs(dx) ? 'scroll' : 'yield'
+    return 'yield'
   }
   if (Math.abs(dy) > Math.abs(dx)) return pinned ? 'reorder' : 'cancel'
   return dx > 0 ? 'workspace' : 'cancel'
@@ -143,28 +147,6 @@ export function drawerRowMoveIntent(dx, dy, {
 // After a lift, a release still within this radius did not become a drag.
 export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
-}
-
-// Release velocity (layout px/ms) for the drawer's momentum glide. The pinned
-// rows scroll under our own pointer owner (touch-action reserves them for the
-// hold-to-reorder gesture), so the browser gives us no native fling — we measure
-// one. A thumb DECELERATES in the last moment before it lifts, so reading only
-// the final move reports "no flick" and kills the glide; instead average the
-// travel across the recent window. `samples` are {t (ms), top (scroll offset)}
-// pushed each move. Returns 0 for a paused release (newest sample stale) or a
-// window too short to measure, so a deliberate stop keeps its exact position.
-export function flingReleaseVelocity(samples, now, { maxAgeMs = 110, minSpanMs = 8 } = {}) {
-  if (!Array.isArray(samples) || samples.length < 2) return 0
-  const newest = samples[samples.length - 1]
-  if (!newest || now - newest.t > maxAgeMs) return 0
-  let oldest = newest
-  for (let i = samples.length - 1; i >= 0; i -= 1) {
-    if (now - samples[i].t > maxAgeMs) break
-    oldest = samples[i]
-  }
-  const span = newest.t - oldest.t
-  if (span < minSpanMs) return 0
-  return (newest.top - oldest.top) / span
 }
 
 // Whether the workspace-root-edge drop zone may arm for this pointer + mode: it

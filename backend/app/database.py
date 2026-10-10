@@ -188,6 +188,54 @@ def reclaim_startup_database_file_cache() -> dict | None:
   return reclaim_file_cache([filename])
 
 
+_wal_anchor = None
+
+
+def open_wal_anchor() -> bool:
+  """Hold one idle SQLite connection for the server's lifetime.
+
+  The engine uses NullPool, so every session closes its connection. When the
+  last connection to a WAL database closes, SQLite checkpoints the log,
+  fsyncs, and deletes the -wal/-shm files; the next connection recreates
+  them. Under Möbius's mostly-serial traffic that happened on nearly every
+  transaction (measured on /data: ~6 ms per small write transaction versus
+  ~2 ms with another connection open). An idle anchor keeps the log alive
+  across sessions. It never opens a transaction, so it never pins a read
+  snapshot; automatic checkpoints and journal_size_limit still bound the
+  log's size. It is opened after startup's schema work and is not part of
+  the pool, so pool metrics and NullPool's no-ceiling property are unchanged.
+  Idempotent; returns whether an anchor is held.
+  """
+  global _wal_anchor
+  if _wal_anchor is not None:
+    return True
+  if engine.dialect.name != "sqlite":
+    return False
+  filename = engine.url.database
+  if not filename or filename == ":memory:" or engine.url.query.get("uri"):
+    return False
+  import sqlite3
+  try:
+    conn = sqlite3.connect(filename, check_same_thread=False)
+    for pragma in sqlite_policy.connection_pragmas():
+      conn.execute(pragma).close()
+  except sqlite3.Error:
+    _log.warning("WAL anchor connection could not be opened", exc_info=True)
+    return False
+  _wal_anchor = conn
+  return True
+
+
+def close_wal_anchor() -> None:
+  global _wal_anchor
+  conn, _wal_anchor = _wal_anchor, None
+  if conn is not None:
+    try:
+      conn.close()
+    except Exception:
+      _log.warning("WAL anchor connection did not close cleanly", exc_info=True)
+
+
 def checked_out_connections() -> int:
   """Return live DB checkouts without depending on a concrete pool class."""
   with _pool_metrics_lock:

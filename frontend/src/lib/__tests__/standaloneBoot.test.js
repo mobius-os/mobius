@@ -5,7 +5,6 @@ import {
   initiallyOpenStandaloneInstallCard,
   isVisualContentOnly,
   readStandaloneBoot,
-  standaloneAppVersion,
   standaloneInstallCompleted,
 } from '../standaloneBoot.js'
 
@@ -21,11 +20,6 @@ test('standalone boot requires a server-authored complete app identity', () => {
     readStandaloneBoot(docWith('{"id":7,"slug":"notes","name":"Notes"}')),
     { id: 7, slug: 'notes', name: 'Notes' },
   )
-})
-
-test('standalone app version follows executable updated_at', () => {
-  assert.equal(standaloneAppVersion({ updated_at: '2026-07-30T01:00:00' }), '2026-07-30T01:00:00')
-  assert.equal(standaloneAppVersion({}), '0')
 })
 
 test('an installed PWA stays quiet on launch but shows success after installation', () => {

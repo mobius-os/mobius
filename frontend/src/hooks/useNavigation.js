@@ -3,6 +3,8 @@ import {
   dropPopsForEntry,
   isMobiusNavState,
   isTopmostAppEntry,
+  isCurrentRetiredAppEntry,
+  retireAppEntries,
   navEntryId,
   navEntryIndex,
   navTraversalDirection,
@@ -485,12 +487,8 @@ export default function useNavigation({
   // unmount cleanup can call it as a backstop.
   const retireAppHistory = useCallback((appId, reason = 'evict') => {
     const target = String(appId)
-    for (const [entryId, rec] of appEntryOwnersRef.current) {
-      if (rec.appId === target && rec.status !== 'retired') {
-        consumedAppEntryIdsRef.current.add(entryId)
-        rec.status = 'retired'
-        rec.retiredReason = reason
-      }
+    for (const entryId of retireAppEntries(appEntryOwnersRef.current, target, reason)) {
+      consumedAppEntryIdsRef.current.add(entryId)
     }
     for (const [key, pending] of pendingAppForwardsRef.current) {
       if (pending.appId !== target) continue
@@ -805,7 +803,8 @@ export default function useNavigation({
    * history can't do. On back-gesture, handleBack consumes one of these
    * sentinels by forwarding moebius:nav-back to the iframe.
    *
-   * Returns true on success, false on rejection (not visible, or cap hit).
+   * Returns true on success, false on rejection (not visible, or cap hit),
+   * or "deferred" when background restoration would grow history.
    * `appNavPush(appId)` keeps the AppCanvas callback signature; the owner pane is
    * DERIVED from the workspace, so a stale `paneId` prop during a no-reparent
    * cross-pane move can't mis-route the install (contract §3.2.1).
@@ -820,11 +819,23 @@ export default function useNavigation({
     const ownerPaneId = appOwnerPaneId(ws, appId)
     if (ownerPaneId == null) return false
     const ownerKey = ownerKeyOf(ownerPaneId, appId)
+    const current = currentNavStateRef.current
+    const entryId = navEntryId(current)
+    const record = appEntryOwnersRef.current.get(entryId)
+    // Check the host's own cursor identity; child-frame history is not visible
+    // in top-level history.state or navigation.entries().
+    const reuse = isCurrentRetiredAppEntry(record, entryId, navEntryId(history.state))
+      && current.kind === 'app'
+      && String(current.appNav?.appId) === String(appId)
+      && String(current.route?.paneId) === String(ownerPaneId)
+      && (!record || ownerKeyOf(record.paneId, record.appId) === ownerKey)
+    // Restoration never moves focus. Reusing a retired slot needs no new Back
+    // target; only history growth waits for the owner to focus the pane.
+    if (!reuse && navMeta.userActivated === false
+        && ownerPaneId !== paneModel.SINGLE_SLOT_PANE
+        && ownerPaneId !== ws.focusedPaneId) return 'deferred'
     if ((appSentinelCountsRef.current.get(ownerKey) || 0) >= MAX_APP_SENTINELS) return false
-    // Focus the visible owner pane (design §5: an app gesture focuses its pane).
-    // The SYNTHETIC single-world owner has no tree pane to focus — single mode has
-    // no pane focus — so skip the FOCUS for it (finding 8).
-    if (ownerPaneId !== paneModel.SINGLE_SLOT_PANE) {
+    if (navMeta.userActivated !== false && ownerPaneId !== paneModel.SINGLE_SLOT_PANE) {
       dispatchWorkspace({ type: 'FOCUS', paneId: ownerPaneId })
     }
     const appNav = {
@@ -835,11 +846,14 @@ export default function useNavigation({
     }
     let state
     try {
-      state = pushShellEntry(
-        'app',
-        navRoute('canvas', null, Number(appId), ownerPaneId),
-        appNav,
-      )
+      const route = navRoute('canvas', null, Number(appId), ownerPaneId)
+      if (reuse) {
+        state = updateCurrentNavEntry(route, { kind: 'app', appNav })
+        currentNavStateRef.current = state
+        consumedAppEntryIdsRef.current.delete(entryId)
+      } else {
+        state = pushShellEntry('app', route, appNav)
+      }
     } catch { return false }
     addAppEntry(navEntryId(state), ownerPaneId, appId, appNav)
     return true
@@ -1487,13 +1501,20 @@ export default function useNavigation({
       // still retains the surrounding entries. Explicit launch destinations
       // instead start a new shell-relative history model as before.
       const existing = history.state
+      // App sentinels use the visible owner (the synthetic slot in single
+      // mode), not the hidden builder pane carried by ordinary route hints.
+      const resumeRoute = existing?.kind === 'app' && initialRoute.view === 'canvas'
+        ? navRoute('canvas', null, initialRoute.appId,
+          appOwnerPaneId(workspaceStateRef.current.ws, initialRoute.appId))
+        : initialRoute
       const resumeEntry = !deepLink?.view && !returnView
         && !claimedReloadDestination
         // A base entry showing a non-chat surface still needs the HOME seed
         // behind it, so only a chat base entry is resumed as-is.
-        && (existing?.kind === 'nav' || (existing?.kind === 'base' && !seedHome))
+        && (existing?.kind === 'nav' || existing?.kind === 'app'
+          || (existing?.kind === 'base' && !seedHome))
         && isMobiusNavState(existing)
-        && sameRoute(existing.route, initialRoute)
+        && sameRoute(existing.route, resumeRoute)
       currentNavStateRef.current = resumeEntry
         ? existing
         : replaceNavEntry('base', routePath, baseRoute)
@@ -2222,28 +2243,13 @@ export default function useNavigation({
   const navigateForward = useCallback(() => {
     const current = currentNavStateRef.current
     const currentIndex = navEntryIndex(current)
-    // An iframe can append untagged entries to the shared physical history.
-    // Never issue a shell shortcut while its cursor is on one of those entries.
+    // Guard against drift in the shell's own history tracking. Child-frame
+    // entries do not change these top-level state or Navigation API stores.
     if (!isMobiusNavState(history.state)
         || navEntryId(history.state) !== navEntryId(current)) return false
-    // Where the Navigation API exposes its entries, verify the physical next
-    // entry is ours too. It can also recover a pre-marker shell branch left by
-    // an older document version. The marker alone cannot see a later iframe
-    // push that truncated the old Forward branch.
-    let nextShellEntry = null
-    if (typeof navigation !== 'undefined' && typeof navigation.entries === 'function') {
-      try {
-        const entries = navigation.entries()
-        const position = navigation.currentEntry?.index
-        if (Number.isInteger(position)) {
-          nextShellEntry = isMobiusNavState(entries[position + 1]?.getState?.())
-        }
-      } catch { /* best-effort mirror; classic state remains authoritative */ }
-    }
-    if (nextShellEntry === false || currentIndex == null || (
+    if (currentIndex == null || (
       currentIndex >= furthestNavIndexRef.current
       && current?.hasShellForward !== true
-      && nextShellEntry !== true
     )) return false
     if (typeof navigation !== 'undefined' && navigation.canGoForward === false) return false
     try {
@@ -2266,8 +2272,14 @@ export default function useNavigation({
     const kind = history.state.kind === 'drawer' && !drawerPushedRef.current
       ? 'nav'
       : history.state.kind
-    currentNavStateRef.current = updateCurrentNavEntry(snapshotRoute(), { kind })
-  }, [activeView, activeChatId, activeAppId, activeProjectId, contentRoute.paneId, snapshotRoute])
+    const route = snapshotRoute()
+    if (kind === 'app' && route.view === 'canvas'
+        && String(history.state.appNav?.appId) === String(route.appId)) {
+      route.paneId = appOwnerPaneId(workspaceStateRef.current.ws, route.appId) ?? route.paneId
+    }
+    currentNavStateRef.current = updateCurrentNavEntry(route, { kind })
+  }, [activeView, activeChatId, activeAppId, activeProjectId, contentRoute.paneId,
+    snapshotRoute, appOwnerPaneId, workspaceStateRef])
 
   // A queued close from a hidden cached app becomes safe once shell Back restores
   // that app and its sentinel to the current tagged entry — or once a split/focus

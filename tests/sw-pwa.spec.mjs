@@ -306,7 +306,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
         }
       })).toBe(true)
 
-      const appVersion = String(app.updated_at ?? '0').trim() || '0'
+      const appVersion = String(app.frame_version ?? '0').trim() || '0'
       const frameRev = await page.locator('meta[name="mobius-frame-rev"]').getAttribute('content')
       const frameVersion = frameRev ? `${appVersion}-${frameRev}` : appVersion
       await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion, cacheName }) => {

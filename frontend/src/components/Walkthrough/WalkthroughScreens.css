@@ -177,7 +177,7 @@
    compact sizing are set, and the question card's Submit button is hidden. */
 .wt-chatflow__reply { display: grid; gap: 14px; min-width: 0; width: 100%; }
 .wt-chatflow__reply .qcard { width: 100%; margin: 0; padding: 8px 12px; gap: 4px; }
-.wt-chatflow__reply .qcard__submit, .wt-chatflow__reply .qcard__submit-error, .wt-chatflow__reply .qcard__attachments { display: none; }
+.wt-chatflow__reply .qcard__submit, .wt-chatflow__reply .qcard__submit-error, .wt-chatflow__reply .qcard__attach { display: none; }
 /* The confirmation follows the card with room to breathe, as a new line of the agent's reply would. */
 .wt-chatflow__reply .qcard + .chat__text--assistant { margin-top: 22px; }
 .wt-chatflow__reply .chat__text--assistant { width: 100%; max-width: none; box-sizing: border-box; padding: 0; }

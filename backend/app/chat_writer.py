@@ -1175,7 +1175,7 @@ class FinishRun(_Command):
 
 @dataclass
 class RecoverWedgedRun(_Command):
-  """Atomically materialize an interrupted turn and close its durable run.
+  """Atomically materialize a terminal error and close its durable run.
 
   Runtime recovery must never clear the only durable recovery handle while
   leaving a trailing user message unanswered.  This command folds the saved
@@ -1187,6 +1187,9 @@ class RecoverWedgedRun(_Command):
   chat_id: str = ""
   run_token: str = ""
   interruption_block: dict = field(default_factory=dict)
+  # Setup/provider failures are failed; ordinary recovery stays interrupted.
+  # Only these error outcomes are valid here (successful turns use FinishRun).
+  terminal_status: str = "interrupted"
   # When set, the exact run is parked for the continuation sweep (a resource
   # wait that resolves itself) instead of closed as an interrupted failure.
   parked_until: datetime | None = None
@@ -5619,6 +5622,13 @@ class ChatWriterActor:
 
     from app.models import Chat, ChatRun
 
+    if cmd.terminal_status not in ("failed", "interrupted"):
+      raise _PersistFailed(
+        f"invalid RecoverWedgedRun status: {cmd.terminal_status!r}"
+      )
+    if cmd.parked_until is not None and cmd.terminal_status != "interrupted":
+      raise _PersistFailed("parked RecoverWedgedRun cannot be failed")
+
     owner = self._run_token_owner.get(cmd.chat_id)
     owner_is_ours = not (
       cmd.run_token and owner is not None and owner != cmd.run_token
@@ -5641,7 +5651,7 @@ class ChatWriterActor:
         run.parked_until = cmd.parked_until
         run.park_reason = cmd.park_reason
       else:
-        run.status = "interrupted"
+        run.status = cmd.terminal_status
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True

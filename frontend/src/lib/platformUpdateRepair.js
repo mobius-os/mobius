@@ -1,13 +1,22 @@
 /** Turns update evidence into an agent handoff, without interpreting file contents or bypassing checks. */
 import { redactDiagnosticText } from './diagnosticRedaction.js'
+import { errorRecoveryFingerprint } from './errorRecovery.js'
 import { requiresAgentActivation } from './platformUpdateState.js'
 
 const REVIEW_AGAIN = new Set([
   'update_plan_stale', 'update_plan_invalid', 'activation_changed',
 ])
 
+function repairTarget({ preview, platform }) {
+  return preview?.target_sha || platform?.unfinished_update?.target_sha
+    || platform?.contained_upstream_sha || null
+}
+
 export function platformUpdateRepairReason({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
   if (REVIEW_AGAIN.has(errorCode)) return null
+  if (rebuild?.state === 'needs_recovery') {
+    return 'The previous replacement still needs recovery before another update can start.'
+  }
   if (errorCode === 'update_applied_rebuild_pending') {
     return 'The update was applied, but Möbius needs help finishing the container replacement.'
   }
@@ -18,9 +27,11 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
     return 'Möbius needs to check your deployment settings before this update can finish.'
   }
-  const target = preview?.target_sha || platform?.contained_upstream_sha
-  if (level === 'image_rebuild' && target && rebuild?.expected_sha === target
-    && ['failed', 'rolled_back', 'needs_recovery'].includes(rebuild.state)) {
+  const target = repairTarget({ preview, platform })
+  const unfinishedTarget = platform?.unfinished_update?.target_sha
+  if (target && rebuild?.expected_sha === target
+    && (level === 'image_rebuild' || unfinishedTarget === target)
+    && ['failed', 'rolled_back'].includes(rebuild.state)) {
     return 'The last attempt to finish this update needs attention.'
   }
   if (error || platform?.state === 'rolled_back') {
@@ -30,7 +41,7 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
 }
 
 export function platformUpdateRepairEvidence({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
-  const target = preview?.target_sha || platform?.contained_upstream_sha || null
+  const target = repairTarget({ preview, platform })
   return {
     reviewed_release: preview ? {
       current_sha: preview.current_sha, target_sha: preview.target_sha,
@@ -38,16 +49,44 @@ export function platformUpdateRepairEvidence({ preview, platform, rebuild, error
       operation: preview.operation,
     } : null,
     installed_release: platform?.contained_upstream_sha || null,
+    unfinished_update: platform?.unfinished_update || null,
     activation: preview?.activation || platform?.activation || null,
     incoming_activation: preview?.incoming_activation || null,
     local_image_paths: preview?.local_image_paths || [],
     conflict_paths: preview?.conflict_paths || platform?.conflict_paths || [],
     source_state: platform?.state || null,
     source_rollback_error: platform?.rollback_error || null,
-    // An old controller failure for another release is not this update's failure.
-    replacement: rebuild?.expected_sha === target ? rebuild : null,
+    // Unresolved recovery still owns the controller even for another release;
+    // ordinary historical failures are evidence only for this update's target.
+    replacement: rebuild && (rebuild.state === 'needs_recovery'
+      || (target && rebuild.expected_sha === target)) ? rebuild : null,
     error, error_code: errorCode,
   }
+}
+
+export function platformUpdateRepairFingerprint(evidence) {
+  const replacement = evidence.replacement
+  // The host nonce exists before its helper assigns an operation id. Keep
+  // the admission identity when that later id arrives; Railway uses its id.
+  const operation = replacement?.request_nonce
+    ? { request_nonce: replacement.request_nonce }
+    : replacement?.operation_id ? { operation_id: replacement.operation_id } : null
+  const identity = replacement ? {
+    deployment: replacement.deployment || evidence.activation?.deployment || null,
+    target_sha: replacement.expected_sha || null,
+    ...operation,
+  } : null
+  // The controller's durable operation, not its changing progress, owns retries.
+  // Otherwise backend create/send deduplication would swallow a later repair.
+  if (operation) {
+    return errorRecoveryFingerprint('platform-update', JSON.stringify(identity))
+  }
+  return errorRecoveryFingerprint('platform-update', JSON.stringify({
+    replacement: identity, unfinished_target: evidence.unfinished_update?.target_sha || null,
+    release: evidence.reviewed_release, installed: evidence.installed_release,
+    paths: evidence.conflict_paths, actions: evidence.activation?.required_actions,
+    code: evidence.error_code, error: evidence.error,
+  }))
 }
 
 export function buildPlatformUpdateRepairPrompt(evidence) {

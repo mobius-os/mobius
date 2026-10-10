@@ -1,6 +1,7 @@
 /* Project exact post-steer text replay as one continuous assistant answer. */
 
 import { safeSteerMarkdownCut } from './markdown/steerContinuation.js'
+import { splitSteerMarkdown, sliceMarkdownRange } from './markdown/steerMarkdownRange.js'
 
 
 export function isSteeredUserMessage(message) {
@@ -26,17 +27,21 @@ export function isHiddenReplyCarrier(message, root) {
 }
 
 
-/** Return the sealed assistant immediately before one or more steered rows. */
-export function sealedAssistantBeforeSteer(messages, continuationIndex) {
-  if (!Array.isArray(messages) || !Number.isInteger(continuationIndex)) return null
+function sealedAssistantIndexBeforeSteer(messages, continuationIndex) {
+  if (!Array.isArray(messages) || !Number.isInteger(continuationIndex)) return -1
   let index = continuationIndex - 1
   let sawSteer = false
   while (index >= 0 && isSteeredUserMessage(messages[index])) {
     sawSteer = true
     index -= 1
   }
-  if (!sawSteer || messages[index]?.role !== 'assistant') return null
-  return messages[index]
+  return sawSteer && messages[index]?.role === 'assistant' ? index : -1
+}
+
+/** Return the sealed assistant immediately before one or more steered rows. */
+export function sealedAssistantBeforeSteer(messages, continuationIndex) {
+  const index = sealedAssistantIndexBeforeSteer(messages, continuationIndex)
+  return index >= 0 ? messages[index] : null
 }
 
 
@@ -75,20 +80,36 @@ function firstContinuationTextBlock(blocks) {
 function projectedText(prefix, text, { active }) {
   if (!prefix || !text) return null
   if (text.startsWith(prefix)) {
-    if (!safeSteerMarkdownCut(text, prefix.length)) return null
-    return text.slice(prefix.length)
+    if (safeSteerMarkdownCut(text, prefix.length)) return { content: text.slice(prefix.length) }
+    const ranges = splitSteerMarkdown(text, prefix.length)
+    return ranges ? { content: text.slice(prefix.length), ranges } : null
   }
   // While the provider is replaying the already-visible prefix, hold that
   // provisional duplicate off-screen. If one character diverges, this branch
   // stops matching and the complete accumulated text appears unchanged.
-  if (active && prefix.startsWith(text)) return ''
+  if (active && prefix.startsWith(text)) return { content: '' }
   return null
+}
+
+function isCurrentSteerProjection(message) {
+  const replay = message.steer_replay
+  if (!replay) return false
+  const blocks = message.blocks
+  const index = blocks?.length ? firstContinuationTextBlock(blocks) : 0
+  if (index !== replay.textIndex) return false
+  const text = blocks?.length ? blocks[index].content : message.content
+  const output = replay.text.startsWith(replay.prefix)
+    ? replay.text.slice(replay.prefix.length)
+    : replay.prefix.startsWith(replay.text) ? '' : null
+  return output !== null && text === output && (!blocks?.length
+    || (blocks[index].source_text_offset || 0)
+      === replay.sourceOffset + replay.text.length - output.length)
 }
 
 
 /**
  * Return a presentation-only assistant message. Stored content is never
- * rewritten: a mismatch, a settled short response, or an unsafe Markdown cut
+ * rewritten: a mismatch, a settled short response, or an unmappable Markdown cut
  * returns the original object by identity.
  */
 export function projectSteerContinuationMessage(
@@ -98,6 +119,14 @@ export function projectSteerContinuationMessage(
 ) {
   if (!sealedMessage || continuationMessage?.role !== 'assistant') {
     return continuationMessage
+  }
+  // Transcript presentation and Reply source selection can meet at this seam.
+  // Reuse an exact projection, but not stale metadata inherited by fresh SSE.
+  if (isCurrentSteerProjection(continuationMessage)) return continuationMessage
+  if (continuationMessage.steer_replay) {
+    continuationMessage = { ...continuationMessage }
+    delete continuationMessage.steer_replay
+    delete continuationMessage.markdown_range
   }
   if (sealedMessage.id && continuationMessage.id
       && assistantReplyRoot(sealedMessage)
@@ -114,30 +143,80 @@ export function projectSteerContinuationMessage(
     if (projected == null) return continuationMessage
     const nextBlocks = blocks.slice()
     nextBlocks[textIndex] = {
-      ...blocks[textIndex], content: projected,
+      ...blocks[textIndex], content: projected.content,
+      ...(projected.ranges ? { markdown_range: projected.ranges.after } : {}),
       // Activity offsets refer to persisted text, before this display-only cut.
-      source_text_offset: (blocks[textIndex].source_text_offset || 0) + text.length - projected.length,
+      source_text_offset: (blocks[textIndex].source_text_offset || 0) + text.length - projected.content.length,
     }
     return {
       ...continuationMessage,
-      content: projected,
+      content: projected.content,
       blocks: nextBlocks,
-      steer_replay: { textIndex, prefix, text, sourceOffset: blocks[textIndex].source_text_offset || 0 },
+      steer_replay: { textIndex, prefix, text, sourceOffset: blocks[textIndex].source_text_offset || 0,
+        ...(projected.ranges ? { prefixRange: projected.ranges.before } : {}) },
     }
   }
 
   const text = String(continuationMessage.content || '')
   const projected = projectedText(prefix, text, { active })
   if (projected == null) return continuationMessage
-  return { ...continuationMessage, content: projected,
-    steer_replay: { textIndex: 0, prefix, text, sourceOffset: 0 } }
+  return { ...continuationMessage, content: projected.content,
+    ...(projected.ranges ? { markdown_range: projected.ranges.after } : {}),
+    steer_replay: { textIndex: 0, prefix, text, sourceOffset: 0,
+      ...(projected.ranges ? { prefixRange: projected.ranges.before } : {}) } }
+}
+
+/** Give the sealed prefix the same parsed formatting as its exact continuation.
+ * Its text and position stay frozen; only the display context crosses the steer. */
+export function projectSteerPrefixMessage(sealed, continuation) {
+  const range = continuation?.steer_replay?.prefixRange
+  if (!range || !sealed) return sealed
+  const index = sealed.blocks?.length
+    ? sealed.blocks.findLastIndex(block => block.type !== 'thinking') : 0
+  const block = sealed.blocks?.length ? sealed.blocks[index] : { type: 'text', content: sealed.content }
+  if (block?.type !== 'text') return sealed
+  const replay = sealed.steer_replay?.textIndex === index ? sealed.steer_replay : null
+  const start = replay ? replay.text.length - block.content.length : 0
+  // A newer parse may supply formatting, never a different row's prose.
+  if (range.source.slice(range.start + start, range.start + start + block.content.length) !== block.content) return sealed
+  const markdownRange = sliceMarkdownRange(range, start, start + block.content.length)
+  if (!markdownRange) return sealed
+  // Carry the final parse backward only through this same exact text section.
+  // A later tool/text section must not lend its formatting to an earlier one.
+  const prefixRange = replay && range.source.startsWith(replay.text)
+    ? sliceMarkdownRange(range, 0, replay.prefix.length) : null
+  const context = prefixRange ? { steer_replay: { ...replay, prefixRange } } : {}
+  if (!sealed.blocks?.length) return { ...sealed, ...context, markdown_range: markdownRange }
+  const blocks = sealed.blocks.slice()
+  blocks[index] = { ...block, markdown_range: markdownRange }
+  return { ...sealed, ...context, blocks }
+}
+
+/** Update only the active replay chain; unrelated settled rows stay cached. */
+export function projectActiveSteerPrefix(messages, activePrefix) {
+  if (!activePrefix?.continuation?.steer_replay?.prefixRange) return messages
+  // Transcript position binds the actual predecessor even in ID-less history.
+  let index = sealedAssistantIndexBeforeSteer(messages, activePrefix.continuationIndex)
+  if (index < 0) return messages
+  const presented = messages.slice()
+  let continuation = activePrefix.continuation
+  while (index >= 0) {
+    const message = projectSteerPrefixMessage(presented[index], continuation)
+    if (message === presented[index]) break
+    presented[index] = message
+    if (!message.steer_replay?.prefixRange) break
+    continuation = message
+    index -= 1
+    while (isSteeredUserMessage(messages[index])) index -= 1
+  }
+  return presented
 }
 
 
 /** Apply the exact replay projection to settled transcript rows. */
 export function projectSettledSteerContinuations(messages, { preserveHidden = false } = {}) {
   if (!Array.isArray(messages)) return []
-  return messages.map((message, index) => {
+  const presented = messages.map((message, index) => {
     if (message?.role !== 'assistant') return message
     const root = assistantReplyRoot(message)
     let before = index - 1
@@ -151,4 +230,13 @@ export function projectSettledSteerContinuations(messages, { preserveHidden = fa
       message,
     )
   })
+  // Latest complete formatting wins all the way back through replay chains.
+  for (let index = presented.length - 1; index >= 0; index -= 1) {
+    const message = presented[index]
+    if (!message?.steer_replay?.prefixRange) continue
+    let before = index - 1
+    while (isSteeredUserMessage(messages[before])) before -= 1
+    presented[before] = projectSteerPrefixMessage(presented[before], message)
+  }
+  return presented
 }
