@@ -871,54 +871,19 @@ async def install_app(
   # doing so preempted the owner's choice and raced a duplicate chat against the
   # store's own.
   upstream_version = str(manifest.get("version", "")).strip() or None
-  return schemas.AppInstallOut(
-    id=app.id,
-    name=app.name,
-    description=app.description,
-    compiled_path=app.compiled_path,
-    chat_id=app.chat_id,
-    source_dir=app.source_dir,
-    pinned_at=app.pinned_at,
-    cross_app_access=app.cross_app_access,
-    share_with_apps=app.share_with_apps,
-    offline_capable=app.offline_capable,
-    embeds_agent=app.embeds_agent,
-    shell_shortcuts=app.shell_shortcuts,
-    manage_apps=app.manage_apps,
-    github_access=app.github_access,
-    manage_skills=app.manage_skills,
-    github_connect=app.github_connect,
-    filesystem_access=app.filesystem_access,
-    slug=app.slug,
-    manifest_url=app.manifest_url,
-    package_id=app.package_id,
-    service_id=app.service_id,
-    published_manifest_url=app.published_manifest_url,
-    public_name=app.public_name,
-    public_bundle_path=app.public_bundle_path,
-    public_bundle_digest=app.public_bundle_digest,
-    public_source_commit=app.public_source_commit,
-    public_access_contract=app.public_access_contract,
-    public_access_digest=app.public_access_digest,
-    public_published_at=app.public_published_at,
-    theme_color=app.theme_color,
-    background_color=app.background_color,
-    display=app.display,
-    offline_contract=app.offline_contract,
-    system_prompt_file=app.system_prompt_file,
-    chat_log_access=app.chat_log_access,
-    capability_contract=app.capability_contract,
-    created_at=app.created_at,
-    updated_at=app.updated_at,
-    mode=mode,
-    version=app.version or "unknown",
-    upstream_version=upstream_version if mode == "conflict" else None,
-    warnings=warnings,
-    conflict_paths=conflict_paths,
-    divergence=divergence,
-    reconciliation=schemas.ReconciliationReceiptOut(
-      **reconciliation.as_dict(),
-    ),
+  # dict(model) retains excluded identity inputs for the response projections.
+  return schemas.AppInstallOut.model_validate(
+    dict(schemas.AppOut.model_validate(app)) | {
+      "mode": mode,
+      "version": app.version or "unknown",
+      "upstream_version": upstream_version if mode == "conflict" else None,
+      "warnings": warnings,
+      "conflict_paths": conflict_paths,
+      "divergence": divergence,
+      "reconciliation": schemas.ReconciliationReceiptOut(
+        **reconciliation.as_dict(),
+      ),
+    },
   )
 
 
@@ -1104,12 +1069,18 @@ def _validate_pending_update(repo: Path, receipt: dict) -> _PendingUpdatePlan:
         checkout=worktree,
       )
   override = receipt.get("merge_base_override")
-  merge = (
-    app_git.merge_refs(
-      repo, app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
-      merge_base=override,
-    ) if override is not None else app_git.merge_upstream(repo)
-  )
+  try:
+    merge = (
+      app_git.merge_refs(
+        repo, app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+        merge_base=override,
+      ) if override is not None else app_git.merge_upstream(repo)
+    )
+  except app_git.GitTransferTimeout as exc:
+    raise install.git_source_error(
+      "The installed version was left unchanged.",
+      exc,
+    ) from exc
   if merge.status != "conflict" or not merge.conflict_paths:
     raise _conflict_state_changed()
   return _PendingUpdatePlan(merge=merge)
@@ -1664,8 +1635,10 @@ async def update_candidate_preview(
     except (
       OSError, subprocess.SubprocessError, RuntimeError, TypeError, ValueError,
     ) as exc:
-      raise HTTPException(
-        409, "This app does not have a usable Git update source.",
+      raise install.git_source_error(
+        "The installed version was left unchanged.",
+        exc,
+        failure="This app does not have a usable Git update source.",
       ) from exc
   upstream_diff = await asyncio.to_thread(
     _diff_preview_trees, previous_source, candidate.runtime_tree,
@@ -3179,8 +3152,8 @@ async def delete_app_data(
     # The badge counted data that no longer exists; forgetting it also resets
     # the app's report ordering for its fresh start.
     app_badge.clear(db, app.id)
-    # Advance updated_at so the iframe cache-buster changes and a currently-open
-    # app remounts against its now-empty storage.
+    # The new nonce changes frame_version, so a currently-open app remounts
+    # against its now-empty storage; updated_at refreshes list consumers.
     app.updated_at = now_naive_utc()
     db.commit()
 

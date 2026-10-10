@@ -211,6 +211,10 @@ class AppOut(BaseModel):
   public_access_contract: dict | None = Field(default=None, exclude=True)
   public_access_digest: str | None = Field(default=None, exclude=True)
   public_published_at: datetime | None = Field(default=None, exclude=True)
+  # Internal source for frame and storage-generation projections. App-scoped
+  # JWTs separately carry this nonce as app_nonce.
+  token_nonce: str | None = Field(default=None, exclude=True)
+  runtime_revision: str | None = Field(default=None, exclude=True)
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed
   # (they backfill on their next update). The store reads this to show
@@ -237,6 +241,22 @@ class AppOut(BaseModel):
   capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
+
+  @computed_field
+  @property
+  def frame_version(self) -> str:
+    """The app frame's reload key; see app_compile_contract.app_frame_version."""
+    from app.app_compile_contract import app_frame_version
+
+    return app_frame_version(self)
+
+  @computed_field
+  @property
+  def storage_generation(self) -> str:
+    """Stable across app updates; rotates when app data is wiped."""
+    from app.app_compile_contract import app_storage_generation
+
+    return app_storage_generation(self.token_nonce)
 
   @computed_field
   @property

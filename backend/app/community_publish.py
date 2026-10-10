@@ -8,10 +8,11 @@ import hashlib
 import json
 import re
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from app import app_git, models
+from app import app_git, icon_assets, models
 from app.config import get_settings
 from app.manifest_contract import (
   PACKAGE_MAX_BYTES,
@@ -28,20 +29,59 @@ MAX_PATH_BYTES = 512
 MAX_JOURNAL_BYTES = 16 * 1024
 MAX_STORE_SCREENSHOTS = 5
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
-_SOURCE_SEGMENT = re.compile(r"^[A-Za-z0-9._@+ -]+$")
-_SENSITIVE_DIRS = {
-  ".git", ".github", ".env", "node_modules", "credentials", "secrets",
+# Unicode UCD categories plus Default_Ignorable_Code_Point extras from
+# DerivedCoreProperties.txt (Hangul/Khmer/Mongolian fillers and selectors),
+# and U+2800 BRAILLE PATTERN BLANK; ASCII spaces are allowed inside names.
+_UNSAFE_PATH_CATEGORIES = {"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp", "Zs"}
+_INVISIBLE_PATH_EXTRAS = frozenset(
+  "\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f"
+  "\u2800\u3164\uffa0"
+)
+
+
+def _is_unsafe_path_character(char: str) -> bool:
+  return char != " " and (
+    unicodedata.category(char) in _UNSAFE_PATH_CATEGORIES
+    or char in _INVISIBLE_PATH_EXTRAS
+    or "\ufe00" <= char <= "\ufe0f"
+    or "\U000e0100" <= char <= "\U000e01ef"
+  )
+
+
+# Path segments refused anywhere in a published tree, each with the reason the
+# author sees. Private folder names remain a guard beyond the content scan.
+_UNPUBLISHED_SEGMENTS = {
+  ".git": "Git's own metadata is never app source.",
+  ".env": "environment files usually hold credentials.",
+  "credentials": "private credential directories must not be published.",
+  "secrets": "private secret directories must not be published.",
+  ".github": (
+    "Möbius does not publish .github files, because creating GitHub workflow "
+    "files needs a broader GitHub token scope than publishing uses."
+  ),
+  "node_modules": (
+    "installed apps use the platform's bundled libraries, so committed "
+    "dependencies are never loaded and only add third-party code to the "
+    "public repository."
+  ),
 }
 _SENSITIVE_FILES = {
   ".netrc", ".npmrc", ".pypirc",
   "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
   "credentials.json", "service-account.json",
 }
+# Heuristics catch recognizable credentials, not every possible secret.
+# Authors still need to review the accepted source before publication.
 _SECRET_PATTERNS = (
-  re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+  re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED |DSA )?PRIVATE KEY-----"),
+  re.compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----"),
   re.compile(r"\bgh[pousr]_[A-Za-z0-9]{24,}\b"),
   re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
   re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+  re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+  re.compile(r"\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"),
+  re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b"),
+  re.compile(r"\bxox[abprs]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{10,}\b"),
 )
 _JOURNAL_STATES = {"listing_pending", "failed", "live"}
 _LOCAL_APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
@@ -307,34 +347,40 @@ def accepted_history_contains(
 def _validate_path(path: str) -> None:
   pure = PurePosixPath(path)
   parts = pure.parts
-  folded = [part.casefold() for part in parts]
   if (
     not path
     or path.startswith("/")
     or "\\" in path
-    or len(path.encode("utf-8")) > MAX_PATH_BYTES
     or str(pure) != path
     or any(part in {"", ".", ".."} for part in parts)
-    or any(not _SOURCE_SEGMENT.fullmatch(part) for part in parts)
+    or any(part != part.strip(" ") for part in parts)
+    or any(_is_unsafe_path_character(char) for char in path)
+    or len(path.encode("utf-8")) > MAX_PATH_BYTES
   ):
     raise CommunityPublicationError(
-      "The accepted app revision contains an unsupported path.", "invalid_path",
+      f"The path {path!r} cannot be published. Use a relative path of at most "
+      f"{MAX_PATH_BYTES} bytes with '/' separators (no backslashes), no '.' "
+      "or '..' segments, no leading or trailing spaces in a name, and no "
+      "control, text-direction, invisible or blank-lookalike characters.",
+      "invalid_path",
     )
-  if (
-    any(part in _SENSITIVE_DIRS for part in folded)
-    or folded[-1] in _SENSITIVE_FILES
-    or folded[-1].startswith(".env.")
-  ):
+  folded = [part.casefold() for part in parts]
+  for part in folded:
+    reason = _UNPUBLISHED_SEGMENTS.get(part)
+    if reason is not None:
+      raise CommunityPublicationError(
+        f"Remove {path} before publishing: {reason}", "sensitive_path",
+      )
+  if folded[-1] in _SENSITIVE_FILES or folded[-1].startswith(".env."):
     raise CommunityPublicationError(
-      f"Remove the sensitive path {path} before publishing.", "sensitive_path",
+      f"Remove {path} before publishing: it is a common credential file name.",
+      "sensitive_path",
     )
 
 
 def _scan_content(path: str, content: bytes) -> None:
-  try:
-    text = content.decode("utf-8")
-  except UnicodeDecodeError:
-    return
+  # Replacement preserves ASCII token runs even in otherwise binary files.
+  text = content.decode("utf-8", errors="replace")
   if any(pattern.search(text) for pattern in _SECRET_PATTERNS):
     raise CommunityPublicationError(
       f"A likely credential was found in {path}. Remove it before publishing.",
@@ -477,13 +523,19 @@ def _public_tree_entries(repo: Path, commit: str) -> list[_PublicTreeEntry]:
       path = raw_path.decode("utf-8", "strict")
     except (UnicodeDecodeError, ValueError) as exc:
       raise CommunityPublicationError(
-        "The app source tree contains an unsupported path.", "invalid_path",
+        f"The path {raw_path.decode('utf-8', 'replace')!r} is not valid UTF-8 "
+        "and cannot be published.",
+        "invalid_path",
       ) from exc
     _validate_path(path)
-    folded = path.casefold()
+    # Case-insensitive and macOS (decomposed Unicode) checkouts would merge
+    # these names into one file.
+    folded = unicodedata.normalize("NFC", path).casefold()
     if folded in seen:
       raise CommunityPublicationError(
-        "The app contains paths that collide when published.", "invalid_path",
+        f"The path {path!r} collides with another file that differs only in "
+        "letter case or Unicode form.",
+        "invalid_path",
       )
     seen.add(folded)
     if object_type != "blob" or mode not in {"100644", "100755"} or not _OID.fullmatch(oid):
@@ -619,6 +671,19 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
     validate_manifest_contract(manifest)
   except ManifestContractError as exc:
     raise CommunityPublicationError(str(exc), "invalid_manifest") from exc
+  icon = manifest.get("icon")
+  icon_item = next((item for item in files if item["path"] == icon), None)
+  if icon:
+    if icon_item is None:
+      raise CommunityPublicationError(
+        f"The app icon {icon} is missing from the published snapshot.", "invalid_icon",
+      )
+    try:
+      icon_assets.normalize_icon(base64.b64decode(icon_item["content_base64"]))
+    except icon_assets.InvalidIcon as exc:
+      raise CommunityPublicationError(
+        f"The app icon {icon} cannot be used: {exc}", "invalid_icon",
+      ) from exc
   # Install charges each declaration in full, so bound the same declared sum:
   # every snapshot the Store accepts is then installable.
   declared = package_bytes(manifest, lambda rel: sizes.get(rel, 0))

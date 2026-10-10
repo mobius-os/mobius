@@ -294,6 +294,16 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert row["theme_color"] == "#223344"
   assert row["background_color"] == "#101820"
   assert row["display"] == "fullscreen"
+  assert payload["frame_version"] == row["frame_version"]
+  assert payload["storage_generation"] == row["storage_generation"]
+  install_fields = {
+    "mode", "upstream_version", "warnings", "conflict_paths", "divergence",
+    "reconciliation",
+  }
+  assert {k: v for k, v in payload.items() if k not in install_fields} == row
+  assert set(payload) == set(row) | install_fields
+  assert "token_nonce" not in payload
+  assert "runtime_revision" not in payload
 
 
 def test_install_fresh_service_app_syncs_aliases_during_activation(
@@ -872,6 +882,7 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
     })
   assert r1.status_code == 201
   v1_id = r1.json()["id"]
+  v1_generation = r1.json()["storage_generation"]
 
   # User edits the prompt seed before the update lands.
   data_dir = Path(get_settings().data_dir)
@@ -900,6 +911,7 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert payload["mode"] == "update"
   assert payload["version"] == "1.2.0"
   assert payload["id"] == v1_id  # same row, not a duplicate
+  assert payload["storage_generation"] == v1_generation
   # User's edit is preserved
   assert user_prompt_path.read_text() == "USER EDITED"
   # JSX got refreshed in source_dir
@@ -1079,6 +1091,35 @@ def test_commit_pinned_install_clones_exact_reviewed_commit(
   assert app_git.head_sha(source_dir, "main") == commit
   assert app_git.head_sha(source_dir, "upstream") == commit
 
+
+
+def test_git_clone_timeout_reads_as_a_timeout_not_a_missing_source(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://raw.githubusercontent.com/acme/slow-git/main/"
+  manifest = {
+    "id": "slow-git", "name": "Slow Git", "version": "1.0.0",
+    "description": "Git lineage is required", "entry": "index.jsx",
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.clone_upstream",
+    side_effect=app_git.GitTransferTimeout("it ran longer than 30 seconds"),
+  ):
+    failed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert failed.status_code == 409, failed.text
+  detail = failed.json()["detail"]
+  assert detail["code"] == "git_transfer_timeout"
+  assert "timed out: it ran longer than 30 seconds" in detail["message"]
+  assert "Nothing was installed." in detail["message"]
+  assert db.query(models.App).filter_by(slug="slow-git").first() is None
 
 
 def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
@@ -1905,42 +1946,56 @@ def test_install_accepts_valid_cron_shapes(client, auth, bypass_url_validation):
 
 
 def test_install_rejects_decompression_bomb_icon(client, auth, bypass_url_validation):
-  """Fix 2: a tiny PNG that decodes to a giant image must be rejected
-  before PIL's `load()` allocates gigabytes. We patch `Image.open` to
-  return a mock whose `.size` reports 50000x50000 — the dimension gate
-  fires before `load()`, so the install endpoint treats it as a 415
-  icon error and surfaces it as a non-fatal warning (icons are
-  optional). The app installs without the icon."""
-  from unittest.mock import patch as _patch, MagicMock
+  """Pillow refuses a real oversized header before allocating its pixels.
+
+  Icon rejection remains nonfatal for imports; no pixel decode may run.
+  """
+  from PIL import Image
+
+  icon = io.BytesIO()
+  Image.new("1", (6000, 6000)).save(icon, format="PNG")
   base = "https://x.test/bomb/"
   responses = {
     base + "mobius.json": (200, json.dumps({
       **MANIFEST_NEWS, "id": "bomb-icon",
     }).encode()),
     base + "index.jsx": (200, JSX.encode()),
-    base + "icon.png": (200, b"\x89PNG\r\n\x1a\n" + b"bogus"),  # any bytes
+    base + "icon.png": (200, icon.getvalue()),
     base + "prompt.md": (200, PROMPT.encode()),
     base + "fetch.sh": (200, b""),
   }
-  fake_img = MagicMock()
-  fake_img.size = (50000, 50000)
-  fake_img.mode = "RGB"
-  with _patch(
+  with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
-  ), _patch("PIL.Image.open", return_value=fake_img):
+  ), patch("PIL.PngImagePlugin.PngImageFile.load") as load:
     r = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
     })
-  # Icon rejection is non-fatal — the install succeeds, the icon path
-  # surfaces as a warning. The important assertion is that PIL.load()
-  # was NEVER called (i.e. no gigabyte allocation).
-  fake_img.load.assert_not_called()
+  load.assert_not_called()
   assert r.status_code == 201, r.text
-  assert any("icon" in w.lower() for w in r.json()["warnings"])
+  assert any("32 million pixels" in warning for warning in r.json()["warnings"])
 
 
 # --- Stream byte counter aborts mid-download (fix 3) ----------------
+
+
+@pytest.mark.asyncio
+async def test_package_download_encodes_literal_declared_names(monkeypatch):
+  """Declared names are literal paths; HTTP installs must request them encoded."""
+  requested = []
+
+  async def fake_get(_client, url, _max_bytes, _hops=0):
+    requested.append(url)
+    return b"x"
+
+  monkeypatch.setattr(install, "_http_get", fake_get)
+  download = install._PackageDownload(object(), "https://raw.example/app/")
+  await download.read("assets/100%.png")
+  await download.read("a b.js")
+  assert requested == [
+    "https://raw.example/app/assets/100%25.png",
+    "https://raw.example/app/a%20b.js",
+  ]
 
 
 @pytest.mark.asyncio
@@ -2015,6 +2070,76 @@ def test_install_surfaces_github_rate_limit_as_429(client, auth, bypass_url_vali
   assert r.status_code == 429, r.text
   assert "GitHub rate-limited" in r.json()["detail"]
   assert "minute" in r.json()["detail"]
+
+
+
+@pytest.mark.parametrize("headers", [
+  {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1783620000"},
+  {"retry-after": "60"},
+])
+def test_install_surfaces_github_403_rate_limit_as_429(
+  client, auth, bypass_url_validation, headers,
+):
+  """GitHub reports exhausted rate limits as 403, not as a permission error."""
+  base = "https://raw.githubusercontent.com/mobius-os/app-test/main/"
+  responses = {base + "mobius.json": (403, b"API rate limit exceeded", headers)}
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 429, r.text
+  assert "GitHub rate-limited" in r.json()["detail"]
+  assert "Upstream 403" not in r.json()["detail"]
+
+
+def test_install_keeps_an_ordinary_403_as_an_upstream_error(
+  client, auth, bypass_url_validation,
+):
+  base = "https://raw.githubusercontent.com/mobius-os/app-test/main/"
+  responses = {
+    base + "mobius.json": (403, b"forbidden", {"x-ratelimit-remaining": "42"}),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 502, r.text
+  assert "Upstream 403" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("host, status, expected", [
+  ("api.github.com", 403, 429),
+  ("github.com", 403, 429),
+  ("raw.githubusercontent.com", 403, 429),
+  ("example.test", 403, 502),
+  ("github.com.example.test", 403, 502),
+  ("notgithub.test", 403, 502),
+  ("example.test", 429, 429),
+])
+@pytest.mark.parametrize("headers", [
+  {"retry-after": "60"}, {"x-ratelimit-remaining": "0"},
+])
+def test_install_reinterprets_rate_limit_403_only_for_github_hosts(
+  client, auth, bypass_url_validation, host, status, expected, headers,
+):
+  url = f"https://{host}/mobius.json"
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({url: (status, b"unavailable", headers)}),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": url,
+    })
+
+  assert response.status_code == expected, response.text
+  if expected == 502:
+    assert "Upstream 403" in response.json()["detail"]
 
 
 # --- Update path rolls back compiled bundle (fix 4) -----------------
@@ -4880,6 +5005,47 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert row["version"] == "1.0.0"
 
 
+def test_update_candidate_preview_classifies_git_transfer_timeout_without_mutation(
+  client, auth, db, tmp_path, bypass_url_validation,
+):
+  base = "https://raw.githubusercontent.com/acme/preview-timeout/main/"
+  manifest = {
+    "id": "preview-timeout", "name": "Preview timeout", "version": "1.0.0",
+    "description": "Git preview timeout", "entry": "index.jsx",
+  }
+  _, bare, _ = _make_clone_fixture(tmp_path, JSX_MULTI, "")
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, JSX_MULTI, "", bare,
+  )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  repo = Path(get_settings().data_dir) / "apps" / manifest["id"]
+  before = (repo / "index.jsx").read_bytes()
+  upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.app_git._run_network",
+    side_effect=app_git.GitTransferTimeout("it ran longer than 30 seconds"),
+  ) as network:
+    response = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+
+  network.assert_called_once()
+  assert network.call_args.args[1] == "fetch"
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "git_transfer_timeout"
+  assert "timed out: it ran longer than 30 seconds" in detail["message"]
+  assert "installed version was left unchanged" in detail["message"]
+  assert (repo / "index.jsx").read_bytes() == before
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == upstream
+  db.expire_all()
+  assert db.get(models.App, app_id).version == manifest["version"]
+
+
 def test_update_candidate_preview_applies_the_reviewed_commit_without_refetch(
   client, auth, db, tmp_path, bypass_url_validation,
 ):
@@ -6890,7 +7056,7 @@ def test_git_manifest_accepts_exact_size_boundary(tmp_path):
   assert summary.manifest["id"] == MANIFEST_MULTI["id"]
 
 
-def test_git_package_inputs_are_bounded_like_http_installs(monkeypatch):
+def test_git_candidate_inputs_are_bounded_like_http_installs(monkeypatch):
   from app import install
 
   manifest = {
@@ -6907,10 +7073,10 @@ def test_git_package_inputs_are_bounded_like_http_installs(monkeypatch):
   monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 399)
 
   with pytest.raises(install.PackageTooLarge, match="MiB app package limit"):
-    install._read_git_package_inputs(tree, strict=True)
+    install._read_git_candidate_inputs(tree, strict=True)
 
   monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", len(JSX) + 400)
-  assert install._read_git_package_inputs(tree, strict=True).static_assets
+  assert install._read_git_candidate_inputs(tree, strict=True).static_assets
 
 
 def _commit_package(root: Path, files: dict[str, bytes]) -> tuple[Path, str]:
@@ -8696,3 +8862,162 @@ def test_conflict_resolver_rejects_oversized_prompt_before_parking_any_checkout(
   with SessionLocal() as db:
     assert all(db.get(models.App, app_id).conflict_resolver_chat_id is None
                for app_id in ids)
+
+
+def test_install_git_network_has_short_lifecycle_ceiling(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  """An unopened connection must not monopolize app lifecycle work."""
+  base = "https://raw.githubusercontent.com/acme/unopened/main/"
+  manifest = {
+    "id": "unopened", "name": "Unopened", "version": "1.0.0",
+    "description": "Connection never opens", "entry": "index.jsx",
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  seen = []
+  real_popen = app_git.subprocess.Popen
+
+  class SlowTransfer(real_popen):
+    timed_out = False
+
+    def communicate(self, *args, **kwargs):
+      if not self.timed_out and ("clone" in self.args or "fetch" in self.args):
+        self.timed_out = True
+        seen.append(kwargs["timeout"])
+        assert 0 < kwargs["timeout"] <= 30
+        raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
+      return super().communicate(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", SlowTransfer)
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ):
+    failed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert seen
+  assert failed.status_code == 409, failed.text
+  assert failed.json()["detail"]["code"] == "git_transfer_timeout"
+  assert db.query(models.App).filter_by(slug="unopened").first() is None
+
+
+def test_update_git_fetch_has_short_ceiling_and_preserves_installed_revision(
+  client, auth, tmp_path, bypass_url_validation, monkeypatch,
+):
+  base = "https://raw.githubusercontent.com/acme/fetch-ceiling/main/"
+  manifest = {
+    "id": "fetch-ceiling", "name": "Fetch ceiling", "version": "1.0.0",
+    "description": "Locked update transfer", "entry": "index.jsx",
+  }
+  _, bare, first = _make_clone_fixture(tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1)
+  installed = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+  assert installed.status_code == 201, installed.text
+  seen = []
+  real_popen = app_git.subprocess.Popen
+
+  class SlowTransfer(real_popen):
+    timed_out = False
+
+    def communicate(self, *args, **kwargs):
+      if not self.timed_out and ("fetch" in self.args):
+        self.timed_out = True
+        seen.append(kwargs["timeout"])
+        assert 0 < kwargs["timeout"] <= 30
+        raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
+      return super().communicate(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", SlowTransfer)
+  failed = _install_clone_fixture(
+    client, auth, base, {**manifest, "version": "2.0.0"},
+    CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+  assert seen
+  assert failed.status_code == 409, failed.text
+  assert failed.json()["detail"]["code"] == "git_transfer_timeout"
+  src = Path(get_settings().data_dir) / "apps" / "fetch-ceiling"
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == first
+  assert (src / "index.jsx").read_text() == CLONE_INDEX_V1
+
+
+@pytest.mark.parametrize("operation", ["update", "resolver"])
+def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
+  client, auth, db, bypass_url_validation, monkeypatch, operation,
+):
+  from app import install
+
+  base = "https://unshallow-timeout.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "unshallow-timeout"}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  repo = Path(get_settings().data_dir) / "apps" / manifest["id"]
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE")
+  (repo / "index.jsx").write_text(local)
+  incoming = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  upstream_before = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  def hide_merge_base(source_dir):
+    # Model a depth-one upstream graft left by an earlier fetch. Local Git
+    # commands and the entire merge -> unshallow chain remain real.
+    app_git._run(source_dir, "remote", "add", "origin", base)
+    upstream = app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH)
+    (Path(source_dir) / ".git" / "shallow").write_text(upstream + "\n")
+
+  real_merge = app_git.merge_upstream
+  if operation == "update":
+    def merge_with_hidden_base(source_dir, **kwargs):
+      hide_merge_base(source_dir)
+      return real_merge(source_dir, **kwargs)
+
+    monkeypatch.setattr(app_git, "merge_upstream", merge_with_hidden_base)
+  else:
+    conflict = _update_v2(
+      client, auth, base, {**manifest, "version": "2.0.0"}, incoming,
+    )
+    assert conflict.status_code == 201, conflict.text
+    assert conflict.json()["mode"] == "conflict"
+    hide_merge_base(repo)
+    upstream_before = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  seen = []
+  real_popen = app_git.subprocess.Popen
+
+  class SlowTransfer(real_popen):
+    timed_out = False
+
+    def communicate(self, *args, **kwargs):
+      if not self.timed_out and ("--unshallow" in self.args):
+        self.timed_out = True
+        seen.append(kwargs["timeout"])
+        assert 0 < kwargs["timeout"] <= 30
+        raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
+      return super().communicate(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", SlowTransfer)
+  if operation == "update":
+    failed = _update_v2(
+      client, auth, base, {**manifest, "version": "2.0.0"}, incoming,
+    )
+  else:
+    failed = client.post(
+      f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+    )
+
+  assert seen == [30]
+  assert failed.status_code == 409, failed.text
+  assert failed.json()["detail"]["code"] == "git_transfer_timeout"
+  assert (repo / "index.jsx").read_text() == local
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == upstream_before
+  assert not install.pending_update_worktree(repo).exists()
+  db.expire_all()
+  assert db.get(models.App, app_id).version == manifest["version"]
+
+
+def test_git_source_error_without_failure_has_no_leading_space():
+  error = install.git_source_error("The app was not changed.", RuntimeError("unavailable"))
+  assert error.detail["message"] == "The app was not changed."

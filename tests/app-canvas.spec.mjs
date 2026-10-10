@@ -23,6 +23,7 @@
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-canvas.spec.mjs
  */
+import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
 import { installMockProviderUsage, mockDeliveryReady, emptyChatPage } from './_chatTestPrerequisites.mjs'
 
@@ -755,8 +756,8 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     })
     await setupShellBasics(page)
 
-    // Digit-string updated_at values double as the frame version keys
-    // (appVersionKey passes them through): while the app sits at '1000' the
+    // The row's frame_version is the frame version key (appFrameVersion passes
+    // it through): while the app sits at '1000' the
     // live frame mounts at that version; once the test ARMS the swap the app
     // reports '2000', so the next refetch triggers the double-buffer swap and
     // mounts a hidden incoming frame.
@@ -772,7 +773,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // however many — returns '1000', and only the post-arm refetch returns
     // '2000'.
     let swapArmed = false
-    const appRow = (updatedAt) => ({
+    const appRow = (frameVersion) => ({
       id: appId,
       name: 'CrashToy',
       slug: 'crashtoy',
@@ -781,7 +782,8 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       chat_id: null,
       source_dir: null,
       created_at: '1000',
-      updated_at: updatedAt,
+      updated_at: frameVersion,
+      frame_version: frameVersion,
     })
     await page.route(/\/api\/apps\/$/, route => {
       if (route.request().method() !== 'GET') return route.fallback()
@@ -877,7 +879,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
     // Arm the swap: the live frame has settled at '1000', so from here every
     // apps fetch reports '2000'. Then trigger an apps refetch (an unknown
-    // open-app target refetches once before giving up) — the bumped updated_at
+    // open-app target refetches once before giving up) — the new frame_version
     // starts the swap and mounts the hidden incoming frame.
     swapArmed = true
     const settledLiveFrame = await waitForContentFrame(
@@ -923,5 +925,405 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
       .toHaveValue(/crashed with this error/, { timeout: 8000 })
     expect(chatsCreated).toBe(1)
+  })
+})
+
+// These scenarios run the compiled navigation runtime inside a controlled frame,
+// but leave AppCanvas promotion, source attribution, storage and shell history real.
+const navRuntime = readFileSync(new URL('../frontend/public/mobius-runtime.js', import.meta.url), 'utf8')
+
+function locationFrameHTML(appId, { manualMount = false, fallback = false } = {}) {
+  return `<!doctype html><html><body><div id="root">booting</div>
+<script type="module">
+  import { makeNav } from '${BASE}/test-nav-runtime.js';
+  window.documentId = Math.random();
+  window.initCalls = 0;
+  window.visible = false;
+  window.detail = false;
+  const post = data => window.parent.postMessage(data, window.location.origin);
+  const render = () => { document.getElementById('root').textContent = window.detail ? 'detail: notes' : 'list'; };
+  window.mount = () => post({ type: 'moebius:frame-mounted', appId: '${appId}' });
+  window.fail = () => post({ type: 'moebius:frame-error', appId: '${appId}' });
+  window.openApp = appId => post({ type: 'moebius:open-app', appId });
+  window.addEventListener('message', e => {
+    if (e.source !== window.parent || e.origin !== window.location.origin) return;
+    const msg = e.data;
+    if (msg?.type === 'moebius:frame-visibility') window.visible = msg.visible === true;
+    if (msg?.type !== 'moebius:frame-init') return;
+    window.initCalls++;
+    window.lastToken = msg.token;
+    if (window.nav) return;
+    window.nav = makeNav({ location: msg.navLocation, waitForNavigationReady: msg.waitForNavigationReady });
+    window.initialLocation = window.nav.location;
+    window.report = () => window.nav.setLocation({ ...window.nav.location, detail: window.detail ? 'notes' : null });
+    window.openDetail = async () => {
+      window.restoring = true;
+      const handle = window.nav.open('notes', () => { window.detail = false; render(); window.report(); });
+      window.ownership = await handle.outcome;
+      if (window.ownership.status === 'owned') window.detail = true;
+      window.restoring = false;
+      render();
+      window.report();
+    };
+    render();
+    if (window.initialLocation?.detail && !${fallback}) void window.openDetail();
+    else window.report();
+    if (!${manualMount}) window.mount();
+  });
+</script></body></html>`
+}
+
+async function setupLocationRoutes(page) {
+  const appId = 81
+  await setupAppRoutes(page, appId, '')
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'deviceMemory', { configurable: true, value: 4 })
+  })
+  const state = {
+    version: '1000', instance: 'nonce-a', storageGeneration: 'generation-a', updatedAt: '1000', name: 'Location 0',
+    manualVersions: new Set(), fallbackVersions: new Set(), fetches: 0,
+  }
+  await page.route('**/test-nav-runtime.js', route => route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/javascript', 'Access-Control-Allow-Origin': '*' },
+    body: navRuntime,
+  }))
+  await page.route(/\/api\/apps\/$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    state.fetches++
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(Array.from({ length: 8 }, (_, index) => ({
+        id: appId + index, name: index === 0 ? state.name : `Location ${index}`, slug: `location-${index}`,
+        compiled_path: `/data/compiled/app-${appId + index}.js`, chat_id: null,
+        created_at: '1000', updated_at: index === 0 ? state.updatedAt : '1000',
+        frame_version: index === 0 ? state.version : '1000',
+        storage_generation: index === 0 ? state.storageGeneration : `generation-${index}`,
+      }))),
+    })
+  })
+  await page.route(/\/api\/auth\/app-token$/, route => {
+    const id = route.request().postDataJSON().app_id
+    const payload = { scope: 'app', app_id: id, app_nonce: state.instance, exp: 4102444800 }
+    const token = `e30.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.test`
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ token }) })
+  })
+  await page.route(/\/api\/apps\/\d+\/frame/, route => {
+    const url = new URL(route.request().url())
+    const id = Number(url.pathname.split('/')[3])
+    const version = url.searchParams.get('v').split('-')[0]
+    return route.fulfill({
+      status: 200, contentType: 'text/html',
+      body: locationFrameHTML(id, {
+        manualMount: id === appId && state.manualVersions.has(version),
+        fallback: id === appId && state.fallbackVersions.has(version),
+      }),
+    })
+  })
+  await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+  const frame = await locationFrame(page, appId, 'live', '1000')
+  await frame.waitForFunction(() => window.visible)
+  return state
+}
+
+async function locationFrame(page, appId = 81, role = 'live', version = null) {
+  const appSelector = role === 'live' ? `[data-app-id="${appId}"]` : ''
+  const selector = `iframe.canvas--${role}${appSelector}${version ? `[data-frame-version="${version}"]` : ''}`
+  await page.waitForSelector(selector, { state: 'attached', timeout: 8000 })
+  const frame = await waitForContentFrame(page, selector)
+  await frame.waitForFunction(() => Boolean(window.nav))
+  return frame
+}
+
+async function refetchLocationApps(page, state, frame) {
+  const before = state.fetches
+  await frame.evaluate(() => window.openApp('no-such-app'))
+  await expect.poll(() => state.fetches).toBeGreaterThan(before)
+}
+
+async function storedLocation(page) {
+  return page.evaluate(() => JSON.parse(sessionStorage.getItem('mobius:app-nav-location:81') || 'null'))
+}
+
+async function expectDetail(frame) {
+  await frame.waitForFunction(() => window.detail && !window.restoring)
+  expect(await frame.evaluate(() => window.ownership.status)).toBe('owned')
+}
+
+test.describe('AppCanvas location lifecycle', () => {
+  test('malformed location reports cannot erase the saved place', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const frame = await locationFrame(page)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    await expect.poll(async () => (await storedLocation(page))?.location)
+      .toBe('{"detail":"notes"}')
+    for (const location of [undefined, '{broken', { detail: 'object' }, 'null', '"' + 'x'.repeat(4096) + '"']) {
+      await frame.evaluate(location => {
+        window.parent.postMessage({ type: 'moebius:nav-location', location }, window.location.origin)
+      }, location)
+      // The subsequent app-open request crosses the same ordered message channel.
+      await refetchLocationApps(page, state, frame)
+      expect((await storedLocation(page)).location).toBe('{"detail":"notes"}')
+    }
+    await frame.evaluate(() => window.nav.setLocation(null))
+    await expect.poll(() => storedLocation(page)).toBeNull()
+  })
+
+  test('bookmark restoration owns Back through version swap and shell refresh', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    let frame = await locationFrame(page)
+    const entryBeforeDetail = await page.evaluate(() => history.state?.entryId)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    state.version = '2000'
+    await refetchLocationApps(page, state, frame)
+    frame = await locationFrame(page, 81, 'live', '2000')
+    await expectDetail(frame)
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => !window.detail)
+    await expect.poll(() => page.evaluate(() => history.state?.entryId)).toBe(entryBeforeDetail)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    frame = await locationFrame(page, 81, 'live', '2000')
+    await expectDetail(frame)
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => !window.detail)
+    await expect.poll(() => page.evaluate(() => history.state?.entryId)).toBe(entryBeforeDetail)
+    expect(await frame.locator('#root').textContent()).toBe('list')
+  })
+
+  test('a same-version document reload restores one Back target, not a ghost from the old document', async ({ page }) => {
+    await setupLocationRoutes(page)
+    let frame = await locationFrame(page, 81, 'live', '1000')
+    const entryBeforeDetail = await page.evaluate(() => history.state?.entryId)
+    expect(typeof entryBeforeDetail).toBe('string')
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    const documentId = await frame.evaluate(() => window.documentId)
+    await frame.goto(frame.url(), { waitUntil: 'load' })
+    frame = await locationFrame(page, 81, 'live', '1000')
+    expect(await frame.evaluate(() => window.documentId)).not.toBe(documentId)
+    await expectDetail(frame)
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => !window.detail)
+    // Restoration reused the physical detail slot, so one Back reaches its base.
+    await expect.poll(() => page.evaluate(() => history.state?.entryId)).toBe(entryBeforeDetail)
+  })
+
+  test('bookmark survives actual warm-cache eviction and remount', async ({ page }) => {
+    await setupLocationRoutes(page)
+    let frame = await locationFrame(page)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    const documentId = await frame.evaluate(() => window.documentId)
+    // Seven other apps exceed the six-frame low-memory LRU budget.
+    for (let id = 82; id <= 88; id++) {
+      await frame.evaluate(id => window.openApp(id), id)
+      frame = await locationFrame(page, id)
+      await frame.waitForFunction(() => window.visible)
+    }
+    await expect(page.locator('iframe[data-app-id="81"]')).toHaveCount(0)
+    await frame.evaluate(() => window.openApp(81))
+    frame = await locationFrame(page)
+    expect(await frame.evaluate(() => window.documentId)).not.toBe(documentId)
+    await expectDetail(frame)
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => !window.detail)
+  })
+
+  test('an update while hidden defers restoration until return, then Back stays in the app', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const original = await locationFrame(page)
+    await original.evaluate(() => window.openDetail())
+    await expectDetail(original)
+    await original.evaluate(() => window.openApp(82))
+    const other = await locationFrame(page, 82)
+    await other.waitForFunction(() => window.visible)
+    state.version = '2000'
+    await refetchLocationApps(page, state, other)
+    const replacement = await locationFrame(page, 81, 'live', '2000')
+    expect(await replacement.evaluate(() => ({ visible: window.visible, restoring: window.restoring, detail: window.detail })))
+      .toEqual({ visible: false, restoring: true, detail: false })
+    // Return only after the old eager ownership budget would have expired.
+    // This wait probes a contractual deadline, not app settling.
+    await page.waitForTimeout(5200)
+    expect(await replacement.evaluate(() => window.ownership)).toBeUndefined()
+    await other.evaluate(() => window.openApp(81))
+    await expectDetail(replacement)
+    await page.evaluate(() => history.back())
+    await replacement.waitForFunction(() => !window.detail)
+    await expect(page.locator('iframe.canvas--live[data-app-id="81"]')).toBeVisible()
+  })
+
+  test('incoming fallback reports persist only on promotion, not a failed swap', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const original = await locationFrame(page)
+    await original.evaluate(() => window.openDetail())
+    await expectDetail(original)
+    state.manualVersions.add('2000')
+    state.fallbackVersions.add('2000')
+    state.version = '2000'
+    await refetchLocationApps(page, state, original)
+    const failed = await locationFrame(page, 81, 'incoming', '2000')
+    await failed.waitForFunction(() => window.nav.location?.detail === null)
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":"notes"}')
+    await failed.evaluate(() => window.fail())
+    await expect(page.locator('iframe[data-frame-version="2000"]')).toHaveCount(0)
+    expect((await storedLocation(page)).location).toBe('{"detail":"notes"}')
+
+    state.manualVersions.add('3000')
+    state.fallbackVersions.add('3000')
+    state.version = '3000'
+    await refetchLocationApps(page, state, original)
+    const incoming = await locationFrame(page, 81, 'incoming', '3000')
+    await incoming.waitForFunction(() => window.nav.location?.detail === null)
+    expect((await storedLocation(page)).location).toBe('{"detail":"notes"}')
+    await incoming.evaluate(() => window.mount())
+    await locationFrame(page, 81, 'live', '3000')
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":null}')
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const restored = await locationFrame(page, 81, 'live', '3000')
+    expect(await restored.evaluate(() => window.initialLocation)).toEqual({ detail: null })
+  })
+
+  test('a live document fallback cannot overwrite the bookmark before mounting', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    let frame = await locationFrame(page)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    state.manualVersions.add('1000')
+    state.fallbackVersions.add('1000')
+    await frame.goto(frame.url(), { waitUntil: 'load' })
+    frame = await locationFrame(page)
+    await frame.waitForFunction(() => window.nav.location?.detail === null)
+    expect((await storedLocation(page)).location).toBe('{"detail":"notes"}')
+    await frame.evaluate(() => window.mount())
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":null}')
+  })
+
+  test('a newer live report supersedes a fallback staged before promotion', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const original = await locationFrame(page)
+    await original.evaluate(() => window.openDetail())
+    await expectDetail(original)
+    state.manualVersions.add('2000')
+    state.fallbackVersions.add('2000')
+    state.version = '2000'
+    await refetchLocationApps(page, state, original)
+    const incoming = await locationFrame(page, 81, 'incoming', '2000')
+    await incoming.waitForFunction(() => window.nav.location?.detail === null)
+    // Report a newer location at the DOM promotion boundary, before a passive
+    // effect may flush the staged fallback. The latest live report must win.
+    await page.evaluate(() => {
+      const frame = document.querySelector('iframe.canvas--incoming[data-frame-version="2000"]')
+      const observer = new MutationObserver(() => {
+        if (!frame.classList.contains('canvas--live')) return
+        observer.disconnect()
+        window.dispatchEvent(new MessageEvent('message', {
+          source: frame.contentWindow, origin: window.location.origin,
+          data: { type: 'moebius:nav-location', location: '{"detail":null,"filter":"latest"}' },
+        }))
+      })
+      observer.observe(frame, { attributes: true, attributeFilter: ['class'] })
+    })
+    await incoming.evaluate(() => window.mount())
+    await locationFrame(page, 81, 'live', '2000')
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":null,"filter":"latest"}')
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const restored = await locationFrame(page, 81, 'live', '2000')
+    expect(await restored.evaluate(() => window.initialLocation)).toEqual({ detail: null, filter: 'latest' })
+  })
+
+  test('promotion saves the restored screen even when the outgoing frame reported a newer place', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const outgoing = await locationFrame(page)
+    await outgoing.evaluate(() => window.openDetail())
+    await expectDetail(outgoing)
+    state.manualVersions.add('2000')
+    state.version = '2000'
+    await refetchLocationApps(page, state, outgoing)
+    const incoming = await locationFrame(page, 81, 'incoming', '2000')
+    expect(await incoming.evaluate(() => window.initialLocation)).toEqual({ detail: 'notes' })
+    await outgoing.evaluate(() => window.nav.setLocation({ detail: 'notes', filter: 'changed-during-swap' }))
+    await expect.poll(async () => (await storedLocation(page))?.location)
+      .toBe('{"detail":"notes","filter":"changed-during-swap"}')
+    await incoming.evaluate(() => window.mount())
+    const promoted = await locationFrame(page, 81, 'live', '2000')
+    await expectDetail(promoted)
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":"notes"}')
+  })
+
+  test('token rotation before a wipe swap cannot adopt an outgoing document bookmark', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const outgoing = await locationFrame(page)
+    await outgoing.evaluate(() => window.openDetail())
+    await expectDetail(outgoing)
+    // A wipe rotates the token before the apps-list/version refresh. Hold that
+    // interval open so the old document can still report and receive duplicate init.
+    state.instance = 'nonce-b'
+    const before = await outgoing.evaluate(() => window.initCalls)
+    await outgoing.evaluate(() => window.parent.postMessage({ type: 'moebius:token-expired', appId: '81' }, window.location.origin))
+    await outgoing.waitForFunction(count => {
+      const payload = window.lastToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+      return window.initCalls > count && JSON.parse(atob(payload)).app_nonce === 'nonce-b'
+    }, before)
+    await outgoing.evaluate(() => window.nav.setLocation({ detail: 'outgoing-old-data' }))
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":"outgoing-old-data"}')
+    expect((await storedLocation(page)).instance).toBe('generation-a')
+    state.storageGeneration = 'generation-b'
+    state.version = '2000'
+    await refetchLocationApps(page, state, outgoing)
+    const fresh = await locationFrame(page, 81, 'live', '2000')
+    expect(await fresh.evaluate(() => window.initialLocation)).toBeNull()
+    expect(await fresh.evaluate(() => window.detail)).toBe(false)
+  })
+
+  test('a wipe list refresh before token refresh binds the new frame to the new storage generation', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const outgoing = await locationFrame(page)
+    await outgoing.evaluate(() => window.openDetail())
+    await expectDetail(outgoing)
+    const staleToken = await outgoing.evaluate(() => window.lastToken)
+    // Refresh only the app list first. AppCanvas deliberately still holds the
+    // cached pre-wipe token while mounting the new version.
+    state.instance = 'nonce-b'
+    state.storageGeneration = 'generation-b'
+    state.version = '2000'
+    await refetchLocationApps(page, state, outgoing)
+    const fresh = await locationFrame(page, 81, 'live', '2000')
+    expect(await fresh.evaluate(() => window.lastToken)).toBe(staleToken)
+    expect(await fresh.evaluate(() => window.initialLocation)).toBeNull()
+    expect(await fresh.evaluate(() => window.detail)).toBe(false)
+    await expect.poll(async () => (await storedLocation(page))?.instance).toBe('generation-b')
+    // Token-expiry recovery re-initializes this document but must not change
+    // its app-row binding or resurrect the pre-wipe place.
+    const before = await fresh.evaluate(() => window.initCalls)
+    await fresh.evaluate(() => window.parent.postMessage({ type: 'moebius:token-expired', appId: '81' }, window.location.origin))
+    await fresh.waitForFunction(count => window.initCalls > count, before)
+    await fresh.evaluate(() => window.nav.setLocation({ detail: null, filter: 'fresh' }))
+    await expect.poll(async () => (await storedLocation(page))?.location).toBe('{"detail":null,"filter":"fresh"}')
+    expect((await storedLocation(page)).instance).toBe('generation-b')
+    await fresh.goto(fresh.url(), { waitUntil: 'load' })
+    const reloaded = await locationFrame(page, 81, 'live', '2000')
+    expect(await reloaded.evaluate(() => window.initialLocation)).toEqual({ detail: null, filter: 'fresh' })
+  })
+
+  test('settings-only changes retain the same frame document and open view', async ({ page }) => {
+    const state = await setupLocationRoutes(page)
+    const frame = await locationFrame(page)
+    await frame.evaluate(() => window.openDetail())
+    await expectDetail(frame)
+    const documentId = await frame.evaluate(() => window.documentId)
+    state.updatedAt = 'settings-changed'
+    state.name = 'Renamed by settings'
+    await refetchLocationApps(page, state, frame)
+    await expect(page.locator('iframe.canvas--live[data-app-id="81"]')).toHaveAttribute('title', state.name)
+    expect(await frame.evaluate(() => window.documentId)).toBe(documentId)
+    expect(await frame.evaluate(() => window.detail)).toBe(true)
+    await expect(page.locator('iframe[data-app-id="81"]')).toHaveCount(1)
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => !window.detail)
   })
 })

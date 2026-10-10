@@ -44,6 +44,7 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
   const entries = []
   let index = -1
   let queued = 0
+  let childEntries = 0
   const navigateHandlers = new Set()
   const windowHandlers = new Map()
 
@@ -62,6 +63,7 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
 
   const history = {
     get state() { return index >= 0 ? entries[index].state : null },
+    get length() { return entries.length + childEntries },
     pushState(state) {
       entries.length = index + 1
       entries.push({ state, mirror: undefined })
@@ -156,16 +158,13 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
     /** A real Back gesture: the engine traverses on its own. */
     userBack() { commitOneTraversal() },
     userForward() { commitOneTraversal(1) },
-    /** An untagged entry a sandboxed app/preview iframe pushed. */
-    pushIframeEntry() {
-      entries.length = index + 1
-      entries.push({ state: { iframe: true }, mirror: undefined })
-      index = entries.length - 1
-    },
+    // Child pushState grows joint history, not the top-level state or entries.
+    // These tests do not traverse the child's own entries.
+    pushIframeEntry() { childEntries += 1 },
     get pendingTraversals() { return queued },
     get currentKind() { return history.state?.kind ?? null },
     get currentState() { return history.state },
-    get depth() { return index },
+    get depth() { return index + childEntries },
   }
 }
 
@@ -229,19 +228,19 @@ for (const [path, options] of [
   })
 }
 
-test('Forward shortcut refuses an iframe-owned physical cursor', async () => {
+test('Forward shortcut refuses drift in the shell current-entry tracking', async () => {
   const engine = sessionHistory({ navigationApi: false })
   const mounted = await mountNavigation(engine, { tab: { kind: 'chat', id: 'a' } })
   mounted.result.current.recordChatNavigation('b')
   engine.userBack()
-  engine.pushIframeEntry()
+  engine.history.pushState({ untracked: true })
   assert.equal(mounted.result.current.navigateForward(), false)
-  assert.deepEqual(engine.currentState, { iframe: true })
+  assert.deepEqual(engine.currentState, { untracked: true })
   mounted.unmount()
 })
 
 async function mountNavigation(engine, {
-  tab = { kind: 'chat', id: 'c1' }, frames = null, dragActiveRef = { current: false },
+  tab = { kind: 'chat', id: 'c1' }, workspace = null, frames = null, dispatchWorkspace = () => {}, dragActiveRef = { current: false },
 } = {}) {
   globalThis.window = engine.win
   globalThis.location = engine.win.location
@@ -261,22 +260,23 @@ async function mountNavigation(engine, {
     import('../../components/Shell/paneModel.js'),
   ])
 
-  const ws = { ...paneModel.seedFromFlatTabs([tab]), singleScreen: tab }
+  const ws = workspace || { ...paneModel.seedFromFlatTabs([tab]), singleScreen: tab }
   const workspaceStateRef = { current: { ws, undo: null } }
   // The wedged engine reports every failed mirror write through the shared
   // client-error logger; keep that console noise out of the test output.
   const consoleError = console.error
   console.error = () => {}
   try {
-    return renderHook(useNavigation, {
+    const mounted = renderHook(useNavigation, {
       workspace: ws,
       workspaceStateRef,
-      dispatchWorkspace: () => {},
+      dispatchWorkspace,
       visiblePaneIds: new Set(Object.keys(ws.panes)),
       blobValid: true,
       replaceImplicitBootTab: false,
       dragActiveRef,
     })
+    return { ...mounted, workspace: ws, workspaceStateRef }
   } finally {
     console.error = consoleError
   }
@@ -596,14 +596,12 @@ test('late close bookkeeping cannot dismiss the next surface', async () => {
 })
 
 test('a back gesture dismisses the surface even when it lands on an untagged entry', async () => {
-  // iOS Safari without the Navigation API, with a sandboxed iframe entry
-  // sitting beneath the sentinel: the landing reads untagged, and the phantom
-  // guard must not mistake our own sentinel for that iframe's entry.
+  // A top-level untagged entry beneath the sentinel must not prevent dismissal.
   const engine = sessionHistory({ navigationApi: false })
   const { result } = await mountNavigation(engine)
   const dismissals = []
 
-  engine.pushIframeEntry()
+  engine.history.pushState({ untracked: true })
   result.current.openHistoryDismiss(() => dismissals.push('gesture'))
   assert.equal(engine.currentKind, 'dismissible')
 
@@ -669,3 +667,119 @@ test('explicit file close remains synchronous and can be reversed once', async (
   engine.userForward()
   assert.deepEqual(calls, ['close', 'restore'])
 })
+
+for (const [path, options] of [
+  ['Navigation API', {}],
+  ['popstate fallback', { navigationApi: false }],
+]) {
+  for (const reset of ['document reset', 'shell reload']) {
+    test(`${path} ${reset} reuses the current app entry and Back reaches its base`, async () => {
+      const engine = sessionHistory(options)
+      globalThis.document = { querySelector: () => ({ contentWindow: { postMessage() {} } }) }
+      let mounted = await mountNavigation(engine, { tab: { kind: 'app', id: '119' } })
+      const base = engine.currentState.entryId
+      const depth = engine.depth
+      assert.equal(mounted.result.current.appNavPush(119, { requestId: 'old' }), true)
+      const detail = engine.currentState.entryId
+      if (reset === 'shell reload') {
+        const workspace = mounted.workspace
+        mounted.unmount()
+        mounted = await mountNavigation(engine, { workspace })
+      } else {
+        mounted.result.current.appNavReset(119)
+      }
+      assert.equal(mounted.result.current.appNavPush(119, { requestId: 'restored' }), true)
+      assert.equal(engine.depth, depth + 1, 'restoration must not add a ghost level')
+      assert.equal(engine.currentState.entryId, detail)
+      assert.equal(engine.currentState.appNav.requestId, 'restored')
+      engine.userBack()
+      assert.equal(engine.currentState.entryId, base)
+      mounted.unmount()
+    })
+  }
+}
+
+test("a reload never reuses another app's retired history slot", async () => {
+  const engine = sessionHistory({ navigationApi: false })
+  let mounted = await mountNavigation(engine, { tab: { kind: 'app', id: '119' } })
+  mounted.result.current.appNavPush(119, { requestId: 'old' })
+  const oldId = engine.currentState.entryId
+  mounted.unmount()
+  mounted = await mountNavigation(engine, { tab: { kind: 'app', id: '120' } })
+  assert.equal(mounted.result.current.appNavPush(120, { requestId: 'new' }), true)
+  assert.notEqual(engine.currentState.entryId, oldId)
+  mounted.unmount()
+})
+
+
+for (const options of [{}, { navigationApi: false }]) {
+  test('child pushState leaves the host retired slot reusable without growing top-level history', async () => {
+    const engine = sessionHistory(options)
+    const mounted = await mountNavigation(engine, { tab: { kind: 'app', id: '119' } })
+    mounted.result.current.appNavPush(119, { requestId: 'old' })
+    mounted.result.current.appNavReset(119)
+    const length = engine.history.length
+    const state = engine.history.state
+    const entries = engine.navigation?.entries().length
+    engine.pushIframeEntry()
+    assert.equal(engine.history.length, length + 1)
+    assert.equal(engine.history.state, state)
+    assert.equal(engine.navigation?.entries().length, entries)
+    assert.equal(mounted.result.current.appNavPush(119, { requestId: 'restored' }), true)
+    assert.equal(engine.history.length, length + 1, 'only child history grew; the host reused its slot')
+    mounted.unmount()
+  })
+}
+
+for (const activated of [false, true]) {
+  test(`background split ${activated ? 'user gesture focuses' : 'restoration waits for'} its app pane`, async () => {
+    const paneModel = await import('../../components/Shell/paneModel.js')
+    const engine = sessionHistory()
+    let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'c1' }])
+    ws = paneModel.splitPaneWithTab(ws, { kind: 'app', id: '119' }, {
+      paneId: 'p0', edge: 'right', focus: false,
+    })
+    ws = { ...ws, viewMode: 'panes' }
+    const actions = []
+    const mounted = await mountNavigation(engine, { workspace: ws, dispatchWorkspace: action => actions.push(action) })
+    const depth = engine.depth
+    const meta = { requestId: 'restored', userActivated: activated }
+    assert.equal(mounted.result.current.appNavPush(119, meta), activated ? true : 'deferred')
+    assert.equal(engine.depth, depth + Number(activated))
+    assert.equal(ws.focusedPaneId, 'p0')
+    assert.deepEqual(actions.filter(action => action.type === 'FOCUS'), activated ? [{ type: 'FOCUS', paneId: 'p1' }] : [])
+    if (!activated) {
+      mounted.workspaceStateRef.current.ws = paneModel.focusPane(ws, 'p1')
+      assert.equal(mounted.result.current.appNavPush(119, meta), true)
+      assert.equal(engine.depth, depth + 1, 'the deferred restoration can own history after focus')
+    }
+    mounted.unmount()
+  })
+}
+
+for (const options of [{}, { navigationApi: false }]) {
+  test('background one-level restore reuses the retired slot without changing focus', async () => {
+    const paneModel = await import('../../components/Shell/paneModel.js')
+    const engine = sessionHistory(options)
+    let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'c1' }])
+    ws = paneModel.splitPaneWithTab(ws, { kind: 'app', id: '119' }, {
+      paneId: 'p0', edge: 'right', focus: false,
+    })
+    ws = { ...ws, viewMode: 'panes' }
+    const actions = []
+    const mounted = await mountNavigation(engine, { workspace: ws, dispatchWorkspace: action => actions.push(action) })
+    mounted.result.current.appNavPush(119, { requestId: 'old', userActivated: true })
+    mounted.result.current.appNavReset(119)
+    actions.length = 0
+    const length = engine.history.length
+    const slot = engine.currentState.entryId
+    assert.equal(mounted.result.current.appNavPush(119, { requestId: 'restored', userActivated: false }), true)
+    assert.equal(engine.history.length, length)
+    assert.equal(engine.currentState.entryId, slot)
+    assert.equal(mounted.workspaceStateRef.current.ws.focusedPaneId, 'p0')
+    assert.deepEqual(actions.filter(action => action.type === 'FOCUS'), [])
+    assert.equal(mounted.result.current.appNavPush(119, { requestId: 'inner', userActivated: false }), 'deferred')
+    assert.equal(engine.history.length, length)
+    mounted.unmount()
+  })
+}

@@ -62,6 +62,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -103,10 +104,15 @@ _EXCLUDE_END = "# END MOBIUS MANAGED IGNORE RULES"
 _GIT_NAME = "Mobius"
 _GIT_EMAIL = "mobius@localhost"
 
-# Subprocess timeout. App repos are tiny (one source file plus a couple
-# of scripts), so any git op that runs longer than this is wedged, not
-# slow.
+# One wall-clock ceiling for Git subprocesses. Network transfers can run while
+# lifecycle or source locks are held, so even healthy but slow downloads must
+# be bounded to avoid monopolizing those locks.
 _GIT_TIMEOUT = 30
+
+
+class GitTransferTimeout(RuntimeError):
+  """A network Git transfer exceeded its wall-clock ceiling."""
+
 
 # Contribute records a reviewed change as a Git object in the repository that
 # owns the live source.  The pending ref proves the reviewed diff came from a
@@ -412,10 +418,39 @@ def _run(
     "-C", str(repo),
     *args,
   ]
-  return subprocess.run(
-    cmd, capture_output=True, text=True, timeout=timeout,
-    check=check, env=_git_env(repo, read_only=read_only),
-  )
+  with subprocess.Popen(
+    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    start_new_session=True, env=_git_env(repo, read_only=read_only),
+  ) as process:
+    try:
+      stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+      # Git removes its locks on SIGTERM; stop transport children with it.
+      try:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+          process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+          os.killpg(process.pid, signal.SIGKILL)
+          process.communicate()
+      except ProcessLookupError:
+        pass  # The whole group exited on its own in the meantime.
+      raise
+    if check and process.returncode:
+      raise subprocess.CalledProcessError(process.returncode, cmd, stdout, stderr)
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
+def _run_network(
+  repo: Path, *args: str, check: bool = True,
+) -> subprocess.CompletedProcess:
+  """Run a Git transfer, reporting an overlong command even with check=False."""
+  try:
+    return _run(repo, *args, check=check)
+  except subprocess.TimeoutExpired as exc:
+    raise GitTransferTimeout(
+      f"it ran longer than {_GIT_TIMEOUT} seconds"
+    ) from exc
 
 
 def _run_with_index(
@@ -2112,7 +2147,7 @@ def fetch_origin_commit(
   fetch_args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"]
   if depth is not None:
     fetch_args.extend(("--depth", str(depth)))
-  _run(repo, *fetch_args, "origin", requested)
+  _run_network(repo, *fetch_args, "origin", requested)
   fetched = _resolve_commit(repo, requested)
   if fetched != requested:
     raise RuntimeError("origin returned a different commit")
@@ -2152,7 +2187,7 @@ def fetch_origin_ref(
       raise ValueError("invalid origin ref")
   if origin_url(repo) is None:
     raise RuntimeError("source repository has no origin")
-  _run(
+  _run_network(
     repo, "fetch", "--quiet", "--no-tags", "--depth", str(depth),
     "origin", immutable or requested,
   )
@@ -2662,7 +2697,7 @@ def clone_upstream(
   Returns:
     The checked-out HEAD sha.
   """
-  repo = Path(source_dir)
+  repo = Path(source_dir).resolve()
   if repo.exists() and not repo.is_dir():
     raise RuntimeError(f"source_dir exists and is not a directory: {repo}")
   repo.parent.mkdir(parents=True, exist_ok=True)
@@ -2690,10 +2725,8 @@ def clone_upstream(
         clone_dir, immutable_ref, depth=depth,
       )
     else:
-      cmd = [
-        "git",
-        "-c", f"user.name={_GIT_NAME}",
-        "-c", f"user.email={_GIT_EMAIL}",
+      _run_network(
+        clone_parent,
         # core.symlinks=false: check out any tracked symlink as a PLAIN FILE
         # (the link text as content), never a real filesystem symlink. Catalog
         # repos are untrusted content; a materialized symlink (e.g. `static` ->
@@ -2702,15 +2735,8 @@ def clone_upstream(
         # _assert_within — that guard is skipped for the cloned tree, so the
         # non-symlink checkout is what keeps the clone inside its own dir.
         "-c", "core.symlinks=false",
-        "clone", "-q",
-        "--depth", str(depth),
-        "--branch", ref,
-        repo_url,
-        str(clone_dir),
-      ]
-      subprocess.run(
-        cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-        check=True, env=_git_env(repo),
+        "clone", "-q", "--depth", str(depth), "--branch", ref,
+        repo_url, str(clone_dir),
       )
       remote_ref = f"origin/{ref}"
       _run(clone_dir, "rev-parse", "--verify", remote_ref)
@@ -2766,7 +2792,7 @@ def fetch_upstream(
     The fetched commit and any trusted equal-tree adoption proof.
   """
   repo = Path(source_dir)
-  _run(repo, "fetch", "--depth", "1", "origin", ref)
+  _run_network(repo, "fetch", "--depth", "1", "origin", ref)
   # A branch/tag fetch updates ``origin/<ref>``.  Fetching an immutable commit
   # oid does not create that remote-tracking name; Git records the exact fetched
   # commit only in FETCH_HEAD.  Store updates are commonly review-bound to a
@@ -3330,7 +3356,7 @@ def _restore_shallow_history_if_needed(
     raise RuntimeError(
       f"no merge base between {left} and {right} in shallow repo without origin"
     )
-  fetched = _run(
+  fetched = _run_network(
     repo, "fetch", "--unshallow", "--no-tags", "origin", check=False,
   )
   if fetched.returncode != 0:

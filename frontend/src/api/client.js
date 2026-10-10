@@ -6,6 +6,7 @@
 import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
+import { clearAppNavLocations } from '../lib/appNavLocationStore.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/scroll/readingPositions.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
@@ -292,6 +293,8 @@ function clearOwnerClientState({ preserveChatOutbox }) {
   // harmless shell preferences, they must not survive logout/token expiry and
   // appear in a later owner's session on the same browser.
   clearOwnerDraftStorage()
+  // Where each app was (a search query, an open item) is owner app data too.
+  clearAppNavLocations()
   // Media token cache is per-owner (tokens carry the owner's epoch). Clear
   // on logout so a new session doesn't inherit stale media tokens.
   try {
@@ -1163,7 +1166,7 @@ export const api = {
     // Wipes the app's runtime storage back to empty while KEEPING it
     // installed — distinct from `remove` (which tombstones the whole app).
     deleteData: (appId) => apiFetch(`/apps/${appId}/data`, { method: 'DELETE' }),
-    // Stable base URL. AppCanvas appends `?v=<app.updated_at>` so the
+    // Stable base URL. AppCanvas appends `?v=<app.frame_version>` so the
     // service worker can serve cached offline-capable apps cache-first while
     // app edits naturally become cache misses. The backend still sends ETags
     // for browser-cache revalidation on non-SW/cold paths.
