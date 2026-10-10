@@ -22,6 +22,7 @@ from app.tool_sources import (
   enrich_tool_source,
   normalize_tool_sources,
 )
+from app.viewed_images import SNAPSHOT_NAME
 
 
 # The canonical terminal subagent statuses the persisted block stores, matching
@@ -74,6 +75,7 @@ EventType = Literal[
   "tool_output",
   "tool_sources",
   "tool_end",
+  "viewed_image",
   "skill_loaded",
   "generated_file",
   "task_start",
@@ -267,7 +269,8 @@ def _persisted_block(block: dict) -> dict:
 #    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
 #    second" blocks (even splitting mid-word). They change no block, so they must
 #    not touch thinking structure.
-#  - tool_input / tool_output / tool_sources / tool_end / skill_loaded only MUTATE
+#  - tool_input / tool_output / tool_sources / tool_end / viewed_image /
+#    skill_loaded only MUTATE
 #    an existing tool block. tool_start (which IS in this set) has already closed
 #    thinking and made a tool the trailing block before any of these arrive, so a
 #    later thinking auto-separates regardless.
@@ -768,7 +771,7 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
 
 _TOOL_EVENT_TYPES = frozenset({
   "tool_start", "tool_input", "tool_output", "tool_sources", "tool_end",
-  "skill_loaded", "generated_file",
+  "viewed_image", "skill_loaded", "generated_file",
 })
 
 
@@ -912,6 +915,27 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       digest = event["viewed_image_sha256"]
       if isinstance(digest, str):
         blk["viewed_image_sha256"] = digest
+    return True
+
+  if event_type == "viewed_image":
+    # Codex records a view's model-bound image only after the view completes,
+    # so the runner binds the chat snapshot of it once the turn has ended.
+    # Exact id only: a snapshot must never be adopted by a different view.
+    view_id = event.get("tool_use_id")
+    blk = next((
+      candidate for candidate in reversed(assistant_blocks)
+      if view_id and candidate.get("type") == "tool"
+      and candidate.get("tool_use_id") == view_id
+    ), None)
+    name = event.get("viewed_image_media")
+    if (
+      blk is None
+      or blk.get("tool") != "ViewImage"
+      or not isinstance(name, str)
+      or not SNAPSHOT_NAME.fullmatch(name)
+    ):
+      return False
+    blk["viewed_image_media"] = name
     return True
 
   if event_type == "skill_loaded":

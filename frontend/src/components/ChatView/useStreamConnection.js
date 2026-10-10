@@ -19,6 +19,7 @@ import {
   replaceThinkingContent,
   anchorReplayedThinking,
   attachToolSources,
+  attachViewedImage,
   attachGeneratedFile,
   reconcileStreamItems,
   applyTaskEvent,
@@ -134,6 +135,8 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
  *   tool_sources          WebSearch source metadata
  *                         { sources }. Stamps source chips onto block.
  *   tool_end              Marks the running tool done (status flip).
+ *   viewed_image          A finished ViewImage's chat snapshot, bound at
+ *                         turn end { tool_use_id, viewed_image_media }.
  *   skill_loaded          Agent loaded a skill { skill }. Adds a receipt to
  *                         the running tool; the transcript derives a quiet,
  *                         standalone skill-read activity from it.
@@ -1166,6 +1169,8 @@ export default function useStreamConnection(chatId, {
             applyStreamItems(
               prev => attachToolSources(prev, event.sources, event.tool_use_id),
             )
+          } else if (event.type === 'viewed_image') {
+            applyStreamItems(prev => attachViewedImage(prev, event))
           } else if (event.type === 'generated_file') {
             // Append the turn-owned download block. Idempotent under catch-up
             // replay and identical to the durable reducer's event shape.

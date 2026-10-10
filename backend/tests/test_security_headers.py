@@ -470,7 +470,7 @@ def test_app_agent_chat_and_third_party_bytes_never_run_as_the_shell():
     "/api/proxy/favicon",
     "/api/chats/c1/uploads/page.html",
     "/api/chats/c1/generated-files/page.html",
-    "/api/chats/c1/tmp-images/x.svg",
+    "/api/chats/c1/scratch-images/x.svg",
     "/api/community/publications/github/preview/assets/1/abc/x.svg",
     "/api/fs/read?path=/tmp/x.html",
     "/api/storage/apps/1/x.html",

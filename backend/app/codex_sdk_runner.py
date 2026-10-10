@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app import generated_files
+from app import generated_files, viewed_images
 from app.codex_sdk_contract import (
   app_server_exit_code,
   app_server_pid,
@@ -1874,6 +1874,12 @@ async def _run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
+      # Codex records each view's model-bound image in the rollout after the
+      # view item completes; bind those views once the turn has completed.
+      view_mark = await asyncio.to_thread(
+        viewed_images.TurnMark.capture, env["CODEX_HOME"], current_session_id,
+      )
+      image_view_ids: list[str] = []
       turn = await thread.turn(
         user_message,
         cwd=cwd,
@@ -2136,6 +2142,8 @@ async def _run_codex_sdk_turn(
             ):
               image_view_cls = sdk.get("ImageViewThreadItem")
               if image_view_cls is not None and isinstance(item, image_view_cls):
+                if event.get("type") == "tool_end" and getattr(item, "id", None):
+                  image_view_ids.append(item.id)
                 # Bind the completed view to its bytes without retaining a
                 # copy. An empty value prevents later same-name substitution.
                 event["viewed_image_sha256"] = await asyncio.to_thread(
@@ -2243,6 +2251,17 @@ async def _run_codex_sdk_turn(
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
           completed_turn = payload.turn
+          if image_view_ids:
+            snapshots = await asyncio.to_thread(
+              viewed_images.bind_turn_views,
+              runtime_data_dir, chat_id, view_mark, image_view_ids,
+            )
+            for view_id, snapshot in snapshots.items():
+              bc.publish({
+                "type": "viewed_image",
+                "tool_use_id": view_id,
+                "viewed_image_media": snapshot,
+              })
           break
 
         if (

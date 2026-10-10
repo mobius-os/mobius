@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 
 import {
   upsertQuestionItem,
+  attachViewedImage,
   attachToolOutput,
   closeToolLifecycle,
   closeAllToolLifecycles,
@@ -1310,4 +1311,22 @@ test('replaceThinkingContent adds a thought that never streamed and ignores no-o
   assert.equal(added[1].content, 'Unseen thought.')
   assert.equal(replaceThinkingContent(added, 'think-2', 'Unseen thought.'), added)
   assert.equal(replaceThinkingContent(added, null, 'x'), added)
+})
+
+test('viewed_image binds a snapshot only to its exact finished view', () => {
+  const name = `viewed-${'a'.repeat(64)}.png`
+  const prev = [
+    { type: 'tool', tool: 'ViewImage', tool_use_id: 'view-1', status: 'done' },
+    { type: 'tool', tool: 'Bash', tool_use_id: 'shell', status: 'done' },
+  ]
+  assert.equal(attachViewedImage(prev, { tool_use_id: 'shell', viewed_image_media: name }), prev)
+  assert.equal(attachViewedImage(prev, { tool_use_id: 'missing', viewed_image_media: name }), prev)
+  assert.equal(attachViewedImage(prev, { viewed_image_media: name }), prev)
+  assert.equal(attachViewedImage(prev, { tool_use_id: 'view-1', viewed_image_media: '../x.png' }), prev)
+
+  const next = attachViewedImage(prev, { tool_use_id: 'view-1', viewed_image_media: name })
+  assert.equal(next[0].viewed_image_media, name)
+  assert.equal(prev[0].viewed_image_media, undefined)
+  // Catch-up replay of the same event changes nothing.
+  assert.equal(attachViewedImage(next, { tool_use_id: 'view-1', viewed_image_media: name }), next)
 })
