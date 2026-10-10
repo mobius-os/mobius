@@ -45,6 +45,10 @@ os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
 os.environ["MOBIUS_SSO_ISSUER"] = ""
 os.environ["MOBIUS_SSO_INSTANCE_ID"] = ""
 os.environ["MOBIUS_IDENTITY_BROKER_SOCKET"] = f"{_tmp}/no-identity-broker.sock"
+# Nor may it inherit a Railway host's deployment identity: those markers switch
+# update, domain, and version behavior. Railway tests opt in with monkeypatch.
+for _name in [name for name in os.environ if name.startswith("RAILWAY_")]:
+  del os.environ[_name]
 
 # Production entrypoint proves the image-owned filesystem half before FastAPI
 # starts. Reproduce that boundary in the host-only runtime so startup can
