@@ -342,11 +342,13 @@ async def lifespan(app):
       setup_task.cancel()
       await asyncio.gather(setup_task, return_exceptions=True)
     record_memory_checkpoint("shutdown_begin")
-    try:
-      from app.public_app_transport import close_public_fetch_clients
-      await close_public_fetch_clients()
-    except Exception as exc:
-      _log.error("public fetch client shutdown failed: %s", exc, exc_info=True)
+    from app.public_app_transport import close_public_fetch_clients
+    from app.routes.proxy import close_proxy_clients
+    for close_clients in (close_public_fetch_clients, close_proxy_clients):
+      try:
+        await close_clients()
+      except Exception as exc:
+        _log.error("outbound fetch client shutdown failed: %s", exc, exc_info=True)
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
