@@ -729,6 +729,11 @@ The same capability works in the signed-in shell and in a hosted public app.
 It is device-local, best-effort, and partitioned by app installation; use
 `window.mobius.storage` for durable owner data or public server-side state.
 
+For live voice, video or screen sharing between people the app connects,
+declare `media.call`: the shell owns devices, connections and painted video,
+and the app relays `signal` payloads and steers `volume` and `tiles`. The
+`media.call` section of the platform `CAPABILITIES.md` has the contract.
+
 ## Local zoom surfaces
 
 The Möbius shell keeps its toolbar, drawer, chat, and app frame at one stable

@@ -25,6 +25,7 @@ import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
 import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
+import { createCallTileLayer } from '../../lib/callTileLayer.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
@@ -367,6 +368,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [serviceSurface, setServiceSurface] = useState(null)
   const [cameraPreview, setCameraPreview] = useState(null)
   const canvasWrapRef = useRef(null)
+  // media.call paints video tiles here imperatively, so per-frame tile moves
+  // never re-render this component.
+  const callLayerRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
   // Fresh app tokens are persisted for their remaining short lifetime so a
@@ -632,6 +636,11 @@ const AppCanvas = forwardRef(function AppCanvas({
             const rect = clampCameraPreviewRect(next.rect, bounds)
             setCameraPreview(rect ? { ...next, rect } : null)
           },
+        },
+        call: {
+          createSurface: () => createCallTileLayer({
+            getContainer: () => callLayerRef.current,
+          }),
         },
         screenControl: { appId },
       }),
@@ -1759,6 +1768,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         )
       })}
       <CameraPreviewLayer preview={cameraPreview} />
+      {/* Host-painted media.call video. Covers exactly the frame's box, so tiles
+          given in the app's CSS pixels move, resize, and clip with the frame;
+          never interactive, and its children are owned by callTileLayer.js. */}
+      <div className="canvas-call-layer" ref={callLayerRef} aria-hidden="true" />
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it
           remounts (replays) exactly when a promotion lands, and a live-frame

@@ -377,6 +377,53 @@ def test_camera_capture_limits_are_validated_and_bound_into_the_digest():
       }))
 
 
+def _media_call(max_peers=None):
+  declaration = {"version": 1, "reason": "Talk with nearby players."}
+  if max_peers is not None:
+    declaration["limits"] = {"max_peers": max_peers}
+  return {"media.call": declaration}
+
+
+def test_media_call_is_a_reviewed_active_frame_session_bounded_by_peers():
+  call = normalize_runtime_capabilities(
+    _manifest(capabilities=_media_call(max_peers=12)),
+  )["media.call"]
+  assert (call["kind"], call["risk"], call["lifecycle"]) == ("session", "device", "active_frame")
+  assert call["limits"] == {"max_peers": 12}
+  assert call["reason"] == "Talk with nearby players."
+  # The owner reviews screen sharing as part of the capability.
+  assert "share a screen" in call["description"]
+  defaulted = normalize_runtime_capabilities(_manifest(capabilities={
+    "media.call": {"version": 1},
+  }))
+  assert defaulted["media.call"]["limits"] == {"max_peers": 8}
+
+
+@pytest.mark.parametrize(("limits", "message"), [
+  ({"max_peers": 0}, "must be between 1 and 32"),
+  ({"max_peers": 33}, "must be between 1 and 32"),
+  ({"max_peers": "12"}, "must be a number"),
+  ({"screen_share": 1}, "unknown limits: screen_share"),
+])
+def test_media_call_rejects_out_of_range_and_unknown_limits(limits, message):
+  with pytest.raises(ValueError, match=message):
+    normalize_runtime_capabilities(_manifest(capabilities={
+      "media.call": {"version": 1, "limits": limits},
+    }))
+
+
+def test_media_call_peer_ceiling_is_bound_into_digest_and_update_review():
+  contract, digest = contract_and_digest(_manifest(capabilities=_media_call(max_peers=8)))
+  raised, raised_digest = contract_and_digest(_manifest(capabilities=_media_call(max_peers=12)))
+  lowered, _digest = contract_and_digest(_manifest(capabilities=_media_call(max_peers=4)))
+  without, _digest = contract_and_digest(_manifest())
+  assert digest != raised_digest
+  assert diff_contracts(contract, raised)["widens"] is True
+  assert diff_contracts(contract, lowered)["widens"] is False
+  assert diff_contracts(without, contract)["widens"] is True
+
+
+
 def test_screen_control_is_reviewed_as_an_app_owned_background_session():
   runtime = normalize_runtime_capabilities(_manifest(capabilities={
     "workspace.screen-control": {

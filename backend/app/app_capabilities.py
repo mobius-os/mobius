@@ -380,6 +380,22 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "max_bytes": (64 * 1024, 256 * 1024 * 1024),
     },
   },
+  # The shell owns the devices, peer connections, playback, and painted video
+  # tiles; the app only relays opaque signalling and steers volume and tile
+  # rectangles. `max_peers` bounds the full-mesh fan-out of one participant.
+  "media.call": {
+    "version": 1,
+    "kind": "session",
+    "title": "Join live calls",
+    "description": (
+      "Use the microphone and camera, and share a screen you pick, for live "
+      "calls with people this app connects you to, while this app is visible."
+    ),
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {"max_peers": 8},
+    "hard_limits": {"max_peers": (1, 32)},
+  },
   "workspace.screen-control": {
     "version": 1,
     "kind": "session",
