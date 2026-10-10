@@ -7,6 +7,11 @@ function delimiterAtStart(src) {
 function inlineToken(src) {
   const delimiter = delimiterAtStart(src)
   if (!delimiter) return undefined
+  // Pandoc's single-dollar rule keeps currency as prose ("$5 and $10"): the
+  // opening `$` is not followed by whitespace, and the closing `$` neither
+  // follows whitespace nor precedes a digit.
+  const single = delimiter === '$'
+  if (single && /\s/.test(src[1] ?? '')) return undefined
 
   for (let i = delimiter.length; i < src.length; i += 1) {
     if (src[i] === '\n') return undefined
@@ -17,6 +22,9 @@ function inlineToken(src) {
     if (!src.startsWith(delimiter, i)) continue
     const text = src.slice(delimiter.length, i)
     if (!text || text.endsWith('$')) return undefined
+    if (single && (/\s/.test(src[i - 1]) || /[0-9]/.test(src[i + 1] ?? ''))) {
+      return undefined
+    }
     return {
       type: 'inlineKatex',
       raw: src.slice(0, i + delimiter.length),

@@ -25,6 +25,16 @@ test('math tokenizer keeps escaped and unmatched delimiters as text', () => {
   assert.equal(inline.start('price $5 without a close'), undefined)
 })
 
+test('math tokenizer leaves currency amounts as text', () => {
+  assert.equal(inline.tokenizer('$5 and $10 per month'), undefined)
+  assert.equal(inline.start('costs $5 and $10 per month'), undefined)
+  assert.equal(inline.tokenizer('$5-$10'), undefined)
+  assert.equal(inline.tokenizer('$ x $'), undefined)
+  assert.equal(inline.tokenizer('$5 or $x$')?.text, undefined)
+  assert.equal(inline.start('between $5 and $x$'), 'between $5 and '.length)
+  assert.equal(inline.tokenizer('$$ x + 1 $$')?.text, 'x + 1')
+})
+
 test('math tokenizer preserves fenced block math', () => {
   assert.deepEqual(block.tokenizer('$$\nx + 1\n$$\nafter'), {
     type: 'blockKatex',
