@@ -42,6 +42,8 @@ export default function DrawerItemActionMenu({
   onShare,
   onDelete,
   onDeleteData,
+  // Apps that are running only: ends the app without uninstalling it.
+  onCloseApp,
 }) {
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
@@ -363,6 +365,16 @@ export default function DrawerItemActionMenu({
                   onClick={() => run(onProjectAction, { restoreFocus: false })}
                 >
                   {projectActionLabel}
+                </button>
+              )}
+              {onCloseApp && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="drawer__item-action-item"
+                  onClick={() => run(onCloseApp)}
+                >
+                  Close app
                 </button>
               )}
               <div className="drawer__item-action-separator" role="separator" />

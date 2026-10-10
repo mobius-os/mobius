@@ -149,6 +149,9 @@ export default function Drawer({
   onSetChatArchived,
   onDeleteApp,
   onDeleteAppData,
+  // Apps whose frame is mounted (on screen or kept warm in the background): they are running.
+  runningAppIds = [],
+  onCloseApp,
   onNotice,
   onSettings,
   appsActive = false,
@@ -195,6 +198,7 @@ export default function Drawer({
   const failedSet = failedChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
+  const runningSet = useMemo(() => new Set(runningAppIds.map(String)), [runningAppIds])
   // An open artifact is its own destination: it never lights up a project row.
   const activeProject = projects.find(project => (
     (activeView === 'project' && String(activeProjectId) === String(project.id))
@@ -602,6 +606,9 @@ export default function Drawer({
     },
     removeData(id) {
       rowActionInputsRef.current.onDeleteAppData?.(id)
+    },
+    closeApp(id) {
+      rowActionInputsRef.current.onCloseApp?.(id)
     },
     install(app) {
       rowActionInputsRef.current.setInstallingApp(app)
@@ -1199,6 +1206,7 @@ export default function Drawer({
     onSetChatArchived,
     onDeleteApp,
     onDeleteAppData,
+    onCloseApp,
     onNotice,
     showItemMenu,
     closeItemMenu,
@@ -1361,6 +1369,7 @@ export default function Drawer({
                       attention={kind === 'chat'
                         ? attentionSet.has(item.id)
                         : kind === 'app' && newAppSet.has(Number(item.id))}
+                      running={kind === 'app' && runningSet.has(String(item.id))}
                       active={isRowActive({ kind, item })}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
@@ -1462,6 +1471,7 @@ export default function Drawer({
                       attention={kind === 'chat'
                         ? attentionSet.has(item.id)
                         : kind === 'app' && newAppSet.has(Number(item.id))}
+                      running={kind === 'app' && runningSet.has(String(item.id))}
                       active={isRowActive({ kind, item })}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
@@ -1573,6 +1583,7 @@ export default function Drawer({
         projects={projects}
         actions={rowActions}
         restoreFocusRef={menuRestoreFocusRef}
+        running={openMenu?.kind === 'app' && runningSet.has(String(openMenu.id))}
       />
       {installingApp && (
         <InstallSheet
@@ -1688,6 +1699,8 @@ const DrawerRow = memo(function DrawerRow({
   // pulses the same way an active chat does.
   building,
   attention,
+  // App rows only: the app is running (its frame is mounted, on screen or warm).
+  running,
   renaming,
   actions,
   dragActiveRef,
@@ -2368,6 +2381,8 @@ const DrawerRow = memo(function DrawerRow({
             aria-label="New activity"
             title="New activity"
           />
+        ) : running ? (
+          <span className="drawer__running-dot" role="img" aria-label="Running" title="Running" />
         ) : null}
         <span className={`drawer__item-text${badgeLabel ? ' drawer__item-text--unread' : ''}`}>{label}</span>
         {badgeLabel && (
@@ -2408,6 +2423,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
   projects,
   actions,
   restoreFocusRef,
+  running,
 }) {
   const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && ['app', 'artifact'].includes(menu.kind)))
   const projectAction = projectSourceAction(projects, importSources.data, menu?.kind, menu?.id)
@@ -2443,6 +2459,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       onShare={() => actions.share(item)}
       onDelete={() => actions.remove(kind, id)}
       onDeleteData={() => actions.removeData(id)}
+      onCloseApp={kind === 'app' && running ? () => actions.closeApp(id) : undefined}
     />
   )
 })

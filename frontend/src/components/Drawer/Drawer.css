@@ -1025,6 +1025,17 @@
   background: var(--danger);
 }
 
+/* A running app (on screen or kept warm in the background): a filled green dot,
+   unlike the hollow green "new activity" ring. Its menu offers Close app. */
+.drawer__running-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
 /* An execution needing recovery is not a failed Goal or a saved question. */
 .drawer__recovery-icon {
   box-sizing: border-box;

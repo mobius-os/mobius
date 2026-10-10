@@ -4438,6 +4438,18 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     await refreshApps()
   }
 
+  // Close a running app: it stays installed, but its frame unmounts, so its sound,
+  // timers and network stop. Its tab, Standard's screen and the warm cache let it go.
+  function closeApp(id) {
+    const sid = String(id)
+    const key = tabModel.tabKey(tabModel.makeTab('app', sid))
+    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key })
+    if (paneModel.singleScreenKey(workspaceStateRef.current.ws) === key) {
+      dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
+    }
+    dropFromWarmLru(cid => String(cid) === sid)
+  }
+
   // Wipes an app's stored data back to empty while KEEPING it installed —
   // a separate, additive action from deleteApp (which tombstones the whole
   // app). Lives here, like deleteApp, so it has access to notifyShell and
@@ -4736,6 +4748,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onSetChatArchived={setChatArchived}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
+        runningAppIds={renderedAppIds}
+        onCloseApp={closeApp}
         onNotice={notifyShell}
         onSettings={() => {
           setSettingsFocusTarget(null)
