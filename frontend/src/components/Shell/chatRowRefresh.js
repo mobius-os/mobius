@@ -6,8 +6,10 @@
  * the next read, so two answers for the same row never land out of order.
  * Complete list reads still own first load, reconnects, and mutations:
  * - a complete read already in flight when a batch is due began before those
- *   events and would overwrite their rows, so the batch becomes a fresh
- *   complete read instead;
+ *   events and would overwrite their rows, so the batch waits for it to land
+ *   and then reads the rows. It never starts another complete read: the
+ *   server keeps computing a read the browser cancels, so replacing a slow
+ *   complete read on every event piled up concurrent list builds under load;
  * - a complete read that starts after a scoped request and lands before its
  *   answer is newer, so the scoped answer is dropped. One that fails, is
  *   cancelled, or is still in flight does not suppress it: a later landing
@@ -43,7 +45,7 @@ export function createChatRowRefresh({
     pending = new Set()
     try {
       if (fullReadInFlight()) {
-        await refreshAll()
+        for (const id of ids) pending.add(id)
         return
       }
       const mark = fullReadMark()

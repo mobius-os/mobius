@@ -14,6 +14,8 @@ import {
 import { groupTimelineRows } from './timelineRowGrouping.js'
 import { activityEventsFromPages, peerRecordTool, peerTime, foldPeerActivity } from './peerTimeline.js'
 
+const EMPTY_TIMELINE_MAP = new Map()
+
 export function usePeerTimeline(chatId, messages, enabled, activeTools) {
   const query = useInfiniteQuery({
     queryKey: chatActivityQueryKey(chatId),
@@ -32,16 +34,21 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools) {
     if (enabled && hasNextPage && !isFetching && !isError && oldestLoaded >= windowStart) void fetchNextPage()
   }, [enabled, hasNextPage, isFetching, isError, oldestLoaded, windowStart, fetchNextPage])
   return useMemo(
-    () => ({
-      ...foldPeerActivity(
+    () => {
+      const timeline = foldPeerActivity(
         messages,
         projectChatActivity(messages, events, chatId, activeTools),
         chatId,
-      ),
-      // Source identity for the scroll handover; streaming projection alone
-      // must not schedule pre-paint geometry reads on every token.
-      activityEvents: events,
-    }),
+      )
+      return {
+        ...timeline,
+        tools: timeline.tools.size ? timeline.tools : EMPTY_TIMELINE_MAP,
+        positions: timeline.positions.size ? timeline.positions : EMPTY_TIMELINE_MAP,
+        // Source identity for the scroll handover; streaming projection alone
+        // must not schedule pre-paint geometry reads on every token.
+        activityEvents: events,
+      }
+    },
     [messages, events, chatId, activeTools],
   )
 }

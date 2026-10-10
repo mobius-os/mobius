@@ -5,9 +5,44 @@ import assert from 'node:assert/strict'
 import {
   projectSettledSteerContinuations,
   projectSteerContinuationMessage,
+  projectActiveSteerPrefix,
   sealedAssistantBeforeSteer,
 } from '../steerContinuity.js'
 import { safeSteerMarkdownCut } from '../markdown/steerContinuation.js'
+
+test('active formatting updates preserve unrelated settled reply identities', () => {
+  const unrelated = [assistant('**Old pre', { id: 'old' }), steer(),
+    assistant('**Old previous answer**', { id: 'old:assistant:1' })]
+  const current = [assistant('**3. Don', { id: 'run' }), steer(),
+    assistant('**3. Don’t', { id: 'run:assistant:1' }), steer()]
+  const settled = projectSettledSteerContinuations([...unrelated, ...current])
+  const original = JSON.stringify(settled)
+  let prior = settled
+  for (const text of ['**3. Don’t continue**', '**3. Don’t continue further**']) {
+    const continuation = projectSteerContinuationMessage(current[2],
+      assistant(text, { id: 'run:assistant:2' }), { active: true })
+    const updated = projectActiveSteerPrefix(settled, { continuationIndex: settled.length, continuation })
+    for (let index = 0; index < unrelated.length; index++) {
+      assert.equal(updated[index], settled[index])
+      assert.equal(updated[index], prior[index])
+    }
+    assert.equal(updated[3].blocks[0].markdown_range.source, text)
+    assert.equal(updated[5].blocks[0].markdown_range.source, text)
+    prior = updated
+  }
+  assert.equal(JSON.stringify(settled), original)
+  assert.equal(projectActiveSteerPrefix(settled, null), settled)
+})
+
+test('a stale active parse cannot replace different predecessor prose', () => {
+  const sealed = assistant('**Old')
+  const rows = [sealed, steer()]
+  const continuation = projectSteerContinuationMessage(assistant('**Plan'), assistant('**Planned**'), { active: true })
+  const shown = projectActiveSteerPrefix(rows, { continuationIndex: rows.length, continuation })
+  assert.equal(shown[0], sealed)
+  assert.equal(shown[0].blocks[0].content, '**Old')
+  assert.equal(shown[0].blocks[0].markdown_range, undefined)
+})
 
 
 function assistant(text, extras = {}) {
@@ -48,6 +83,37 @@ test('an exact post-steer replay renders only its unseen suffix', () => {
   assert.equal(continuation.blocks[0].content,
     'The key is preserving the boundary.', 'durable source stays untouched')
 })
+
+for (const legacy of [false, true]) {
+  test(`projection is idempotent but fresh live content inheriting metadata still updates (legacy=${legacy})`, () => {
+    const sealed = assistant('**ab ')
+    const raw = assistant('**ab **ab cd**ef**')
+    if (legacy) { delete sealed.blocks; delete raw.blocks }
+    const projected = projectSteerContinuationMessage(sealed, raw)
+    assert.equal(projected.content, '**ab cd**ef**')
+    assert.equal(projectSteerContinuationMessage(sealed, projected), projected)
+    assert.equal(projectSteerContinuationMessage(sealed, projected, { active: true }), projected)
+    const grown = { ...projected, content: '**ab **ab cd**ef** tail',
+      ...(legacy ? {} : { blocks: [{ type: 'text', content: '**ab **ab cd**ef** tail' }] }) }
+    const fresh = projectSteerContinuationMessage(sealed, grown, { active: true })
+    assert.equal(fresh.content, '**ab cd**ef** tail')
+    if (!legacy) {
+      assert.equal(fresh.blocks[0].source_text_offset, sealed.content.length)
+      const freshCollision = { ...projected,
+        blocks: [{ type: 'text', content: projected.content }] }
+      assert.equal(projectSteerContinuationMessage(sealed, freshCollision, { active: true }).content,
+        projected.content.slice(sealed.content.length),
+        'fresh raw blocks are not mistaken for a projection even when text coincides')
+    }
+    const divergent = { ...projected, content: 'Different answer',
+      ...(legacy ? {} : { blocks: [{ type: 'text', content: 'Different answer' }] }) }
+    const different = projectSteerContinuationMessage(sealed, divergent, { active: true })
+    assert.equal(different.content, 'Different answer')
+    assert.equal(different.steer_replay, undefined)
+    assert.equal(different.markdown_range, undefined)
+    assert.equal(raw.content, '**ab **ab cd**ef**')
+  })
+}
 
 
 test('a plain word may continue across the steered user row', () => {
@@ -252,7 +318,7 @@ test('a terminal-section replay hides live partials but reveals divergence and s
 })
 
 
-test('terminal-section replay preserves unsafe Markdown instead of hiding real formatting', () => {
+test('terminal-section replay carries formatting context without hiding real content', () => {
   const sealed = assistant('Earlier\n\n**Plan', {
     blocks: [
       { type: 'text', content: 'Earlier' },
@@ -261,7 +327,10 @@ test('terminal-section replay preserves unsafe Markdown instead of hiding real f
   })
   const continuation = assistant('**Planned** maintenance')
 
-  assert.equal(projectSteerContinuationMessage(sealed, continuation), continuation)
+  const projected = projectSteerContinuationMessage(sealed, continuation)
+  assert.equal(projected.blocks[0].content, 'ned** maintenance')
+  assert.ok(projected.blocks[0].markdown_range)
+  assert.equal(continuation.blocks[0].content, '**Planned** maintenance')
 })
 
 
@@ -392,22 +461,35 @@ test('plain-text cuts preserve graphemes and character references', () => {
 })
 
 
-test('an unsafe Markdown split keeps the full post-steer response', () => {
+test('a formatted split preserves the parsed context instead of replaying its prefix', () => {
   const sealed = assistant('**Plan')
   const continuation = assistant('**Planned** maintenance')
-  const activePartial = assistant('**Planned')
-  const activeExact = assistant('**Plan')
+  const projected = projectSteerContinuationMessage(sealed, continuation)
+  assert.equal(projected.blocks[0].content, 'ned** maintenance')
+  assert.equal(projected.blocks[0].source_text_offset, '**Plan'.length)
+  assert.ok(projected.blocks[0].markdown_range)
+  assert.ok(projected.steer_replay.prefixRange)
+  assert.equal(continuation.content, '**Planned** maintenance')
+})
 
-  assert.equal(
-    projectSteerContinuationMessage(sealed, continuation),
-    continuation,
-  )
-  assert.equal(
-    projectSteerContinuationMessage(sealed, activePartial, { active: true }),
-    activePartial,
-  )
-  assert.equal(
-    projectSteerContinuationMessage(sealed, activeExact, { active: true }),
-    activeExact,
-  )
+
+test('unmappable code, links and math still preserve the complete response', () => {
+  for (const [prefix, text] of [
+    ['```js\nconst', '```js\nconst x = 1\n```'],
+    ['[see](https://exa', '[see](https://example.com)'],
+    ['$x', '$x + y$'],
+  ]) {
+    const continuation = assistant(text)
+    assert.equal(projectSteerContinuationMessage(assistant(prefix), continuation), continuation)
+  }
+})
+
+test('an unfinished emphasis replay remains lossless while catching up to the sealed text', () => {
+  const sealed = assistant('**Plan')
+  for (const [text, expected] of [['**Pl', ''], ['**Plan', ''], ['**Planned', 'ned']]) {
+    const projected = projectSteerContinuationMessage(sealed, assistant(text), { active: true })
+    assert.equal(projected.content, expected)
+  }
+  const shorter = assistant('**Pl')
+  assert.equal(projectSteerContinuationMessage(sealed, shorter), shorter)
 })

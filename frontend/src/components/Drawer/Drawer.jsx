@@ -2043,7 +2043,7 @@ const DrawerRow = memo(function DrawerRow({
     )
   }
 
-  function beginPinnedReorder({ pointerId, start, moveEvent }) {
+  function beginPinnedReorder({ pointerId, start, moveEvent, releaseHeldTouchPan }) {
     if (!pinned || !moveEvent) return false
     // Finish any still-settling previous drag before this gesture can measure;
     // lingering transforms from the old preview would poison the new geometry.
@@ -2089,6 +2089,7 @@ const DrawerRow = memo(function DrawerRow({
     function removeListeners() {
       if (listenersOff) return
       listenersOff = true
+      releaseHeldTouchPan?.()
       window.removeEventListener('pointermove', onMove, true)
       window.removeEventListener('pointerup', onUp, true)
       window.removeEventListener('pointercancel', onCancel, true)

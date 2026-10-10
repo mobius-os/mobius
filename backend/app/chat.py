@@ -3417,7 +3417,7 @@ _BROWSER_CLOSE_KILL_GRACE = 1.0
 _BROWSER_CLOSE_KILL_WAIT_TIMEOUT = 1.0
 
 
-async def _close_browser_session(chat_id: str) -> None:
+async def _close_browser_session(chat_id: str) -> bool:
   """Close every agent-browser session created by this chat.
 
   Best-effort: logs cleanup failures without preventing turn completion.
@@ -3427,7 +3427,7 @@ async def _close_browser_session(chat_id: str) -> None:
   Chromium trees would otherwise escape terminal cleanup.
   """
   if not chat_id:
-    return
+    return False
   log = _get_logger()
 
   targets: set[browser_profiles.BrowserSessionTarget] = set()
@@ -3436,7 +3436,7 @@ async def _close_browser_session(chat_id: str) -> None:
     scan = await asyncio.to_thread(browser_profiles.browser_session_targets_for_chat, chat_id)
     targets.update(scan.targets)
     if scan.idle:
-      return
+      return True
     if not scan.complete:
       log.warning(
         "agent-browser session discovery incomplete for chat %s", chat_id,
@@ -3569,10 +3569,12 @@ async def _close_browser_session(chat_id: str) -> None:
         log.info("agent-browser ownership released chat_id=%s", chat_id)
       from app.file_cache import browser_tool_paths, reclaim_file_cache
       await asyncio.to_thread(reclaim_file_cache, browser_tool_paths())
+      return scan is not None and scan.complete
     else:
       log.warning("agent-browser ownership remains unverified chat_id=%s", chat_id)
   except Exception as exc:
     log.warning("agent-browser process cleanup failed chat_id=%s: %s", chat_id, exc)
+  return False
 
 
 # Browser teardown must not hold the queue lock: that lock has independent
@@ -3600,19 +3602,106 @@ async def _close_turn_browser(chat_id: str, run_gen: int | None) -> None:
       and not registry.is_alive(chat_id)
     )
     if owns or stopped:
-      # Shield and JOIN cleanup on cancellation: releasing the gate while a
-      # worker thread still sends signals would endanger the successor.
-      task = asyncio.create_task(_close_browser_session(chat_id))
+      await _join_browser_close(chat_id)
+
+
+async def _join_browser_close(chat_id: str) -> bool:
+  """Run browser teardown to completion; call only under the lifecycle lock.
+
+  Shield and JOIN cleanup on cancellation: releasing the gate while a worker
+  thread still sends signals would endanger the successor.
+  """
+  task = asyncio.create_task(_close_browser_session(chat_id))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    while not task.done():
       try:
         await asyncio.shield(task)
       except asyncio.CancelledError:
-        while not task.done():
-          try:
-            await asyncio.shield(task)
-          except asyncio.CancelledError:
-            continue
-        task.result()
-        raise
+        continue
+    task.result()
+    raise
+
+
+async def reap_unowned_browsers(*, memory_budget_bytes: int | None) -> dict:
+  """Release orphaned chat browsers and enforce the container memory budget.
+
+  A nomination is only a hint. Recheck ownership and measured memory while
+  holding the same lock as turn start; only verified cleanup counts as freed.
+  """
+  log = _get_logger()
+
+  async def measure() -> dict[str, browser_processes.BrowserChatUsage]:
+    return await asyncio.to_thread(browser_processes.browser_usage_by_chat)
+
+  def measured(usage: dict[str, browser_processes.BrowserChatUsage]) -> dict[str, int]:
+    return {chat_id: sample.pss_bytes for chat_id, sample in usage.items()
+            if sample.pss_bytes is not None}
+
+  generation = getattr(registry, 'current_generation', None)
+  usage = await measure()
+  orphans: dict[str, int | None] = {}
+  for chat_id in usage:
+    if registry.is_alive(chat_id):
+      continue
+    nominated_generation = generation(chat_id) if generation else None
+    async with _browser_lifecycle_lock(chat_id):
+      if (registry.is_alive(chat_id)
+          or (generation and generation(chat_id) != nominated_generation)):
+        continue
+      current = await measure()
+      if chat_id not in current:
+        continue
+      before = current[chat_id].pss_bytes
+      closed = await _join_browser_close(chat_id)
+      after = await measure()
+      if closed and chat_id not in after:
+        orphans[chat_id] = before
+        log.warning("agent-browser orphan closed chat_id=%s bytes=%s",
+                    chat_id, before if before is not None else "unknown")
+
+  guarded: dict[str, int] = {}
+  attempted: set[str] = set()
+  while memory_budget_bytes:
+    usage = measured(await measure())
+    if sum(usage.values()) <= memory_budget_bytes:
+      break
+    candidates = sorted(
+      ((chat_id, size) for chat_id, size in usage.items()
+       if chat_id not in attempted), key=lambda item: item[1], reverse=True,
+    )
+    if not candidates:
+      break
+    chat_id, _ = candidates[0]
+    was_alive = registry.is_alive(chat_id)
+    nominated_generation = generation(chat_id) if generation else None
+    async with _browser_lifecycle_lock(chat_id):
+      current = measured(await measure())
+      if sum(current.values()) <= memory_budget_bytes:
+        break
+      current_candidates = sorted(
+        ((owner, size) for owner, size in current.items()
+         if owner not in attempted), key=lambda item: item[1], reverse=True,
+      )
+      # Never let a queued nomination close a successor or a now-smaller chat.
+      if (not current_candidates or current_candidates[0][0] != chat_id
+          or registry.is_alive(chat_id) != was_alive
+          or (generation and generation(chat_id) != nominated_generation)):
+        attempted.add(chat_id)
+        continue
+      before = current.get(chat_id, 0)
+      if before:
+        closed = await _join_browser_close(chat_id)
+        after = await measure()
+        if closed and chat_id not in after:
+          guarded[chat_id] = before
+          log.warning(
+            "agent-browser memory guard closed chat_id=%s bytes=%d budget=%d",
+            chat_id, before, memory_budget_bytes,
+          )
+    attempted.add(chat_id)
+  return {"orphans_closed": orphans, "guard_closed": guarded}
 
 
 async def _terminal_setup_error_cleanup(

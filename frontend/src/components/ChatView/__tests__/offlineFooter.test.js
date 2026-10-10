@@ -216,8 +216,12 @@ test('the chat footer stays quiet through transient trouble and shows only an ac
   ]) {
     assert.doesNotMatch(chatView, retiredNote, `retired footer note ${retiredNote} must not return`)
   }
-  assert.match(chatView,
-    /\.catch\(\(\) => \{[\s\S]{0,500}retry\.timer = setTimeout\([\s\S]{0,300}olderHistoryShouldLoad\(scrollEl, \{ userDriven: true \}\)[\s\S]{0,120}loadOlderMessages\(before, \{ readerDriven \}\)[\s\S]{0,80}olderHistoryRetryDelayMs\(retry\.attempts\)/,
+  const historyFailure = chatView.slice(chatView.indexOf('const failPage = error =>'),
+    chatView.indexOf('    apiFetch(', chatView.indexOf('const failPage = error =>')))
+  assert.match(chatView, /\.catch\(failPage\)/,
+    'network failures use the same quiet retry owner as the progressive page')
+  assert.match(historyFailure,
+    /retry\.timer = setTimeout\([\s\S]{0,400}olderHistoryShouldLoad\(scrollEl, \{ userDriven: true \}\)[\s\S]{0,120}loadOlderMessages\(before, \{ readerDriven \}\)[\s\S]{0,80}olderHistoryRetryDelayMs\(retry\.attempts\)/,
     'a failed older page retries quietly while the reader still waits near the top')
   assert.match(chatView,
     /function loadOlderMessages\([^)]*\) \{[\s\S]{0,300}if \(olderHistoryRetryRef\.current\.timer\) return/,

@@ -231,7 +231,7 @@ test('automatic geometry owners and newer semantic actions share reader authorit
   )
   assert.ok(
     paginationPath.indexOf('flushSync(() =>')
-      < paginationPath.indexOf('restorePaginationPrepend(paginationAnchor)'),
+      < paginationPath.indexOf('restorePaginationPrepend(anchor)'),
     'pagination must restore the captured coordinate in the same task after commit',
   )
   assert.ok(
