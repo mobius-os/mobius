@@ -52,14 +52,14 @@ export default function useChatRuntimePolicy({
     setChatInfo(previous => previous || cachedChatInfo)
   }, [cachedChatInfo])
   useLayoutEffect(() => {
-    if (!cachedSessionId) return
     setChatInfo(previous => {
       // A session belongs to exactly one provider. A late settled read from
       // the outgoing provider must never repoint a chat that has since
       // switched providers; the incoming provider earns its own session on
-      // its first completed turn.
+      // its first completed turn. A cleared session (after /compact) is
+      // adopted too, so the context gauge stops reading the old session.
       if (!previous || previous.provider !== cachedProvider) return previous
-      if (previous.session_id === cachedSessionId) return previous
+      if ((previous.session_id || null) === cachedSessionId) return previous
       return { ...previous, session_id: cachedSessionId }
     })
   }, [cachedProvider, cachedSessionId])

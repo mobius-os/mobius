@@ -153,6 +153,26 @@ test('a settled first turn adopts its provider session without a remount', () =>
   )
 })
 
+test('a compacted chat drops the provider session the server cleared', () => {
+  resetProviderSwitchMemoryForTests()
+  const props = {
+    chatId: 'policy-compacted',
+    cached: { chatInfo: { provider: 'claude', session_id: 'claude-session-1' } },
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  }
+  const { result, rerender } = renderHook(useChatRuntimePolicy, props)
+  assert.equal(result.current.chatInfo.session_id, 'claude-session-1')
+
+  rerender({
+    ...props,
+    cached: { chatInfo: { provider: 'claude', session_id: null } },
+  })
+
+  assert.equal(result.current.chatInfo.session_id, null)
+})
+
 test('a late session from the outgoing provider is never adopted', () => {
   resetProviderSwitchMemoryForTests()
   const { result, rerender } = renderHook(useChatRuntimePolicy, {
