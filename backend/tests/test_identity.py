@@ -33,6 +33,44 @@ async def test_managed_railway_inventory_forwards_region_opt_in_only_when_reques
 
 
 @pytest.mark.asyncio
+async def test_managed_railway_inventory_forwards_each_opt_in_only_when_requested(monkeypatch):
+  from app.routes import identity
+
+  paths = []
+
+  async def managed_response(method, path, **_kwargs):
+    paths.append(path)
+    return httpx.Response(200, json={"connection": None, "instances": []})
+
+  monkeypatch.setattr(identity, "_managed_response", managed_response)
+  await identity._managed_railway_remote(include_workspace_ids=True)
+  await identity._managed_railway_remote(
+    include_region_options=True, include_workspace_ids=True,
+  )
+  assert paths == [
+    "/api/instance/v1/railway?workspace_ids=1",
+    "/api/instance/v1/railway?region_options=1&workspace_ids=1",
+  ]
+
+
+def test_linked_railway_inventory_forwards_the_workspace_opt_in(
+  client, auth, monkeypatch,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(200, {"connection": None, "instances": []}),
+  )
+  plain = client.get("/api/identity/railway", headers=granted)
+  asked = client.get(
+    "/api/identity/railway?region_options=1&workspace_ids=1", headers=granted,
+  )
+
+  assert (plain.status_code, asked.status_code) == (200, 200)
+  base = "https://www.mobius.you/api/account/v1/railway"
+  assert [call[1] for call in calls] == [base, base + "?region_options=1&workspace_ids=1"]
+
+
+@pytest.mark.asyncio
 async def test_linked_instance_resolves_another_accounts_handle(db, monkeypatch):
   from app.routes import identity
 
@@ -678,6 +716,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "volume_mb": None,
       "update_policy": "manual",
       "region": "europe-west4-drams3a",
+      "workspace_id": "ws_personal",
     },
     headers=granted,
   )
@@ -701,17 +740,17 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
   )
   invalid_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "Wrong region", "region": "unknown"},
+    json={"name": "Wrong region", "region": "unknown", "workspace_id": "ws_personal"},
     headers=granted,
   )
   without_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "Legacy request"},
+    json={"name": "Legacy request", "workspace_id": "ws_personal"},
     headers=granted,
   )
   null_region = client.post(
     "/api/identity/railway/deployments",
-    json={"name": "No preference", "region": None},
+    json={"name": "No preference", "region": None, "workspace_id": "ws_personal"},
     headers=granted,
   )
 
@@ -737,6 +776,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
         "volume_mb": None,
         "update_policy": "manual",
         "region": "europe-west4-drams3a",
+        "workspace_id": "ws_personal",
       },
     ),
     (
@@ -763,15 +803,246 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "POST",
       "https://www.mobius.you/api/account/v1/railway/instances",
       {"name": "Legacy request", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None},
+       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
     (
       "POST",
       "https://www.mobius.you/api/account/v1/railway/instances",
       {"name": "No preference", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None},
+       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
   ]
+
+
+def _linked_railway_bridge(client, auth, monkeypatch, respond):
+  """Grant Railway access with a linked account; return the bridge call log."""
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True, railway_granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("railway-token-" + "x" * 40),
+      scopes_json=[
+        "deployments:delete", "deployments:read", "identity:read",
+        "identity:write", "railway:read", "railway:write",
+      ],
+    ))
+    session.commit()
+  calls = []
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      calls.append((method, url, kwargs.get("json")))
+      return respond(method, url)
+
+    async def get(self, url, **kwargs):
+      return await self.request("GET", url, **kwargs)
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  return granted, calls
+
+
+class _Upstream:
+  def __init__(self, status_code, payload):
+    self.status_code = status_code
+    self._payload = payload
+
+  def json(self):
+    return self._payload
+
+
+def test_railway_create_forwards_its_stripped_workspace(client, auth, monkeypatch):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
+  )
+  response = client.post(
+    "/api/identity/railway/deployments",
+    json={"name": "Team box", "workspace_id": "  ws_team  "},
+    headers=granted,
+  )
+
+  assert response.status_code == 202
+  assert [call[2] for call in calls] == [
+    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
+     "volume_mb": None, "workspace_id": "ws_team"},
+  ]
+
+
+@pytest.mark.parametrize("body", [
+  {"name": "Missing"},
+  {"name": "Null", "workspace_id": None},
+  {"name": "Blank", "workspace_id": "   "},
+  {"name": "Long", "workspace_id": "w" * 129},
+])
+def test_railway_create_without_a_valid_workspace_is_refused_before_the_bridge(
+  client, auth, monkeypatch, body,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
+  )
+  response = client.post(
+    "/api/identity/railway/deployments", json=body, headers=granted,
+  )
+
+  assert response.status_code == 422
+  assert calls == []
+
+
+def _workspace_plans(**changes):
+  limits = {
+    "cpu_choices": [1, 2, 4], "max_cpu": 8, "default_cpu": 2,
+    "memory_options_mb": [1024, 4096], "max_memory_mb": 8192,
+    "default_memory_mb": 4096, "volume_options_mb": [5000, 10000],
+    "default_volume_mb": 5000, "included_usd": 5.0,
+  }
+  workspace = {
+    "id": "ws_personal", "name": "Personal", "plan": "hobby",
+    "deploy_blocked": "", "plan_limits": limits,
+  }
+  workspace.update(changes)
+  return {"workspaces": [workspace]}
+
+
+def test_railway_workspace_plans_are_proxied_after_the_contract_check(
+  client, auth, monkeypatch,
+):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch, lambda *_: _Upstream(200, _workspace_plans()),
+  )
+  response = client.get("/api/identity/railway/workspace-plans", headers=granted)
+
+  assert response.status_code == 200
+  assert response.json() == _workspace_plans()
+  assert calls == [(
+    "GET", "https://www.mobius.you/api/account/v1/railway/workspace-plans", None,
+  )]
+
+
+def test_older_account_service_without_workspace_plans_is_reported_as_missing(
+  client, auth, monkeypatch,
+):
+  granted, _ = _linked_railway_bridge(
+    client, auth, monkeypatch,
+    lambda *_: _Upstream(404, {"detail": "Not Found"}),
+  )
+  response = client.get("/api/identity/railway/workspace-plans", headers=granted)
+
+  assert response.status_code == 404
+
+
+def _bad_limits(**changes):
+  limits = dict(_workspace_plans()["workspaces"][0]["plan_limits"])
+  limits.update(changes)
+  return {"plan_limits": limits}
+
+
+@pytest.mark.parametrize("payload", [
+  {"current": "ws_personal"},
+  {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 2},
+  {**_workspace_plans(), "workspaces": "nope"},
+  {**_workspace_plans(), "workspaces": _workspace_plans()["workspaces"] * 101},
+  _workspace_plans(id=""),
+  _workspace_plans(id="w" * 129),
+  _workspace_plans(name=3),
+  _workspace_plans(name=""),
+  _workspace_plans(plan="platinum"),
+  _workspace_plans(deploy_blocked="x" * 1001),
+  _workspace_plans(deploy_blocked=None),
+  _workspace_plans(plan_limits=None),
+  _workspace_plans(**_bad_limits(max_cpu=True)),
+  _workspace_plans(**_bad_limits(max_cpu=-1)),
+  _workspace_plans(**_bad_limits(default_volume_mb=0)),
+  _workspace_plans(**_bad_limits(included_usd="5")),
+  _workspace_plans(**_bad_limits(included_usd=True)),
+  _workspace_plans(**_bad_limits(memory_options_mb=["1024"])),
+  _workspace_plans(**_bad_limits(cpu_choices=list(range(51)))),
+])
+def test_railway_workspace_plans_contract_rejects_unbounded_or_malformed_state(payload):
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  with pytest.raises(HTTPException) as refused:
+    _railway_workspace_plans_contract(payload)
+  assert refused.value.status_code == 502
+
+
+def test_railway_workspace_plans_contract_drops_fields_a_newer_account_service_adds():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  payload = _workspace_plans(extra="x", **_bad_limits(future_limit=5))
+  payload["extra_top"] = 1
+  payload["workspaces"][0]["plan_limits"]["future_limit"] = 5
+
+  assert _railway_workspace_plans_contract(payload) == _workspace_plans()
+
+
+@pytest.mark.parametrize("current", ["ws_personal", None, "", 7])
+def test_railway_workspace_plans_contract_ignores_a_legacy_current_key(current):
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  payload = {**_workspace_plans(), "current": current}
+
+  assert _railway_workspace_plans_contract(payload) == _workspace_plans()
+
+
+def test_railway_workspace_plans_contract_counts_characters_not_bytes():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  assert _railway_workspace_plans_contract(
+    _workspace_plans(name="\N{GRINNING FACE}" * 128)
+  )["workspaces"][0]["name"] == "\N{GRINNING FACE}" * 128
+
+
+def test_railway_workspace_plans_contract_accepts_unknown_credit_and_no_workspaces():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  unknown = _workspace_plans(plan="unknown", **_bad_limits(included_usd=None))
+  enterprise = _workspace_plans(plan="enterprise", **_bad_limits(included_usd=None))
+  empty = {"workspaces": []}
+
+  assert _railway_workspace_plans_contract(unknown) == unknown
+  assert _railway_workspace_plans_contract(enterprise) == enterprise
+  assert _railway_workspace_plans_contract(empty) == empty
+
+
+def test_railway_workspace_plans_contract_accepts_the_largest_listing_with_emoji_names():
+  from app.routes.identity import _railway_workspace_plans_contract
+
+  base = _workspace_plans()["workspaces"][0]
+  largest = {"workspaces": [
+    {**base, "id": f"ws_{index}", "name": "\N{GRINNING FACE}" * 128,
+     "deploy_blocked": "x" * 1000}
+    for index in range(100)
+  ]}
+
+  assert _railway_workspace_plans_contract(largest) == largest
+
+
+@pytest.mark.parametrize("method,path", [
+  ("GET", "/api/identity/railway/workspaces"),
+  ("PUT", "/api/identity/railway/workspace"),
+  ("POST", "/api/identity/railway/workspace"),
+])
+def test_the_saved_workspace_routes_are_gone(client, auth, monkeypatch, method, path):
+  granted, calls = _linked_railway_bridge(
+    client, auth, monkeypatch, lambda *_: _Upstream(200, {}),
+  )
+  response = client.request(method, path, json={"workspace_id": "ws"}, headers=granted)
+
+  assert response.status_code in (404, 405)
+  assert calls == []
 
 
 @pytest.mark.parametrize("name", ["   ", "x" * 81])

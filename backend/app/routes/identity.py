@@ -97,6 +97,7 @@ class RailwayCreate(BaseModel):
   region: Literal[
     "us-west2", "us-east4-eqdc4a", "europe-west4-drams3a", "asia-southeast1-eqsg3a"
   ] | None = None
+  workspace_id: str
 
 
 class RailwayCompute(BaseModel):
@@ -119,10 +120,6 @@ class RailwayUpdates(BaseModel):
 class RailwayConfirmAbsent(BaseModel):
   model_config = {"extra": "forbid"}
   confirmed_absent: bool
-
-
-class RailwaySelectWorkspace(BaseModel):
-  workspace_id: str
 
 
 class RailwayConnectStart(BaseModel):
@@ -806,8 +803,26 @@ async def read_avatar(
   )
 
 
-async def _managed_railway_remote(*, include_region_options: bool = False) -> dict:
-  suffix = "?region_options=1" if include_region_options else ""
+def _railway_inventory_query(
+  *, include_region_options: bool, include_workspace_ids: bool,
+) -> str:
+  """The opt-in extensions an app asked for; older account services ignore them."""
+  flags = [
+    name for name, wanted in (
+      ("region_options", include_region_options),
+      ("workspace_ids", include_workspace_ids),
+    ) if wanted
+  ]
+  return "?" + "&".join(f"{name}=1" for name in flags) if flags else ""
+
+
+async def _managed_railway_remote(
+  *, include_region_options: bool = False, include_workspace_ids: bool = False,
+) -> dict:
+  suffix = _railway_inventory_query(
+    include_region_options=include_region_options,
+    include_workspace_ids=include_workspace_ids,
+  )
   response = await _managed_response("GET", "/api/instance/v1/railway" + suffix)
   if response.status_code != 200:
     raise HTTPException(502, "The Möbius account service could not read Railway state.")
@@ -819,6 +834,7 @@ async def _managed_railway_remote(*, include_region_options: bool = False) -> di
 
 async def _linked_railway_remote(
   db: Session, owner_id: int, *, include_region_options: bool = False,
+  include_workspace_ids: bool = False,
 ) -> tuple[str, dict | None]:
   link = _linked_row(db, owner_id)
   if link is None:
@@ -833,7 +849,10 @@ async def _linked_railway_remote(
     return "signed_out", None
   try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      suffix = "?region_options=1" if include_region_options else ""
+      suffix = _railway_inventory_query(
+        include_region_options=include_region_options,
+        include_workspace_ids=include_workspace_ids,
+      )
       response = await client.get(
         get_settings().mobius_account_origin + "/api/account/v1/railway" + suffix,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -861,10 +880,12 @@ async def read_railway(
   db: Session = Depends(get_db),
 ):
   include_region_options = request.query_params.get("region_options") == "1"
+  include_workspace_ids = request.query_params.get("workspace_ids") == "1"
   if get_settings().mobius_sso_enabled:
     try:
       payload = await _managed_railway_remote(
         include_region_options=include_region_options,
+        include_workspace_ids=include_workspace_ids,
       )
     except HTTPException as exc:
       if exc.status_code == 502:
@@ -873,6 +894,7 @@ async def read_railway(
     return {"railway_access": "available", **payload}
   access, payload = await _linked_railway_remote(
     db, owner.id, include_region_options=include_region_options,
+    include_workspace_ids=include_workspace_ids,
   )
   return {
     "railway_access": access,
@@ -965,27 +987,76 @@ async def _railway_mutation(
   return {"instance": instance}
 
 
-def _railway_workspaces_contract(payload: object) -> dict:
-  if not isinstance(payload, dict) or set(payload) != {"workspaces", "current"}:
-    raise HTTPException(502, "The Möbius account service returned invalid workspaces.")
-  workspaces = payload.get("workspaces")
-  current = payload.get("current")
-  if (
-    not isinstance(workspaces, list)
-    or len(workspaces) > 100
-    or any(
-      not isinstance(item, dict)
-      or set(item) != {"id", "name"}
-      or not isinstance(item.get("id"), str)
-      or not isinstance(item.get("name"), str)
-      or len(item["id"]) > 128
-      or len(item["name"]) > 128
-      for item in workspaces
+_RAILWAY_PLANS = {"trial", "free", "hobby", "pro", "enterprise", "unknown"}
+_RAILWAY_PLAN_LIMIT_LISTS = ("cpu_choices", "memory_options_mb", "volume_options_mb")
+_RAILWAY_PLAN_LIMIT_INTS = (
+  "max_cpu", "default_cpu", "max_memory_mb", "default_memory_mb", "default_volume_mb",
+)
+_RAILWAY_WORKSPACE_PLAN_KEYS = ("id", "name", "plan", "deploy_blocked", "plan_limits")
+
+
+def _is_positive_int(value: object) -> bool:
+  return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _railway_plan_limits_projection(limits: object) -> dict | None:
+  """The known plan-limit fields, or None when any is missing or malformed.
+
+  A newer account service may add fields; they are dropped here rather than
+  rejected, so an older platform keeps the per-workspace flow working.
+  """
+  keys = (*_RAILWAY_PLAN_LIMIT_LISTS, *_RAILWAY_PLAN_LIMIT_INTS, "included_usd")
+  if not isinstance(limits, dict) or not set(keys) <= set(limits):
+    return None
+  included = limits["included_usd"]
+  if not (
+    all(
+      isinstance(limits[key], list)
+      and len(limits[key]) <= 50
+      and all(_is_positive_int(item) for item in limits[key])
+      for key in _RAILWAY_PLAN_LIMIT_LISTS
     )
-    or (current is not None and (not isinstance(current, str) or len(current) > 128))
+    and all(_is_positive_int(limits[key]) for key in _RAILWAY_PLAN_LIMIT_INTS)
+    and (
+      included is None
+      or (isinstance(included, (int, float)) and not isinstance(included, bool)
+          and 0 <= included <= 100000)
+    )
   ):
-    raise HTTPException(502, "The Möbius account service returned invalid workspaces.")
-  return payload
+    return None
+  return {key: limits[key] for key in keys}
+
+
+def _railway_workspace_plan_projection(item: object) -> dict | None:
+  if (
+    not isinstance(item, dict)
+    or not set(_RAILWAY_WORKSPACE_PLAN_KEYS) <= set(item)
+    or not isinstance(item["id"], str) or not 0 < len(item["id"]) <= 128
+    or not isinstance(item["name"], str) or not 0 < len(item["name"]) <= 128
+    or item["plan"] not in _RAILWAY_PLANS
+    or not isinstance(item["deploy_blocked"], str) or len(item["deploy_blocked"]) > 1000
+  ):
+    return None
+  limits = _railway_plan_limits_projection(item["plan_limits"])
+  if limits is None:
+    return None
+  return {**{key: item[key] for key in _RAILWAY_WORKSPACE_PLAN_KEYS[:4]}, "plan_limits": limits}
+
+
+def _railway_workspace_plans_contract(payload: object) -> dict:
+  invalid = HTTPException(502, "The Möbius account service returned invalid workspace plans.")
+  if not isinstance(payload, dict) or "workspaces" not in payload:
+    raise invalid
+  raw_workspaces = payload["workspaces"]
+  if not isinstance(raw_workspaces, list) or len(raw_workspaces) > 100:
+    raise invalid
+  workspaces = [_railway_workspace_plan_projection(item) for item in raw_workspaces]
+  if (
+    any(item is None for item in workspaces)
+    or len({item["id"] for item in workspaces}) != len(workspaces)
+  ):
+    raise invalid
+  return {"workspaces": workspaces}
 
 
 def _railway_metrics_contract(payload: object) -> dict:
@@ -1135,6 +1206,10 @@ async def create_railway_deployment(
   # hosts still receive the original request when the app omits this field.
   if body.region is not None:
     settings["region"] = body.region
+  workspace_id = body.workspace_id.strip()
+  if not workspace_id or len(workspace_id) > 128:
+    raise HTTPException(422, "Choose a Railway workspace.")
+  settings["workspace_id"] = workspace_id
   return await _railway_mutation(
     db,
     owner.id,
@@ -1158,32 +1233,14 @@ async def start_railway_connection(
   )
 
 
-@router.get("/railway/workspaces")
-async def read_railway_workspaces(
+@router.get("/railway/workspace-plans")
+async def read_railway_workspace_plans(
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
   db: Session = Depends(get_db),
 ):
-  return _railway_workspaces_contract(
-    await _railway_proxy(db, owner.id, "GET", "/workspaces")
+  return _railway_workspace_plans_contract(
+    await _railway_proxy(db, owner.id, "GET", "/workspace-plans")
   )
-
-
-@router.post(
-  "/railway/workspace",
-  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
-)
-async def select_railway_workspace(
-  body: RailwaySelectWorkspace,
-  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
-):
-  workspace_id = body.workspace_id.strip()
-  if not workspace_id or len(workspace_id) > 128:
-    raise HTTPException(422, "Choose a Railway workspace.")
-  await _railway_proxy(
-    db, owner.id, "POST", "/workspace", json={"workspace_id": workspace_id}
-  )
-  return {"ok": True}
 
 
 @router.post(
