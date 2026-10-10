@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from math import ceil
+from time import monotonic
 from urllib.parse import urljoin, urlparse
 from urllib.request import parse_http_list
 
@@ -61,10 +62,12 @@ _proxy_clients = PinnedHostClientPool()
 # Browser freshness the owner proxy will grant at most, whatever upstream says.
 _PROXY_MAX_BROWSER_AGE = 24 * 60 * 60
 
-ResponseCacheHeaders = Callable[[httpx.Response], dict[str, str]]
+ResponseCacheHeaders = Callable[[httpx.Response, float], dict[str, str]]
 
 
-def forward_upstream_cache_headers(upstream: httpx.Response) -> dict[str, str]:
+def forward_upstream_cache_headers(
+  upstream: httpx.Response, elapsed: float = 0,
+) -> dict[str, str]:
   """Pass upstream cache headers through unchanged (anonymous public apps)."""
   return {
     name: upstream.headers[name]
@@ -85,7 +88,9 @@ def _cache_directives(value: str) -> dict[str, str]:
   return directives
 
 
-def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
+def private_browser_cache_headers(
+  upstream: httpx.Response, elapsed: float = 0,
+) -> dict[str, str]:
   """Let the requesting browser, and only it, reuse a proxied public read.
 
   The proxy URL is requested with a bearer token, so an upstream `public` or
@@ -96,7 +101,7 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
   exposed: the proxy URL does not bind the origin selected by redirects, so
   expired reads must fetch again unconditionally. Nothing is cached server-side.
   """
-  if upstream.status_code not in (200, 304):
+  if upstream.status_code not in (200, 304, *_REDIRECT_STATUSES):
     return {}
   directives = _cache_directives(upstream.headers.get("cache-control", ""))
   if "no-store" in directives:
@@ -124,7 +129,7 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
     # again, potentially serving stale bytes as fresh.
     age = 0
     try:
-      age = max(0, int(upstream.headers.get("age", "0")))
+      age = max(0, int(upstream.headers.get("age", "0"))) + ceil(elapsed)
     except ValueError:
       age = max_age
     if "date" in upstream.headers:
@@ -145,6 +150,63 @@ def private_browser_cache_headers(upstream: httpx.Response) -> dict[str, str]:
   if "must-revalidate" in directives:
     headers["cache-control"] += ", must-revalidate"
   return headers
+
+
+class _PrivateBrowserCacheHeaders:
+  """Intersect freshness and selection limits for one resolved proxy URL."""
+
+  def __init__(self):
+    self.redirected = False
+    self.no_store = False
+    self.no_cache = False
+    self.must_revalidate = False
+    self.fresh_until: float | None = None
+    self.vary: dict[str, str] = {}
+
+  def __call__(
+    self, upstream: httpx.Response, elapsed: float = 0,
+  ) -> dict[str, str]:
+    self.redirected |= upstream.status_code in _REDIRECT_STATUSES
+    headers = private_browser_cache_headers(upstream, elapsed)
+    if not headers:
+      if not self.redirected:
+        return headers
+      # Never grant freshness to an unsupported final status, but do not let
+      # a heuristically cacheable error erase the redirector's restrictions.
+      directives = _cache_directives(upstream.headers.get("cache-control", ""))
+      headers = {
+        "cache-control": "no-store" if "no-store" in directives else "private, no-cache",
+        "vary": upstream.headers.get("vary", ""),
+      }
+    directives = _cache_directives(headers["cache-control"])
+    self.no_store |= "no-store" in directives
+    self.no_cache |= "no-cache" in directives
+    self.must_revalidate |= "must-revalidate" in directives
+    now = monotonic()
+    if "max-age" in directives:
+      fresh_until = now + int(directives["max-age"])
+      self.fresh_until = (
+        fresh_until if self.fresh_until is None
+        else min(self.fresh_until, fresh_until)
+      )
+    for name in headers.get("vary", "").split(","):
+      name = name.strip()
+      if name:
+        self.vary.setdefault(name.lower(), name)
+    if self.no_store:
+      return {"cache-control": "no-store"}
+    # Round down so time spent following later hops is never granted again.
+    max_age = int(self.fresh_until - now) if self.fresh_until is not None else 0
+    cache_control = (
+      "private, no-cache" if self.no_cache or max_age <= 0
+      else f"private, max-age={max_age}"
+    )
+    if self.must_revalidate:
+      cache_control += ", must-revalidate"
+    return {
+      "cache-control": cache_control,
+      "vary": "*" if "*" in self.vary else ", ".join(self.vary.values()),
+    }
 
 
 async def close_proxy_clients() -> None:
@@ -293,7 +355,8 @@ async def _read_external_get(
 
   Every hop is resolved, validated, and DNS-pinned independently. Letting
   httpx follow redirects itself would allow a public URL to bounce into the
-  container network after only the first host passed validation.
+  container network after only the first host passed validation. The cache
+  policy is evaluated on every hop so it can restrict the resolved response.
   """
   current_url = url
   for hop in range(_MAX_REDIRECTS + 1):
@@ -332,9 +395,12 @@ async def _read_external_get(
               f"Too many redirects (>{_MAX_REDIRECTS}) "
               f"starting from {url}",
             )
+          if cache_headers is not None:
+            cache_headers(upstream, 0)
           current_url = urljoin(current_url, location)
           continue
 
+        received_at = monotonic()
         body = await _read_bounded_body(
           upstream, max_bytes + int(probe_truncation), current_url,
         )
@@ -346,6 +412,7 @@ async def _read_external_get(
           truncated=len(body) > max_bytes,
           forwarded_headers=_response_headers(
             upstream, len(body) >= max_bytes, cache_headers,
+            elapsed=monotonic() - received_at,
           ),
         )
       finally:
@@ -380,6 +447,8 @@ def _response_headers(
   upstream: httpx.Response,
   capped: bool,
   cache_headers: ResponseCacheHeaders | None,
+  *,
+  elapsed: float = 0,
 ) -> dict[str, str]:
   headers = {
     name: upstream.headers[name]
@@ -387,7 +456,7 @@ def _response_headers(
     if name in upstream.headers
   }
   if cache_headers is not None:
-    headers.update(cache_headers(upstream))
+    headers.update(cache_headers(upstream, elapsed))
     if capped and upstream.status_code == 200:
       # A bounded prefix must never carry full-body validators or freshness.
       for name in ("etag", "last-modified", "expires"):
@@ -506,8 +575,8 @@ async def proxy_get(
   intentionally not applied here. The POST proxy remains guarded.
 
   Redirects are independently validated and pinned like app install. Each
-  hop leases its own Host/SNI client; only the final response contributes
-  private freshness metadata. Browser validators are never forwarded: a cached
+  hop leases its own Host/SNI client; freshness and Vary restrictions apply
+  across the whole chain. Browser validators are never forwarded: a cached
   proxy URL cannot establish which origin will serve its next read.
   """
   headers = {"User-Agent": _PROXY_USER_AGENT}
@@ -515,7 +584,7 @@ async def proxy_get(
     async with asyncio.timeout(_EXCHANGE_DEADLINE):
       read = await _read_external_get(
         _proxy_clients, url, _MAX_BYTES, headers=headers,
-        probe_truncation=False, cache_headers=private_browser_cache_headers,
+        probe_truncation=False, cache_headers=_PrivateBrowserCacheHeaders(),
       )
   except TimeoutError:
     raise HTTPException(
