@@ -1091,7 +1091,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-  }, [dispatchWorkspace])
+    if (tab.kind !== 'app') return
+    // An explicit close ends the app: nothing hidden may keep its frame mounted,
+    // neither the warm cache nor Standard's slot behind a still-open Builder.
+    dropFromWarmLru(id => String(id) === String(tab.id))
+    const ws = workspaceStateRef.current.ws
+    if (ws.viewMode === 'panes' && paneModel.singleScreenKey(ws) === key) {
+      dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
+    }
+  }, [dispatchWorkspace, dropFromWarmLru, workspaceStateRef])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
