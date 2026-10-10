@@ -368,7 +368,6 @@ async def compile_jsx(
   *,
   out_path: str | Path,
   source_path: str | Path | None = None,
-  source_inputs: set[Path] | None = None,
 ) -> str:
   """Compiles JSX source to an ES module and returns the output path.
 
@@ -383,8 +382,6 @@ async def compile_jsx(
       Rolldown compiles that path directly, allowing relative imports from
       sibling files in the app source tree. When omitted, the legacy
       string-only path writes ``jsx_source`` to a temp file and compiles that.
-
-    source_inputs: Optional output set populated from the bundler's real inputs.
 
   Returns:
     The absolute path of the compiled JS file.
@@ -448,13 +445,6 @@ async def compile_jsx(
       _remove_unsupported_output(out)
       raise CompileError(
         "Compilation failed.", stderr=contract_error, source_path=entry_path,
-      )
-    if source_inputs is not None:
-      # Rolldown virtual modules (e.g. the runtime bridge) have NUL ids,
-      # not source paths. Relative real ids are relative to the build cwd.
-      source_inputs.update(
-        (Path(compile_cwd or os.getcwd()) / name).resolve()
-        for name in report["inputs"] if not name.startswith("\0")
       )
   finally:
     report_path.unlink(missing_ok=True)

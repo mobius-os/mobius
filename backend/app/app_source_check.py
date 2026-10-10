@@ -67,11 +67,14 @@ _RE_REQUIRE = re.compile(r"""\brequire\s*\(\s*['"]([^'"\n]+)['"]\s*\)""")
 # established statically. URL references also need to ship in fetch installs.
 _RE_TEMPLATE_DYNAMIC = re.compile(r"\bimport\s*\(\s*`([^`$\n]+)`\s*\)")
 _RE_MODULE_URL = re.compile(
-  r"""\bnew\s+URL\s*\(\s*['"`]([^'"`\n]+)['"`]\s*,\s*import\.meta\.url\s*\)"""
+  r"""\bnew\s+URL\s*\(\s*['"]([^'"\n]+)['"]\s*,\s*import\.meta\.url\s*\)"""
+)
+_RE_TEMPLATE_MODULE_URL = re.compile(
+  r"\bnew\s+URL\s*\(\s*`((?![^`\n]*\$\{)[^`\n]+)`\s*,\s*import\.meta\.url\s*\)"
 )
 _IMPORT_RES = (
   _RE_FROM, _RE_SIDE_EFFECT, _RE_DYNAMIC, _RE_REQUIRE,
-  _RE_TEMPLATE_DYNAMIC, _RE_MODULE_URL,
+  _RE_TEMPLATE_DYNAMIC, _RE_MODULE_URL, _RE_TEMPLATE_MODULE_URL,
 )
 
 # Any http(s) URL. Runs on comment-stripped, string-preserving source so it

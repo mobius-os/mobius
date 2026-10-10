@@ -317,3 +317,18 @@ def test_literal_dynamic_and_module_url_dependencies_must_be_declared(reference)
   result = check_app_source(files, entry="index.jsx")
   assert [finding.code for finding in result.errors] == ["undeclared_source"]
   assert check_app_source(files, entry="index.jsx", source_files=["helper.js"]).ok
+
+
+@pytest.mark.parametrize("reference", [
+  "new URL(`./a/${x}.png`, import.meta.url)",
+  "import(`./a/${x}.js`)",
+])
+def test_interpolated_template_dependencies_are_not_literal_paths(reference):
+  assert check_app_source({"index.jsx": reference}, entry="index.jsx").ok
+
+
+def test_literal_template_module_url_must_be_declared():
+  result = check_app_source(
+    {"index.jsx": "new URL(`./helper.js`, import.meta.url)"}, entry="index.jsx",
+  )
+  assert [finding.code for finding in result.errors] == ["missing_import"]

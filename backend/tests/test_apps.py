@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import ANY, AsyncMock, call, patch
 
 import pytest
 from app import app_git, install, models
@@ -170,7 +170,7 @@ def test_update_app_attaches_distribution_manifest_without_changing_install_iden
     )
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["distribution_manifest"] is None
-  fetch.assert_awaited_once_with(distribution_url)
+  fetch.assert_awaited_once_with(distribution_url, db=ANY)
 
 
 @pytest.mark.parametrize("address_kind", ["plain", "stored", "previous-id", "wrong-id"])

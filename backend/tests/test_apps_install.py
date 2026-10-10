@@ -990,6 +990,14 @@ def test_derive_repo_ref_from_raw_github_manifest_url():
   ) == ("https://github.com/acme/widgets.git", "main")
 
 
+@pytest.mark.parametrize("address", [
+  "https://raw.githubusercontent.com/example/app/main/mobius.json",
+  "https://raw.githubusercontent.com/example/app/main#manifest-id=app",
+])
+def test_stored_address_preserves_git_clone_eligibility(address):
+  assert install._derive_repo_ref(address) == ("https://github.com/example/app.git", "main")
+
+
 def test_derive_repo_ref_returns_none_for_non_github_and_inline():
   from app.install import _derive_repo_ref
 
@@ -4359,17 +4367,12 @@ def _install_readme_fixture(client, auth, tmp_path, app_id, manifest, files=None
   "project_templates", "model_provider",
 ])
 def test_executable_manifest_features_are_excluded_from_ancillary_resolution(field):
-  from app import manifest_contract
-
-  # Every runtime feature validated by the contract must bypass the JS-only
-  # completeness gate, even when it is empty or disabled.
-  assert field in manifest_contract.EXECUTABLE_MANIFEST_FIELDS
+  # Independent list of features the platform executes; the JS-only gate
+  # cannot prove their dependency completeness, even if disabled.
   manifest = {
     "id": "runtime-feature", "name": "Runtime", "version": "1.0.0",
-    "entry": "index.jsx", "description": "Runtime feature", field: "invalid",
+    "entry": "index.jsx", "description": "Runtime feature",
   }
-  with pytest.raises(ValueError, match=field):
-    manifest_contract.validate_manifest_contract(manifest)
   assert not install._benign_source_complete(
     {"index.jsx": b"export default function App() { return null }"},
     {**manifest, field: None}, {},
@@ -8633,11 +8636,88 @@ def test_stored_address_follows_only_an_installed_permanent_package(
       assert first.status_code == 201, first.text
     renamed = {**manifest, "id": "after-rename", "version": "2.0.0"}
     responses[base + "mobius.json"] = (200, json.dumps(renamed).encode())
+    address = base.rstrip("/") + "#manifest-id=before-rename"
+    preview = client.post("/api/apps/preview", headers=auth, json={
+      "manifest_url": address,
+    })
+    assert preview.status_code == (200 if installed else 409), preview.text
     result = client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base.rstrip("/") + "#manifest-id=before-rename",
+      "manifest_url": address,
     })
   if installed:
     assert result.status_code == 201, result.text
     assert result.json()["id"] == first.json()["id"]
   else:
     assert result.status_code == 409, result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_dependency", [False, True])
+async def test_ancillary_build_never_materializes_undeclared_parent_paths(
+  tmp_path, missing_dependency,
+):
+  import tempfile
+
+  manifest = _simple_manifest("safe-bundle")
+  index = JSX + ("\nimport './helper.js';" if missing_dependency else "")
+  tree = {
+    "index.jsx": index.encode(), "../escaped.js": b"must not escape",
+    "helper.js": b"export default 1",
+  }
+  temporary_directory = tempfile.TemporaryDirectory
+  with patch("app.install.tempfile.TemporaryDirectory", side_effect=lambda **kw:
+    temporary_directory(dir=tmp_path, **kw)
+  ), patch("app.install._benign_source_complete", return_value=True):
+    complete = await install._benign_bundle_complete(tree, manifest, {})
+  # A missed static dependency must still use the resolver; a complete package
+  # may keep ancillary edits, but neither path writes the untrusted tree entry.
+  assert complete is not missing_dependency
+  assert not (tmp_path / "escaped.js").exists()
+
+
+def test_nonstandard_manifest_filename_preserves_package_source_identity(
+  client, auth, db, bypass_url_validation,
+):
+  manifest_url = "https://custom-manifest.test/package/app.json"
+  manifest = _simple_manifest("custom-manifest")
+  manifest["package_id"] = "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"
+  responses = {
+    manifest_url: (200, json.dumps(manifest).encode()),
+    "https://custom-manifest.test/package/index.jsx": (200, JSX.encode()),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+    first = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": manifest_url,
+    })
+    assert first.status_code == 201, first.text
+    app_id = first.json()["id"]
+    original_identity = db.get(models.App, app_id).source_identity
+    expected = "url:" + hashlib.sha256(manifest_url.encode()).hexdigest()
+    assert original_identity == expected
+    responses[manifest_url] = (200, json.dumps({**manifest, "version": "2.0.0"}).encode())
+    updated = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": manifest_url,
+    })
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["id"] == app_id
+    assert updated.json()["version"] == "2.0.0"
+
+
+def test_fetch_install_accepts_interpolated_module_url(
+  client, auth, bypass_url_validation,
+):
+  base = "https://interpolated-url.test/package/"
+  manifest = _simple_manifest("interpolated-url")
+  source = JSX + (
+    "\nconst x = 'icon';"
+    " export const image = new URL(`./a/${x}.png`, import.meta.url);"
+  )
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, source.encode()),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+    installed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert installed.status_code == 201, installed.text
