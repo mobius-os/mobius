@@ -2396,6 +2396,7 @@
 .chat__foot .chat__progress-action,
 .chat__foot .chat__progress-clear,
 .chat__foot .chat__goal-plan,
+.chat__foot .chat__goal-auto-resume,
 .chat__foot .chat__wait-summary,
 .chat__foot .chat__wait-cancel,
 .chat__foot .chat__archived-restore,
@@ -3868,6 +3869,79 @@
 /* Expanded Goal and Waiting share the same translucent reading surface. */
 .chat__progress-rail:has(.chat__goal-plan) {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.chat__goal-auto-resume {
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-rail-gap);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  animation: progress-rail-in 0.22s ease both;
+}
+
+.chat__goal-auto-resume-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.chat__goal-auto-resume-copy > span { color: var(--muted); }
+
+.chat__goal-auto-resume-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat__goal-auto-resume-enable,
+.chat__goal-auto-resume-later {
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat__goal-auto-resume-enable {
+  background: var(--accent);
+  color: var(--accent-text, white);
+}
+
+.chat__goal-auto-resume-later {
+  background: transparent;
+  color: var(--muted);
+}
+
+.chat__goal-auto-resume-enable:disabled,
+.chat__goal-auto-resume-later:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.chat__goal-auto-resume-error {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .chat__goal-auto-resume { grid-template-columns: 1fr; }
+  .chat__goal-auto-resume-actions { justify-content: flex-start; }
 }
 
 @keyframes progress-rail-in {
