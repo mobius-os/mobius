@@ -672,6 +672,77 @@ def test_service_boundary_failure_has_safe_category(client, auth, db, monkeypatc
   }
 
 
+@pytest.mark.parametrize("output, detail, category", [
+  ("not JSON", "App service returned invalid JSON.", "invalid_json"),
+  ('[]', "App service returned an invalid response envelope.", "invalid_envelope"),
+  ('{"status":true}', "App service returned an invalid status.", "invalid_status"),
+  ('{"headers":[]}', "response headers must be a bounded object", "invalid_headers"),
+  ('{"body_base64":123}', "App service returned an invalid binary response.", "invalid_binary_response"),
+  ('{"media_type":"text/plain"}', "App service returned an invalid media type.", "invalid_media_type"),
+  ('{"body_base64":"!","media_type":"text/plain"}', "App service returned invalid binary data.", "invalid_binary_data"),
+])
+def test_response_boundary_failures_keep_http_detail_and_stable_category(
+  client, auth, db, monkeypatch, output, detail, category,
+):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+  app = _service_app(db)
+  accepted = runtime_parent(app.id) / app.runtime_revision
+  (accepted / "service.py").write_text(f"print({output!r})\n")
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+  assert response.status_code == 502
+  assert response.json() == {"detail": detail}
+  assert recorded[-1] == {"mobius.service.error_type": category}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [
+  "App service returned invalid JSON.", "Reworded failure with private text.",
+])
+async def test_boundary_category_survives_display_text_changes(monkeypatch, detail):
+  error = app_services.ServiceBoundaryError(502, detail, category="invalid_json")
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+
+  async def fail(*args, **kwargs):
+    raise error
+
+  monkeypatch.setattr(app_services, "_invoke_service", fail)
+  with pytest.raises(HTTPException) as raised:
+    await app_services.invoke_service(SimpleNamespace(slug="test"), None, {})
+  assert raised.value is error
+  assert raised.value.status_code == 502
+  assert raised.value.detail == detail
+  assert recorded[-1] == {"mobius.service.error_type": "invalid_json"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, category", [
+  (HTTPException(502, "App service returned invalid JSON."), "service_boundary_error"),
+  (HTTPException(503, {"private": "text"}), "service_boundary_error"),
+  (ValueError("private message"), "service_internal_error"),
+  (type("PrivateImplementationError", (Exception,), {})("private message"), "service_internal_error"),
+  (HTTPException(403, "private message"), None),
+  (asyncio.CancelledError(), None),
+])
+async def test_untyped_failures_never_derive_labels_from_text_or_class(
+  monkeypatch, error, category,
+):
+  recorded = []
+  monkeypatch.setattr(app_services.tracing, "annotate", lambda _h, attrs: recorded.append(attrs))
+
+  async def fail(*args, **kwargs):
+    raise error
+
+  monkeypatch.setattr(app_services, "_invoke_service", fail)
+  with pytest.raises(type(error)) as raised:
+    await app_services.invoke_service(SimpleNamespace(slug="test"), None, {})
+  assert raised.value is error
+  labels = [attrs["mobius.service.error_type"] for attrs in recorded
+            if "mobius.service.error_type" in attrs]
+  assert labels == ([] if category is None else [category])
+
+
 def test_malformed_optional_diagnostics_do_not_break_service(client, auth, db):
   app = _service_app(db, slug="optional-diagnostic")
   accepted = runtime_parent(app.id) / app.runtime_revision
