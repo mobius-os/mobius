@@ -11,6 +11,13 @@ const REQUEST_TYPES = new Set([
  * Narrow the frame's navigation request wire format before it leaves the
  * exact-window-attributed AppCanvas boundary. Hosts receive one small, stable
  * contract rather than the frame's arbitrary postMessage object.
+ *
+ * A new-chat request only ever stages an editable draft. The owner's composer
+ * Send is the trusted action bound to that exact text: a submitted first
+ * message runs with the owner's full authority (including connected services
+ * an app's own chats never receive), and no browser signal proves the owner
+ * approved app-chosen text. Apps that need one-click work use
+ * `mobius.chat.start`, which creates an app-attributed chat instead.
  */
 export function appHostRequest(message) {
   if (!message || !REQUEST_TYPES.has(message.type)) return null
@@ -18,7 +25,6 @@ export function appHostRequest(message) {
     return {
       type: message.type,
       draft: typeof message.draft === 'string' ? message.draft : '',
-      autoSend: message.autoSend === true,
     }
   }
   if (message.type === 'moebius:open-chat') {
