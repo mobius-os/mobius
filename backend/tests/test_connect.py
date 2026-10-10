@@ -3074,3 +3074,58 @@ def test_malformed_host_id_is_rejected_before_touching_the_filesystem(client, au
     response = client.get(f"/api/connect/hosts/{host_id}/commands", headers=auth)
     assert response.status_code == 400, response.text
   assert client.get("/api/connect/hosts/h_0123456789abcdef/commands", headers=auth).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_large_script_crosses_admission_and_executes_through_runner_stdin(
+  client, auth,
+):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel()
+  connect_routes._channels[pairing["id"]] = channel
+  request_id = "f" * 16
+  script = "# café 🛰 '$literal'\n" * 20_000 + "printf '%s' '$literal café 🛰'\n"
+  assert len(script.encode("utf-8")) > 64 * 1024
+
+  request = asyncio.create_task(connect_routes.exec_on_host(
+    pairing["id"],
+    connect_routes.ExecBody(script=script, shell="bash", timeout=10, request_id=request_id),
+    _owner=object(),
+  ))
+  event = await asyncio.wait_for(channel.queue.get(), timeout=1)
+  assert event["script"] == script
+  assert "cmd" not in event
+  [persisted] = connect_routes._load_host(pairing["id"])["active_commands"]
+  assert persisted["script"] == script
+  proc, _command_file = connect_runner._spawn_command(
+    None, event.get("cwd"), script=event["script"], shell=event["shell"],
+  )
+  connect_routes._mark_command_started(pairing["id"], request_id)
+  stdout, stderr = await asyncio.to_thread(
+    proc.communicate, input=event["script"].encode("utf-8"), timeout=5,
+  )
+  connect_routes._finish_command(pairing["id"], request_id, {
+    "stdout": stdout.decode("utf-8"), "stderr": stderr.decode("utf-8"),
+    "exit_code": proc.returncode, "outcome": "completed",
+  })
+  result = await request
+  assert result["stdout"] == "$literal café 🛰"
+  assert result["stderr"] == ""
+  assert result["exit_code"] == 0
+
+
+def test_inline_command_admission_uses_the_shared_body_budget_not_character_count():
+  text = "echo ok\n#" + "é" * 100_000
+  assert connect_routes.ExecBody(cmd=text).cmd == text
+
+
+def test_script_requests_still_obey_the_shared_http_body_guard(client, auth):
+  from app.main import _MAX_REQUEST_BODY_BYTES
+
+  # Declared oversized bodies are rejected before validation or execution.
+  response = client.post(
+    "/api/connect/hosts/not-a-real-host/exec",
+    headers={**auth, "Content-Length": str(_MAX_REQUEST_BODY_BYTES + 1)},
+    json={"script": "echo must-not-run"},
+  )
+  assert response.status_code == 413, response.text
