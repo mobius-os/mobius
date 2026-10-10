@@ -166,6 +166,18 @@ contract freezes this allowlist; only exact matches are traced. Without a
 declaration, route diagnostics are ignored. Declarations must contain at most
 128 distinct paths, each at most 256 characters, and are reviewed source, not
 request-derived data. A path-shaped string alone cannot prove it is a template.
+Likewise declare the finite, code-authored exception class labels:
+`"diagnostics_error_types": ["HTTPStatusError", "ValueError"]`. The accepted
+contract freezes this allowlist too; only exact matches are traced on 5xx
+responses. Missing, malformed, or undeclared error labels become
+`app_http_error`; existing accepted contracts without this declaration now use
+that generic category until a new declaration is reviewed and accepted.
+Declarations must contain at most 128 distinct class-name labels, each 1-128
+characters matching `[A-Za-z_][A-Za-z0-9_.]*`. Class-shaped syntax alone cannot
+prove provenance: reviewers must verify that labels are stable code-authored
+classes, not request-derived identifiers. The allowlist bounds the tracing
+vocabulary; it does not sandbox a reviewed trusted app or prove which exception
+occurred. Platform-owned boundary error categories are independent of it.
 Use the matched code-authored route template, never the concrete request path;
 use exception class names, never messages or tracebacks. Do not include request
 values, content, credentials, or resource IDs. Only these bounded shape fields

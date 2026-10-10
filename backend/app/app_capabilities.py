@@ -15,7 +15,9 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
-from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES, service_diagnostics_routes
+from app.manifest_contract import (
+  SERVICE_REQUEST_MAX_BYTES, service_diagnostics_error_types, service_diagnostics_routes,
+)
 
 
 CONTRACT_SCHEMA = 6
@@ -598,6 +600,9 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     routes = service_diagnostics_routes(service)
     if routes:
       accepted_service["diagnostics_routes"] = routes
+    error_types = service_diagnostics_error_types(service)
+    if error_types:
+      accepted_service["diagnostics_error_types"] = error_types
     contract["service"] = accepted_service
   return contract
 
@@ -711,6 +716,8 @@ def contract_from_app_state(
       }
       if accepted_service.get("diagnostics_routes"):
         service["diagnostics_routes"] = list(accepted_service["diagnostics_routes"])
+      if accepted_service.get("diagnostics_error_types"):
+        service["diagnostics_error_types"] = list(accepted_service["diagnostics_error_types"])
       if accepted_service.get("aliases"):
         service["aliases"] = list(accepted_service["aliases"])
   if isinstance(service, dict):

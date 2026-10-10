@@ -458,6 +458,27 @@ def service_diagnostics_routes(service: Mapping) -> list[str]:
   return sorted(routes)
 
 
+def service_diagnostics_error_types(service: Mapping) -> list[str]:
+  """Reviewed, finite error labels; syntax cannot prove class provenance."""
+  error_types = service.get("diagnostics_error_types", [])
+  if not isinstance(error_types, list) or len(error_types) > 128:
+    _fail(
+      "Manifest `service.diagnostics_error_types` must be an array of at most "
+      "128 error labels."
+    )
+  if not all(
+    isinstance(label, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", label)
+    for label in error_types
+  ):
+    _fail(
+      "Manifest `service.diagnostics_error_types` must contain class-name "
+      "labels of at most 128 characters."
+    )
+  if len(set(error_types)) != len(error_types):
+    _fail("Manifest `service.diagnostics_error_types` must not contain duplicates.")
+  return sorted(error_types)
+
+
 def validate_agent_tools(tools, *, has_service: bool) -> None:
   """Validate the tools an app contributes to every agent run.
 
@@ -998,13 +1019,14 @@ def validate_manifest_contract(manifest) -> None:
   service = manifest.get("service")
   if service is not None:
     if not isinstance(service, Mapping) or set(service) - {
-      "id", "aliases", "entry", "access", "diagnostics_routes",
+      "id", "aliases", "entry", "access", "diagnostics_routes", "diagnostics_error_types",
     }:
       _fail(
         "Manifest `service` must contain only `id`, `aliases`, `entry`, "
-        "`access`, and `diagnostics_routes`."
+        "`access`, `diagnostics_routes`, and `diagnostics_error_types`."
       )
     service_diagnostics_routes(service)
+    service_diagnostics_error_types(service)
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
     service_id = service.get("id", mid)

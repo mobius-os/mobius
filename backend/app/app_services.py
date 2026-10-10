@@ -4,7 +4,8 @@ The platform owns authentication, accepted-runtime identity, process limits,
 and revocation. The app owns the request paths and domain behavior behind one
 small JSON protocol. An optional response `diagnostics` object may contain
 `route` (a matched template declared in `service.diagnostics_routes`),
-`error_type` (exception class name only), and `upstream_status` (HTTP integer).
+`error_type` (a class label declared in `service.diagnostics_error_types`),
+and `upstream_status` (HTTP integer).
 These fields are local tracing metadata only, not forwarded to HTTP callers.
 Never include request values, ids, exception messages, stderr, or response bodies.
 This is deliberately not a framework or an import hook:
@@ -507,12 +508,13 @@ async def _invoke_service(
     error_type = diagnostics.get("error_type")
     upstream_status = diagnostics.get("upstream_status")
     safe = {}
-    # Only the accepted manifest supplies route labels, never response syntax.
+    # Only the accepted manifest supplies labels, never response syntax.
     routes = service.get("diagnostics_routes", [])
     if isinstance(route, str) and isinstance(routes, list) and route in routes:
       safe["mobius.service.route"] = route
     if status >= 500:
-      if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", error_type):
+      error_types = service.get("diagnostics_error_types", [])
+      if isinstance(error_type, str) and isinstance(error_types, list) and error_type in error_types:
         safe["mobius.service.error_type"] = error_type
       else:
         safe["mobius.service.error_type"] = "app_http_error"
