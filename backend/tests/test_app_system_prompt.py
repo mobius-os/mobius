@@ -9,7 +9,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 import pytest
 
-from app import models
+from app import app_git, models
 from app.config import get_settings
 from app.install import _validate_manifest
 from app.system_prompts import (
@@ -24,6 +24,13 @@ from tests.test_apps_install import (  # noqa: F401
   _stub_resolver_run_chat,
   bypass_url_validation,
 )
+
+
+def _publish(source: Path) -> str:
+  """Commit the worktree as an accepted revision, as install/apply would."""
+  app_git.ensure_repo(source)
+  app_git.commit_local(source, "apply app source")
+  return app_git.head_sha(source, app_git.LOCAL_BRANCH)
 
 
 def _manifest(**over):
@@ -67,15 +74,15 @@ def test_only_live_app_fragments_are_composed_in_stable_order(db, tmp_path):
   db.add_all([
     models.App(
       id=20, name="two", slug="two", source_dir=str(second),
-      system_prompt_file="fragment.md",
+      system_prompt_file="fragment.md", source_commit=_publish(second),
     ),
     models.App(
       id=10, name="one", slug="one", source_dir=str(first),
-      system_prompt_file="fragment.md",
+      system_prompt_file="fragment.md", source_commit=_publish(first),
     ),
     models.App(
       id=5, name="gone", slug="gone", source_dir=str(gone),
-      system_prompt_file="fragment.md",
+      system_prompt_file="fragment.md", source_commit=_publish(gone),
       deleted_at=datetime.now(UTC),
     ),
   ])
@@ -94,7 +101,7 @@ def test_lingering_fragment_is_inert_after_soft_uninstall(db, tmp_path):
   (source / "memory-core.md").write_text("GRAPH INSTRUCTIONS", encoding="utf-8")
   app = models.App(
     name="Memory", slug="memory", source_dir=str(source),
-    system_prompt_file="memory-core.md",
+    system_prompt_file="memory-core.md", source_commit=_publish(source),
   )
   db.add(app)
   db.commit()
@@ -152,7 +159,7 @@ def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
   fragment.write_text("MEMORY V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="memory", source_dir=str(source),
-    system_prompt_file="memory-core.md",
+    system_prompt_file="memory-core.md", source_commit=_publish(source),
   )
   first = create_chat(id="first", title="First", messages=[])
   second = create_chat(id="second", title="Second", messages=[])
@@ -166,6 +173,7 @@ def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
   assert digest
 
   fragment.write_text("MEMORY V2", encoding="utf-8")
+  app.source_commit = _publish(source)
   app.deleted_at = datetime.now(UTC)
   db.commit()
 
@@ -184,7 +192,7 @@ def test_app_update_changes_only_chats_started_after_update(db):
   fragment.write_text("MEMORY V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="updated-memory", source_dir=str(source),
-    system_prompt_file="memory-core.md",
+    system_prompt_file="memory-core.md", source_commit=_publish(source),
   )
   first = create_chat(id="before-update", title="Before", messages=[])
   second = create_chat(id="after-update", title="After", messages=[])
@@ -194,6 +202,8 @@ def test_app_update_changes_only_chats_started_after_update(db):
   before = prompt_for_chat(first, "BASE", db, persist=True)
   db.commit()
   fragment.write_text("MEMORY V2", encoding="utf-8")
+  app.source_commit = _publish(source)
+  db.commit()
 
   after = prompt_for_chat(second, "BASE", db, persist=True)
   db.commit()
@@ -225,7 +235,7 @@ def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
   fragment.write_text("V1", encoding="utf-8")
   app = models.App(
     name="Memory", slug="preview-memory", source_dir=str(source),
-    system_prompt_file="memory-core.md",
+    system_prompt_file="memory-core.md", source_commit=_publish(source),
   )
   row = create_chat(id="preview", title="Preview", messages=[])
   db.add_all([app, row])
@@ -234,6 +244,8 @@ def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
   assert "V1" in prompt_for_chat(row, "BASE", db, persist=False)
   assert row.system_prompt_snapshot_id is None
   fragment.write_text("V2", encoding="utf-8")
+  app.source_commit = _publish(source)
+  db.commit()
   assert "V2" in prompt_for_chat(row, "BASE", db, persist=False)
 
 
@@ -263,7 +275,7 @@ def test_any_installed_app_may_contribute_a_fragment(db):
   (source / "fragment.md").write_text("ORDINARY RULE", encoding="utf-8")
   db.add(models.App(
     name="Ordinary", slug="ordinary", source_dir=str(source),
-    system_prompt_file="fragment.md",
+    system_prompt_file="fragment.md", source_commit=_publish(source),
   ))
   db.commit()
 
@@ -276,6 +288,28 @@ def test_manifest_prompt_no_longer_needs_a_system_flag():
   _validate_manifest(_manifest())
 
 
+@pytest.mark.parametrize("filename", [
+  "rules[1].md", "rules*.md", ":(glob)rules*.md",
+  ":(literal)rules.md",
+])
+def test_accepted_prompt_filename_is_literal_not_a_git_pathspec(db, filename):
+  _validate_manifest(_manifest(system_prompt=filename, source_files=[filename]))
+  source = Path(get_settings().data_dir) / "apps" / "literalprompt"
+  source.mkdir(parents=True)
+  (source / filename).write_text("LITERAL RULE", encoding="utf-8")
+  (source / "rules1.md").write_text("OTHER RULE", encoding="utf-8")
+  (source / "rules.md").write_text("OTHER RULE", encoding="utf-8")
+  db.add(models.App(
+    name="Literal prompt", slug="literalprompt", source_dir=str(source),
+    system_prompt_file=filename, source_commit=_publish(source),
+  ))
+  db.commit()
+
+  composed = compose_system_prompt("BASE", db)
+  assert "LITERAL RULE" in composed
+  assert "OTHER RULE" not in composed
+
+
 def test_symlink_fragment_is_never_read(db, tmp_path):
   secret = tmp_path / "secret.md"
   secret.write_text("HOST SECRET", encoding="utf-8")
@@ -284,7 +318,92 @@ def test_symlink_fragment_is_never_read(db, tmp_path):
   (source / "fragment.md").symlink_to(secret)
   db.add(models.App(
     name="Memory", slug="memory", source_dir=str(source),
+    system_prompt_file="fragment.md", source_commit=_publish(source),
+  ))
+  db.commit()
+
+  # Git records the link itself, never the target's bytes; a non-regular tree
+  # entry contributes nothing, not even its target path.
+  assert compose_system_prompt("BASE", db) == "BASE"
+
+
+def test_unapplied_fragment_edit_never_reaches_new_chats(db):
+  """An interrupted worktree edit stays inert until an explicit apply."""
+  source = Path(get_settings().data_dir) / "apps" / "reflection"
+  source.mkdir(parents=True)
+  fragment = source / "reflection-core.md"
+  fragment.write_text("COMPLETE RULE.", encoding="utf-8")
+  app = models.App(
+    name="Reflection", slug="reflection", source_dir=str(source),
+    system_prompt_file="reflection-core.md", source_commit=_publish(source),
+  )
+  db.add(app)
+  db.commit()
+
+  fragment.write_text("HALF-WRITTEN RU", encoding="utf-8")
+  draft = compose_system_prompt("BASE", db)
+  assert "COMPLETE RULE." in draft
+  assert "HALF-WRITTEN" not in draft
+
+  fragment.write_text("REVISED RULE.", encoding="utf-8")
+  app.source_commit = _publish(source)
+  db.commit()
+  applied = compose_system_prompt("BASE", db)
+  assert "REVISED RULE." in applied
+  assert "COMPLETE RULE." not in applied
+
+
+def test_app_without_accepted_revision_contributes_no_fragment(db):
+  source = Path(get_settings().data_dir) / "apps" / "unapplied"
+  source.mkdir(parents=True)
+  (source / "fragment.md").write_text("NEVER APPLIED", encoding="utf-8")
+  db.add(models.App(
+    name="Unapplied", slug="unapplied", source_dir=str(source),
     system_prompt_file="fragment.md",
+  ))
+  db.commit()
+
+  assert compose_system_prompt("BASE", db) == "BASE"
+
+
+def test_oversized_accepted_fragment_is_skipped(db):
+  source = Path(get_settings().data_dir) / "apps" / "huge"
+  source.mkdir(parents=True)
+  (source / "fragment.md").write_text("x" * (256 * 1024 + 1), encoding="utf-8")
+  db.add(models.App(
+    name="Huge", slug="huge", source_dir=str(source),
+    system_prompt_file="fragment.md", source_commit=_publish(source),
+  ))
+  db.commit()
+
+  assert compose_system_prompt("BASE", db) == "BASE"
+
+
+def test_fragment_added_after_the_last_apply_contributes_nothing(db):
+  source = Path(get_settings().data_dir) / "apps" / "newfragment"
+  source.mkdir(parents=True)
+  (source / "index.jsx").write_text("export default () => null\n", encoding="utf-8")
+  accepted = _publish(source)
+  (source / "fragment.md").write_text("NOT YET APPLIED", encoding="utf-8")
+  db.add(models.App(
+    name="New fragment", slug="newfragment", source_dir=str(source),
+    system_prompt_file="fragment.md", source_commit=accepted,
+  ))
+  db.commit()
+
+  assert compose_system_prompt("BASE", db) == "BASE"
+
+
+@pytest.mark.parametrize("revision", ["HEAD", "short"])
+def test_accepted_revision_must_be_an_exact_commit_id(db, revision):
+  source = Path(get_settings().data_dir) / "apps" / "movingref"
+  source.mkdir(parents=True)
+  (source / "fragment.md").write_text("PINNED ONLY", encoding="utf-8")
+  accepted = _publish(source)
+  db.add(models.App(
+    name="Moving ref", slug="movingref", source_dir=str(source),
+    system_prompt_file="fragment.md",
+    source_commit=accepted[:7] if revision == "short" else revision,
   ))
   db.commit()
 

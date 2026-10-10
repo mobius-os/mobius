@@ -3788,6 +3788,59 @@ def read_blob(source_dir: str | Path, ref: str, rel: str) -> bytes | None:
   return proc.stdout if proc.returncode == 0 else None
 
 
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_REGULAR_FILE_MODES = frozenset({b"100644", b"100755"})
+
+
+def read_committed_file(
+  source_dir: str | Path,
+  commit: str,
+  rel: str,
+  *,
+  max_bytes: int,
+  timeout: float = 5,
+) -> bytes | None:
+  """Bytes of one regular file in an exact accepted commit, or None.
+
+  Reads only Git's object database, so uncommitted worktree edits, symlinks,
+  and other non-regular tree entries can never reach the caller. ``commit``
+  must be a full object id (an accepted ``source_commit``), not a moving ref.
+  """
+  if not isinstance(commit, str) or not _COMMIT_SHA_RE.fullmatch(commit):
+    return None
+  repo = Path(source_dir)
+  env = _git_env(repo, read_only=True)
+  try:
+    listing = subprocess.run(
+      ["git", "--literal-pathspecs", "-C", str(repo),
+       "ls-tree", "-l", "-z", commit, "--", rel],
+      capture_output=True, timeout=timeout, check=False, env=env,
+    )
+    if listing.returncode != 0:
+      return None
+    meta, tab, name = listing.stdout.removesuffix(b"\0").partition(b"\t")
+    fields = meta.split()
+    if (
+      not tab
+      or name != rel.encode()
+      or len(fields) != 4
+      or fields[0] not in _REGULAR_FILE_MODES
+      or fields[1] != b"blob"
+      or not fields[3].isdigit()
+      or int(fields[3]) > max_bytes
+    ):
+      return None
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "blob", fields[2].decode("ascii")],
+      capture_output=True, timeout=timeout, check=False, env=env,
+    )
+  except (OSError, subprocess.SubprocessError, UnicodeError):
+    return None
+  if blob.returncode != 0 or len(blob.stdout) > max_bytes:
+    return None
+  return blob.stdout
+
+
 # Sentinels for the structural JSON merge: a key that is absent on a side, and
 # an irreconcilable overlap. Both are `object()` so they compare only by
 # identity and can never collide with real JSON values (including `null`).
