@@ -1,4 +1,5 @@
 """Exact selected heads, private reviews and guarded public merge receipts."""
+from app import chat_writer
 from app.chat_writer import create_chat
 import asyncio
 import json
@@ -198,12 +199,25 @@ def test_github_blockers_stop_before_merge(changes):
   assert domain.merge_blocker(TARGET, REPO, PULL, {**CHECKS, **changes})
 
 
+@pytest.mark.parametrize("rollup", [None, {"state": "SUCCESS"}])
+def test_merge_accepts_passing_or_absent_checks(rollup):
+  checks = {**CHECKS, "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
+  assert domain.merge_blocker(TARGET, REPO, PULL, checks) is None
+
+
+@pytest.mark.parametrize("rollup", [{"state": "PENDING"}, {"state": "FAILURE"}, {}])
+def test_merge_refuses_any_unsuccessful_rollup(rollup):
+  checks = {**CHECKS, "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
+  assert domain.merge_blocker(TARGET, REPO, PULL, checks)
+
+
 def test_removed_permission_stops_merge():
   assert domain.merge_blocker(TARGET, {**REPO, "permissions": {}}, PULL, CHECKS)
 
 
 def test_live_target_branch_not_pull_comparison_base_binds_selection():
-  pull = {**PULL, "base": {"ref": "main", "sha": "c" * 40}}
+  pull = {**PULL, "base": {"ref": "main", "sha": "c" * 40},
+    "head": {"sha": SHA, "repo": {"id": 1, "full_name": "example/project"}, "ref": "topic"}}
   def gh(cwd, command, endpoint):
     value = REPO if endpoint == "repos/example/project" else REF if "/git/ref/" in endpoint else pull
     return SimpleNamespace(stdout=json.dumps(value))
@@ -593,6 +607,34 @@ def test_stopped_review_is_visible_not_forever_reviewing(setup):
   assert "stopped" in result["runs"][0]["summary"]
 
 
+def test_failed_review_says_why_the_conversation_stopped(setup):
+  """Out of credits or a provider block is shown, not only 'stopped'."""
+  db, row, principal = setup
+  db.get(models.ChatRun, "physical-run").status = "failed"
+  db.commit()
+  chat = db.get(models.Chat, row.chat_id)
+  chat_writer.get_writer().submit(chat_writer.ReplaceTranscript(chat_id=chat.id, messages=[
+    {"role": "assistant", "id": "a1", "content": "",
+     "blocks": [{"type": "error", "message": "Your workspace is out of credits. Add credits to continue."}]}
+  ])).result(30)
+  db.expire_all()
+  summary = routes.list_reviews(1, db, principal)["runs"][0]["summary"]
+  assert summary == "The review conversation stopped: Your workspace is out of credits. Add credits to continue."
+
+
+def test_open_owner_card_is_waiting_not_stopped(setup):
+  """A turn that ended on a question card reads as waiting, whatever its run status."""
+  db, row, principal = setup
+  db.get(models.ChatRun, "physical-run").status = "interrupted"
+  db.get(models.Chat, row.chat_id).pending_question_id = "question-1"
+  db.commit()
+  for view in (routes.list_reviews(1, db, principal)["runs"][0],
+               routes.get_review(1, row.id, db, principal)["run"]):
+    assert view["state"] == "needs_you"
+    assert view["execution_state"] == "awaiting_owner"
+    assert view["summary"] == "The review conversation asked you a question. It continues when you answer."
+
+
 def test_bound_run_permission_is_checked_after_remote_preflight(setup, monkeypatch):
   # Check order explicitly: no public attempt can be durably armed first.
   db, row, _ = setup
@@ -699,3 +741,72 @@ def test_attempted_queue_reconciliation_does_not_require_unchanged_base(setup, m
   })
   monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("must not retry"))
   assert report(setup)["run"]["items"][0]["state"] == "queued"
+
+
+def _public_review_run(setup):
+  db, row, _ = setup
+  row.mode = "review"
+  row.options_json = {"post_review": True}
+  db.commit()
+  return db, row
+
+
+def test_owner_requested_review_is_posted_once_as_a_comment_on_the_exact_head(setup, monkeypatch):
+  db, row = _public_review_run(setup)
+  posts = []
+  def post(_gh, _cwd, target, body):
+    db.refresh(row)
+    assert row.outcomes_json[domain.key(ITEM)]["public_review"]["state"] == "posting", "receipt before I/O"
+    posts.append((target["head_sha"], body))
+    return {"id": 9, "url": "https://github.com/example/project/pull/7#pullrequestreview-9"}
+  monkeypatch.setattr(domain, "post_review", post)
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("review only merged"))
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "all_clear"
+  assert item["public_review"] == {"state": "posted", "id": 9, "url": "https://github.com/example/project/pull/7#pullrequestreview-9"}
+  assert posts[0][0] == SHA and "All clear" in posts[0][1] and "Full diff reviewed" in posts[0][1]
+  report(setup, state="needs_you", summary="A later continuation")
+  assert len(posts) == 1, "an item's review is posted at most once"
+
+
+def test_lost_review_post_is_unknown_and_never_replayed(setup, monkeypatch):
+  _public_review_run(setup)
+  calls = []
+  def lost(*args):
+    calls.append(1)
+    raise RuntimeError("lost response")
+  monkeypatch.setattr(domain, "post_review", lost)
+  assert report(setup)["run"]["items"][0]["public_review"]["state"] == "unknown"
+  report(setup)
+  assert calls == [1]
+
+
+def test_reviews_are_private_without_the_opt_in_or_outside_review_only(setup, monkeypatch):
+  db, row, _ = setup
+  monkeypatch.setattr(domain, "post_review", lambda *a: pytest.fail("posted without consent"))
+  row.mode = "review"
+  db.commit()
+  assert "public_review" not in report(setup)["run"]["items"][0]
+  row.mode = "review_merge"
+  row.options_json = {"post_review": True}
+  row.outcomes_json = {}
+  db.commit()
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
+  assert "public_review" not in report(setup)["run"]["items"][0]
+
+
+def test_changed_github_account_skips_the_public_review(setup, monkeypatch):
+  _public_review_run(setup)
+  monkeypatch.setattr(domain, "read", lambda *args: {"id": 99})
+  monkeypatch.setattr(domain, "post_review", lambda *a: pytest.fail("posted as another account"))
+  assert report(setup)["run"]["items"][0]["public_review"]["state"] == "skipped"
+
+
+def test_post_review_writes_a_comment_review_bound_to_the_head():
+  calls = []
+  def gh(_cwd, *args):
+    calls.append(args)
+    return SimpleNamespace(stdout='{"id": 5, "html_url": "https://github.com/x"}')
+  assert domain.post_review(gh, "/tmp", TARGET, "Body") == {"id": 5, "url": "https://github.com/x"}
+  assert "event=COMMENT" in calls[0] and f"commit_id={SHA}" in calls[0]
+  assert not any("APPROVE" in part or "REQUEST_CHANGES" in part for part in calls[0])

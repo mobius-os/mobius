@@ -29,6 +29,77 @@ PREVIOUS_RELEASE_SCHEMA = (
 )
 
 
+def test_core_review_run_upgrade_preserves_rows_and_request_idempotency(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'review-runs.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    # Simulate the shipped table; create_all never alters an existing table.
+    conn.execute(text("DROP TABLE contribution_review_runs"))
+    conn.execute(text("""
+      CREATE TABLE contribution_review_runs (
+        id VARCHAR(64) PRIMARY KEY,
+        app_id INTEGER NOT NULL REFERENCES apps(id),
+        owner_id INTEGER NOT NULL REFERENCES owner(id),
+        request_id VARCHAR(64) NOT NULL,
+        mode VARCHAR(24) NOT NULL,
+        github_actor_id VARCHAR(64) NOT NULL,
+        app_nonce VARCHAR(64) NOT NULL,
+        targets_json JSON NOT NULL,
+        outcomes_json JSON NOT NULL,
+        chat_id VARCHAR(64) NOT NULL REFERENCES chats(id),
+        revision INTEGER NOT NULL,
+        created_at DATETIME,
+        UNIQUE (app_id, request_id)
+      )
+    """))
+    conn.execute(text("CREATE INDEX ix_contribution_review_runs_app_id "
+                      "ON contribution_review_runs (app_id)"))
+    conn.execute(text("""
+      INSERT INTO contribution_review_runs
+        (id, app_id, owner_id, request_id, mode, github_actor_id,
+         app_nonce, targets_json, outcomes_json, chat_id, revision)
+      VALUES ('old', 1, 1, 'same-request', 'review', 'actor', 'nonce',
+              '[]', '{}', 'chat', 0)
+    """))
+
+  migrations._allow_core_contribution_review_runs(eng)
+  migrations._allow_core_contribution_review_runs(eng)
+  columns = {c["name"]: c for c in inspect(eng).get_columns("contribution_review_runs")}
+  assert columns["app_id"]["nullable"]
+  assert columns["app_nonce"]["nullable"]
+  assert columns["options_json"]["nullable"]
+  with eng.begin() as conn:
+    assert conn.execute(text(
+      "SELECT app_id, app_nonce, options_json FROM contribution_review_runs "
+      "WHERE id = 'old'"
+    )).one() == (1, "nonce", None)
+    conn.execute(text("""
+      INSERT INTO contribution_review_runs
+        (id, app_id, owner_id, request_id, mode, github_actor_id,
+         app_nonce, options_json, targets_json, outcomes_json, chat_id, revision)
+      VALUES ('core', NULL, 1, 'same-request', 'review', 'actor',
+              NULL, '{"prompt":"frozen"}', '[]', '{}', 'chat', 0)
+    """))
+  with pytest.raises(IntegrityError):
+    with eng.begin() as conn:
+      conn.execute(text("""
+        INSERT INTO contribution_review_runs
+          (id, app_id, owner_id, request_id, mode, github_actor_id,
+           app_nonce, targets_json, outcomes_json, chat_id, revision)
+        VALUES ('duplicate-core', NULL, 1, 'same-request', 'review', 'actor',
+                NULL, '[]', '{}', 'chat', 0)
+      """))
+  with pytest.raises(IntegrityError):
+    with eng.begin() as conn:
+      conn.execute(text("""
+        INSERT INTO contribution_review_runs
+          (id, app_id, owner_id, request_id, mode, github_actor_id,
+           app_nonce, targets_json, outcomes_json, chat_id, revision)
+        VALUES ('duplicate-app', 1, 1, 'same-request', 'review', 'actor',
+                'nonce', '[]', '{}', 'chat', 0)
+      """))
+
+
 def test_legacy_helper_interruption_column_upgrades_idempotently(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'legacy-helper.db'}")
   models.Base.metadata.create_all(eng)
@@ -117,10 +188,11 @@ def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatc
   eng = create_engine(f"sqlite:///{db_path}")
   models.Base.metadata.create_all(bind=eng)
   versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
-  assert versions[-3:] == [
+  assert versions[-4:] == [
     "0083_swap_chat_note_sections", "0086_drop_chat_note_backup", "0087_transcript_rows",
+    "0088_core_contribution_review_runs",
   ]
-  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-2])
   run_migrations(eng)  # The previous release's ledger.
   monkeypatch.undo()
   monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -1851,6 +1923,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0083_swap_chat_note_sections",
     "0086_drop_chat_note_backup",
     "0087_transcript_rows",
+    "0088_core_contribution_review_runs",
   ]
   assert second == first
 
@@ -4749,6 +4822,38 @@ def test_delegation_goal_task_keeps_existing_name_links(tmp_path):
       "SELECT id, goal_task_id FROM delegations"
     )).all())
   assert links == {"old": "audit", "new": None}
+
+
+def test_core_review_run_postgres_upgrade_statements_are_idempotent(monkeypatch):
+  import sqlalchemy
+  columns = {
+    "app_id": {"name": "app_id", "nullable": False},
+    "app_nonce": {"name": "app_nonce", "nullable": False},
+  }
+  statements = []
+  class Connection:
+    def __enter__(self):
+      return self
+    def __exit__(self, *args):
+      return False
+    def execute(self, value):
+      sql = str(value)
+      statements.append(sql)
+      if "ALTER COLUMN app_id DROP NOT NULL" in sql:
+        columns["app_id"]["nullable"] = True
+      elif "ALTER COLUMN app_nonce DROP NOT NULL" in sql:
+        columns["app_nonce"]["nullable"] = True
+      elif "ADD COLUMN options_json" in sql:
+        columns["options_json"] = {"name": "options_json", "nullable": True}
+  engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"), begin=lambda: Connection())
+  inspector = SimpleNamespace(get_table_names=lambda: ["contribution_review_runs"],
+    get_columns=lambda _: list(columns.values()))
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda _: inspector)
+  migrations._allow_core_contribution_review_runs(engine)
+  migrations._allow_core_contribution_review_runs(engine)
+  assert sum("DROP NOT NULL" in s for s in statements) == 2
+  assert sum("ADD COLUMN options_json" in s for s in statements) == 1
+  assert statements[-1] == "CREATE UNIQUE INDEX IF NOT EXISTS uq_contribution_review_runs_core_request ON contribution_review_runs (owner_id, request_id) WHERE app_id IS NULL"
 
 
 def test_retired_write_journal_tables_are_dropped_idempotently(tmp_path):
