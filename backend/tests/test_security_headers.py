@@ -298,14 +298,18 @@ def test_app_frame_policy_allows_a_distinct_configured_api_origin():
     "https://app.example.test",
     api_origin="http://localhost:8000",
   )
-  assert "connect-src https://app.example.test http://localhost:8000" in policy
+  assert (
+    "connect-src https://app.example.test http://localhost:8000 "
+    "wss://app.example.test ws://localhost:8000;"
+  ) in policy
   assert "script-src https://app.example.test" in policy
   assert "img-src https://app.example.test data: blob:" in policy
 
 
 def test_app_frame_policy_does_not_infer_the_backend_localhost_default():
   policy = app_frame_csp("https://app.example.test", api_origin="")
-  assert "connect-src https://app.example.test;" in policy
+  # The ws(s) form of the origin is named too: live rooms are a WebSocket.
+  assert "connect-src https://app.example.test wss://app.example.test;" in policy
   assert "localhost" not in policy
 
 

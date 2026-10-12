@@ -67,6 +67,12 @@ def app_frame_csp(
   api = absolute_csp_origin(api_origin)
   if api is not None and api != origin:
     connect_sources.append(api)
+  # An http(s) source does not authorise ws(s) in Chrome. Live rooms are a
+  # same-origin WebSocket, so name the ws(s) form of each connect origin.
+  connect_sources.extend(
+    "ws" + source[len("http"):] for source in list(connect_sources)
+    if source.startswith(("http://", "https://"))
+  )
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None and gateway != origin:
     frame_sources.append(gateway)
