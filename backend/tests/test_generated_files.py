@@ -655,6 +655,16 @@ def test_generated_file_timeout_preserves_late_writer_commit(
       sink, data_dir=settings.data_dir, chat_id=chat.id,
     )
     assert (inbox / "report.pdf").read_bytes() == b"report"
+    # Let the late command commit, but keep its sink acknowledgement unresolved.
+    # Later publications (one per native image) must not freeze more copies.
+    writer.resume_for_test()
+    monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 2)
+    sink.generated_file_capacity = ChatEventSink.generated_file_capacity.__get__(sink)
+    for _ in range(3):
+      assert await gf.publish_inbox_files(
+        sink, data_dir=settings.data_dir, chat_id=chat.id,
+      ) == set()
+    assert len(list(gf.stored_dir(settings.data_dir, chat.id).iterdir())) == 1
     sink.publish({
       "type": "error", "message": "Stopped", "resumable": True,
     })

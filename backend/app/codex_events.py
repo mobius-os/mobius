@@ -681,6 +681,13 @@ async def _record_collab_child_links(
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
+  image_generation_cls = sdk.get("ImageGenerationThreadItem")
+  if image_generation_cls is not None and isinstance(item, image_generation_cls):
+    return {
+      "type": "tool_start",
+      "tool": "ImageGen",
+      "input": getattr(item, "revised_prompt", None) or "",
+    }
   image_view_cls = sdk.get("ImageViewThreadItem")
   if image_view_cls is not None and isinstance(item, image_view_cls):
     return {
@@ -762,6 +769,20 @@ def _tool_completed_events(
   streamed_command_output: str | None = None,
 ) -> list[dict[str, Any]]:
   """Builds Möbius tool-end events from a completed typed item."""
+  image_generation_cls = sdk.get("ImageGenerationThreadItem")
+  if image_generation_cls is not None and isinstance(item, image_generation_cls):
+    failed = item.status != "completed" or getattr(item, "failure", None) is not None
+    # The runner captures result bytes through managed deliverables. Never put
+    # base64 or the provider's private saved_path in a transcript/tool output.
+    return [
+      {
+        "type": "tool_output",
+        "content": "Image generation failed." if failed else "Image generated.",
+        "output_complete": True,
+        "output_exit_code": 1 if failed else 0,
+      },
+      {"type": "tool_end"},
+    ]
   image_view_cls = sdk.get("ImageViewThreadItem")
   if image_view_cls is not None and isinstance(item, image_view_cls):
     return [{"type": "tool_end"}]

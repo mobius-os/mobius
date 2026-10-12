@@ -225,7 +225,11 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
-// Matches /api/chats/<chat_id>/{uploads,media}/<file>. These paths require a
+export function safeImageHref(href) {
+  return safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+}
+
+// Matches /api/chats/<chat_id>/{uploads,media,generated-files}/<file>. These paths require a
 // short-lived media token on ?token=;
 // the owner JWT must not appear there (it would leak into access logs, history,
 // Referer). Other /api/ paths that appear in markdown images (rare) still get the
@@ -234,7 +238,7 @@ function resolveStaticImageSrc(href) {
   // Returns a URL for non-media API paths (or null for invalid hrefs).
   // Appends the owner token for API paths that aren't upload/generated routes —
   // those use the async ExpandableImage path instead.
-  let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  let src = safeImageHref(href)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     // Embedded-chat bearer material is memory-only and must never enter a URL,
@@ -262,7 +266,7 @@ export function ExpandableImage({
   const [resolvedSrc, setResolvedSrc] = useState(null)
   const historyDismiss = useHistoryDismiss(() => setOpen(false))
 
-  const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  const rawSrc = safeImageHref(href)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
   const previewSrc = resolvedSrc
     ? previewSrcForChatMedia(resolvedSrc)
@@ -297,7 +301,12 @@ export function ExpandableImage({
     if (mediaChatId) {
       // Media path: fetch a short-lived media token, never the owner JWT in URL.
       mediaTokenParam(mediaChatId).then(param => {
-        if (!cancelled) setResolvedSrc(`${BASE}${new URL(rawSrc, location.origin).pathname}${param}`)
+        if (cancelled) return
+        const src = `${BASE}${new URL(rawSrc, location.origin).pathname}${param}`
+        // Generated files have no display derivative (preview only selects
+        // inline delivery), so the viewer reuses the transcript's URL rather
+        // than downloading the original a second time.
+        setResolvedSrc(src.includes('/generated-files/') ? previewSrcForChatMedia(src) : src)
       })
     } else {
       // Non-media API path or external URL: use owner token (or no token for external).

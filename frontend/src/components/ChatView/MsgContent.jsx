@@ -6,7 +6,8 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {
   activitySummaryTools,
@@ -17,7 +18,7 @@ import { foldAppActivityOperations } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
-import Attachments from './Attachments.jsx'
+import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
 import { isContinuationMessage } from './chatRuntimeState.js'
@@ -601,24 +602,34 @@ function MsgContentInner({
     // arrive here after conversion to the same block shape, so the transcript
     // doesn't reshuffle on promote.
     const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
-    const generatedFiles = msg.role === 'assistant' && !isStreaming
+    const generatedFiles = msg.role === 'assistant'
       ? (msg.blocks || []).flatMap(block =>
           block.type === 'generated_files' && Array.isArray(block.files)
             ? block.files.map(file => ({ ...file, kind: 'generated' }))
             : [],
         )
       : []
-    // The inbox is captured after the turn ends, which can be after a saved
-    // question. Place those files after the agent's last prose but before any
-    // terminal question card, including in already-saved transcripts.
+    // Images show as soon as they are published; documents wait for the final
+    // answer. Both sit after the last prose and before any terminal question
+    // card. A picture the prose already embeds is not repeated as an attachment.
+    const embeddedImagePaths = new Set(generatedFiles.some(attachmentIsGalleryImage)
+      ? displayBlocks.filter(block => block.type === 'text')
+        .flatMap(block => markdownImageHrefs(block.content || block.text || ''))
+        .map(safeImageHref).filter(Boolean)
+        .map(src => new URL(src, 'https://mobius.local').pathname)
+      : [])
+    const visibleFiles = generatedFiles.filter(file => attachmentIsGalleryImage(file)
+      ? !embeddedImagePaths.has(generatedImageHref(chatId, file.name))
+      : !isStreaming)
+
     const lastTextNode = nodes.findLastIndex(node => node.single?.item?.type === 'text')
-    const beforeQuestionNode = generatedFiles.length
+    const beforeQuestionNode = visibleFiles.length
       ? nodes.findIndex((node, index) =>
           index > lastTextNode && node.single?.item?.type === 'question',
         )
       : -1
-    const fileAttachments = generatedFiles.length
-      ? <Attachments key="generated-files" attachments={generatedFiles} chatId={chatId} />
+    const fileAttachments = visibleFiles.length
+      ? <Attachments key="generated-files" attachments={visibleFiles} chatId={chatId} mediaDimensions={msg.media_dimensions} />
       : null
 
     return (

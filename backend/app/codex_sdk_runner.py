@@ -26,9 +26,11 @@ advertise it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import concurrent.futures as _cf
 import functools
+import io
 import logging
 import tomllib
 import shlex
@@ -36,10 +38,13 @@ import json
 import os
 import shutil
 import time
+import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from PIL import Image
 
 from app import generated_files
 from app.codex_sdk_contract import (
@@ -121,11 +126,63 @@ _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
 # How often a running Codex helper row re-reads its child rollout for the
 # owner-facing "currently doing" line. The read is a small tail of one file.
 HELPER_PROGRESS_INTERVAL_S = 3.0
+MAX_GENERATED_IMAGE_PIXELS = 32_000_000
 
 
 def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
   """Supply the configured-data fallback without overriding provider setup."""
   env.setdefault("CODEX_HOME", str(Path(data_dir) / "cli-auth" / "codex"))
+
+
+def _generated_png_bytes(result: str) -> bytes:
+  """Decode a native image result, proving it is one bounded, decodable PNG."""
+  limit = generated_files.MAX_RECORDED_BYTES
+  try:
+    if len(result) > ((limit + 2) // 3) * 4:
+      raise ValueError("generated image exceeds the deliverable size limit")
+    content = base64.b64decode(result, validate=True)
+    if len(content) > limit:
+      raise ValueError("generated image exceeds the deliverable size limit")
+    with Image.open(io.BytesIO(content), formats=["PNG"]) as image:
+      # Size comes from the header; check it before decoding any pixels. An
+      # animated PNG is rejected because load() decodes only its first frame.
+      if (
+        not 0 < image.width * image.height <= MAX_GENERATED_IMAGE_PIXELS
+        or getattr(image, "n_frames", 1) != 1
+      ):
+        raise ValueError("generated image is not one bounded frame")
+      image.verify()  # Chunk checksums and a complete file, without pixels.
+    with Image.open(io.BytesIO(content), formats=["PNG"]) as image:
+      image.load()
+  except (TypeError, ValueError, OSError, SyntaxError, EOFError, Image.DecompressionBombError) as exc:
+    raise ValueError(f"generated image result is not a valid bounded PNG: {exc}") from exc
+  return content
+
+
+def _stage_codex_generated_image(data_dir: str, chat_id: str, result: str) -> str:
+  name = f"generated-image-{uuid.uuid4().hex}.png"
+  generated_files.add_inbox_file(data_dir, chat_id, name, _generated_png_bytes(result))
+  return name
+
+
+async def _deliver_codex_generated_image(sink, data_dir: str, chat_id: str, result: str) -> bool:
+  """Attach a native image through the deliverable inbox; return whether it shows.
+
+  Use the typed result bytes, never the provider's saved path inside the
+  protected credentials tree. A capture interrupted after staging stays in the
+  inbox, where the turn's final publication or the next turn recovers it.
+  """
+  try:
+    # Never stage bytes that cannot become an attachment.
+    if await sink.generated_file_capacity() <= 0:
+      return False
+    name = await asyncio.to_thread(_stage_codex_generated_image, data_dir, chat_id, result)
+    return name in await generated_files.publish_inbox_files(
+      sink, data_dir=data_dir, chat_id=chat_id, names=[name],
+    )
+  except (OSError, ValueError):
+    log.warning("Codex generated-image capture failed chat_id=%s", chat_id, exc_info=True)
+    return False
 
 
 def _process_group_capture_delay(elapsed: float) -> float:
@@ -1071,6 +1128,7 @@ def _sdk_imports() -> dict[str, Any]:
     ErrorNotification,
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
+    ImageGenerationThreadItem,
     ImageViewThreadItem,
     HooksListResponse,
     ItemCompletedNotification,
@@ -1128,6 +1186,7 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
+    "ImageGenerationThreadItem": ImageGenerationThreadItem,
     "ImageViewThreadItem": ImageViewThreadItem,
     "Personality": Personality,
     "ReasoningEffort": ReasoningEffort,
@@ -1745,6 +1804,7 @@ async def _run_codex_sdk_turn(
   # completed item. Retain them only for the lifetime of this turn so a Codex
   # path that omits that aggregate can still publish one authoritative result.
   command_output_deltas: dict[str, list[str]] = {}
+  completed_image_ids: set[str] = set()
   helper_host = None
   codex_context = (
     sdk["AsyncCodex"](config=config) if helper_host_key is None else None
@@ -2264,6 +2324,19 @@ async def _run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          image_delivery_error = None
+          image_generation_cls = sdk.get("ImageGenerationThreadItem")
+          if image_generation_cls is not None and isinstance(item, image_generation_cls):
+            if item.id in completed_image_ids:
+              continue  # A repeated completion must not attach a second image.
+            completed_image_ids.add(item.id)
+            if (
+              item.status == "completed" and item.failure is None
+              and not await _deliver_codex_generated_image(
+                bc, runtime_data_dir, chat_id, item.result,
+              )
+            ):
+              image_delivery_error = "The image was generated, but Möbius could not attach it."
           if isinstance(item, sdk["ContextCompactionThreadItem"]):
             _publish_codex_context_compaction(bc, chat_id)
             continue
@@ -2285,6 +2358,9 @@ async def _run_codex_sdk_turn(
             for event in _tool_completed_events(
               item, sdk, streamed_command_output=streamed_command_output,
             ):
+              if image_delivery_error and event["type"] == "tool_output":
+                event["content"] = image_delivery_error
+                event["output_exit_code"] = 1
               image_view_cls = sdk.get("ImageViewThreadItem")
               if image_view_cls is not None and isinstance(item, image_view_cls):
                 # Bind the completed view to its bytes without retaining a

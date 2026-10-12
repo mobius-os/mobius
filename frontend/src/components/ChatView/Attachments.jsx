@@ -4,6 +4,7 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 import DocumentAttachment from './DocumentAttachment.jsx'
+import { ExpandableImage } from './markdown/InlineContent.jsx'
 
 export function generatedFileCanPreview(file) {
   return file?.kind === 'generated'
@@ -23,11 +24,15 @@ export function generatedFileIsPdf(file) {
   return generatedFileCanPreview(file) && file.mime_type === 'application/pdf'
 }
 
+export function generatedImageHref(chatId, name) {
+  return `/api/chats/${encodeURIComponent(chatId)}/generated-files/${encodeURIComponent(name)}`
+}
+
 export function documentAttachmentIdentity(file, chatId) {
   return `${chatId}:${file.name}:${file.sha256 || ''}`
 }
 
-export default function Attachments({ attachments, chatId }) {
+export default function Attachments({ attachments, chatId, mediaDimensions }) {
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0
 
   // Fetch a short-lived media token for this chat. Owner JWTs must not appear
@@ -53,7 +58,15 @@ export default function Attachments({ attachments, chatId }) {
     <div className={`chat__attachments${hasDocuments ? ' chat__attachments--documents' : ''}`}>
       {images.length > 0 && (
         <div className="chat__attach-images">
-          {images.map((img, i) => (
+          {images.map((img, i) => img.kind === 'generated' ? (
+            <span key={img.name} className="chat__generated-image">
+              <ExpandableImage
+                href={generatedImageHref(chatId, img.name)}
+                alt={img.name}
+                mediaDimensions={mediaDimensions}
+              />
+            </span>
+          ) : (
             <AttachImage
               key={i}
               src={tokenParam

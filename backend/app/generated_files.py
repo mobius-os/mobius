@@ -361,13 +361,47 @@ def _open_deliverable_file(
     os.close(directory_fd)
 
 
-async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
-  """Freeze, persist, and consume the next batch of completed deliverables."""
+def add_inbox_file(data_dir: str, chat_id: str, name: str, content: bytes) -> None:
+  """Offer runtime-produced bytes as a finished deliverable.
+
+  The inbox is published without format checks, so a partial file must never
+  appear there. Write in the private store, then rename it in whole.
+  """
+  root = _chat_root(data_dir, chat_id)
+  inbox_fd = _open_directory(root / "inbox", create=True)
+  stored_fd = None
+  temporary = f".{uuid.uuid4().hex}.tmp"
+  try:
+    stored_fd = _open_directory(root / "files", create=True)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=stored_fd)
+    with os.fdopen(fd, "wb") as stream:
+      stream.write(content)
+    os.rename(temporary, name, src_dir_fd=stored_fd, dst_dir_fd=inbox_fd)
+  finally:
+    if stored_fd is not None:
+      try:
+        os.unlink(temporary, dir_fd=stored_fd)
+      except FileNotFoundError:
+        pass
+      os.close(stored_fd)
+    os.close(inbox_fd)
+
+
+async def publish_inbox_files(
+  sink, *, data_dir: str, chat_id: str, names: list[str] | None = None,
+) -> set[str]:
+  """Freeze, persist, and consume a batch; return the published inbox names.
+
+  Every inbox file is a finished candidate only once the turn has ended. A
+  mid-turn caller passes ``names`` to publish just the files it wrote whole.
+  """
+  published: set[str] = set()
   capacity = await sink.generated_file_capacity()
   if capacity <= 0:
-    return
-  names = (await asyncio.to_thread(_inbox_names, data_dir, chat_id))[:capacity]
-  for name in names:
+    return published
+  if names is None:
+    names = await asyncio.to_thread(_inbox_names, data_dir, chat_id)
+  for name in names[:capacity]:
     captured = await asyncio.to_thread(_freeze_file, data_dir, chat_id, name)
     if captured is None:
       continue
@@ -384,7 +418,10 @@ async def publish_inbox_files(sink, *, data_dir: str, chat_id: str) -> None:
     if outcome is PUBLICATION_UNCERTAIN:
       # Do not enqueue a later file behind an unresolved publication: its
       # snapshot cannot yet include the first file's collision-resolved name.
-      return
+      return published
     await asyncio.to_thread(
       _settle_capture, data_dir, chat_id, captured, accepted=bool(outcome),
     )
+    if outcome:
+      published.add(name)
+  return published

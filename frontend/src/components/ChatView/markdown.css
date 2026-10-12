@@ -579,3 +579,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   .md-app-card { min-height: 12rem; }
   .md-app-card__visual { height: 7.5rem; min-height: 7.5rem; }
 }
+
+/* Native generated pictures share Markdown's full-size viewer, not upload thumbs. */
+.chat__generated-image { display: block; width: 100%; }
+.chat__attach-images:has(.chat__generated-image) { flex-direction: column; width: 100%; }

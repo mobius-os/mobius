@@ -1011,7 +1011,9 @@ class ChatEventSink:
 
   async def generated_file_capacity(self) -> int:
     """Return how many files can fit before performing any disk copies."""
-    if not self.chat_id:
+    # An unresolved commit may still consume a row, and a publication behind
+    # it would only leave another frozen copy. Report no room until it settles.
+    if not self.chat_id or self._uncertain_generated_files:
       return 0
     try:
       return int(await _await_ack(get_writer().submit(

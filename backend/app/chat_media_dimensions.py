@@ -2,11 +2,13 @@
 
 import re
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from fastapi import HTTPException
 
+from app import generated_files
 from app.image_previews import stored_image_dimensions
+from app.models import GeneratedFile
 from app.path_utils import validate_path_within_base
 
 
@@ -16,7 +18,7 @@ def _media_path_pattern(chat_id: str) -> re.Pattern:
   # dimensions are keyed by pathname so auth/preview parameters never matter.
   return re.compile(
     rf"(?P<path>/api/chats/{re.escape(chat_id)}/"
-    rf"(?P<kind>uploads|media)/(?P<filename>[^\s?#)>\]\"']+))"
+    rf"(?P<kind>uploads|media|generated-files)/(?P<filename>[^\s?#)>\]\"']+))"
   )
 
 
@@ -45,11 +47,33 @@ def _stored_dimensions(base: Path, filename: str) -> dict | None:
   return stored_image_dimensions(file_path, base)
 
 
+def _message_image_references(message: dict, pattern, chat_id: str):
+  references = {}
+  for markdown in _message_markdown(message):
+    for match in pattern.finditer(markdown):
+      references.setdefault(match.group("path"),
+        (match.group("kind"), unquote(match.group("filename"))))
+  # Generated images are attachments, not Markdown; key them by the same URL
+  # the renderer builds with encodeURIComponent.
+  for block in message.get("blocks") or []:
+    if not isinstance(block, dict) or block.get("type") != "generated_files":
+      continue
+    for file in block.get("files") or []:
+      if (isinstance(file, dict) and isinstance(file.get("name"), str)
+          and str(file.get("mime_type", "")).startswith("image/")
+          and file.get("previewable") is True):
+        encoded_name = quote(file["name"], safe="~!*'()")
+        references.setdefault(f"/api/chats/{chat_id}/generated-files/{encoded_name}",
+          ("generated-files", file["name"]))
+  return references
+
+
 def project_message_image_dimensions(
   messages: list[dict],
   *,
   chat_id: str,
   data_dir: str,
+  db=None,
 ) -> list[dict]:
   """Attach intrinsic dimensions to messages that reference local images.
 
@@ -61,15 +85,26 @@ def project_message_image_dimensions(
   pattern = _media_path_pattern(chat_id)
   chat_root = Path(data_dir) / "chats" / chat_id
   projected: list[dict] | None = None
+  message_references = [_message_image_references(message, pattern, chat_id) for message in messages]
+  generated_names = {filename for references in message_references
+    for kind, filename in references.values() if kind == "generated-files"}
+  # Stored rows are bounded per chat; Markdown references are not. Intersect
+  # in Python so hostile text cannot exhaust the database bind-parameter limit.
+  generated_paths = {}
+  if generated_names and db is not None:
+    try:
+      generated_base = generated_files.stored_dir(data_dir, chat_id)
+    except (OSError, ValueError):
+      pass
+    else:
+      generated_paths = {
+        row.name: row.path for row in db.query(GeneratedFile).filter(
+          GeneratedFile.chat_id == chat_id,
+        ).all() if row.name in generated_names and row.mime_type.startswith("image/")
+      }
 
   for message_index, message in enumerate(messages):
-    references: dict[str, tuple[str, str]] = {}
-    for markdown in _message_markdown(message):
-      for match in pattern.finditer(markdown):
-        references.setdefault(
-          match.group("path"),
-          (match.group("kind"), unquote(match.group("filename"))),
-        )
+    references = message_references[message_index]
     if not references:
       continue
 
@@ -80,7 +115,12 @@ def project_message_image_dimensions(
     # and keeps the default frame.
     dimensions = {}
     for url_path, (kind, filename) in references.items():
-      dimensions[url_path] = _stored_dimensions(chat_root / kind, filename)
+      if kind != "generated-files":
+        dimensions[url_path] = _stored_dimensions(chat_root / kind, filename)
+      elif filename in generated_paths:
+        dimensions[url_path] = _stored_dimensions(generated_base, generated_paths[filename])
+      else:
+        dimensions[url_path] = None
 
     if projected is None:
       projected = list(messages)
