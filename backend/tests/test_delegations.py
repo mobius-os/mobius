@@ -1854,6 +1854,9 @@ class _ActivityCheckpointProvider:
   def build_env(self, **_kwargs):
     return {}
 
+  def measured_run_accounting(self, cost_usd, usage):
+    return cost_usd, usage
+
 
 def _run_activity_checkpoint(
   db, monkeypatch, *, parent_id, root_run_id, delegation_id, response,
