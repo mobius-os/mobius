@@ -60,7 +60,7 @@ import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useScrollActivity from './hooks/useScrollActivity.js'
 import useComposerPopoverClose from './hooks/useComposerPopoverClose.js'
 import { resolvedChatSettings } from './modelSelectionPolicy.js'
-import { compactChangesSummary } from './chatChangesLifecycle.js'
+import { compactChangesSummary } from './chatChanges.js'
 import {
   appArtifactAttentionDecision,
   appArtifactTouchKey,
@@ -71,13 +71,7 @@ import {
   appTouchCursorsForBrainOpen,
 } from './chatAppArtifactAcknowledgement.js'
 import { formatUsageMenuText } from './chatUsageFormat.js'
-import {
-  changesAttentionCursor,
-  hasUnseenChangesAttention,
-  readSeenChangesAttention,
-  writeSeenChangesAttention,
-} from './brainChangesAttention.js'
-import { useChatChangesOverview } from './useChatChangesOverview.js'
+import { useChatChanges } from './useChatChanges.js'
 import './ChatWork.css'
 
 export default function ComposerPopover({
@@ -158,11 +152,10 @@ export default function ComposerPopover({
     enabled: Boolean(open && !embedded && chatReady && artifactsAppId && chatId),
     staleTime: 0,
   })
-  const changesOverview = useChatChangesOverview(chatId, initialChangeEntries, {
-    // This compact query previously stayed live through the persistent review
-    // card. Keep it live here after removing that card so the existing Brain
-    // button can carry one geometry-free attention dot for Changes.
-    enabled: Boolean(!embedded && chatReady && chatId),
+  // Changes is informational, so its summary is read only while the menu
+  // that shows it is open.
+  const changes = useChatChanges(chatId, initialChangeEntries, {
+    enabled: Boolean(open && !embedded && chatReady && chatId),
   })
   const chatArtifacts = artifactsQuery.data || []
   const artifactItems = chatArtifactPickerItems(appArtifacts, chatArtifacts)
@@ -172,33 +165,8 @@ export default function ComposerPopover({
   const [iconDropQueue, setIconDropQueue] = useState([])
   const artifactTouchesRef = useRef(null)
   const unseenArtifactCount = unseenAppArtifactCount(appArtifacts)
-  const changesNeedOwner = Boolean(
-    changesOverview.lifecycleAvailable
-    && (Number(changesOverview.counts?.attention || 0) > 0
-      || changesOverview.workState === 'attention'),
-  )
-  const currentChangesCursor = changesAttentionCursor(changesOverview)
-  const currentChatKey = String(chatId || '')
-  const [seenChangesState, setSeenChangesState] = useState(() => ({
-    chatKey: currentChatKey,
-    cursor: readSeenChangesAttention(chatId),
-  }))
-  const seenChangesCursor = seenChangesState.chatKey === currentChatKey
-    ? seenChangesState.cursor
-    : readSeenChangesAttention(chatId)
-  const unseenChangesAttention = hasUnseenChangesAttention(
-    currentChangesCursor,
-    seenChangesCursor,
-  )
-  const hasUnseenBrainActivity = unseenArtifactCount > 0 || unseenChangesAttention
+  const hasUnseenBrainActivity = unseenArtifactCount > 0
   const iconDropApp = iconDropQueue[0] || null
-
-  useEffect(() => {
-    setSeenChangesState({
-      chatKey: currentChatKey,
-      cursor: readSeenChangesAttention(chatId),
-    })
-  }, [chatId, currentChatKey])
 
   useEffect(() => {
     if (!appArtifactsReady) {
@@ -399,13 +367,6 @@ export default function ComposerPopover({
       wasInputFocusedRef.current = wasFocused
       setIconDropQueue([])
       acknowledgeUnseenAppUpdates(appTouches)
-      if (currentChangesCursor) {
-        writeSeenChangesAttention(chatId, currentChangesCursor)
-        setSeenChangesState({
-          chatKey: currentChatKey,
-          cursor: currentChangesCursor,
-        })
-      }
     }
     setOpen(current => !current)
     if (!wasFocused && el) {
@@ -448,7 +409,6 @@ export default function ComposerPopover({
           unseenArtifactCount > 0
             ? `${unseenArtifactCount} app ${unseenArtifactCount === 1 ? 'update' : 'updates'} available.`
             : '',
-          unseenChangesAttention ? 'Changes need attention.' : '',
         ].filter(Boolean).join(' ')}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -551,16 +511,11 @@ export default function ComposerPopover({
                 <span className="composer-popover__row-main">
                   <span className="composer-popover__row-title-line">
                     <span className="composer-popover__row-title">Changes</span>
-                    {changesNeedOwner && (
-                      <span className="composer-popover__row-attention">
-                        Needs you
-                      </span>
-                    )}
                   </span>
                   <span className="composer-popover__row-sub">
-                    {changesOverview.loading && !changesOverview.hasWork
-                      ? 'Checking this chat’s work…'
-                      : compactChangesSummary(changesOverview)}
+                    {changes.loading && changes.files.length === 0
+                      ? 'Checking this chat’s edits…'
+                      : compactChangesSummary(changes)}
                   </span>
                 </span>
               </button>

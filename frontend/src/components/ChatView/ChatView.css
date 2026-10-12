@@ -3131,17 +3131,6 @@
   min-width: 0;
 }
 
-.composer-popover__row-attention {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.4;
-  color: var(--warning, #d8922f);
-}
-
 .composer-popover__row-sub {
   font-size: 12px;     /* --font-text-xs */
   font-weight: 400;

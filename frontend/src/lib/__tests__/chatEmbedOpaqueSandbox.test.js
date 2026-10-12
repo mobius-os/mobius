@@ -20,7 +20,7 @@ const composerSource = readFileSync(
   'utf8',
 )
 const changesSource = readFileSync(
-  new URL('../../components/ChatView/useChatChangesOverview.js', import.meta.url),
+  new URL('../../components/ChatView/useChatChanges.js', import.meta.url),
   'utf8',
 )
 const queriesSource = readFileSync(
@@ -94,14 +94,12 @@ test('opaque embed boot skips service workers and owner browser storage', () => 
 })
 
 test('embedded chat never starts the owner app inventory query', () => {
-  const changesOverviewCall = composerSource.match(
-    /const changesOverview = useChatChangesOverview\([\s\S]*?\n  \}\)/,
+  const changesCall = composerSource.match(
+    /const changes = useChatChanges\([\s\S]*?\n  \}\)/,
   )?.[0] || ''
-  assert.match(
-    changesOverviewCall,
-    /enabled: Boolean\(!embedded && (?:chatReady && )?chatId\)/,
-  )
-  assert.match(changesSource, /appQueries\.list\.useQuery\(\{ enabled, staleTime: Infinity \}\)/)
+  assert.match(changesCall, /enabled: Boolean\(open && !embedded && chatReady && chatId\)/)
+  // Changes reads only this chat's edits, never the owner's app inventory.
+  assert.doesNotMatch(changesSource, /appQueries/)
   assert.match(
     queriesSource,
     /function useAppsQuery\(\{ reconcile, enabled = true, staleTime \} = \{\}\)[\s\S]*?\n    enabled,\n/,
