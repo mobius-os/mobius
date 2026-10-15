@@ -261,11 +261,11 @@ RUN cd ./shell-src \
 RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-      --engine-strict --strict-allow-scripts pdfjs-dist@6.3.289 \
-    && mkdir -p /app/static/vendor/pdfjs@6.3.289 \
-    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@6.3.289/pdf.mjs \
-    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@6.3.289/pdf.worker.mjs \
-    && ln -s pdfjs@6.3.289 /app/static/vendor/pdfjs \
+      --engine-strict --strict-allow-scripts pdfjs-dist@6.4.299 \
+    && mkdir -p /app/static/vendor/pdfjs@6.4.299 \
+    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@6.4.299/pdf.mjs \
+    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@6.4.299/pdf.worker.mjs \
+    && ln -s pdfjs@6.4.299 /app/static/vendor/pdfjs \
     && cd / && rm -rf /tmp/pdfjs-install /root/.npm
 
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports
@@ -280,13 +280,13 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-      --engine-strict --strict-allow-scripts katex@0.18.9 \
-    && mkdir -p /app/static/vendor/katex@0.18.9/fonts \
-    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.18.9/ \
-    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.18.9/ \
-    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.18.9/ \
-    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.18.9/fonts/ \
-    && ln -s katex@0.18.9 /app/static/vendor/katex \
+      --engine-strict --strict-allow-scripts katex@0.19.0 \
+    && mkdir -p /app/static/vendor/katex@0.19.0/fonts \
+    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.19.0/ \
+    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.19.0/ \
+    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.19.0/ \
+    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.19.0/fonts/ \
+    && ln -s katex@0.19.0 /app/static/vendor/katex \
     && cd / && rm -rf /tmp/katex-install /root/.npm
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
