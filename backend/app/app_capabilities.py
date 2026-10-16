@@ -15,7 +15,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
-from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
+from app.manifest_contract import MANIFEST_MAX_BYTES, SERVICE_REQUEST_MAX_BYTES
 
 
 CONTRACT_SCHEMA = 6
@@ -290,6 +290,19 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "chat.blocks.passive": {
+    "version": 1,
+    "kind": "session",
+    "title": "Read app receipts while scrolling chat",
+    "description": (
+      "Allow passive chat sessions. Module startup and session hydration must "
+      "be read-only; actions require an explicit owner gesture."
+    ),
+    "risk": "execution",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "device.storage": {
     "version": 1,
     "kind": "invoke",
@@ -944,3 +957,41 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     group = path.split(".", 1)[0]
     return any(key.startswith(f"{group}.") for key in after_leaves)
   return True
+
+
+def passive_block_module_digest(app: Any) -> str | None:
+  """Admit passive execution only for accepted, frozen opt-in app code.
+
+  Local Store capability acceptance may precede source Apply. Neither that
+  acceptance nor an editable manifest alone proves the served revision opted
+  in. Require both the accepted grant and the immutable applied declaration,
+  and return the compiled content address for pre-evaluation verification.
+  """
+  from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
+  from app.compiler import app_bundle_digest
+
+  contract = getattr(app, "capability_contract", None)
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get("chat.blocks.passive") if isinstance(runtime, dict) else None
+  if (
+    not isinstance(grant, dict)
+    or type(grant.get("version")) is not int
+    or grant["version"] != 1
+  ):
+    return None
+  digest = app_bundle_digest(app.id, getattr(app, "compiled_path", None))
+  if digest is None:
+    return None
+  try:
+    manifest_path = runtime_root(app) / "mobius.json"
+    if manifest_path.is_symlink():
+      return None
+    with manifest_path.open("rb") as handle:
+      raw = handle.read(MANIFEST_MAX_BYTES + 1)
+    if len(raw) > MANIFEST_MAX_BYTES:
+      return None
+    manifest = json.loads(raw)
+    declaration = normalize_runtime_capabilities(manifest).get("chat.blocks.passive")
+    return digest if declaration and declaration["version"] == 1 else None
+  except (AppliedRuntimeUnavailable, OSError, ValueError, TypeError, AttributeError):
+    return None

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { parse } from 'acorn'
 
 import {
@@ -180,4 +181,35 @@ test('bundled app packages are not duplicated in the shell install precache', ()
     assert.doesNotMatch(worker, new RegExp(stale))
   }
   assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
+})
+
+const start = frame.indexOf('    function renderMountedComponent()')
+const renderSource = frame.slice(start, frame.indexOf('    const OWNED_FONT_FAMILIES', start))
+
+function renderAppMount({ supportsAppBlocks = true, currentBlockSession = null, currentToken = 'app-session' } = {}) {
+  let tree
+  const context = {
+    mountedRoot: { render: value => { tree = value } },
+    mountedComponent: 'App', Fragment: 'Fragment', MountSignal: 'MountSignal',
+    _FRAME_APP_ID: 7, currentToken, supportsAppBlocks, currentBlockSession,
+    createElement: (type, props, ...children) => ({ type, props, children }),
+  }
+  runInNewContext(`${renderSource}\nrenderMountedComponent()`, context)
+  return tree?.children[1].props
+}
+
+test('first render receives passive block context before workspace startup', () => {
+  const session = { sessionId: 's', actions: [{ key: 'chat-send:a', label: 'Contribute' }] }
+  const props = renderAppMount({ currentBlockSession: session })
+  assert.equal(props.blockSession, session)
+  assert.equal(props.appId, 7)
+  assert.equal(props.token, 'app-session')
+  assert.equal(Object.hasOwn(props, 'initialAction'), false)
+})
+
+test('ordinary app mounts and apps without block support keep their existing props', () => {
+  assert.equal(renderAppMount().blockSession, null)
+  const props = renderAppMount({ supportsAppBlocks: false, currentBlockSession: { sessionId: 's' } })
+  assert.deepEqual(Object.keys(props).sort(), ['appId', 'token'])
+  assert.equal(renderAppMount({ currentToken: null }), undefined)
 })

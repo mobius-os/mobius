@@ -589,3 +589,51 @@ large package in memory.
 - No capability inferred from an app name, current screen, or payload app id.
 - No raw shell JWT, cookies, DOM handles, `MediaStream`, or general shell-origin
   access passed into an ordinary app.
+
+## Passive transcript sessions
+
+`capabilities["chat.blocks.passive"] = {"version": 1, "reason": "Read receipts in chat."}`
+opts an app into evaluation while a transcript block approaches the viewport.
+Omission is no grant: unknown and legacy apps remain click-open. This is an
+owner-reviewable execution capability, not a new HTTP permission. Its v1
+contract requires **read-only module startup and passive session hydration**;
+public actions still require explicit owner input and the existing app guards.
+It is not a read-only sandbox for arbitrary code with an app-scoped bearer.
+
+The host's `passiveAppBlockAllowed(app)` checks the accepted capability and
+`AppOut.passive_block_module_digest`. That server projection requires the same
+opt-in in the immutable applied runtime manifest, never editable `mobius.json`,
+and a content-addressed compiled bundle. Accepting a new local Store runtime
+capability does not alone admit an older served revision; apply an opted-in
+package through the ordinary accepted-source path. Existing owners are never
+auto-granted this capability. The frame independently requires the server's
+admission and checks transferred module bytes against that exact SHA-256 before
+import. Cached-frame/module mismatches fail closed, including offline; absence
+of secure digest support also fails closed. An admitted module that omits
+`appBlockSessions = true` is not mounted as an ordinary default component on a
+passive path.
+
+AppCanvas retains negotiation per attributed document. Its callback is
+`onBlockCapability(supported, {version, reset: true})`, with `supported: null`
+on a same-version document reload, and a boolean on initial mount/promotion.
+Hosts invalidate stale idle/confirmation views on reset, not active or unknown
+publication ownership. `blockSession.retain` pins the outgoing document while
+it owns an active/uncertain operation; a ready incoming frame waits without a
+loading timeout until retention clears. Promotion initializes a read session,
+never replays an already delivered Confirm nonce, and ignores old-frame state.
+
+A live `moebius:app-block-state` may include `ackNonce` for the last accepted
+owner event and `retain: true` while its document owns confirmation, active
+publication or an uncertain receipt. The host pins unacknowledged events and
+retained owners even offscreen; idle offscreen sessions are released. Apps
+acknowledge without replaying an event and release only after cancellation or
+canonical settlement. These fields convey lifecycle, not publication authority.
+
+An action with `confirming: true` supplies the complete frozen presentation as
+`confirmation: [{title, facts: [{label, value}]}]`. It describes every member of
+the current publication phase, not the historical transcript snapshot. The
+host displays all members and rejects an incomplete/oversized presentation
+without truncation: Confirm stays disabled and ordinary app review remains
+available. Current limits are 256 members, 8 facts per member and 512 characters
+per text field. Document reset clears stale confirmation controls, preserving
+active/uncertain ownership until fresh observation releases it.
