@@ -262,6 +262,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `app_compile_contract.py` | Canonical self-contained mini-app compiler contract, dependency list, and runtime ABI |
 | `app_runtime_inject.js` | React + `mobius-runtime` bridge injected into every compiled app bundle |
 | `app_services.py` | Bounded JSON request/response execution for reviewed app-owned server policy; binds every invocation to the accepted immutable runtime and a short-lived app token |
+| `public_service_index.py` | In-process snapshot of which ids name a public app service, with each one's rate bucket and allowance, so the anonymous door counts and refuses callers without a query per request; committed app or alias changes discard it |
 | `runtime_types.py` | Shared runtime type definitions |
 | `net_utils.py` | SSRF-safe URL validation shared by the install fetcher and the proxy |
 | `resource_access.py` | Resource-access helpers, incl. `live_app` / `live_app_or_404` (tombstone-aware app resolution) |

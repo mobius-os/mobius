@@ -48,6 +48,11 @@ PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# Anonymous requests a minute one caller may make to one public app service.
+# A public service may declare more, up to the cap, when its product needs a
+# faster cadence (a live multiplayer room); the owner accepts it on apply.
+PUBLIC_SERVICE_REQUESTS_PER_MINUTE = 60
+PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX = 600
 SERVICE_TRANSFER_MAX_BYTES = 60 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
 SERVICE_ROUTE_LIMITS_MAX = 16
@@ -1106,10 +1111,11 @@ def validate_manifest_contract(manifest) -> None:
   if service is not None:
     if not isinstance(service, Mapping) or set(service) - {
       "id", "aliases", "entry", "access", "max_bytes", "route_limits",
+      "public_requests_per_minute",
     }:
       _fail(
         "Manifest `service` must contain only `id`, `aliases`, `entry`, "
-        "`access`, `max_bytes`, and `route_limits`."
+        "`access`, `max_bytes`, `route_limits`, and `public_requests_per_minute`."
       )
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
@@ -1146,6 +1152,23 @@ def validate_manifest_contract(manifest) -> None:
       )
     if service.get("access", "self") not in {"self", "apps", "public"}:
       _fail("Manifest `service.access` must be `self`, `apps`, or `public`.")
+    if "public_requests_per_minute" in service:
+      allowance = service["public_requests_per_minute"]
+      if service.get("access", "self") != "public":
+        _fail(
+          "Manifest `service.public_requests_per_minute` applies only to a "
+          "service with `access: public`."
+        )
+      if (
+        isinstance(allowance, bool) or not isinstance(allowance, int)
+        or not PUBLIC_SERVICE_REQUESTS_PER_MINUTE
+        <= allowance <= PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX
+      ):
+        _fail(
+          "Manifest `service.public_requests_per_minute` must be an integer "
+          f"from {PUBLIC_SERVICE_REQUESTS_PER_MINUTE} to "
+          f"{PUBLIC_SERVICE_REQUESTS_PER_MINUTE_MAX}."
+        )
     max_bytes = service["max_bytes"] if "max_bytes" in service else SERVICE_REQUEST_MAX_BYTES
     if type(max_bytes) is not int or not 1 <= max_bytes <= SERVICE_TRANSFER_MAX_BYTES:
       _fail(
