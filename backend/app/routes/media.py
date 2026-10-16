@@ -25,9 +25,6 @@ _RASTER_MEDIA_TYPES = {
   "image/webp",
 }
 
-_AGENT_TMP_ROOT = Path("/tmp")
-
-
 def _authorize_chat_media(chat_id, token_src, db):
   """Validate the chat id and the owner-scoped media credential once."""
   validate_chat_id(chat_id)
@@ -85,24 +82,6 @@ def serve_chat_media(
   return _serve_chat_image(
     chat_id, filename, token_src, db, preview=preview,
   )
-
-
-@router.get("/{chat_id}/tmp-images/{filename:path}")
-def serve_agent_tmp_image(
-  chat_id: str,
-  filename: str,
-  token_src: TokenSource = Depends(get_auth_token_source),
-  db: Session = Depends(get_db),
-):
-  """Serve a raster image viewed by the agent from inside ``/tmp``.
-
-  Codex's native image-view event records only the file path, not a duplicate
-  base64 result. This narrow route lets the owner's chat render that exact
-  temporary image while keeping every non-image file and every path outside
-  ``/tmp`` inaccessible. The ordinary short-lived, chat-scoped media token
-  protects browser image requests just like durable chat media.
-  """
-  return _serve_temporary_raster(chat_id, filename, _AGENT_TMP_ROOT, token_src, db)
 
 
 @router.get("/{chat_id}/scratch-images/{filename:path}")

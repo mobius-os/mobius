@@ -167,8 +167,9 @@ function GenericToolBlock({
     savedImage: t.saved_image,
     files: generatedFiles,
     viewedDigest: t.viewed_image_sha256,
+    viewedMedia: t.viewed_image_media,
     completed: t.status === 'done',
-  }), [t.saved_image, generatedFiles, t.viewed_image_sha256, t.status])
+  }), [t.saved_image, generatedFiles, t.viewed_image_sha256, t.viewed_image_media, t.status])
   const servedImage = useMemo(() => (
     savedScreenshot || (isImageTool ? servedImageReference(t.input, chatId, stepImage) : null)
   ), [savedScreenshot, isImageTool, t.input, chatId, stepImage])
@@ -198,8 +199,8 @@ function GenericToolBlock({
     // barrier then guarantees the final queued stash wins the query.
     if (t.status === 'running') return
     if (!t.output_truncated || previewOutput !== null || missingOutput) return
-    // Protected chat media (including a screenshot's recorded file) and /tmp
-    // rasters render through narrow routes, avoiding the image tool's much
+    // Protected chat media (including a screenshot's recorded file) and view
+    // snapshots render through narrow routes, avoiding the image tool's much
     // larger base64 sidecar. An image viewed elsewhere needs the complete
     // result (not the ordinary 20k text preview) so the fallback data URL is
     // valid.

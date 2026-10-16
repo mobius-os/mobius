@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.agent_lifecycle import stable_activation_id
+from app.codex_rollouts import rollout_paths
 from app.config import get_settings
 from app.continuations import SIDE_QUESTION_MESSAGE_KIND
 from app.tool_summaries import summarize_tool_input
@@ -196,18 +197,9 @@ def _claude_sidechain_path(session_id: str | None, agent_id: str) -> Path | None
 
 
 def _codex_rollout_path(thread_id: str) -> Path | None:
-  """Codex writes ``sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl``."""
-  if not _SAFE_ID.match(thread_id):
-    return None
-  home = _provider_home("codex")
-  for pattern in (
-    home / "sessions" / "*" / "*" / "*" / f"rollout-*-{thread_id}.jsonl",
-    home / "archived_sessions" / f"rollout-*-{thread_id}.jsonl",
-  ):
-    matches = glob.glob(str(pattern))
-    if matches:
-      return Path(matches[0])
-  return None
+  """The child thread's rollout, live or archived."""
+  matches = rollout_paths(_provider_home("codex"), thread_id, archived=True)
+  return matches[0] if matches else None
 
 
 def _tail_records(
