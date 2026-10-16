@@ -1,6 +1,7 @@
-// A notification can ask an already-mounted chat to reveal its one actionable
-// question. This is intentionally transient: it must not replace the owner's
-// saved reading position or replay after a reload.
+// Transient state for bringing a chat's one actionable question into view.
+// A notification can ask an already-mounted chat to reveal that question. This
+// is intentionally transient: it must not replace the owner's saved reading
+// position or replay after a reload.
 const requests = new Map()
 const listeners = new Map()
 let serial = 0
@@ -42,4 +43,22 @@ export function subscribeChatQuestionReveal(chatId, listener) {
     set.delete(listener)
     if (set.size === 0) listeners.delete(id)
   }
+}
+
+// Contract R5c: a newly pending decision also comes into view by itself, at
+// most once per page session. Remembering the decision each chat has already
+// shown is what lets a reader scroll away from it without being pulled back.
+// Like notification requests this is transient: a reload forgets it, which at
+// most brings a still-pending decision into view one more time.
+const arrivalReveals = new Map()
+
+export function questionArrivalRevealed(chatId, questionId) {
+  const id = String(chatId || '')
+  return !!id && !!questionId && arrivalReveals.get(id) === String(questionId)
+}
+
+export function markQuestionArrivalRevealed(chatId, questionId) {
+  const id = String(chatId || '')
+  if (!id || !questionId) return
+  arrivalReveals.set(id, String(questionId))
 }
