@@ -388,6 +388,15 @@ jobs:
         # and the whole test suite fails on ERR_MODULE_NOT_FOUND.
         working-directory: frontend
         run: npm ci
+      - name: Install mounted-unit browser dependencies
+        # Use the root lockfile's browser version, also used by the e2e job.
+        run: npm ci --ignore-scripts
+      - name: Provision Chromium for mounted unit tests
+        # Shell/__tests__/chatOpenRequests.test.js drives the real app in
+        # Chromium and requires CHROME_BIN.
+        run: |
+          npx playwright install --with-deps chromium
+          node --input-type=module -e "import { chromium } from '@playwright/test'; console.log('CHROME_BIN=' + chromium.executablePath())" >> "$GITHUB_ENV"
       - name: Audit frontend runtime dependencies
         working-directory: frontend
         run: |

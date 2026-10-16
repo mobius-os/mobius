@@ -235,6 +235,11 @@ export default function useNavigation({
   // remount (pushNavEntry is not idempotent). See the mount effect below.
   const seededHomeRef = useRef(false)
   const historyInitializedRef = useRef(false)
+  // The first commit renders the restored workspace; the mount effect below
+  // then applies an explicit boot destination (deep link, reload claim). Shell
+  // mounts content surfaces only after that decision, so a restored chat that
+  // the launch replaces never starts its own transcript reads.
+  const [bootRouteApplied, setBootRouteApplied] = useState(false)
 
   const navStackRef = useRef([])
   // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
@@ -1538,6 +1543,7 @@ export default function useNavigation({
       // destination with another base entry.
       currentNavStateRef.current = history.state
     }
+    setBootRouteApplied(true)
 
     function handleForward(destination, sourceRoute) {
       // A forward traversal abandons any in-flight drawer close: clear the LOGICAL
@@ -2304,6 +2310,7 @@ export default function useNavigation({
 
   return {
     initialNav,
+    bootRouteApplied,
     activeView,
     activeAppId,
     activeChatId,

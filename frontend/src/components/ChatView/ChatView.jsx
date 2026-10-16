@@ -1603,6 +1603,10 @@ export default function ChatView({
   // payload and hydrate only runtime fields — do not replace the transcript.
   const refreshRuntimeState = useCallback(async ({ shared = false } = {}) => {
     if (provisionalNewChatRef.current) return null
+    // Until activation settles it alone reads this chat, and the result below
+    // would be discarded anyway; a focus or recovery nudge during activation
+    // must not spend a runtime read the activation already makes redundant.
+    if (!activationSettledRef.current) return null
     const gen = fetchGenRef.current
     try {
       const read = () => (
@@ -1612,7 +1616,8 @@ export default function ChatView({
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
       if (chatIdStaleRef.current) return null
       // A running status alone must not attach a stream over a transcript that
-      // never loaded; a resumed reply would then look like the whole chat.
+      // never loaded; a resumed reply would then look like the whole chat. An
+      // activation retry can begin while this read is in flight.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
       // Runtime-only reads cannot retire recovery before Resume appends its acknowledged row.
@@ -2691,10 +2696,23 @@ export default function ChatView({
         const anchorParam = activationAnchorKey
           ? `&anchor=${encodeURIComponent(activationAnchorKey)}`
           : ''
-        runtime = await requestJson(
-          `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
-          'CHAT_LOAD_FAILED',
-        )
+        // The drawer warms this exact page on pointerdown; join that read
+        // when it is still in flight instead of decoding the page twice. A
+        // /runtime read that already disagreed with the cache may postdate
+        // the warm-up, so after one this view reads the page fresh.
+        if (anchorParam || runtime !== null) {
+          runtime = await requestJson(
+            `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
+            'CHAT_LOAD_FAILED',
+          )
+        } else {
+          const page = await chatQueries.messages.readFirstPage(chatId, {
+            signal: initialLoadController.signal,
+          })
+          if (page.status === 404) throw new Error('CHAT_NOT_FOUND')
+          if (!page.ok) throw new Error(`CHAT_LOAD_FAILED_${page.status}`)
+          runtime = page.data
+        }
         const runtimeAnchorMatch = anchorMatchIn(runtime)
         if (activationAnchorKey && runtime.requested_anchor_found === true) {
           if (!runtimeAnchorMatch) {
@@ -6599,7 +6617,9 @@ export default function ChatView({
           projectRef={chatInfo?.project || null}
           leftButtons={
             <BrainUsageButton
-              usageEnabled={!embedded}
+              // A hidden instance paints no gauge (a handoff cover still
+              // does); it reads usage when it is shown again.
+              usageEnabled={!embedded && (!hidden || keepTranscriptPainted)}
               chatId={chatId}
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}

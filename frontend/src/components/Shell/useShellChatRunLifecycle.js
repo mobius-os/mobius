@@ -12,6 +12,7 @@ import {
   chatRunSignal,
 } from '../../lib/chatRunSignal.js'
 import { withoutSettledLocalChatRuns } from './chatListProjection.js'
+import { forgetChatFirstPageRead } from '../../lib/chatDetailReads.js'
 
 
 export default function useShellChatRunLifecycle(chats = []) {
@@ -100,21 +101,23 @@ export default function useShellChatRunLifecycle(chats = []) {
     return reconciled
   }, [])
 
+  // A ChatView that mounts after a signal treats it as already handled, so a
+  // drawer-warmed first-page read begun before the signal must not be joined.
+  const bumpSignal = useCallback((chatId, eventType) => {
+    if (chatId) forgetChatFirstPageRead(chatId)
+    setChatRunSignals(previous => (
+      bumpChatRunSignal(previous, chatId, eventType)
+    ))
+  }, [])
   const markChatRunActivity = useCallback((chatId) => {
-    setChatRunSignals(previous => (
-      bumpChatRunSignal(previous, chatId, 'chat_run_started')
-    ))
-  }, [])
+    bumpSignal(chatId, 'chat_run_started')
+  }, [bumpSignal])
   const markChatRunReconcile = useCallback((chatId) => {
-    setChatRunSignals(previous => (
-      bumpChatRunSignal(previous, chatId, 'chat_run_reconcile')
-    ))
-  }, [])
+    bumpSignal(chatId, 'chat_run_reconcile')
+  }, [bumpSignal])
   const markChatRunFinished = useCallback((chatId) => {
-    setChatRunSignals(previous => (
-      bumpChatRunSignal(previous, chatId, 'chat_run_finished')
-    ))
-  }, [])
+    bumpSignal(chatId, 'chat_run_finished')
+  }, [bumpSignal])
   const chatRunSignalFor = useCallback(
     chatId => chatRunSignal(chatRunSignals, chatId),
     [chatRunSignals],

@@ -2,6 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
 import useShellChatRunLifecycle from '../useShellChatRunLifecycle.js'
+import {
+  readChatFirstPage,
+  resetChatFirstPageReadsForTests,
+} from '../../../lib/chatDetailReads.js'
 
 
 test('mounted and durable runs share one projected streaming set', () => {
@@ -84,3 +88,27 @@ test('start and finish remain observable when one render ends idle', () => {
     'another pane does not inherit this chat activity',
   )
 })
+
+
+for (const mark of ['markChatRunActivity', 'markChatRunReconcile', 'markChatRunFinished']) {
+  test(`${mark} keeps a later ChatView from joining a first-page read begun before it`, async () => {
+    resetChatFirstPageReadsForTests()
+    const { result } = renderHook(useShellChatRunLifecycle, [])
+    let requests = 0
+    const request = () => {
+      requests += 1
+      return new Promise(() => {})
+    }
+    const warming = readChatFirstPage('chat-1', request)
+    const joined = readChatFirstPage('chat-1', request)
+    assert.equal(joined, warming, 'drawer warming and activation share one read')
+    result.current[mark]('chat-1')
+    const afterSignal = readChatFirstPage('chat-1', request)
+    assert.notEqual(afterSignal, warming)
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(requests, 2)
+    assert.equal(result.current.chatRunSignalFor('chat-1').seq, 1)
+    resetChatFirstPageReadsForTests()
+  })
+}

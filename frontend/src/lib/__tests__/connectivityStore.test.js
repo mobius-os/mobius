@@ -419,7 +419,101 @@ test('cold startup and concurrent verification never guess readiness from naviga
   settle(readiness())
   await first
   assert.equal(h.store.getDeliveryReadySnapshot(), true)
-  assert.equal(h.store.getRecoverySnapshot(), 1)
+  assert.equal(h.store.getRecoverySnapshot(), 0,
+    'the first ready verdict ends unknown startup; nothing was refused, so nothing recovers')
+})
+
+test('startup readiness is not a recovery edge unless delivery was refused first', async () => {
+  const cold = harness(async () => readiness())
+  const stopCold = cold.store.subscribe(() => {})
+  await flush()
+  assert.equal(cold.store.getDeliveryReadySnapshot(), true)
+  assert.equal(cold.store.getRecoverySnapshot(), 0, 'mounted chats are not re-read at boot')
+  stopCold()
+
+  let response = readiness(false)
+  const booting = harness(async () => response)
+  const stopBooting = booting.store.subscribe(() => {})
+  await flush()
+  assert.equal(booting.store.getDeliveryReadySnapshot(), false)
+  response = readiness()
+  booting.timers.runTimeout(RECOVERY_RETRY_MIN_MS)
+  await flush()
+  assert.equal(booting.store.getDeliveryReadySnapshot(), true)
+  assert.equal(booting.store.getRecoverySnapshot(), 1, 'work refused while the server booted retries')
+
+  // Once delivery has been ready, every later regain is a recovery as before.
+  booting.documentTarget.visibilityState = 'hidden'
+  booting.documentTarget.emit('visibilitychange')
+  booting.documentTarget.visibilityState = 'visible'
+  booting.documentTarget.emit('visibilitychange')
+  await flush()
+  assert.equal(booting.store.getRecoverySnapshot(), 2)
+  stopBooting()
+})
+
+test('work refused by a client while delivery is unknown retries on the first ready verdict', async () => {
+  let settle
+  const h = harness(() => new Promise(resolve => { settle = resolve }))
+  const stop = h.store.subscribe(() => {})
+  // New Chat tapped before the startup probe answered: refused as offline,
+  // remembered at the current recovery generation.
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  const refusedAt = h.store.getRecoverySnapshot()
+  h.store.noteDeliveryRefused()
+  settle(readiness())
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.ok(h.store.getRecoverySnapshot() > refusedAt, 'the refused allocation sees a recovery edge')
+
+  // A refusal is meaningless once delivery is ready: no later spurious edge.
+  h.store.noteDeliveryRefused()
+  h.store.reportReachable()
+  await flush()
+  assert.equal(h.store.getRecoverySnapshot(), refusedAt + 1)
+  stop()
+})
+
+test('transport evidence during the startup probe joins it instead of probing twice', async () => {
+  let probes = 0
+  let settle
+  const h = harness(() => {
+    probes += 1
+    return new Promise(resolve => { settle = resolve })
+  })
+  const stop = h.store.subscribe(() => {})
+  assert.equal(probes, 1)
+  // Any API response reports reachability while the first probe is in flight.
+  h.store.reportReachable()
+  h.store.reportReachable()
+  settle(readiness())
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.equal(probes, 1)
+  stop()
+})
+
+test('a joined probe that fails as stale re-probes at once instead of waiting for backoff', async () => {
+  const probes = []
+  const h = harness(() => new Promise((resolve, reject) => probes.push({ resolve, reject })))
+  const stop = h.store.subscribe(() => {})
+  // An outage: the startup probe fails and recovery backs off.
+  probes[0].reject(new TypeError('offline'))
+  await flush()
+  assert.equal(probes.length, 1)
+  h.timers.runTimeout(RECOVERY_RETRY_MIN_MS)
+  assert.equal(probes.length, 2, 'the backoff retry probe is in flight')
+  // An ordinary app request succeeds while that retry hangs on a dying socket.
+  h.store.reportReachable()
+  assert.equal(probes.length, 2, 'the evidence joins the probe in flight')
+  // The doomed probe fails; newer evidence makes the failure stale.
+  probes[1].reject(new TypeError('socket closed'))
+  await flush()
+  assert.equal(probes.length, 3, 'readiness is re-probed immediately')
+  probes[2].resolve(readiness())
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  stop()
 })
 
 test('a proxy success without the application readiness body never permits delivery', async () => {

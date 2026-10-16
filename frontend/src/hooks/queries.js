@@ -2,6 +2,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
+import { readChatFirstPage } from '../lib/chatDetailReads.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -193,14 +194,24 @@ async function fetchChats({ signal, timeoutMs, cache } = {}) {
   return Array.isArray(data) ? data : []
 }
 
-async function fetchChatMessages(chatId, { signal } = {}) {
-  const res = await api.chats.detail(chatId, {
+// The compact first page a chat opens on. Drawer warming and ChatView
+// activation share one in-flight read of it (chatDetailReads.js) and each
+// interpret its { status, ok, data } result. `signal` stops this caller
+// waiting; the shared request is aborted only when every caller has left.
+// Its timeout starts with the first reader, so a caller that joins late may
+// wait less than the full 15 seconds.
+function readChatFirstPageShared(chatId, { signal } = {}) {
+  return readChatFirstPage(chatId, sharedSignal => api.chats.detail(chatId, {
     limit: 20,
     compact: true,
-    signal,
+    signal: sharedSignal,
     timeoutMs: 15_000,
-  })
-  const data = await jsonOrThrow(res, 'chat fetch failed:')
+  }), { signal })
+}
+
+async function fetchChatMessages(chatId, { signal } = {}) {
+  const { ok, status, data } = await readChatFirstPageShared(chatId, { signal })
+  if (!ok) throw new Error(`chat fetch failed: ${status}`)
   return chatDetailCacheValue(data)
 }
 
@@ -668,6 +679,7 @@ export const chatQueries = {
   messages: {
     key: (chatId) => ['chat-messages', chatId],
     fetch: fetchChatMessages,
+    readFirstPage: readChatFirstPageShared,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
   usage: {
