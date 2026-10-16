@@ -81,3 +81,26 @@ test('screen readers learn that ↑ browses history, and how to move and leave o
   assert.equal(composerHistoryKeyHint({ hasEntries: false }), null, 'nothing to browse, nothing to announce')
   assert.equal(composerHistoryKeyHint({ hasEntries: true, touch: true }), null, 'touch input has no arrow keys')
 })
+
+
+test('a queued preview never cuts an emoji in half', async () => {
+  const { queuedPreview } = await import('../queuedPreview.js')
+  const text = `a${'😀'.repeat(40)}`
+  const { preview, needsTruncation } = queuedPreview(text)
+
+  assert.equal(needsTruncation, true)
+  assert.ok(preview.endsWith('😀…'), preview)
+  assert.equal(preview.isWellFormed(), true)
+})
+
+
+test('a queued preview keeps short and multi-line text readable', async () => {
+  const { queuedPreview } = await import('../queuedPreview.js')
+
+  assert.deepEqual(queuedPreview('hi'), { preview: 'hi', needsTruncation: false })
+  assert.deepEqual(
+    queuedPreview('first\nsecond'),
+    { preview: 'first …', needsTruncation: true },
+  )
+  assert.equal(queuedPreview('x'.repeat(81)).preview, `${'x'.repeat(80)}…`)
+})
