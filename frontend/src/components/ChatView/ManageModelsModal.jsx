@@ -37,6 +37,7 @@ export default function ManageModelsModal({
   providerOrder,
   providerInfo,
   configuredProviders,
+  onlyProvider = null,
 }) {
   const queryClient = useQueryClient()
   // Read straight from cache — by the time the modal opens, the
@@ -178,7 +179,7 @@ export default function ManageModelsModal({
   const visibleProviderOrder = configuredProviderOrder(
     providerOrder,
     configuredProviders,
-  )
+  ).filter(pid => !onlyProvider || pid === onlyProvider)
 
   return (
     <div
@@ -195,7 +196,7 @@ export default function ManageModelsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mmm__head">
-          <h2 id="mmm-title" className="mmm__title">Manage models</h2>
+          <h2 id="mmm-title" className="mmm__title">{onlyProvider ? `${providerInfo[onlyProvider]?.label || onlyProvider} models` : 'Manage models'}</h2>
           <button
             ref={closeRef}
             type="button"

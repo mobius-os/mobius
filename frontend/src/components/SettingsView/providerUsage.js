@@ -4,7 +4,17 @@ import { formatDateTime } from '../../lib/dateTimeFormat.js'
 export function formatPlanStatus(label) {
   const value = typeof label === 'string' ? label.trim() : ''
   const name = value.replace(/\s+plan$/i, '').trim()
+  // Codex's account protocol exposes this internal tier name rather than a
+  // customer-facing plan label. Keep the verified Business family, not the
+  // implementation suffix.
+  if (/^Self Serve Business Prolite$/i.test(name)) return 'Plan: Business'
   return `Plan: ${name || 'Unknown'}`
+}
+
+export function formatUsageObservedAt(value) {
+  if (typeof value !== 'string' || !value) return ''
+  const checked = new Date(value)
+  return Number.isNaN(checked.getTime()) ? '' : `Checked ${formatDateTime(checked)}`
 }
 
 export function clampUsagePercent(value) {
