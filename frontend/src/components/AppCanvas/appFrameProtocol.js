@@ -1,5 +1,9 @@
 import { fetchAppModuleBytes } from '../../lib/appModuleBroker.js'
 import {
+  appFileExportIsCurrent, beginAppFileExport, finishAppFileExport,
+  readAppFileExport, saveAppFileExport,
+} from '../../lib/appFileExport.js'
+import {
   clearAppFrameStorage,
   isSharedVirtualStorageKey,
   removeAppFrameStorage,
@@ -11,6 +15,62 @@ export function attributedFrameVersion(frames, source) {
     if (element?.contentWindow && element.contentWindow === source) return version
   }
   return null
+}
+
+// The same protocol path AppCanvas uses: attribute the sender before a prompt
+// occupies the shell, then read only after the person's confirmation.
+export function serveAppFileExportRequest({ message, source, frames, liveVersion, visible,
+  pendingRef, setPending, appId }) {
+  if (message?.type !== 'moebius:file-export') return false
+  const sourceVersion = attributedFrameVersion(frames, source)
+  if (sourceVersion == null) return true // an unknown/retired frame gets no reply
+  const request = beginAppFileExport({ message, source, sourceVersion,
+    liveVersion, visible, pending: pendingRef.current, appId })
+  if (request) {
+    pendingRef.current = request
+    setPending(request)
+  }
+  return true
+}
+
+export function retireStaleAppFileExport({ pendingRef, setPending, appId, visible,
+  liveVersion, frames }) {
+  const request = pendingRef.current
+  if (!request || appFileExportIsCurrent({ request, appId, visible, liveVersion,
+    sourceVersion: attributedFrameVersion(frames, request.source) })) return false
+  return finishAppFileExport({ request, pendingRef, setPending, result: { cancelled: true } })
+}
+
+export async function confirmAppFileExport({ pendingRef, setPending, appId,
+  getVisible, getLiveVersion, getSourceVersion, getToken,
+  readFile = readAppFileExport, saveFile = saveAppFileExport }) {
+  const request = pendingRef.current
+  if (!request || request.busy) return
+  const isCurrent = () => appFileExportIsCurrent({ request, appId,
+    visible: getVisible(), liveVersion: getLiveVersion(),
+    sourceVersion: getSourceVersion(request.source) })
+  if (!isCurrent()) {
+    finishAppFileExport({ request, pendingRef, setPending, result: { cancelled: true } })
+    return
+  }
+  const busy = { ...request, busy: true, error: null, controller: new AbortController() }
+  pendingRef.current = busy
+  setPending(busy)
+  try {
+    const blob = await readFile({ appId, path: request.path, token: getToken(), signal: busy.controller.signal })
+    if (pendingRef.current !== busy) return
+    if (!isCurrent()) {
+      finishAppFileExport({ request: busy, pendingRef, setPending, result: { cancelled: true } })
+      return
+    }
+    saveFile(blob, request.name)
+    finishAppFileExport({ request: busy, pendingRef, setPending, result: { ok: true } })
+  } catch (error) {
+    if (pendingRef.current !== busy) return
+    const failed = { ...request, error: error?.message || 'File export failed.' }
+    pendingRef.current = failed
+    setPending(failed)
+  }
 }
 
 export function attributedShellShortcutAction(message, advertisedShortcuts) {

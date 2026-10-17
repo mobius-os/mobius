@@ -4992,6 +4992,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
               version={versionForApp(id)}
               storageGeneration={app?.storage_generation}
               appName={app?.name}
+              themeColor={app?.theme_color}
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}

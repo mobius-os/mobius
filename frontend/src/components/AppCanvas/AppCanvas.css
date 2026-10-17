@@ -44,6 +44,93 @@
   opacity: 1;
 }
 
+.canvas-file-export {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, .7);
+  backdrop-filter: blur(8px);
+}
+
+.canvas-file-export__card {
+  --file-export-accent: var(--accent);
+  --file-export-ink: var(--accent-fg, var(--bg));
+  position: relative;
+  overflow: auto;
+  width: min(100%, 450px);
+  max-height: 100%;
+  padding: clamp(26px, 5vw, 36px);
+  border: 1px solid color-mix(in srgb, var(--file-export-accent) 28%, var(--border));
+  border-radius: 24px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .42);
+  text-align: center;
+}
+
+.canvas-file-export__card::before {
+  content: '';
+  display: block;
+  width: 42px;
+  height: 4px;
+  margin: 0 auto 24px;
+  border-radius: 4px;
+  background: var(--file-export-accent);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--file-export-accent) 45%, transparent);
+}
+
+.canvas-file-export__eyebrow {
+  color: var(--file-export-accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+
+.canvas-file-export__card h2 {
+  margin: 12px 0 16px;
+  font-size: clamp(24px, 5vw, 30px);
+  line-height: 1.12;
+  letter-spacing: -.04em;
+}
+
+.canvas-file-export__card p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.canvas-file-export__card .canvas-file-export__name {
+  overflow-wrap: anywhere;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.canvas-file-export__card .canvas-file-export__error { color: #df695f; }
+
+.canvas-file-export__actions { display: flex; justify-content: center; gap: 10px; margin-top: 28px; }
+.canvas-file-export__actions button {
+  flex: 1;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2, var(--surface));
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.canvas-file-export__actions button:focus-visible { outline: 3px solid var(--file-export-accent); outline-offset: 2px; }
+.canvas-file-export__actions button:disabled { opacity: .6; cursor: wait; }
+.canvas-file-export__actions .canvas-file-export__primary { background: var(--file-export-accent); color: var(--file-export-ink); border-color: var(--file-export-accent); }
+
 /* Camera frames remain top-level shell resources. The opaque app sends only
    bounded viewfinder geometry; this non-interactive layer paints the stream in
    that slot without exposing MediaStream, tracks, or shell DOM to the app. */

@@ -25,6 +25,7 @@
 //   window.mobius.storage.getText(path)           -> string | null      (offline-capable, SWR)
 //   window.mobius.storage.setText(path, str, opts?)-> {synced} | {queued}   opts.contentType
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
+//   window.mobius.fileExport.save(path, name?)    -> Promise<boolean> (shell-confirmed own-file download)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
 //   window.mobius.storage.list(prefix, opts?)     -> entries[]  (best-known compatibility view)
@@ -104,6 +105,7 @@ import { makeNav, makeSplit } from './navigation.js'
 import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
+import { makeFileExport } from './fileExport.js'
 import { makeProjects } from './projects.js'
 import { makeVisibility } from './visibility.js'
 import { tokenMatchesRuntime } from './token.js'
@@ -219,6 +221,7 @@ export function init({
     _runtimeContext.capabilities?._destroy?.()
     _runtimeContext.projects?._destroy?.()
     _runtimeContext.chat?._destroy?.()
+    _runtimeContext.fileExport?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -236,6 +239,7 @@ export function init({
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
   const projects = makeProjects()
   const chat = makeChat({ appId, getToken: scopedToken, storage })
+  const fileExport = makeFileExport()
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -274,10 +278,11 @@ export function init({
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
+    fileExport,
     projects,
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, fileExport, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
