@@ -757,6 +757,75 @@ def test_contribution_proxy_binds_and_forwards_idempotency_key(broker, monkeypat
       )
 
 
+def test_push_relay_routes_are_exact_socket_only_and_capability_bound(
+  broker, monkeypatch,
+):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["url"] = url
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(method, url, content=kwargs.get("content"), headers=kwargs["headers"])
+
+    def send(self, request, *, stream):
+      return httpx.Response(200, request=request, content=b'{"results":[]}')
+
+    def close(self):
+      return None
+
+  broker.client.close()
+  broker.client = FakeClient()
+
+  def capability(**kwargs):
+    seen["capability"] = kwargs
+    return "token"
+
+  monkeypatch.setattr(broker, "_capability", capability)
+  body = b'{"targets":[]}'
+  for path, scope in (
+    ("/v1/push/send", "push:send"),
+    ("/v1/push/devices/bind", "push:register"),
+    ("/v1/push/devices/unbind", "push:register"),
+  ):
+    key = "push-send:0123456789abcdef"
+    broker.proxy(
+      method="POST", path=path, body=body,
+      headers={"idempotency-key": key, "x-mobius-request-id": "request:12345678"},
+      allow_private_routes=True,
+    ).close()
+    assert seen["url"] == broker_module.PUSH_RELAY_BASE_URL + path
+    assert seen["capability"]["audience"] == "mobius-push-relay"
+    assert seen["capability"]["scope"] == scope
+    assert seen["capability"]["body"] == body
+    assert seen["headers"]["Idempotency-Key"] == key
+
+  with pytest.raises(ValueError, match="idempotency key is required"):
+    broker.proxy(
+      method="POST", path="/v1/push/send", body=body, headers={},
+      allow_private_routes=True,
+    )
+  # Agents reach only the loopback surface, which can never send push.
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="POST", path="/v1/push/send", body=body,
+      headers={"idempotency-key": "push-send:0123456789abcdef"},
+      allow_private_routes=False,
+    )
+  for method, path in (
+    ("GET", "/v1/push/send"),
+    ("POST", "/v1/push/send?to=other"),
+    ("POST", "/v1/push/devices"),
+    ("POST", "/v1/push/devices/bind/extra"),
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method=method, path=path, body=body,
+        headers={"idempotency-key": "push-send:0123456789abcdef"},
+        allow_private_routes=True,
+      )
+
+
 def test_capability_request_wraps_exact_signed_request_binding(broker):
   seen = {}
 

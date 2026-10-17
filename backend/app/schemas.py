@@ -905,6 +905,17 @@ class PushUnsubscribeRequest(BaseModel):
   endpoint: str
 
 
+class PushDeviceRequest(BaseModel):
+  """The FCM token from the mobile app's ``MobiusNative.registerPush()``.
+
+  FCM tokens are printable ASCII without spaces; this bounds what the relay is
+  handed without encoding today's token format. Other fields the app returns
+  (``platform``, APNs details) are ignored: the relay delivers through FCM.
+  """
+
+  token: str = Field(pattern=r"^[\x21-\x7e]{1,4096}$")
+
+
 class NotificationAction(BaseModel):
   model_config = ConfigDict(extra="forbid")
 

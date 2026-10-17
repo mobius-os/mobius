@@ -1774,5 +1774,19 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify(payload),
     }),
+    // Native push for the Möbius mobile app (lib/nativePush.js).
+    devices: {
+      list: () => apiFetch('/push/devices'),
+      register: (payload) => apiFetch('/push/devices', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+      forget: (payload) => apiFetch('/push/devices', {
+        method: 'DELETE',
+        body: JSON.stringify(payload),
+        // Sign-out reloads the page right after; let the request finish.
+        keepalive: true,
+      }),
+    },
   },
 }
