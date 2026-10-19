@@ -67,7 +67,7 @@ test('states what enabling does: this chat, paid usage, new chats you start, sta
   assert.match(html, /Continue this chat after usage limits\?/)
   assert.match(html, /Auto-continue this chat/)
   assert.match(html, /even while this device sleeps/)
-  assert.match(html, /when the provider&#x27;s limit is expected to reset/)
+  assert.match(html, /around the provider&#x27;s reset time, or after a short wait if none is given/)
   assert.doesNotMatch(html, /at the provider&#x27;s reset time/,
     'the server retries at a bounded check time, not at the reset itself')
   assert.match(html, /Retries may use paid usage/)

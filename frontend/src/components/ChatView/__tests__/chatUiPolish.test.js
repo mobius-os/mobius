@@ -371,7 +371,7 @@ test('the Goal auto-continue actions keep a full touch target on coarse pointers
 test('the Goal auto-continue banner opts back into pointer events inside the foot', () => {
   assert.match(
     chatCss,
-    /\.chat__foot \.chat__goal-auto-resume,[\s\S]*?\{ pointer-events: auto; \}/,
+    /\.chat__foot \.chat__goal-auto-resume,[^{}]*\{ pointer-events: auto; \}/,
     'the foot passes pointer events through, so the banner must opt back in or its buttons cannot be tapped',
   )
 })
@@ -385,6 +385,8 @@ test('the Goal auto-continue banner copy uses the shared status type token', () 
 test('the Goal auto-continue banner waits for the policy, yields to a limit park, and is scoped to its chat', () => {
   const offer = chatView.match(/shouldOfferGoalAutoResume\(\{([^}]*)\}\)/)
   assert.ok(offer, 'ChatView decides the offer through shouldOfferGoalAutoResume')
+  assert.match(offer[1], /embedded[,\s]/,
+    'embedded chats cannot save this policy and must never see the banner')
   assert.match(offer[1], /policyKnown:\s*chatInfo != null/,
     'until chat info loads the policy reads off even when it is on')
   assert.match(offer[1], /limitParked:\s*Boolean\(pendingLimitPark\)/,

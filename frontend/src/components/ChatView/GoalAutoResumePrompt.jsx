@@ -55,16 +55,17 @@ export default function GoalAutoResumePrompt({
   /* The copy states what enabling really does: the switch is per chat, saving
      it also seeds the default for chats the owner starts afterwards
      (owner.auto_resume_on_limit_default in routes/chats.py), and the server
-     retries at a bounded check time near the expected reset, not at the reset
-     itself (chat._limit_park_fields). */
+     retries around the reported reset, or after a fixed wait when none is
+     reported, never exactly at the reset (chat._limit_park_fields). */
   return (
     <aside className="chat__goal-auto-resume" aria-label="Goal continuation">
       <div className="chat__goal-auto-resume-copy">
         <strong>Continue this chat after usage limits?</strong>
         <span>
-          Möbius can try again when the provider&apos;s limit is expected to
-          reset, even while this device sleeps. Retries may use paid usage, and
-          new chats you start will have this on. Manual stops stay stopped.
+          Möbius can try again around the provider&apos;s reset time, or after
+          a short wait if none is given, even while this device sleeps. Retries
+          may use paid usage, and new chats you start will have this on. Manual
+          stops stay stopped.
         </span>
       </div>
       <div className="chat__goal-auto-resume-actions">
