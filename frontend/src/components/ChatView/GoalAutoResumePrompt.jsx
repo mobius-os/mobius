@@ -9,15 +9,17 @@ import {
 } from './goalAutoResumeDismissal.js'
 
 /* Only an open Goal continues automatically: the server never resumes a held
-   (stopped) Goal, and a held Goal is the one that carries a pause_reason. */
+   (stopped) Goal (goals.goal_allows_automatic_resume), and a held Goal is the
+   one that carries a pause_reason (goal_plans._goal_presentation). */
 function goalContinuesAutomatically(goal) {
   if (goal?.status === 'active') return true
   return goal?.status === 'paused' && !goal.pause_reason
 }
 
 /* `policyKnown` waits for chat info: until it loads, autoResumeEnabled reads
-   false even when the policy is on. A pending limit park already offers the
-   same switch on its own card, so the banner steps aside for it. */
+   false even when the policy is on. While a limit park is pending, its own
+   card owns this decision (and Settings always carries the switch), so the
+   banner stays out of the way. */
 export function shouldOfferGoalAutoResume({
   embedded = false,
   goal = null,
@@ -50,17 +52,19 @@ export default function GoalAutoResumePrompt({
     setDismissedGoalKey(goalKey)
   }
 
-  /* The copy states what enabling really does: the switch is per chat, and
-     saving it also becomes the default for chats created afterwards
-     (owner.auto_resume_on_limit_default in routes/chats.py). */
+  /* The copy states what enabling really does: the switch is per chat, saving
+     it also seeds the default for chats the owner starts afterwards
+     (owner.auto_resume_on_limit_default in routes/chats.py), and the server
+     retries at a bounded check time near the expected reset, not at the reset
+     itself (chat._limit_park_fields). */
   return (
     <aside className="chat__goal-auto-resume" aria-label="Goal continuation">
       <div className="chat__goal-auto-resume-copy">
         <strong>Continue this chat after usage limits?</strong>
         <span>
-          Möbius can retry at the provider&apos;s reset time, even while this
-          device sleeps. Retries may use paid usage, and new chats will start
-          with this on. Manual stops stay stopped.
+          Möbius can try again when the provider&apos;s limit is expected to
+          reset, even while this device sleeps. Retries may use paid usage, and
+          new chats you start will have this on. Manual stops stay stopped.
         </span>
       </div>
       <div className="chat__goal-auto-resume-actions">

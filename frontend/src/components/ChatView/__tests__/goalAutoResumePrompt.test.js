@@ -58,7 +58,7 @@ test('stays quiet when the policy is on, unknown, embedded, or a limit park offe
     'the parked card already carries the same switch')
 })
 
-test('states what enabling does: this chat, paid usage, new chats, standby, manual stops', () => {
+test('states what enabling does: this chat, paid usage, new chats you start, standby, manual stops', () => {
   const html = renderToStaticMarkup(createElement(GoalAutoResumePrompt, {
     goalKey: 'goal-1',
     onEnable() {},
@@ -67,8 +67,11 @@ test('states what enabling does: this chat, paid usage, new chats, standby, manu
   assert.match(html, /Continue this chat after usage limits\?/)
   assert.match(html, /Auto-continue this chat/)
   assert.match(html, /even while this device sleeps/)
+  assert.match(html, /when the provider&#x27;s limit is expected to reset/)
+  assert.doesNotMatch(html, /at the provider&#x27;s reset time/,
+    'the server retries at a bounded check time, not at the reset itself')
   assert.match(html, /Retries may use paid usage/)
-  assert.match(html, /new chats will start with this on/)
+  assert.match(html, /new chats you start will have this on/)
   assert.match(html, /Manual stops stay stopped/)
   assert.match(html, /Not now/)
 })

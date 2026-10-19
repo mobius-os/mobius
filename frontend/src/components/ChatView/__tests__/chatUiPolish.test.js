@@ -367,3 +367,31 @@ test('the Goal auto-continue actions keep a full touch target on coarse pointers
   assert.ok(coarse, 'both actions are sized in a coarse-pointer block')
   assert.match(coarse[1], /min-height:\s*44px/)
 })
+
+test('the Goal auto-continue banner opts back into pointer events inside the foot', () => {
+  assert.match(
+    chatCss,
+    /\.chat__foot \.chat__goal-auto-resume,[\s\S]*?\{ pointer-events: auto; \}/,
+    'the foot passes pointer events through, so the banner must opt back in or its buttons cannot be tapped',
+  )
+})
+
+test('the Goal auto-continue banner copy uses the shared status type token', () => {
+  const copy = stripComments(chatCss).match(/\.chat__goal-auto-resume-copy\s*\{([^}]*)\}/)
+  assert.ok(copy, 'banner copy rule exists')
+  assert.match(copy[1], /font-size:\s*var\(--chat-status-font-size\)/)
+})
+
+test('the Goal auto-continue banner waits for the policy, yields to a limit park, and is scoped to its chat', () => {
+  const offer = chatView.match(/shouldOfferGoalAutoResume\(\{([^}]*)\}\)/)
+  assert.ok(offer, 'ChatView decides the offer through shouldOfferGoalAutoResume')
+  assert.match(offer[1], /policyKnown:\s*chatInfo != null/,
+    'until chat info loads the policy reads off even when it is on')
+  assert.match(offer[1], /limitParked:\s*Boolean\(pendingLimitPark\)/,
+    'the parked card already carries the same switch')
+  const banner = chatView.match(/<GoalAutoResumePrompt([\s\S]*?)\/>/)
+  assert.ok(banner, 'ChatView renders the banner')
+  assert.match(banner[1], /chatId=\{chatId\}/, '"Not now" is remembered per chat')
+  assert.match(banner[1], /goalKey=\{goalPresentation\?\.id\}/,
+    'the dismissal key is the Goal id, never its objective text')
+})

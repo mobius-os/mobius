@@ -4024,7 +4024,7 @@
   flex-direction: column;
   gap: 2px;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--chat-status-font-size);
   line-height: 1.4;
 }
 

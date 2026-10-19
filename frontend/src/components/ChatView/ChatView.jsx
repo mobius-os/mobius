@@ -6518,7 +6518,7 @@ export default function ChatView({
         {goalAutoResumeOffered && (
           <GoalAutoResumePrompt
             chatId={chatId}
-            goalKey={goalPresentation?.id || activeGoalObjective}
+            goalKey={goalPresentation?.id}
             saving={autoResumeSaving}
             error={autoResumeErrorSource === 'goal' ? autoResumeError : ''}
             onEnable={(next) => handleAutoResumeChange(next, 'goal')}
