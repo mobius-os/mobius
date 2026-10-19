@@ -350,3 +350,20 @@ test('the history strip\'s back control keeps a 26px well with a 44px tap target
     'the foot passes pointer events through, so the strip must opt back in or its × cannot be tapped',
   )
 })
+
+test('the Goal auto-continue button uses the theme foreground for accent fills', () => {
+  const rule = chatCss.match(/\.chat__goal-auto-resume-enable\s*\{([^}]*)\}/)
+  assert.ok(rule, 'enable button rule exists')
+  assert.match(rule[1], /background:\s*var\(--accent\)/)
+  // --accent-fg is the theme's only foreground for text on an --accent fill;
+  // a light custom accent sets it dark, so a fixed white would vanish.
+  assert.match(rule[1], /color:\s*var\(--accent-fg\b/)
+})
+
+test('the Goal auto-continue actions keep a full touch target on coarse pointers', () => {
+  const coarse = stripComments(chatCss).match(
+    /@media \(pointer: coarse\)\s*\{\s*\.chat__goal-auto-resume-enable,\s*\.chat__goal-auto-resume-later\s*\{([^}]*)\}/,
+  )
+  assert.ok(coarse, 'both actions are sized in a coarse-pointer block')
+  assert.match(coarse[1], /min-height:\s*44px/)
+})

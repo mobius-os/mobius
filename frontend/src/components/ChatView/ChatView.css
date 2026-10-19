@@ -4050,7 +4050,7 @@
 
 .chat__goal-auto-resume-enable {
   background: var(--accent);
-  color: var(--accent-text, white);
+  color: var(--accent-fg, #fff);
 }
 
 .chat__goal-auto-resume-later {
@@ -4068,6 +4068,11 @@
   grid-column: 1 / -1;
   color: var(--danger);
   font-size: 12px;
+}
+
+@media (pointer: coarse) {
+  .chat__goal-auto-resume-enable,
+  .chat__goal-auto-resume-later { min-height: 44px; }
 }
 
 @media (max-width: 560px) {

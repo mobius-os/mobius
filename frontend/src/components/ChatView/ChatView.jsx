@@ -5932,8 +5932,10 @@ export default function ChatView({
   const goalHandoff = goalPresentation?.handoff?.kind || 'none'
   const goalAutoResumeOffered = shouldOfferGoalAutoResume({
     embedded,
-    goalStatus: goalPresentation?.status,
+    goal: goalPresentation,
     autoResumeEnabled,
+    policyKnown: chatInfo != null,
+    limitParked: Boolean(pendingLimitPark),
   })
   const goalResumeBlocked = useCallback(() => resumeBlocked() || !canResumeGoal(goalPresentation, {
     turnActive, hasPendingQuestion, chatHandoff,
@@ -6515,6 +6517,7 @@ export default function ChatView({
         </div>
         {goalAutoResumeOffered && (
           <GoalAutoResumePrompt
+            chatId={chatId}
             goalKey={goalPresentation?.id || activeGoalObjective}
             saving={autoResumeSaving}
             error={autoResumeErrorSource === 'goal' ? autoResumeError : ''}
