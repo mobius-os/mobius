@@ -1,6 +1,7 @@
 import { startMicrophoneCapture } from './microphoneCapture.js'
 import { startCameraCapture } from './cameraCapture.js'
 import { readCameraPreviewRect } from './cameraPreview.js'
+import { createCallProvider, MEDIA_CALL } from './callSession.js'
 import {
   createDeviceAssetCacheProvider,
   DEVICE_ASSET_CACHE,
@@ -195,6 +196,7 @@ export function builtInCapabilityProviders(options = {}) {
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [DEVICE_STORAGE]: createDeviceStorageProvider(options.deviceStorage),
     [CAMERA_CAPTURE]: createCameraProvider(options.camera),
+    [MEDIA_CALL]: createCallProvider(options.call),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
     [SPEECH]: createSpeechProvider(options.speech),
     [SPEECH_MODELS]: createSpeechModelsProvider({
