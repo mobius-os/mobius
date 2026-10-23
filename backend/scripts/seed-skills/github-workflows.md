@@ -127,5 +127,39 @@ interpret an unrelated-repository admission as proof that old uncertainty
 is settled.
 Pending checks/queues remain owned by the existing
 conversation's durable Wait; these routes do not create automatic waits.
+
+## Draft readiness is a separate scope
+
+`preview --mode review_fix_merge --allow-mark-ready` freezes explicit
+`named_pr_repairs_ready_and_reviewed_successors` consent. The older repair
+scope does not acquire readiness authority. After fresh independent full-diff
+review and passing checks, the parent calls `/ready` with the exact head/base,
+independent receipt, full scope and test evidence. The final preflight runs
+inside the shared Stop admission lock immediately before the single public
+attempt, so an armed reservation cannot hide head or base drift.
+
+If the target base moves before dispatch, `/ready` refuses the mutation and
+releases its exact reservation; this is not an unknown public effect. For
+scoped takeover with the same head, call `/reviewers`: it can prove that the
+new base strictly descends from the reviewed base and freeze a fresh independent
+review of that effective head/base. After its new all-clear receipt and passing
+tests, `/ready` may be tried again under the same grant. Do not reuse old-base
+evidence or relax the exact-base check. `/observe` reconciles uncertain public
+effects; it does not adopt this pre-dispatch base advance.
+
+A validated mark-ready response confirms the saved PR/head immediately; a
+later Stop, actor or rights change cannot undo that fact. If the response is
+lost, `/observe` may confirm the exact PR/head is non-draft, independently of
+the old base and current actor or rights. A moved head stays unknown: GitHub's
+`ReadyForReviewEvent` has no head SHA, so its timeline entry alone cannot
+attribute readiness to the reviewed head. Do not replay the mutation or claim
+that a later non-draft head proves this attempt. Once exact PR identity and a
+different live head are verified, a finished unknown receipt becomes visibly
+`unattributable`: its old-head claim and audit remain, but it no longer fences
+new grants on other heads. An `attempting` receipt must first surface as
+unknown; an unsafe identity read cannot retire it. Readiness never authorizes
+merge using an old review. Unknown readiness remains visible and fences new
+public actions until that conservative observation succeeds.
 For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. Owner questions and blocked verification use `publish: false` (the default), remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
+
 

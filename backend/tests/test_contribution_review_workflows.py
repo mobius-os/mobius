@@ -73,8 +73,8 @@ def test_review_presets_advertises_capabilities_outside_preview_hash(setup, monk
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   before = routes.review_preview(1, routes.ReviewPreview(), db, owner)
-  assert routes.review_presets(1, db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True}
-  assert routes.core_review_presets(db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True}
+  assert routes.review_presets(1, db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
+  assert routes.core_review_presets(db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
   assert routes.review_preview(1, routes.ReviewPreview(), db, owner) == before
   assert "capabilities" not in before["options"]
 

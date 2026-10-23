@@ -48,7 +48,7 @@ def verify_selection(selection):
   if selection.get("mode") not in ("review", "review_merge", "review_fix_merge"):
     raise ValueError("Invalid saved selection mode.")
   if selection.get("mode") == "review_fix_merge" and (
-      not selection.get("preview_sha256") or selection.get("confirmation_scope") != "named_pr_repairs_and_reviewed_successors"):
+      not selection.get("preview_sha256") or selection.get("confirmation_scope") not in {"named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"}):
     raise ValueError("Takeover requires an exact frozen scoped preview.")
   if selection.get("preview_sha256"):
     snapshot = selection["resolved_snapshot"]
