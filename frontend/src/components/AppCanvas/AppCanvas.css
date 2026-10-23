@@ -129,6 +129,21 @@
 }
 .canvas-file-export__actions button:focus-visible { outline: 3px solid var(--file-export-accent); outline-offset: 2px; }
 .canvas-file-export__actions button:disabled { opacity: .6; cursor: wait; }
+.canvas-folder-access__list { display: grid; gap: 8px; margin-top: 18px; }
+.canvas-folder-access__folder {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.canvas-folder-access__folder:focus-visible { outline: 3px solid var(--file-export-accent); outline-offset: 2px; }
 .canvas-file-export__actions .canvas-file-export__primary { background: var(--file-export-accent); color: var(--file-export-ink); border-color: var(--file-export-accent); }
 
 /* Camera frames remain top-level shell resources. The opaque app sends only

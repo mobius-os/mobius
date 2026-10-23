@@ -466,6 +466,29 @@ def test_device_storage_is_a_small_reviewed_invoke_capability():
   assert storage["limits"] == {"max_bytes": 32 * 1024}
 
 
+def test_device_folders_is_a_device_capability_with_reviewed_read_limits():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.folders": {
+      "version": 1,
+      "reason": "Read letter scans from a folder on this computer.",
+      "limits": {"max_file_bytes": 128 * 1024 * 1024},
+    },
+  }))
+
+  folders = runtime["device.folders"]
+  assert folders["kind"] == "invoke"
+  assert folders["risk"] == "device"
+  assert folders["lifecycle"] == "active_frame"
+  assert folders["limits"] == {
+    "max_file_bytes": 128 * 1024 * 1024,
+    "max_entries": 5000,
+  }
+  with pytest.raises(ValueError, match="max_file_bytes"):
+    normalize_runtime_capabilities(_manifest(capabilities={
+      "device.folders": {"version": 1, "limits": {"max_file_bytes": 4 * 1024 ** 3}},
+    }))
+
+
 def test_speech_capabilities_separate_model_management_from_generation():
   runtime = normalize_runtime_capabilities(_manifest(capabilities={
     "device.speech-models": {

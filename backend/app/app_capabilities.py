@@ -325,6 +325,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
     },
   },
+  "device.folders": {
+    "version": 1,
+    "kind": "invoke",
+    "title": "Open folders on this computer",
+    "description": (
+      "Read files from folders the owner connects in this browser; each "
+      "folder needs the owner's approval for this app."
+    ),
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_file_bytes": 64 * 1024 * 1024,
+      "max_entries": 5000,
+    },
+    "hard_limits": {
+      "max_file_bytes": (1024 * 1024, 512 * 1024 * 1024),
+      "max_entries": (1, 50_000),
+    },
+  },
   "device.speech-models": {
     "version": 1,
     "kind": "session",

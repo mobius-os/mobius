@@ -30,6 +30,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import AppConsentPanel from './AppConsentPanel.jsx'
+import FolderAccessDialog from './FolderAccessDialog.jsx'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   accountLinkCompletion,
@@ -431,6 +432,25 @@ const AppCanvas = forwardRef(function AppCanvas({
   const [cameraPreview, setCameraPreview] = useState(null)
   const [pendingFileExport, setPendingFileExport] = useState(null)
   const pendingFileExportRef = useRef(null)
+  // One owner dialog for `device.folders`; a newer request answers the older
+  // one with "no" so a provider never waits on a dialog nobody can see.
+  const [folderDialog, setFolderDialog] = useState(null)
+  const folderDialogRef = useRef(null)
+  const appNameRef = useRef(appName)
+  appNameRef.current = appName
+  const answerFolderDialog = (choice) => {
+    const pending = folderDialogRef.current
+    if (!pending) return
+    folderDialogRef.current = null
+    setFolderDialog(null)
+    pending.resolve(choice)
+  }
+  const requestFolderDialog = (details) => new Promise((resolve) => {
+    folderDialogRef.current?.resolve(null)
+    const pending = { ...details, resolve }
+    folderDialogRef.current = pending
+    setFolderDialog(pending)
+  })
   const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
@@ -725,6 +745,11 @@ const AppCanvas = forwardRef(function AppCanvas({
           },
         },
         screenControl: { appId },
+        folders: {
+          appId,
+          getAppName: () => appNameRef.current,
+          requestDialog: requestFolderDialog,
+        },
       }),
       getDeclaration(capability) {
         return capabilityContractRef.current?.runtime?.[capability] || null
@@ -1306,10 +1331,12 @@ const AppCanvas = forwardRef(function AppCanvas({
   // pane. Finish/cancel active-frame work before a cached app becomes hidden.
   useLayoutEffect(() => {
     if (visible) return
+    answerFolderDialog(null)
     capabilityHostRef.current.deactivate()
   }, [visible])
 
   useEffect(() => () => {
+    answerFolderDialog(null)
     capabilityHostRef.current.destroy()
   }, [])
 
@@ -1878,6 +1905,13 @@ const AppCanvas = forwardRef(function AppCanvas({
         )
       })}
       <CameraPreviewLayer preview={cameraPreview} />
+      {folderDialog && visible && (
+        <FolderAccessDialog request={folderDialog} onAnswer={answerFolderDialog}
+          accentStyle={themeColor ? {
+            '--file-export-accent': themeColor,
+            '--file-export-ink': fileExportInk(themeColor),
+          } : undefined} />
+      )}
       {pendingFileExport && visible && (
         <AppFileExportDialog appName={appName} themeColor={themeColor} request={pendingFileExport}
           onCancel={cancelFileExport}

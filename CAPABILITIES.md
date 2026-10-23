@@ -714,7 +714,7 @@ expose shell tokens, paths, browser internals, or another app's activity.
 Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
-- `device.storage`, `device.asset-cache`
+- `device.storage`, `device.asset-cache`, `device.folders`
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.current`, `location.watch`
@@ -763,6 +763,26 @@ app-owned identifiers; values must be JSON. This storage is best-effort and
 device-local: clearing site data removes it, it is not synchronized, and it is
 not a substitute for `window.mobius.storage` when data belongs to the owner or
 must be shared between visitors.
+
+### Folders on the owner's computer
+
+`device.folders` lets an opaque app read files from folders the owner connects
+in this browser. The shell owns the File System Access handles (in its own
+`mobius-local-folders` IndexedDB, cleared on logout) and records, per folder,
+the exact app ids the owner approved. Every grant and every browser
+re-permission happens on a click in a shell dialog the app cannot draw, which
+also supplies the user activation the browser requires.
+
+Operations: `list` → `{supported, folders: [{id, name, ready}]}`; `connect` →
+`{id, name}` (dialog: reuse a connected folder or choose a new one); `entries`
+`{folderId, path?, recursive?, maxEntries?}` → `{entries: [{path, name, kind,
+size?, modified?}], truncated}`; `read` `{folderId, path}` → `{path, name, type,
+size, modified, bytes}` with `bytes` transferred; `forget` `{folderId}` removes
+this app's grant and drops the folder when no app keeps it. Paths are relative,
+`/`-separated names; `.` and `..` are refused. Reviewed limits are
+`max_file_bytes` (default 64 MiB) and `max_entries` (default 5000). Browsers
+without `showDirectoryPicker` report `supported: false` and refuse `connect`
+with `unavailable`.
 
 ### Large public assets stored on one device
 
