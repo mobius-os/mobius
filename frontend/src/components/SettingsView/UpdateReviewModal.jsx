@@ -4,7 +4,7 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
+import { retiredLocalCopies, shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
 import { deploymentKindLabel, platformActivationLabel, reviewedUpdateUsesContainerRebuild } from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import UpdateRepairAction from './UpdateRepairAction.jsx'
@@ -27,6 +27,19 @@ function localImagePathLabel(path) {
   if (path.startsWith('backend/runtime/')) return 'Protected startup files'
   if (path.includes('entrypoint')) return 'Startup behavior'
   return 'System setup'
+}
+
+export function RetiredLocalCopies({ copies }) {
+  if (!copies.length) return null
+  return (
+    <section className="urm__retired">
+      <h3>Local copies that will be replaced</h3>
+      <p>These changes were merged into Möbius, so the update uses the released version. A snapshot of your old copies is saved on the server; the three most recent snapshots are kept.</p>
+      <ul>{copies.map(copy => <li key={copy.path}>
+        <code>{copy.path}</code> · from <a href={copy.url} target="_blank" rel="noopener noreferrer">#{copy.pr}</a>
+      </li>)}</ul>
+    </section>
+  )
 }
 
 export default function UpdateReviewModal({
@@ -104,6 +117,7 @@ export default function UpdateReviewModal({
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
   const localImagePaths = preview?.local_image_paths || []
+  const retiredCopies = retiredLocalCopies(preview)
   // Predicted with the same merge Apply runs: an agent merges these instead
   // of Apply stopping on them.
   const overlaps = !finish && preview?.conflict_paths?.length > 0
@@ -157,7 +171,7 @@ export default function UpdateReviewModal({
                     <p>{overlaps
                       ? 'Some of your local changes overlap this update.'
                       : repairReason || (finish ? 'Finish setting up the installed update.'
-                      : 'Install this reviewed update while keeping your changes. If anything overlaps, Möbius pauses and asks you to resolve it.')}</p>
+                      : `Install this reviewed update while keeping your changes${retiredCopies.length ? ', except local copies this release already includes (listed below)' : ''}. If anything overlaps, Möbius pauses and asks you to resolve it.`)}</p>
                     <h3>What to expect</h3>
                     <p>{overlaps
                       ? 'Möbius will keep running as it is. An agent merges the overlapping files on a separate copy, checks the result, and finishes the update.'
@@ -171,6 +185,7 @@ export default function UpdateReviewModal({
                     {localImagePaths.length > 0 && !repairReason && <p>Your changes to how Möbius itself runs stay saved, but the official system doesn’t run them. Afterwards, ask Möbius to set up anything you still need another way.</p>}
                     {rebuildUpdate && !repairReason && <p>If the updated system does not pass its checks, Möbius tries to restore the previous system image. Your chats, apps, data, and newly installed source stay in place, so that combination may still need attention.</p>}
                   </section>
+                  <RetiredLocalCopies copies={retiredCopies} />
                   <details className="urm__technical">
                     <summary>Technical details{summary.fileCount ? ` · ${summary.fileCount} files` : ''}</summary>
                     <p>Reviewed version <code className="urm__sha">{target}</code> · {activation && deploymentKindLabel(activation)}</p>

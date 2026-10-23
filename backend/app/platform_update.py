@@ -486,8 +486,8 @@ class PlatformUpdatePreview(TypedDict):
   local_image_paths: list[str]
   # Unchanged local copies of pull requests this release merged; Apply takes
   # the release's version of each (``app_git.without_retired_units``). The
-  # Settings update review does not list them yet; the old copies stay
-  # recoverable under the ``retired-*`` set-aside pins.
+  # Settings update review lists them; a snapshot of the old copies is pinned
+  # under a ``retired-*`` set-aside ref (the newest three are kept).
   retired_paths: NotRequired[list[dict]]
   # Evidence from preparation, not a claim about later replayed edits.
   local_tests: NotRequired[dict]
