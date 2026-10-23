@@ -6,12 +6,13 @@ An ambiguous merge receipt is never retried: reconcile read-only or ask the owne
 """
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import HTTPException
-from sqlalchemy import or_, update
+from sqlalchemy import String, and_, cast, func, not_, or_, select, update
 
 from app import agent_work_claims, models
 from app.contribution_errors import ContributionSubmitError
@@ -162,7 +163,7 @@ def checks_blocker(pr) -> str | None:
 
 
 def pull_checks(gh, cwd, target):
-  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
+  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id enqueuedAt} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
                          "-f", f"id={target['pr_id']}").stdout)
   if result.get("errors") or not (result.get("data") or {}).get("node"):
@@ -181,7 +182,7 @@ def queue_entry(pr, target):
 def enqueue(gh, cwd, target):
   query = """mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{
     pullRequestId:$id,expectedHeadOid:$head,jump:false
-  }){mergeQueueEntry{id}}}"""
+  }){mergeQueueEntry{id enqueuedAt}}}"""
   response = gh(cwd, "api", "graphql", "-f", f"query={query}",
     "-f", f"id={target['pr_id']}", "-f", f"head={target['head_sha']}", check=False)
   result = graphql_mutation_result(response)
@@ -240,6 +241,40 @@ def head_branch_identity(target) -> tuple[int, str] | None:
   return repo_id, ref
 
 
+def _transition_candidates(db, owner_id, target):
+  """Project only possibly overlapping grants; retain unmatchable legacy rows.
+
+  Consent is an immutable JSON array. Correlated json_each keeps disjoint
+  well-formed branches out of Python without assuming legacy rows are safe.
+  The Python fence below remains authoritative for receipt state and identity.
+  """
+  run = models.ContributionReviewRun
+  # SQLite JSON1 projection: SQLite is the sole shipped runtime (ARCHITECTURE.md).
+  frozen = func.json_each(run.targets_json).table_valued("value").alias("frozen_target")
+  value = frozen.c.value
+  repo = func.json_extract(value, "$.repo")
+  number = func.json_extract(value, "$.number")
+  repo_id = func.json_extract(value, "$.head_repo_id")
+  ref = func.json_extract(value, "$.head_ref")
+  usable = func.coalesce(and_(
+    func.json_type(value, "$.head_repo_id") == "integer", repo_id > 0,
+    func.json_type(value, "$.head_ref") == "text", func.length(ref) > 0,
+    # Match Python str.strip for legacy identity classification, not just SQL spaces.
+    func.trim(ref, "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+      "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+      "\u2028\u2029\u202f\u205f\u3000") == ref), False)
+  branch = head_branch_identity(target)
+  query = db.query(run.id, run.chat_id, run.targets_json, run.outcomes_json).filter(run.owner_id == owner_id)
+  if branch is not None:
+    overlap = or_(and_(func.lower(repo) == target["repo"].lower(), number == target["number"]),
+      and_(repo_id == branch[0], ref == branch[1]),
+      and_(func.lower(repo) == target["repo"].lower(), not_(usable)))
+  else:
+    overlap = func.lower(repo) == target["repo"].lower()
+  query = query.filter(select(1).select_from(frozen).where(overlap).correlate(run).exists())
+  return query.all()
+
+
 def require_public_transition_clear(db, row, target):
   """New mutations must not cross an unresolved item or head-branch attempt.
 
@@ -247,8 +282,10 @@ def require_public_transition_clear(db, row, target):
   infer resolution from the PR projection, which can lag a public branch push.
   Call again under the database fence after claim acquisition commits.
   """
-  grants = db.query(models.ContributionReviewRun).filter_by(
-    owner_id=row.owner_id).populate_existing().all()
+  grants = _transition_candidates(db, row.owner_id, target)
+  # Projection does not refresh the ORM identity map. Re-read the owning row
+  # explicitly so receipts admitted during claim commit are not overwritten.
+  db.refresh(row)
   original = next(t for t in row.targets_json if key(t) == key(target))
   current = effective_target(row, original)
   if current["head_sha"] != target["head_sha"] or current["base_sha"] != target["base_sha"]:
@@ -257,8 +294,8 @@ def require_public_transition_clear(db, row, target):
   for grant in grants:
     for original in grant.targets_json:
       item = (grant.outcomes_json or {}).get(key(original), {})
-      merge_pending = item.get("state") != "merged" and (
-        item.get("merge_attempted") or item.get("state") in {"merging", "merge_unknown", "queued"})
+      merge_pending = (item.get("state") != "merged" and merge_attempted(item)
+        and not (grant.id == row.id and item.get("queue_removal")))
       repair_pending = any(a.get("state") in {"pushing", "push_unknown"}
         for a in item.get("repair_attempts", []))
       ready = item.get("ready_attempt")
@@ -326,19 +363,27 @@ def arm_merge(db, row, target, outcome, principal):
                         + ("Your Goal follows this claim and will receive its result." if follows else
                            f"No new Goal follow was created ({follow_status}); reconcile the result yourself."))}
   item_key = key(target)
-  previous = db.query(models.ContributionReviewRun).filter(
+  item = models.ContributionReviewRun.outcomes_json[item_key]
+  # Filter by PR key and either the current attempt or a historical same-head
+  # attempt. The second clause is a coarse SQL prefilter; Python proves shape.
+  candidates = db.query(models.ContributionReviewRun.id,
+      models.ContributionReviewRun.chat_id, item).filter(
     models.ContributionReviewRun.owner_id == row.owner_id,
-    models.ContributionReviewRun.outcomes_json[item_key]["head_sha"].as_string() == target["head_sha"],
-    or_(models.ContributionReviewRun.outcomes_json[item_key]["merge_attempted"].as_boolean().is_(True),
-        models.ContributionReviewRun.outcomes_json[item_key]["state"].as_string().in_(
-          ("merging", "merge_unknown", "queued", "merged"))),
-  ).populate_existing().first()
+    or_(item["head_sha"].as_string() == target["head_sha"],
+      cast(item["merge_attempts"], String).like(f"%{target['head_sha']}%")),
+  ).all()
+  previous = next(((grant_id, chat_id, saved) for grant_id, chat_id, saved in candidates
+    if isinstance(saved, dict) and any(
+      isinstance(attempt, dict) and attempt.get("head_sha") == target["head_sha"]
+        and merge_attempted(attempt)
+      for attempt in [saved, *(saved.get("merge_attempts") if isinstance(saved.get("merge_attempts"), list) else [])])), None)
   if previous is not None:
     # Claim acquisition commits and refreshes ORM state. Recheck this row too:
     # another worker may have armed it while this one awaited GitHub preflight.
-    result = {**previous.outcomes_json[item_key], "review_selection_id": previous.id} if previous.id == row.id else {
-              **outcome, "state": "needs_you", "review_chat_id": previous.chat_id,
-              "review_selection_id": previous.id,
+    prior_id, prior_chat_id, prior_item = previous
+    result = {**prior_item, "review_selection_id": prior_id} if prior_id == row.id and prior_item.get("head_sha") == target["head_sha"] else {
+              **outcome, "state": "needs_you", "review_chat_id": prior_chat_id,
+              "review_selection_id": prior_id,
               "summary": "An earlier review already attempted this exact merge. Follow its saved result; no request was repeated."}
     db.rollback()
     return result
@@ -697,7 +742,7 @@ def arm_repair(db, row, target, previous, receipt, principal):
     save_outcome(db, row, key(target), {**row.outcomes_json.get(key(target), {}),
       "state": "needs_you", "summary": summary, "review_chat_id": claim["owner_chat_id"]})
     return summary
-  grants = db.query(models.ContributionReviewRun).filter_by(owner_id=row.owner_id).populate_existing().all()
+  grants = _transition_candidates(db, row.owner_id, target)
   for grant in grants:
     for item in (grant.outcomes_json or {}).values():
       for attempt in item.get("repair_attempts", []):
@@ -740,10 +785,21 @@ must not be all_clear. Return findings to the owning parent conversation.
 
 
 def confirmed_successor(previous, attempts, receipt):
-  """A new head clears obsolete review evidence, never the audit receipts."""
-  outcome = {k: v for k, v in previous.items() if k not in {
-    "base_advance", "checkout", "reviewed_base_sha", "independent_receipt_id",
-    "scope", "tests", "tests_passed", "next_step"}}
+  """Keep the archived predecessor while clearing ONLY its active overlay."""
+  outcome = dict(previous)
+  if merge_attempted(previous):
+    if (not previous.get("queue_removal") or receipt["head_sha"] == previous.get("head_sha")):
+      raise HTTPException(409, "A merge attempt cannot be cleared without a newly repaired successor.")
+    fields = ("head_sha", "merge_attempted", "queue_entry_id", "queue_enqueued_at",
+              "queue_removal", "merge_sha")
+    if not any(a.get("head_sha") == previous.get("head_sha")
+        and a.get("queue_removal") == previous["queue_removal"]
+        and merge_attempted(a) for a in previous.get("merge_attempts", [])):
+      raise HTTPException(409, "The removed attempt must retain its immutable history.")
+    for field in (*fields, "queue_receipt_unconfirmed", "reviewed_base_sha", "independent_receipt_id", "scope", "tests", "tests_passed"):
+      outcome.pop(field, None)
+  for field in ("base_advance", "checkout", "reviewed_base_sha", "independent_receipt_id", "scope", "tests", "tests_passed", "next_step"):
+    outcome.pop(field, None)
   return {**outcome, "repair_attempts": attempts,
     "successor": {"head_sha": receipt["head_sha"], "base_sha": receipt["base_sha"]},
     "head_sha": receipt["head_sha"], "state": "reviewing",
@@ -919,3 +975,174 @@ def disarm_ready(db, row, target, receipt_id):
     "ready_audit": audit})
   agent_work_claims.finish_work(db, owner_id=row.owner_id, chat_id=row.chat_id,
     work_key=ready_work_key(target), outcome="Draft readiness was not attempted.", release=True)
+
+
+def merge_attempted(outcome):
+  return outcome.get("merge_attempted") is True or outcome.get("state") in {
+    "merging", "merge_unknown", "queued", "merged"}
+
+
+def queue_receipt(entry):
+  # Do not replace a saved admission with a later external requeue.
+  timestamp = entry.get("enqueuedAt")
+  if _queue_time(timestamp) is None:
+    # Only receipts saved before this protocol may use the legacy exception.
+    return {"queue_entry_id": entry["id"], "queue_receipt_unconfirmed": True}
+  return {"queue_entry_id": entry["id"], "queue_enqueued_at": timestamp}
+
+
+def _queue_time(value):
+  if not isinstance(value, str) or len(value) > 40:
+    return None
+  try:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else None
+  except ValueError:
+    return None
+
+
+def _ordered_queue_events(timeline):
+  """Accept complete alternating queue cycles, including equal-time events."""
+  if not isinstance(timeline, dict):
+    return None
+  page = timeline.get("pageInfo")
+  if not isinstance(page, dict):
+    return None
+  events = timeline.get("nodes")
+  if (page.get("hasPreviousPage") is not False or page.get("hasNextPage") is not False
+      or not isinstance(events, list) or not 2 <= len(events) <= 100 or len(events) % 2):
+    return None
+  last_time = None
+  ids = set()
+  for index, event in enumerate(events):
+    expected = "AddedToMergeQueueEvent" if index % 2 == 0 else "RemovedFromMergeQueueEvent"
+    if not isinstance(event, dict):
+      return None
+    timestamp = _queue_time(event.get("createdAt"))
+    event_id = event.get("id")
+    if (event.get("__typename") != expected or not isinstance(event_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_+/=-]{1,256}", event_id)
+        or event_id in ids or timestamp is None
+        or (last_time is not None and timestamp < last_time)):
+      return None
+    last_time = timestamp
+    ids.add(event_id)
+  return events
+
+
+_QUEUE_PROOF_UNAVAILABLE = object()
+
+
+def confirmed_queue_removal(gh, cwd, target, previous, *, unavailable_marker=None):
+  """Prove the saved admission ended, never infer it from missing entry/checks.
+
+  Queue removal events have no entry id, and beforeCommit is a synthetic
+  merge-group commit, NOT the PR head. Match the saved unique admission by timestamp;
+  legacy receipts require a unique pair in the complete queue-event history.
+  A bounded incomplete history deliberately blocks rather than guessing.
+  """
+  if (not previous.get("queue_entry_id") or previous.get("queue_receipt_unconfirmed")
+      or previous.get("head_sha") != target["head_sha"]):
+    return None
+  query = """query($id:ID!){node(id:$id){... on PullRequest {
+    id headRefOid state merged mergeQueueEntry{id}
+    timelineItems(last:100,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){
+      pageInfo{hasPreviousPage hasNextPage} nodes{
+        __typename
+        ... on AddedToMergeQueueEvent{id createdAt}
+        ... on RemovedFromMergeQueueEvent{id createdAt}
+      }
+    }
+  }}}"""
+  try:
+    result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
+      "-f", f"id={target['pr_id']}").stdout)
+    if not isinstance(result, dict):
+      return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+      return None
+    pr = data.get("node")
+    if not isinstance(pr, dict):
+      return None
+    if (result.get("errors") or pr.get("id") != target["pr_id"]
+        or pr.get("headRefOid") != target["head_sha"] or pr.get("state") != "OPEN"
+        or pr.get("merged") is not False or "mergeQueueEntry" not in pr
+        or pr["mergeQueueEntry"] is not None):
+      return None
+    events = _ordered_queue_events(pr.get("timelineItems"))
+    if events is None:
+      return None
+    enqueued_at = previous.get("queue_enqueued_at")
+    if enqueued_at is None:
+      # A legacy receipt has no admission timestamp: one complete cycle only.
+      if len(events) != 2:
+        return None
+      pair = 0
+    else:
+      admission = _queue_time(enqueued_at)
+      if admission is None:
+        return None
+      matching = [i for i in range(0, len(events), 2)
+        if _queue_time(events[i]["createdAt"]) == admission]
+      if len(matching) != 1:
+        return None
+      pair = matching[0]
+    added, removed = events[pair:pair + 2]
+    proof = {"queue_entry_id": previous["queue_entry_id"],
+      "head_sha": target["head_sha"], "added_event_id": added["id"],
+      "enqueued_at": added["createdAt"], "removed_event_id": removed["id"],
+      "removed_at": removed["createdAt"]}
+    if previous.get("queue_removal") not in (None, proof):
+      return None
+    return proof
+  except (subprocess.SubprocessError, OSError, json.JSONDecodeError, ContributionSubmitError):
+    # Provider/transport failure is unknown; never expose raw diagnostics.
+    return unavailable_marker
+
+
+def reconcile_merge(gh, cwd, target, previous, pull):
+  if pull.get("merged"):
+    return {**previous, "state": "merged", "merge_sha": pull.get("merge_commit_sha")}
+  checks = pull_checks(gh, cwd, target)
+  entry = queue_entry(checks, target)
+  if entry:
+    receipt = {} if previous.get("queue_entry_id") else {
+      "queue_entry_id": entry["id"], "queue_receipt_unconfirmed": True}
+    return {**previous, **receipt, "state": "queued"}
+  proof = confirmed_queue_removal(gh, cwd, target, previous,
+    unavailable_marker=_QUEUE_PROOF_UNAVAILABLE)
+  if proof is _QUEUE_PROOF_UNAVAILABLE:
+    # A failed observation cannot retract an already persisted removal fact.
+    # Action boundaries still revalidate it and fail closed on unavailable reads.
+    return previous if previous.get("queue_removal") else {**previous,
+      "state": "merge_unknown", "summary":
+      "The exact earlier merge/queue attempt remains unclear. It was not repeated."}
+  if pull.get("state") == "open" and proof:
+    history = list(previous.get("merge_attempts", []))
+    if not any(a.get("head_sha") == target["head_sha"] for a in history):
+      # Snapshot the complete prior attempt/review before repair can replace
+      # active state or evidence. Exclude aggregate audit lists to avoid
+      # recursively copying earlier attempts at every successor.
+      snapshot = {k: v for k, v in previous.items() if k not in {
+        "steps", "merge_attempts", "repair_attempts", "independent_reviews", "reviewer_steps", "ready_audit", "checkout"}}
+      history.append({**snapshot, "merge_attempted": True, "queue_removal": proof})
+    return {**previous, "merge_attempts": history,
+      "merge_attempted": True, "state": "needs_you", "queue_removal": proof,
+      "summary": "The saved queue admission was removed. Only a new repaired successor with fresh independent review may proceed; this head cannot be retried."}
+  return {**previous, "state": "merge_unknown",
+    "summary": "The exact earlier merge/queue attempt remains unclear. It was not repeated."}
+
+
+def require_repairable_merge(gh, cwd, target, previous):
+  """Revalidate immediately before checkout/public repair, not just observation."""
+  if not merge_attempted(previous):
+    return
+  repo, pull = current_pull(gh, cwd, target)
+  if not merge_permission(repo):
+    raise HTTPException(403, "Your repository write permission is no longer available.")
+  proof = confirmed_queue_removal(gh, cwd, target, previous)
+  if pull.get("state") != "open" or pull.get("merged") or not proof:
+    raise HTTPException(409, "The saved merge attempt has no confirmed queue removal. No repair may start.")
+  if previous.get("queue_removal") != proof:
+    raise HTTPException(409, "Observe the confirmed queue removal before preparing a repaired successor.")

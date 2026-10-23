@@ -437,14 +437,7 @@ def _merge_attempted(outcome) -> bool:
 
 
 async def _reconcile_merge(previous, target, pull, cwd):
-  if pull.get("merged"):
-    return {**previous, "state": "merged", "merge_sha": pull.get("merge_commit_sha")}
-  checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)  # unsettled: read-only (GitHub API reads)
-  entry = reviews.queue_entry(checks, target)
-  if entry:
-    return {**previous, "state": "queued", "queue_entry_id": entry["id"]}
-  return {**previous, "state": "merge_unknown", "summary":
-    "The earlier merge or queue request is not confirmed. Check GitHub; it was not repeated."}
+  return await asyncio.to_thread(reviews.reconcile_merge, _gh, cwd, target, previous, pull)  # unsettled: read-only (GitHub merge and queue proof)
 
 
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/outcomes",
@@ -787,8 +780,7 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
         _repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub API reads)
         outcome = await _reconcile_merge(previous, target, pull, cwd)
       except HTTPException:
-        # A failed read proves no new fact; historical review evidence and the
-        # exact public-attempt fence both remain intact.
+        # A failed read proves no new fact; preserve evidence and attempt fence.
         continue
       if outcome != previous:
         reviews.save_effect_outcome(db, row, reviews.key(original), outcome)
@@ -946,8 +938,6 @@ async def repair_checkout(app_id: int | None, run_id: str, body: RepairCheckout,
     target = _target(row, body)
     previous = row.outcomes_json.get(reviews.key(target), {})
     _require_ready_attempt_resolved(previous, target)
-    if previous.get("merge_attempted") or previous.get("state") in {"merged", "queued", "merge_unknown"}:
-      raise HTTPException(409, "An existing merge attempt must be reconciled before any repair.")
     attempts = previous.get("repair_attempts", [])
     if any(r.get("state") in {"pushing", "push_unknown"} for r in attempts):
       raise HTTPException(409, "An earlier push has an unclear public outcome. Reconcile it; do not prepare another repair.")
@@ -958,6 +948,8 @@ async def repair_checkout(app_id: int | None, run_id: str, body: RepairCheckout,
       actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
       if str(actor.get("id") or "") != row.github_actor_id:
         raise HTTPException(409, "The connected GitHub actor changed. Approve a new selection.")
+      await asyncio.to_thread(reviews.require_repairable_merge, _gh, cwd, target, previous)  # unsettled: read-only (exact saved queue removal)
+      _parent(db, row, principal)
       if (previous.get("checkout") and previous["checkout"].get("initial_head_sha") == target["head_sha"]
           and repairs.checkout_present(previous["checkout"].get("checkout"))):
         checkout = {**previous["checkout"], "target_base_sha": await settled.run_settled(
@@ -1022,6 +1014,8 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
       actor = await asyncio.to_thread(reviews.read, _gh, cwd, "user")  # unsettled: read-only (GitHub observation; no mutation)
       if str(actor.get("id") or "") != row.github_actor_id:
         raise HTTPException(409, "The connected GitHub actor changed. No push started.")
+      await asyncio.to_thread(reviews.require_repairable_merge, _gh, cwd, target, previous)  # unsettled: read-only (exact saved queue removal)
+      _parent(db, row, principal)
       current_base = await asyncio.to_thread(reviews.base_head, _gh, cwd, target["repo"], target["base_ref"])  # unsettled: read-only (GitHub observation; no mutation)
       await asyncio.to_thread(reviews.assert_approved_base_ancestry, _gh, cwd, target, current_base)  # unsettled: read-only (GitHub ancestry proof; no mutation)
       try:
@@ -1032,6 +1026,8 @@ async def publish_repair(app_id: int | None, run_id: str, body: RepairPublish,
         raise
       if await asyncio.to_thread(reviews.base_head, _gh, cwd, target["repo"], target["base_ref"]) != current_base:  # unsettled: read-only (GitHub observation; no mutation)
         raise HTTPException(409, "The target base moved during repair validation. Test the new combined result first.")
+      if previous.get("queue_removal") and validation["head_sha"] == target["head_sha"]:
+        raise HTTPException(409, "A removed queue head cannot be retried. Prepare a new repaired successor.")
       validation["base_sha"] = current_base
       receipt = {**validation, "id": str(uuid.uuid4()), "state": "pushing",
         "from_sha": target["head_sha"], "summary": body.summary, "tests": body.tests,

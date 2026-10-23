@@ -108,6 +108,9 @@ async def dispatch_repair(row, target, validation, *, gh, cwd, authorize):
   async def guard():
     try:
       authorize()
+      previous = dict((row.outcomes_json or {}).get(reviews.key(target), {}))
+      await asyncio.to_thread(reviews.require_repairable_merge, gh, cwd, target, previous)  # unsettled: read-only (saved queue removal proof)
+      authorize()
     except HTTPException as exc:
       raise NotDispatched(str(exc.detail)) from exc
   def before_push():
