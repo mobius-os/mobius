@@ -533,6 +533,54 @@ def test_a_runtime_limit_change_changes_the_row_text():
   assert rows(2 * 1024 ** 3)["device.asset-cache"].endswith("max_bytes 2 GiB.")
 
 
+def _runtime_contract(**limits):
+  contract = _contract()
+  contract["runtime"] = {"media.camera.capture": {
+    "title": "Record video", "description": "Use a device camera.",
+    "limits": {"max_duration_ms": 60_000, "max_bytes": 128 * 1024 * 1024, **limits},
+    "reason": None,
+  }}
+  return contract
+
+
+def test_runtime_limits_are_part_of_the_accepted_answer(db):
+  app = _accepted(db, "camera", _runtime_contract())
+  assert app.accepted_consent["rows"] == [{
+    "id": "media.camera.capture", "rank": 1,
+    "limits": {"max_bytes": 128 * 1024 * 1024, "max_duration_ms": 60_000},
+  }]
+  assert app_consent.status(app) == "accepted"
+
+
+def test_raising_a_runtime_limit_asks_again_but_lowering_it_does_not(db):
+  app = _accepted(db, "camera-update", _runtime_contract())
+  app.capability_contract = _runtime_contract(max_duration_ms=30_000)
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _runtime_contract(max_duration_ms=300_000)
+  assert app_consent.status(app) == "required"
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["media.camera.capture"]
+
+
+def test_changed_runtime_limits_change_the_digest_so_a_stale_accept_fails(db):
+  app = _app(db, "camera-stale", contract=_runtime_contract())
+  shown = app_consent.request_digest(app_consent.current_rows(app))
+  app.capability_contract = _runtime_contract(max_bytes=256 * 1024 * 1024)
+  assert not app_consent.accept(app, shown)
+  assert app.accepted_consent is None
+
+
+def test_an_answer_saved_without_runtime_limits_asks_once_more(db):
+  # Rows accepted before limits were recorded say nothing about the limits the
+  # owner saw, so they cannot cover any; one new answer records them.
+  app = _app(db, "camera-legacy", contract=_runtime_contract(), accepted={
+    "id": "legacy", "version": 1, "rows": [{"id": "media.camera.capture", "rank": 1}],
+    "digest": "", "at": "2026-10-21T12:00:00Z", "via": "owner",
+  })
+  assert app_consent.status(app) == "required"
+  assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
+  assert app_consent.status(app) == "accepted"
+
+
 def test_installed_rows_use_the_installed_versions_templates():
   from app import schemas
 
