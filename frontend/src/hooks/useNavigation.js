@@ -25,7 +25,7 @@ import {
 } from '../lib/navigationPersistence.js'
 import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
 import { shellReload } from '../lib/shellReloadState.js'
-import { isOwnerWorkspace, ownerStore } from '../lib/workspaceStorage.js'
+import { isOwnerWorkspace, localStore, ownerStore } from '../lib/workspaceStorage.js'
 import { recordClientError } from '../lib/errorLog.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
@@ -169,7 +169,7 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
   beforeRestoreRouteRef,
-  navigationStorage = localStorage,
+  navigationStorage = localStore(),
   routePath = '/shell/',
 }) {
   // Monotonic presentation signal for re-revealing an already-active tab. The

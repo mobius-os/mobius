@@ -30,6 +30,9 @@ export default function useOutboxDrain() {
         while (requested && !disposed && getDeliveryReadySnapshot()) {
           requested = false
           await drainOutbox({
+            // Replay is global singleflight: a replacement effect can share
+            // this admitted batch, so only readiness may pause its claims.
+            canDeliver: getDeliveryReadySnapshot,
             deliver: record => getDeliveryReadySnapshot()
               ? deliverIntent(record, requestOutboxDelivery)
               : 'retry',

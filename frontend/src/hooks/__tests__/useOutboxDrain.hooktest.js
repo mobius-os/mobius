@@ -24,7 +24,21 @@ test('outbox readiness owns restart suspension and answer-triggered follow-up de
   }
   globalThis.window = new EventTarget()
   globalThis.document = Object.assign(new EventTarget(), { visibilityState: 'visible' })
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } })
+  let replayLocked = false
+  let replayGate = Promise.resolve()
+  const locks = {
+    request(name, options, callback) {
+      if (typeof options === 'function') { callback = options; options = {} }
+      if (replayLocked) {
+        if (options.ifAvailable) return Promise.resolve(callback(null))
+        throw new Error('unexpected nested replay lock request')
+      }
+      replayLocked = true
+      return replayGate.then(() => callback({ name }))
+        .finally(() => { replayLocked = false })
+    },
+  }
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true, locks } })
   globalThis.indexedDB = new IDBFactory()
   let serviceReady = false
   let bootId = 'boot-a'
@@ -42,23 +56,33 @@ test('outbox readiness owns restart suspension and answer-triggered follow-up de
   }
   const connectivity = await import('../../lib/connectivityStore.js')
   restart = connectivity.setRestartPending
-  const { enqueueIntent, markIntentLocallyQueued, listIntents, outboxPrincipalKey, clearOutboxForTests, retireIntent } = await import('../../components/ChatView/chatOutbox.js')
+  const {
+    enqueueIntent, markIntentLocallyQueued, listIntents, outboxPrincipalKey,
+    clearOutboxForTests, retireIntent, editLocalIntent, cancelLocalIntent,
+  } = await import('../../components/ChatView/chatOutbox.js')
   const { default: useOutboxDrain } = await import('../useOutboxDrain.js')
   const principalKey = outboxPrincipalKey(token)
-  for (const cid of ['first', 'second']) {
-    assert.equal(await enqueueIntent({ chatId: 'chat', cid, principalKey, body: { cid, text: cid } }), true)
+  for (const cid of ['first', 'second', 'third']) {
+    assert.equal(await enqueueIntent({ chatId: 'chat', cid, principalKey, body: { cid, content: cid } }), true)
   }
   const hook = renderHook(useOutboxDrain)
   t.after(() => hook.unmount())
   await connectivity.verifyConnectivity()
   assert.deepEqual(posts, [], 'reachable 503 is not delivery readiness')
-  assert.equal((await listIntents(principalKey)).length, 2)
+  assert.equal((await listIntents(principalKey)).length, 3)
   serviceReady = true
   await connectivity.verifyConnectivity()
   for (let n = 0; n < 40 && posts.length === 0; n++) await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(posts, ['first'])
-  for (let n = 0; n < 40 && (await listIntents(principalKey)).length !== 1; n++) await new Promise(resolve => setImmediate(resolve))
-  assert.equal((await listIntents(principalKey)).length, 1)
+  for (let n = 0; n < 80 && (replayLocked || (await listIntents(principalKey)).length !== 2); n++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(replayLocked, false)
+  assert.deepEqual((await listIntents(principalKey)).map(record => [record.cid, record.dispatchStarted]), [
+    ['second', false], ['third', false],
+  ], 'restart suspension must not claim messages it cannot POST')
+  const owner = { chatId: 'chat', principalKey }
+  assert.equal((await editLocalIntent('second', { ...owner, content: 'edited before recovery' })).status, 'saved')
+  assert.equal((await cancelLocalIntent('third', owner)).status, 'cancelled')
+  assert.equal((await listIntents(principalKey))[0].body.content, 'edited before recovery')
   assert.equal(connectivity.getDeliveryReadySnapshot(), false)
   await connectivity.verifyConnectivity()
   assert.deepEqual(posts, ['first'], 'old ready boot cannot release the second intent')
@@ -115,5 +139,31 @@ test('outbox readiness owns restart suspension and answer-triggered follow-up de
       ? [followup, answer, followup] : [followup, followup],
     'answer acknowledgement uses the existing coalesced drain to release B without a new wake')
   }
+
+  await t.test('a held replay survives effect unmount and remount without another readiness edge', async remount => {
+    for (let n = 0; n < 80 && replayLocked; n++) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(replayLocked, false)
+    hook.unmount()
+    const start = posts.length
+    const cid = 'retained-across-remount'
+    await enqueueIntent({ chatId: 'chat', cid, principalKey, body: { cid, content: 'retained' } })
+    let releaseReplay
+    replayGate = new Promise(resolve => { releaseReplay = resolve })
+    remount.after(() => releaseReplay())
+    const firstMount = renderHook(useOutboxDrain)
+    remount.after(() => firstMount.unmount())
+    await connectivity.verifyConnectivity()
+    for (let n = 0; n < 80 && !replayLocked; n++) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(replayLocked, true, 'the first mount is waiting to enter its replay lock')
+    firstMount.unmount()
+    const secondMount = renderHook(useOutboxDrain)
+    remount.after(() => secondMount.unmount())
+    await connectivity.verifyConnectivity()
+    assert.equal(connectivity.getDeliveryReadySnapshot(), true)
+    releaseReplay()
+    for (let n = 0; n < 80 && (replayLocked || posts.length === start); n++) await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(posts.slice(start), [cid], 'the coalesced global replay must outlive the retired effect')
+    assert.deepEqual(await listIntents(principalKey), [])
+  })
 
 })
