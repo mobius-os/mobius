@@ -13,6 +13,7 @@ import {
   createDeviceStorageProvider,
   DEVICE_STORAGE,
 } from './deviceStorage.js'
+import { createFoldersProvider, DEVICE_FOLDERS } from './localFolders.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 export const CAMERA_CAPTURE = 'media.camera.capture'
@@ -194,6 +195,7 @@ export function builtInCapabilityProviders(options = {}) {
   return {
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [DEVICE_STORAGE]: createDeviceStorageProvider(options.deviceStorage),
+    ...(options.folders ? { [DEVICE_FOLDERS]: createFoldersProvider(options.folders) } : {}),
     [CAMERA_CAPTURE]: createCameraProvider(options.camera),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
     [SPEECH]: createSpeechProvider(options.speech),
