@@ -305,8 +305,10 @@ def test_owner_top_level_agent_and_scoped_app_keep_external_controls(
   from app.routes import github, identity
 
   auths, app_id = _external_control_auth(client, owner_token, db)
+  mutations = []
 
   async def mutate(*args, **kwargs):
+    mutations.append((args, kwargs))
     return {"instance": {"id": "mob_example"}}
 
   monkeypatch.setattr(identity, "_railway_mutation", mutate)
@@ -314,11 +316,14 @@ def test_owner_top_level_agent_and_scoped_app_keep_external_controls(
   monkeypatch.setattr(github.github_auth, "clear_credentials", lambda: None)
 
   for actor in ("owner", "top_level", "app"):
+    # Deleting a deployment is never performed by Möbius, for any actor: the
+    # owner finishes it on the account website behind their own sign-in.
     railway = client.delete(
       "/api/identity/railway/deployments/mob_example",
       headers=auths[actor],
     )
-    assert railway.status_code == 202, (actor, railway.text)
+    assert railway.status_code == 409, (actor, railway.text)
+    assert railway.json()["detail"]["code"] == "confirm_on_account"
 
     disconnected = client.delete("/api/github/connect", headers=auths[actor])
     assert disconnected.status_code == 200, (actor, disconnected.text)
@@ -338,6 +343,7 @@ def test_owner_top_level_agent_and_scoped_app_keep_external_controls(
       json={"confirm_publication": True},
     )
     assert relay.status_code == 404, (actor, relay.text)
+  assert mutations == []
 
 
 def test_owner_top_level_and_scoped_app_keep_review_control_boundaries(

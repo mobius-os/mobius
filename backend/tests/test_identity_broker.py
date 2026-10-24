@@ -1620,3 +1620,34 @@ def test_shared_inbox_broker_exposes_only_exact_response_route():
   for method, suffix in (("GET", ""), ("DELETE", ""), ("POST", "/other"),
                          ("POST", "?subject=other"), ("POST", "/../grants")):
     assert broker_module._managed_upstream_path(method, "/managed" + path + suffix) is None
+
+
+@pytest.mark.parametrize("method, path", [
+  ("POST", "/api/instance/v1/railway/instances"),
+  ("POST", "/api/instance/v1/railway/instances/mob_example/retry"),
+  ("DELETE", "/api/instance/v1/railway/instances/mob_example"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/compute"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/storage"),
+  ("POST", "/api/instance/v1/railway/instances/mob_example/recovery"),
+  ("POST", "/api/instance/v1/railway/instances/mob_example/confirm-absent"),
+  ("POST", "/api/instance/v1/railway/workspace"),
+  ("POST", "/api/instance/v1/railway/disconnect"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/updates/extra"),
+])
+def test_broker_never_forwards_owner_only_deployment_actions(method, path):
+  # These reach every deployment the owner has; only the owner's own account
+  # session on the website may take them, so an instance cannot ask for them.
+  assert broker_module._managed_upstream_path(method, "/managed" + path) is None
+
+
+@pytest.mark.parametrize("method, path", [
+  ("GET", "/api/instance/v1/railway"),
+  ("GET", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("GET", "/api/instance/v1/railway/instances/mob_example/recovery/status"),
+  ("POST", "/api/instance/v1/railway/connect/start"),
+  ("POST", "/api/instance/v1/railway/plan/refresh"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/updates"),
+])
+def test_broker_keeps_reads_and_reviewed_deployment_writes(method, path):
+  assert broker_module._managed_upstream_path(method, "/managed" + path) == path

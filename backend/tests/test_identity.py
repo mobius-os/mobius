@@ -712,31 +712,9 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   connect = client.post("/api/identity/railway/connect/start", headers=granted)
-  created = client.post(
-    "/api/identity/railway/deployments",
-    json={
-      "name": "Writing room",
-      "managed_auth": True,
-      "cpu": None,
-      "memory_mb": None,
-      "volume_mb": None,
-      "update_policy": "manual",
-      "region": "europe-west4-drams3a",
-      "workspace_id": "ws_personal",
-    },
-    headers=granted,
-  )
   renamed = client.patch(
     "/api/identity/railway/deployments/mob_example",
     json={"name": "Writing room"},
-    headers=granted,
-  )
-  deleted = client.delete(
-    "/api/identity/railway/deployments/mob_example", headers=granted,
-  )
-  storage = client.patch(
-    "/api/identity/railway/deployments/mob_example/storage",
-    json={"volume_mb": 2048},
     headers=granted,
   )
   updates = client.patch(
@@ -744,78 +722,20 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
     json={"update_policy": "manual"},
     headers=granted,
   )
-  invalid_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Wrong region", "region": "unknown", "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-  without_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Legacy request", "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-  null_region = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "No preference", "region": None, "workspace_id": "ws_personal"},
-    headers=granted,
-  )
-
   assert connect.status_code == 200
   assert connect.json()["authorization_url"].startswith("https://www.mobius.you/")
-  assert created.status_code == 202
-  assert invalid_region.status_code == 422
-  assert without_region.status_code == 202
-  assert null_region.status_code == 202
   assert renamed.status_code == 200
-  assert deleted.status_code == 202
-  assert storage.status_code == 200
   assert updates.status_code == 202
   assert calls == [
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {
-        "name": "Writing room",
-        "managed_auth": True,
-        "cpu": None,
-        "memory_mb": None,
-        "volume_mb": None,
-        "update_policy": "manual",
-        "region": "europe-west4-drams3a",
-        "workspace_id": "ws_personal",
-      },
-    ),
     (
       "PATCH",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
       {"name": "Writing room"},
     ),
     (
-      "DELETE",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
-      None,
-    ),
-    (
-      "PATCH",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/storage",
-      {"volume_mb": 2048},
-    ),
-    (
       "PATCH",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example/updates",
       {"update_policy": "manual"},
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {"name": "Legacy request", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances",
-      {"name": "No preference", "managed_auth": True, "cpu": None,
-       "memory_mb": None, "volume_mb": None, "workspace_id": "ws_personal"},
     ),
   ]
 
@@ -868,42 +788,36 @@ class _Upstream:
     return self._payload
 
 
-def test_railway_create_forwards_its_stripped_workspace(client, auth, monkeypatch):
-  granted, calls = _linked_railway_bridge(
-    client, auth, monkeypatch,
-    lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
-  )
-  response = client.post(
-    "/api/identity/railway/deployments",
-    json={"name": "Team box", "workspace_id": "  ws_team  "},
-    headers=granted,
-  )
-
-  assert response.status_code == 202
-  assert [call[2] for call in calls] == [
-    {"name": "Team box", "managed_auth": True, "cpu": None, "memory_mb": None,
-     "volume_mb": None, "workspace_id": "ws_team"},
-  ]
-
-
-@pytest.mark.parametrize("body", [
-  {"name": "Missing"},
-  {"name": "Null", "workspace_id": None},
-  {"name": "Blank", "workspace_id": "   "},
-  {"name": "Long", "workspace_id": "w" * 129},
+@pytest.mark.parametrize(("method", "path"), [
+  ("POST", "/api/identity/railway/deployments"),
+  ("POST", "/api/identity/railway/deployments/mob_example/retry"),
+  ("DELETE", "/api/identity/railway/deployments/mob_example"),
+  ("PATCH", "/api/identity/railway/deployments/mob_example/compute"),
+  ("PATCH", "/api/identity/railway/deployments/mob_example/storage"),
+  ("POST", "/api/identity/railway/deployments/mob_example/recovery"),
+  ("POST", "/api/identity/railway/deployments/mob_example/confirm-absent"),
+  ("POST", "/api/identity/railway/disconnect"),
 ])
-def test_railway_create_without_a_valid_workspace_is_refused_before_the_bridge(
-  client, auth, monkeypatch, body,
+def test_owner_only_deployment_actions_are_sent_to_the_account_website(
+  client, auth, monkeypatch, method, path,
 ):
+  # Anything inside Möbius can call these routes (the agent, an app, root), and
+  # they reach every deployment the owner has, so Möbius never performs them.
   granted, calls = _linked_railway_bridge(
     client, auth, monkeypatch,
     lambda *_: _Upstream(202, {"instance": {"id": "mob_example"}}),
   )
-  response = client.post(
-    "/api/identity/railway/deployments", json=body, headers=granted,
+  response = client.request(
+    method, path, headers=granted,
+    json={"name": "Team box", "workspace_id": "ws_team", "volume_mb": 2048,
+          "confirmed_absent": True},
   )
 
-  assert response.status_code == 422
+  assert response.status_code == 409
+  detail = response.json()["detail"]
+  assert detail["code"] == "confirm_on_account"
+  assert detail["confirm_url"] == "https://www.mobius.you/dashboard"
+  assert "mobius.you" in detail["message"]
   assert calls == []
 
 
@@ -1160,11 +1074,6 @@ def test_linked_railway_deletion_recovery_requires_fresh_bounded_state(
   diagnosis = client.get(
     "/api/identity/railway/deployments/mob_example/deletion", headers=granted,
   )
-  rejected = client.post(
-    "/api/identity/railway/deployments/mob_example/confirm-absent",
-    json={"confirmed_absent": False},
-    headers=granted,
-  )
   confirmed = client.post(
     "/api/identity/railway/deployments/mob_example/confirm-absent",
     json={"confirmed_absent": True},
@@ -1174,19 +1083,15 @@ def test_linked_railway_deletion_recovery_requires_fresh_bounded_state(
   assert diagnosis.status_code == 200
   assert diagnosis.json()["state"] == "missing_unconfirmed"
   assert diagnosis.json()["can_confirm_absent"] is True
-  assert rejected.status_code == 422
-  assert confirmed.status_code == 200
-  assert confirmed.json()["instance"]["status"] == "deleted"
+  # Diagnosis stays readable; confirming the project is gone (which forgets the
+  # deployment) is finished on the account website.
+  assert confirmed.status_code == 409
+  assert confirmed.json()["detail"]["code"] == "confirm_on_account"
   assert calls == [
     (
       "GET",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example/deletion",
       None,
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/confirm-absent",
-      {"confirmed_absent": True},
     ),
   ]
 
