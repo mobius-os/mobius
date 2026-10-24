@@ -131,6 +131,86 @@ def test_runner_update_command_pins_the_selected_mobius_instance():
   )
 
 
+def test_windows_machine_gets_a_powershell_install_and_update(client, auth):
+  created = client.post(
+    "/api/connect/hosts", headers=auth, json={"name": "Desktop"},
+  )
+  assert created.status_code == 200, created.text
+  pairing = created.json()
+  code = pairing["pairing_code"]
+
+  # PowerShell has no `sh`; the Windows command is one quote-free fetch too.
+  command = pairing["windows_install_command"]
+  assert command.startswith("irm ")
+  assert command.endswith(f"/api/connect/w/{code} | iex")
+  assert '"' not in command and "'" not in command
+
+  script = client.get(f"/api/connect/w/{code}")
+  assert script.status_code == 200, script.text
+  body = script.text
+  assert f"$code = '{code}'" in body
+  assert "/api/connect/runner" in body
+  assert "--pair $code --url $base --install" in body
+  # It runs inside the owner's own PowerShell session: `exit` would close it.
+  assert "exit" not in body.lower()
+  assert client.get("/api/connect/w/nope").status_code == 404
+
+  update = connect_routes._update_command("https://railway.example", "Windows 11")
+  assert "curl.exe -fsSL" in update and "| python3" not in update
+  assert '--url "https://railway.example" --install' in update
+  assert connect_routes._update_command("https://railway.example", "Linux 6.1") == (
+    connect_routes._update_command("https://railway.example")
+  )
+
+
+def test_windows_install_registers_sign_in_start_and_uninstall_removes_it(
+  monkeypatch, tmp_path,
+):
+  registry = {}
+
+  class FakeKey:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+  def query(key, name):
+    if name not in registry:
+      raise FileNotFoundError(name)
+    return registry[name], 1
+
+  def delete(key, name):
+    registry.pop(name)
+
+  fake_winreg = SimpleNamespace(
+    HKEY_CURRENT_USER=object(), KEY_SET_VALUE=2, REG_SZ=1,
+    CreateKey=lambda root, path: FakeKey(),
+    OpenKey=lambda root, path, *args: FakeKey(),
+    SetValueEx=lambda key, name, reserved, kind, value: registry.__setitem__(name, value),
+    QueryValueEx=query,
+    DeleteValue=delete,
+  )
+  started = []
+  monkeypatch.setattr(connect_runner, "winreg", fake_winreg)
+  monkeypatch.setattr(connect_runner, "_start_detached", started.append)
+  monkeypatch.setattr(connect_runner, "RUNNER_PATH", str(tmp_path / "runner.py"))
+  monkeypatch.setattr(connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"))
+  monkeypatch.setattr(connect_runner, "PID_PATH", str(tmp_path / "runner.pid"))
+  monkeypatch.setattr(connect_runner.platform, "system", lambda: "Windows")
+  (tmp_path / "pythonw.exe").write_text("")
+  python = str(tmp_path / "python.exe")
+
+  assert connect_runner._install_windows(python) is True
+  # It runs now and again at every sign-in, without a console window.
+  assert started == [str(tmp_path / "pythonw.exe")]
+  entry = registry[connect_runner.WINDOWS_RUN_VALUE]
+  assert "pythonw.exe" in entry and "--background-service" in entry
+
+  connect_runner._uninstall_service(stop_running=False)
+  assert connect_runner.WINDOWS_RUN_VALUE not in registry
+
+
 def test_runner_install_honors_explicit_instance_when_multiple_are_saved(
   monkeypatch,
 ):
@@ -3079,6 +3159,43 @@ def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
   b_thread = created[1]
   assert b_thread.name == "mobius-connect-h_b"
   assert b_thread.args[1].is_set()
+
+
+def test_background_runner_hands_over_to_a_newer_one(monkeypatch, tmp_path):
+  """Reinstalling replaces the background runner through its PID file, without
+  signalling a PID that an unrelated process may have reused."""
+  pid_path = tmp_path / "runner.pid"
+  monkeypatch.setattr(connect_runner, "PID_PATH", str(pid_path))
+  monkeypatch.setattr(
+    connect_runner, "_connections", lambda *args, **kw: [{"host_id": "h_a"}],
+  )
+  started = []
+
+  class FakeThread:
+    def __init__(self, target=None, args=(), daemon=None, name=None):
+      started.append(name)
+
+    def start(self):
+      pass
+
+    def is_alive(self):
+      return True
+
+  monkeypatch.setattr(connect_runner.threading, "Thread", FakeThread)
+  newer_pid = connect_runner.os.getpid() + 1
+  pid_path.write_text(str(connect_runner.os.getpid()))
+
+  def newer_runner_starts(_seconds):
+    pid_path.write_text(str(newer_pid))
+  monkeypatch.setattr(connect_runner.time, "sleep", newer_runner_starts)
+  killed = []
+  monkeypatch.setattr(connect_runner.os, "kill", lambda *args: killed.append(args))
+
+  connect_runner._serve_all(background_service=True)
+
+  assert started == ["mobius-connect-h_a"]
+  assert killed == []
+  assert pid_path.read_text() == str(newer_pid)
 
 
 def test_malformed_host_id_is_rejected_before_touching_the_filesystem(client, auth):

@@ -799,11 +799,33 @@ def _install_command(base: str, code: str) -> str:
   return f"curl -fsSL {base}/api/connect/i/{code} | sh"
 
 
-def _update_command(base: str) -> str:
+def _windows_install_command(base: str, code: str) -> str:
+  # PowerShell has no `sh`, and on Windows PowerShell 5.1 `curl` is an alias
+  # for Invoke-WebRequest. `irm | iex` works in every supported PowerShell and,
+  # like the POSIX form, carries no quotes or arguments of its own.
+  return f"irm {base}/api/connect/w/{code} | iex"
+
+
+def _is_windows_platform(platform: str | None) -> bool:
+  # The runner reports `platform.system() platform.release()`, e.g. "Windows 11".
+  return bool(platform) and platform.split(" ", 1)[0].casefold() == "windows"
+
+
+def _update_command(base: str, platform: str | None = None) -> str:
   # The target can be paired with several Möbius instances. Pin both the
   # download and the install source to the instance whose Connect UI generated
   # this command; otherwise the runner's saved first connection may silently
-  # supply a different (older) release.
+  # supply a different (older) release. The command runs in the machine's own
+  # shell, so a Windows machine gets the PowerShell form.
+  if _is_windows_platform(platform):
+    return (
+      f"$r = Join-Path ([IO.Path]::GetTempPath()) 'mobius-connect-runner.py'; "
+      f"curl.exe -fsSL \"{base}/api/connect/runner\" -o $r; "
+      f"if (Get-Command py -ErrorAction SilentlyContinue) "
+      f"{{ py -3 $r --url \"{base}\" --install }} "
+      f"else {{ python $r --url \"{base}\" --install }}; "
+      f"Remove-Item -Force -ErrorAction SilentlyContinue $r"
+    )
   return (
     f'curl -fsSL "{base}/api/connect/runner" '
     f'| python3 - --url "{base}" --install'
@@ -849,7 +871,7 @@ def _public_host(host: dict) -> dict:
     "runner_release": runner_release,
     "runner_update_available": runner_update_available,
     "update_command": (
-      _update_command(_base_url())
+      _update_command(_base_url(), host.get("platform"))
       if runner_update_available and not managed_by_mobius else None
     ),
     "runner_managed": host.get("runner_managed"),
@@ -934,6 +956,7 @@ def _issue_pairing(host: dict) -> dict:
     "name": host["name"],
     "pairing_code": code,
     "install_command": _install_command(_base_url(), code),
+    "windows_install_command": _windows_install_command(_base_url(), code),
     "expires_at": host["pairing_expires_at"],
   }
 
@@ -1555,6 +1578,51 @@ trap 'rm -f "$runner"' EXIT INT TERM
 curl -fsSL "$base/api/connect/runner" -o "$runner"
 python3 "$runner" --pair "$code" --url "$base" --install
 """
+
+
+# The Windows twin of the POSIX bootstrap, served for `irm .../w/<code> | iex`.
+# It runs inside the owner's own PowerShell session, so it never calls `exit`
+# (that would close their window) and keeps its variables in a script block.
+_WINDOWS_INSTALL_SCRIPT_TEMPLATE = """\
+# Mobius Connect installer for Windows -- pairs this machine and installs the
+# background runner. It only makes outbound HTTPS requests and runs commands
+# as you.
+& {{
+  $ErrorActionPreference = 'Stop'
+  $base = '{base}'
+  $code = '{code}'
+  $runner = Join-Path ([IO.Path]::GetTempPath()) ('mobius-connect-' + [guid]::NewGuid().ToString('N') + '.py')
+  try {{
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/api/connect/runner" -OutFile $runner
+    if (Get-Command py -ErrorAction SilentlyContinue) {{
+      & py -3 $runner --pair $code --url $base --install
+    }} elseif (Get-Command python -ErrorAction SilentlyContinue) {{
+      & python $runner --pair $code --url $base --install
+    }} else {{
+      Write-Host 'Connect needs Python 3. Install it from https://www.python.org/downloads/ and run this command again.'
+    }}
+  }} finally {{
+    Remove-Item -Force -ErrorAction SilentlyContinue $runner
+  }}
+}}
+"""
+
+
+def _powershell_literal(value: str) -> str:
+  # Inside a single-quoted PowerShell string only `'` is special.
+  return value.replace("'", "''")
+
+
+@router.get("/w/{code}")
+async def windows_install_script(code: str) -> PlainTextResponse:
+  """Serve the PowerShell install bootstrap: `irm .../w/<code> | iex`."""
+  normalized = _normalize_code(code)
+  if normalized is None:
+    raise HTTPException(status_code=404, detail="Unknown pairing code.")
+  script = _WINDOWS_INSTALL_SCRIPT_TEMPLATE.format(
+    base=_powershell_literal(_base_url()), code=normalized,
+  )
+  return PlainTextResponse(script, media_type="text/plain")
 
 
 @router.get("/i/{code}")
