@@ -2176,3 +2176,103 @@ def test_overlong_path_name_is_rejected_without_creating_folders(
   assert r.status_code == 400
   listing = client.get(f"/api/storage/apps-list/{app_id}/", headers=auth).json()
   assert [entry["name"] for entry in listing["entries"]] == []
+
+
+@pytest.mark.parametrize("raw", [
+  b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}',
+  b'{"value":1e309}', b'{"value":"\\ud800"}',
+])
+def test_content_listing_isolates_json_that_cannot_be_emitted_as_utf8(
+  client, auth, owner_token, raw,
+):
+  app_id = _make_app(client, owner_token)
+  root = Path(get_settings().data_dir) / "apps" / str(app_id) / "records"
+  root.mkdir(parents=True)
+  (root / "a-invalid.json").write_bytes(raw)
+  (root / "b-healthy.json").write_text('{"value":"healthy"}')
+  (root / "c-next.json").write_text('{"value":"next"}')
+
+  url = f"/api/storage/apps-list/{app_id}/records?include_content=true&limit=2"
+  response = client.get(url, headers=auth)
+  assert response.status_code == 200
+  page = response.json()
+  assert [entry["name"] for entry in page["entries"]] == [
+    "a-invalid.json", "b-healthy.json",
+  ]
+  assert "content" not in page["entries"][0]
+  assert page["entries"][1]["content"] == {"value": "healthy"}
+  assert page["next_cursor"]
+  remaining = client.get(
+    url + "&cursor=" + page["next_cursor"], headers=auth,
+  ).json()
+  assert remaining["entries"][0]["content"] == {"value": "next"}
+  assert remaining["next_cursor"] is None
+
+
+def test_inline_storage_read_version_belongs_to_returned_bytes(
+  client, auth, owner_token, monkeypatch,
+):
+  app_id = _make_app(client, owner_token)
+  url = f"/api/storage/apps/{app_id}/race.json"
+  assert client.put(url, json={"value": "original"}, headers=auth).status_code == 204
+  target = Path(get_settings().data_dir) / "apps" / str(app_id) / "race.json"
+  original_token = storage_routes.file_version_token(target)
+  serve = storage_routes._serve_file
+
+  def serve_then_replace(*args, **kwargs):
+    response = serve(*args, **kwargs)
+    storage_routes.atomic_write(target, '{"value":"concurrent"}')
+    return response
+
+  monkeypatch.setattr(storage_routes, "_serve_file", serve_then_replace)
+  response = client.get(url, headers=auth)
+  assert response.status_code == 200
+  assert response.json() == {"value": "original"}
+  assert response.headers["etag"] == original_token
+  stale_save = client.put(
+    url, json={"value": "stale edit"},
+    headers={**auth, "If-Match": response.headers["etag"]},
+  )
+  assert stale_save.status_code == 412
+  assert json.loads(target.read_text()) == {"value": "concurrent"}
+
+
+@pytest.mark.parametrize("range_header", [None, "bytes=0-3", "bytes=0-1,4-5"])
+def test_streamed_storage_read_pins_version_through_replacement(
+  client, auth, owner_token, monkeypatch, range_header,
+):
+  from starlette.responses import FileResponse
+
+  app_id = _make_app(client, owner_token)
+  url = f"/api/storage/apps/{app_id}/race.bin"
+  original = b"original binary data"
+  assert client.put(
+    url, content=original,
+    headers={**auth, "Content-Type": "application/octet-stream"},
+  ).status_code == 204
+  target = Path(get_settings().data_dir) / "apps" / str(app_id) / "race.bin"
+  original_token = storage_routes.file_version_token(target)
+  serve = FileResponse.__call__
+
+  async def replace_before_streaming(response, scope, receive, send):
+    storage_routes.atomic_write(target, b"concurrent binary data")
+    await serve(response, scope, receive, send)
+
+  monkeypatch.setattr(FileResponse, "__call__", replace_before_streaming)
+  response = client.get(
+    url, headers={**auth, **({"Range": range_header} if range_header else {})},
+  )
+  assert response.headers["etag"] == original_token
+  if range_header is None:
+    assert response.status_code == 200
+    assert response.content == original
+  elif "," not in range_header:
+    assert response.status_code == 206
+    assert response.content == original[:4]
+    assert response.headers["content-range"] == f"bytes 0-3/{len(original)}"
+  else:
+    assert response.status_code == 206
+    assert b"\r\nor\r\n" in response.content
+    assert b"\r\nin\r\n" in response.content
+  assert int(response.headers["content-length"]) == len(response.content)
+  assert target.read_bytes() == b"concurrent binary data"
