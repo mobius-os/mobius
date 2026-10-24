@@ -52,7 +52,7 @@ def test_invalid_options_fail_before_provider_resolution(options, round_choice):
   assert round_choice == []
 
 
-@pytest.mark.parametrize("options", [None, {}, {"max_rounds": None}, {"autopilot": False}, {"fix_prompt": subject.FIX_PROMPT}])
+@pytest.mark.parametrize("options", [None, {}, {"autopilot": False}])
 def test_default_unsupported_options_are_neither_advertised_nor_frozen(options):
   snapshot = subject.resolve_options(object(), options)
   assert not {"max_rounds", "autopilot", "fix_prompt"} & snapshot.keys()
@@ -62,6 +62,14 @@ def test_default_unsupported_options_are_neither_advertised_nor_frozen(options):
 def test_finite_limit_is_refused_until_enforced(limit):
   with pytest.raises(ValueError, match="not supported"):
     subject.resolve_options(object(), {"max_rounds": limit})
+
+
+def test_repair_mode_freezes_custom_fix_prompt_and_finite_limit():
+  snapshot = subject.resolve_options(object(), {"fix_prompt": "Fix only this issue", "max_rounds": 2},
+    mode="review_fix_merge")
+  assert snapshot["fix_prompt"] == "Fix only this issue"
+  assert snapshot["max_rounds"] == 2
+  assert subject.resolve_options(object(), mode="review_fix_merge")["max_rounds"] is None
 
 
 def test_post_review_is_frozen_only_when_chosen_so_old_snapshots_keep_their_hash():

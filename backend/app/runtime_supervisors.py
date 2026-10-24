@@ -24,6 +24,7 @@ CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
 DELEGATION_STARTUP_RECOVERY_INTERVAL_SECS = 60.0
 DELEGATION_WAKE_RECOVERY_INTERVAL_SECS = 60.0
 AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
+REPAIR_CHECKOUT_GC_INTERVAL_SECS = 60 * 60
 # Capacity monitor: sample /data headroom every tick; recompute the (more
 # expensive) per-domain attribution walk only every Nth tick unless pressure is
 # present, so the monitor never amplifies the disk pressure it watches.
@@ -168,6 +169,20 @@ class RuntimeSupervisors:
       except Exception as exc:
         self.log.error("agent-browser reaper failed: %s", exc, exc_info=True)
       await asyncio.sleep(BROWSER_REAPER_INTERVAL_SECS)
+
+  async def _repair_checkout_gc_loop(self) -> None:
+    """Collect retired repair checkouts at boot and hourly without a review Wait."""
+    from app.contribution_review_repair_actions import sweep_checkout_receipts_once
+    from app.settled import run_settled
+
+    while True:
+      try:
+        await run_settled(sweep_checkout_receipts_once)
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        self.log.error("repair checkout GC failed: %s", exc, exc_info=True)
+      await asyncio.sleep(REPAIR_CHECKOUT_GC_INTERVAL_SECS)
 
   async def _oom_watchdog_loop(self) -> None:
     """Record a durable diagnostic whenever the cgroup loses a process to OOM.
@@ -668,6 +683,7 @@ class RuntimeSupervisors:
     self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("provider-session-retention", provider_session_retention_loop())
     self._spawn("capacity-monitor", capacity_monitor_loop())
+    self._spawn("repair-checkout-gc", self._repair_checkout_gc_loop())
     self._spawn("platform-update-watch", platform_update_watch_loop())
 
   async def stop(self) -> None:

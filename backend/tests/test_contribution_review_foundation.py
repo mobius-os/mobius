@@ -16,14 +16,13 @@ from app.contribution_review_effects import NotDispatched, classify_dispatch_err
 from app.contribution_errors import ContributionSubmitError
 
 
-def test_app_less_routes_do_not_expose_repair_or_posting():
+def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
   assert "/api/github/review-preview" in paths
   assert "/api/github/review-runs/{run_id}/outcomes" in paths
-  assert not any("repair-checkout" in path or path.endswith("/repairs") for path in paths)
-  assert routes.REVIEW_CAPABILITIES == {"post_review": True, "review_fix_merge": False}
-  with pytest.raises(ValueError):
-    routes.StartReviews(mode="review_fix_merge", request_id="request-123", items=[ITEM])
+  assert "/api/github/review-runs/{run_id}/repairs" in paths
+  assert routes.REVIEW_CAPABILITIES == {"post_review": True, "review_fix_merge": True}
+  assert not any(path.endswith("/ready") for path in paths)
 
 
 def test_cli_app_adapter_identity_and_body_use_canonical_helpers(monkeypatch):
@@ -467,6 +466,19 @@ def test_core_migration_upgrades_legacy_strict_table_shape(tmp_path, nonce_nulla
   with eng.connect() as conn:
     assert conn.execute(text("SELECT id, app_id, app_nonce FROM contribution_review_runs")).one() == ("old-run", 2, "old-nonce")
     assert conn.execute(text("SELECT count(*) FROM schema_migrations")).scalar_one() == 0
+
+
+def test_canonical_cli_freezes_takeover_scope_in_request_identity(monkeypatch):
+  monkeypatch.setattr(cli, "inspect_pr", lambda ref: {**ITEM, "title": "Safe change", "url": "https://github.com/example/project/pull/7"})
+  snapshot = {"review_prompt": "Review", "fix_prompt": "Fix", "merge_prompt": "Merge",
+    "max_rounds": None, "autopilot": False, "provider": "codex", "model": "test-model",
+    "reasoning_effort": "high"}
+  monkeypatch.setattr(cli, "api", lambda path, **kw: {"options": snapshot, "preview_sha256": routes._fingerprint(snapshot)})
+  frozen = cli.freeze_preview(cli.prepare_selection(["example/project#7"], "review_fix_merge", "chat-1"))
+  verify_selection(frozen)
+  assert start_body(frozen)["confirmation_scope"] == "named_pr_repairs_and_reviewed_successors"
+  with pytest.raises(ValueError):
+    verify_selection({**frozen, "confirmation_scope": "broader-scope"})
 
 
 def test_core_migration_preserves_exact_post_0079_nullable_shape(tmp_path):

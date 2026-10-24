@@ -8,7 +8,7 @@ GitHub is connected through Möbius Settings. The core endpoints at
 `/api/github/review-runs` do not depend on Contribute. The optional app can
 read core runs, but cannot spend their public grant. This version supports
 private `review`, explicitly opted-in public COMMENT reviews, and pinned
-`review_merge`: it has no repair/push mode. Do not use an app-specific CLI to reimplement selection.
+`review_merge`, and explicitly scoped `review_fix_merge` takeover. Do not use an app-specific CLI to reimplement selection.
 
 ## Authority
 
@@ -88,4 +88,44 @@ Private evidence fields accept up to 200,000 characters each. The public copy
 is bounded conservatively to 65,536 UTF-16 units with explicit omission
 markers; the full accepted private evidence is retained.
 
+## Scoped repair and independently reviewed successors
+
+Use `preview --mode review_fix_merge` only when the owning chat explicitly
+authorizes repairing the named PR and merging freshly reviewed successors.
+The saved selection binds `named_pr_repairs_and_reviewed_successors` scope.
+Read the run's returned brief. The parent alone calls `/repair-checkout` and
+`/repairs`; independent reviewers are admitted through `/reviewers`, inherit
+the parent's Goal, and report exact head/base evidence through
+`/independent-reviews`. A repair author cannot supply their independent review.
+
+Edit only the server-provided checkout and frozen file scope. Ordinary
+fast-forward commits and one merge of the fetched `refs/mobius/target-base`
+are supported; never rebase or force-push. A moved target base requires fresh
+independent review of the new combined result, not reuse of old evidence.
+
+The dedicated checkout protects cooperative agents from accidental scope
+drift and unsafe Git metadata; it is not a sandbox against a hostile actor
+with host access. Git config is allowlisted, redirections and attributes are
+rejected, and server diffs disable textconv. A confirmed push discards the
+checkout. Stop discards only unspent abandoned edits; uncertain receipts keep
+their checkouts. Request preparation again if a legitimate cleanup removed it.
+
+Only `not_dispatched` releases an exact public reservation. `unknown` means
+read-only observation, never a retry. Stop revokes new actions but cannot
+erase a confirmed push or clear uncertainty. If an older unresolved attempt
+blocks a new grant, open the run/chat named by the refusal and call that
+run's `/observe` endpoint. An exact matching merged PR or pushed branch tip
+can settle its receipt; where the owner completed the exact GitHub action
+manually, observe that fact before considering a new grant. A closed,
+unmerged PR or unchanged projection does not prove a push or merge was never
+applied. If exact nonapplication cannot be proved, there is currently no safe
+self-service release of that old receipt: stop and request owner-supervised
+recovery rather than resetting it or replaying the write.
+For an unidentified legacy fork head, the repository-scoped fence cannot
+identify the same fork branch across different base repositories; do not
+interpret an unrelated-repository admission as proof that old uncertainty
+is settled.
+Pending checks/queues remain owned by the existing
+conversation's durable Wait; these routes do not create automatic waits.
 For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. Owner questions and blocked verification use `publish: false` (the default), remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
+
