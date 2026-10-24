@@ -187,6 +187,70 @@ def closes_without_reply(card: dict, answers: dict, selections: dict | None) -> 
   return quiet
 
 
+def typed_replies(card: dict) -> list[tuple[str, str]]:
+  """(question, text) for each offered choice the owner answered in own words.
+
+  `selected_options` is the card's record of an option pick; the client omits
+  it whenever custom text is part of the answer. A question offered without
+  options expects typed text, so it is never a typed reply. An exact label
+  still counts as a pick from a client that predates option identities.
+  """
+  answers = card.get("answers") or {}
+  picked = card.get("selected_options") or {}
+  replies = []
+  for question in card.get("questions") or []:
+    options = question.get("options") or []
+    prompt = question.get("question")
+    answer = answers.get(prompt, answers.get(question.get("id")))
+    if (not options or question.get("id") in picked
+        or not isinstance(answer, str) or not answer.strip()
+        or answer in {option.get("label") for option in options}):
+      continue
+    replies.append((prompt, answer))
+  return replies
+
+
+def typed_reply_context(db, chat, turn_content: str) -> str:
+  """Frame a card answer the owner typed instead of picking an option.
+
+  The answer reaches the agent as "- <question>: <text>", which reads like a
+  choice. When the text is a question or objection, agents have parked the
+  answer for later and re-saved the card without ever showing one, so the
+  owner sees the same card again with no reply. This turn-only note names the
+  text as the owner's message and puts the reply before any new card.
+  """
+  found_turn = False
+  for _seq, message in transcript_rows.reverse_iter(db, chat):
+    if not isinstance(message, dict):
+      continue
+    if not found_turn:
+      if message.get("role") != "user":
+        continue
+      if (message.get("continuation_reason") != "question_answer"
+          or message.get("content") != turn_content):
+        return ""
+      found_turn = True
+      continue
+    if message.get("role") != "assistant":
+      continue
+    cards = [block for block in message.get("blocks") or []
+             if block.get("type") == "question" and block.get("answers")]
+    replies = typed_replies(cards[-1]) if cards else []
+    if not replies:
+      return ""
+    quoted = "\n".join(f"- {question}\n  Owner wrote: {text}" for question, text in replies)
+    return (
+      "On your question card, the owner typed their own reply instead of "
+      "picking an option:\n"
+      f"{quoted}\n"
+      "Treat it as the owner's message, not a choice. If it asks something, "
+      "objects, or asks for an explanation, answer it in visible reply text "
+      "first; an answer kept in thinking or promised for later never reaches "
+      "them. Only then save a new card, and only if the decision is still open."
+    )
+  return ""
+
+
 def open_continuation_question(chat, question_id: str | None) -> dict | None:
   """Find an exact open card whose answer belongs to a subsequent turn.
 

@@ -5947,6 +5947,17 @@ async def _run_chat_impl_with_db(
       )
       side_question_cids = tuple(body["cid"] for body in owed_side_rows)
 
+  if chat_row is not None:
+    from app.questions import typed_reply_context
+    try:
+      typed_reply = typed_reply_context(db, chat_row, raw_user_message)
+    except Exception:
+      # Advisory framing: the owner's answer still reaches the agent verbatim.
+      log.exception("typed card reply context unreadable chat_id=%s", chat_id)
+      typed_reply = ""
+    if typed_reply:
+      user_message = f"{typed_reply}\n\n{user_message}"
+
   goal_brief_refresh = None
   if chat_id:
     from app.goals import compaction_brief_refresh, turn_goal_brief
