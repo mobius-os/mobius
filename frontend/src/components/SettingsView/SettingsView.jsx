@@ -9,6 +9,7 @@ import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
+import { forgetNativePush } from '../../lib/nativePush.js'
 import { handOffExplicitSignOut } from '../../lib/nativeSession.js'
 import { stopShellInstallPassPreparation } from '../../lib/shellInstallPass.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
@@ -873,6 +874,7 @@ export default function SettingsView({
       await clearExplicitOwnerSession({
         stopInstallHandoffPreparation: stopShellInstallPassPreparation,
         revokeInstallHandoffs: () => api.auth.shellInstallPass.revoke(),
+        forgetPushDevice: forgetNativePush,
         dropCredential: clearToken,
         clearOwnerCache: clearQueryCache,
       })

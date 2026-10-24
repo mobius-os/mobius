@@ -24,6 +24,7 @@ import {
   invalidateShellListCache,
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
+import useNativePush from '../../hooks/useNativePush.js'
 import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
@@ -2445,6 +2446,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }, [apps, appsLiveFetched, placeInWorkspace])
 
   usePushSubscription()
+  useNativePush()
 
   // Share live-required reads without coupling callback identity to query updates.
   // Best-effort callers retain their current UI on failure; reconnecting chats

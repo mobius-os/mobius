@@ -1875,6 +1875,31 @@ class PushSubscription(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class PushDevice(Base):
+  """A phone running the Möbius mobile app that receives native push.
+
+  The shell registers the FCM token from ``MobiusNative.registerPush()``
+  through ``PUT /api/push/devices`` on every load. Like a ``PushSubscription``,
+  a device receives every owner notification. Delivery goes through the
+  mobius.you push relay (``app.push_relay``), so this installation holds no
+  FCM credential. A token the relay reports invalid is deleted.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "push_devices"
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  token = Column(Text, nullable=False, unique=True)
+  # Changes on every registration, so cleanup after a send can tell whether
+  # the phone registered again while that send was in flight.
+  registered_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Notification(Base):
   """Record of a sent push notification."""
 

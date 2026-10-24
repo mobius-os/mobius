@@ -130,14 +130,15 @@ test('explicit logout revokes copied handoffs before local owner state', async (
   await clearExplicitOwnerSession({
     stopInstallHandoffPreparation: async () => { calls.push('stop') },
     revokeInstallHandoffs: async () => { calls.push('revoke') },
+    forgetPushDevice: async () => { calls.push('push') },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
 })
 
-test('failed handoff revocation never strands ordinary local logout', async () => {
+test('failed handoff revocation or push sign-out never strands ordinary local logout', async () => {
   const calls = []
   await clearExplicitOwnerSession({
     stopInstallHandoffPreparation: async () => { calls.push('stop') },
@@ -145,11 +146,15 @@ test('failed handoff revocation never strands ordinary local logout', async () =
       calls.push('revoke')
       throw new Error('offline')
     },
+    forgetPushDevice: async () => {
+      calls.push('push')
+      throw new Error('offline')
+    },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
 })
 
 test('failed local preparation stop still reaches server revocation', async () => {
@@ -160,11 +165,12 @@ test('failed local preparation stop still reaches server revocation', async () =
       throw new Error('cancel failed')
     },
     revokeInstallHandoffs: async () => { calls.push('revoke') },
+    forgetPushDevice: async () => { calls.push('push') },
     dropCredential: () => { calls.push('credential') },
     clearOwnerCache: async () => { calls.push('cache') },
   })
 
-  assert.deepEqual(calls, ['stop', 'revoke', 'credential', 'cache'])
+  assert.deepEqual(calls, ['stop', 'revoke', 'push', 'credential', 'cache'])
 })
 
 test('explicit logout records that it was deliberate for the sign-in screen', async () => {

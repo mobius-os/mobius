@@ -68,6 +68,9 @@ CONTRIBUTION_BASE_URL = os.environ.get(
 COMMUNITY_BASE_URL = os.environ.get(
   "MOBIUS_COMMUNITY_REGISTRY_URL", IDENTITY_BASE_URL
 ).rstrip("/")
+PUSH_RELAY_BASE_URL = os.environ.get(
+  "MOBIUS_PUSH_RELAY_URL", IDENTITY_BASE_URL
+).rstrip("/")
 MAX_BODY = 2_000_000
 MAX_INFERENCE_BODY = 16_000_000
 MAX_CONTRIBUTION_BODY = 3_000_000
@@ -94,8 +97,9 @@ MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 # favour of the baked copy instead of returning 404 for the new routes.
 # 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present;
 # 3 = standalone web search endpoint; 4 = flat gateway wire for Codex web.run;
-# 5 = account review routes; 6 = shared access; 7 = recipient invitation response.
-BROKER_ROUTE_EPOCH = 7
+# 5 = account review routes; 6 = shared access; 7 = recipient invitation response;
+# 8 = native push relay routes.
+BROKER_ROUTE_EPOCH = 8
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -107,6 +111,16 @@ INFERENCE_ROUTES = {
   ("POST", "/v1/responses"): (
     "inference:responses", "mobius-agent-gateway", "gateway"
   ),
+}
+
+# Native push: the relay holds the FCM credentials for every installation,
+# so it authenticates each request by its capability (installation + linked
+# account) and keeps its own token-to-installation binding. Socket-only, like
+# contribution routes: no agent-facing surface may send push.
+PUSH_ROUTES = {
+  ("POST", "/v1/push/send"): "push:send",
+  ("POST", "/v1/push/devices/bind"): "push:register",
+  ("POST", "/v1/push/devices/unbind"): "push:register",
 }
 
 _COMMUNITY_ROUTES = (
@@ -1205,6 +1219,11 @@ class Broker:
           "contribution:read", CONTRIBUTION_BASE_URL,
           "mobius-contribution-relay",
         )
+      elif (method, route_path) in PUSH_ROUTES and not split.query:
+        route = (
+          PUSH_ROUTES[(method, route_path)], PUSH_RELAY_BASE_URL,
+          "mobius-push-relay",
+        )
       else:
         community = _community_scope(method, route_path, split.query)
         if community is not None:
@@ -1219,7 +1238,8 @@ class Broker:
     ):
       raise ValueError("invalid idempotency key")
     if method != "GET" and audience in {
-      "mobius-contribution-relay", "mobius-community-registry"
+      "mobius-contribution-relay", "mobius-community-registry",
+      "mobius-push-relay",
     } and not idempotency_key:
       raise ValueError("an idempotency key is required")
     capability = self._capability(
