@@ -5,7 +5,10 @@ and its authorization server, driven through the real handshake, discovery,
 consent, token-custody, and broker code paths.
 """
 
+import base64
+import hashlib
 import json
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import pytest
@@ -19,6 +22,8 @@ from app.timeutil import now_naive_utc
 
 MCP_URL = "https://mcp.test/mcp"
 AS_ISSUER = "https://as.test"
+# FRONTEND_ORIGIN is independently fixed by conftest, not by the CIMD producer.
+CLIENT_METADATA_URL = "http://localhost:5173/api/connectors/oauth/client-metadata.json"
 # The genuine client, captured before any fixture monkeypatches it.
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -29,7 +34,7 @@ class MockProvider:
   def __init__(self, *, cimd=False, issue_secret=False, no_register=False,
                anon_open=False, slash_issuer=False):
     self.registered = 0
-    self.codes = {}          # code -> {"challenge": ..., "resource": ...}
+    self.codes = {}           # one-use code -> captured authorization parameters
     self.refresh_tokens = {}  # refresh_token -> generation counter
     self.access_tokens = {}   # access_token -> valid bool
     self.issued = 0
@@ -41,6 +46,20 @@ class MockProvider:
     self.slash_issuer = slash_issuer  # Google shape: PRM issuer has trailing "/"
     self.secrets_seen = []            # client_secret values the token endpoint got
     self.client_ids_seen = []         # client_id values the token endpoint got
+
+  def authorize(self, authorize_url, code):
+    """Model consent using the actual URL sent to the browser, not sealed state."""
+    url = urlparse(authorize_url)
+    assert f"{url.scheme}://{url.netloc}{url.path}" == f"{AS_ISSUER}/authorize"
+    query = parse_qs(url.query, keep_blank_values=True)
+    assert query["response_type"] == ["code"]
+    assert query["code_challenge_method"] == ["S256"]
+    binding = {}
+    for key in ("code_challenge", "client_id", "redirect_uri", "resource"):
+      assert len(query[key]) == 1 and query[key][0]
+      binding[key] = query[key][0]
+    assert code not in self.codes
+    self.codes[code] = binding
 
   def handler(self, request: httpx.Request) -> httpx.Response:
     url = str(request.url)
@@ -134,12 +153,24 @@ class MockProvider:
       self.secrets_seen.append(form.get("client_secret"))
       self.client_ids_seen.append(form.get("client_id"))
       if form.get("grant_type") == "authorization_code":
-        return self._issue(form.get("code"))
+        code = form.get("code")
+        binding = self.codes.get(code)
+        verifier = form.get("code_verifier", "")
+        challenge = base64.urlsafe_b64encode(
+          hashlib.sha256(verifier.encode()).digest(),
+        ).rstrip(b"=").decode()
+        if (binding is None or not verifier
+            or challenge != binding["code_challenge"]
+            or any(form.get(key) != binding[key]
+                   for key in ("client_id", "redirect_uri", "resource"))):
+          return httpx.Response(400, json={"error": "invalid_grant"})
+        del self.codes[code]
+        return self._issue()
       if form.get("grant_type") == "refresh_token":
         rt = form.get("refresh_token")
         if rt in self.revoked or rt not in self.refresh_tokens:
           return httpx.Response(400, json={"error": "invalid_grant"})
-        return self._issue(None, rotate_from=rt)
+        return self._issue(rotate_from=rt)
       return httpx.Response(400, json={"error": "unsupported_grant_type"})
 
     # ── revocation (RFC 7009) ──
@@ -149,7 +180,7 @@ class MockProvider:
 
     return httpx.Response(404, json={"error": "not_found"})
 
-  def _issue(self, code, rotate_from=None):
+  def _issue(self, rotate_from=None):
     self.issued += 1
     access = f"access-{self.issued}"
     refresh = f"refresh-{self.issued}"
@@ -191,6 +222,49 @@ def provider(monkeypatch):
 
 def _headers(auth, generation):
   return {**auth, "X-Mobius-Connector-Generation": generation}
+
+
+# Pin the fake's S256 oracle to the RFC 7636 Appendix B vector, independently
+# of both production's PKCE generator and the fake's hash implementation.
+@pytest.mark.parametrize("field", [
+  "code", "code_verifier", "client_id", "redirect_uri", "resource",
+])
+@pytest.mark.parametrize("replacement", [None, "wrong"])
+def test_provider_rejects_unbound_exchange_and_code_reuse(field, replacement):
+  mock = MockProvider()
+  verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+  binding = {
+    "response_type": "code", "client_id": "expected-client",
+    "redirect_uri": "https://client.test/callback", "resource": MCP_URL,
+    "code_challenge_method": "S256",
+    "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+  }
+  mock.authorize(f"{AS_ISSUER}/authorize?{urlencode(binding)}", "valid-code")
+  form = {
+    "grant_type": "authorization_code", "code": "valid-code",
+    "code_verifier": verifier, "client_id": binding["client_id"],
+    "redirect_uri": binding["redirect_uri"], "resource": binding["resource"],
+  }
+  invalid = dict(form)
+  if replacement is None:
+    invalid.pop(field)
+  else:
+    invalid[field] = replacement
+  with httpx.Client(transport=httpx.MockTransport(mock.handler)) as token_client:
+    rejected = token_client.post(f"{AS_ISSUER}/token", data=invalid)
+    assert rejected.status_code == 400
+    assert rejected.json() == {"error": "invalid_grant"}
+    assert mock.issued == 0
+    assert mock.access_tokens == {} and mock.refresh_tokens == {}
+    # A rejected exchange cannot produce tokens; a correctly bound one must.
+    accepted = token_client.post(f"{AS_ISSUER}/token", data=form)
+    assert accepted.status_code == 200
+    assert accepted.json()["access_token"] == "access-1"
+    assert "valid-code" not in mock.codes
+    replayed = token_client.post(f"{AS_ISSUER}/token", data=form)
+    assert replayed.status_code == 400
+    assert replayed.json() == {"error": "invalid_grant"}
+    assert mock.issued == 1
 
 
 # ── discovery unit ─────────────────────────────────────────────────────────
@@ -253,7 +327,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
   # 2. Client-metadata document is public and self-consistent.
   meta = client.get("/api/connectors/oauth/client-metadata.json")
   assert meta.status_code == 200
-  assert meta.json()["client_id"] == meta.json()["client_id"]
+  assert meta.json()["client_id"] == CLIENT_METADATA_URL
   assert meta.json()["client_name"] == "Möbius Integrations"
   assert meta.json()["redirect_uris"][0].endswith("/api/connectors/oauth/callback")
 
@@ -276,7 +350,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
 
   # 4. Provider redirects to the callback with a code → tokens sealed, status ok.
   #    (No Bearer, cross-site — authorized solely by the sealed state.)
-  provider.codes["auth-code"] = {}
+  provider.authorize(authorize_url, "auth-code")
   callback = client.get(
     "/api/connectors/oauth/callback",
     params={"code": "auth-code", "state": state, "iss": AS_ISSUER},
@@ -284,6 +358,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
   assert callback.status_code == 200
   assert "<title>Integrations sign-in</title>" in callback.text
   assert "connected" in callback.text
+  assert "auth-code" not in provider.codes
 
   listed = client.get("/api/connectors", headers=auth).json()["connectors"]
   signed = next(c for c in listed if c["id"] == cid)
@@ -341,8 +416,10 @@ async def test_refresh_before_attach_renews_near_expiry(client, auth, db, provid
   ).json()
   from urllib.parse import parse_qs, urlparse
   state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
-  client.get("/api/connectors/oauth/callback",
-             params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  provider.authorize(started["authorize_url"], "c1")
+  callback = client.get("/api/connectors/oauth/callback",
+                        params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  assert "connected" in callback.text
 
   # Force the stored token to look near-expiry.
   db.expire_all()
@@ -369,8 +446,10 @@ async def test_refresh_revoked_grant_latches_signed_out(client, auth, db, provid
   ).json()
   from urllib.parse import parse_qs, urlparse
   state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
-  client.get("/api/connectors/oauth/callback",
-             params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  provider.authorize(started["authorize_url"], "c1")
+  callback = client.get("/api/connectors/oauth/callback",
+                        params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  assert "connected" in callback.text
 
   db.expire_all()
   oauth = db.query(models.ConnectorOAuth).filter_by(connector_id=cid).one()
@@ -396,8 +475,10 @@ def _signed_in_connection(client, auth, provider):
   ).json()
   from urllib.parse import parse_qs, urlparse
   state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
-  client.get("/api/connectors/oauth/callback",
-             params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  provider.authorize(started["authorize_url"], "c1")
+  callback = client.get("/api/connectors/oauth/callback",
+                        params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  assert "connected" in callback.text
   return cid, generation
 
 
@@ -468,6 +549,7 @@ def test_callback_honors_the_sealed_generation(client, auth, db, provider):
   ).json()
   from urllib.parse import parse_qs, urlparse
   stale_state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
+  provider.authorize(started["authorize_url"], "c-late")
   # ...then disconnect, rotating capability_id and clearing tokens.
   db.expire_all()
   gen_now = db.get(models.Connector, cid).capability_id
@@ -498,11 +580,15 @@ def test_cimd_path_registers_nothing_and_uses_the_metadata_url(
   ).json()
   from urllib.parse import parse_qs, urlparse
   q = parse_qs(urlparse(started["authorize_url"]).query)
-  assert q["client_id"][0] == cox.client_metadata_url()
+  meta = client.get("/api/connectors/oauth/client-metadata.json")
+  assert meta.status_code == 200
+  assert meta.json()["client_id"] == CLIENT_METADATA_URL
+  assert q["client_id"] == [CLIENT_METADATA_URL]
   assert mock.registered == 0  # CIMD → no dynamic registration
   assert db.query(models.OAuthClientRegistration).count() == 0
   # Sign-in completes with the CIMD client identity (no stored registration).
   state = q["state"][0]
+  mock.authorize(started["authorize_url"], "c1")
   cb = client.get("/api/connectors/oauth/callback",
                   params={"code": "c1", "state": state, "iss": AS_ISSUER})
   assert "connected" in cb.text
@@ -531,6 +617,7 @@ async def test_confidential_client_secret_is_stored_and_used_never_exposed(
   assert "dcr-secret" not in reg.client_secret_encrypted  # encrypted at rest
   assert core.decrypt_oauth(reg.client_secret_encrypted) == "dcr-secret-1"
 
+  mock.authorize(started["authorize_url"], "c1")
   cb = client.get("/api/connectors/oauth/callback",
                   params={"code": "c1", "state": state, "iss": AS_ISSUER})
   assert "connected" in cb.text
@@ -626,6 +713,7 @@ def test_byo_setup_signin_and_recovery(client, auth, db, monkeypatch):
   state = q["state"][0]
 
   # 4. Callback exchanges with the owner's client_id + secret and signs in.
+  mock.authorize(started2["authorize_url"], "c1")
   cb = client.get("/api/connectors/oauth/callback",
                   params={"code": "c1", "state": state, "iss": AS_ISSUER})
   assert "connected" in cb.text
@@ -783,6 +871,43 @@ def test_callback_rejects_forged_state(client, auth, db, provider):
   assert db.get(models.Connector, created["id"]).status == "oauth_required"
 
 
+def test_callback_rejects_unknown_and_reused_code(client, auth, db, provider):
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL}).json()
+  cid, generation = created["id"], created["generation"]
+  started = client.post(
+    f"/api/connectors/{cid}/oauth/start", headers=_headers(auth, generation),
+  ).json()
+  state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
+  provider.authorize(started["authorize_url"], "valid-code")
+  rejected = client.get("/api/connectors/oauth/callback", params={
+    "code": "unknown-code", "state": state, "iss": AS_ISSUER,
+  })
+  assert "failed" in rejected.text
+  assert provider.issued == 0
+  db.expire_all()
+  oauth = db.query(models.ConnectorOAuth).filter_by(connector_id=cid).one()
+  assert oauth.access_token_encrypted is None
+  assert oauth.refresh_token_encrypted is None
+  assert db.get(models.Connector, cid).status == "oauth_required"
+
+  params = {"code": "valid-code", "state": state, "iss": AS_ISSUER}
+  accepted = client.get("/api/connectors/oauth/callback", params=params)
+  assert "connected" in accepted.text
+  db.expire_all()
+  oauth = db.query(models.ConnectorOAuth).filter_by(connector_id=cid).one()
+  sealed_access = oauth.access_token_encrypted
+  sealed_refresh = oauth.refresh_token_encrypted
+  assert sealed_access is not None and sealed_refresh is not None
+
+  replayed = client.get("/api/connectors/oauth/callback", params=params)
+  assert "failed" in replayed.text
+  assert provider.issued == 1
+  db.expire_all()
+  assert oauth.access_token_encrypted == sealed_access
+  assert oauth.refresh_token_encrypted == sealed_refresh
+  assert db.get(models.Connector, cid).status == "ok"
+
+
 def test_callback_rejects_issuer_mismatch(client, auth, db, provider):
   created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL}).json()
   cid, generation = created["id"], created["generation"]
@@ -791,11 +916,14 @@ def test_callback_rejects_issuer_mismatch(client, auth, db, provider):
   ).json()
   from urllib.parse import parse_qs, urlparse
   state = parse_qs(urlparse(started["authorize_url"]).query)["state"][0]
+  provider.authorize(started["authorize_url"], "c1")
   # RFC 9207: a mismatched iss must abort before the code is exchanged.
   bad = client.get("/api/connectors/oauth/callback",
                    params={"code": "c1", "state": state, "iss": "https://evil.test"})
   assert "failed" in bad.text
   assert provider.issued == 0
+  assert provider.client_ids_seen == []  # no token request, even with a valid code
+  assert "c1" in provider.codes
 
 
 def test_oauth_completion_page_may_run_its_platform_script(client):

@@ -534,31 +534,48 @@ test('nav helper waits for ack before owning a back entry', async () => {
 test('projects runtime sends bounded requests and accepts only its parent response', async () => {
   await withFakeWindow(async ({ window, parent }) => {
     const projects = makeProjects()
-    const pending = projects.create({
-      templateId: 'webstudio:web-app',
-      name: `  ${'A'.repeat(300)}  `,
-    })
-    const message = parent.messages.at(-1)
-    assert.equal(message.origin, 'https://mobius.test')
-    assert.equal(message.data.type, 'moebius:projects')
-    assert.equal(message.data.action, 'create')
-    assert.equal(message.data.templateId, 'webstudio:web-app')
-    assert.equal(message.data.name.length, 256)
+    try {
+      const pending = projects.create({
+        templateId: 'webstudio:web-app',
+        name: `  ${'A'.repeat(300)}  `,
+      })
+      const message = parent.messages.at(-1)
+      assert.equal(message.origin, 'https://mobius.test')
+      assert.equal(message.data.type, 'moebius:projects')
+      assert.equal(message.data.action, 'create')
+      assert.equal(message.data.templateId, 'webstudio:web-app')
+      assert.equal(message.data.name.length, 256)
 
-    window.emit({
-      type: 'moebius:projects-result',
-      requestId: message.data.requestId,
-      ok: true,
-      result: { id: 'project-1' },
-    }, { origin: 'https://attacker.test' })
-    window.emit({
-      type: 'moebius:projects-result',
-      requestId: message.data.requestId,
-      ok: true,
-      result: { id: 'project-1' },
-    })
-    assert.deepEqual(await pending, { id: 'project-1' })
-    projects._destroy()
+      let settled = false
+      pending.then(() => { settled = true }, () => { settled = true })
+      window.emit({
+        type: 'moebius:projects-result',
+        requestId: message.data.requestId,
+        ok: true,
+        result: { id: 'attacker-origin' },
+      }, { origin: 'https://attacker.test' })
+      await Promise.resolve()
+      assert.equal(settled, false, 'even the parent cannot reply from a foreign origin')
+
+      window.emit({
+        type: 'moebius:projects-result',
+        requestId: message.data.requestId,
+        ok: true,
+        result: { id: 'attacker-sibling' },
+      }, { source: {} })
+      await Promise.resolve()
+      assert.equal(settled, false, 'same-origin siblings cannot settle the parent request')
+
+      window.emit({
+        type: 'moebius:projects-result',
+        requestId: message.data.requestId,
+        ok: true,
+        result: { id: 'project-1' },
+      })
+      assert.deepEqual(await pending, { id: 'project-1' })
+    } finally {
+      projects._destroy()
+    }
   })
 })
 

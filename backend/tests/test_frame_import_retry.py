@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.config import get_settings
+from tests.frame_entrypoint_probe import run_frame_entrypoint
 
 
 def _find_app_frame() -> Path | None:
@@ -83,3 +84,106 @@ def test_retry_runs_after_token_renegotiation_branch():
   assert retry_delay != -1 and first_token_expired != -1 and retry_use != -1
   assert first_token_expired < retry_use
   assert html.count("renegotiateExpiredModuleToken(retryErr)") == 1
+
+
+_NETWORK_FAILURE = {"code": "network", "message": "parent fetch failed"}
+_BLOB_FAILURE = {
+  "name": "TypeError",
+  "message": "Failed to fetch dynamically imported module: blob:https://frame.test/id",
+}
+
+
+@pytest.mark.parametrize("failure", [
+  _NETWORK_FAILURE,
+  _BLOB_FAILURE,
+  {"name": "TypeError", "message": "error loading dynamically imported module: blob:null/id"},
+], ids=["parent-network", "chromium-blob", "firefox-blob"])
+def test_loader_retries_transport_once_only_after_the_delay(failure):
+  observed = run_frame_entrypoint(_frame_html(), failures=[failure])
+  waiting = observed["beforeDelay"]
+  assert waiting["imports"] == [0]
+  assert len(waiting["delays"]) == 1
+  assert waiting["delays"][0] > 0
+  assert waiting["renderCount"] == 0
+  assert not waiting["mounted"] and not waiting["panel"]
+  assert waiting["messages"] == []
+
+  loaded = observed["beforeCommit"]
+  assert loaded["imports"] == [0, 1]
+  assert loaded["delays"] == waiting["delays"]
+  assert loaded["renderCount"] == 1
+  assert not loaded["mounted"]
+  assert not loaded["configPresent"]
+  assert observed["final"]["mounted"]
+  assert observed["final"]["messages"] == ["moebius:frame-mounted"]
+
+
+@pytest.mark.parametrize("failure", [
+  {"name": "SyntaxError", "message": "Unexpected token"},
+  {"name": "ReferenceError", "message": "missing app variable"},
+  {"name": "TypeError", "message": "app property is not a function"},
+  {"name": "TypeError", "message": "Failed to fetch dynamically imported module: https://app.test/a.js"},
+  {"name": "Error", "message": _BLOB_FAILURE["message"]},
+  {"code": "permission-denied", "message": "module access refused"},
+], ids=["syntax", "reference", "app-typeerror", "non-blob-url", "non-typeerror", "refusal"])
+def test_loader_does_not_replay_deterministic_evaluation_or_refusal(failure):
+  observed = run_frame_entrypoint(_frame_html(), failures=[failure])
+  failed = observed["final"]
+  assert failed["imports"] == [0]
+  assert failed["delays"] == []
+  assert failed["renderCount"] == 0
+  assert not failed["mounted"]
+  assert failed["messages"] == ["moebius:frame-error"]
+  assert failed["panel"] and failed["rootHidden"]
+  assert failed["title"] == "Failed to load app"
+  assert failure["message"] in failed["detail"]
+  assert not failed["configPresent"]
+
+
+@pytest.mark.parametrize("failure", [_NETWORK_FAILURE, _BLOB_FAILURE], ids=["network", "blob"])
+def test_loader_does_not_retry_transport_after_a_real_mount(failure):
+  observed = run_frame_entrypoint(_frame_html(), postmount=True, failures=[failure])
+  assert observed["initial"]["mounted"]
+  failed = observed["final"]
+  assert failed["imports"] == [0]
+  assert failed["delays"] == []
+  assert failed["renderCount"] == 1  # only the successful setup render
+  assert failed["messages"] == ["moebius:frame-mounted", "moebius:frame-error"]
+  assert failed["panel"]
+  assert failure["message"] in failed["detail"]
+
+
+@pytest.mark.parametrize("second_failure", [
+  _NETWORK_FAILURE, _BLOB_FAILURE, {"name": "SyntaxError", "message": "bad app syntax"},
+], ids=["network-again", "blob-again", "deterministic-on-retry"])
+def test_retry_failure_is_terminal_without_a_third_import(second_failure):
+  observed = run_frame_entrypoint(
+    _frame_html(), failures=[_NETWORK_FAILURE, second_failure],
+  )
+  failed = observed["final"]
+  assert failed["imports"] == [0, 1]
+  assert len(failed["delays"]) == 1
+  assert failed["delays"][0] > 0
+  assert failed["renderCount"] == 0
+  assert not failed["mounted"]
+  assert failed["messages"] == ["moebius:frame-error"]
+  assert failed["panel"]
+  assert second_failure["message"] in failed["detail"]
+  assert not failed["configPresent"]
+
+
+@pytest.mark.parametrize("on_retry", [False, True], ids=["first-import", "retry-import"])
+def test_expired_token_renegotiation_precedes_even_blob_shaped_retry_errors(on_retry):
+  expired = {**_BLOB_FAILURE, "code": "token-expired"}
+  failures = [_NETWORK_FAILURE, expired] if on_retry else [expired]
+  observed = run_frame_entrypoint(_frame_html(), failures=failures)
+  waiting_for_token = observed["final"]
+  assert waiting_for_token["imports"] == ([0, 1] if on_retry else [0])
+  assert len(waiting_for_token["delays"]) == int(on_retry)
+  assert all(delay > 0 for delay in waiting_for_token["delays"])
+  assert not waiting_for_token["initialized"]
+  assert not waiting_for_token["mounted"]
+  assert waiting_for_token["renderCount"] == 0
+  assert not waiting_for_token["panel"]
+  assert waiting_for_token["messages"] == ["moebius:token-expired"]
+  assert not waiting_for_token["configPresent"]

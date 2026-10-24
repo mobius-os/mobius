@@ -10,8 +10,6 @@ cache-first service worker — the failure mode behind the missing
 import json
 from pathlib import Path
 
-import pytest
-
 from app.main import _is_static_asset_path, _public_static_headers
 
 
@@ -120,21 +118,18 @@ def test_opaque_frame_public_assets_are_intrinsically_cors_readable():
   assert _public_static_headers("icons/icon-192.png") == {}
 
 
-def _spa_active(client):
-  """The catch-all only registers when a static dir exists (the Docker
-  pytest image has /app/static; a bare local checkout does not)."""
+def _assert_shell_served(client):
+  """Conftest provisions the shell; a missing route is a regression, not a skip."""
   r = client.get("/")
-  return r.status_code == 200 and "text/html" in r.headers.get(
-    "content-type", ""
-  )
+  assert r.status_code == 200, r.text
+  assert "text/html" in r.headers.get("content-type", ""), r.headers
 
 
 def test_live_vite_asset_route_is_intrinsically_cors_readable(
   client, monkeypatch, tmp_path,
 ):
   """The dedicated /assets handler must not bypass the opaque-frame policy."""
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  _assert_shell_served(client)
   asset = tmp_path / "index-opaque-frame.js"
   asset.write_text("export default 1", encoding="utf-8")
   monkeypatch.setattr("app.main._resolve_asset_file", lambda _path: asset)
@@ -144,8 +139,7 @@ def test_live_vite_asset_route_is_intrinsically_cors_readable(
 
 
 def test_vendor_miss_returns_404_not_html(client):
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  _assert_shell_served(client)
   for miss in (
     "/vendor/three@0.184.0/does-not-exist.js",
     "/vendor/three@0.184.0/missing.wasm",
@@ -158,8 +152,7 @@ def test_vendor_miss_returns_404_not_html(client):
 
 
 def test_app_route_still_serves_html(client):
-  if not _spa_active(client):
-    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  _assert_shell_served(client)
   r = client.get("/some-nonexistent-app-route")
   assert r.status_code == 200
   assert "text/html" in r.headers.get("content-type", "")
