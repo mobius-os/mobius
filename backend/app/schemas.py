@@ -296,6 +296,14 @@ class AppOut(BaseModel):
 
   @computed_field
   @property
+  def passive_block_module_digest(self) -> str | None:
+    """Pre-execution admission for this accepted applied bundle, or None."""
+    from app.app_capabilities import passive_block_module_digest
+
+    return passive_block_module_digest(self)
+
+  @computed_field
+  @property
   def frame_version(self) -> str:
     """The app frame's reload key; see app_compile_contract.app_frame_version."""
     from app.app_compile_contract import app_frame_version

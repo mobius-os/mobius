@@ -468,6 +468,119 @@ most 16384.
   records it names. A twelve-id list does not fit the 256-character payload.
   The handle is a reference, never approval.
 
+### Passive block sessions
+
+A block with `"interaction": "inline"` can show live status and an in-place
+Confirm without the reader opening the app. It needs all three of:
+
+1. `"capabilities": {"chat.blocks.passive": {"version": 1}}` in `mobius.json`,
+   accepted by the owner and applied (the editable manifest alone is never
+   enough; the frame checks the exact applied bundle's SHA-256 before running);
+2. `export const appBlockSessions = true` from the entry module;
+3. a default component that, given `props.blockSession`, exchanges the
+   messages below. Its output is never shown.
+
+Otherwise the block is static. An "unsupported" result belongs to the applied
+revision that gave it: after the app is updated, the block negotiates again. While the block is near the viewport the host
+runs a hidden, inert instance of the app; it cannot navigate, open chats or
+apps, or use other host requests, and it never reads or writes the app's saved
+shell place. At most 3 idle hidden instances run per app (the blocks nearest
+the viewport, measured as the page scrolls); further blocks stay static with
+an explicit open, and an instance that reports `retain` always keeps its frame.
+A view the reader opened in a static block stays open until they close it,
+even if a slot frees up. Module startup and
+session hydration must be read-only. The host draws every control; the app
+reports state.
+
+**`actions[].intent` is untrusted.** The actions in `blockSession` and
+`app-block-init` come from the block, which the conversation wrote; any text
+the agent read can steer them, and a hidden instance mounts just because the
+block scrolled into view. Use an intent only to look up your own data for
+display. Never act, publish, or change state because of an intent at startup
+or on `app-block-init`; act only on an owner `app-block-action`, and check
+that request against your own data first.
+
+`props.blockSession` is `{sessionId, generation, actions, checkpoint, retain,
+recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+`[{key, intent, label}]` and `key` is the action's intent. The host also posts
+window messages; read them with `subscribe` or a `message` listener that checks
+`event.source === window.parent`:
+
+- `{type:'moebius:app-block-init', sessionId, generation, actions, checkpoint,
+  retain, recoveryError}` when the session envelope changes.
+- `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
+  `event` one of `activate | confirm | cancel`. Each reader click sends one
+  event; the host sends no other event until you acknowledge that `nonce`.
+
+A message for another session or document `generation`, or for a module without
+the export, is stopped before any app listener sees it. A reload or app update
+starts a new generation; the previous document's controls are discarded.
+
+Report state with `setState(state)`, which stamps `type`, `sessionId` and
+`generation` for you, or by posting
+`{type:'moebius:app-block-state', sessionId, generation, ...state}` to the
+parent yourself. `generation` must be the number from this document's
+`blockSession` (the same value every `app-block-init` carries). A reload keeps
+the frame's window, so the host cannot tell documents apart by sender: it drops
+any report with a missing, older or newer generation, acknowledgements
+included.
+
+- `actions`: up to 24 `{key, label?, disabled?, busy?, hidden?, confirming?,
+  confirmation?, note?, tone?, status?, statusTone?, links?, badges?}`, one
+  per key from `actions` (a key you do not report stays "Loading…"; use
+  `hidden: true` to remove its control). Unknown keys are dropped. Text is plain and bounded (`label` and `status` 40, `note` 500);
+  `links` are up to 12 `{label, url}` with uncredentialed `https:` URLs; tones
+  are `neutral|success|attention|danger`; `badges` replaces the block's saved
+  badges for that action (omit to keep them, `[]` to clear them).
+- `notice` (500) and `summary` (240): plain text shown in the block.
+- `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
+  without acting twice on the same nonce.
+- `retain: true` while you own a confirmation, an operation in progress or an
+  unknown outcome; the host then keeps your document alive offscreen and does
+  not replace it with an app update. If an update removes the capability or
+  its applied admission while you retain, the block keeps your document and
+  its checkpoint, sends no new owner event, and tells the reader to open the
+  app to check the result; it becomes static once you release. Release it
+  only after cancellation or a settled result.
+- `checkpoint`: `{id (1-128), data (string, at most 32768 UTF-8 bytes)}` or
+  `null`, opaque to the host and returned in the next document's
+  `app-block-init`. Put only what is needed to recover an unresolved outcome
+  in it, never an approval or a request to replay. A new document must report
+  `checkpointAck` equal to the checkpoint `id` it imported before its controls
+  are enabled; until then they stay disabled. `recoveryError: true` reports a
+  checkpoint you could not use and keeps the block locked with a note to open
+  the app.
+
+**Confirmation contract.** To ask for Confirm, report the action with
+`confirming: true` and `confirmation`: the complete, current list of what
+Confirm will do, `[{title, facts: [{label, value}]}]` with 1-256 items, at most
+8 facts each and every text 1-512 characters. Only one action may be
+confirming at a time, and a `hidden` action never is: if two or more report
+`confirming: true`, the host enables no Confirm, shows no list, and asks the
+reader to open the app. Describe the exact targets and
+versions your app will act on now, from your own data, not the block's saved
+snapshot. The host shows every item, hides the block's saved badges unless you
+supply `badges`, and says the saved title and details come from the
+conversation. It never shortens the list: a missing, empty, oversized or
+malformed `confirmation` keeps Confirm disabled and shows "Open the app to
+review this action. Its full current identity is unavailable here." Confirm
+replaces the action's button in place, with "Not now" beside it. It stays
+disabled until, during this showing of that exact confirmation (the action
+and its list), the end of the list has been on screen at least once (as
+observed after this showing's own layout; a position under an earlier list
+never counts), and
+then Confirm itself has been on screen in a visible page for about 500 ms
+without interruption. The list is drawn below Confirm, so its end having been
+on screen means the whole list has passed through the viewport; a long list
+just needs scrolling to its end and back. A showing ends, and the next one
+starts from nothing, when the list changes or disappears, when Confirm or "Not
+now" is pressed, or on reload; Confirm leaving the screen or the page being
+hidden restarts the delay. So a double-click on the action, a list swapped
+just before a click, or a list that was never on screen never sends
+`confirm`. Treat
+`confirm` as a request: check it again in the app before acting, and report
+`busy` and then the result.
+
 ---
 
 ## Storage — `window.mobius.storage` is the default

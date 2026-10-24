@@ -492,6 +492,7 @@
 
   <script>
     // Populated by server-side injection in get_frame() — do not rename.
+    var _FRAME_PASSIVE_BLOCK_DIGEST = null
     var _FRAME_APP_ID = 'unknown'
     var _FRAME_CHAT_ID = ''
 
@@ -649,6 +650,17 @@
     //      every foreground change. The first one usually lands before the app
     //      runtime evaluates, so this frame keeps the latest verdict and hands
     //      it to the runtime's init (`frameVisible` in its config).
+    //  11. transcript block session (building-apps.md "Passive block
+    //      sessions"): frame-init may carry blockSession {sessionId,
+    //      generation, actions, checkpoint, retain, recoveryError}. Only a
+    //      server-admitted revision whose bytes match _FRAME_PASSIVE_BLOCK_DIGEST
+    //      and whose module exports `appBlockSessions = true` mounts; it gets
+    //      props.blockSession. frame-mounted reports supportsAppBlocks and the
+    //      document's blockGeneration; app-block-state must carry the same
+    //      generation (setState stamps it). Parent
+    //      app-block-init/app-block-action messages reach app listeners only for
+    //      this exact session and document generation; any other is stopped
+    //      here, before app code can see it.
     //
     // Origin check: the opaque iframe still sees the parent shell's concrete
     // origin on incoming postMessage events and rejects every other sender.
@@ -658,6 +670,10 @@
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;
+    // Passive transcript context: selects an opted-in entry point, never an action.
+    let passiveRequested = false;
+    let currentBlockSession = null;
+    let supportsAppBlocks = false;
     let currentNavLocation = null;
     let waitForNavigationReady = false;
     let tokenRefreshPromise = null;
@@ -968,8 +984,26 @@
       });
     }
 
+    function passiveNotAdmitted(message) {
+      const error = new Error(message);
+      error.code = 'passive-not-admitted';
+      return error;
+    }
+
     async function importBrokeredModule(retry) {
       const bytes = await requestModuleBytes(retry);
+      // A cached frame or racing Apply must not evaluate a different module
+      // under this document's passive admission.
+      if (passiveRequested) {
+        if (!_FRAME_PASSIVE_BLOCK_DIGEST || !globalThis.crypto?.subtle) {
+          throw passiveNotAdmitted('Passive app sessions are not admitted for this revision.');
+        }
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        if (actual !== _FRAME_PASSIVE_BLOCK_DIGEST) {
+          throw passiveNotAdmitted('Passive app module revision changed; open the app explicitly.');
+        }
+      }
       const blob = new Blob([bytes], { type: 'text/javascript' });
       const blobUrl = URL.createObjectURL(blob);
       try {
@@ -1099,12 +1133,65 @@
     document.addEventListener('pointerdown', notifyParentFocus, { capture: true, passive: true });
     document.addEventListener('wheel', rememberGestureScrollers, { capture: true, passive: true });
 
+    // The app's handle on its transcript block session. Fields mirror the
+    // init envelope; subscribe/setState are an optional convenience over the
+    // same window messages, which an app may also read directly.
+    const blockSessionListeners = new Set();
+    function blockSessionApi(session) {
+      if (!session || typeof session.sessionId !== 'string' || !Number.isSafeInteger(session.generation)) return null;
+      return Object.freeze({
+        sessionId: session.sessionId,
+        generation: session.generation,
+        actions: Array.isArray(session.actions) ? session.actions : [],
+        checkpoint: session.checkpoint || null,
+        retain: session.retain === true,
+        recoveryError: session.recoveryError || null,
+        subscribe(cb) {
+          if (typeof cb !== 'function') return function () {};
+          blockSessionListeners.add(cb);
+          return function () { blockSessionListeners.delete(cb); };
+        },
+        setState(state) {
+          window.parent.postMessage(
+            Object.assign({}, state, { type: 'moebius:app-block-state', sessionId: session.sessionId,
+              generation: session.generation }),
+            window.location.origin
+          );
+        },
+      });
+    }
+
+    // Returns true for a block-session message. A message for another sender,
+    // session or document generation, or for a module without the export, is
+    // stopped here: this listener is registered before any app listener.
+    function deliverBlockSessionMessage(event, msg) {
+      if (msg.type !== 'moebius:app-block-init' && msg.type !== 'moebius:app-block-action') return false;
+      if (event.source !== window.parent || event.origin !== window.location.origin
+          || !supportsAppBlocks || !currentBlockSession
+          || msg.sessionId !== currentBlockSession.sessionId
+          || msg.generation !== currentBlockSession.generation) {
+        event.stopImmediatePropagation();
+        return true;
+      }
+      blockSessionListeners.forEach(function (cb) {
+        try { cb(msg); } catch (err) { console.error(err); }
+      });
+      return true;
+    }
+    // Registered before the app module loads, hence before every app listener.
+    window.addEventListener('message', function (e) {
+      if (e.data && typeof e.data === 'object') deliverBlockSessionMessage(e, e.data);
+    });
+
     function renderMountedComponent() {
       if (!mountedRoot || !mountedComponent || !currentToken) return;
       mountedRoot.render(
         createElement(Fragment, null,
           createElement(MountSignal),
-          createElement(mountedComponent, { appId: _FRAME_APP_ID, token: currentToken })
+          createElement(mountedComponent, {
+            appId: _FRAME_APP_ID, token: currentToken,
+            ...(supportsAppBlocks ? { blockSession: currentBlockSession } : {})
+          })
         )
       );
     }
@@ -1203,7 +1290,8 @@
       if (!node || window.__frameMounted) return;
       window.__frameMounted = true;
       window.parent.postMessage(
-        { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
+        { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID, supportsAppBlocks,
+          blockGeneration: currentBlockSession ? currentBlockSession.generation : null },
         window.location.origin
       );
     }
@@ -1396,7 +1484,18 @@
       showErr('Runtime error', detail);
     }
 
+    // A passive document that cannot run its session reports unsupported
+    // without mounting the app's ordinary default view.
+    function settlePassiveUnsupported() {
+      supportsAppBlocks = false;
+      signalFrameMounted(document.getElementById('root'));
+    }
+
     async function loadModule() {
+      if (passiveRequested && (!currentBlockSession || !_FRAME_PASSIVE_BLOCK_DIGEST)) {
+        settlePassiveUnsupported();
+        return;
+      }
       const token = currentToken;
       if (!token) {
         showErr('Configuration error', 'No token received from parent.');
@@ -1466,6 +1565,12 @@
         createElement = compiledRuntime.createElement;
         Fragment = compiledRuntime.Fragment;
         const Component = mod.default;
+        supportsAppBlocks = mod.appBlockSessions === true;
+        // Admission permits evaluation, not an unsupported ordinary root.
+        if (passiveRequested && !supportsAppBlocks) {
+          settlePassiveUnsupported();
+          return;
+        }
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
           return;
@@ -1481,6 +1586,10 @@
         // and a component that throws during its first render would have already
         // claimed "mounted". See MountSignal.
       } catch (err) {
+        if (passiveRequested && err?.code === 'passive-not-admitted') {
+          settlePassiveUnsupported();
+          return;
+        }
         showErr('Failed to load app', err.stack || err.message);
       } finally {
         delete globalThis.__mobiusRuntimeConfig;
@@ -1585,6 +1694,9 @@
         acceptToken(msg.token);
         if (initialized) return;
         initialized = true;
+        // A malformed passive request still fails closed as passive.
+        passiveRequested = Boolean(msg.blockSession);
+        currentBlockSession = blockSessionApi(msg.blockSession);
         waitForNavigationReady = msg.waitForNavigationReady === true;
         currentNavLocation = typeof msg.navLocation === 'string' ? msg.navLocation : null;
         if (typeof window.__mobiusHydrateLocalStorage === 'function') {

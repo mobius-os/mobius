@@ -1,7 +1,7 @@
 /* App block parts. A static block is a conversation-authored snapshot with
    links into the app; nothing app-owned runs until the reader explicitly
    opens the embedded view. */
-import { lazy, Suspense, useCallback, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
@@ -78,10 +78,12 @@ export function AppBlockView({ app, intent, height, onHostRequest }) {
   </div>
 }
 
-/** Shared block chrome. `actionFor` renders the control for one app action. */
-export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionFor, toggle = null, children = null }) {
+/** Shared block chrome. `actionFor` renders the control for one app action;
+ *  `summary` is optional app-reported text shown under the saved title. */
+export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionFor, toggle = null,
+  summary = '', sectionRef = null, children = null }) {
   const action = actionFor(block.action)
-  return <section className="md-app-block" aria-label={block.title}>
+  return <section ref={sectionRef} className="md-app-block" aria-label={block.title}>
     <header>
       <strong>{block.title}</strong>
       <Badges badges={block.badges} />
@@ -89,6 +91,7 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
         Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>
     </header>
     <p className="md-app-block__source">From this conversation</p>
+    {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
     <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} />
     {action || toggle ? <footer>{toggle}{action}</footer> : null}
@@ -97,8 +100,11 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   </section>
 }
 
-export function StaticAppBlock({ block, app, appsLoading, onInternalNav }) {
+export function StaticAppBlock({ block, app, appsLoading, onInternalNav, sectionRef = null, onOpenChange = null }) {
   const [viewIntent, setViewIntent] = useState(null)
+  // A passive host keeps this block static while the reader has a view open.
+  const open = viewIntent !== null
+  useEffect(() => { onOpenChange?.(open) }, [onOpenChange, open])
   const navigate = useTranscriptNavigation(onInternalNav)
   const onHostRequest = useCallback((_, request) => transcriptHostRequest(request, { navigate }), [navigate])
   const openable = block.inline && app
@@ -114,7 +120,7 @@ export function StaticAppBlock({ block, app, appsLoading, onInternalNav }) {
       {viewIntent !== null ? 'Hide details' : block.expandLabel || 'Show details here'}</button>
     : null
   return <AppBlockLayout block={block} app={app} appsLoading={appsLoading} onInternalNav={onInternalNav}
-    actionFor={actionFor} toggle={toggle}>
+    actionFor={actionFor} toggle={toggle} sectionRef={sectionRef}>
     {openable && viewIntent !== null
       ? <AppBlockView key={viewIntent} app={app} intent={viewIntent} height={block.height} onHostRequest={onHostRequest} />
       : null}

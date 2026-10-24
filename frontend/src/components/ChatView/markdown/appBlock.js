@@ -89,6 +89,9 @@ export function appBlockFromToken(token) {
   const inline = value.inline !== false
   return {
     app, intent, title, inline, href: appBlockHref(app, intent),
+    // `"interaction": "inline"` asks for a passive session (see appBlockSession.js);
+    // the host grants it only to an admitted app, otherwise the block is static.
+    session: inline && value.interaction === 'inline',
     facts: blockFacts(value.facts, APP_BLOCK_LIMITS.facts),
     badges: blockBadges(value.badges),
     // Invalid items and actions are dropped; they never widen another field.
@@ -103,8 +106,16 @@ export function appBlockFromToken(token) {
   }
 }
 
+/** The app actions a block names, keyed by their intent. */
+export function blockActions(block) {
+  return [block.action, ...block.items.map(item => item.action)].filter(Boolean)
+    .map(action => ({ key: action.intent, intent: action.intent, label: action.label }))
+}
+
 /** A transcript is not a workspace navigation owner or a chat-control
- *  authority, so an embedded view may only open a conversation or an app. */
+ *  authority, so an embedded view may only open a conversation or an app.
+ *  Hidden session canvases get no host-request handler at all (AppCanvas
+ *  refuses their requests). */
 export function transcriptHostRequest(request, { navigate }) {
   if (request?.type === 'moebius:open-chat' && request.chatId) {
     navigate(`/shell/?${new URLSearchParams({ chat: request.chatId })}`)

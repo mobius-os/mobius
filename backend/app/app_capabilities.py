@@ -12,11 +12,12 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
 from app.manifest_contract import (
-  PUBLIC_SERVICE_REQUESTS_PER_MINUTE, SERVICE_REQUEST_MAX_BYTES,
+  MANIFEST_MAX_BYTES, PUBLIC_SERVICE_REQUESTS_PER_MINUTE, SERVICE_REQUEST_MAX_BYTES,
   accepted_service_max_bytes, accepted_service_route_limits,
 )
 
@@ -293,6 +294,23 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  # Runs accepted app code in a hidden frame while one of its chat blocks is
+  # near the viewport. See CAPABILITIES.md "Passive transcript sessions".
+  "chat.blocks.passive": {
+    "version": 1,
+    "kind": "session",
+    "title": "Run in its chat blocks",
+    "description": (
+      "Run this app's code, without showing it, while one of its blocks is "
+      "near the visible part of a chat, so the block can show current status. "
+      "After you press the block's Confirm, the app can act on your behalf, "
+      "for example publish a change."
+    ),
+    "risk": "execution",
+    "lifecycle": "passive_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "device.storage": {
     "version": 1,
     "kind": "invoke",
@@ -1070,3 +1088,69 @@ def _widens(path: str, before: Any, after: Any, after_leaves: dict) -> bool:
     group = path.split(".", 1)[0]
     return any(key.startswith(f"{group}.") for key in after_leaves)
   return True
+
+
+PASSIVE_BLOCK_CAPABILITY = "chat.blocks.passive"
+
+
+class _RuntimeManifestUnavailable(Exception):
+  """The frozen runtime tree is absent; never cache that answer."""
+
+
+@lru_cache(maxsize=512)
+def _applied_passive_digest(app_id: int, runtime_revision: str, compiled_path: str) -> str | None:
+  """Digest of one immutable (runtime revision, compiled bundle) pair.
+
+  Both inputs are content addressed, so the answer can never change for this
+  key: a new Apply produces a new revision and bundle name. The editable source
+  manifest is never consulted, and a missing runtime cache is not rebuilt from
+  a serializer; it simply stays unadmitted until the frame is next served.
+  """
+  from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_parent
+  from app.compiler import app_bundle_digest
+
+  digest = app_bundle_digest(app_id, compiled_path)
+  if digest is None:
+    return None
+  try:
+    root = runtime_parent(app_id) / runtime_revision
+    if not root.is_dir():
+      raise _RuntimeManifestUnavailable
+    manifest_path = root / "mobius.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+      return None
+    with manifest_path.open("rb") as handle:
+      raw = handle.read(MANIFEST_MAX_BYTES + 1)
+    if len(raw) > MANIFEST_MAX_BYTES:
+      return None
+    declaration = normalize_runtime_capabilities(json.loads(raw)).get(PASSIVE_BLOCK_CAPABILITY)
+  except (AppliedRuntimeUnavailable, OSError) as exc:
+    raise _RuntimeManifestUnavailable from exc
+  except (ValueError, TypeError, AttributeError):
+    return None
+  return digest if declaration and declaration["version"] == 1 else None
+
+
+def passive_block_module_digest(app: Any) -> str | None:
+  """Admit passive execution only for accepted, applied opt-in app code.
+
+  Local Store capability acceptance may precede source Apply, so neither that
+  acceptance nor the editable manifest alone proves the served revision opted
+  in. Require the owner's live grant (read on every call, so revocation is
+  immediate) and the immutable applied declaration, and return the compiled
+  content address the frame verifies before evaluating module bytes.
+  """
+  contract = getattr(app, "capability_contract", None)
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  grant = runtime.get(PASSIVE_BLOCK_CAPABILITY) if isinstance(runtime, dict) else None
+  if not isinstance(grant, dict) or type(grant.get("version")) is not int or grant["version"] != 1:
+    return None
+  revision = getattr(app, "runtime_revision", None)
+  compiled = getattr(app, "compiled_path", None)
+  if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) \
+      or not isinstance(compiled, str) or not compiled:
+    return None
+  try:
+    return _applied_passive_digest(int(app.id), revision, compiled)
+  except _RuntimeManifestUnavailable:
+    return None

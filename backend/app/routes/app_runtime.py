@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import activity, models, theme
+from app.app_capabilities import passive_block_module_digest
 from app.config import get_settings
 from app.database import get_db
 from app.deps import authorize_app_module_token, get_current_owner
@@ -284,6 +285,11 @@ def _frame_etag(
   parts: list[str] = []
   if app.updated_at:
     parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
+  # The frame embeds its passive-session admission, so a revoked or changed
+  # admission must not revalidate as the cached frame.
+  passive = passive_block_module_digest(app)
+  if passive:
+    parts.append(f"p{passive[:16]}")
   if frame_rev is None:
     try:
       parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
@@ -380,6 +386,10 @@ def get_frame(
   html = frame_path.read_text(encoding="utf-8")
 
   # Per-app server-side substitution of the app/chat ids the runtime needs.
+  html = html.replace(
+    "var _FRAME_PASSIVE_BLOCK_DIGEST = null",
+    f"var _FRAME_PASSIVE_BLOCK_DIGEST = {json.dumps(passive_block_module_digest(app))}",
+  )
   html = html.replace(
     "var _FRAME_APP_ID = 'unknown'",
     f"var _FRAME_APP_ID = {json.dumps(str(app_id))}",

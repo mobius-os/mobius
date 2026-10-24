@@ -181,3 +181,155 @@ test('bundled app packages are not duplicated in the shell install precache', ()
   }
   assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
 })
+
+// Passive transcript block sessions: execute the frame runtime's own function
+// declarations (found by name in the parsed module script) with mocked I/O.
+const runtimeScript = [...frame.matchAll(/<script type="module">([\s\S]*?)<\/script>/g)]
+  .map(match => match[1]).find(source => source.includes('function loadModule('))
+const runtimeAst = parse(runtimeScript, { ecmaVersion: 'latest', sourceType: 'module' })
+function runtimeFunctions(...names) {
+  return names.map(name => {
+    const node = runtimeAst.body.find(item => item.type === 'FunctionDeclaration' && item.id.name === name)
+    assert.ok(node, `${name} is a top-level frame function`)
+    return runtimeScript.slice(node.start, node.end)
+  }).join('\n')
+}
+function frameScope(names, scope, result) {
+  return new Function('scope', `with (scope) { ${runtimeFunctions(...names)}\n return ${result} }`)(scope)
+}
+
+function blockSessionFrame({ supportsAppBlocks = true, session = { sessionId: 's', generation: 3, actions: [{ key: 'run:1' }] } } = {}) {
+  const parent = { posted: [], postMessage(message, origin) { this.posted.push({ message, origin }) } }
+  const scope = {
+    supportsAppBlocks, currentBlockSession: null, blockSessionListeners: new Set(), console,
+    window: { parent, location: { origin: 'https://mobius.test' } },
+  }
+  const { api, deliver } = frameScope(['blockSessionApi', 'deliverBlockSessionMessage'], scope,
+    '{ api: blockSessionApi, deliver: deliverBlockSessionMessage }')
+  scope.currentBlockSession = api(session)
+  const appListener = []
+  const send = (msg, source = parent, origin = 'https://mobius.test') => {
+    const event = { source, origin, data: msg, stopped: false, stopImmediatePropagation() { this.stopped = true } }
+    const handled = deliver(event, msg)
+    // A later app listener on window sees the event unless the runtime stopped it.
+    if (!event.stopped) appListener.push(msg)
+    return { handled, stopped: event.stopped }
+  }
+  return { api: scope.currentBlockSession, makeApi: api, send, appListener, parent }
+}
+
+test('block-session messages reach app listeners only for this exact session, generation and parent', () => {
+  const action = { type: 'moebius:app-block-action', sessionId: 's', generation: 3, key: 'run:1', event: 'confirm', nonce: 'n' }
+  const off = blockSessionFrame({ supportsAppBlocks: false })
+  assert.deepEqual(off.send(action), { handled: true, stopped: true })
+  assert.deepEqual(off.appListener, [])
+
+  const on = blockSessionFrame()
+  const subscribed = []
+  const unsubscribe = on.api.subscribe(msg => subscribed.push(msg))
+  for (const foreign of [{ ...action, sessionId: 'other' }, { ...action, generation: 2 }, { ...action, generation: undefined },
+    { type: 'moebius:app-block-init', sessionId: 'other', generation: 3, actions: [] }]) {
+    assert.deepEqual(on.send(foreign), { handled: true, stopped: true })
+  }
+  assert.deepEqual(on.send(action, { not: 'the parent' }), { handled: true, stopped: true })
+  assert.deepEqual(on.send(action, on.parent, 'https://evil.test'), { handled: true, stopped: true })
+  assert.deepEqual(on.send({ type: 'moebius:app-intent', intent: 'x:1' }), { handled: false, stopped: false })
+  // The exact message reaches both the subscription API and a direct window
+  // listener such as `window.addEventListener('message', …)` in the app.
+  assert.deepEqual(on.send(action), { handled: true, stopped: false })
+  assert.deepEqual(subscribed, [action])
+  assert.deepEqual(on.appListener.filter(msg => msg.type === 'moebius:app-block-action'), [action])
+  unsubscribe()
+  on.send(action)
+  assert.equal(subscribed.length, 1)
+})
+
+test('the app block-session handle mirrors the init envelope and stamps its own state', () => {
+  const on = blockSessionFrame({ session: { sessionId: 's', generation: 4, actions: [{ key: 'run:1' }],
+    checkpoint: { id: 'c1', data: 'opaque' }, retain: true, recoveryError: null } })
+  assert.equal(on.api.sessionId, 's')
+  assert.equal(on.api.generation, 4)
+  assert.deepEqual(on.api.checkpoint, { id: 'c1', data: 'opaque' })
+  assert.equal(on.api.retain, true)
+  assert.ok(Object.isFrozen(on.api))
+  on.api.setState({ actions: [{ key: 'run:1', busy: true }], type: 'forged', sessionId: 'other' })
+  assert.equal(on.parent.posted[0].message.type, 'moebius:app-block-state')
+  assert.equal(on.parent.posted[0].message.sessionId, 's')
+  assert.equal(on.parent.posted[0].message.generation, 4, 'the handle stamps its own document generation')
+  assert.equal(on.parent.posted[0].origin, 'https://mobius.test')
+  assert.equal(on.makeApi({ sessionId: 's' }), null, 'an envelope without a generation is not a session')
+})
+
+function renderAppMount({ supportsAppBlocks = true, currentBlockSession = null } = {}) {
+  let tree
+  const render = frameScope(['renderMountedComponent'], {
+    mountedRoot: { render: value => { tree = value } }, mountedComponent: 'App', Fragment: 'Fragment',
+    MountSignal: 'MountSignal', _FRAME_APP_ID: 7, currentToken: 'app-session', supportsAppBlocks, currentBlockSession,
+    createElement: (type, props, ...children) => ({ type, props, children }),
+  }, 'renderMountedComponent')
+  render()
+  return tree.children[1].props
+}
+
+test('only a supporting module receives props.blockSession; ordinary props are unchanged', () => {
+  const session = { sessionId: 's' }
+  assert.equal(renderAppMount({ currentBlockSession: session }).blockSession, session)
+  assert.deepEqual(Object.keys(renderAppMount({ supportsAppBlocks: false, currentBlockSession: session })).sort(), ['appId', 'token'])
+})
+
+function passiveLoad({ requested = true, session = { sessionId: 'p', generation: 1 }, admitted, exports = {}, importError = null }) {
+  const observed = { imports: 0, roots: 0, renders: 0, mounted: [], errors: [] }
+  const scope = {
+    passiveRequested: requested, currentBlockSession: session, supportsAppBlocks: false,
+    _FRAME_PASSIVE_BLOCK_DIGEST: admitted ? 'a'.repeat(64) : null, _FRAME_APP_ID: '42',
+    currentToken: 'token', currentCapabilityContract: null, currentNavLocation: null,
+    waitForNavigationReady: false, frameVisible: true, COMPILED_RUNTIME_ABI: 1,
+    globalThis: { __mobiusCompiledRuntime: { abi: 1, createRoot() { observed.roots++; return {} }, createElement() {}, Fragment: {} } },
+    document: { getElementById() { return {} } }, window: { __frameMounted: false },
+    async importBrokeredModule() { observed.imports++; if (importError) throw importError; return { default() {}, ...exports } },
+    tokenAppInstanceId() { return 'fixture' }, runtimeToken() {}, handleUncaughtAppError() {},
+    signalFrameMounted() { observed.mounted.push(scope.supportsAppBlocks) },
+    showErr(...args) { observed.errors.push(args) }, async settleOwnedFontsBeforeMount() {},
+    renderMountedComponent() { observed.renders++ },
+    renegotiateExpiredModuleToken() { return false }, isBlobModuleLoadFailure() { return false },
+  }
+  const load = frameScope(['settlePassiveUnsupported', 'loadModule'], scope, 'loadModule')
+  return load().then(() => observed)
+}
+
+test('a passive document runs app code only for an admitted, supporting module', async () => {
+  const unadmitted = await passiveLoad({ admitted: false })
+  assert.deepEqual([unadmitted.imports, unadmitted.roots, unadmitted.renders], [0, 0, 0])
+  assert.deepEqual(unadmitted.mounted, [false])
+  const malformed = await passiveLoad({ admitted: true, session: null })
+  assert.deepEqual([malformed.imports, malformed.mounted], [0, [false]], 'a malformed envelope still fails closed')
+  const unsupported = await passiveLoad({ admitted: true })
+  assert.deepEqual([unsupported.imports, unsupported.roots, unsupported.renders], [1, 0, 0])
+  assert.deepEqual(unsupported.mounted, [false])
+  const supported = await passiveLoad({ admitted: true, exports: { appBlockSessions: true } })
+  assert.deepEqual([supported.roots, supported.renders, supported.errors], [1, 1, []])
+  const drift = await passiveLoad({ admitted: true, importError: Object.assign(new Error('drift'), { code: 'passive-not-admitted' }) })
+  assert.deepEqual([drift.roots, drift.mounted, drift.errors], [0, [false], []])
+  const ordinary = await passiveLoad({ requested: false, session: null, admitted: false })
+  assert.deepEqual([ordinary.roots, ordinary.renders], [1, 1], 'ordinary frames are unaffected')
+})
+
+test('module bytes must match the admitted digest before any passive evaluation', async () => {
+  const { webcrypto } = await import('node:crypto')
+  const bytes = new TextEncoder().encode('globalThis.__passiveStartupCount++; export default 1;')
+  const digest = Buffer.from(await webcrypto.subtle.digest('SHA-256', bytes)).toString('hex')
+  const scope = {
+    passiveRequested: true, _FRAME_PASSIVE_BLOCK_DIGEST: '0'.repeat(64), crypto: webcrypto,
+    globalThis: { crypto: webcrypto }, Blob, async requestModuleBytes() { return bytes },
+    URL: { createObjectURL() { return 'data:text/javascript;base64,' + Buffer.from(bytes).toString('base64') }, revokeObjectURL() {} },
+  }
+  const importModule = frameScope(['passiveNotAdmitted', 'importBrokeredModule'], scope, 'importBrokeredModule')
+  globalThis.__passiveStartupCount = 0
+  try {
+    await assert.rejects(importModule(0), error => error.code === 'passive-not-admitted')
+    assert.equal(globalThis.__passiveStartupCount, 0)
+    scope._FRAME_PASSIVE_BLOCK_DIGEST = digest
+    await importModule(0)
+    assert.equal(globalThis.__passiveStartupCount, 1)
+  } finally { delete globalThis.__passiveStartupCount }
+})

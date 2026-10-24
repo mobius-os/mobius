@@ -114,6 +114,12 @@ test('an embedded transcript view may only open a conversation or an app', () =>
   assert.equal(seen.length, 2)
 })
 
+test('inline sessions are opt-in and never apply to link-only blocks', () => {
+  assert.equal(appBlockFromToken(token({ ...base, interaction: 'inline' })).session, true)
+  assert.equal(appBlockFromToken(token(base)).session, false)
+  assert.equal(appBlockFromToken(token({ ...base, inline: false, interaction: 'inline' })).session, false)
+})
+
 test('invalid facts never take a valid fact\'s slot', () => {
   const block = appBlockFromToken(token({ ...base, facts: [...Array(8).fill({ label: '', value: 'x' }), { label: 'Kept', value: 'yes' }] }))
   assert.deepEqual(block.facts, [{ label: 'Kept', value: 'yes' }])

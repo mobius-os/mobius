@@ -795,6 +795,57 @@ licensing of the bytes. A `read` consumer sends `control('next')` after taking
 ownership of every `chunk` event, so neither message port accumulates a whole
 large package in memory.
 
+### Passive transcript sessions
+
+`chat.blocks.passive` v1 lets an app's `"interaction": "inline"` chat blocks
+run its accepted code in a hidden, inert frame while the block is near the
+viewport, so the block can show current status and an in-place Confirm. It is
+an execution capability, not an HTTP permission: the app keeps its ordinary
+app token and server grants, so this is not a read-only sandbox. Its contract
+requires read-only module startup and session hydration; the app may act only
+after an explicit owner event (`activate`, `confirm`, `cancel`) and must check
+it again itself. The review copy says so: after the owner presses Confirm the
+app can act, for example publish a change. Omission is no grant; existing
+owners are never auto-granted it, and declaring it is a reviewable widening.
+
+Admission is server-owned. `AppOut.passive_block_module_digest` (also injected
+into the frame and folded into its ETag) is non-null only when the owner's live
+grant exists and the immutable applied runtime manifest declares the
+capability; it is the content address of the applied compiled bundle. It is
+computed once per (runtime revision, bundle) pair, never from the editable
+manifest, and a missing runtime cache is reported as unadmitted rather than
+rebuilt during serialization. The frame verifies the transferred module bytes
+against that SHA-256 before evaluation; without a digest or WebCrypto it does
+not run the module. That integrity check also applies offline, but admission
+then reflects the last digest the shell received: a cached app list and frame
+can run cached, admitted bytes, so a revocation takes effect once the shell
+reaches the server again. An admitted module that does not export
+`appBlockSessions = true` is never mounted as its ordinary view on this path;
+the block falls back to an explicit, visible open. That verdict belongs to one
+applied revision; after an update the block negotiates again.
+
+Each frame document has a host-assigned generation, echoed by the frame in
+`frame-mounted` and every `app-block-state`. Negotiation, reported state
+and owner events are bound to it; a reload or version promotion resets idle
+controls, and an idle session released offscreen keeps nothing. A document that
+reports `retain` (an unacknowledged event, a confirmation, an operation in
+progress or an unknown outcome) stays mounted and is not replaced by an app
+update until it releases. If admission itself is withdrawn meanwhile (an
+update drops the capability or its digest), the retained session stays
+mounted with its checkpoint, takes no new owner event, and tells the reader to
+open the app to check the result; it becomes a static block once it releases. AppCanvas refuses host requests from a buffered
+successor, and from any transcript or session canvas that is not visible (the
+hidden session canvas gets no host-request handler at all). An ordinary shell
+app keeps its background requests, such as chat status or a projects list,
+while another view is on screen. At most 3 idle session frames run per app
+(nearest the viewport centre, measured as the page scrolls; a reader-opened
+static view is never torn down for a slot). Confirm arms only after the end of
+its exact list (a sentinel after the last item, drawn below Confirm) has been
+observed on screen after the current showing's layout and Confirm itself has then been on
+screen in a visible page for about 500 ms; every new showing starts over. The
+wire protocol and the confirmation contract are in
+`building-apps.md` "Passive block sessions".
+
 ## Adding a capability
 
 1. Add one definition (name, version, kind, copy, lifecycle, limits) to the
