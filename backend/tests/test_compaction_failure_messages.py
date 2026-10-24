@@ -170,7 +170,7 @@ async def test_claude_error_terminal_is_actionable_and_discards_partial_text(
   monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", lambda _opts: client)
   with pytest.raises(compaction.CompactionError) as failure:
     await compaction._run_claude_summarize_turn(
-      "private prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "private prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert action in str(failure.value)
   assert "secret" not in str(failure.value)
@@ -264,7 +264,7 @@ async def test_claude_retried_rate_limit_does_not_mask_final_sign_in_failure(
   monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", lambda _opts: Client())
   with pytest.raises(compaction.CompactionError) as failure:
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert "Reconnect" in str(failure.value)
 
@@ -305,7 +305,7 @@ async def test_claude_retried_rate_limit_does_not_mask_terminal_result_text(
   monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", lambda _opts: Client())
   with pytest.raises(compaction.CompactionError) as failure:
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert "Reconnect" in str(failure.value)
 
@@ -356,6 +356,6 @@ async def test_claude_auth_error_type_survives_repeated_result_text(
   monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", lambda _opts: Client())
   with pytest.raises(compaction.CompactionError) as failure:
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert "Reconnect" in str(failure.value)

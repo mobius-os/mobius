@@ -87,6 +87,7 @@ from app.routes import (
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
   chats_router, chats_stream_router,
   secure_inputs_router,
+  model_relay_router,
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
@@ -353,7 +354,10 @@ async def lifespan(app):
     record_memory_checkpoint("shutdown_begin")
     from app.public_app_transport import close_public_fetch_clients
     from app.routes.proxy import close_proxy_clients
-    for close_clients in (close_public_fetch_clients, close_proxy_clients):
+    from app.routes.model_relay import close_model_relay_client
+    for close_clients in (
+      close_public_fetch_clients, close_proxy_clients, close_model_relay_client,
+    ):
       try:
         await close_clients()
       except Exception as exc:
@@ -1043,6 +1047,7 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(model_relay_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
 app.include_router(delegations_router)
