@@ -42,10 +42,12 @@ def state_lock(instance_id: str) -> threading.RLock:
 
 
 def validate_state_path(path: str) -> str:
-  parts = Path(path).parts
+  # Validate the original key before Path can collapse aliases that would
+  # return under a different JSON key in snapshots and change records.
+  parts = path.split("/")
   if (
     not path or len(path) > 200 or path.startswith("/") or "\\" in path
-    or ".." in parts or not _SAFE_PATH.fullmatch(path)
+    or any(part in {"", ".", ".."} for part in parts) or not _SAFE_PATH.fullmatch(path)
     or any(is_atomic_write_temp_name(part) for part in parts)
   ):
     raise HTTPException(400, "Invalid shared app data path.")
@@ -73,7 +75,8 @@ def _target(row: models.SharedAppInstance, path: str) -> Path:
   return target
 
 
-def read_state(row: models.SharedAppInstance) -> dict:
+def read_snapshot(db: Session, row: models.SharedAppInstance) -> dict:
+  """Read values, versions and their reconnect cursor as one locked snapshot."""
   with state_lock(str(row.id)):
     root = state_root(row)
     values = {}
@@ -94,7 +97,13 @@ def read_state(row: models.SharedAppInstance) -> dict:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
           raise HTTPException(500, "Shared app data could not be read.") from exc
         versions[path] = file_version_token(target)
-    return {"values": values, "versions": versions}
+    # Writers hold this same lock through their change-log commit. Releasing
+    # it before reading the cursor could permanently skip a concurrent write.
+    return {
+      "values": values,
+      "versions": versions,
+      "cursor": list_changes(db, row, None)["cursor"],
+    }
 
 
 def _append_change(

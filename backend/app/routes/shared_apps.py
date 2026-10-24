@@ -418,9 +418,7 @@ def get_shared_app_state(
   db: Session = Depends(get_db),
 ):
   row = _instance_for(db, instance_id, principal)
-  state = shared_app_state.read_state(row)
-  state["cursor"] = shared_app_state.list_changes(db, row, None)["cursor"]
-  return state
+  return shared_app_state.read_snapshot(db, row)
 
 
 @router.get("/{instance_id}/changes")
