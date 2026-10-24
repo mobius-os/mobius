@@ -8,18 +8,16 @@ import base64
 import json
 import os
 import re
-import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+from agent_api import agent_credentials, agent_request
 
 
 def _environment() -> tuple[str, str, str]:
-  api = (os.environ.get("API_BASE_URL") or "").rstrip("/")
-  token = os.environ.get("AGENT_TOKEN") or ""
+  api, token = agent_credentials()
   chat_id = os.environ.get("CHAT_ID") or ""
-  if not api or not token or not chat_id:
+  if not chat_id:
     raise SystemExit("API_BASE_URL, AGENT_TOKEN, and CHAT_ID are required.")
   if not re.fullmatch(r"[A-Za-z0-9_-]+", chat_id):
     raise SystemExit("CHAT_ID has an unexpected shape.")
@@ -33,31 +31,7 @@ def _request(
   path: str,
   payload: dict | None = None,
 ) -> object | None:
-  data = None if payload is None else json.dumps(payload).encode("utf-8")
-  request = urllib.request.Request(
-    api + path,
-    data=data,
-    method=method,
-    headers={
-      "Authorization": f"Bearer {token}",
-      **({"Content-Type": "application/json"} if data is not None else {}),
-    },
-  )
-  try:
-    with urllib.request.urlopen(request, timeout=60) as response:
-      raw = response.read()
-  except urllib.error.HTTPError as exc:
-    raw = exc.read()
-    try:
-      detail = json.loads(raw.decode("utf-8")).get("detail")
-    except Exception:
-      detail = raw.decode("utf-8", errors="replace") or exc.reason
-    raise SystemExit(f"screen-control request failed ({exc.code}): {detail}")
-  except OSError as exc:
-    raise SystemExit(f"screen-control request failed: {exc}")
-  if not raw:
-    return None
-  return json.loads(raw.decode("utf-8"))
+  return agent_request(api, token, method, path, payload, label="screen-control")
 
 
 def _command(api: str, token: str, chat_id: str, payload: dict) -> object:

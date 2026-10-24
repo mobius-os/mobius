@@ -430,6 +430,10 @@ class SystemBroadcast:
     except ValueError:
       pass
 
+  def subscription(self, subscription_id: str) -> SystemSubscription | None:
+    """The live subscriber with this id, or None once it has disconnected."""
+    return next((sub for sub in tuple(self.subscribers) if sub.id == subscription_id), None)
+
   def report_visible_apps(
     self, subscription_id: str, sequence: int, app_ids: frozenset[str],
   ) -> bool:
@@ -440,13 +444,13 @@ class SystemBroadcast:
     newer one is ignored, so a delayed "visible" can never overwrite a later
     "hidden" and silence pushes the owner is no longer looking at.
     """
-    for sub in self.subscribers:
-      if sub.id == subscription_id:
-        if sequence > sub.visible_apps_sequence:
-          sub.visible_apps_sequence = sequence
-          sub.visible_app_ids = app_ids
-        return True
-    return False
+    sub = self.subscription(subscription_id)
+    if sub is None:
+      return False
+    if sequence > sub.visible_apps_sequence:
+      sub.visible_apps_sequence = sequence
+      sub.visible_app_ids = app_ids
+    return True
 
   def app_is_visible(self, app_id: str) -> bool:
     return any(app_id in sub.visible_app_ids for sub in self.subscribers)

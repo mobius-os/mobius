@@ -208,6 +208,16 @@ import useWorkspaceSession from './useWorkspaceSession.js'
 import useDeferredNewChatMaterialization from './useDeferredNewChatMaterialization.js'
 import useShellUpdateController from './useShellUpdateController.js'
 import useVisibleAppPresence from './useVisibleAppPresence.js'
+import useSharedFolderHost from './useSharedFolderHost.js'
+import SharedFolderActivity from './SharedFolderActivity.jsx'
+import {
+  SHARED_FOLDER_ACTIVITY_EVENT,
+  SHARED_FOLDER_COMMAND_EVENT,
+  SHARED_FOLDER_PAUSE_EVENT,
+  handleSharedFolderCommand,
+  showSharedFolderActivity,
+} from '../../lib/sharedFolders/folderHost.js'
+import { applyRemotePause } from '../../lib/sharedFolders/folderActions.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import useShellShortcuts from '../../hooks/useShellShortcuts.js'
@@ -3030,7 +3040,14 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
     observeManagedAppEvent(ev)
-    if (ev.type === 'agent_coordination_message') {
+    if (ev.type === SHARED_FOLDER_COMMAND_EVENT) {
+      // Addressed to this tab's stream only: the folder lives in this browser.
+      void handleSharedFolderCommand(ev)
+    } else if (ev.type === SHARED_FOLDER_ACTIVITY_EVENT) {
+      showSharedFolderActivity(ev)
+    } else if (ev.type === SHARED_FOLDER_PAUSE_EVENT) {
+      void applyRemotePause(ev)
+    } else if (ev.type === 'agent_coordination_message') {
       // Mailbox hints refresh owner views without polling a model inbox.
       const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
       void invalidateChatActivityForSystemEvent(queryClient, ev)
@@ -3459,6 +3476,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     onSubscription: setSystemSubscriptionId,
   })
   useVisibleAppPresence(systemSubscriptionId, visibleAppIds)
+  useSharedFolderHost(systemSubscriptionId)
 
   // Installed-app launches and worker messages enter the same destination path
   // as the notification centre, including revealing a pending answer card.
@@ -4703,6 +4721,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         </nav>
         <div className="shell__bar-actions">
           <ScreenControlButton chatId={activeChatId} onNotice={notifyShell} />
+          <SharedFolderActivity />
           {connectionStatusLabel && (
             <span
               className="shell__connection-status"

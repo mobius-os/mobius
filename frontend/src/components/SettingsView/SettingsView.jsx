@@ -27,6 +27,7 @@ import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import GithubConnection from './GithubConnection.jsx'
+import SharedFoldersSection from './SharedFoldersSection.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusProviderAccess from './MobiusProviderAccess.jsx'
 import { formatPlanStatus } from './providerUsage.js'
@@ -1148,6 +1149,8 @@ export default function SettingsView({
         </section>
 
         {!detailPage && <>
+        <SharedFoldersSection />
+
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 
         <section className="settings__section settings__section--compact">

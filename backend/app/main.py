@@ -100,6 +100,7 @@ from app.routes import (
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   screen_control_router,
+  shared_folders_router,
   public_apps_router,
   public_storage_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
@@ -1055,6 +1056,7 @@ app.include_router(connectors_public_router)
 app.include_router(app_chat_router)
 app.include_router(notify_router)
 app.include_router(screen_control_router)
+app.include_router(shared_folders_router)
 app.include_router(proxy_router)
 app.include_router(public_storage_router)
 app.include_router(public_apps_router)

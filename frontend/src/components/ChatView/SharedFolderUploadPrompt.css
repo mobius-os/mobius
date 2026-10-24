@@ -1,0 +1,76 @@
+/* The big-upload decision box reuses the question card; it lives in the chat foot above the chat box. */
+.chat__foot .upload-folder-prompt {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-card-gap, 6px);
+  padding: 12px 14px 14px;
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__foot .upload-folder-prompt { animation: none; }
+}
+
+.upload-folder-prompt__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.upload-folder-prompt__head .qcard__header {
+  margin-bottom: 0;
+}
+
+.upload-folder-prompt__close {
+  flex: none;
+  margin: -8px -8px -4px auto;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.upload-folder-prompt__close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.upload-folder-prompt__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.upload-folder-prompt .qcard__text {
+  margin: 4px 0 10px;
+}
+
+/* The space-saving choice is the suggested one. */
+.upload-folder-prompt__share {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.upload-folder-prompt__error {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.upload-folder-prompt__visit-input {
+  display: none;
+}
+
+/* Phones: full-width choices and 44px tap targets. */
+@media (pointer: coarse), (max-width: 620px) {
+  .upload-folder-prompt .qcard__opt {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+}

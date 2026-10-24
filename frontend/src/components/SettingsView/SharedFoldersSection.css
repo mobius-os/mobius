@@ -1,0 +1,292 @@
+/* Shared folders reuse the Settings card, provider rows and buttons; only their own pieces live here. */
+.shared-folders__intro {
+  margin: -4px 0 12px;
+}
+
+.shared-folders__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* Scoped under the section so it wins over the generic .settings__btn--outline
+   display, which loads later in the bundle. */
+.shared-folders .shared-folders__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 8px 14px;
+}
+
+.shared-folders__visit-input {
+  display: none;
+}
+
+.shared-folders__alert {
+  margin-top: 12px;
+}
+
+.shared-folders__hint {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+/* Safari, Firefox and Brave: Pick a folder, with a yellow warning icon on its right. */
+.shared-folders__visit {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  --shared-folders-warning: #e5b20e;
+}
+
+[data-theme="light"] .shared-folders__visit {
+  --shared-folders-warning: #a87b00;
+}
+
+.shared-folders__note-trigger {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--shared-folders-warning) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--shared-folders-warning) 12%, transparent);
+  color: var(--shared-folders-warning);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shared-folders__note-trigger:focus-visible {
+  outline: 2px solid var(--shared-folders-warning);
+  outline-offset: 2px;
+}
+
+/* Opens just under the row, inside the card, above what follows. */
+.shared-folders__note {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 5;
+  width: min(320px, 100%);
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.shared-folders__note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.shared-folders__note-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--shared-folders-warning);
+}
+
+.shared-folders__note-close {
+  flex: none;
+  margin: -6px -8px -6px 0;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.shared-folders__note-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.shared-folders__note-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+@media (pointer: coarse) {
+  .shared-folders__note-trigger { width: 44px; height: 44px; }
+  .shared-folders__note-close { width: 40px; height: 40px; }
+}
+
+/* The one action that makes a folder usable again sits under its row. */
+.shared-folders__prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}
+
+.shared-folders__prompt-text {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.shared-folders__choices {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.shared-folders__choices > .settings__btn--sm {
+  align-self: flex-start;
+}
+
+.shared-folders__choices-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.shared-folders__choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  padding: 11px 13px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .shared-folders__choice:hover {
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--border-light));
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+  }
+}
+
+.shared-folders__choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.shared-folders__choice-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.shared-folders__choice-detail {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.shared-folders__manage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.shared-folders__manage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shared-folders__confirm .settings__subtext {
+  margin: 0 0 8px;
+}
+
+.shared-folders__others {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-light);
+}
+
+.shared-folders__others-title {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.shared-folders__others-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The activity pill reuses the screen-control pill; keep long folder names on one line. */
+.shared-folder-activity__label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.shared-folder-activity__text,
+.shared-folder-activity__device {
+  max-width: 46vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Another device is where the work happens: say which, quietly. */
+.shared-folder-activity__device {
+  font-size: 10.5px;
+  font-weight: 560;
+  color: var(--muted);
+}
+
+.shared-folders__other .provider-row__main {
+  justify-content: space-between;
+}
+
+.shared-folders__other .shared-folders__other-pause {
+  flex-shrink: 0;
+  align-self: center;
+}
+
+/* Touch screens: every control here is at least 44px tall. */
+@media (pointer: coarse) {
+  .shared-folders .settings__btn--sm,
+  .shared-folders .shared-folders__add,
+  .shared-folders__choice {
+    min-height: 44px;
+  }
+}
+
+@container settings (max-width: 420px) {
+  .shared-folders__prompt {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .shared-folders__prompt .settings__btn--sm {
+    align-self: flex-start;
+  }
+}
