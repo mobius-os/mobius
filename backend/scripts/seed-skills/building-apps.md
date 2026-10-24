@@ -900,10 +900,21 @@ useEffect(() => {
 ## Pausing work while the app is hidden
 
 The shell keeps recently used apps loaded but hidden so switching back is
-instant. A hidden app frame's `document.hidden` stays `false` unless the whole
-browser tab is hidden, so a timer gated only on `document.hidden` keeps
-polling, animating, or playing audio for an app nobody can see. Gate that work
-on the runtime's combined signal instead:
+instant. While an app is hidden, its frame reads as a hidden page the standard
+way (`document.hidden`, `document.visibilityState`, and `visibilitychange` on
+the way out and back), so engines and libraries that follow the Page Visibility
+API pause themselves. The frame also pauses the app's sound: it suspends every
+Web Audio context and pauses playing `<audio>`/`<video>` elements — including
+media that begins on its own while hidden, such as autoplay or a clip that was
+still loading — holds any `resume()` or `play()` the app calls while hidden, and
+on return resumes exactly what it paused, never what the app paused itself (nor
+an element the app removed from the page while hidden). A held `resume()` or
+`play()` resolves right away: it reports that the request was accepted, not that
+audio is playing, and a later failure when it actually starts on return is not
+surfaced — so don't treat that resolution as proof sound is audible.
+
+Timers keep running, so pause polling, animation, and game clocks yourself and
+catch up on return:
 
 ```jsx
 useEffect(() => {
@@ -922,7 +933,32 @@ useEffect(() => {
 tab is visible. `onVisibilityChange(cb)` calls `cb(visible)` immediately and on
 every change, and returns an unsubscribe function. A Store app that may run on
 an older Möbius checks `window.mobius.runtimeFeatures?.frameVisibility` and
-otherwise falls back to `document.hidden` with `visibilitychange`.
+otherwise falls back to `document.hidden` with `visibilitychange`; on those
+hosts, pause the app's own sound as well.
+
+Playback the owner starts deliberately and expects to keep hearing (a podcast,
+read-aloud, music) keeps playing while the app is hidden if the app opens a
+shell media session for it. The drawer then shows a now-playing control:
+
+```js
+const send = (message) => window.parent.postMessage(
+  { type: 'moebius:media-session', sessionId: 'episode-42', ...message },
+  window.location.origin,
+)
+send({ event: 'open', title: 'Episode 42', playbackState: 'playing' })
+send({ event: 'update', playbackState: 'paused' }) // 'loading' | 'playing' | 'paused'
+send({ event: 'close' })                            // playback ended
+// The drawer's controls arrive as
+// { type: 'moebius:media-control', sessionId, action: 'play' | 'pause' | 'stop' }.
+```
+
+The page still reads as hidden while such playback continues. Documents the
+app embeds in its own child iframes are separate pages: forward the visibility
+to them yourself. For the same reason, `<audio>`/`<video>` inside an open
+shadow root isn't reached — the frame's scan doesn't cross shadow boundaries
+and `play` events don't escape them — so pause shadow-DOM media yourself from
+`onVisibilityChange` as well. Plain (light-DOM) elements and `new Audio()` are
+handled for you.
 
 ---
 

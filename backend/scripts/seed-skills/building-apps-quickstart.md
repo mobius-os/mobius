@@ -229,10 +229,10 @@ defaults, or deleting records—switch to `building-apps.md` and use
 empty. Do not use `localStorage`, IndexedDB, native `alert`/`confirm`/`prompt`,
 or owner credentials.
 
-If the app polls, animates, or plays audio, pause that work while
-`window.mobius.visible` is false and resume it from
-`window.mobius.onVisibilityChange(cb)`: hidden apps stay loaded, and
-`document.hidden` alone does not see them (see `building-apps.md`).
+Hidden apps stay loaded. Möbius pauses their sound and reports the page as
+hidden, but timers keep running: pause polling, animation, and game clocks
+while `window.mobius.visible` is false and resume them from
+`window.mobius.onVisibilityChange(cb)` (see `building-apps.md`).
 
 ### 5. Verify the rendered app without exploring the whole shell
 

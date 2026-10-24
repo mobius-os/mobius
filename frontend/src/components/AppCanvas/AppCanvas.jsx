@@ -185,9 +185,13 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      scrim but synchronously cancels any Android compositor scroll already in
 //      flight. Hidden/incoming frames receive false too.
 //
-//   3c. {type: 'moebius:frame-visibility', visible, navigationReady} parent → frame
+//   3c. {type: 'moebius:frame-visibility', visible, navigationReady,
+//        backgroundPlayback} parent → frame
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
+//      app-frame.html turns visible:false into a hidden page and pauses the
+//      frame's sound unless backgroundPlayback says the document owns an open
+//      media session (deliberate playback the drawer still controls).
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-deferred` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -683,6 +687,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   visibleRef.current = visible
   const frameVisibleRef = useRef(frameVisible)
   frameVisibleRef.current = frameVisible
+  // Assigned once sendVisibility is declared; the message handler calls it by
+  // ref so it never enters that effect's dependency list.
+  const resyncBackgroundPlaybackRef = useRef(() => {})
   function finishFileExport(request, result) {
     finishAppFileExport({ request, pendingRef: pendingFileExportRef, setPending: setPendingFileExport, result })
   }
@@ -1101,11 +1108,19 @@ const AppCanvas = forwardRef(function AppCanvas({
         if (mediaEvent.event === 'close') {
           if (currentSessionId !== mediaEvent.sessionId) return
           frameMediaSessionRef.current.delete(srcVersion)
+          // backgroundPlayback just flipped true -> false; re-send the
+          // visibility verdict so a hidden frame drops its exemption now.
+          resyncBackgroundPlaybackRef.current(srcVersion)
           onMediaSessionRef.current?.(appId, mediaEvent)
           return
         }
         if (mediaEvent.event === 'update' && currentSessionId !== mediaEvent.sessionId) return
+        const hadSession = frameMediaSessionRef.current.has(srcVersion)
         frameMediaSessionRef.current.set(srcVersion, mediaEvent.sessionId)
+        // A session that opens while the frame is hidden flips backgroundPlayback
+        // false -> true; re-send so the frame exempts its deliberate playback
+        // instead of staying held until the next show/hide.
+        if (!hadSession) resyncBackgroundPlaybackRef.current(srcVersion)
         const source = e.source
         onMediaSessionRef.current?.(appId, mediaEvent, (action) => {
           if (!['play', 'pause', 'stop', 'cycle-speed'].includes(action)) return false
@@ -1514,11 +1529,14 @@ const AppCanvas = forwardRef(function AppCanvas({
   // shell ancestor — which does NOT change the nested iframe's
   // document.visibilityState (no visibilitychange/blur/pagehide fires). So an
   // app that plays audio or animates keeps running after you navigate away
-  // (the reported "music keeps playing after exiting" bug). Posting the verdict
-  // lets an app pause on `visible:false` and resume on `visible:true`. The
-  // native Page Visibility API still covers real tab-hide (it propagates to
-  // same-origin child frames), so the two compose: an app is foreground only
-  // when it's the active canvas AND the tab is visible.
+  // (the reported "music keeps playing after exiting" bug). app-frame.html
+  // turns this verdict into the standard Page Visibility state and pauses the
+  // document's Web Audio and media elements, so its sound stops without
+  // Möbius-specific app code. `backgroundPlayback` exempts a document with an open media
+  // session from that forced pause: its playback is deliberate and stays
+  // controllable from the drawer. The native Page Visibility API still covers
+  // real tab-hide, so the two compose: an app is foreground only when it's
+  // the active canvas AND the tab is visible.
   //
   // Double-buffer routing: only the LIVE frame ever receives the real verdict.
   // A buffered incoming frame is invisible by construction, so it gets an
@@ -1537,8 +1555,22 @@ const AppCanvas = forwardRef(function AppCanvas({
       navigationReady: visible && visibleRef.current
         && v === liveVersionRef.current && swap.liveLoaded
         && frameNavRef.current.get(v)?.mounted === true,
+      backgroundPlayback: frameMediaSessionRef.current.has(v),
     })
   }
+
+  // backgroundPlayback only rides along a frame-visibility message. When a media
+  // session opens or closes, the per-frame flag changes but no show/hide flip
+  // follows, so a hidden live frame would keep its stale hold-or-exempt state.
+  // Re-send the current verdict (with the updated flag) to the live frame. The
+  // message handler reaches this through a ref so it stays out of that effect's
+  // dependency list, like the other handler callbacks.
+  function resyncBackgroundPlayback(v) {
+    if (v === liveVersionRef.current && loadedDocsRef.current.has(v)) {
+      sendVisibility(v, frameVisibleRef.current)
+    }
+  }
+  resyncBackgroundPlaybackRef.current = resyncBackgroundPlayback
 
   function sendInteractivity(v, enabled, frameIsVisible = frameVisibleRef.current) {
     postToFrame(v, {

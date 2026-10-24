@@ -229,6 +229,202 @@
     forward(shortcut.actionId);
   }, true);
 })();</script>
+      <!-- Background pause. The shell keeps recently used apps loaded but
+           hidden so they reopen instantly. Hiding a shell ancestor does not
+           change this document's native Page Visibility, so a closed game
+           would keep playing. While the shell reports visible:false, this
+           document reads as hidden (document.hidden, visibilityState and a
+           visibilitychange event, so engines pause their own loops) and its
+           Web Audio contexts and audio/video elements are paused. An app's
+           resume() or play() while hidden is held, not refused; on return,
+           exactly what was paused or held resumes, never what the app paused
+           itself. backgroundPlayback marks a document with an open media
+           session: its deliberate playback continues (the drawer controls
+           it), though the page still honestly reads as hidden. Child frames
+           are separate documents and keep their own lifecycle. -->
+      <script data-mobius-background-pause>(function () {
+  var shellHidden = false;
+  var holding = false;
+  var heldContexts = new Set();
+  // element -> wasConnected at the time it was held. release() resumes each
+  // held element except one that was in the page when held and the app has
+  // since removed while hidden: restarting a detached element would play audio
+  // the app discarded and nobody could stop.
+  var heldMedia = new Map();
+  var trackedMedia = new Set();
+  var knownMedia = new WeakSet();
+  function ignore() {}
+
+  // Page Visibility composes the shell's verdict with the browser's own.
+  var stateGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get;
+  var hiddenGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get;
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: function () { return shellHidden ? 'hidden' : stateGetter.call(document); }
+  });
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    get: function () { return shellHidden || hiddenGetter.call(document); }
+  });
+
+  // Web Audio: every context made in this document is tracked from birth.
+  var trackedContexts = new Set();
+  var contextApis = [];
+  ['AudioContext', 'webkitAudioContext'].forEach(function (name) {
+    var Native = window[name];
+    if (typeof Native !== 'function') return;
+    var api = contextApis.find(function (item) { return item.Native === Native; });
+    if (!api) {
+      var proto = Native.prototype;
+      api = { Native: Native, resume: proto.resume, suspend: proto.suspend, close: proto.close };
+      proto.resume = function () {
+        if (holding && this.state !== 'closed') {
+          // Held while hidden: resolve now rather than start audio in the
+          // background. The promise reports "accepted", not "running" — nothing
+          // plays until release() resumes it on return, and a later native
+          // resume failure won't surface to this caller. Accepted so an app's
+          // playback-start path isn't blocked for the whole time it's hidden.
+          heldContexts.add(this);
+          return Promise.resolve();
+        }
+        return api.resume.apply(this, arguments);
+      };
+      proto.suspend = function () {
+        heldContexts.delete(this);
+        return api.suspend.apply(this, arguments);
+      };
+      proto.close = function () {
+        heldContexts.delete(this);
+        return api.close.apply(this, arguments);
+      };
+      var Tracked = function () {
+        var context = Reflect.construct(Native, arguments, new.target || Tracked);
+        trackedContexts.add(new WeakRef(context));
+        // resume() is asynchronous: one requested while visible can still be
+        // 'suspended' when the hide arrives, so hold() skips it, and its later
+        // completion would start audio while hidden. Catch the transition to
+        // 'running' while holding, suspend it, and retain it for return.
+        context.addEventListener('statechange', function () {
+          if (holding && context.state === 'running') {
+            heldContexts.add(context);
+            api.suspend.call(context).catch(ignore);
+          }
+        });
+        // A context born while hidden (an app booting in the background)
+        // starts held and runs once the app is foreground.
+        if (holding) {
+          api.suspend.call(context).catch(ignore);
+          heldContexts.add(context);
+        }
+        return context;
+      };
+      Tracked.prototype = proto;
+      Object.setPrototypeOf(Tracked, Native);
+      Object.defineProperty(Tracked, 'name', { value: Native.name });
+      api.Tracked = Tracked;
+      contextApis.push(api);
+    }
+    window[name] = api.Tracked;
+  });
+  function contextApi(context) {
+    return contextApis.find(function (item) { return context instanceof item.Native; });
+  }
+
+  // Media elements: play() tracks detached `new Audio()` elements too.
+  var mediaProto = HTMLMediaElement.prototype;
+  var nativePlay = mediaProto.play;
+  var nativePause = mediaProto.pause;
+  mediaProto.play = function () {
+    if (!knownMedia.has(this)) {
+      knownMedia.add(this);
+      trackedMedia.add(new WeakRef(this));
+    }
+    if (holding) {
+      // Held, not played: see the AudioContext.resume() note above. Resolves
+      // now; release() starts it on return, and a later failure won't surface.
+      heldMedia.set(this, this.isConnected);
+      return Promise.resolve();
+    }
+    return nativePlay.apply(this, arguments);
+  };
+  mediaProto.pause = function () {
+    heldMedia.delete(this);
+    return nativePause.apply(this, arguments);
+  };
+
+  function eachLive(refs, callback) {
+    refs.forEach(function (ref) {
+      var value = ref.deref();
+      if (value) callback(value);
+      else refs.delete(ref);
+    });
+  }
+
+  function hold() {
+    eachLive(trackedContexts, function (context) {
+      if (context.state !== 'running') return;
+      heldContexts.add(context);
+      contextApi(context).suspend.call(context).catch(ignore);
+    });
+    var media = [];
+    eachLive(trackedMedia, function (element) { media.push(element); });
+    document.querySelectorAll('audio, video').forEach(function (element) { media.push(element); });
+    media.forEach(function (element) {
+      if (element.paused || heldMedia.has(element)) return;
+      heldMedia.set(element, element.isConnected);
+      nativePause.call(element);
+    });
+  }
+
+  // Browser-initiated playback (autoplay once its policy allows, or an element
+  // that starts after loading) never passes through the play() override above.
+  // hold() only scans what is attached on entry, so catch these in the capture
+  // phase while holding: pause and retain the element so release() resumes it.
+  document.addEventListener('play', function (event) {
+    if (!holding) return;
+    var element = event.target;
+    if (!(element instanceof HTMLMediaElement)) return;
+    // play events are delivered asynchronously, so a stale one can arrive after
+    // the app has already paused the element (play() then pause() before we go
+    // hidden). The element is paused by now, so there is nothing to hold —
+    // holding it would restart playback the app deliberately stopped.
+    if (element.paused) return;
+    if (!heldMedia.has(element)) heldMedia.set(element, element.isConnected);
+    nativePause.call(element);
+  }, true);
+
+  function release() {
+    var contexts = Array.from(heldContexts);
+    var media = Array.from(heldMedia);
+    heldContexts.clear();
+    heldMedia.clear();
+    contexts.forEach(function (context) {
+      if (context.state !== 'closed') contextApi(context).resume.call(context).catch(ignore);
+    });
+    media.forEach(function (entry) {
+      var element = entry[0];
+      var wasConnected = entry[1];
+      // The app removed a once-attached element while hidden: it discarded that
+      // playback. Resuming would play a detached element nobody can stop.
+      if (wasConnected && !element.isConnected) return;
+      nativePlay.call(element).catch(ignore);
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    var msg = event.data;
+    if (!msg || msg.type !== 'moebius:frame-visibility') return;
+    var wasHidden = document.hidden;
+    shellHidden = msg.visible === false;
+    var shouldHold = shellHidden && msg.backgroundPlayback !== true;
+    if (shouldHold && !holding) { holding = true; hold(); }
+    else if (!shouldHold && holding) { holding = false; release(); }
+    if (document.hidden !== wasHidden) {
+      document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+    }
+  });
+})();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
            src/lib/applyTheme.js). The frame reads its injected theme slot and
            may read the safe compatibility storage snapshot when available;
