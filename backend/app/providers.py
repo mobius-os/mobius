@@ -1203,16 +1203,15 @@ class AppModelProvider(BaseProvider):
   def check_auth(self, data_dir: str) -> str | None:
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return f"{self.name} is turned off in its app."
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    if not path.is_file():
-      return f"Connect {self.name} in its app to use these models."
-    try:
-      from app.app_secret_crypto import decrypt_app_secret
-      if decrypt_app_secret(path).strip():
-        return None
-    except Exception:
-      pass
-    return f"Reconnect {self.name} in its app; its saved key is unavailable."
+    from app import key_vault
+    # The declared secret name is the vault key the app asked for; the owner's
+    # grant to this app is what makes the models available.
+    if key_vault.app_may_use(self.app_id, self.declaration["secret_name"]):
+      return None
+    return (
+      f"Connect {self.name} in its app, then approve its key request in "
+      "Settings › Keys to use these models."
+    )
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
@@ -1240,9 +1239,10 @@ class AppModelProvider(BaseProvider):
     return Path(get_settings().data_dir) / "apps" / str(self.app_id) / "model-runtime" / "catalog.json"
 
   def build_env(self, base_env, data_dir, chat_id=None):
-    from app.app_secret_crypto import decrypt_app_secret
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    key = decrypt_app_secret(path)
+    from app import key_vault
+    key = key_vault.reveal_for_app_platform_use(self.app_id, self.declaration["secret_name"])
+    if not key:
+      raise RuntimeError(f"{self.name}'s key is not available; check Settings › Keys.")
     env = dict(base_env)
     for name in list(env):
       if name.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN")) or name in {

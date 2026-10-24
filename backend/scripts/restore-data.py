@@ -94,7 +94,7 @@ import backup_lib as lib  # noqa: E402
 SECRET_FILE_MODE = 0o600
 SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
-SECRET_DIRS = ("cli-auth", "app-secrets", "push")
+SECRET_DIRS = ("cli-auth", "app-secrets", "push", ".vault")
 
 # Rough gz -> uncompressed expansion for the capacity preflight.
 EXPAND_FACTOR = 4

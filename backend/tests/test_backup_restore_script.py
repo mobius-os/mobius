@@ -215,6 +215,19 @@ def _seed_data_dir(root):
   (root / "cli-auth" / "claude").mkdir(parents=True)
   (root / "cli-auth" / "claude" / ".credentials.json").write_text("SECRET")
   (root / ".secret-key").write_text("SIGNING-KEY")
+  # The key vault: encrypted keys next to their master key, plus a live socket.
+  (root / ".vault").mkdir()
+  (root / ".vault" / "master.key").write_bytes(b"M" * 32)
+  (root / ".vault" / "keys.json").write_text('{"version": 1, "keys": {}}')
+  # Bind by relative name: socket paths are limited to ~108 bytes.
+  _cwd = os.getcwd()
+  os.chdir(root / ".vault")
+  try:
+    _vault_socket = socket.socket(socket.AF_UNIX)
+    _vault_socket.bind("vault.sock")
+    _vault_socket.close()
+  finally:
+    os.chdir(_cwd)
   (root / "service-token.txt").write_text("JWT")
   (root / ".recovery-secret").write_text("RSECRET")
   (root / ".recovery-owner.json").write_text('{"owner":"x"}')
@@ -306,6 +319,8 @@ def test_backup_skips_secrets_without_recipient(tmp_path):
   assert not any("logs" in m for m in members)
   assert not any(m.startswith("platform") for m in members)
   assert not any(".secret-key" in m for m in members)
+  # Keys and their master key never land in the unencrypted archive.
+  assert not any(".vault" in m for m in members)
   assert not any(".recovery-secret" in m for m in members)
   assert not any(".recovery-owner.json" in m for m in members)
   assert not any(".recover-pending" in m for m in members)
@@ -330,6 +345,8 @@ def test_backup_plaintext_secrets_perms_and_hashes(tmp_path):
     assert any(m == expected or m.endswith("/" + expected)
                for m in secret_members), f"{expected} missing from secrets"
   assert any("cli-auth" in m for m in secret_members)
+  assert {".vault/master.key", ".vault/keys.json"} <= set(secret_members)
+  assert ".vault/vault.sock" not in secret_members
   with tarfile.open(bdir / "data.tar.gz") as t:
     data_members = t.getnames()
   allm = secret_members + data_members

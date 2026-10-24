@@ -85,6 +85,31 @@ Full agent root is the default normal-instance capability. The root-owned baked
 entrypoint creates an unrestricted sudo rule unless an operator sets
 `MOBIUS_AGENT_SUDO=0`; changing that boundary requires recreating the container.
 
+### Keys: the agent may read them, apps only borrow them
+
+Keys live encrypted in the key vault (`/data/.vault/`), managed in
+**Settings › Keys**. The owner and the owner's agents may read a key; every
+read is logged without its value, and an agent replacing an existing key
+notifies the owner. Apps never receive a value: an app asks once for a key by
+name, the owner approves it, and the app then sends requests through
+`/api/keys/use/…`, where the server identifies the app from its own
+platform-issued token and the vault adds the key on the way out (default-deny
+sites, methods and paths; public-address pinning; no redirects; echoed values
+redacted; answers sandboxed). Only the server talks to the vault, over a
+mode-0600 socket. Approving requests and changing grants is refused to apps,
+shared-browser guests and delegated helpers. App ids are reused after a purge,
+so a purge removes that app's grants. Backups carry the vault only in the
+encrypted secrets archive (skipped when no backup recipient is configured),
+and agents are guided to borrow keys through the vault rather than read them,
+so values stay out of chat logs.
+
+Known limitation: app *browser* code cannot reach a value, but an app's
+server-side service and scheduled jobs still run as the same OS user as the
+server, which has root by default, so determined server-side app code could
+read the vault folder. A kernel sandbox for that code is future work
+(KEY_VAULT_DESIGN.md). Treat any key as readable by your agent, and by
+installed apps' server code until then.
+
 ## Opaque embedded-chat contract
 
 `window.mobius.chat` creates three documents. The outer sandbox restriction

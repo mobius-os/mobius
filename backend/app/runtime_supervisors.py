@@ -144,6 +144,8 @@ class RuntimeSupervisors:
     await self._start_frontend_watcher()
     from app.connect_outbound import supervise_outbound_connects
     self._spawn("connect-outbound", supervise_outbound_connects())
+    from app.key_vault import supervise_key_vault
+    self._spawn("key-vault", supervise_key_vault())
     self._spawn("oom-watchdog", self._oom_watchdog_loop())
     self._spawn("browser-reaper", self._browser_reaper_loop())
 

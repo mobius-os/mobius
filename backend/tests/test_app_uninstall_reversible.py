@@ -263,26 +263,14 @@ def test_recover_never_reactivates_pre_uninstall_app_token(
   token = _app_token(client, auth, app_id)
   app_auth = {"Authorization": f"Bearer {token}"}
 
-  assert client.put(
-    f"/api/apps/{app_id}/secrets/key",
-    headers=auth,
-    json={"value": "preserved"},
-  ).status_code == 204
-  assert client.head(
-    f"/api/apps/{app_id}/secrets/key", headers=app_auth,
-  ).status_code == 204
+  assert client.get("/api/apps/", headers=app_auth).status_code == 200
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
   assert client.post(
     f"/api/apps/{app_id}/recover", headers=auth,
   ).status_code == 200
 
-  assert client.head(
-    f"/api/apps/{app_id}/secrets/key", headers=app_auth,
-  ).status_code == 401
-  owner_read = client.get(f"/api/apps/{app_id}/secrets/key", headers=auth)
-  assert owner_read.status_code == 200
-  assert owner_read.text == "preserved"
+  assert client.get("/api/apps/", headers=app_auth).status_code == 401
 
 
 def test_recover_expired_returns_410(client, auth, db, bypass_url_validation):
@@ -302,16 +290,16 @@ def test_recover_active_returns_404(client, auth, bypass_url_validation):
   assert r.status_code == 404
 
 
-def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
+def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation, monkeypatch):
+  from app import key_vault
+  forgotten = []
+
+  async def forget(app_id):
+    forgotten.append(app_id)
+  monkeypatch.setattr(key_vault, "forget_app", forget)
   app = _install(client, auth)
   app_id = app["id"]
   data_file = _seed_data(app_id)
-  assert client.put(
-    f"/api/apps/{app_id}/secrets/key",
-    headers=auth,
-    json={"value": "purge-me"},
-  ).status_code == 204
-  secret_dir = Path(get_settings().data_dir) / "app-secrets" / str(app_id)
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
   # Age the tombstone past the TTL, then a list call sweeps it.
@@ -324,7 +312,8 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   db.expire_all()
   assert db.query(models.App).filter(models.App.id == app_id).first() is None
   assert not data_file.exists()
-  assert not secret_dir.exists()
+  # The freed id may be reused, so its key grants go with it.
+  assert forgotten == [app_id]
 
 
 def test_provider_app_purge_detaches_but_preserves_native_project(
@@ -522,12 +511,6 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   old_nonce = db.query(models.App).filter(models.App.id == app_id).one().token_nonce
   data_file = _seed_data(app_id, body="wipe-me")
   storage_dir = Path(get_settings().data_dir) / "apps" / str(app_id)
-  assert client.put(
-    f"/api/apps/{app_id}/secrets/key",
-    headers=auth,
-    json={"value": "wipe-me"},
-  ).status_code == 204
-  secret_dir = Path(get_settings().data_dir) / "app-secrets" / str(app_id)
   assert data_file.exists()
 
   r = client.delete(f"/api/apps/{app_id}/data", headers=auth)
@@ -536,7 +519,6 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   # Storage tree gone.
   assert not data_file.exists()
   assert not storage_dir.exists()
-  assert not secret_dir.exists()
 
   # App row still LIVE — not tombstoned, not hard-deleted.
   db.expire_all()

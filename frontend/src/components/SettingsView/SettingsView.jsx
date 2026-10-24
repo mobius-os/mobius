@@ -27,6 +27,7 @@ import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import GithubConnection from './GithubConnection.jsx'
+import KeysSection, { KeyPage } from './KeysSection.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusProviderAccess from './MobiusProviderAccess.jsx'
 import { formatPlanStatus } from './providerUsage.js'
@@ -305,10 +306,12 @@ export default function SettingsView({
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [githubAccountOpen, setGithubAccountOpen] = useState(false)
-  // null shows the overview; a provider id shows that provider's detail page.
+  // null shows the overview; a provider id shows that provider's detail page,
+  // and `key:<name>` a vault key's page (`key:` alone adds a key).
   // Usage is on demand: only an open provider page fetches its usage.
   const [detailPage, setDetailPage] = useState(null)
-  const selectedProvider = detailPage
+  const keyPage = typeof detailPage === 'string' && detailPage.startsWith('key:') ? detailPage.slice(4) : null
+  const selectedProvider = keyPage === null ? detailPage : null
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -951,7 +954,7 @@ export default function SettingsView({
       <div className="settings__content">
         <header className="settings__header">
           {detailPage && <button type="button" className="settings__back" aria-label="Back to Settings" onClick={() => setDetailPage(null)}><ArrowLeft width={18} height={18} aria-hidden="true" /></button>}
-          <h1 className="settings__title">{selectedProvider ? (modelProviderInfo[selectedProvider]?.label || selectedProvider) : 'Settings'}</h1>
+          <h1 className="settings__title">{keyPage !== null ? (keyPage || 'New key') : selectedProvider ? (modelProviderInfo[selectedProvider]?.label || selectedProvider) : 'Settings'}</h1>
           {!detailPage && <button
             type="button"
             className="settings__appearance-toggle"
@@ -993,7 +996,23 @@ export default function SettingsView({
           </div>
         </section>}
 
-        <section
+        {!detailPage && (
+          <KeysSection
+            focusRef={(node) => setSetupFocusRef('keys', node)}
+            attention={attentionSection === 'keys'}
+            onOpenKey={(name) => openDetailPage(`key:${name}`)}
+            onAddKey={() => openDetailPage('key:')}
+          />
+        )}
+        {keyPage !== null && (
+          <KeyPage
+            name={keyPage}
+            onOpenKey={(name) => openDetailPage(`key:${name}`)}
+            onClose={() => setDetailPage(null)}
+          />
+        )}
+
+        {keyPage === null && <section
           className={`settings__section settings__section--ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
           id="settings-ai-providers"
           ref={(node) => setSetupFocusRef('ai-providers', node)}
@@ -1145,7 +1164,7 @@ export default function SettingsView({
               onlyProvider={manageModelsProvider === 'all' ? null : manageModelsProvider}
             />
           )}
-        </section>
+        </section>}
 
         {!detailPage && <>
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />

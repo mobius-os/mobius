@@ -1,0 +1,301 @@
+/* Settings › Keys: overview list in the AI-providers style, app requests, and a key's own page. */
+/* Settings' own stylesheet loads after this one, so overrides of shared
+   settings classes carry one extra class. */
+
+/* -- overview: heading over one bordered list, like AI providers ---------- */
+.settings__section.settings-keys {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-keys__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-keys .settings-keys__title { margin: 0 0 5px; }
+.settings-keys .settings__subtext { margin: 0; }
+
+.settings__btn.settings-keys__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.settings-keys > .alert,
+.settings-keys > [role="alert"] { margin-bottom: 10px; }
+
+.settings-keys__list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.settings-keys__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 62px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-keys__row + .settings-keys__row,
+.settings-keys__list > * + .settings-keys__denied { border-top: 1px solid var(--border); }
+.settings-keys__row:hover { background: var(--surface-2); }
+.settings-keys__row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.settings__account-icon.settings-keys__icon {
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-keys__row-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.settings-keys__row-copy strong { font-weight: 500; font-size: 14px; overflow-wrap: anywhere; }
+.settings-keys__row-copy small { color: var(--muted); font-size: 13px; }
+.settings-keys__chevron { color: var(--muted); flex: none; }
+
+.settings-keys__empty {
+  margin: 0;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.settings-keys__denied {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* -- an app asking for a key -------------------------------------------- */
+.settings-keys__request {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 8px;
+  background: var(--surface);
+}
+.settings-keys__request-lead { margin: 0; font-size: 14px; line-height: 1.45; color: var(--text); }
+.settings-keys__request-lead strong { font-weight: 600; overflow-wrap: anywhere; }
+
+/* -- shared bits ---------------------------------------------------------- */
+.settings-keys__muted { margin: 0; font-size: 13px; line-height: 1.45; color: var(--muted); }
+.settings-keys__refused { color: var(--danger); }
+.settings-keys__error { display: block; padding: 0 16px 10px; color: var(--danger); font-size: 12.5px; }
+
+.settings-keys__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-keys__input,
+.settings-keys__select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.settings-keys__input:focus-visible,
+.settings-keys__select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.settings-keys__input[aria-invalid="true"] { border-color: var(--danger); }
+
+.settings-keys__link {
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.settings-keys__link:disabled { opacity: 0.5; cursor: default; }
+
+.settings-keys__icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.settings-keys__icon-btn:hover { background: var(--surface-2); color: var(--text); }
+
+.settings__btn.settings-keys__danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.settings__btn.settings-keys__danger-outline { color: var(--danger); }
+
+/* -- a key's page --------------------------------------------------------- */
+.settings-keys-page { display: grid; gap: 0; }
+.settings-keys-page > .alert { margin-bottom: 10px; }
+
+.settings__section-title.settings-keys-page__heading { margin: 14px 0 6px; padding: 0 2px; }
+.settings-keys-page__note { margin: 2px 2px 12px; }
+
+.settings__section.settings-keys-card {
+  padding: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+
+.settings-keys-card__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  margin: 0;
+  padding: 9px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.settings-keys-card > * + * { border-top: 1px solid var(--border); }
+
+.settings-keys-card__copy { display: grid; gap: 3px; min-width: 0; flex: 1; font-size: 14px; }
+.settings-keys-card__copy strong { font-weight: 500; overflow-wrap: anywhere; }
+.settings-keys-card__copy small { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.settings-keys-card__end { display: inline-flex; align-items: center; gap: 12px; flex: none; }
+
+.settings-keys-card__row--add {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+}
+.settings-keys-card__row--add:hover { background: var(--surface-2); }
+.settings-keys-card__row--add .settings-keys__select {
+  min-height: 34px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.settings-keys-card__form { display: grid; gap: 8px; padding: 12px 16px 14px; }
+
+.settings-keys-card__field { display: grid; gap: 6px; padding: 12px 16px; font-size: 13px; color: var(--muted); }
+
+.settings-keys__value {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+}
+
+/* "How it's sent": the technical slot, out of the way until needed. */
+.settings-keys-sent {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.settings-keys-sent summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 50px;
+  padding: 9px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  list-style: none;
+}
+.settings-keys-sent summary::-webkit-details-marker { display: none; }
+.settings-keys-sent summary code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.settings-keys-sent[open] summary { border-bottom: 1px solid var(--border); }
+
+.settings-keys__segmented {
+  display: inline-flex;
+  justify-self: start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.settings-keys__segment {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-keys__segment--on { background: var(--surface-2); color: var(--text); }
+
+.settings-keys-delete { display: grid; gap: 8px; margin-top: 18px; justify-items: start; }
+
+/* The agents switch uses the shell accent, like the chat settings switch. */
+.settings-keys-switch {
+  --switch-track-width: 36px;
+  --switch-track-height: 20px;
+  --switch-thumb-size: 16px;
+  --switch-thumb-offset: 2px;
+  --switch-track-color: var(--border);
+  --switch-track-color-hover: var(--surface-2);
+  --switch-track-color-checked: var(--accent);
+  --switch-track-color-disabled: var(--surface);
+  --switch-track-color-checked-disabled: var(--accent-dim);
+  --color-ring: var(--accent);
+}
+
+.settings-keys-switch button[role="switch"] {
+  background: var(--switch-track-color);
+  border-radius: var(--radius-full, 9999px);
+}
+.settings-keys-switch button[role="switch"][data-state="checked"] {
+  background: var(--switch-track-color-checked);
+}
+.settings-keys-switch button[role="switch"][data-disabled] {
+  background: var(--switch-track-color-disabled);
+}
+.settings-keys-switch button[role="switch"][data-disabled][data-state="checked"] {
+  background: var(--switch-track-color-checked-disabled);
+}

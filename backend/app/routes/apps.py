@@ -526,7 +526,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
 
   # Remove the ID-KEYED trees, and fail loudly if any survives, BEFORE the row
   # is deleted. App.id has no AUTOINCREMENT, so SQLite can hand a freed id to
-  # the next install; a silently-orphaned /data/apps/<id>/ tree (or its secrets)
+  # the next install; a silently-orphaned /data/apps/<id>/ tree (or a key grant)
   # would then be readable by that unrelated replacement app under its own valid
   # credentials. Keeping the row — hence the id — claimed until the storage is
   # gone closes that window: a persistent failure leaves the tombstone for the
@@ -535,11 +535,12 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # compiled_path can never turn this into an arbitrary unlink.
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   storage_dir = apps_root / str(deleted_app_id)
-  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
   from app.compiler import purge_app_bundles
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
-  await asyncio.to_thread(_rmtree_strict, secrets_dir)
+  # The id can be reused after the purge, so no key grant may outlive it.
+  from app import key_vault
+  await key_vault.forget_app(deleted_app_id)
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent
@@ -3513,7 +3514,6 @@ async def delete_app_data(
       settings, app.id, app.token_nonce,
     )
     storage_dir = apps_root / str(app.id)
-    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
     # next write (atomic_write mkdirs its parent). Wipe LOUDLY: a swallowed
@@ -3521,7 +3521,6 @@ async def delete_app_data(
     # owner asked to erase are still on disk and readable by the still-live app.
     try:
       await settled.run_settled(_rmtree_strict, storage_dir)
-      await settled.run_settled(_rmtree_strict, secrets_dir)
     except OSError as exc:
       log.error("app %s data wipe failed: %s", app.id, exc)
       raise HTTPException(

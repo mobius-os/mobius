@@ -86,8 +86,8 @@ _FLAGS = (
 # named here. A test fails when a new permission is added without one, so a
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
-  {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read"} | {key for key, *_ in _FLAGS}
+  {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps"}
+  | {key for key, *_ in _FLAGS}
 )
 
 
@@ -96,9 +96,9 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
   """One thing an app asks for.
 
   ``rank`` orders levels of the same permission (read < write). ``scope`` names
-  the specific things a row covers (secret names, an install-time run): an
-  accepted answer covers a request only when it includes every name, so
-  adding or swapping one asks again.
+  the specific things a row covers (an install-time run): an accepted answer
+  covers a request only when it includes every name, so adding or swapping one
+  asks again.
   """
   return {
     "id": row_id, "title": title, "text": text, "level": level,
@@ -139,13 +139,6 @@ def rows_from_contract(
   for key, row_id, title, text in _FLAGS:
     if data.get(key):
       rows.append(_row(row_id, title, text))
-  names = data.get("job_secret_read")
-  if isinstance(names, list) and names:
-    rows.append(_row(
-      "job_secret_read", "Read named secrets in its job",
-      "Its background job can read the secrets it names: " + ", ".join(names) + ".",
-      scope=[str(name) for name in names],
-    ))
   background = contract.get("background")
   if isinstance(background, dict):
     scheduled = background.get("mode") == "scheduled"

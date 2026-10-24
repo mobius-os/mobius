@@ -61,7 +61,7 @@ def eligible(path: str) -> bool:
     return False
   for part in rel.parts:
     lower = part.lower()
-    if lower in EXCLUDED or lower == '.env' or lower.startswith('.env.') or lower.endswith(('.pem', '.key', '.p12', '.sqlite', '.sqlite3', '.db')) or lower in {'credentials', 'credentials.json', 'secrets.json', '.npmrc', '.pypirc', '.secret-key', 'service-token.txt', 'cli-auth', 'app-secrets'}:
+    if lower in EXCLUDED or lower == '.env' or lower.startswith('.env.') or lower.endswith(('.pem', '.key', '.p12', '.sqlite', '.sqlite3', '.db')) or lower in {'credentials', 'credentials.json', 'secrets.json', '.npmrc', '.pypirc', '.secret-key', 'service-token.txt', 'cli-auth', 'app-secrets', '.vault'}:
       return False
   return True
 

@@ -579,8 +579,6 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
-  if perms.get("job_secret_read"):
-    contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -671,8 +669,8 @@ def contract_from_app_state(
   Local apps are created and edited directly by their owner, so their durable
   database state is authoritative for server permissions while ``mobius.json``
   is authoritative for host-mediated runtime capabilities — including an
-  app-secret model provider, which reaches no turn until the owner saves its
-  key in the app.
+  vault-key model provider, which reaches no turn until the owner approves its
+  key request in Settings › Keys.
   """
   if capabilities is None:
     capabilities = runtime_declaration_from_contract(
@@ -698,12 +696,6 @@ def contract_from_app_state(
       "github_connect": bool(getattr(app, "github_connect", False)),
       "connections_manage": bool(getattr(app, "connections_manage", False)),
       "connect_manage": bool(getattr(app, "connect_manage", False)),
-      # Manifest apply passes an explicit mapping: omission revokes. An
-      # unrelated row projection (no mapping) retains reviewed job access.
-      "job_secret_read": (
-        contract_permissions if contract_permissions is not None else
-        (getattr(app, "capability_contract", None) or {}).get("data", {})
-      ).get("job_secret_read", []),
       # These contract-only grants must be declared on every local apply.
       "identity_manage": bool(
         (contract_permissions or {}).get("identity_manage", False)
@@ -945,7 +937,7 @@ _BOOLEAN_GRANTS = {
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools", "data.job_secret_read",
+  "agent.skills", "agent.tools",
   "public.network",
 }
 
