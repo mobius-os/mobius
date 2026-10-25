@@ -310,6 +310,8 @@ function clearOwnerClientState({ preserveChatOutbox }) {
       : [clearChatOutbox()]),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     delDatabase('mobius-listings', 'directory listing cache').catch(() => {}),
+    // Connected folders are owner-approved; the next owner reconnects their own.
+    delDatabase('mobius-local-folders', 'connected folders').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
 }

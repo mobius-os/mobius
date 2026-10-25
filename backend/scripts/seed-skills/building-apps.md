@@ -845,6 +845,39 @@ The same capability works in the signed-in shell and in a hosted public app.
 It is device-local, best-effort, and partitioned by app installation; use
 `window.mobius.storage` for durable owner data or public server-side state.
 
+For files on the owner's own computer, declare `device.folders`. The owner
+connects a folder through a Möbius dialog (Chrome or Edge on a desktop; other
+browsers report `supported: false`), approves it per app, and the app then
+lists and reads files by relative path without uploading them. The app never
+sees a folder handle, and Möbius asks again by itself when the browser forgets
+permission after a restart:
+
+```json
+"capabilities": {
+  "device.folders": {
+    "version": 1,
+    "reason": "Read scans from a folder on this computer.",
+    "limits": { "max_file_bytes": 67108864 }
+  }
+}
+```
+
+```js
+const folders = (op) => window.mobius.capabilities.invoke('device.folders', op)
+const { supported, folders: mine } = await folders({ operation: 'list' })  // [{id, name, ready}]
+const folder = await folders({ operation: 'connect' })                     // from a button tap; {id, name}
+const { entries } = await folders({ operation: 'entries', folderId: folder.id, recursive: true })
+const file = await folders({ operation: 'read', folderId: folder.id, path: entries[0].path })
+const blob = new Blob([file.bytes], { type: file.type })
+await folders({ operation: 'forget', folderId: folder.id })
+```
+
+`connect` rejects with code `aborted` when the owner cancels. Store the folder
+id and each file's path with your records so the app can reopen the original
+later; save to `window.mobius.storage` only what must live on the server (for
+example a smaller copy an agent has to read). Agents cannot reach these
+folders; for agent work on a paired computer use Connect.
+
 ## Local zoom surfaces
 
 The Möbius shell keeps its toolbar, drawer, chat, and app frame at one stable
