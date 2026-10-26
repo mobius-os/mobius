@@ -10,6 +10,7 @@ routes/admin.py:sign_out_everywhere.
 from datetime import timedelta
 
 from app import auth, models
+from app import setup_code
 from test_app_fixtures import create_local_app
 
 
@@ -53,7 +54,7 @@ def test_token_epoch_bump_revokes_existing_tokens(client, owner_token):
 def test_fresh_login_after_bump_works(client):
   """After signing out everywhere, logging back in mints a token at the
   new epoch that validates."""
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "test", "password": "testpassword123",
   })
   r = client.post("/api/auth/token", data={
@@ -208,7 +209,7 @@ def test_service_token_carries_epoch_and_is_revocable(client):
   """The 90-day service token written at setup must be stamped with the
   owner's epoch so a sign-out-everywhere revokes it — a long-lived
   unrevocable token would be the biggest hole in the revocation story."""
-  client.post("/api/auth/setup", json={
+  client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "test", "password": "testpassword123",
   })
   r = client.post("/api/auth/token", data={

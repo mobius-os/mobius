@@ -8,6 +8,11 @@ being external attackers reaching the public HTTPS endpoint.
 
 - **Authentication:** bcrypt-12 password hashing, HS256 JWT (30-day expiry),
   rate-limited login (5/min per IP + global backoff after 10 failures).
+- **First-owner setup:** a self-hosted instance with no owner requires a
+  one-time setup code, printed to the server log and stored in
+  `<data_dir>/setup-code` (mode 0600), so reaching the URL first cannot claim
+  it. The code is deleted when the owner is created. Managed deployments bind
+  their owner through managed sign-in instead.
 - **PKCE OAuth:** Server-side token exchange for CLI provider auth.
   No client-side token exposure.
 - **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
