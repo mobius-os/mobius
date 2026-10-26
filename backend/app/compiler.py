@@ -367,6 +367,7 @@ async def compile_jsx(
   *,
   out_path: str | Path,
   source_path: str | Path | None = None,
+  source_root: str | Path | None = None,
 ) -> str:
   """Compiles JSX source to an ES module and returns the output path.
 
@@ -380,7 +381,11 @@ async def compile_jsx(
     source_path: Optional real filesystem entrypoint. When present,
       Rolldown compiles that path directly, allowing relative imports from
       sibling files in the app source tree. When omitted, the legacy
-      string-only path writes ``jsx_source`` to a temp file and compiles that.
+      string-only path writes ``jsx_source`` to a private temp folder and
+      compiles that.
+    source_root: The app source tree containing ``source_path``; required
+      with it. Rolldown may read modules only inside this tree and the
+      platform runtime packages, never other files the server can read.
 
   Returns:
     The absolute path of the compiled JS file.
@@ -402,16 +407,18 @@ async def compile_jsx(
   out = Path(out_path)
 
   entry_path = Path(source_path) if source_path is not None else None
-  tmp_path = None
+  tmp_dir = None
   compile_cwd = None
   if entry_path is None:
-    with tempfile.NamedTemporaryFile(
-      suffix=".jsx", mode="w", delete=False, encoding="utf-8"
-    ) as f:
-      f.write(jsx_source)
-      tmp_path = f.name
-    entry_path = Path(tmp_path)
+    # A private folder, so the confinement root holds nothing but this entry.
+    tmp_dir = tempfile.mkdtemp(prefix="mobius-jsx-")
+    entry_path = Path(tmp_dir) / "entry.jsx"
+    entry_path.write_text(jsx_source, encoding="utf-8")
+    root = Path(tmp_dir)
   else:
+    if source_root is None:
+      raise ValueError("compile_jsx needs source_root with source_path")
+    root = Path(source_root)
     # Compile real source trees from their root with a relative entry name.
     # Besides keeping sibling imports natural, this makes output deterministic:
     # Rolldown's generated module comments no longer embed a random temporary
@@ -427,7 +434,9 @@ async def compile_jsx(
   report_path = Path(report_name)
   try:
     returncode, stderr = await _run_rolldown(
-      rolldown_command(command_entry, out, report=report_path),
+      rolldown_command(
+        command_entry, out, report=report_path, source_root=root,
+      ),
       cwd=compile_cwd,
     )
     if returncode != 0:
@@ -448,8 +457,8 @@ async def compile_jsx(
       )
   finally:
     report_path.unlink(missing_ok=True)
-    if tmp_path is not None:
-      os.unlink(tmp_path)
+    if tmp_dir is not None:
+      shutil.rmtree(tmp_dir, ignore_errors=True)
 
   return str(out)
 
@@ -548,6 +557,9 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
       jsx_source,
       out_path=staged,
       source_path=compile_source_path,
+      source_root=(
+        Path(snapshot.name) if snapshot is not None else Path(app.source_dir)
+      ),
     )
   except Exception:
     if snapshot is not None:

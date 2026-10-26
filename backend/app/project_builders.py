@@ -536,7 +536,10 @@ async def build_app(
   )
   bundle = entry.with_suffix(".js")
   try:
-    await compile_jsx(entry.read_text(), out_path=bundle, source_path=entry)
+    await compile_jsx(
+      entry.read_text(), out_path=bundle, source_path=entry,
+      source_root=output_dir,
+    )
     code = re.sub(r"</script", r"<\\/script", bundle.read_text(), flags=re.IGNORECASE)
     (output_dir / "index.html").write_text(
       '<!doctype html><html lang="en"><meta charset="utf-8">'
