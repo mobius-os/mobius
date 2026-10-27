@@ -1,6 +1,6 @@
 """Typed runtime contracts shared across runners and chat plumbing."""
 
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app.events import EventType
 
@@ -10,6 +10,9 @@ class RunnerResult(TypedDict):
 
   session_id: str | None
   cost_usd: float | None
+  # Claude returns a restored session estimate; the durable accounting owner
+  # resolves it to a turn cost before logging, broadcasting or summing it.
+  cost_scope: NotRequired[Literal["turn", "session"]]
   error: str | None
   usage: NotRequired[dict | None]
   usage_metrics: NotRequired[dict | None]

@@ -1975,12 +1975,13 @@ async def test_a_long_system_prompt_reaches_claude_whole_without_a_long_argument
 async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   clients = _install_fake_client(monkeypatch)
 
-  await _run_turn(
+  result = await _run_turn(
     "chat-thinking", bc=_Bus(), cwd="/data",
     agent_settings={"model": "claude-opus-4-8", "effort": "high"},
   )
 
   options = clients[0].options
+  assert result["cost_scope"] == "session"
   assert options.model == "claude-opus-4-8"
   assert options.effort == "high"
   # The Claude runner appends its provider-authored concise register on top of

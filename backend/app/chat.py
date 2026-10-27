@@ -654,7 +654,9 @@ async def _record_run_metrics(
   provider_session_id: str | None,
   cost_usd: float | None,
   usage: dict | None,
-) -> None:
+  cost_scope: str = "turn",
+  resumed_session_id: str | None = None,
+) -> dict | None:
   """Best-effort durable accounting for one provider run.
 
   Usage must not be able to turn an otherwise successful chat response into a
@@ -674,12 +676,14 @@ async def _record_run_metrics(
     if isinstance(value, (int, float)) and not isinstance(value, bool)
   })
   try:
-    await _await_ack(get_writer().submit(RecordRunMetrics(
+    return await _await_ack(get_writer().submit(RecordRunMetrics(
       chat_id=chat_id,
       run_token=run_token,
       provider_session_id=provider_session_id,
       cost_usd=cost_usd,
       usage=usage,
+      cost_scope=cost_scope,
+      resumed_session_id=resumed_session_id,
     )))
   except Exception:
     _get_logger().warning(
@@ -6705,13 +6709,17 @@ async def _run_chat_impl_with_db(
           side_question_cids=side_question_cids,
         )
       usage_metrics = runner_result.get("usage_metrics")
-      await _record_run_metrics(
+      recorded_metrics = await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or claude_session_id,
         cost_usd=runner_result.get("cost_usd"),
         usage=usage_metrics,
+        cost_scope=runner_result.get("cost_scope", "turn"),
+        resumed_session_id=claude_session_id,
       )
+      if runner_result.get("cost_scope") == "session":
+        runner_result["cost_usd"] = (recorded_metrics or {}).get("cost_usd")
       if (
         not err
         and new_session_id

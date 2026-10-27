@@ -476,6 +476,8 @@ class RecordRunMetrics(_Command):
   provider_session_id: str | None = None
   cost_usd: float | None = None
   usage: dict | None = None
+  cost_scope: str = "turn"
+  resumed_session_id: str | None = None
 
 
 @dataclass
@@ -3186,10 +3188,10 @@ class ChatWriterActor:
       db, results, incorporated=True, filters=tuple(ownership_filters),
     )
 
-  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
+  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> dict:
     """Attach provider usage/cost to the exact durable run row."""
     if not cmd.chat_id or not cmd.run_token:
-      return False
+      return {"cost_usd": None}
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(
@@ -3201,9 +3203,37 @@ class ChatWriterActor:
 
     if cmd.provider_session_id:
       run.provider_session_id = cmd.provider_session_id
-    if cmd.cost_usd is not None:
-      run.cost_usd = float(cmd.cost_usd)
     usage = copy.deepcopy(cmd.usage) if cmd.usage else None
+    if cmd.cost_scope == "session" and cmd.cost_usd is not None:
+      from app.claude_costs import session_cost_snapshot, turn_cost
+
+      baseline = 0.0
+      if cmd.resumed_session_id == cmd.provider_session_id:
+        # Exclude this exact row so repeated metric acknowledgements are
+        # idempotent. A late result must never subtract a successor's spend.
+        baseline = None
+        from sqlalchemy import or_
+        previous = db.query(ChatRun).filter(
+          ChatRun.chat_id == cmd.chat_id,
+          ChatRun.provider == run.provider,
+          or_(
+            ChatRun.provider_session_id == cmd.provider_session_id,
+            (ChatRun.provider_session_id.is_(None)
+             & ChatRun.provider_execution_admitted.is_not(False)),
+          ),
+          ChatRun.id != run.id,
+          ChatRun.started_at < run.started_at,
+        ).order_by(ChatRun.started_at.desc(), ChatRun.id.desc()).first()
+        if previous is not None:
+          baseline = session_cost_snapshot(previous.usage_json, previous.cost_usd)
+      run.cost_usd = turn_cost(cmd.cost_usd, baseline)
+      usage = usage or copy.deepcopy(run.usage_json) or {}
+      usage["provider_cost"] = {
+        "scope": "session", "total_usd": cmd.cost_usd,
+        "baseline_usd": baseline,
+      }
+    elif cmd.cost_usd is not None:
+      run.cost_usd = float(cmd.cost_usd)
     if usage is not None:
       run.usage_json = usage
       for field_name in (
@@ -3215,6 +3245,8 @@ class ChatWriterActor:
         "total_tokens",
         "model_context_window",
       ):
+        if cmd.usage is None:
+          continue  # A cost-only acknowledgement must not erase token metrics.
         value = usage.get(field_name)
         setattr(
           run,
@@ -3223,7 +3255,7 @@ class ChatWriterActor:
         )
     if not _commit_or_rollback(db):
       raise _PersistFailed("RecordRunMetrics did not persist")
-    return True
+    return {"cost_usd": run.cost_usd}
 
   def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:
     """Insert/upsert a large tool output's full text into `tool_outputs`.
