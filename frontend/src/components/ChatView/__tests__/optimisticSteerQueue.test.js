@@ -46,6 +46,11 @@ test('accepted deferred steers leave the queue and appear inline immediately', (
     /data-steer-pending="true"[\s\S]*?<MsgContent[\s\S]*?messageKey=\{dataKey\}/,
     'the provisional row uses the ordinary user-message renderer and stable cid target',
   )
+  assert.match(
+    source,
+    /data-steer-pending="true"[\s\S]*?className="chat__steer-pending-note"[\s\S]*?after its current step/,
+    'a delivered mid-turn message says when the agent will read it, so it never reads as ignored',
+  )
 })
 
 test('Stop serializes behind an in-flight steer; steer bails under a committed Stop', () => {
