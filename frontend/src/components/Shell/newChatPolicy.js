@@ -151,6 +151,33 @@ export function currentReusableEmptyChat(chats, {
 }
 
 /**
+ * Return the untouched chat a project's New chat may reopen instead of adding
+ * another blank to that project.
+ *
+ * Only the project's own rows are candidates, so New chat never lands in
+ * another project's chat. Like currentReusableEmptyChat this is provisional:
+ * the list can be stale across browsers, so the caller must prove the chat is
+ * still empty with a fresh detail read before opening it. Archived chats stay
+ * filed away.
+ */
+export function reusableProjectEmptyChat(projectChats, {
+  recoveredChatIds = new Set(),
+  streamingChatIds = new Set(),
+} = {}) {
+  const recoveredIds = new Set([...recoveredChatIds].map(normalizedId))
+  const streamingIds = new Set([...streamingChatIds].map(normalizedId))
+  return (projectChats || []).find(chat => {
+    const id = normalizedId(chat?.id)
+    return id != null
+      && !chat.has_messages
+      && !chat.archived_at
+      && !chat.running
+      && !recoveredIds.has(id)
+      && !streamingIds.has(id)
+  }) || null
+}
+
+/**
  * Validate the fresh detail response before keeping an active blank open.
  * Fail closed when the response is partial or unfamiliar: creating a fresh
  * row is preferable to navigating into a conversation that has started in

@@ -20,6 +20,7 @@ import {
   rememberCreatedChat,
   resolveNewChatIntentId,
   reusableChatDetailVerdict,
+  reusableProjectEmptyChat,
   validNewChatIntentId,
   writeNewChatIntent,
 } from '../newChatPolicy.js'
@@ -445,6 +446,29 @@ test('id comparison is stable across numeric and string representations', () => 
   assert.equal(currentReusableEmptyChat([active], {
     activeChatId: '7',
   }), active)
+})
+
+test('project New chat nominates its newest untouched chat instead of adding a blank', () => {
+  const used = empty('used', { has_messages: true })
+  const newest = empty('newest')
+  const older = empty('older')
+  assert.equal(reusableProjectEmptyChat([used, newest, older]), newest)
+  assert.equal(reusableProjectEmptyChat([used]), null)
+  assert.equal(reusableProjectEmptyChat([]), null)
+  assert.equal(reusableProjectEmptyChat(undefined), null)
+})
+
+test('project New chat never nominates an archived, running, recovered, or streaming chat', () => {
+  assert.equal(reusableProjectEmptyChat([
+    empty('archived', { archived_at: '2026-10-01T00:00:00Z' }),
+  ]), null)
+  assert.equal(reusableProjectEmptyChat([empty('running', { running: true })]), null)
+  assert.equal(reusableProjectEmptyChat([empty(7)], {
+    recoveredChatIds: new Set(['7']),
+  }), null)
+  assert.equal(reusableProjectEmptyChat([empty('streaming'), empty('idle')], {
+    streamingChatIds: new Set(['streaming']),
+  })?.id, 'idle')
 })
 
 function untouchedDetail(extra = {}) {
