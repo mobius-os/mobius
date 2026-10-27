@@ -13,6 +13,7 @@ you'd otherwise add a column for, use per-app storage at
 separate encrypted app-secrets API.
 """
 
+import logging
 import secrets
 import json
 import uuid
@@ -23,6 +24,7 @@ from sqlalchemy import (
   Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, text,
   true,
 )
+from sqlalchemy import inspect as sa_inspect
 
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import column_property, deferred, relationship
@@ -510,6 +512,11 @@ class ChatRun(Base):
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+  # Why an "interrupted" run ended (RUN_END_REASONS below). Observational
+  # only: no lifecycle decision reads it, so it can explain a run without
+  # changing what "interrupted" means to Goals, Waits or question parking.
+  # NULL on other statuses and on rows interrupted before 0098_run_end_reason.
+  end_reason = Column(String(32), nullable=True, default=None)
   # One-shot platform-authored intent identity for a planned restart. It only
   # authorizes replay when the frozen supervisor's root-owned boot ledger binds
   # the same nonce + exact run id to the current boot.
@@ -933,6 +940,37 @@ def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
   ))
 
 
+# Every way a run can end as "interrupted". Keep this the single vocabulary so
+# a report can group by it.
+RUN_END_REASONS = frozenset((
+  "owner_input",          # turn ended to wait on a saved owner card
+  "activation",           # turn ended for an approved restart/activation
+  "restart_drain",        # a planned restart drained the live turn
+  "server_restart",       # the server stopped mid-turn (found on boot)
+  "superseded",           # a new turn started while this row was still open
+  "provider_switch",      # a provider handoff retired the run
+  "dependency_withdrawn", # its Goal dependency result was withdrawn
+  "chat_deleted",         # the chat was deleted mid-turn
+  "recovered",            # the turn wedged and was closed by recovery
+))
+
+
+def _warn_unexplained_interruption(_mapper, _connection, run) -> None:
+  """Make a new interrupted path that forgot its reason visible in the log.
+
+  Only the transition counts: rows interrupted before end_reason existed stay
+  NULL and may still be updated for unrelated reasons without a warning.
+  """
+  if run.status != "interrupted" or run.end_reason in RUN_END_REASONS:
+    return
+  if sa_inspect(run).attrs.status.history.has_changes():
+    logging.getLogger(__name__).warning(
+      "run %s interrupted without a known end_reason (%r)", run.id, run.end_reason,
+    )
+
+
+event.listen(ChatRun, "before_insert", _warn_unexplained_interruption)
+event.listen(ChatRun, "before_update", _warn_unexplained_interruption)
 event.listen(ChatRun, "after_insert", _append_agent_lifecycle_run_update)
 event.listen(ChatRun, "after_update", _append_agent_lifecycle_run_update)
 event.listen(ChatRun, "before_delete", _append_agent_lifecycle_run_tombstone)

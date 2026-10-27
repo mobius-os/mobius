@@ -173,6 +173,57 @@ def test_traversal_attempts_rejected(serving):
   assert main._resolve_asset_file("") is None
 
 
+@pytest.mark.parametrize("live_build", [True, False], ids=["live", "baked-floor"])
+@pytest.mark.parametrize("escape", [
+  "..%2fsentinel-secret.txt",
+  "%2e%2e/sentinel-secret.txt",
+  "%2e%2e%2fsentinel-secret.txt",
+  "vendor/..%2f..%2fsentinel-secret.txt",
+])
+def test_spa_fallback_never_serves_files_outside_the_build(
+  client, serving, live_build, escape,
+):
+  """The unauthenticated catch-all must not read files beside the build.
+
+  Starlette percent-decodes the path parameter, so ``..%2f`` reaches the
+  handler as ``../``; before containment this returned any readable file,
+  including the JWT signing key.
+  """
+  root = serving["live"] if live_build else serving["baked"]
+  if live_build:
+    _write_build(root, "TRAVERSAL")
+  # A real subdirectory, so the OS can walk `vendor/..` exactly as it would in
+  # an image build that ships /vendor.
+  (root / "vendor").mkdir(exist_ok=True)
+  _reset_memo()
+  assert main._resolve_static_dir() == root
+  outside = [root.parent / "sentinel-secret.txt", root.parent.parent / "sentinel-secret.txt"]
+  for path in outside:
+    path.write_text("SENTINEL-SECRET", encoding="utf-8")
+    serving["created_baked"].append(path)
+  served = client.get("/" + escape)
+  assert "SENTINEL-SECRET" not in served.text
+  assert served.headers.get("content-type", "").startswith("text/html") \
+    or served.status_code == 404
+  if live_build:
+    # Legitimate files inside the build keep serving.
+    assert client.get("/sw.js").status_code == 200
+
+
+def test_contained_file_rejects_escapes_and_accepts_inner_files(tmp_path):
+  root = tmp_path / "build"
+  (root / "vendor" / "lib@1").mkdir(parents=True)
+  (root / "vendor" / "lib@1" / "a.js").write_text("x", encoding="utf-8")
+  (root / "vendor" / "lib").symlink_to("lib@1")  # image-style relative alias
+  (tmp_path / "secret").write_text("s", encoding="utf-8")
+  assert main._contained_file(root, "vendor/lib/a.js") is not None
+  assert main._contained_file(root, "../secret") is None
+  assert main._contained_file(root, "vendor/../../secret") is None
+  assert main._contained_file(root, str(tmp_path / "secret")) is None
+  assert main._contained_file(root, "") is None
+  assert main._contained_file(root, "a\x00b") is None
+
+
 # -- request-time SPA/static-dir resolution: no restart needed -----------
 
 

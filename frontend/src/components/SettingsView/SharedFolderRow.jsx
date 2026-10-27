@@ -15,13 +15,17 @@ const STATUS = {
 
 function subtitle(folder) {
   const rights = folder.mode === 'edit' && folder.access === 'remembered' ? 'Read & edit' : 'Read only'
-  const kept = folder.access === 'remembered' ? 'Remembered on this browser' : 'Until you leave Möbius'
+  const kept = folder.native
+    ? 'Remembered in the Möbius app'
+    : folder.access === 'remembered' ? 'Remembered on this browser' : 'Until you leave Möbius'
   return `${rights} · ${kept}`
 }
 
 export default function SharedFolderRow({ folder, report, onPickAgain }) {
   const [open, setOpen] = useState(false)
-  const status = STATUS[folder.state] || STATUS.paused
+  // The phone app cannot be asked again; its fix is picking the folder anew.
+  const state = folder.native && folder.state === 'needs_permission' ? 'needs_pick' : folder.state
+  const status = STATUS[state] || STATUS.paused
   return (
     <ProviderRow
       name={folder.name}
@@ -42,7 +46,11 @@ export default function SharedFolderRow({ folder, report, onPickAgain }) {
 function FolderPrompt({ folder, report, onPickAgain }) {
   const prompts = {
     // requestPermission needs this tap's activation: call it directly.
-    needs_permission: {
+    needs_permission: folder.native ? {
+      text: 'The Möbius app can no longer open this folder.',
+      label: 'Pick again',
+      run: async () => report(await reconnectFolder(folder.id)),
+    } : {
       text: 'The browser asks again after you close Möbius.',
       label: 'Reconnect',
       run: async () => report(await reconnectFolder(folder.id)),

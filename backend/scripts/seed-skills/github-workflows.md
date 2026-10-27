@@ -125,7 +125,14 @@ run's `/observe` endpoint. An exact matching merged PR or pushed branch tip
 can settle its receipt; where the owner completed the exact GitHub action
 manually, observe that fact before considering a new grant. A closed,
 unmerged PR or unchanged projection does not prove a push or merge was never
-applied. If exact nonapplication cannot be proved, there is currently no safe
+applied, with one exception for merge attempts: once their one-hour dispatch
+window has closed (counted from server start for a receipt without an arm
+time), the same PR read closed and unmerged at any head (with a live read
+showing it in no merge queue), or open at another head, settles the
+attempt. No request issued for it can still land, and its receipt still
+forbids replaying that head. Within the window it settles nothing, because
+a reopened PR could still take an in-flight request.
+If exact nonapplication cannot be proved, there is currently no safe
 self-service release of that old receipt: stop and request owner-supervised
 recovery rather than resetting it or replaying the write.
 For an unidentified legacy fork head, the repository-scoped fence cannot

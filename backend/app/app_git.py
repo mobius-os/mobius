@@ -900,7 +900,8 @@ def preview_merge_refs(
     )
     if left_oid is None or right_oid is None or common.returncode != 0:
       return None
-    object_dir = (Path(common.stdout.strip()) / "objects").resolve()
+    common_dir = Path(common.stdout.strip()).resolve()
+    object_dir = (common_dir / "objects").resolve()
     if not object_dir.is_dir() or "\n" in str(object_dir):
       return None
     with tempfile.TemporaryDirectory(prefix="mobius-merge-preview-") as tmp:
@@ -909,10 +910,19 @@ def preview_merge_refs(
       alternates = proof_repo / ".git" / "objects" / "info" / "alternates"
       alternates.parent.mkdir(parents=True, exist_ok=True)
       alternates.write_text(f"{object_dir}\n", encoding="utf-8")
+      # A shallow source hides grafted-away parents behind its boundary file,
+      # which alternates do not carry; without the copy, merge-tree fails on
+      # the missing parent and every shallow repo's preview reads as broken.
+      shallow = common_dir / "shallow"
+      if shallow.is_file():
+        shutil.copyfile(shallow, proof_repo / ".git" / "shallow")
       return merge_refs(
         proof_repo, left_oid, right_oid, read_only=True,
       )
-  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+    # Callers render None as a generic "review unavailable"; keep the real
+    # reason reachable through the server log.
+    log.warning("merge preview failed for %s (%s..%s): %s", repo, left, right, exc)
     return None
 
 

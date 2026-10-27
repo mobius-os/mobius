@@ -2,6 +2,9 @@
 import { api, isSharedBrowserAuth } from '../../api/client.js'
 import { FolderError } from './folderPaths.js'
 import { createHandleFolder } from './handleFolder.js'
+import {
+  NATIVE_NEEDS_PICK_MESSAGE, createNativeFolder, nativeFolderBridge, nativeFolderPermission,
+} from './nativeFolder.js'
 import { deviceId, deviceLabel, loadFolderRecords } from './folderStore.js'
 import {
   folderState, hostStore, publish, publishFolders,
@@ -83,7 +86,15 @@ async function checkServer() {
 export async function refreshPermissions({ report = true } = {}) {
   const store = hostStore()
   for (const record of store.records.values()) {
-    if (record.access !== 'remembered' || !record.handle) continue
+    if (record.access !== 'remembered') continue
+    if (record.source === 'native') {
+      const bridge = nativeFolderBridge()
+      const permission = await nativeFolderPermission(bridge, record.nativeId)
+      store.permissions.set(record.id, permission)
+      if (permission === 'granted') store.access.set(record.id, createNativeFolder(bridge, record.nativeId))
+      continue
+    }
+    if (!record.handle) continue
     const permission = await folderPermission(record)
     store.permissions.set(record.id, permission)
     if (permission === 'granted' && !store.access.has(record.id)) {
@@ -195,14 +206,15 @@ function allowedFolder(folderId, editing) {
   const record = store.records.get(folderId)
   if (!record) throw new FolderError('not_found', 'This folder is no longer shared from this browser.')
   const state = folderState(record)
-  if (state !== 'ready') throw new FolderError(state, notReadyMessage(state))
+  if (state !== 'ready') throw new FolderError(state, notReadyMessage(state, record))
   if (editing && (record.mode !== 'edit' || record.access !== 'remembered')) {
     throw new FolderError('read_only', 'This folder is shared as Read only.')
   }
   return store.access.get(record.id)
 }
 
-function notReadyMessage(state) {
+function notReadyMessage(state, record) {
+  if (state === 'needs_permission' && record.source === 'native') return NATIVE_NEEDS_PICK_MESSAGE
   const messages = {
     paused: 'The owner paused this folder. Ask them to resume it in Settings → Shared folders.',
     needs_pick: 'This browser forgets folders between visits. Ask the owner to tap Pick again in Settings → Shared folders.',

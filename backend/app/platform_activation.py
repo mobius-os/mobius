@@ -304,7 +304,7 @@ def _applies(rule: _Rule, deployment: DeploymentKind) -> bool:
   return rule.deployment == "all" or rule.deployment == deployment
 
 
-def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
+def guidance_for(level: ActivationLevel, deployment: DeploymentKind) -> str:
   if level is ActivationLevel.LIVE:
     return (
       "No deployment action is required; live source is rebuilt or read on "
@@ -395,9 +395,9 @@ def classify_activation(
     key=LEVEL_ORDER.get,
   )
   ordered_actions = sorted(action_levels, key=LEVEL_ORDER.get)
-  guidance = [_guidance(level, active_deployment) for level in ordered_actions]
+  guidance = [guidance_for(level, active_deployment) for level in ordered_actions]
   if not guidance:
-    guidance = [_guidance(ActivationLevel.LIVE, active_deployment)]
+    guidance = [guidance_for(ActivationLevel.LIVE, active_deployment)]
 
   return PlatformActivationImpact(
     level=required_level.value,

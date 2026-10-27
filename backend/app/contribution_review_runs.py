@@ -179,31 +179,45 @@ def utc_now_iso() -> str:
 
 
 def moved_head_fact(target, previous, pull, read_at: float):
-  """Settle a merge attempt at an old head from the same PR's later state.
+  """Settle a merge attempt from the same PR's later state.
 
   ``read_at`` is when the read of ``pull`` started. A merge at a later head
-  ends the attempt at any time. Otherwise a moved head alone proves nothing:
-  both dispatch paths pin the attempted head (REST ``sha``, GraphQL
-  ``expectedHeadOid``), but that is an equality check. If the head returns to
-  it while a request is still in flight, that request can still land. So an
-  open, unmerged PR at another head settles the attempt only when read after
-  ``dispatch_window_closed``: GitHub then has evaluated or dropped every request
-  issued for it. One evaluated at the attempted head merged the PR, which this
-  read would show, or queued it, and a push removes a PR from its merge queue.
-  A closed, unmerged PR proves nothing: it can be reopened at the attempted
-  head. The receipt fields stay as audit history, and ``merge_attempted``
-  still forbids replaying that head.
+  ends the attempt at any time (one at the attempted head is ``reconcile_merge``'s
+  ``merged``). Otherwise the PR's state proves nothing while a request issued
+  for the attempt may still be evaluated: both dispatch paths pin the attempted
+  head (REST ``sha``, GraphQL ``expectedHeadOid``), but that is an equality
+  check. If the head returns to it, or a closed PR is reopened at it, while a
+  request is still in flight, that request can still land. So an unmerged PR
+  settles the attempt only when read after ``dispatch_window_closed``: GitHub
+  then has evaluated or dropped every request issued for it. One evaluated at
+  the attempted head merged the PR, which this read would show, or queued it,
+  and a push removes a PR from its merge queue; for a close,
+  ``later_pull_fact`` observes the exit. Reopening cannot revive a dropped
+  request. So after the window an open PR at another head records
+  ``head_moved``, and a closed PR at any head ``pr_closed_unmerged``.
+  The receipt fields stay as audit history, and ``merge_attempted`` still
+  forbids replaying that head.
   """
   attempted = target["head_sha"]
   head_sha = (pull.get("head") or {}).get("sha")
-  if previous.get("head_sha") != attempted or not isinstance(head_sha, str) or head_sha == attempted:
+  if previous.get("head_sha") != attempted or not isinstance(head_sha, str):
     return None
   if pull.get("merged") is True:
+    if head_sha == attempted:
+      return None
     return {"state": "needs_you", "pr_merged": {"head_sha": head_sha,
       "merge_commit_sha": pull.get("merge_commit_sha"), "merged_at": pull.get("merged_at")},
       "summary": "The pull request was merged at a later head. The earlier attempt can no longer land and was not repeated."}
-  if (pull.get("state") != "open" or pull.get("merged") is not False
+  if (pull.get("merged") is not False
       or not dispatch_window_closed(previous.get("merge_armed_at"), read_at)):
+    return None
+  if pull.get("state") == "closed":
+    return {"state": "needs_you", "pr_closed_unmerged": {"attempted_head_sha": attempted,
+      "attempt_state": previous.get("state"), "head_sha": head_sha, "closed_at": pull.get("closed_at")},
+      "summary": ("The pull request was closed without merging, and the earlier merge or queue "
+                  "request can no longer be processed. It was not repeated. Review the pull request "
+                  "again before any merge.")}
+  if pull.get("state") != "open" or head_sha == attempted:
     return None
   return {"state": "needs_you", "head_moved": {"attempted_head_sha": attempted,
     "attempt_state": previous.get("state"), "head_sha": head_sha},
@@ -212,9 +226,39 @@ def moved_head_fact(target, previous, pull, read_at: float):
                 "be processed. It was not repeated. Review the new head before any merge.")}
 
 
+def queue_entry_absent(gh, cwd, target) -> bool:
+  """Whether a live read shows the PR in no merge queue, at any head.
+
+  Unlike ``queue_entry``, an entry GitHub attached at another head counts.
+  A failed or incomplete read proves nothing (False).
+  """
+  try:
+    pr = pull_checks(gh, cwd, target)
+  except (HTTPException, ContributionSubmitError, OSError, ValueError, AttributeError,
+          subprocess.SubprocessError):
+    return False
+  return isinstance(pr, dict) and "mergeQueueEntry" in pr and pr["mergeQueueEntry"] is None
+
+
+def later_pull_fact(gh, cwd, target, previous, pull, read_at: float):
+  """``moved_head_fact``, with a closed PR's queue exit observed, not inferred.
+
+  GitHub does not document that closing a PR removes it from its merge queue,
+  so ``pr_closed_unmerged`` also requires a later read showing no entry.
+  """
+  fact = moved_head_fact(target, previous, pull, read_at)
+  if fact and "pr_closed_unmerged" in fact and not queue_entry_absent(gh, cwd, target):
+    return None
+  return fact
+
+
+# Facts the same PR later proved about a saved merge attempt (moved_head_fact).
+MERGE_SETTLEMENTS = ("head_moved", "pr_merged", "pr_closed_unmerged")
+
+
 def merge_settled(item) -> bool:
   """A saved attempt the same PR later proved can no longer land."""
-  return bool(item.get("pr_merged") or item.get("head_moved"))
+  return any(item.get(field) for field in MERGE_SETTLEMENTS)
 
 
 def merge_blocker(target, repo, pull, pr) -> str | None:
@@ -971,15 +1015,15 @@ def confirmed_successor(previous, attempts, receipt):
         and a.get("queue_removal") == previous["queue_removal"] and merge_attempted(a)), None)
     if index is None:
       raise HTTPException(409, "The removed attempt must retain its immutable history.")
-    # A settlement observed after the removal snapshot (head_moved, pr_merged)
+    # A settlement observed after the removal snapshot (MERGE_SETTLEMENTS)
     # answers only for the predecessor. Archive it with that attempt: left
     # active, merge_settled would hide the successor's own later attempt.
-    settlement = {k: previous[k] for k in ("head_moved", "pr_merged") if k in previous}
+    settlement = {k: previous[k] for k in MERGE_SETTLEMENTS if k in previous}
     if settlement:
       history[index] = {**settlement, **history[index]}
       outcome["merge_attempts"] = history
     for field in ("head_sha", "merge_attempted", "merge_armed_at", "queue_entry_id", "queue_enqueued_at",
-                  "queue_receipt_unconfirmed", "queue_removal", "merge_sha", "head_moved", "pr_merged"):
+                  "queue_receipt_unconfirmed", "queue_removal", "merge_sha", *MERGE_SETTLEMENTS):
       outcome.pop(field, None)
   for field in ("base_advance", "checkout", "reviewed_base_sha", "independent_receipt_id", "scope", "tests", "tests_passed", "next_step"):
     outcome.pop(field, None)

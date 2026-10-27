@@ -20,7 +20,7 @@ $F mkdir "Downloads/Sorted"
 $F bin "Downloads/old.zip"               # moves it to the "Möbius bin" folder
 ```
 
-`write`, `move`, `mkdir` and `bin` work only in folders shared as **Read & edit** (Chrome or Edge). Safari, Firefox and Brave share folders read-only, for one visit. A move stays inside one shared folder; files can't move between shared folders.
+`write`, `move`, `mkdir` and `bin` work only in folders shared as **Read & edit** (Chrome or Edge). Safari, Firefox and Brave share folders read-only, for one visit. Folders shared from the Möbius phone app are read-only and stay shared until the owner removes them. A move stays inside one shared folder; files can't move between shared folders.
 
 Two shared folders can have the same name, for example one on each device. Then add `--folder ID` (the id from `list`) to pick one; paths still start with the folder's name.
 
@@ -35,9 +35,10 @@ Two shared folders can have the same name, for example one on each device. Then 
 - Keep `write` content exact. Use `--overwrite` only when the owner asked to replace that file; its old version goes to the bin.
 - If a change answers `timeout` or `offline`, it may still have happened. Check with `info` or `ls` before trying it again. `busy` means nothing changed; try again shortly.
 - `original_kept` or `changed_during_move`: the file was copied but the original stayed, so both exist. Tell the owner; don't retry.
+- `changed_during_write`: the file changed while you replaced it, so nothing was written; the version before that change is in the bin. Read the file again and tell the owner before writing.
 - A refusal is an answer, not a bug. Relay its fix in plain words:
   - `offline`: Möbius is not open in that browser. Ask the owner to open it there.
-  - `needs_permission`: the owner taps **Reconnect** in Settings → Shared folders.
+  - `needs_permission`: the owner taps **Reconnect** in Settings → Shared folders (**Pick again** for a folder from the phone app).
   - `needs_pick`: the owner taps **Pick again** (Safari, Firefox and Brave forget folders between visits).
   - `paused`: the owner paused sharing; they can tap **Resume**.
   - `read_only`: the folder is Read only; ask before suggesting they share it again with Read & edit.

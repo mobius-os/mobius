@@ -6,13 +6,25 @@ backstop and drains first. These tests pin those boundaries without killing the
 test process (os.kill is mocked)."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import signal
 
+import pytest
+
 from app import chat as chat_mod
+from app import platform_boot
 from app import restart_ledger
 import app.restart_util as ru
+
+
+@pytest.fixture(autouse=True)
+def _unready_boots(monkeypatch, tmp_path):
+  """Keep every restart away from the instance's real boot record."""
+  record = tmp_path / "unready-boots.json"
+  monkeypatch.setattr(platform_boot, "UNREADY_BOOTS", record)
+  return record
 
 
 class _FakeTimer:
@@ -213,6 +225,42 @@ def test_last_chance_restart_preflight_does_not_drain_invalid_source(
   asyncio.run(ru.restart_this_worker())
 
   assert claimed == []
+
+
+def test_an_approved_restart_retries_a_commit_set_aside_for_not_starting(
+  monkeypatch, _unready_boots,
+):
+  _unready_boots.write_text(json.dumps({"sha": "abc", "unready_boots": 2}))
+  monkeypatch.setattr(ru, "validate_restart_source", lambda: None)
+  monkeypatch.setattr(ru, "_claim_in_process_restart", lambda: True)
+  monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+
+  class _StopAfterAdmission(Exception):
+    pass
+
+  async def _stop_after_admission(**_kwargs):
+    raise _StopAfterAdmission
+
+  monkeypatch.setattr(ru, "_drain_exact_restart", _stop_after_admission)
+
+  with pytest.raises(_StopAfterAdmission):
+    asyncio.run(ru.restart_this_worker())
+
+  assert not _unready_boots.exists()
+
+
+def test_a_refused_restart_keeps_the_set_aside_commit_set_aside(
+  monkeypatch, _unready_boots,
+):
+  _unready_boots.write_text(json.dumps({"sha": "abc", "unready_boots": 2}))
+  monkeypatch.setattr(
+    ru, "validate_restart_source",
+    lambda: (_ for _ in ()).throw(ru.RestartSourceInvalid("broken")),
+  )
+
+  asyncio.run(ru.restart_this_worker())
+
+  assert _unready_boots.exists()
 
 
 def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch):

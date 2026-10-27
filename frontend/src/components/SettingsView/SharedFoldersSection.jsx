@@ -26,7 +26,11 @@ export default function SharedFoldersSection() {
   const repickId = useRef(null)
   if (isSharedBrowserAuth()) return null
 
-  const report = (outcome) => setNotice(outcome?.ok === false && !outcome.cancelled ? outcome.message : null)
+  // A failure is shown as one; a done action may still say something (say, a folder shared Read only).
+  const report = (outcome) => {
+    if (outcome?.ok === false) setNotice(outcome.cancelled ? null : { color: 'danger', text: outcome.message })
+    else setNotice(outcome?.notice ? { color: 'info', text: outcome.notice } : null)
+  }
   const pickForVisit = (folderId = null) => {
     repickId.current = folderId
     visitInput.current?.click()
@@ -42,7 +46,7 @@ export default function SharedFoldersSection() {
       <h2 className="settings__section-title" id="settings-shared-folders-title">Shared folders</h2>
       <p className="settings__subtext shared-folders__intro">Agents use files without uploading.</p>
       <SectionBody state={state} report={report} pickForVisit={pickForVisit} />
-      {notice && <Alert className="shared-folders__alert" color="danger" variant="soft" description={notice} />}
+      {notice && <Alert className="shared-folders__alert" color={notice.color} variant="soft" description={notice.text} />}
       <input
         ref={visitInput}
         className="shared-folders__visit-input"
@@ -79,15 +83,37 @@ function SectionBody({ state, report, pickForVisit }) {
           ))}
         </div>
       )}
-      {state.canRemember
-        ? <RememberedFolderPicker report={report} />
-        : <VisitFolderPicker onPick={() => pickForVisit()} />}
+      {state.canPickNative
+        ? state.canEditNative
+          ? <RememberedFolderPicker report={report} hint="The Möbius app remembers the folder until you remove it." />
+          : <NativeFolderPicker report={report} />
+        : state.canRemember
+          ? <RememberedFolderPicker report={report} />
+          : <VisitFolderPicker onPick={() => pickForVisit()} />}
       <OtherDeviceFolders localFolders={state.folders} />
     </>
   )
 }
 
-function RememberedFolderPicker({ report }) {
+/** Inside an older Möbius phone app: its own folder picker, read only (that app offers no writes). */
+function NativeFolderPicker({ report }) {
+  return (
+    <div>
+      <button
+        type="button"
+        className="settings__btn settings__btn--outline shared-folders__add"
+        onClick={async () => report(await addRememberedFolder('read'))}
+      >
+        <FolderPlus width={16} height={16} aria-hidden="true" /> Add folder
+      </button>
+      <p className="shared-folders__hint">Agents can list and read its files. The app remembers the folder until you remove it.</p>
+    </div>
+  )
+}
+
+const BROWSER_HINT = 'Pick a folder inside Downloads, Desktop or Documents. Browsers do not share those whole folders.'
+
+function RememberedFolderPicker({ report, hint = BROWSER_HINT }) {
   const [choosing, setChoosing] = useState(false)
   if (!choosing) {
     return (
@@ -111,9 +137,7 @@ function RememberedFolderPicker({ report }) {
           <span className="shared-folders__choice-detail">{detail}</span>
         </button>
       ))}
-      <p className="shared-folders__hint">
-        Pick a folder inside Downloads, Desktop or Documents. Browsers do not share those whole folders.
-      </p>
+      <p className="shared-folders__hint">{hint}</p>
       <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => setChoosing(false)}>
         Cancel
       </button>

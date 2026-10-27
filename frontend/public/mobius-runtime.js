@@ -3885,7 +3885,7 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		blobUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
 		worker = new Worker(blobUrl);
 		armStartupTimeout();
-		worker.onerror = (event) => fail(speechError("engine_blocked", event?.message || `The speech engine could not start: ${SPEECH_WORKER_URL} did not load.`));
+		worker.onerror = (event) => fail(speechError("engine_blocked", event?.message || `The speech engine could not start: ${"/speech/pocket-tts-worker.js"} did not load.`));
 		worker.onmessage = ({ data }) => onWorkerMessage(data);
 	})();
 	ready.catch(fail);

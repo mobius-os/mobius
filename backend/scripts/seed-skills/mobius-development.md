@@ -93,8 +93,11 @@ reason to hide or skip validation. Inside Möbius:
 
 - run `scripts/test.sh --fast` for the cheap hermetic contracts and
   `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
-- keep memory bounded: the container shares one memory limit with every
-  running chat. Build the shell only through `npm run build` (it caps the heap
+- keep resources bounded: the container shares one cgroup quota — about 4
+  CPUs, 1000 process ids, and one ~4 GB memory limit, whatever `nproc`
+  reports — with every running chat and helper, so aggregate concurrency
+  counts, not just one process's memory. Build the shell only through
+  `npm run build` (it caps the heap
   and takes the build lock); never call `vite` directly. Frontend tests run one
   worker by default (`MOBIUS_TEST_CONCURRENCY`; most workers need about 100 MB,
   component-rendering workers reach about 900 MB, so three nearly fill a

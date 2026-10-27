@@ -3,10 +3,17 @@
 const GLOBAL_KEY = Symbol.for('mobius.shared-folders-host.v1')
 
 function initialState() {
+  // Inside the Möbius phone app, its own folder picker is used even where the
+  // WebView has showDirectoryPicker (Android), so both apps behave the same.
+  const canPickNative = typeof globalThis.MobiusNative?.pickFolder === 'function'
   return {
     // loading | ready | restart (server lacks the feature) | unavailable (guest or no support)
     status: 'loading',
-    canRemember: typeof globalThis.showDirectoryPicker === 'function' && globalThis.isSecureContext !== false,
+    canPickNative,
+    // Older app builds only read folders.
+    canEditNative: canPickNative && typeof globalThis.MobiusNative?.writeFolderFile === 'function',
+    canRemember: canPickNative
+      || (typeof globalThis.showDirectoryPicker === 'function' && globalThis.isSecureContext !== false),
     canPickForVisit: typeof document !== 'undefined'
       && 'webkitdirectory' in document.createElement('input'),
     folders: [],
@@ -66,6 +73,7 @@ export function publishFolders() {
     name: record.name,
     mode: record.mode,
     access: record.access,
+    native: record.source === 'native',
     paused: Boolean(record.paused),
     state: folderState(record),
     fileCount: store.access.get(record.id)?.fileCount ?? null,

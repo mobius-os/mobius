@@ -88,39 +88,12 @@ class LinkComplete(BaseModel):
   attempt: str
 
 
-class RailwayCreate(BaseModel):
-  name: str
-  managed_auth: bool = True
-  cpu: int | None = None
-  memory_mb: int | None = None
-  volume_mb: int | None = None
-  update_policy: Literal["automatic", "manual"] | None = None
-  region: Literal[
-    "us-west2", "us-east4-eqdc4a", "europe-west4-drams3a", "asia-southeast1-eqsg3a"
-  ] | None = None
-  workspace_id: str
-
-
-class RailwayCompute(BaseModel):
-  cpu: int | None = None
-  memory_mb: int | None = None
-
-
 class RailwayName(BaseModel):
   name: str
 
 
-class RailwayStorage(BaseModel):
-  volume_mb: int
-
-
 class RailwayUpdates(BaseModel):
   update_policy: Literal["automatic", "manual"]
-
-
-class RailwayConfirmAbsent(BaseModel):
-  model_config = {"extra": "forbid"}
-  confirmed_absent: bool
 
 
 class RailwayConnectStart(BaseModel):
@@ -1183,47 +1156,40 @@ async def _railway_connect_start(
   return {"authorization_url": authorization_url}
 
 
+ACCOUNT_CONFIRMED_CODE = "confirm_on_account"
+
+
+def _confirm_on_account() -> None:
+  """Refuse a deployment action that only the owner's account session may take.
+
+  Creating, retrying, deleting, resizing, recovering and disconnecting can
+  spend money, destroy a deployment's data, or open a root session, and they
+  reach every deployment the owner has. Anything running inside Möbius — the
+  chat agent, an app, or code with root that copies this instance's
+  credential — can call these routes, so Möbius never performs them. The owner
+  does them on the account website, behind their own sign-in. The response
+  names that place so the identity app can send the owner there.
+  """
+  raise HTTPException(409, detail={
+    "code": ACCOUNT_CONFIRMED_CODE,
+    "message": (
+      "Finish this on your mobius.you dashboard. For safety, Möbius can't "
+      "create, delete, resize or recover deployments, or change the Railway "
+      "connection, by itself."
+    ),
+    "confirm_url": _account_origin() + "/dashboard",
+  })
+
+
 @router.post(
   "/railway/deployments",
   status_code=202,
   dependencies=[Depends(require_nondelegated_owner_or_app_control)],
 )
 async def create_railway_deployment(
-  body: RailwayCreate,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  name = body.name.strip()
-  if not name or len(name) > 80:
-    raise HTTPException(422, "Use a deployment name between 1 and 80 characters.")
-  settings = {
-    "name": name,
-    "managed_auth": body.managed_auth,
-    "cpu": body.cpu,
-    "memory_mb": body.memory_mb,
-    "volume_mb": body.volume_mb,
-  }
-  # Omit the extension for older account-service deployments. The identity app
-  # only sends it after the inventory advertises update-policy support.
-  if body.update_policy is not None:
-    settings["update_policy"] = body.update_policy
-  # The account service advertises region support in its inventory. Older
-  # hosts still receive the original request when the app omits this field.
-  if body.region is not None:
-    settings["region"] = body.region
-  # The workspace is always sent: the account service has no default workspace
-  # and refuses a create without one, so an app that omits it cannot create.
-  workspace_id = body.workspace_id.strip()
-  if not workspace_id or len(workspace_id) > 128:
-    raise HTTPException(422, "Choose a Railway workspace.")
-  settings["workspace_id"] = workspace_id
-  return await _railway_mutation(
-    db,
-    owner.id,
-    "POST",
-    "/instances",
-    json=settings,
-  )
+  _confirm_on_account()
 
 
 @router.post(
@@ -1268,10 +1234,8 @@ async def refresh_railway_plan(
 )
 async def disconnect_railway(
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  await _railway_proxy(db, owner.id, "POST", "/disconnect")
-  return {"ok": True}
+  _confirm_on_account()
 
 
 @router.get("/railway/deployments/{instance_id}/metrics")
@@ -1328,19 +1292,9 @@ async def read_railway_deletion_state(
 )
 async def confirm_railway_deletion_absent(
   instance_id: str,
-  body: RailwayConfirmAbsent,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  if body.confirmed_absent is not True:
-    raise HTTPException(422, "Confirm that the Railway project is no longer there.")
-  return await _railway_mutation(
-    db,
-    owner.id,
-    "POST",
-    f"/instances/{_railway_instance_id(instance_id)}/confirm-absent",
-    json={"confirmed_absent": True},
-  )
+  _confirm_on_account()
 
 
 @router.post(
@@ -1350,12 +1304,8 @@ async def confirm_railway_deletion_absent(
 async def open_railway_recovery(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  payload = await _railway_proxy(
-    db, owner.id, "POST", f"/instances/{_railway_instance_id(instance_id)}/recovery"
-  )
-  return {"state": str(payload.get("state") or "starting")}
+  _confirm_on_account()
 
 
 @router.get("/railway/deployments/{instance_id}/recovery/status")
@@ -1379,11 +1329,8 @@ async def read_railway_recovery_status(
 async def retry_railway_deployment(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  return await _railway_mutation(
-    db, owner.id, "POST", f"/instances/{_railway_instance_id(instance_id)}/retry"
-  )
+  _confirm_on_account()
 
 
 @router.patch(
@@ -1392,17 +1339,9 @@ async def retry_railway_deployment(
 )
 async def update_railway_compute(
   instance_id: str,
-  body: RailwayCompute,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  return await _railway_mutation(
-    db,
-    owner.id,
-    "PATCH",
-    f"/instances/{_railway_instance_id(instance_id)}/compute",
-    json={"cpu": body.cpu, "memory_mb": body.memory_mb},
-  )
+  _confirm_on_account()
 
 
 @router.patch(
@@ -1411,17 +1350,9 @@ async def update_railway_compute(
 )
 async def update_railway_storage(
   instance_id: str,
-  body: RailwayStorage,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  return await _railway_mutation(
-    db,
-    owner.id,
-    "PATCH",
-    f"/instances/{_railway_instance_id(instance_id)}/storage",
-    json={"volume_mb": body.volume_mb},
-  )
+  _confirm_on_account()
 
 
 @router.patch(
@@ -1452,11 +1383,8 @@ async def update_railway_image_policy(
 async def delete_railway_deployment(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
 ):
-  return await _railway_mutation(
-    db, owner.id, "DELETE", f"/instances/{_railway_instance_id(instance_id)}"
-  )
+  _confirm_on_account()
 
 
 @router.post(

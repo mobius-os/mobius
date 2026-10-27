@@ -51,7 +51,7 @@ async def _run_broken_setup(chat, monkeypatch, writer, *, error=None):
   monkeypatch.setattr(chat_mod, "get_writer", lambda: writer)
   finished = []
 
-  async def record_finish(chat_id, run_token="", terminal_status="completed"):
+  async def record_finish(chat_id, run_token="", terminal_status="completed", end_reason=None):
     finished.append((chat_id, run_token, terminal_status))
 
   monkeypatch.setattr(chat_mod, "_finish_run_strict", record_finish)
@@ -269,7 +269,7 @@ async def test_disk_admission_deferral_persists_resumable_pause(
 
   finished = []
 
-  async def record_finish(chat_id, run_token="", terminal_status="completed"):
+  async def record_finish(chat_id, run_token="", terminal_status="completed", end_reason=None):
     finished.append((chat_id, run_token, terminal_status))
 
   monkeypatch.setattr(chat_mod, "_finish_run_strict", record_finish)

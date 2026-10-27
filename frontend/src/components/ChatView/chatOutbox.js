@@ -269,11 +269,14 @@ export async function markIntentLocallyQueued(cid, owner = {}) {
 // This is the boundary before any POST of a retained intent. Existing replay
 // singleflight/Web Locks and server cid dedup still own duplicate requests;
 // this transaction makes local mutation versus first dispatch unambiguous.
-export async function claimIntentDispatch(cid, owner = {}) {
+export async function claimIntentDispatch(cid, owner = {}, canDispatch = () => true) {
   try {
     const result = await mutateOwnedIntent(cid, owner, record => (
       retirementFences.has(String(cid)) ? { status: 'retired' }
-        : record.replayState === 'retired' ? { status: 'retired' } : {
+        : record.replayState === 'retired' ? { status: 'retired' }
+        // IndexedDB may wait behind another transaction after admission was
+        // checked. Recheck before writing, not by undoing an uncertain claim.
+        : !canDispatch() ? { status: 'paused' } : {
         status: 'claimed', record: { ...record, dispatchStarted: true },
       }
     ))
@@ -677,7 +680,7 @@ export async function deliverIntent(record, request) {
   }
 }
 
-async function drainInner({ deliver, principalKey, generation }) {
+async function drainInner({ deliver, canDeliver, principalKey, generation }) {
   const records = await listIntents(principalKey)
   if (generation !== clearGeneration) return
   const questionBlockedChats = new Set()
@@ -698,12 +701,17 @@ async function drainInner({ deliver, principalKey, generation }) {
     }
     if (retirementFences.has(String(snapshot.cid))) continue
     if (snapshot.authBlocked && authBlockedAttempted.has(snapshot.cid)) break
-    if (snapshot.authBlocked) authBlockedAttempted.add(snapshot.cid)
-    const claim = await claimIntentDispatch(snapshot.cid, { chatId: snapshot.chatId, principalKey })
+    if (!canDeliver()) break
+    const claim = await claimIntentDispatch(
+      snapshot.cid,
+      { chatId: snapshot.chatId, principalKey },
+      () => generation === clearGeneration && canDeliver(),
+    )
     if (generation !== clearGeneration) return
     if (claim.status === 'absent' || claim.status === 'retired') continue
     if (claim.status !== 'claimed') break
     const record = claim.record
+    if (record.authBlocked) authBlockedAttempted.add(record.cid)
     const outcome = await deliver(record)
     // Logout/owner cleanup may race a bounded request already on the wire. Its
     // result must never repopulate or announce data after the owner store was
@@ -745,7 +753,7 @@ async function drainInner({ deliver, principalKey, generation }) {
 // Same-document events coalesce through the promise; Web Locks serialize the
 // database across tabs. The server's cid gate remains the correctness backstop.
 let inFlight = null
-export function drainOutbox({ deliver, principalKey }) {
+export function drainOutbox({ deliver, principalKey, canDeliver = () => true }) {
   if (typeof deliver !== 'function' || !principalKey) return Promise.resolve()
   if (inFlight) return inFlight
   const generation = clearGeneration
@@ -753,9 +761,9 @@ export function drainOutbox({ deliver, principalKey }) {
     (typeof navigator !== 'undefined' && navigator.locks?.request)
       ? navigator.locks.request(
           OUTBOX_REPLAY_LOCK,
-          () => drainInner({ deliver, principalKey, generation }),
+          () => drainInner({ deliver, canDeliver, principalKey, generation }),
         )
-      : drainInner({ deliver, principalKey, generation })
+      : drainInner({ deliver, canDeliver, principalKey, generation })
   )
   const tracked = Promise.resolve().then(run).finally(() => {
     if (inFlight === tracked) inFlight = null

@@ -600,6 +600,7 @@ async def _finish_run(
   chat_id: str,
   run_token: str = "",
   terminal_status: str = "completed",
+  end_reason: str | None = None,
 ) -> None:
   """Close a chat's durable run once the turn has ended.
 
@@ -621,6 +622,7 @@ async def _finish_run(
         chat_id=chat_id,
         run_token=run_token,
         terminal_status=terminal_status,
+        end_reason=end_reason,
       )
     )
     await _await_ack(ack)
@@ -692,6 +694,7 @@ async def _finish_run_strict(
   chat_id: str,
   run_token: str = "",
   terminal_status: str = "completed",
+  end_reason: str | None = None,
 ) -> None:
   """Strict terminal variant of `_finish_run`: surfaces a failed ack.
 
@@ -717,6 +720,7 @@ async def _finish_run_strict(
       chat_id=chat_id,
       run_token=run_token,
       terminal_status=terminal_status,
+      end_reason=end_reason,
     )
   )
   await _await_ack(ack)
@@ -1206,6 +1210,7 @@ def reconcile_startup_chats(
       if chat is not None and chat.deleted_at is None:
         continue
       run.status = "interrupted"
+      run.end_reason = "chat_deleted"
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       closed += 1

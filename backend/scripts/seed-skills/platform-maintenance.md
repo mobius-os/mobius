@@ -126,6 +126,13 @@ When the backend is slow or CPU-bound, `profile` samples every thread in-process
 (py-spy cannot attach inside the container) and ranks the busy app frames and
 stacks. It occupies one worker for the window, and one profile runs at a time.
 
+Exercising owner-input cards programmatically (for a test, never to answer for
+the owner): while a card is open, posting a chat message returns 409
+`pending_question_open` — that is the designed gate, not a bug. The two-step is
+to answer the card at `POST /api/chats/<id>/question-answers` with its
+`question_id`, which records the answer but does **not** resume the paused
+turn, and then `POST` a chat message to start the next turn.
+
 ---
 
 ## Backend edits — restart to load, hand off persistence
@@ -138,6 +145,9 @@ because `/data/platform` is the persistent served clone. The baked
 - A bad import keeps the edited tree from serving. Boot import-probes the
   persistent clone and falls back to the baked backend, leaving the local tree
   intact for repair. Always run `python3 -m py_compile <file>` before a restart.
+  A commit that imports but crashes or hangs while the server starts is set
+  aside the same way after two such boots in a row; `/data/logs/platform-boot.jsonl`
+  records an `admit` refusal. A new commit or an approved restart tries it again.
 - A local fix is persistent but not upstream. Startup preserves installed source and local changes without fetching newer
   code. Explicit updates reconcile local changes onto the reviewed release;
   they can still conflict, and another installation will not receive a local fix. Ask

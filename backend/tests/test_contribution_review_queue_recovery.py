@@ -265,14 +265,22 @@ def test_archived_removed_head_cannot_merge_under_another_grant_after_claim_rele
   assert item["state"] == "needs_you" and item["review_selection_id"] == row.id
 
 
-def test_successor_never_inherits_the_predecessors_settlement(setup, monkeypatch):
+@pytest.mark.parametrize("settlement", ["head_moved", "pr_closed_unmerged"])
+def test_successor_never_inherits_the_predecessors_settlement(setup, monkeypatch, settlement):
   db, row, principal, node = prepare_removed(setup, monkeypatch)
-  # Removed H, then observed at external head K after the dispatch window.
   loaded_before_window(monkeypatch)
-  node["headRefOid"] = "f" * 40
-  moved = observe_removed(db, row, principal)
-  assert moved["head_moved"]["attempted_head_sha"] == SHA and moved["queue_removal"]
-  node["headRefOid"] = SHA  # The author restored H; the removal proof still holds.
+  monkeypatch.setattr(domain, "pull_checks", lambda *a: {**CHECKS, "mergeQueueEntry": None})
+  if settlement == "head_moved":
+    # Removed H, then observed at external head K after the dispatch window.
+    node["headRefOid"] = "f" * 40
+  else:
+    # Removed H, then the PR was closed unmerged at H after the window.
+    node["state"] = "CLOSED"
+  settled = observe_removed(db, row, principal)
+  assert settled[settlement]["attempted_head_sha"] == SHA and settled["queue_removal"]
+  assert not set(domain.MERGE_SETTLEMENTS).difference({settlement}).intersection(settled)
+  # The author restored H or reopened the PR at H; the removal proof still holds.
+  node["headRefOid"], node["state"] = SHA, "OPEN"
   def push(*a, before_push=None):
     before_push()
     return DispatchResult.confirmed({})
@@ -280,14 +288,22 @@ def test_successor_never_inherits_the_predecessors_settlement(setup, monkeypatch
   item = asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))["run"]["items"][0]
   saved = row.outcomes_json[domain.key(ITEM)]
   assert item["head_sha"] == NEW and item["state"] == "reviewing"
-  assert not {"head_moved", "pr_merged", "queue_removal", "merge_attempted"}.intersection(saved)
+  assert not {*domain.MERGE_SETTLEMENTS, "queue_removal", "merge_attempted"}.intersection(saved)
   # The settlement stays archived with the predecessor attempt it answers.
-  assert saved["merge_attempts"][0]["head_moved"] == moved["head_moved"]
-  assert saved["merge_attempts"][0]["head_sha"] == SHA
+  assert len(saved["merge_attempts"]) == 1
+  archived = saved["merge_attempts"][0]
+  assert archived[settlement] == settled[settlement]
+  assert archived["head_sha"] == SHA and archived["merge_attempted"] is True
+  assert archived["queue_removal"] == settled["queue_removal"]
   # The successor's own later uncertain merge stays observed and fenced.
   successor = {**saved, "state": "merge_unknown", "merge_attempted": True}
   assert domain._cas_outcome(db, row, domain.key(ITEM), successor)
-  assert domain.merge_pending(successor)
+  assert not domain.merge_settled(successor) and domain.merge_pending(successor)
   peer = overlapping_grant(db, row)
   with pytest.raises(HTTPException, match="earlier public attempt"):
     domain.require_public_transition_clear(db, peer, peer.targets_json[0])
+  # Observing it never resurrects the archived settlement.
+  monkeypatch.setattr(domain, "current_pull", lambda *a: (REPO, {**PULL, "merged": False, "head": {"sha": NEW}}))
+  observed = observe_removed(db, row, principal)
+  assert observed["head_sha"] == NEW and domain.merge_pending(row.outcomes_json[domain.key(ITEM)])
+  assert not set(domain.MERGE_SETTLEMENTS).intersection(row.outcomes_json[domain.key(ITEM)])

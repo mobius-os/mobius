@@ -88,6 +88,8 @@ platform.crashloop-prev.*
 .platform-restart-requested
 .platform-rolled-back
 .platform-update-progress.json
+# Boot's count of starts that never became ready, and its atomic staging file.
+.platform-unready-boots.json*
 # Server-owned App Store update batch receipts are runtime progress.
 /app-update-batches/
 .platform-reconcile-pre

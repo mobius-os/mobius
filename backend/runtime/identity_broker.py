@@ -77,18 +77,31 @@ MAX_CONTRIBUTION_BODY = 3_000_000
 log = logging.getLogger("mobius.identity_broker")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
-MANAGED_INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,80}$")
+MANAGED_INSTANCE_ID = r"mob_[A-Za-z0-9_-]{3,80}"
+MANAGED_INSTANCE_RE = re.compile(rf"^{MANAGED_INSTANCE_ID}$")
 OAUTH_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 MANAGED_PREFIX = "/managed"
+# Railway management is read-only from an instance apart from a few reviewed
+# writes. Creating, retrying, deleting, resizing, recovering and disconnecting
+# deployments reach every deployment the owner has, so they belong to the
+# owner's own account session on the website and are never forwarded here.
 MANAGED_UPSTREAM_POLICIES = (
   ("/api/instance/v1/identity", frozenset({"GET", "POST", "PATCH"})),
-  ("/api/instance/v1/railway", frozenset({"GET", "POST", "PATCH", "DELETE"})),
+  ("/api/instance/v1/railway", frozenset({"GET"})),
   ("/api/instance/v1/container-replacement", frozenset({"GET", "POST"})),
 )
 MANAGED_EXACT_ROUTES = frozenset({
   ("GET", "/api/instance/v1/agent"),
   ("POST", "/api/instance/v1/agent/trial"),
+  ("POST", "/api/instance/v1/railway/connect/start"),
+  ("POST", "/api/instance/v1/railway/plan/refresh"),
 })
+MANAGED_RAILWAY_INSTANCE_WRITES = (
+  ("PATCH", re.compile(rf"/api/instance/v1/railway/instances/{MANAGED_INSTANCE_ID}")),
+  ("PATCH", re.compile(
+    rf"/api/instance/v1/railway/instances/{MANAGED_INSTANCE_ID}/updates"
+  )),
+)
 MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 
 # Monotonic marker read (without importing this module) by the frozen launcher
@@ -444,6 +457,11 @@ def _managed_upstream_path(method: str, path: str) -> str | None:
   ):
     return None
   if (method, upstream) in MANAGED_EXACT_ROUTES:
+    return upstream
+  if any(
+    method == allowed and pattern.fullmatch(upstream)
+    for allowed, pattern in MANAGED_RAILWAY_INSTANCE_WRITES
+  ):
     return upstream
   if (method, upstream) in {
     ("POST", "/api/instance/v1/browser-access/grants"),

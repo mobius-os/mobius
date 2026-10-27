@@ -101,7 +101,11 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     not isinstance(body, str)
     or not body.strip()
     or "\x00" in body
-    or len(body.encode("utf-8")) > 65_536
+    # GitHub's limit is 65,536 CHARACTERS, not UTF-8 bytes. Counting bytes
+    # rejected real publishable bodies: Dependabot truncates to exactly 65,536
+    # characters, so any non-ASCII character pushed the byte count over and
+    # permanently blocked updates to large Dependabot PRs.
+    or len(body) > 65_536
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "

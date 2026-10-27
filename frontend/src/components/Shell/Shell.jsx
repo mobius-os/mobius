@@ -1,4 +1,6 @@
 import { fetchFreshShellList, letSystemStreamOwnListRefresh } from './shellListReconciliation.js'
+import { invalidateEventFedCachesAfterReconnect } from './eventFedCaches.js'
+import { ownerStore, sessionStore } from '../../lib/workspaceStorage.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { clearAppNavLocation } from '../../lib/appNavLocationStore.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
@@ -79,7 +81,6 @@ import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import {
-  invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
 } from '../ChatView/chatActivityQueries.js'
 import {
@@ -257,6 +258,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   const sharedWorkspaceStorage = useMemo(() => sharedGrantId
     ? sharedBrowserStorageForGrant(sharedGrantId)
     : null, [sharedGrantId])
+  const workspaceStorage = isSharedBrowserAccess ? sharedWorkspaceStorage : ownerStore()
+  const tabStorage = isSharedBrowserAccess ? sharedWorkspaceStorage : sessionStore()
   const [projectCopyUrl, setProjectCopyUrl] = useState(incomingProjectCopy)
   function closeProjectCopy() {
     setProjectCopyUrl('')
@@ -275,7 +278,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     setOpen: setDesktopSidebarOpen,
     width: desktopSidebarWidth,
     setWidth: setDesktopSidebarWidth,
-  } = useDesktopSidebar(isSharedBrowserAccess ? sharedWorkspaceStorage : localStorage)
+  } = useDesktopSidebar(workspaceStorage)
 
   const {
     workspace,
@@ -301,8 +304,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     visiblePaneIds,
     persistWorkspaceSnapshot,
   } = useWorkspaceSession({
-    storage: isSharedBrowserAccess ? sharedWorkspaceStorage : localStorage,
-    legacyStorage: sharedBrowserAccess ? null : sessionStorage,
+    storage: workspaceStorage,
+    legacyStorage: sharedBrowserAccess ? null : tabStorage,
   })
   // Back/Forward can reserve a draft's mobile writing session before the
   // outgoing surface becomes inert. The callback is filled after the shared
@@ -338,7 +341,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     replaceImplicitBootTab,
     dragActiveRef,
     beforeRestoreRouteRef,
-    navigationStorage: isSharedBrowserAccess ? sharedWorkspaceStorage : localStorage,
+    navigationStorage: workspaceStorage,
     routePath: sharedBrowserAccess ? sharedBrowserRoutePath() : '/shell/',
   })
 
@@ -1071,7 +1074,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     retireAppHistory,
     tombstoneRoute,
     dispatchWorkspace,
-    storage: isSharedBrowserAccess ? sharedWorkspaceStorage : localStorage,
+    storage: workspaceStorage,
   })
   // Becoming a two-tab workspace engages the strip; returning to zero resets it.
   // A single implicit home tab on a fresh session stays visually identical to
@@ -2286,7 +2289,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     win: window,
     doc: document,
     nav: navigator,
-    storage: isSharedBrowserAccess ? sharedWorkspaceStorage : sessionStorage,
+    storage: tabStorage,
     sharedBrowserAccess: Boolean(sharedBrowserAccess),
     queryClient,
     persistWorkspaceSnapshot,
@@ -3432,13 +3435,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
-      modelQueries.registry.invalidate(queryClient),
-      authQueries.provider.statuses.invalidate(queryClient),
-      appSourceQueries.invalidate(queryClient),
-      chatAppArtifactQueries.invalidateAll(queryClient),
-      invalidateAllChatActivity(queryClient),
-      queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
-      queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
+      ...invalidateEventFedCachesAfterReconnect(queryClient),
       reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
     ])
     await reconcileDeletedChatIdentities()

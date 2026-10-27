@@ -14,8 +14,8 @@ export function shouldSuggestSharedFolder(files, state = hostStore().state) {
   const { count, bytes } = uploadTotals(files)
   if (count <= SUGGEST_ABOVE_FILES && bytes <= SUGGEST_ABOVE_BYTES) return false
   if (state.status !== 'ready') return false
-  // The Möbius phone app picks files natively and cannot share folders yet.
-  if (globalThis.MobiusNative) return false
+  // Older Möbius phone app builds take over the folder picker and cannot share folders.
+  if (globalThis.MobiusNative && !state.canPickNative) return false
   return Boolean(state.canRemember || state.canPickForVisit)
 }
 

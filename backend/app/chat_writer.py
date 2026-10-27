@@ -1251,6 +1251,8 @@ class FinishRun(_Command):
   run_token: str = ""
   # Preserve the real provider/setup/user-stop outcome in the run record.
   terminal_status: str = "completed"
+  # Why an "interrupted" finish happened (models.RUN_END_REASONS).
+  end_reason: str | None = None
 
 
 @dataclass
@@ -1270,6 +1272,8 @@ class RecoverWedgedRun(_Command):
   # Setup/provider failures are failed; ordinary recovery stays interrupted.
   # Only these error outcomes are valid here (successful turns use FinishRun).
   terminal_status: str = "interrupted"
+  # Why an "interrupted" recovery happened (models.RUN_END_REASONS).
+  end_reason: str = "recovered"
   # When set, the exact run is parked for the continuation sweep (a resource
   # wait that resolves itself) instead of closed as an interrupted failure.
   parked_until: datetime | None = None
@@ -2854,6 +2858,7 @@ class ChatWriterActor:
             and carrier.goal_id == row.waiting_goal_id and carrier.status == "running"
             and carrier.provider_execution_admitted is False):
           carrier.status = "interrupted"
+          carrier.end_reason = "dependency_withdrawn"
           carrier.ended_at = now_naive_utc()
           stopped_tokens.add(token)
           if (chat.live_assistant or {}).get("id") == token:
@@ -3458,6 +3463,7 @@ class ChatWriterActor:
         # the same transaction as startup recovery. A Core UPDATE bypassed
         # that listener and stranded the last projection at ``running``.
         run.status = "interrupted"
+        run.end_reason = "server_restart"
         run.ended_at = cmd.recovered_at
         run.restart_nonce = None
       from app.chat_failure_activity import mark_failed
@@ -3858,7 +3864,9 @@ class ChatWriterActor:
         ChatRun.provider_execution_admitted.is_(False),
       ).all():
         displaced.owner_superseded_by_run_id = cmd.run_token
-    self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
+    self._close_nonterminal_runs(
+      db, cmd.chat_id, "interrupted", end_reason="superseded",
+    )
     from app.continuations import continuation_control_envelope
     admit_goal(db, cmd.chat_id, goal_id, goal_objective, provider_source)
     db.add(ChatRun(
@@ -5032,6 +5040,7 @@ class ChatWriterActor:
       ChatRun.status.in_(models.CONTINUATION_RUN_STATUSES),
     ).all():
       run.status = "interrupted"
+      run.end_reason = "provider_switch"
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
     if not _commit_or_rollback(db):
@@ -5470,7 +5479,8 @@ class ChatWriterActor:
     if root_run_id != durable_run_token and grant_id is None:
       grant_id = _root_browser_lineage(db, root_run_id)
     self._close_nonterminal_runs(
-      db, cmd.chat_id, cmd.ending_status, except_token=durable_run_token
+      db, cmd.chat_id, cmd.ending_status, except_token=durable_run_token,
+      end_reason="superseded",
     )
     admit_goal(db, cmd.chat_id, goal_id, goal_objective, agent_pending)
     new_run = ChatRun(
@@ -5862,7 +5872,7 @@ class ChatWriterActor:
     return count
 
   @staticmethod
-  def _close_nonterminal_runs(db, chat_id, status, except_token=None):
+  def _close_nonterminal_runs(db, chat_id, status, except_token=None, end_reason=None):
     """Mark every superseded nonterminal run for a chat terminal.
 
     At most one run is current per chat. When a new run takes over or the chat
@@ -5893,6 +5903,8 @@ class ChatWriterActor:
     failed_run = None
     for run in q.order_by(ChatRun.started_at.asc(), ChatRun.id.asc()).all():
       run.status = status
+      if status == "interrupted":
+        run.end_reason = end_reason
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -5934,6 +5946,8 @@ class ChatWriterActor:
       ).first()
       if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
         run.status = cmd.terminal_status
+        if cmd.terminal_status == "interrupted":
+          run.end_reason = cmd.end_reason
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
         run_changed = True
@@ -5947,7 +5961,7 @@ class ChatWriterActor:
           )
     else:
       run_changed = self._close_nonterminal_runs(
-        db, cmd.chat_id, cmd.terminal_status
+        db, cmd.chat_id, cmd.terminal_status, end_reason=cmd.end_reason,
       )
     changed = run_changed
     # A tokened terminal may retire browser ownership only when it actually
@@ -6073,6 +6087,8 @@ class ChatWriterActor:
         run.park_reason = cmd.park_reason
       else:
         run.status = cmd.terminal_status
+        if cmd.terminal_status == "interrupted":
+          run.end_reason = cmd.end_reason
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -6329,6 +6345,7 @@ class ChatWriterActor:
       "interrupted" if run.park_reason == "restart" else "parked_notified"
     )
     if run.park_reason == "restart":
+      run.end_reason = "restart_drain"
       run.restart_nonce = None
       _mark_restart_pause_manual(_active_chat(db, run.chat_id))
     if run.ended_at is None:

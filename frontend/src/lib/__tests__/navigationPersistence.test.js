@@ -131,6 +131,33 @@ test('return-view is consumed once', () => {
   assert.equal(consumeReturnView(store), null)
 })
 
+test('cold navigation ignores browser storage getters that throw SecurityError', (t) => {
+  for (const key of ['localStorage', 'sessionStorage']) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key)
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    })
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      get() { throw new DOMException('Browser storage is blocked.', 'SecurityError') },
+    })
+  }
+
+  assert.equal(readStoredChatId(), null)
+  assert.equal(readRestoredCanvas(), null)
+  assert.equal(consumeReturnView(), null)
+})
+
+test('cold navigation ignores storage operations that are unavailable', () => {
+  const blocked = {
+    getItem() { throw new DOMException('Browser storage is blocked.', 'SecurityError') },
+  }
+  assert.equal(readStoredChatId(blocked), null)
+  assert.equal(readRestoredCanvas(blocked), null)
+  assert.equal(consumeReturnView(blocked), null)
+})
+
 test('active navigation mirrors cold state without retaining a stale app', () => {
   const store = storage({ moebius_active_app: '9' })
   persistActiveNavigation(store, {

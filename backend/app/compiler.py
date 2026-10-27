@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import tempfile
 from pathlib import Path
 
@@ -362,6 +363,34 @@ async def _spawn_rolldown(
   return proc.returncode or 0, stderr
 
 
+def _compile_failure_detail(returncode: int, stderr: bytes) -> str:
+  """Rolldown's own error text, or an honest account of a silent kill.
+
+  A signal-killed compiler (negative returncode) usually exits with empty
+  stderr, and SIGKILL here is almost always the container's memory limit —
+  without naming that, the failure reads as broken JSX and costs a debug
+  detour through valid source.
+  """
+  detail = stderr.decode()
+  if returncode >= 0 or detail.strip():
+    return detail
+  try:
+    signal_name = signal.Signals(-returncode).name
+  except ValueError:
+    signal_name = f"signal {-returncode}"
+  suffix = (
+    " — with this signal that almost always means the container ran out of"
+    " memory. Finish or stop memory-heavy work (builds, test suites, browser"
+    " sessions), then retry."
+    if signal_name == "SIGKILL"
+    else "."
+  )
+  return (
+    f"The compiler produced no error output: it was killed by {signal_name}"
+    f"{suffix}"
+  )
+
+
 async def compile_jsx(
   jsx_source: str,
   *,
@@ -433,7 +462,7 @@ async def compile_jsx(
     if returncode != 0:
       raise CompileError(
         "Compilation failed.",
-        stderr=stderr.decode(),
+        stderr=_compile_failure_detail(returncode, stderr),
         source_path=entry_path,
       )
     try:

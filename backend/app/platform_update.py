@@ -60,6 +60,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -5670,6 +5671,43 @@ def empty_platform_update_preview(
   )
 
 
+def _with_prepared_image_requirement(
+  activation: PlatformActivationImpact, record: Mapping,
+) -> PlatformActivationImpact:
+  """Add the prepared record's own image requirement to a diff-only impact.
+
+  The boot gate swaps a ``requires_image`` release in only on its matching
+  container image, while the diff classification judges paths alone — on a
+  drifted instance it can report just a restart. A finish preview missing the
+  image requirement sends the owner into a wasted restart, so the record's own
+  flag is surfaced here.
+  """
+  image_level = platform_activation.ActivationLevel.IMAGE_REBUILD
+  if (
+    not record.get("requires_image")
+    or image_level.value in activation["required_actions"]
+  ):
+    return activation
+  digest = record.get("image_digest")
+  return PlatformActivationImpact(
+    level=image_level.value,
+    required_actions=[*activation["required_actions"], image_level.value],
+    deployment=activation["deployment"],
+    reasons=[*activation["reasons"], platform_activation.ActivationReason(
+      code="prepared_image_requirement",
+      summary=(
+        f"The prepared release swaps in only on its reviewed container image ({digest})."
+        if digest
+        else "The prepared release swaps in only on its reviewed container image, whose digest is not resolved yet."
+      ),
+      paths=[],
+    )],
+    guidance=[*activation["guidance"], platform_activation.guidance_for(
+      image_level, activation["deployment"],
+    )],
+  )
+
+
 def prepared_update_preview(
   repo: Path = PLATFORM_REPO,
 ) -> PlatformUpdatePreview | None:
@@ -5678,8 +5716,9 @@ def prepared_update_preview(
   if record is None or record["state"] != "prepared":
     return None
   current = _update_source_tip(repo)
-  activation = _incoming_activation_impact(
-    repo, record["snapshot"], record["prepared"],
+  activation = _with_prepared_image_requirement(
+    _incoming_activation_impact(repo, record["snapshot"], record["prepared"]),
+    record,
   )
   preview = empty_platform_update_preview(
     current_sha=current, target_sha=record["target"],

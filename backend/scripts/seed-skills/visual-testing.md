@@ -33,6 +33,20 @@ Do **not** fall back to raw `agent-browser screenshot` for a Möbius comparison;
 that bypasses the real display density, exact-font readiness, freshness, and
 atomic-output checks. Raw capture remains appropriate for non-Möbius pages.
 
+The helper always applies `$VIEWPORT_WIDTH`/`$VIEWPORT_HEIGHT`, including on
+`--current-page`, so a manual `agent-browser set viewport` is overwritten. To
+capture a different width, override the environment variables for that one
+invocation (`VIEWPORT_WIDTH=390 VIEWPORT_HEIGHT=844 bash
+"$SCRIPTS_DIR/agent-screenshot.sh" …`). The helper's auth probe requires the
+server to be reachable: it cannot capture while the backend is down, by design.
+
+Font fidelity: if the container's fontconfig lacks a sans-serif alias (a fresh
+container before setup restores it), generic `sans-serif`/`system-ui` stacks
+resolve to a monospace face in captures even though the owner's devices render
+them correctly. When verifying typography, put a concrete proportional family
+(for example `'Liberation Sans', Arial`) ahead of the generics, or check
+`fc-match sans-serif` before trusting the rendered face.
+
 Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" "$VIEWPORT_PIXEL_RATIO"` (the helper sets the complete geometry for you; needed when driving raw non-Möbius pages), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
 **Write a shareable image once, at its final home.** Any screenshot, render,
@@ -58,7 +72,13 @@ you create yourself.
 
 For textboxes, use `fill @eN "value"` directly. Do not split that into
 `click`, `Control+A`, and a selector-less `type`; the extra commands add
-round-trips and the final `type` has no target. Batch independent operations
+round-trips and the final `type` has no target. **The Möbius chat composer is
+the exception:** it places the caret at the end on focus and keeps a persisted
+draft, so `fill` appends to the existing text and an empty `fill` does not
+clear it. Drive the composer with `click @eN`, then `press Control+a`, then
+`type` the new text (or `press Backspace` to clear). When a test needs a pause,
+a bare leading `sleep N` is refused in this environment — use
+`python3 -c "import time; time.sleep(N)"`. Batch independent operations
 with stable selectors, then take one verification snapshot. A sequence of
 React toggles is not independent when each click changes labels, disabled
 states, or the rendered control tree: keep it in one shell tool call, but
@@ -91,6 +111,19 @@ The frame context scopes refs and snapshots, not everything:
 - Raw `mouse` commands use page coordinates and do reach the app, but
   `get box` inside the frame reports frame-relative coordinates. Passing those
   to `mouse move` misses the target.
+- Ref-based `click`/`hover @eN` inside an app iframe can also miss: the
+  computed point is shifted by the iframe's own page offset at wide viewports,
+  so the click is refused as "covered by" another element (including a
+  frame-internal overlay such as a modal sheet's scrim) or lands on the wrong
+  element — even after a `✓ Done`. Prefer `focus @eN` + `press Enter`/`Space`
+  for buttons and `fill`/`select` for inputs when interacting inside an app
+  iframe; use pointer clicks there only when a keyboard path genuinely cannot
+  trigger the behavior.
+- To scroll, use `scroll <dir>` or `scrollintoview <sel>`; `mouse wheel`
+  dispatches at (0,0) regardless of any prior `mouse move`, so it scrolls the
+  page, not the element under the pointer. For an inner scroller that neither
+  command reaches, dispatch a CDP `Input.dispatchMouseEvent` wheel at the
+  element's coordinates via `get cdp-url`.
 
 For press-and-hold or drag, let a ref place the pointer, then press:
 
@@ -113,6 +146,13 @@ by that snapshot is preferable to a 25-second timeout.
 
 Session gotchas:
 
+- **The default session uses a persistent per-chat browser profile**, so
+  in-page UI state — open disclosures, scroll positions, entered drafts —
+  survives from earlier turns and sessions. A control may already be in the
+  state a fresh page would not have, and a blind first click toggles it the
+  wrong way. Read the control's current state from a snapshot (for example
+  `aria-expanded`) before toggling or measuring, rather than assuming the
+  pristine default.
 - **With agent-browser 0.38+, surviving elements keep their `@eN` refs across same-document changes.** Replaced elements and navigated documents/frames invalidate refs. Take a fresh snapshot after a transition rather than assuming the old target survived. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
 - **`✓ Done` only confirms dispatch, not state change** — the CLI returns it the instant the command reaches Chromium, not after the UI changed. Verify with `snapshot` or a screenshot after any click meant to transition UI.
 - **Keep screenshots purposeful** — retain the first useful render, a materially changed or error state, and the final evidence. A loader, drawer transition, or near-identical recapture is not a partner-visible milestone.

@@ -6975,6 +6975,18 @@ def _allow_core_contribution_review_runs(eng) -> None:
     ))
 
 
+def _add_run_end_reason(eng) -> None:
+  """Record why a run was interrupted; historical rows stay unexplained (NULL)."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  if "end_reason" not in {c["name"] for c in inspector.get_columns("chat_runs")}:
+    with eng.begin() as conn:
+      conn.execute(text("ALTER TABLE chat_runs ADD COLUMN end_reason VARCHAR(32)"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7094,6 +7106,7 @@ _SCHEMA_MIGRATIONS = (
   ("0095_unique_live_claim_follows", _enforce_unique_live_claim_follows),
   ("0096_app_accepted_consent", _add_app_accepted_consent),
   ("0097_core_contribution_review_runs", _allow_core_contribution_review_runs),
+  ("0098_run_end_reason", _add_run_end_reason),
 )
 
 

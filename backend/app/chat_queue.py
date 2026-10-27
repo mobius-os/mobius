@@ -421,6 +421,9 @@ async def drain_and_release(
         # FinishRun preserves an open question marker when one exists.
         await finish_run_strict(
           chat_id, ending_run_token, "interrupted",
+          end_reason=(
+            "activation" if hold.reason == "activation" else "owner_input"
+          ),
         )
         discard_starting(chat_id)
         forget_chat(chat_id)

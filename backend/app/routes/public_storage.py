@@ -224,9 +224,7 @@ async def read_public_value(
     stored_mime = storage_io.read_content_type(
       settings.data_dir, Path("apps") / str(grant.app_id), actual,
     )
-    version = storage_io.file_version_token(file_path)
     response = storage_routes._serve_file(file_path, stored_mime)
-  response.headers["ETag"] = version
   response.headers["Cache-Control"] = "no-store"
   response.headers["X-Content-Type-Options"] = "nosniff"
   return response

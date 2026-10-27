@@ -6,7 +6,7 @@ import {
   DEFAULT_IMAGE_EDGE, MAX_READ_BYTES, base64ToBytes, fileInfo, pageOf, readFileSlice, shrinkImage, sortEntries,
 } from './fileReads.js'
 
-const MAX_WRITE_BYTES = MAX_READ_BYTES
+export const MAX_WRITE_BYTES = MAX_READ_BYTES
 const ERROR_CODES = {
   NotFoundError: 'not_found',
   TypeMismatchError: 'wrong_kind',
@@ -16,7 +16,7 @@ const ERROR_CODES = {
   InvalidModificationError: 'locked',
   QuotaExceededError: 'no_space',
 }
-const ERROR_MESSAGES = {
+export const ERROR_MESSAGES = {
   not_found: path => `Nothing is at "${path}" in this folder.`,
   wrong_kind: path => `"${path}" is a folder where a file was expected, or the other way round.`,
   needs_permission: () => 'The browser needs the owner to tap Reconnect for this folder in Settings → Shared folders.',
@@ -106,7 +106,7 @@ async function image(root, command) {
  * belongs to the owner, and hidden names (.git/hooks, .vscode/tasks.json,
  * .envrc) hold settings other programs run later.
  */
-function editableSegments(path) {
+export function editableSegments(path) {
   const segments = pathSegments(path)
   if (isInBin(segments)) {
     throw new FolderError(
@@ -145,6 +145,17 @@ async function copyFile(file, targetParent, targetName) {
   }
 }
 
+/**
+ * A file that changed while its old version was copied to the bin. Nothing is
+ * written then: the replacement would overwrite a version the bin never saw.
+ */
+export function changedDuringWrite(path, binned) {
+  return new FolderError(
+    'changed_during_write',
+    `"${path}" changed while it was being replaced, so nothing was written. The version from before that change is in the bin at "${binned}". Read the file again before deciding what to write.`,
+  )
+}
+
 async function binFolderOf(root) {
   return root.getDirectoryHandle(BIN_FOLDER_NAME, { create: true })
 }
@@ -168,8 +179,13 @@ async function write(root, command) {
   if (old) {
     const bin = await binFolderOf(root)
     const binName = await freeBinName(bin, name)
-    await copyFile(await old.getFile(), bin, binName)
+    const backedUp = await old.getFile()
+    await copyFile(backedUp, bin, binName)
     binned = `${BIN_FOLDER_NAME}/${binName}`
+    const current = await old.getFile()
+    if (current.lastModified !== backedUp.lastModified || current.size !== backedUp.size) {
+      throw changedDuringWrite(path, binned)
+    }
   }
   const writable = await (await parent.getFileHandle(name, { create: true })).createWritable()
   await writable.write(bytes)

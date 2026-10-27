@@ -92,18 +92,22 @@ HANDLED_DATA_KEYS = frozenset(
 
 
 def _row(row_id: str, title: str, text: str, *, level: str | None = None,
-         rank: int = 1, scope: list[str] | None = None) -> dict[str, Any]:
+         rank: int = 1, scope: list[str] | None = None,
+         limits: dict[str, int] | None = None) -> dict[str, Any]:
   """One thing an app asks for.
 
   ``rank`` orders levels of the same permission (read < write). ``scope`` names
   the specific things a row covers (secret names, an install-time run): an
   accepted answer covers a request only when it includes every name, so
-  adding or swapping one asks again.
+  adding or swapping one asks again. ``limits`` are a runtime capability's
+  upper bounds: an accepted answer covers only values at or below the ones the
+  owner saw, so raising any of them asks again.
   """
   return {
     "id": row_id, "title": title, "text": text, "level": level,
     "rank": rank, "critical": row_id in CRITICAL,
     "scope": sorted(set(scope)) if scope else None,
+    "limits": dict(sorted(limits.items())) if limits else None,
   }
 
 
@@ -207,6 +211,10 @@ def rows_from_contract(
     rows.append(_row(
       capability, str(declaration.get("title") or capability),
       _runtime_text(capability, declaration),
+      limits={
+        key: int(value) for key, value in (declaration.get("limits") or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+      },
     ))
   rows.sort(key=lambda row: (not row["critical"], row["title"]))
   return rows
@@ -243,7 +251,8 @@ def _runtime_text(capability: str, declaration: dict[str, Any]) -> str:
 def request_digest(rows: list[dict[str, Any]]) -> str:
   canonical = json.dumps(
     sorted(
-      (r["id"], int(r.get("rank") or 1), r.get("level"), r.get("scope") or [])
+      (r["id"], int(r.get("rank") or 1), r.get("level"), r.get("scope") or [],
+       sorted((r.get("limits") or {}).items()))
       for r in rows
     ),
     separators=(",", ":"),
@@ -273,6 +282,8 @@ def _stored_row(row: dict[str, Any]) -> dict[str, Any]:
   stored: dict[str, Any] = {"id": row["id"], "rank": int(row.get("rank") or 1)}
   if row.get("scope"):
     stored["scope"] = list(row["scope"])
+  if row.get("limits"):
+    stored["limits"] = dict(row["limits"])
   return stored
 
 
@@ -294,7 +305,8 @@ def _record(rows: list[dict[str, Any]], via: str) -> dict[str, Any]:
 
 
 def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
-  """Row id to its accepted ``rank`` and ``scope``; None when never accepted."""
+  """Row id to its accepted ``rank``, ``scope`` and ``limits``; None when never
+  accepted."""
   record = app.accepted_consent
   if not isinstance(record, dict):
     return None
@@ -307,17 +319,26 @@ def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
       record["contract"], project_builders=bool(record.get("project_builders")),
     )
   return {
-    r["id"]: {"rank": int(r.get("rank") or 1), "scope": set(r.get("scope") or [])}
+    r["id"]: {
+      "rank": int(r.get("rank") or 1), "scope": set(r.get("scope") or []),
+      "limits": dict(r.get("limits") or {}),
+    }
     for r in stored
   }
 
 
 def _covered(row: dict[str, Any], accepted: dict[str, dict[str, Any]]) -> bool:
   held = accepted.get(row["id"])
+  # A limit missing from the answer was never shown to the owner (answers
+  # saved before limits were recorded), so it covers nothing.
   return (
     held is not None
     and held["rank"] >= int(row.get("rank") or 1)
     and set(row.get("scope") or []) <= held["scope"]
+    and all(
+      key in held["limits"] and held["limits"][key] >= value
+      for key, value in (row.get("limits") or {}).items()
+    )
   )
 
 

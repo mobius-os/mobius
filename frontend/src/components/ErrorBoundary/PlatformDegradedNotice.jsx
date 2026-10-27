@@ -9,7 +9,8 @@ import './ErrorBoundary.css'
 // but are not what they are looking at:
 //
 // - `serving_source: "baked"` — the entrypoint serves the image-baked BACKEND
-//   because /data/platform failed to import at boot.
+//   because /data/platform failed to import at boot, or its commit did not
+//   finish starting in recent boots (an `admit` refusal in the boot log).
 // - `frontend_source: "baked"` — the platform backend serves the image-baked
 //   SHELL because /data/platform/frontend/dist is not a complete build (the
 //   watcher never published one, or the last publish was rejected).
@@ -36,10 +37,12 @@ const VARIANTS = {
         'changes did not finish loading. The latest source is preserved but ' +
         'is not being served.',
       '',
-      'Reproduce the import failure from the served backend. ' +
+      'Reproduce the failure from the served backend. ' +
         '/data/logs/platform-boot.jsonl records the boot transaction (its ' +
-        'activate, guard and revert steps, with the exact error of a failed ' +
-        'one), not the import check itself. Find the root cause in ' +
+        'activate, guard, revert and admit steps, with the exact error of a ' +
+        'failed one), not the import check itself. An admit refusal means the ' +
+        'commit imported but crashed or hung while the server started, in ' +
+        'more than one boot. Find the root cause in ' +
         '/data/platform and implement a targeted fix so the normal platform ' +
         'serves again.',
       '',

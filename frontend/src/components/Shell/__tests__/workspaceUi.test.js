@@ -116,9 +116,11 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
 })
 
 test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
+  assert.match(shell, /const workspaceStorage = isSharedBrowserAccess \? sharedWorkspaceStorage : ownerStore\(\)/)
+  assert.match(shell, /const tabStorage = isSharedBrowserAccess \? sharedWorkspaceStorage : sessionStore\(\)/)
   assert.match(
     shell,
-    /useWorkspaceSession\(\{\s*storage: isSharedBrowserAccess \? sharedWorkspaceStorage : localStorage,\s*legacyStorage: sharedBrowserAccess \? null : sessionStorage,\s*\}\)/,
+    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*\}\)/,
     'owner durability and one-time migration remain canonical; guest storage is separate',
   )
   assert.doesNotMatch(

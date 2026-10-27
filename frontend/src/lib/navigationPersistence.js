@@ -1,16 +1,17 @@
 import { isSharedBrowserRoute } from './sharedBrowserWorkspace.js'
 import { settingsSectionOrNull } from './settingsSections.js'
+import { localStore, sessionStore } from './workspaceStorage.js'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 const ACTIVE_VIEW_KEY = 'moebius_active_view'
 const ACTIVE_APP_KEY = 'moebius_active_app'
 const RETURN_VIEW_KEY = 'mobius:return-view'
 
-export function readStoredChatId(storage = globalThis.localStorage) {
+export function readStoredChatId(storage = localStore()) {
   try { return storage?.getItem(ACTIVE_CHAT_KEY) ?? null } catch { return null }
 }
 
-export function readRestoredCanvas(storage = globalThis.localStorage) {
+export function readRestoredCanvas(storage = localStore()) {
   try {
     const view = storage?.getItem(ACTIVE_VIEW_KEY)
     const app = storage?.getItem(ACTIVE_APP_KEY)
@@ -20,7 +21,7 @@ export function readRestoredCanvas(storage = globalThis.localStorage) {
   } catch { return null }
 }
 
-export function consumeReturnView(storage = globalThis.sessionStorage) {
+export function consumeReturnView(storage = sessionStore()) {
   try {
     const view = storage?.getItem(RETURN_VIEW_KEY)
     storage?.removeItem(RETURN_VIEW_KEY)
