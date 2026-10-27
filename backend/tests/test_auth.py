@@ -1217,6 +1217,17 @@ def test_setup_requires_the_one_time_code_from_the_server(client):
   assert client.get("/api/auth/setup/status").json()["configured"] is False
 
 
+def test_setup_rejects_a_non_ascii_code_as_an_ordinary_wrong_code(client):
+  """Unicode letters must fail like any wrong code, not crash the comparison."""
+  code = setup_code.current()
+  body = {"username": "admin", "password": "securepassword123"}
+  for typed in ("é", "Ａ" * 16, code[:15] + "é", code + "é"):
+    r = client.post("/api/auth/setup", json={**body, "setup_code": typed})
+    assert r.status_code == 403, (typed, r.status_code, r.text)
+  assert client.get("/api/auth/setup/status").json()["configured"] is False
+  assert setup_code.code_path().exists()
+
+
 def test_setup_code_is_forgiving_about_case_and_dashes_and_works_once(client):
   code = setup_code.current()
   assert len(code) == 16

@@ -35,7 +35,8 @@ def code_path() -> Path:
 
 
 def _normalize(value: str) -> str:
-  return "".join(ch for ch in value.upper() if ch.isalnum())
+  # ASCII only: the alphabet is ASCII, and compare_digest rejects other text.
+  return "".join(ch for ch in value.upper() if ch.isascii() and ch.isalnum())
 
 
 def _format(raw: str) -> str:
@@ -82,7 +83,7 @@ def current(*, announce: bool = False) -> str:
 def matches(candidate: str | None) -> bool:
   """Constant-time check of an entered code against the pending one."""
   expected = _read(code_path())
-  if expected is None or not isinstance(candidate, str):
+  if expected is None or not isinstance(candidate, str) or not candidate.isascii():
     return False
   return secrets.compare_digest(_normalize(candidate), expected)
 
