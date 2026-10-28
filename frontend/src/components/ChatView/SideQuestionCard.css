@@ -150,14 +150,15 @@
 .side-question__button:hover { background: var(--surface-2); }
 
 .side-question__button--primary {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: var(--accent-fill, var(--accent));
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #fff);
 }
 
+/* Deepen rather than brighten: a lighter fill would drop the label below 4.5:1. */
 .side-question__button--primary:hover {
-  background: var(--accent);
-  filter: brightness(1.08);
+  border-color: var(--accent-fill-hover, var(--accent-hover));
+  background: var(--accent-fill-hover, var(--accent-hover));
 }
 
 .side-question__button:focus-visible,

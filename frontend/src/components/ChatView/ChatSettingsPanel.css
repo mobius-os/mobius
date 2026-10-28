@@ -280,7 +280,7 @@
   min-height: 44px;
   padding: 6px 4px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   cursor: pointer;
   display: inline-flex;
@@ -428,8 +428,15 @@
 
 .csp__confirm-btn--primary {
   color: var(--accent-fg, #ffffff);
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: var(--accent-fill, var(--accent));
+  background: var(--accent-fill, var(--accent));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .csp__confirm-btn--primary:not(:disabled):hover {
+    border-color: var(--accent-fill-hover, var(--accent-hover));
+    background: var(--accent-fill-hover, var(--accent-hover));
+  }
 }
 
 .csp__confirm-btn--ghost {

@@ -43,7 +43,7 @@ function makeDomStub() {
       contains: (name) => documentElement._classes.has(name),
     },
     // applyThemeToDom now syncs the inline --bg (BUG 2); capture it.
-    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] }, getPropertyValue(name) { return this._props[name] } },
   }
   const body = { style: {} }
   function makeNode(tag) {
@@ -212,7 +212,6 @@ test('SHIP-BLOCKER #2 — newBg is extracted from BUILT css, not stale meta', as
   assert.equal(result.newBg, '#f0eeeb',
     `newBg must be the NEW light bg (#f0eeeb), not the old dark bg. Got ${result.newBg}.`)
   // And the DOM must reflect the new bg too.
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
   assert.equal(dom.meta.content, '#f0eeeb')
 })
 
@@ -228,7 +227,7 @@ test('I4 — warm cache: toggleTheme paints WITHOUT awaiting getThemeCss (instan
   assert.ok(!api.calls.some(c => c[0] === 'getThemeCss'),
     `getThemeCss must NOT be fetched when the theme cache is warm (it gates the optimistic paint). Got: ${api.calls.map(c=>c[0]).join(', ')}`)
   assert.equal(result.newMode, 'light')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
   assert.ok(api.calls.some(c => c[0] === 'putThemeCss'), 'still persists the new css')
 })
 
@@ -498,7 +497,7 @@ test('BUG 1 — direction derived from effective DOM mode toggles correctly even
   const result = await themeService.toggleTheme(qc, currentMode, api)
   assert.equal(result.newMode, 'dark',
     'toggling away from the visible LIGHT theme must go DARK (not stay/flip wrong)')
-  assert.equal(dom.document.body.style.background, '#0d0d0d',
+  assert.equal(dom.meta.content, '#0d0d0d',
     'the DOM must repaint to the new dark bg (no stuck no-op)')
   assert.equal(themeService.getEffectiveTheme().mode, 'dark',
     'after the toggle the visible mode is dark')
@@ -527,14 +526,16 @@ test('BUG 1 — repeated toggles driven by effective mode never get stuck', asyn
     `repeated toggles must strictly alternate; got ${seen.join(', ')}`)
 })
 
-test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted theme', async () => {
-  // toggleTheme -> applyThemeToDom must overwrite any stale inline --bg.
+test('BUG 2 — toggleTheme leaves no stale inline --bg over the painted theme', async () => {
+  // toggleTheme -> applyThemeToDom removes any inline --bg: the theme
+  // stylesheet owns it, and an inline value would outrank the owner's.
   dom.documentElement.style.setProperty('--bg', '#deadbe')  // stale splash value
   const qc = makeQueryClient()
   const api = makeApi(DARK_CSS)  // dark -> light
   await themeService.toggleTheme(qc, 'dark', api)
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
-    'inline --bg must track the toggled-to light bg, not the stale splash value')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined,
+    'no inline --bg may outrank the toggled-to theme stylesheet')
+  assert.equal(dom.meta.content, '#f0eeeb')
   // Delegation: applyThemeToDom persists the {bg,mode} key the pre-paint IIFE reads.
   assert.deepEqual(
     JSON.parse(localStorage.getItem('mobius-theme')),
@@ -581,7 +582,7 @@ test('NAV REGRESSION — Settings toggleTheme avoids View Transition snapshot na
   assert.equal(dom.document.documentElement.classList.contains('theme-transitioning'), false,
     'theme toggles from Settings should not animate descendant colors independently')
   assert.equal(result.newMode, 'light')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 })
 
 test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
@@ -608,17 +609,20 @@ test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
 test('toggleTheme derives --accent-fg from the accent it preserved', async () => {
   // The server injects --accent-fg into a TRAILING :root that parseThemeMeta
   // does not read, so it is absent from meta.colors here. A fixed palette
-  // value would be spread back over the derivation and then persisted into the
-  // first :root, where _ensure_core_vars stops treating it as missing --
-  // permanently disabling the derivation for that theme.
+  // value would be spread back over the derivation; persisting even the
+  // derived value into the first :root would stop _ensure_core_vars from ever
+  // re-deriving it after a later --accent edit. So the toggle PAINTS the
+  // derived foreground and leaves theme.css without it.
   const whiteAccent = DARK_CSS.replace('--accent: #ff00ff', '--accent: #ffffff')
   const qc = makeQueryClient()
   const api = makeApi(whiteAccent)
-  await themeService.toggleTheme(qc, 'dark', api)
+  const { newCss: painted } = await themeService.toggleTheme(qc, 'dark', api)
   const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
   assert.ok(newCss.includes('--accent: #ffffff'), 'accent survives the toggle')
-  assert.ok(newCss.includes('--accent-fg: #000000'),
+  assert.ok(painted.includes('--accent-fg: #000000'),
     'a white accent must not keep a white foreground through a toggle')
+  assert.equal(newCss.includes('--accent-fg'), false,
+    'the derived foreground is painted, never frozen into theme.css')
 })
 
 test('toggleTheme keeps a foreground the theme declared for itself', async () => {
@@ -632,4 +636,196 @@ test('toggleTheme keeps a foreground the theme declared for itself', async () =>
   const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
   assert.ok(newCss.includes('--accent-fg: #123456'),
     'an explicitly declared foreground is never overwritten by derivation')
+})
+
+// ---------------------------------------------------------------------------
+// Mode-owned defaults vs genuine customisations across a light/dark toggle.
+// A shipped default of either mode belongs to the mode and is swapped; any
+// other value is the owner's and survives. Role tokens (--accent-text,
+// --accent-fill, ...) are painted for the new mode but never persisted unless
+// the theme declared them, so a later --accent edit still re-derives them.
+// ---------------------------------------------------------------------------
+
+function persistedCss(api) {
+  return api.calls.filter(c => c[0] === 'putThemeCss').at(-1)[1]
+}
+
+function rootVar(css, name) {
+  const m = css.match(new RegExp(`(?:^|[\\s;{])${name}\\s*:\\s*([^;]+);`))
+  return m ? m[1].trim() : undefined
+}
+
+async function toggleOnce(css, fromMode) {
+  const qc = makeQueryClient({ css })
+  const api = makeApi(css)
+  const result = await themeService.toggleTheme(qc, fromMode, api)
+  return { result, persisted: persistedCss(api) }
+}
+
+const { DARK_COLORS, LIGHT_COLORS, DARK_ROLES, LIGHT_ROLES } = await import('../../theme.js')
+
+function shippedCss(colors, mode) {
+  const vars = Object.entries(colors).map(([k, v]) => `  ${k}: ${v};`).join('\n')
+  return `:root {\n  /* Colors - ${mode} theme */\n${vars}\n  --font: 'Inter', sans-serif;\n  --mono: monospace;\n  font-size: 15px;\n  color-scheme: ${mode};\n}\n`
+}
+
+test('ROUND TRIP — dark → light → dark returns every shipped dark default', async () => {
+  const first = await toggleOnce(shippedCss(DARK_COLORS, 'dark'), 'dark')
+  for (const [k, v] of Object.entries(LIGHT_COLORS)) {
+    assert.equal(rootVar(first.persisted, k), v, `light ${k}`)
+  }
+  const back = await toggleOnce(first.persisted, 'light')
+  for (const [k, v] of Object.entries(DARK_COLORS)) {
+    assert.equal(rootVar(back.persisted, k), v, `dark ${k} after the round trip`)
+  }
+})
+
+test('REGRESSION — light status defaults carried into a dark theme are swapped, not kept as custom', async () => {
+  // The pre-fix toggle swapped only structural keys, so many dark theme.css
+  // files carry light --danger/--green/--accent-dim. Those are shipped values,
+  // not customisations: the next toggle must give the target mode's own.
+  const carried = shippedCss({
+    ...DARK_COLORS,
+    '--danger': LIGHT_COLORS['--danger'],
+    '--green': LIGHT_COLORS['--green'],
+    '--accent-dim': LIGHT_COLORS['--accent-dim'],
+  }, 'dark')
+  const toLight = await toggleOnce(carried, 'dark')
+  assert.equal(rootVar(toLight.persisted, '--danger'), LIGHT_COLORS['--danger'])
+  const toDark = await toggleOnce(toLight.persisted, 'light')
+  assert.equal(rootVar(toDark.persisted, '--danger'), DARK_COLORS['--danger'])
+  assert.equal(rootVar(toDark.persisted, '--green'), DARK_COLORS['--green'])
+  assert.equal(rootVar(toDark.persisted, '--accent-dim'), DARK_COLORS['--accent-dim'])
+})
+
+test('ROUND TRIP — genuine custom values survive both directions', async () => {
+  const custom = shippedCss({
+    ...DARK_COLORS,
+    '--danger': '#ff2d55',
+    '--accent-text': '#c4b5fd',
+    '--brand-glow': 'rgba(1, 2, 3, 0.5)',
+  }, 'dark')
+  const toLight = await toggleOnce(custom, 'dark')
+  const toDark = await toggleOnce(toLight.persisted, 'light')
+  for (const css of [toLight.persisted, toDark.persisted]) {
+    assert.equal(rootVar(css, '--danger'), '#ff2d55')
+    assert.equal(rootVar(css, '--accent-text'), '#c4b5fd')
+    assert.equal(rootVar(css, '--brand-glow'), 'rgba(1, 2, 3, 0.5)')
+  }
+})
+
+test('the toggle paints the new mode\'s roles without persisting them', async () => {
+  const { result, persisted } = await toggleOnce(shippedCss(DARK_COLORS, 'dark'), 'dark')
+  for (const [k, v] of Object.entries(LIGHT_ROLES)) {
+    assert.equal(rootVar(result.newCss, k), v, `painted light ${k}`)
+    assert.equal(rootVar(persisted, k), undefined, `${k} must stay derivable, not frozen into theme.css`)
+  }
+  assert.equal(rootVar(persisted, '--accent-fg'), undefined)
+})
+
+test('shipped role values persisted by an older toggle are recognised and swapped', async () => {
+  const old = shippedCss({ ...LIGHT_COLORS, ...LIGHT_ROLES, '--accent-fg': '#ffffff' }, 'light')
+  const { result, persisted } = await toggleOnce(old, 'light')
+  assert.equal(rootVar(persisted, '--accent-text'), undefined)
+  assert.equal(rootVar(result.newCss, '--accent-text'), DARK_ROLES['--accent-text'])
+})
+
+test('a custom accent re-derives its roles for each mode instead of carrying the old mode\'s', async () => {
+  const teal = shippedCss({ ...DARK_COLORS, '--accent': '#0ea5e9' }, 'dark')
+  const toLight = await toggleOnce(teal, 'dark')
+  const lightText = rootVar(toLight.result.newCss, '--accent-text')
+  const toDark = await toggleOnce(toLight.result.newCss, 'light')
+  const darkText = rootVar(toDark.result.newCss, '--accent-text')
+  assert.ok(lightText && darkText && lightText !== darkText,
+    `light ${lightText} and dark ${darkText} accent text must each suit their mode`)
+  assert.equal(rootVar(toDark.persisted, '--accent-text'), undefined)
+  assert.equal(rootVar(toDark.persisted, '--accent'), '#0ea5e9')
+})
+
+test('REGRESSION — a server-injected defaults block is not persisted back as owner CSS', async () => {
+  const served = `${shippedCss(DARK_COLORS, 'dark')}
+.keep-me { gap: 4px; }
+/* Möbius: injected defaults for variables the theme omitted */
+:root {
+  --accent-fg: #ffffff;
+  --accent-text: #957cf8;
+}
+`
+  const { persisted } = await toggleOnce(served, 'dark')
+  assert.ok(persisted.includes('.keep-me { gap: 4px; }'), 'owner extras survive')
+  assert.equal(persisted.includes('injected defaults'), false,
+    `the injected block must be regenerated, not frozen:\n${persisted}`)
+})
+
+const { withThemeDefaults, scanRootDeclarations, INJECTED_DEFAULTS_MARKER } = await import('../../theme.js')
+
+test('REGRESSION — an owner role in a later :root follows the generated defaults', async () => {
+  const css = `${shippedCss(DARK_COLORS, 'dark')}
+.keep { gap: 4px; }
+:root { --accent: #00ffff; --accent-text: #abcdef; }
+`
+  const { result, persisted } = await toggleOnce(css, 'dark')
+  assert.ok(persisted.includes(':root { --accent: #00ffff; --accent-text: #abcdef; }'),
+    'the later owner root is kept as owner CSS')
+  const painted = result.newCss
+  // The generated block is first, so the owner's later rule wins the cascade.
+  assert.ok(painted.indexOf(INJECTED_DEFAULTS_MARKER) < painted.indexOf('--accent-text: #abcdef'))
+  assert.equal(painted.split(INJECTED_DEFAULTS_MARKER).length, 2, 'exactly one generated block')
+  // And the defaults derive from the WINNING cyan accent.
+  const block = painted.slice(painted.indexOf(INJECTED_DEFAULTS_MARKER), painted.indexOf('}') + 1)
+  assert.equal(block.includes(`--accent-fill: ${LIGHT_ROLES['--accent-fill']};`), false)
+  assert.equal(scanRootDeclarations(painted)['--accent-text'], '#abcdef')
+})
+
+test('the toggle paints exactly what the server serves for what it persists', async () => {
+  const shapes = [
+    shippedCss(DARK_COLORS, 'dark'),
+    `${shippedCss(DARK_COLORS, 'dark')}\n:root { --accent: #0ea5e9; }\n`,
+    `${shippedCss(DARK_COLORS, 'dark')}\n@media (prefers-contrast: more) { :root { --danger: #ff0000; } }\n`,
+    `${shippedCss({ ...DARK_COLORS, '--green': '#22c55e' }, 'dark')}\n.chat { --accent-fill: #123456; }\n`,
+  ]
+  for (const css of shapes) {
+    const { result, persisted } = await toggleOnce(css, 'dark')
+    // withThemeDefaults is pinned byte-for-byte to backend _ensure_core_vars by themeCssCases.json.
+    assert.equal(result.newCss, withThemeDefaults(persisted))
+    assert.equal(persisted.includes(INJECTED_DEFAULTS_MARKER), false)
+  }
+})
+
+test('REGRESSION — the toggle reads the root rule lexically: quoted braces and commented declarations', async () => {
+  // A `}` inside a string used to end the root block early, so the toggle
+  // read no colours and persisted the rest of the rule as broken extras.
+  const css = `:root {
+  --glyph: "}";
+  --sep: 'a;b';
+  /* --accent: #ff0000; */
+  --bg: #0d0d0d;
+  --accent: #00ffff;
+  font-size: 16px;
+}
+.keep { content: "{"; }
+`
+  const { persisted } = await toggleOnce(css, 'dark')
+  assert.equal(rootVar(persisted, '--accent'), '#00ffff', 'the custom accent survives')
+  assert.equal(rootVar(persisted, '--bg'), LIGHT_COLORS['--bg'], 'the structural bg swaps')
+  assert.ok(persisted.includes('--glyph: "}";'), `the quoted glyph stays a root value:\n${persisted}`)
+  assert.ok(persisted.includes("--sep: 'a;b';"))
+  assert.ok(persisted.includes('font-size: 16px;'))
+  assert.ok(persisted.includes('.keep { content: "{"; }'), 'the following rule is kept whole')
+  assert.equal(persisted.includes('#ff0000'), false, 'a commented-out declaration is not a colour')
+  assert.equal(persisted.split(':root').length, 2, `exactly one root rule:\n${persisted}`)
+})
+
+test('REGRESSION — CSS the lexer cannot follow is kept verbatim rather than edited', async () => {
+  const css = `:root { --bg: #0d0d0d; --accent: #00ffff; }\n.broken { content: "open;\n}\n`
+  const { persisted } = await toggleOnce(css, 'dark')
+  assert.ok(persisted.includes(css.trim()), `owner CSS is preserved byte for byte:\n${persisted}`)
+})
+
+test('REGRESSION — a winning !important root declaration survives a toggle with its importance', async () => {
+  const css = ':root { --bg: #0d0d0d; --accent: #00ffff !important; --accent: #ff0000; }\n'
+  const { persisted } = await toggleOnce(css, 'dark')
+  assert.ok(persisted.includes('--accent: #00ffff !important;'), `the important accent is kept:\n${persisted}`)
+  assert.equal(persisted.includes('#ff0000'), false, 'the overridden normal declaration is not resurrected')
+  assert.equal(scanRootDeclarations(persisted)['--accent'], '#00ffff')
 })

@@ -280,7 +280,7 @@
 .wt-confirm__icon { width: 52px; height: 52px; flex: none; border-radius: 14px; font-size: 20px; }
 .wt-confirm .wt-note { margin: 0; }
 .wt-confirm__label { margin: 0 0 8px; color: var(--muted, #a1a1aa); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.wt-confirm__meta a { color: var(--accent-text, #b9a7f5); }
+.wt-confirm__meta a { color: var(--accent-text, var(--accent, #8b6cf7)); }
 .wt-confirm__meta { margin: 8px 0 0; color: var(--muted, #a1a1aa); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .wt-confirm__empty { margin: 0; padding: 10px 12px; border: 1px solid var(--border, #252b36); border-radius: 12px; color: var(--muted, #a1a1aa); background: var(--surface-2, #1a1f28); font-size: 13px; }
 .wt-confirm__list { display: grid; gap: 8px; max-height: 220px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }

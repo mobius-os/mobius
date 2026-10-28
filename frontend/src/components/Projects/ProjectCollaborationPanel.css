@@ -218,7 +218,7 @@
   cursor: pointer;
 }
 .project-collab__invite > div > button:first-child,
-.project-collab__invite-result button { color: var(--accent-fg, #fff); background: var(--accent); }
+.project-collab__invite-result button { color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); }
 .project-collab__invite-roles { min-width: 0; margin: 0; padding: 0; border: 0; }
 .project-collab__invite-roles legend { margin-bottom: 5px; color: var(--muted); font-size: 10px; font-weight: 650; }
 .project-collab__invite-roles > div { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }

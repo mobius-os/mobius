@@ -78,9 +78,18 @@ body,
    wrong color before the server-injected theme takes effect.
    Only non-color defaults for dev mode (where server injection
    doesn't happen). */
+/* Typography defaults live in the theme's `mobius-defaults` cascade layer
+   (backend/app/theme.py DEFAULTS_LAYER): this bundle loads before the theme
+   style and declares the layer first, so it is the weakest layer and an
+   owner --font/--mono -- unlayered or in an owner layer -- always wins. */
+@layer mobius-defaults {
+  :where(:root) {
+    --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+  }
+}
+
 :root {
-  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
   /* Default to dark. Light-mode override below keeps native UA
      widgets (scrollbars, date picker, autofill background) in
      sync with the active theme. */
@@ -421,9 +430,11 @@ textarea:focus-visible {
   color: var(--text);
 }
 
-/* Gradient user message bubbles, white text */
+/* Gradient user message bubbles, white text. The light start is the action
+   fill, not the brand --accent, so white body text keeps >= 4.5:1 across the
+   whole gradient. */
 .chat__text--user {
-  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 78%, black));
+  background: linear-gradient(135deg, var(--accent-fill, var(--accent)), color-mix(in srgb, var(--accent) 78%, black));
   color: #ffffff;
   box-shadow: 0 2px 14px -4px var(--accent-dim);
 }

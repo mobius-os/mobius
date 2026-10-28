@@ -52,8 +52,9 @@ def test_ensure_core_vars_injects_missing():
   assert "--surface:" in out
 
 
-def test_ensure_core_vars_skips_when_all_present():
-  """A complete theme stays byte-identical."""
+def test_ensure_core_vars_keeps_a_complete_theme_verbatim_after_the_defaults():
+  """A complete theme is served byte-for-byte after the one generated
+  defaults block, so every one of its declarations wins by cascade."""
   css = """\
 :root {
   --bg: #000;
@@ -69,11 +70,23 @@ def test_ensure_core_vars_skips_when_all_present():
   --border-light: #444;
   --danger: #f00;
   --green: #0f0;
+  --warning: #fa0;
+  --accent-text: #f6f;
+  --accent-fill: #a0a;
+  --accent-fill-hover: #909;
+  --danger-text: #f66;
+  --danger-fill: #b00;
+  --green-text: #6f6;
+  --green-fill: #060;
+  --warning-text: #fa0;
   --font: sans-serif;
   --mono: monospace;
 }
 """
-  assert _ensure_core_vars(css) == css
+  out = _ensure_core_vars(css)
+  assert out.endswith(css)
+  assert out.startswith("@layer mobius-defaults;\n/* Möbius: injected defaults")
+  assert out.count(":where(:root)") == 1
 
 
 def test_ensure_core_vars_leaves_creative_css_alone():
@@ -97,6 +110,15 @@ def test_ensure_core_vars_leaves_creative_css_alone():
   --border-light: #1a4d2e;
   --danger: #c4554e;
   --green: #1a8c4a;
+  --warning: #e0b04a;
+  --accent-text: #e2b955;
+  --accent-fill: #d4a437;
+  --accent-fill-hover: #c8992c;
+  --danger-text: #e07a73;
+  --danger-fill: #a8433d;
+  --green-text: #3fbf73;
+  --green-fill: #1a8c4a;
+  --warning-text: #e0b04a;
   --font: 'Inter', sans-serif;
   --mono: monospace;
 }
@@ -106,8 +128,8 @@ body::before { position: fixed; inset: 0; z-index: 10; }
 input:focus-visible { outline: 2px solid red; }
 """
   out = _ensure_core_vars(css)
-  # Output is byte-identical because all core vars are defined.
-  assert out == css
+  # The owner's CSS follows the generated defaults untouched.
+  assert out.endswith(css)
 
 
 # /api/theme endpoint tests --------------------------------------------------
@@ -597,8 +619,10 @@ def test_theme_that_declares_accent_fg_is_left_alone():
   from app.theme import _ensure_core_vars
 
   css = ":root { --bg: #fff; --fg: #111; --accent: #ffffff; --accent-fg: #123456; }"
-  assert _ensure_core_vars(css).count("--accent-fg") == 1
-  assert "#123456" in _ensure_core_vars(css)
+  out = _ensure_core_vars(css)
+  # The owner's own label follows the generated block, so it wins.
+  assert out.endswith(css)
+  assert out.index("--accent-fg: #123456") > out.index(":where(:root)")
 
 
 # ---------------------------------------------------------------------------
@@ -701,8 +725,8 @@ def test_served_theme_uses_surface_2_and_custom_value_wins(tmp_path):
   assert migrate_theme_surface2_token(str(tmp_path)) is True
   css = get_theme_css(str(tmp_path))
   assert "--surface2" not in css
-  assert "--surface-2: #333333" in css  # owner's value wins, not #212121
-  assert "#212121" not in css  # the default was NOT injected on top
+  # The owner's value follows the generated default, so it wins the cascade.
+  assert css.index("--surface-2: #333333") > css.index("--surface-2: #212121")
   # theme_data (the shell + frame handoff) carries the same effective CSS.
   bundle = theme_data(str(tmp_path))
   assert "--surface2" not in bundle["css"]

@@ -111,7 +111,7 @@
   padding: 2px 6px;
   font-size: 13px;
   font-family: var(--mono);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .md-project-download {
@@ -119,7 +119,7 @@
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
@@ -442,11 +442,13 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 
 /* Links in markdown */
 .md-blocks a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.md-blocks a:hover { color: var(--accent-hover); }
+/* Hover thickens the underline rather than shifting hue: the darker
+   --accent-hover drops below 4.5:1 on dark surfaces. */
+.md-blocks a:hover { text-decoration-thickness: 2px; }
 
 .md-blocks strong { font-weight: 600; }
 
@@ -557,7 +559,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 .md-app-card__app-icon { width: 2.25rem; height: 2.25rem; object-fit: contain; }
 .md-app-card__text { min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; }
 .md-app-card__eyebrow {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 0.6875rem;
   line-height: 1.2;
   font-weight: 760;

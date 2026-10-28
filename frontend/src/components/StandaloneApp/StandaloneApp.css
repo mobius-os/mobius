@@ -230,7 +230,7 @@
   padding: 8px 12px;
   border: none;
   background: transparent;
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -294,8 +294,8 @@
   background: var(--hover, rgba(255, 255, 255, 0.06));
 }
 .standalone-install .standalone-install__primary {
-  border-color: var(--accent, #a78bfa);
-  background: var(--accent, #a78bfa);
+  border-color: var(--accent-fill, var(--accent, #a78bfa));
+  background: var(--accent-fill, var(--accent, #a78bfa));
   color: var(--accent-fg, #111);
 }
 

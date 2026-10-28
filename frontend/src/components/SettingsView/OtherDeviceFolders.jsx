@@ -20,7 +20,7 @@ async function fetchOtherFolders() {
 function status(folder) {
   if (!folder.online) return { color: '--muted', label: 'Offline' }
   if (folder.state === 'paused') return { color: '--muted', label: 'Paused' }
-  return { color: '--green', label: 'Online' }
+  return { color: '--green-text', label: 'Online' }
 }
 
 export default function OtherDeviceFolders({ localFolders }) {

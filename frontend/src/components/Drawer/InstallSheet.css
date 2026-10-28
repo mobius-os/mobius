@@ -208,7 +208,7 @@
 }
 
 .is__btn--primary {
-  background: var(--accent, #a78bfa);
+  background: var(--accent-fill, var(--accent, #a78bfa));
   color: var(--accent-fg, #ffffff);
 }
 
@@ -228,7 +228,7 @@
 }
 
 .is__hint--steps strong {
-  color: var(--accent, #a78bfa);
+  color: var(--accent-text, var(--accent, #a78bfa));
   font-weight: 600;
 }
 

@@ -67,7 +67,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 12px;
   font-weight: 700;
 }
@@ -375,7 +375,7 @@
   padding: 10px;
   border-radius: 8px;
   border: none;
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #fff);
   font-size: 14px;
   font-weight: 600;
@@ -390,12 +390,14 @@
   margin-top: 0;
 }
 .qcard__submit:hover:not(:disabled) {
-  background: var(--accent-hover, var(--accent));
+  background: var(--accent-fill-hover, var(--accent-hover));
 }
 .qcard__submit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* A truly disabled control is exempt from text contrast (WCAG 1.4.3,
+   inactive components), so its dimmed label is intentionally below 4.5:1. */
 .qcard__submit:disabled {
   opacity: .4;
   cursor: default;

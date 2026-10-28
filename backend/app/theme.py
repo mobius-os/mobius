@@ -11,6 +11,7 @@ from here.
 """
 
 import hashlib
+import math
 import re
 import shutil
 import time
@@ -56,27 +57,42 @@ DEFAULT_THEME = """\
   --text: #ececec;
   --muted: #a8a8a8;
 
-  /* Accent palette — small accents (buttons, links, focus rings,
-     glow). Free to be vivid; --accent-dim is allowed to be
-     translucent because it's used as a glow, not as a fill.
-     KEEP the purple — it's the platform's brand mark. */
+  /* Accent palette. --accent is the brand mark (KEEP the purple) and
+     the all-purpose accent for dots, borders, focus rings and washes;
+     --accent-dim is allowed to be translucent because it's used as a
+     glow, not as a fill. Text and button fills use the roles below. */
   --accent: #8b6cf7;
   --accent-hover: #7c5ce6;
   --accent-dim: rgba(139, 108, 247, 0.14);
 
-  /* The ONLY legal foreground for text/icons sitting on an --accent
-     or --danger FILL (a primary button, a danger button, an accent
-     chip). Resolves a prior three-way split where apps hardcoded
-     #fff / #0d0d0d / #062016 for that foreground. White is chosen
-     for the #8b6cf7 purple accent (and the #f87171 danger), where
-     it's the legible choice. A custom theme that changes --accent
-     to a light color must also set --accent-fg to a dark value so
-     fill-foreground contrast holds. */
+  /* The foreground for text/icons on a role FILL: --accent-fill,
+     --accent-fill-hover, --danger-fill and --green-fill each carry it at
+     >= 4.5:1. On the legacy --accent itself white is only ~3.8:1 (large
+     text and icons only), which is why the fills exist. A theme that
+     changes --accent to a light colour gets a dark --accent-fg and fills
+     derived to match unless it declares its own. */
   --accent-fg: #ffffff;
 
-  /* Status colors. */
+  /* Status colors: all-purpose like --accent (dots, borders, washes).
+     --warning is also text-safe. */
   --danger: #f87171;
   --green: #10b981;
+  --warning: #d8922f;
+
+  /* Text-safe roles: >= 4.5:1 on --bg, --surface and --surface-2 of
+     this mode. Use for links, status labels and any small coloured text. */
+  --accent-text: #957cf8;
+  --danger-text: #f87171;
+  --green-text: #10b981;
+  --warning-text: #d8922f;
+
+  /* Fill roles for buttons and badges, labelled with --accent-fg. The
+     action fill is a slightly deeper brand purple; hover/pressed deepens
+     it further so every state keeps >= 4.5:1. */
+  --accent-fill: #7c5ce6;
+  --accent-fill-hover: #7053cf;
+  --danger-fill: #dc2626;
+  --green-fill: #047857;
 
   /* Typography. */
   --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
@@ -128,9 +144,7 @@ def extract_imports(css: str) -> tuple[list[str], str]:
 
 def get_bg_color(data_dir: str) -> str:
   """Extracts the --bg color for use in the manifest."""
-  css = get_theme_css(data_dir)
-  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
-  return m.group(1) if m else "#0d0d0d"
+  return _theme_bg(get_theme_css(data_dir))
 
 
 def get_theme_mode(data_dir: str) -> str:
@@ -329,61 +343,27 @@ def _is_safe_import_url(url: str) -> bool:
 
 
 # =============================================================
-# SILENT CSS-VARIABLE AUGMENT (debugger pointer)
+# GENERATED DEFAULTS (debugger pointer)
 # =============================================================
-# `_ensure_core_vars` (below) appends a `:root { ... }` block to
-# any theme that omits one of the variables listed in `_CORE_VARS`.
-# It is applied inside `get_theme_css`, so the EFFECTIVE theme is
-# complete for every consumer — `GET /api/theme`, the app-frame
-# iframe, and the shell's theme-as-data JSON slot all see it. The
-# augmentation is purely additive: the agent's CSS is never
-# rewritten, only gap-filled. The raw, un-augmented override is
-# still readable verbatim at `/api/storage/shared/theme.css` for
-# editors that want the source.
-#
-# Why this matters for debugging: a partial theme "works" not
-# because it's complete, but because `get_theme_css` filled the gap.
-# If a debugger looks at `theme.css` on disk and sees only --bg /
-# --text defined, the shell's surfaces are STILL rendering correctly
-# because `--surface`, `--border`, --accent, etc. were injected by
-# the getter. To inspect the on-disk source, read the storage file;
-# to see what the browser received, read `GET /api/theme` or the
-# shell's theme-as-data JSON slot.
-#
-# Variables augmented when missing (full list lives in
-# `_CORE_VARS`):
-#   --bg, --surface, --surface-2, --text, --muted,
-#   --accent, --accent-hover, --accent-dim, --accent-fg,
-#   --border, --border-light, --danger, --green,
-#   --font, --mono
-#
-# This is the ONLY structural enforcement applied to agent-
-# authored themes. Other patterns (blur, translucent fills,
-# overlays, focus rules) are intentionally NOT rewritten — the
-# right lever for those is the agent's seed/experience file, not
-# server-side mutation.
-_CORE_VARS = {
-  # Variables the shell relies on. If the agent's theme omits any,
-  # we inject the default value so the shell never falls back to an
-  # invisible-on-dark-mode hardcoded literal (e.g. `var(--fg, #111)`
-  # where --fg doesn't exist).
-  "--bg", "--surface", "--surface-2", "--text", "--muted",
-  "--accent", "--accent-hover", "--accent-dim", "--accent-fg",
-  "--border", "--border-light", "--danger", "--green",
-  "--font", "--mono",
-}
-
+# `get_theme_css` serves the owner's theme.css with a generated block of
+# EVERY core variable in the weakest cascade layer, `mobius-defaults` (see
+# `_ensure_core_vars` for the exact layout and guarantee), so
+# `GET /api/theme`, the app-frame iframe and the shell's theme-as-data slot
+# always see a complete theme while owner declarations still win.  If
+# theme.css on disk defines only --bg/--text yet the shell renders surfaces,
+# accents and roles, that block supplied them.  Read the storage file for the
+# owner's source, and `GET /api/theme` for what the browser received.
 
 # Light-mode defaults for the structural + status vars whose correct
-# value DEPENDS on mode. DEFAULT_THEME is the DARK palette, so filling a
-# partial LIGHT theme.css from it injected dark surfaces/borders
-# (--surface-2:#212121, --border-light:#1f1f1f) appended in a cascade-
-# winning :root block — "dark surfaces in light mode". These values
-# mirror the frontend LIGHT_COLORS in frontend/src/theme.js so the
-# server-augmented light theme matches what a client-side toggle
-# produces. --accent/--accent-hover and --font/--mono are mode-agnostic
-# (the brand purple + typography are shared), so they stay sourced from
-# DEFAULT_THEME for both modes.
+# value DEPENDS on mode. DEFAULT_THEME is the DARK palette, so defaulting a
+# partial LIGHT theme.css from it gave dark surfaces/borders
+# (--surface-2:#212121, --border-light:#1f1f1f) -- "dark surfaces in light
+# mode". These values mirror the frontend LIGHT_COLORS/LIGHT_ROLES in
+# frontend/src/theme.js so
+# the server-augmented light theme matches what a client-side toggle
+# produces (backend/tests/test_theme_roles.py enforces it). --accent,
+# --accent-hover, the fills and --font/--mono are mode-agnostic, so they
+# stay sourced from DEFAULT_THEME for both modes.
 _LIGHT_DEFAULTS = {
   "--bg": "#f0eeeb",
   "--surface": "#ffffff",
@@ -395,11 +375,23 @@ _LIGHT_DEFAULTS = {
   "--accent-dim": "rgba(139, 108, 247, 0.08)",
   "--danger": "#ef4444",
   "--green": "#059669",
+  "--warning": "#8f5a00",
+  "--accent-text": "#6548d4",
+  "--danger-text": "#b91c1c",
+  "--green-text": "#046c4e",
+  "--warning-text": "#8f5a00",
 }
 
 
 def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
-  """Best-effort (r, g, b) from a CSS color literal, else None."""
+  """(r, g, b) of an OPAQUE colour literal, else None.
+
+  Accepts #rgb, #rrggbb and rgb()/rgba() whose alpha is absent or 1.  A
+  translucent colour composites over an unknown backdrop, so it is
+  unsupported rather than read as its opaque channels.  Channels round half
+  up, like JavaScript's Math.round (Python's round() is bankers' rounding),
+  so frontend/src/theme.js parses identically.
+  """
   text = value.strip().lower()
   m = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", text)
   if m:
@@ -413,13 +405,20 @@ def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
     # (`rgb(255 255 255 / 50%)`); an unparseable form returns None and keeps
     # the previous fixed default rather than guessing.
     parts = [p for p in re.split(r"[,\s]+", m.group(1).replace("/", " ")) if p]
-    try:
-      channels = [round(float(p[:-1]) * 255 / 100) if p.endswith("%") else round(float(p))
-                  for p in parts[:3]]
-    except ValueError:
+    if len(parts) not in (3, 4):
       return None
-    if len(channels) == 3:
-      return tuple(max(0, min(255, c)) for c in channels)  # type: ignore[return-value]
+    try:
+      if len(parts) == 4:
+        alpha = float(parts[3][:-1]) / 100 if parts[3].endswith("%") else float(parts[3])
+        if not alpha >= 1:
+          return None
+      channels = [
+        _round_half_up(float(p[:-1]) * 255 / 100) if p.endswith("%") else _round_half_up(float(p))
+        for p in parts[:3]
+      ]
+    except (ValueError, OverflowError):
+      return None
+    return tuple(max(0, min(255, c)) for c in channels)  # type: ignore[return-value]
   return None
 
 
@@ -436,107 +435,436 @@ def _contrasting_accent_fg(accent: str | None) -> str | None:
   """DEFAULT_THEME's white, unless it would be illegible on `accent`.
 
   A fixed #ffffff is wrong for a light accent -- a theme setting
-  --accent: #ffffff and omitting --accent-fg paints white on white on every
-  control that pairs the two.  But most accents are dark enough that white is
-  both legible and the intended Möbius look, so only swap to black when white
-  drops below the 3:1 WCAG AA floor for UI components and large text.  Returns
-  None when the accent cannot be parsed, leaving the existing default in place.
+  --accent: #ffffff and omitting --accent-fg paints white on white.  White
+  stays while it keeps 3:1 on the accent, the point past which deepening the
+  fill would stop looking like the accent; otherwise black.  This only picks
+  the label colour: small-text contrast comes from pairing it with
+  --accent-fill, which `theme_role_vars` deepens until the label reaches
+  4.5:1, so the brand purple keeps white labels on a slightly deeper fill.
+  Returns None when the accent cannot be parsed, leaving the existing default
+  in place.  Mirrors `contrastingAccentFg` in frontend/src/theme.js.
   """
   rgb = _parse_css_rgb(accent) if accent else None
   if rgb is None:
     return None
-  luminance = _relative_luminance(rgb)
-  white_contrast = 1.05 / (luminance + 0.05)
-  return "#ffffff" if white_contrast >= 3.0 else "#000000"
+  return "#ffffff" if _rgb_contrast(_WHITE, rgb) >= 3.0 else "#000000"
 
 
-def _infer_theme_mode(css: str) -> str:
-  """Return 'light' or 'dark' for a theme's CSS by --bg luminance,
-  mirroring the frontend themeService._inferThemeMode so server-side
-  augmentation and a client-side toggle agree on mode from the same
-  signal. A missing/unparseable --bg defaults to 'dark' (the historical
-  behavior — DEFAULT_THEME is dark — so existing dark themes are
-  unaffected)."""
-  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
-  if not m:
-    return "dark"
-  raw = m.group(1)[1:]
-  # Normalize any valid CSS hex length to a 6-digit RRGGBB before reading
-  # luminance. The short forms carry one nibble per channel, so the three
-  # RGB nibbles each double (#RGB -> #RRGGBB, #RGBA -> RGB + dropped alpha);
-  # the long forms already use byte-pairs, so the leading six characters are
-  # RGB and a trailing alpha byte is dropped. Alpha never changes the
-  # dark-vs-light direction, and dropping it keeps this in step with the
-  # frontend themeService._inferThemeMode (whose slice(0, 6) classifies
-  # #ffff / #ffffffff as light). Without this a 4- or 8-digit --bg fell
-  # through to the dark default and injected dark structural vars into a
-  # light theme.
-  if len(raw) in (3, 4):
-    raw = "".join(c * 2 for c in raw[:3])
-  else:
-    raw = raw[:6]
-  try:
-    r = int(raw[0:2], 16)
-    g = int(raw[2:4], 16)
-    b = int(raw[4:6], 16)
-  except ValueError:
-    return "dark"
-  return "dark" if (r + g + b) / 3 < 128 else "light"
+# =============================================================
+# TEXT- AND FILL-SAFE COLOUR ROLES
+# =============================================================
+# --accent, --danger and --green serve as dots, borders and washes, where
+# 3:1 is enough, but small text on a surface and labels on a button fill
+# need 4.5:1.  Each base therefore has a text role and (except --warning,
+# which is itself text-safe) a fill role.  The shipped values live in
+# DEFAULT_THEME / _LIGHT_DEFAULTS; `theme_role_vars` fills in roles a theme
+# omitted, deriving them from the theme's own base when it is custom.
+# Mirrored by `themeRoleVars` in frontend/src/theme.js; the shared case
+# tables frontend/src/lib/__tests__/themeRoleCases.json (flat declarations)
+# and themeCssCases.json (whole stylesheets) pin both.
+_ROLE_SOURCES = (
+  {"base": "--accent", "text": "--accent-text", "fill": "--accent-fill",
+   "fill_hover": "--accent-fill-hover"},
+  {"base": "--danger", "text": "--danger-text", "fill": "--danger-fill"},
+  {"base": "--green", "text": "--green-text", "fill": "--green-fill"},
+  {"base": "--warning", "text": "--warning-text"},
+)
+_ROLE_KEYS = frozenset(
+  role for source in _ROLE_SOURCES for key, role in source.items() if key != "base"
+)
+_MIN_TEXT_CONTRAST = 4.5
+_WHITE = (255, 255, 255)
+_BLACK = (0, 0, 0)
+
+# Comment above the generated defaults block `_ensure_core_vars` places
+# before the owner's CSS.  The shell's toggle finds and drops that block by
+# this exact text (theme.js INJECTED_DEFAULTS_MARKER) so it is never
+# persisted as owner CSS.
+INJECTED_DEFAULTS_MARKER = "Möbius: injected defaults for variables the theme omitted"
+# The cascade layer holding every generated default.  It is declared before
+# any owner layer, so it is the weakest layer: owner rules in any layer, and
+# unlayered owner rules, beat it.  app-frame.html's static fallbacks and the
+# shell's index.css typography defaults use the same layer.
+DEFAULTS_LAYER = "mobius-defaults"
+# A generated block in the current layered form or either older form (the
+# leading `:where(:root)` and the trailing `:root`), plus the layer-order
+# statement, so a stale copy is dropped and regenerated.
+# The current form is matched byte-exactly so regenerating is idempotent.
+_GENERATED_BLOCK_RE = re.compile(
+  r"/\* " + re.escape(INJECTED_DEFAULTS_MARKER) + r" \*/\n@layer " + DEFAULTS_LAYER
+  + r" \{\n:where\(:root\) \{\n[^}]*\}\n\}\n"
+  + r"|@layer " + DEFAULTS_LAYER + r";\n"
+  + r"|/\*\s*" + re.escape(INJECTED_DEFAULTS_MARKER)
+  + r"\s*\*/\s*(?::where\(:root\)|:root)\s*\{[^}]*\}\s*"
+)
+_SURFACE_KEYS = ("--bg", "--surface", "--surface-2")
 
 
-def _ensure_core_vars(css: str) -> str:
-  """Append a `:root` block with default values for any core
-  variable the theme omitted.
+def _rgb_contrast(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+  la, lb = _relative_luminance(a), _relative_luminance(b)
+  return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 
-  This is the ONLY structural enforcement we apply to agent-authored
-  themes. It is purely additive — your CSS is never rewritten, only
-  augmented when something the shell needs is missing. The goal is
-  to make sure the shell can always paint readable defaults even if
-  the theme uses a totally different palette and forgets one or two
-  variables, without taking creative space away.
 
-  Other patterns we deliberately do NOT enforce — blur filters,
-  translucent surfaces, fixed-position overlays, global focus rules —
-  are valid design tools when used with intent. Documentation in the
-  seed (and a richer DEFAULT_THEME vocabulary) is the right lever
-  for those.
-  """
-  defined = set(re.findall(r"(--[a-zA-Z][\w-]*)\s*:", css))
-  missing = _CORE_VARS - defined
-  if not missing:
-    return css
-  # Source defaults from DEFAULT_THEME (the DARK palette), then override
-  # mode-dependent vars with their LIGHT values when the theme's own --bg
-  # reads as light. Without this a partial light theme.css got dark
-  # surfaces/borders injected in a cascade-winning :root block.
-  defaults: dict[str, str] = {}
+def _to_hex(rgb) -> str:
+  return "#" + "".join(f"{c:02x}" for c in rgb)
+
+
+def _round_half_up(x: float) -> int:
+  # JavaScript's Math.round, so both derivations land on the same hex.
+  return math.floor(x + 0.5)
+
+
+def _mix_toward(rgb, target, fraction: float) -> tuple[int, int, int]:
+  return tuple(_round_half_up(c + (t - c) * fraction) for c, t in zip(rgb, target))  # type: ignore[return-value]
+
+
+def _nearest_passing_mix(rgb, preferred, meets) -> str | None:
+  """The smallest 1% sRGB mix of `rgb` toward black or white satisfying
+  `meets`, trying `preferred` first and keeping it on a tie.  None when
+  neither endpoint can (for example a mid-grey label): the caller must not
+  present any colour as passing."""
+  best: tuple[int, str] | None = None
+  for target in (preferred, _WHITE if preferred == _BLACK else _BLACK):
+    for i in range(101):
+      if best is not None and i >= best[0]:
+        break
+      mixed = _mix_toward(rgb, target, i / 100)
+      if meets(mixed):
+        best = (i, _to_hex(mixed))
+        break
+  return best[1] if best else None
+
+
+def _normalized_color(value: str) -> str:
+  text = re.sub(r"\s+", "", str(value).strip().lower())
+  m = re.fullmatch(r"#([0-9a-f])([0-9a-f])([0-9a-f])", text)
+  return "#" + "".join(c * 2 for c in m.groups()) if m else text
+
+
+def _shipped_palette(mode: str) -> dict[str, str]:
+  palette = {}
   for line in DEFAULT_THEME.splitlines():
     m = re.match(r"\s*(--[\w-]+)\s*:\s*([^;]+);", line)
     if m:
-      defaults[m.group(1)] = m.group(2).strip()
-  if _infer_theme_mode(css) == "light":
-    defaults.update(_LIGHT_DEFAULTS)
-  # --accent-fg is the one core var whose correct value depends on another var
-  # the theme DID supply.  Derive it from the theme's own --accent so a light
-  # accent does not inherit DEFAULT_THEME's white and paint white-on-white.
-  if "--accent-fg" in missing:
-    declared_accent = re.search(r"--accent\s*:\s*([^;]+);", css)
-    derived = _contrasting_accent_fg(
-      declared_accent.group(1).strip() if declared_accent else defaults.get("--accent")
-    )
-    if derived:
-      defaults["--accent-fg"] = derived
-  injected = "\n".join(
-    f"  {name}: {defaults[name]};"
-    for name in sorted(missing)
-    if name in defaults
+      palette[m.group(1)] = m.group(2).strip()
+  if mode == "light":
+    palette.update(_LIGHT_DEFAULTS)
+  return palette
+
+
+def _is_shipped_value(key: str, value: str) -> bool:
+  v = _normalized_color(value)
+  return any(
+    key in palette and _normalized_color(palette[key]) == v
+    for palette in (_shipped_palette("dark"), _shipped_palette("light"))
   )
-  if not injected:
-    return css
-  return css + (
-    f"\n/* Möbius: injected defaults for variables the theme omitted */\n"
-    f":root {{\n{injected}\n}}\n"
-  )
+
+
+def theme_role_vars(declared: dict[str, str], mode: str) -> dict[str, str]:
+  """Every role token, plus --accent-fg, for a theme whose plain-:root
+  custom properties are `declared`.
+
+  - A shipped base (of either mode) gets the shipped role when that meets
+    its target on this theme's surfaces / label.
+  - Otherwise the role is the nearest black/white mix of the theme's base
+    that meets 4.5:1.  Guaranteed only for opaque hex/rgb() literals: a
+    translucent or other colour syntax, or a target no mix can reach, keeps
+    the theme's own base value -- passed through, not certified.
+  - A label or fill the theme declared is used as the input for the fills
+    and hover that pair with it.
+
+  These are DEFAULTS: they sit in the leading generated block, so any role
+  the owner declares anywhere outranks them by ordinary cascade.  Mirrors
+  `themeRoleVars` in frontend/src/theme.js.
+  """
+  palette = _shipped_palette(mode)
+
+  def value(key: str) -> str:
+    return declared.get(key, palette.get(key, ""))
+
+  surfaces = [_parse_css_rgb(value(k)) or _parse_css_rgb(palette[k]) for k in _SURFACE_KEYS]
+  light_surfaces = _relative_luminance(surfaces[0]) > 0.179
+
+  fg = declared.get("--accent-fg")
+  if fg is None:
+    fg = _contrasting_accent_fg(value("--accent")) or "#ffffff"
+  out: dict[str, str] = {"--accent-fg": fg}
+  fg_rgb = _parse_css_rgb(fg)
+
+  def reads_on_surfaces(rgb) -> bool:
+    return all(_rgb_contrast(rgb, s) >= _MIN_TEXT_CONTRAST for s in surfaces)
+
+  def carries_fg(rgb) -> bool:
+    return fg_rgb is not None and _rgb_contrast(fg_rgb, rgb) >= _MIN_TEXT_CONTRAST
+
+  def away_from_fg(rgb):
+    # Prefer moving away from the label: deeper under a light label, lighter under a dark one.
+    if fg_rgb is not None and _relative_luminance(fg_rgb) < _relative_luminance(rgb):
+      return _WHITE
+    return _BLACK
+
+  for source in _ROLE_SOURCES:
+    base = value(source["base"])
+    base_rgb = _parse_css_rgb(base)
+    shipped_base = _is_shipped_value(source["base"], base)
+
+    def pick(role, meets, preferred):
+      if shipped_base and meets(_parse_css_rgb(palette[role])):
+        return palette[role]
+      derived = _nearest_passing_mix(base_rgb, preferred(base_rgb), meets) if base_rgb else None
+      return derived or base
+
+    toward = _BLACK if light_surfaces else _WHITE
+    out[source["text"]] = pick(source["text"], reads_on_surfaces, lambda _rgb: toward)
+    fill = source.get("fill")
+    if fill:
+      out[fill] = pick(fill, carries_fg, away_from_fg)
+    hover = source.get("fill_hover")
+    if hover:
+      fill_value = declared.get(fill, out[fill])
+      fill_rgb = _parse_css_rgb(fill_value)
+      out[hover] = _to_hex(_mix_toward(fill_rgb, away_from_fg(fill_rgb), 0.1)) if fill_rgb else fill_value
+  return out
+
+
+_DECLARATION_RE = re.compile(r"\s*(--[A-Za-z_][\w-]*)\s*:(.*)", re.S)
+_IMPORTANT_RE = re.compile(r"!\s*important$", re.I)
+_URL_OPEN_RE = re.compile(r"url\(\s*(?=[^\s\"'])", re.I)
+
+
+def _lex_theme_css(css: str) -> tuple[str, str, bool]:
+  """The comment-blanked text plus a same-length mask in which string and
+  unquoted url() contents and escaped characters are neutralised, so
+  structure is read from the mask while values are sliced from the text.
+  The bool is False for syntax the lexer cannot follow (an unterminated
+  string, comment or url)."""
+  text: list[str] = []
+  mask: list[str] = []
+  ok = True
+  i, n = 0, len(css)
+  while i < n:
+    ch = css[i]
+    url = _URL_OPEN_RE.match(css, i) if ch in "uU" else None
+    if url:
+      # An unquoted url() ends at its first UNESCAPED `)`: `url(a\);b)` is one
+      # token, so its `;` must never read as structure.
+      j = url.end()
+      while j < n and css[j] != ")":
+        j += 2 if css[j] == "\\" else 1
+      if j >= n:
+        ok, j = False, n
+      text.append(css[i:j])
+      mask.append(css[i:url.end()] + "x" * (j - url.end()))
+      i = j
+    elif ch == "/" and css[i + 1:i + 2] == "*":
+      j = css.find("*/", i + 2)
+      if j < 0:
+        ok, j = False, n
+      else:
+        j += 2
+      text.append(" " * (j - i))
+      mask.append(" " * (j - i))
+      i = j
+    elif ch in "\"'":
+      text.append(ch)
+      mask.append(ch)
+      i += 1
+      closed = False
+      while i < n:
+        c = css[i]
+        if c == "\\":
+          pair = css[i:i + 2]
+          text.append(pair)
+          mask.append("x" * len(pair))
+          i += len(pair)
+        elif c == ch:
+          text.append(c)
+          mask.append(c)
+          i += 1
+          closed = True
+          break
+        elif c == "\n":
+          break
+        else:
+          text.append(c)
+          mask.append("x")
+          i += 1
+      if not closed:
+        ok = False
+    elif ch == "\\":
+      pair = css[i:i + 2]
+      text.append(pair)
+      mask.append("x" * len(pair))
+      i += len(pair)
+    else:
+      text.append(ch)
+      mask.append(ch)
+      i += 1
+  return "".join(text), "".join(mask), ok
+
+
+def scan_root_declarations(css: str) -> dict[str, str] | None:
+  """The winning custom properties of the theme's unconditional top-level
+  `:root { }` rules, in source order (the last declaration wins; an
+  !important one beats later normal ones), or None when the CSS uses
+  syntax this tokenizer cannot follow.
+
+  These values only feed role DERIVATION and mode inference.  They never
+  decide what is emitted: the generated defaults block always carries every
+  variable and sits before the owner's CSS, so the owner wins regardless.
+  A generated block is ignored; comments, strings, url() contents and
+  escapes are lexed first, so a `}` or `;` inside them is never structure.
+  Mirrors `scanRootDeclarations` in frontend/src/theme.js.
+  """
+  text, mask, supported = _lex_theme_css(_GENERATED_BLOCK_RE.sub("", css or ""))
+  root: dict[str, str] = {}
+  important: set[str] = set()
+
+  def record(decl: str) -> None:
+    m = _DECLARATION_RE.fullmatch(decl)
+    if not m:
+      return
+    name, value = m.group(1), m.group(2).strip()
+    is_important = bool(_IMPORTANT_RE.search(value))
+    if is_important:
+      value = _IMPORTANT_RE.sub("", value).strip()
+    if name in important and not is_important:
+      return
+    if is_important:
+      important.add(name)
+    root[name] = value
+
+  depth = 0
+  segment = 0
+  root_rule = False
+  for i, ch in enumerate(mask):
+    if ch == "{":
+      if depth == 0:
+        root_rule = " ".join(text[segment:i].split()) == ":root"
+      depth += 1
+      segment = i + 1
+    elif ch == "}":
+      if depth == 0:
+        return None
+      if depth == 1 and root_rule:
+        record(text[segment:i])
+      depth -= 1
+      if depth == 0:
+        root_rule = False
+      segment = i + 1
+    elif ch == ";":
+      if depth == 1 and root_rule:
+        record(text[segment:i])
+      segment = i + 1
+  if depth or not supported:
+    return None
+  return root
+
+
+def _infer_theme_mode(css: str) -> str:
+  """'light' or 'dark' from the theme's winning plain-:root --bg
+  (`scan_root_declarations`), mirroring `inferThemeMode` in
+  frontend/src/theme.js.  Anything else -- no such --bg, a non-hex value,
+  or CSS the scanner cannot follow -- is 'dark', the historical default
+  (DEFAULT_THEME is dark).  #RGB/#RGBA double their nibbles and
+  #RRGGBB/#RRGGBBAA use their leading six digits: alpha never changes the
+  dark-vs-light direction.
+  """
+  bg = (scan_root_declarations(css) or {}).get("--bg", "")
+  m = re.fullmatch(r"#([0-9a-fA-F]{3,8})", bg.strip())
+  if not m or len(m.group(1)) not in (3, 4, 6, 8):
+    return "dark"
+  raw = m.group(1)
+  raw = "".join(c * 2 for c in raw[:3]) if len(raw) <= 4 else raw[:6]
+  r, g, b = (int(raw[i:i + 2], 16) for i in (0, 2, 4))
+  return "dark" if (r + g + b) / 3 < 128 else "light"
+
+
+def theme_defaults_for_css(css: str) -> dict[str, str]:
+  """Every core variable's default for `css`: the shipped palette of its
+  inferred mode, with roles derived from its winning plain-:root bases (or
+  from the shipped bases when the scanner cannot follow the CSS)."""
+  mode = _infer_theme_mode(css)
+  defaults = _shipped_palette(mode)
+  defaults.update(theme_role_vars(scan_root_declarations(css) or {}, mode))
+  return defaults
+
+
+def _prelude_bounds(css: str) -> tuple[int, int]:
+  """(end of a leading @charset, end of the leading statement prelude).
+
+  CSS allows only @charset, @import and @layer *statements* before other
+  rules.  Statement ends are found with the same lexer as the root scanner,
+  so a `;` or `{` inside a string, url() or comment (a multi-weight Google
+  Fonts URL, say) never ends a statement.  Both offsets fall between
+  complete statements; nothing is rewritten.  Mirrors `preludeBounds` in
+  frontend/src/theme.js.
+  """
+  text, mask, _ok = _lex_theme_css(css)
+  charset_end = prelude_end = i = 0
+  while True:
+    while i < len(mask) and mask[i].isspace():
+      i += 1
+    m = re.match(r"@(charset|import|layer)\b", text[i:i + 8], re.I)
+    if not m:
+      break
+    j = i
+    while j < len(mask) and mask[j] not in ";{":
+      j += 1
+    if j >= len(mask) or mask[j] == "{":
+      break  # an @layer block is a rule, not a statement
+    i = prelude_end = j + 1
+    if m.group(1).lower() == "charset" and charset_end == 0:
+      charset_end = i
+  return charset_end, prelude_end
+
+
+def _ensure_core_vars(css: str) -> str:
+  """The effective theme: the owner's CSS plus one generated block of every
+  core variable, held in the `mobius-defaults` cascade layer.
+
+  Layout: a leading @charset stays first; then `@layer mobius-defaults;`
+  (declaring the layer before any owner layer, so it is the weakest); then
+  the owner's @import/@layer statements; then the generated
+  `@layer mobius-defaults { :where(:root) { ... } }`; then the rest of the
+  owner's CSS.  Insertion points are between complete statements found by
+  the lexer, and the owner's bytes are not rewritten -- except that a
+  generated block or layer statement from an earlier read or toggle is
+  dropped and regenerated, as the shell's toggle does.
+
+  Guarantee: for every core variable, any normal owner declaration that
+  applies to the root element (unlayered or in any owner layer, in any
+  rule or condition) takes precedence over the generated default, and a
+  variable the owner never declared still resolves.  An owner !important
+  declaration also wins.  Not guaranteed: that the derived role colours
+  suit an owner base set outside a plain :root rule (they are derived from
+  the winning plain-:root bases, else the shipped ones), or that the served
+  `bg` metadata matches a background set outside a plain :root -- it is a
+  pre-paint hint only; the appliers read the background from the cascade.
+  Mirrors `withThemeDefaults` in frontend/src/theme.js byte for byte.
+  """
+  owner = _GENERATED_BLOCK_RE.sub("", css)
+  defaults = theme_defaults_for_css(owner)
+  lines = "\n".join(f"  {name}: {defaults[name]};" for name in sorted(defaults))
+  block = (f"/* {INJECTED_DEFAULTS_MARKER} */\n@layer {DEFAULTS_LAYER} {{\n"
+           f":where(:root) {{\n{lines}\n}}\n}}\n")
+  charset_end, prelude_end = _prelude_bounds(owner)
+  return (owner[:charset_end] + f"@layer {DEFAULTS_LAYER};\n" + owner[charset_end:prelude_end]
+          + block + owner[prelude_end:])
+
+
+def _theme_bg(effective_css: str) -> str:
+  """A pre-paint HINT for the theme's background: the owner's winning
+  plain-:root --bg when it is a hex colour, else the generated default.  A
+  background set in another rule (an `html` rule, a condition, a layer) is
+  not seen here; that is why the appliers only use this value for chrome
+  painted before the theme stylesheet applies (theme-color, the first
+  frame) and read the real background from the cascade afterwards."""
+  bg = (scan_root_declarations(effective_css) or {}).get("--bg", "").strip()
+  if re.fullmatch(r"#[0-9a-fA-F]{3,8}", bg):
+    return bg
+  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)
+  return m.group(1) if m else "#0d0d0d"
 
 
 def frame_content_rev(data_dir: str) -> str:
@@ -620,8 +948,7 @@ def load_effective_theme(data_dir: str) -> EffectiveTheme:
     return cached[1]
 
   css = get_theme_css(data_dir)
-  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
-  bg = m.group(1) if m else "#0d0d0d"
+  bg = _theme_bg(css)
   mode = get_theme_mode(data_dir)
   rev = (
     hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16]

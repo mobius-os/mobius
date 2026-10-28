@@ -2,6 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Declares the theme defaults layer before any stylesheet (bundled
+         Tailwind/SDK layers included), so it is the weakest layer in the
+         document and every owner theme rule, in any layer, beats a default.
+         See backend/app/theme.py DEFAULTS_LAYER. -->
+    <style>@layer mobius-defaults;</style>
     <!-- Möbius chrome is a fixed application surface. Browser page zoom would
          scale the toolbar and drawer with the active app; zoomable content owns
          its gesture locally so it can transform without moving the shell. -->
@@ -135,9 +140,9 @@
       // here because this is a template literal — the evaluated string carries
       // single backslashes (see applyTheme.prepaint.test.js byte-equality).
       css = css.replace(
-        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|((?:[^"'()\s\\]|\\[\s\S])+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
         function (m, u1, u2, u3, q1, q2) {
-          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3.replace(/\\([^0-9a-fA-F\n])/g, '$1') : q1 !== undefined ? q1 : q2);
           return '';
         }
       );
@@ -158,7 +163,10 @@
       }
       el.textContent = css;
     }
-    root.style.setProperty('--bg', bg);
+    // The bg is a pre-style HINT. Once theme css is installed the stylesheet
+    // owns --bg; an inline value would outrank an owner background set in
+    // any rule (html, a condition, a layer), so only hint without css.
+    if (!css) root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
     root.style.colorScheme = mode;
     var themeColorMeta = document.querySelector('meta[name="theme-color"]');

@@ -51,7 +51,7 @@ function makeDomStub() {
     },
     // colorScheme captured so the delegation tests can assert applyThemeToDom
     // now sets documentElement.style.colorScheme via the shared library.
-    style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+    style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, removeProperty(name) { delete this._props[name] }, getPropertyValue(name) { return this._props[name] } },
   }
 
   function makeNode(tag) {
@@ -197,9 +197,9 @@ test('applyThemeToDom removes prior font links before adding new ones', () => {
   assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
 })
 
-test('applyThemeToDom updates body.style.background when bg is valid hex', () => {
+test('applyThemeToDom paints body from the cascade, not the bg hint', () => {
   themeService.applyThemeToDom(':root {}', '#abcdef')
-  assert.equal(dom.document.body.style.background, '#abcdef')
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
 })
 
 test('applyThemeToDom updates <meta name="theme-color"> when bg is valid hex', () => {
@@ -214,7 +214,7 @@ test('applyThemeToDom ignores non-hex bg', () => {
   dom.document.body.style.background = '#initial'
   dom.meta.content = '#initial'
   themeService.applyThemeToDom(':root {}', 'expression(alert(1))')
-  assert.equal(dom.document.body.style.background, '#initial')
+  assert.equal(dom.document.body.style.background, 'var(--bg)')
   assert.equal(dom.meta.content, '#initial')
 })
 
@@ -242,7 +242,7 @@ test('applyThemeToDom uses View Transitions for post-boot theme changes', async 
     'the view-transition CSS class should be present while the DOM mutates')
   assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-x'), '23px')
   assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-y'), '45px')
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 
   await Promise.resolve()
   await Promise.resolve()
@@ -266,7 +266,7 @@ test('applyThemeToDom can opt out of View Transitions for back-stack-sensitive t
   )
 
   assert.equal(called, false)
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 })
 
 test('applyThemeToDom can make a post-boot theme change atomically', () => {
@@ -286,7 +286,7 @@ test('applyThemeToDom can make a post-boot theme change atomically', () => {
 
   assert.equal(called, false)
   assert.equal(dom.documentElement.classList.contains('theme-transitioning'), false)
-  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.equal(dom.meta.content, '#f0eeeb')
 })
 
 test('persistTheme writes CSS + mode + sends notify in parallel', async () => {
@@ -359,17 +359,16 @@ test('getEffectiveTheme returns null when no theme has been applied', () => {
 })
 
 
-// --- applyThemeToDom syncs the inline --bg + structured persistence ---
-// The splash script sets an INLINE --bg on <html> before first paint. An inline
-// style beats `:root{}`, so applyThemeToDom must overwrite it with the theme it
-// actually paints.
+// --- applyThemeToDom drops the splash's inline --bg + structured persistence ---
+// The splash script may set an INLINE --bg on <html> before first paint. An
+// inline style beats every stylesheet rule, so once theme css is applied the
+// inline value is removed and the stylesheet owns --bg.
 
-test('applyThemeToDom syncs the inline --bg on <html> to the active bg', () => {
-  // Seed a STALE inline value the splash would have written (dark).
+test('applyThemeToDom removes the splash inline --bg once theme css applies', () => {
   dom.documentElement.style.setProperty('--bg', '#0d0d0d')
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
-    'inline --bg on <html> must track the painted theme, not the stale splash value')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined,
+    'a stale or guessed inline --bg must not outrank the theme stylesheet')
 })
 
 test('applyThemeToDom writes the structured theme for the next boot', () => {
@@ -380,25 +379,25 @@ test('applyThemeToDom writes the structured theme for the next boot', () => {
   )
 })
 
-test('applyThemeToDom does NOT touch inline --bg or localStorage for a non-hex bg', () => {
-  // Defensive: a malformed bg must not corrupt the inline var or the
+test('applyThemeToDom never writes a non-hex bg inline or into localStorage', () => {
+  // Defensive: a malformed bg must not reach the inline var or the
   // persisted structured theme (same gate as body/meta).
   dom.documentElement.style.setProperty('--bg', '#initial')
   localStorage.setItem('mobius-theme', JSON.stringify({ bg: '#initial', mode: 'dark' }))
   themeService.applyThemeToDom(':root {}', 'expression(alert(1))')
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#initial')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   assert.equal(localStorage.getItem('mobius-theme'), JSON.stringify({ bg: '#initial', mode: 'dark' }))
 })
 
-test('applyThemeToDom dark→light then light→dark leaves a consistent inline --bg', () => {
-  // The owner's exact scenario in miniature: repeated toggles must keep
-  // the inline --bg in lockstep with the painted theme each time.
+test('applyThemeToDom dark→light then light→dark never leaves an inline --bg behind', () => {
+  // The owner's exact scenario in miniature: repeated toggles must leave the
+  // stylesheet in charge of --bg each time.
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // light
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')  // dark
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#0d0d0d')
+  assert.equal(dom.meta.content, '#0d0d0d')
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // back to light
-  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), undefined)
   assert.equal(JSON.parse(localStorage.getItem('mobius-theme')).bg, '#f0eeeb')
 })
 

@@ -209,7 +209,7 @@
   border: 0;
   border-radius: 9px;
   color: var(--accent-fg, white);
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   font-weight: 600;
   cursor: pointer;
 }
@@ -303,9 +303,9 @@
   cursor: pointer;
 }
 .projects-collection__rename > button[type="submit"] {
-  border-color: var(--accent);
+  border-color: var(--accent-fill, var(--accent));
   color: var(--accent-fg, white);
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
 }
 .project-workspace__bar {
   flex: 0 0 auto;
@@ -420,7 +420,7 @@
   padding: 0 11px;
   border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-light));
   border-radius: 9px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: var(--accent-dim);
   font-weight: 650;
   white-space: nowrap;
@@ -478,7 +478,7 @@
   font-weight: 600;
   cursor: pointer;
 }
-.project-inline-create button[type="submit"] { border-color: var(--accent); color: var(--accent-fg, white); background: var(--accent); }
+.project-inline-create button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, white); background: var(--accent-fill, var(--accent)); }
 
 .project-actions--context-only { position: absolute; inset: 0 auto auto 0; width: 0; height: 0; }
 .project-preview { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
@@ -584,7 +584,7 @@
   font-weight: 650;
   cursor: pointer;
 }
-.project-finder__conflict button:first-child { border-color: var(--accent); color: var(--accent-fg, #fff); background: var(--accent); }
+.project-finder__conflict button:first-child { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); }
 
 /* ── Finder ─────────────────────────────────────────────────────────────────── */
 .project-finder {
@@ -705,7 +705,7 @@
 .project-finder__commit > label { color: var(--text); font-size: 11px; font-weight: 700; }
 .project-finder__commit > div { display: flex; gap: 7px; }
 .project-finder__commit input { min-width: 0; flex: 1; min-height: 38px; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 8px; color: var(--text); background: var(--bg); font: inherit; }
-.project-finder__commit button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--accent-fg, #fff); background: var(--accent); font: inherit; font-size: 11px; font-weight: 700; }
+.project-finder__commit button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); font: inherit; font-size: 11px; font-weight: 700; }
 .project-finder__commit small { color: var(--muted); font-size: 10px; }
 .project-finder__changes[open] > summary { color: var(--text); background: var(--surface); }
 .project-finder__change-list {
@@ -889,7 +889,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   font-weight: 600;
   cursor: pointer;
 }
-.project-finder__rename button[type="submit"] { border-color: var(--accent); color: var(--accent-fg, white); background: var(--accent); }
+.project-finder__rename button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, white); background: var(--accent-fill, var(--accent)); }
 
 .project-finder__pane-head {
   flex: 0 0 auto;
@@ -999,7 +999,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .project-markdown ol { margin: 0 0 1.1em; }
 .project-markdown blockquote { margin: 1.8em 0; padding: 1em 1.2em; border-left: 3px solid var(--accent); background: var(--surface); color: color-mix(in srgb, var(--text) 82%, var(--muted)); font-size: 1.08em; }
 .project-markdown code { padding: .15em .35em; border-radius: 5px; background: var(--surface); font: .85em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.project-markdown a { color: var(--accent); }
+.project-markdown a { color: var(--accent-text, var(--accent)); }
 .project-markdown img { max-width: 100%; }
 .project-sheet { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
 .project-sheet__toolbar { flex: 0 0 auto; min-height: 40px; display: flex; align-items: center; gap: 7px; padding: 5px 9px; border-bottom: 1px solid var(--border-light); background: var(--bg); }
@@ -1034,7 +1034,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .project-finder__code .hljs-selector-tag,
 .project-finder__code .hljs-literal,
 .project-finder__code .hljs-section,
-.project-finder__code .hljs-doctag { color: var(--accent); }
+.project-finder__code .hljs-doctag { color: var(--accent-text, var(--accent)); }
 .project-finder__code .hljs-string,
 .project-finder__code .hljs-regexp,
 .project-finder__code .hljs-attr,
@@ -1153,7 +1153,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   white-space: nowrap;
 }
 .artifact-pill--idle { color: var(--muted); background: var(--surface); }
-.artifact-pill--building { color: var(--accent); background: var(--accent-dim); }
+.artifact-pill--building { color: var(--accent-text, var(--accent)); background: var(--accent-dim); }
 .artifact-pill--ok { color: #157a4a; background: color-mix(in srgb, #157a4a 16%, transparent); }
 .artifact-pill--error { color: var(--danger, #c43d3d); background: color-mix(in srgb, var(--danger, #c43d3d) 16%, transparent); }
 

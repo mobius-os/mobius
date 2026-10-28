@@ -1,12 +1,17 @@
 import {
   DARK_COLORS,
   LIGHT_COLORS,
+  THEME_ROLE_KEYS,
   parseThemeMeta,
   buildThemeCss,
-  contrastingAccentFg,
+  isShippedThemeValue,
+  scanRootDeclarations,
+  themeBg,
+  themeRoleVars,
+  withThemeDefaults,
 } from '../theme.js'
 import { themeQueries } from '../hooks/queries.js'
-import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
+import { applyTheme, cascadeBg, inferMode } from './applyTheme.js'
 import { captureLayoutSpace, clientPointToLayout } from './layoutSpace.js'
 
 /**
@@ -51,7 +56,7 @@ let lastThemeSignature = null
 
 function signatureForTheme(css, bg, mode) {
   const cssText = css || ''
-  const cssBg = bg || cssText.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
+  const cssBg = bg || themeBg(cssText)
   return JSON.stringify([
     cssText,
     bg || '',
@@ -251,18 +256,13 @@ export function getEffectiveTheme() {
   const el = document.getElementById(STYLE_ID)
   const css = el?.textContent || ''
   if (!css) return null
-  // body.style.background is the inline value applyThemeToDom set
-  // from the theme's --bg; only trust it if it's a clean hex (the
-  // same constraint applyThemeToDom + the frame's applyTheme use).
-  const rawBg = (document.body?.style?.background || '').trim()
-  const bg = HEX_RE.test(rawBg) ? rawBg : undefined
-  // Prefer the attribute the shell already set (authoritative); fall back
-  // to inferring from the bg, or from the --bg parsed out of the CSS body
-  // when the inline bg is absent. inferMode is bg-only, so parse the CSS
-  // fallback here (mirrors the old _inferThemeMode's css-parse branch).
-  const cssBg = bg || css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
+  // The background the applied stylesheet actually resolves (it owns --bg
+  // once applied; html/body paint var(--bg)), else the css's pre-paint hint.
+  // It is only a hint for the frame, which reads its own cascade too.
+  const bg = cascadeBg(document) || themeBg(css)
+  // Prefer the attribute the shell already set (authoritative).
   const mode = document.documentElement.getAttribute('data-theme')
-    || inferMode(cssBg)
+    || inferMode(bg)
   return { css, bg, mode }
 }
 
@@ -288,10 +288,8 @@ export async function persistTheme(css, mode, api) {
   api.notify.send({ type: 'theme_updated' }).catch(() => {})
 }
 
-// Structural color vars swapped on a light/dark toggle. Accent
-// colors and any agent-set custom vars are preserved via the
-// existing meta.colors spread so a user's "purple accent" survives
-// a theme toggle.
+// Structural color vars always take the new mode's palette on a light/dark
+// toggle: a dark surface is never right in light mode, custom or not.
 const STRUCTURAL_KEYS = [
   '--bg',
   '--surface',
@@ -301,6 +299,42 @@ const STRUCTURAL_KEYS = [
   '--text',
   '--muted',
 ]
+
+/**
+ * The theme.css colours for `newMode`, built from the colours the theme
+ * declared in its first `:root` while in `oldMode`. `oldCss` is the whole
+ * stylesheet, whose winning root declarations decide what `oldMode` derived.
+ *
+ * A declared value is MODE-OWNED, and replaced by the new mode's default,
+ * when it is a structural key, a shipped default of either mode (the shipped
+ * value of one mode carried into the other by an older toggle is not an owner
+ * choice), or a role equal to what `oldMode` derives from the theme's own
+ * bases. Every other value is the owner's and survives unchanged, so a
+ * custom accent or status colour outlives any number of round trips. The
+ * one ambiguity: an owner who deliberately chose a shipped value of the other
+ * mode gets it swapped; pick any other value to pin it.
+ *
+ * Role tokens are not written back unless the owner declared them; the
+ * generated defaults block (`withThemeDefaults`) paints them, so a later
+ * base edit re-derives them rather than meeting a frozen copy.
+ */
+function colorsForMode(declared, oldCss, oldMode, newMode) {
+  const root = scanRootDeclarations(oldCss) || {}
+  const derivedForOldMode = themeRoleVars(
+    Object.fromEntries(Object.entries(root).filter(([k]) => !THEME_ROLE_KEYS.includes(k))),
+    oldMode,
+  )
+  const modeOwned = (key, value) => STRUCTURAL_KEYS.includes(key)
+    || isShippedThemeValue(key, value)
+    || (THEME_ROLE_KEYS.includes(key) && derivedForOldMode[key] === value)
+  // The full base palette first, so a token a prior toggle stripped is
+  // restored; then the owner's own values over it.
+  const colors = { ...(newMode === 'light' ? LIGHT_COLORS : DARK_COLORS) }
+  for (const [key, value] of Object.entries(declared)) {
+    if (!modeOwned(key, value)) colors[key] = value
+  }
+  return colors
+}
 
 // The shell's service worker serves `/api/theme` StaleWhileRevalidate from
 // the `mobius-shell-data` cache (see sw.js). Right after a toggle,
@@ -368,7 +402,7 @@ function _seedThemeQueries(queryClient, css, bg, mode) {
  *   refetches repaint an older theme over the optimistic paint.
  *
  * CRITICAL — bg extraction:
- *   `newBg` is extracted from the BUILT CSS via regex, not from
+ *   `newBg` is read from the BUILT CSS (`themeBg`), not from
  *   the parsed `meta.colors['--bg']` of the input. Mode swap
  *   replaces --bg, so the old meta value is stale. Passing the
  *   stale value to applyThemeToDom would leave body.background +
@@ -400,42 +434,17 @@ export async function toggleTheme(queryClient, currentMode, api) {
 
   // Pre-toggle bg, captured from the last persisted CSS — the
   // authoritative rollback target if persistTheme below throws.
-  const oldBgMatch = currentCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
-  const oldBg = oldBgMatch ? oldBgMatch[1] : meta.colors['--bg']
+  const oldBg = themeBg(currentCss) || meta.colors['--bg']
 
-  // Swap structural colors while preserving agent customisations.
-  const base = newMode === 'light' ? LIGHT_COLORS : DARK_COLORS
-  const swapped = {}
-  for (const k of STRUCTURAL_KEYS) {
-    if (base[k]) swapped[k] = base[k]
-  }
-  // Spread the full base palette FIRST so any token missing from the
-  // persisted file (e.g. --accent/--danger/--green after a prior
-  // toggle stripped them) is restored with the new mode's value;
-  // meta.colors then preserves the user's customisations (their
-  // purple accent survives), and swapped applies the structural
-  // mode-swap last. Without the base spread, a toggle re-persisted
-  // whatever was already missing — degrading theme.css on every swap
-  // until light mode rendered with no accents at all.
-  const colors = { ...base, ...meta.colors, ...swapped }
-
-  // `--accent-fg` is derived, never spread from the palette. The server injects
-  // it into a TRAILING `:root` that `parseThemeMeta` does not read, so it is
-  // absent from `meta.colors` here even when the running page has it. Deriving
-  // from the accent we just preserved reproduces the backend rule instead of
-  // reintroducing a fixed white and persisting it -- which would stop
-  // `_ensure_core_vars` ever injecting again, since it only fills MISSING vars.
-  // A theme that declares its own `--accent-fg` up front keeps it.
-  if (!meta.colors['--accent-fg']) {
-    const derived = contrastingAccentFg(colors['--accent'])
-    if (derived) colors['--accent-fg'] = derived
-    else delete colors['--accent-fg']
-  }
-  const newCss = buildThemeCss(colors, meta, newMode)
+  // Swap mode-owned colours while preserving the owner's customisations.
+  const colors = colorsForMode(meta.colors, currentCss, currentMode, newMode)
+  const persistedCss = buildThemeCss(colors, meta, newMode)
+  // What the shell paints, seeds and hands to app frames: exactly what
+  // `/api/theme` serves for the persisted css (backend `_ensure_core_vars`).
+  const newCss = withThemeDefaults(persistedCss)
 
   // Extract NEW bg from the built CSS, not from old meta.
-  const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
-  const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
+  const newBg = themeBg(newCss) || meta.colors['--bg']
 
   // Stop any in-flight /api/theme or theme-mode fetch from writing an older
   // value after the optimistic paint. Then seed both query caches BEFORE the
@@ -454,7 +463,7 @@ export async function toggleTheme(queryClient, currentMode, api) {
     // sibling loadTheme() refetch. A stale SWR body was the visible snap-back:
     // the UI painted light, then the service worker served the old dark body.
     await _refreshThemeSwCache(newCss, newBg, newMode)
-    await persistTheme(newCss, newMode, api)
+    await persistTheme(persistedCss, newMode, api)
     _seedThemeQueries(queryClient, newCss, newBg, newMode)
     await _refreshThemeSwCache(newCss, newBg, newMode)
     // Mark stale so future explicit reloads know the query can refresh, but do

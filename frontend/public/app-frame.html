@@ -483,9 +483,9 @@
       // here because this is a template literal — the evaluated string carries
       // single backslashes (see applyTheme.prepaint.test.js byte-equality).
       css = css.replace(
-        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|((?:[^"'()\s\\]|\\[\s\S])+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
         function (m, u1, u2, u3, q1, q2) {
-          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3.replace(/\\([^0-9a-fA-F\n])/g, '$1') : q1 !== undefined ? q1 : q2);
           return '';
         }
       );
@@ -506,7 +506,10 @@
       }
       el.textContent = css;
     }
-    root.style.setProperty('--bg', bg);
+    // The bg is a pre-style HINT. Once theme css is installed the stylesheet
+    // owns --bg; an inline value would outrank an owner background set in
+    // any rule (html, a condition, a layer), so only hint without css.
+    if (!css) root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
     root.style.colorScheme = mode;
     var themeColorMeta = document.querySelector('meta[name="theme-color"]');
@@ -556,37 +559,56 @@
        changes the background" bug). Server injection is the real fix; this
        is defense in depth so a light-preference device never paints the dark
        fallback if injection is bypassed. The injected theme still overrides
-       both blocks. */
-    :root {
+       both blocks.
+
+       Both blocks live in the `mobius-defaults` cascade layer, the same layer
+       as the served theme's generated defaults (backend/app/theme.py
+       DEFAULTS_LAYER). It is the first layer declared, so any owner rule --
+       unlayered or in an owner layer -- beats it, and within it the theme
+       style applied after this one replaces these values by source order. */
+    @layer mobius-defaults {
+    :where(:root) {
       --bg: #0d0d0d; --surface: #171717; --surface-2: #212121;
       --border: #2a2a2a; --border-light: #1f1f1f;
       --text: #ececec; --muted: #a8a8a8;
       --accent: #8b6cf7; --accent-hover: #7c5ce6;
       --accent-dim: rgba(139, 108, 247, 0.14);
       --accent-fg: #ffffff;
-      --danger: #f87171; --green: #10b981;
+      --danger: #f87171; --green: #10b981; --warning: #d8922f;
+      /* Text-safe roles (>= 4.5:1 on every surface) and button/badge fills
+         that carry --accent-fg at >= 4.5:1. */
+      --accent-text: #957cf8; --danger-text: #f87171;
+      --green-text: #10b981; --warning-text: #d8922f;
+      --accent-fill: #7c5ce6; --accent-fill-hover: #7053cf;
+      --danger-fill: #dc2626; --green-fill: #047857;
       --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
       --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
-      /* Immersive safe-area insets, forwarded from the shell via
-         moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
-         sandboxed iframe). Default 0 so apps can reference them before the
-         first message and while windowed; non-zero only while immersive. */
-      --mobius-safe-top: 0px; --mobius-safe-right: 0px;
-      --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
-    /* Mode-aware fallback (defense in depth). Gated on data-theme="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
+    /* Mode-aware fallback (defense in depth). Gated on data-theme="light" (zero specificity, inside the same defaults layer, so the served theme still wins),
        set by the pre-paint <head> script (shared IIFE) from the owner's persisted
        localStorage['mobius-theme'] — NOT on OS prefers-color-scheme. A
        dark-shell owner on a light-OS device therefore keeps the dark :root
        default; light only appears from a positive owner signal (this attribute)
        or from the server-filled __mobius-theme__ slot. No signal => dark
-       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. */
-    :root:where([data-theme="light"]) {
+       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS /
+       LIGHT_ROLES (backend/tests/test_theme_roles.py enforces the parity). */
+    :where(:root[data-theme="light"]) {
       --bg: #f0eeeb; --surface: #ffffff; --surface-2: #e8e6e2;
       --border: #d4d1cc; --border-light: #e2dfdb;
       --text: #1c1b1a; --muted: #6b6864;
       --accent-dim: rgba(139, 108, 247, 0.08);
-      --danger: #ef4444; --green: #059669;
+      --danger: #ef4444; --green: #059669; --warning: #8f5a00;
+      --accent-text: #6548d4; --danger-text: #b91c1c;
+      --green-text: #046c4e; --warning-text: #8f5a00;
+    }
+    }
+    /* Immersive safe-area insets, forwarded from the shell via
+       moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
+       sandboxed iframe). Default 0 so apps can reference them before the
+       first message and while windowed; non-zero only while immersive. */
+    :where(:root) {
+      --mobius-safe-top: 0px; --mobius-safe-right: 0px;
+      --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -1525,14 +1547,18 @@
     // logic is inlined; the pre-paint IIFE in <head> (PREPAINT_SRC) is the
     // shared first-paint half, and this is the postMessage live-swap half.
     //
-    // Mode: from the bg's --bg luminance (bg arg first, then parsed out of
-    // the CSS). Mirrors applyTheme.js inferMode. Returns null if no hex
-    // resolves, so a css-only swap with no bg keeps the current mode.
-    function inferMode(css, bg) {
+    // Mode: from the bg hint's luminance, else the --bg the applied
+    // stylesheet resolves to. Returns null if no hex resolves, so a css-only
+    // swap with no bg keeps the current mode.
+    function inferMode(bg) {
       var hex = (typeof bg === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(bg)) ? bg : null;
-      if (!hex && typeof css === 'string') {
-        var m = css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/);
-        if (m) hex = m[1];
+      if (!hex) {
+        // No hint: read the background the applied stylesheet resolves to,
+        // never the first --bg in its text (the generated defaults lead it).
+        try {
+          var v = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+          if (/^#[0-9a-fA-F]{3,8}$/.test(v)) hex = v;
+        } catch (e) {}
       }
       if (!hex) return null;
       var raw = hex.slice(1);
@@ -1566,9 +1592,9 @@
         // by a syntax the quoted-url-only regex didn't see — same broadened
         // pattern as applyTheme.js + the pre-paint IIFE.
         css = css.replace(
-          /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+          /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|((?:[^"'()\s\\]|\\[\s\S])+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
           function (m, u1, u2, u3, q1, q2) {
-            fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+            fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3.replace(/\\([^0-9a-fA-F\n])/g, '$1') : q1 !== undefined ? q1 : q2);
             return '';
           }
         );
@@ -1593,7 +1619,13 @@
         }
         el.textContent = css;
       }
-      if (typeof bg === 'string' && HEX.test(bg)) {
+      if (typeof css === 'string' && css.length) {
+        // The stylesheet now owns --bg. Drop any inline hint (the pre-paint
+        // one included): it would outrank an owner background set in an
+        // html rule, a condition or a layer.
+        document.documentElement.style.removeProperty('--bg');
+        document.body.style.background = 'var(--bg)';
+      } else if (typeof bg === 'string' && HEX.test(bg)) {
         document.body.style.background = bg;
         document.documentElement.style.setProperty('--bg', bg);
       }
@@ -1603,7 +1635,7 @@
       // app mounted dark that receives a light swap keeps the wrong-mode SDK
       // tokens. color-scheme drives UA-native widgets (scrollbars, form
       // controls) — both mirror applyTheme.js.
-      var mode = inferMode(css, bg);
+      var mode = inferMode(bg);
       if (mode) {
         document.documentElement.setAttribute('data-theme', mode);
         document.documentElement.style.colorScheme = mode;

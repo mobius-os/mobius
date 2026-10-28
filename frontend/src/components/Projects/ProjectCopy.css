@@ -9,8 +9,8 @@
 .project-copy button { min-height:40px; display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:8px 12px; border:1px solid var(--border-light); border-radius:9px; background:var(--surface); color:var(--text); font:inherit; font-weight:650; cursor:pointer; }
 .project-copy button:hover:not(:disabled) { background:var(--bg); border-color:var(--accent); }
 .project-copy button:disabled { opacity:.5; cursor:default; }
-.project-copy button.project-copy__primary { background:var(--accent); color:var(--accent-fg,#fff); border-color:var(--accent); }
-.project-copy button.project-copy__primary:hover:not(:disabled) { filter:brightness(.95); }
+.project-copy button.project-copy__primary { background:var(--accent-fill,var(--accent)); color:var(--accent-fg,#fff); border-color:var(--accent-fill,var(--accent)); }
+.project-copy button.project-copy__primary:hover:not(:disabled) { background:var(--accent-fill-hover,var(--accent-hover)); border-color:var(--accent-fill-hover,var(--accent-hover)); }
 .project-copy input:not([type=checkbox]) { width:100%; min-height:42px; box-sizing:border-box; padding:9px 11px; border:1px solid var(--border-light); border-radius:9px; background:var(--bg); color:var(--text); font:inherit; font-size:16px; }
 .project-copy :is(button,input,summary,a):focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .project-copy label { display:block; font-weight:600; }

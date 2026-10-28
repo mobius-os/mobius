@@ -108,7 +108,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
   border-radius: 999px;
   background: color-mix(in srgb, var(--surface) 94%, transparent);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-size: 12px;
   font-weight: 680;

@@ -752,7 +752,7 @@
   line-height: 1.4;
 }
 .chat__recovery-title--paused {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 .chat__recovery-copy {
   margin-top: 4px;
@@ -799,7 +799,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-size: 13px;
   font-weight: 650;
@@ -2566,7 +2566,7 @@
   max-width: 45%;
   padding: 1px 9px;
   border-radius: 999px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2913,7 +2913,7 @@
   background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
-  color: var(--accent); /* CONTRACT: vivid accent text */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: text-safe accent text */
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -2926,8 +2926,8 @@
 }
 .chat__question-nudge:hover,
 .chat__resume-nudge:hover {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
+  background: var(--accent-fill, var(--accent)); /* CONTRACT: opaque accent action fill */
+  color: var(--accent-fg, #fff);
 }
 .chat__question-nudge:active,
 .chat__resume-nudge:active { transform: scale(0.96); }
@@ -4221,7 +4221,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.055em;
@@ -4448,7 +4448,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   .chat__wait-cancel:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border-light));
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    color: var(--accent);
+    color: var(--accent-text, var(--accent));
   }
 }
 
@@ -4900,7 +4900,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   margin: 0 4px 0 2px;
   font-size: 11.5px;
   line-height: 1.2;
-  color: var(--accent); /* CONTRACT: matches the strip's draft chip */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: matches the strip's draft chip */
   white-space: nowrap;
 }
 
@@ -5008,12 +5008,12 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 .chat__peer-time { flex: none; font: 400 11px/1.4 var(--font); color: var(--muted); font-variant-numeric: tabular-nums; }
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
-.chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.chat__peer-links a { color: var(--accent-text, var(--accent)); text-underline-offset: 3px; overflow-wrap: anywhere; }
 .chat__peer-link-button {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent); /* CONTRACT: link-coloured action beside the chat link */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: link-coloured action beside the chat link */
   font: inherit;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -5074,7 +5074,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   text-underline-offset: 3px;
   overflow-wrap: anywhere;
 }
-.chat__dependency-link:hover { color: var(--accent); }
+.chat__dependency-link:hover { color: var(--accent-text, var(--accent)); }
 .chat__dependency-backlinks a:focus-visible,
 .chat__dependency-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 .chat__dependency-history-detail { margin: 6px 0 0 38px; font-size: 12px; }

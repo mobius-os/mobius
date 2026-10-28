@@ -352,8 +352,8 @@
 }
 
 .canvas-loading__offline-button--primary {
-  border-color: var(--accent, #8b6cf7);
-  background: var(--accent, #8b6cf7);
+  border-color: var(--accent-fill, var(--accent, #8b6cf7));
+  background: var(--accent-fill, var(--accent, #8b6cf7));
   color: var(--accent-fg, #fff);
 }
 

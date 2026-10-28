@@ -14,14 +14,14 @@
 .md-app-block__facts dt { color:var(--muted); font-size:14px; }
 .md-app-block__facts dt::after { content:':'; }
 .md-app-block__facts dd { margin:0; font-size:14px; overflow-wrap:anywhere; }
-.md-app-block__facts dd a { color:var(--accent); text-underline-offset:2px; }
+.md-app-block__facts dd a { color:var(--accent-text, var(--accent)); text-underline-offset:2px; }
 .md-app-block__badges { display:inline-flex; flex-wrap:wrap; gap:4px; }
 .md-app-block__badge { display:inline-flex; align-items:center; padding:0 8px; border-radius:2em; font-size:13px; font-weight:600; line-height:20px; white-space:nowrap;
   background:color-mix(in srgb, var(--muted) 16%, transparent); color:var(--text); }
 .md-app-block__badge.is-success { background:color-mix(in srgb, var(--green) 18%, transparent); color:color-mix(in srgb, var(--green) 65%, var(--text)); }
 .md-app-block__badge.is-attention { background:color-mix(in srgb, var(--warning, var(--accent)) 20%, transparent); color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__badge.is-danger { background:color-mix(in srgb, var(--danger) 18%, transparent); color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
-.md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--accent); }
+.md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--accent-text, var(--accent)); }
 .md-app-block__items { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); }
 .md-app-block__items > li { display:flex; align-items:center; gap:12px; padding:8px 16px; }
 .md-app-block__items > li + li { border-top:1px solid var(--border); }
@@ -34,10 +34,10 @@
 .md-app-block__toggle:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 /* A fixed width keeps an action's place stable when its label changes. */
 .md-app-block__action { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; width:132px; min-height:44px; padding:0 14px; border:0; border-radius:8px;
-  background:color-mix(in srgb, var(--accent) 85%, #000); color:var(--accent-fg, #fff); font:inherit; font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+  background:var(--accent-fill, color-mix(in srgb, var(--accent) 85%, #000)); color:var(--accent-fg, #fff); font:inherit; font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .md-app-block a.md-app-block__action { text-decoration:none; }
-.md-app-block__action:hover { background:color-mix(in srgb, var(--accent) 80%, #000); }
-.md-app-block__action[aria-pressed="true"] { background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent); }
+.md-app-block__action:hover { background:var(--accent-fill-hover, color-mix(in srgb, var(--accent) 80%, #000)); }
+.md-app-block__action[aria-pressed="true"] { background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent-text, var(--accent)); }
 .md-app-block__action:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .md-app-block__action:disabled { opacity:.55; cursor:not-allowed; }
 .md-app-block__notice { margin:0; padding:4px 16px 12px; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
@@ -55,7 +55,7 @@
 .md-app-block__status.is-attention { color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__status.is-danger { color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__links { display:flex; flex-wrap:wrap; gap:0 10px; font-size:13px; }
-.md-app-block__links a { display:inline-flex; align-items:center; min-height:44px; color:var(--accent); overflow-wrap:anywhere; }
+.md-app-block__links a { display:inline-flex; align-items:center; min-height:44px; color:var(--accent-text, var(--accent)); overflow-wrap:anywhere; }
 .md-app-block__controls { display:inline-flex; align-items:center; gap:8px; }
 .md-app-block__cancel { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:0 14px; border:1px solid var(--border); border-radius:8px;
   background:var(--surface); color:var(--text); font:inherit; font-size:14px; font-weight:600; white-space:nowrap; cursor:pointer; }

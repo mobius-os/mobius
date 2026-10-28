@@ -386,9 +386,9 @@
 }
 
 .mmm__btn {
-  background: var(--accent);
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #ffffff);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-fill, var(--accent));
   border-radius: 999px;
   padding: 8px 14px;
   font-size: 13px;
@@ -404,7 +404,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .mmm__btn:not(:disabled):hover {
-    background: var(--accent-hover, var(--accent));
+    background: var(--accent-fill-hover, var(--accent-hover));
   }
 }
 
