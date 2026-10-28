@@ -57,6 +57,7 @@ def test_legacy_closed_defaults_do_not_manufacture_capability_changes():
     "connect_manage",
     "identity_manage",
     "railway_manage",
+    "helper_activity_read",
   ):
     legacy["data"].pop(field)
 
@@ -103,6 +104,7 @@ def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public
     (("data", "connect_manage"), True),
     (("data", "identity_manage"), True),
     (("data", "railway_manage"), True),
+    (("data", "helper_activity_read"), True),
     (("public", "storage", "read"), True),
     (("public", "storage", "write_prefix"), "public/submissions/"),
   ],
@@ -111,7 +113,9 @@ def test_legacy_receipt_still_reports_real_new_grants(path, value):
   installed, _digest = contract_and_digest(_manifest())
   installed["schema"] = 4
   installed.pop("public")
-  for field in ("connect_manage", "identity_manage", "railway_manage"):
+  for field in (
+    "connect_manage", "identity_manage", "railway_manage", "helper_activity_read",
+  ):
     installed["data"].pop(field)
   candidate = json.loads(json.dumps(installed))
   candidate["schema"] = 6
@@ -1409,3 +1413,50 @@ def test_complete_service_revocation_never_widens_from_transfer_limits_the_runti
   assert diff_contracts(installed, candidate)["widens"] is False
   # The same refused service that actually remains is still reviewed.
   assert diff_contracts(installed, installed)["widens"] is True
+
+
+@pytest.mark.parametrize(
+  ("grant", "value"),
+  [
+    ("helper_activity_read", True),
+    ("identity_manage", True),
+    ("railway_manage", True),
+    ("job_secret_read", ["tg-1"]),
+  ],
+)
+@pytest.mark.parametrize(
+  "patch_body",
+  [{"pinned": True}, {"chat_log_access": "summary"}],
+  ids=["pinned", "chat_log_access"],
+)
+def test_local_contract_only_grant_survives_unrelated_patch(
+  client, auth, grant, value, patch_body,
+):
+  """A row PATCH must not silently revoke a grant that lives only in the contract."""
+  created = create_local_app(
+    client, auth, name=f"Grant {grant}",
+    manifest_extra={"permissions": {grant: value}},
+  )
+  assert created["capability_contract"]["data"][grant] == value
+
+  response = client.patch(
+    f"/api/apps/{created['id']}", headers=auth, json=patch_body,
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["capability_contract"]["data"][grant] == value
+  fetched = client.get(f"/api/apps/{created['id']}", headers=auth)
+  assert fetched.status_code == 200, fetched.text
+  assert fetched.json()["capability_contract"]["data"][grant] == value
+
+  # Re-applying a manifest that omits the grant still revokes it.
+  manifest_path = Path(created["source_dir"]) / "mobius.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["permissions"] = {}
+  manifest_path.write_text(json.dumps(manifest))
+  reapplied = client.post(
+    "/api/apps/apply", headers=auth,
+    json={"source_dir": created["source_dir"]},
+  )
+  assert reapplied.status_code == 200, reapplied.text
+  data = reapplied.json()["app"]["capability_contract"]["data"]
+  assert not data.get(grant)
