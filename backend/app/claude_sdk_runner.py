@@ -107,6 +107,8 @@ from app.process_groups import (
 )
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
+from app.screenshot_steps import SAVED_IMAGE_FIELD, SCREENSHOT_TOOLS
+from app.viewed_images import chat_media_dir
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +266,12 @@ _CLAUDE_TURN_END_TOOLS = (
   f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
   "Bash",
+)
+# Owner cards whose save hands the turn to the owner; the visible-answer check
+# runs just before one is saved (see `_answer_check_reason`).
+_ANSWER_CHECK_CARD_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
 )
 
 
@@ -1103,37 +1111,64 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
-# The owner reads only a turn's text blocks; thinking is folded away. A turn
-# that ends with a short visible reply after long reasoning is the shape in
-# which the agent composed its answer in thinking and closed with a line such
-# as "Nothing has been changed." — the owner then sees no answer at all. The
-# shape is rare (under 1% of stored replies on one instance), so the check
-# below rarely costs an extra model call, and the agent itself judges whether
-# its reply is complete.
+# The owner reads only a turn's text blocks; thinking and tool activity are
+# folded away. Two shapes leave the owner without what the turn was for:
+#
+# - a short visible reply after long reasoning: the agent composed its answer
+#   in thinking and closed with a line such as "Nothing has been changed.";
+# - an image the agent saved to this chat's media and viewed (a screenshot or
+#   a Read), then never embedded: viewing is private, so a reply that says
+#   "here's the before and after" shows nothing.
+#
+# Both are checked where a turn hands control back: when the agent ends its
+# turn, and just before it saves an owner card (a saved card ends the turn, so
+# a later check could never reopen it). The shapes are rare (the first is
+# under 1% of stored replies on one instance), the check speaks at most once
+# per turn, and the agent itself judges whether its reply is complete.
 _ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
 _ANSWER_CHECK_THINKING_MIN_CHARS = 600
-_ANSWER_CHECK_REASON = (
+_ANSWER_CHECK_IMAGE_PATH = re.compile(r"\.(?:gif|jpe?g|png|webp)$", re.IGNORECASE)
+_ANSWER_CHECK_END_OF_TURN = (
   "Möbius end-of-turn check. The owner sees only your visible reply; your "
-  "thinking is hidden from them. This turn's reasoning is long but its "
-  "visible reply is short, so your answer may exist only in your thinking. "
-  "Re-read the owner's latest message. If your visible reply does not "
-  "already answer it or report the result, write that answer now as visible "
-  "text, without mentioning this check. If it already does, end your turn "
-  "without writing anything more."
+  "thinking and tool activity are hidden from them."
+)
+_ANSWER_CHECK_BEFORE_CARD = (
+  "Möbius check before your card is saved. The card was NOT saved. The owner "
+  "sees only your visible reply; your thinking and tool activity are hidden "
+  "from them."
+)
+_ANSWER_CHECK_THINKING = (
+  "This turn's reasoning is long but its visible reply is short, so your "
+  "answer may exist only in your thinking. Re-read the owner's latest "
+  "message. If your visible reply does not already answer it or report the "
+  "result, write that answer now as visible text."
+)
+_ANSWER_CHECK_IMAGES = (
+  "You viewed {images} this turn, but your visible reply never shows {them}. "
+  "If the owner should see {them} (you described {them}, promised to show "
+  "{them}, or are asking about {them}), embed each now in visible text as "
+  "![short description](/api/chats/{chat_id}/media/<file name>). If {them_was} "
+  "only for your own checking, leave {them} out."
+)
+_ANSWER_CHECK_END_OF_TURN_NEXT = (
+  "Do not mention this check. If nothing is missing, end your turn without "
+  "writing anything more."
+)
+_ANSWER_CHECK_BEFORE_CARD_NEXT = (
+  "Do not mention this check. Then call the same card tool again with the "
+  "same arguments; this check will not stop it a second time."
 )
 
 
-def _answer_may_be_only_in_thinking(
-  blocks: object, last_assistant_message: object = None,
-) -> bool:
-  """Whether this reply's reasoning dwarfs what the owner can actually read.
+def _visible_reply_chars(
+  blocks: list, last_assistant_message: object = None,
+) -> tuple[str, int]:
+  """The text the owner can read in this segment, and its stripped length.
 
-  ``blocks`` is the sink's current assistant segment. The Stop hook can run
-  before the stream reader has dispatched the final text, so the CLI's own
-  ``last_assistant_message`` is counted when the blocks do not contain it yet.
+  The Stop hook can run before the stream reader has dispatched the final
+  text, so the CLI's own ``last_assistant_message`` is counted when the
+  blocks do not contain it yet.
   """
-  if not isinstance(blocks, list):
-    return False
   visible = "".join(
     block["content"] for block in blocks
     if isinstance(block, dict) and block.get("type") == "text"
@@ -1143,7 +1178,94 @@ def _answer_may_be_only_in_thinking(
   if isinstance(last_assistant_message, str):
     tail = last_assistant_message.strip()
     if tail and tail not in visible:
+      visible += "\n" + tail
       visible_chars += len(tail)
+  return visible, visible_chars
+
+
+def _viewed_media_image(block: object, media_dir: str) -> str | None:
+  """The chat-media image file name this tool block showed the agent, if any.
+
+  A screenshot step names the picture it saved; a Read names a path, which
+  counts only when it is an image directly in this chat's media — the files
+  that exist to be shown. Images elsewhere (``/tmp`` verification frames, the
+  owner's own uploads) are not something the owner is waiting to see.
+  """
+  if not isinstance(block, dict) or block.get("type") != "tool":
+    return None
+  tool = block.get("tool")
+  if tool in SCREENSHOT_TOOLS:
+    saved = block.get(SAVED_IMAGE_FIELD)
+    return saved if isinstance(saved, str) and saved else None
+  if tool != "Read":
+    return None
+  raw = block.get("input")
+  if isinstance(raw, dict):
+    raw = raw.get("file_path")
+  if not isinstance(raw, str) or not _ANSWER_CHECK_IMAGE_PATH.search(raw):
+    return None
+  path = os.path.normpath(raw)
+  if os.path.dirname(path) != media_dir:
+    return None
+  return os.path.basename(path)
+
+
+def _unshown_viewed_images(
+  blocks: object, media_dir: str, last_assistant_message: object = None,
+) -> list[str]:
+  """Chat-media images the agent viewed this segment but never embedded."""
+  if not isinstance(blocks, list):
+    return []
+  visible, _ = _visible_reply_chars(blocks, last_assistant_message)
+  unshown: list[str] = []
+  for block in blocks:
+    name = _viewed_media_image(block, media_dir)
+    if name and f"/media/{name}" not in visible and name not in unshown:
+      unshown.append(name)
+  return unshown
+
+
+def _answer_check_reason(
+  blocks: object,
+  *,
+  chat_id: str,
+  media_dir: str,
+  before_card: bool,
+  last_assistant_message: object = None,
+) -> str | None:
+  """What the owner may be missing from this reply, phrased for the agent.
+
+  None means the reply shows no sign of a hidden answer or an unshown image.
+  """
+  parts: list[str] = []
+  if _answer_may_be_only_in_thinking(blocks, last_assistant_message):
+    parts.append(_ANSWER_CHECK_THINKING)
+  images = _unshown_viewed_images(blocks, media_dir, last_assistant_message)
+  if images:
+    one = len(images) == 1
+    parts.append(_ANSWER_CHECK_IMAGES.format(
+      images=", ".join(images),
+      them="it" if one else "them",
+      them_was="it was" if one else "they were",
+      chat_id=chat_id,
+    ))
+  if not parts:
+    return None
+  if before_card:
+    return " ".join([_ANSWER_CHECK_BEFORE_CARD, *parts, _ANSWER_CHECK_BEFORE_CARD_NEXT])
+  return " ".join([_ANSWER_CHECK_END_OF_TURN, *parts, _ANSWER_CHECK_END_OF_TURN_NEXT])
+
+
+def _answer_may_be_only_in_thinking(
+  blocks: object, last_assistant_message: object = None,
+) -> bool:
+  """Whether this reply's reasoning dwarfs what the owner can actually read.
+
+  ``blocks`` is the sink's current assistant segment.
+  """
+  if not isinstance(blocks, list):
+    return False
+  _, visible_chars = _visible_reply_chars(blocks, last_assistant_message)
   if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
     return False
   longest_thinking = max(
@@ -1400,35 +1522,79 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-  # Fires when the root agent is about to end its turn. At most once per turn,
-  # when the visible reply is short beside long reasoning, it returns the turn
-  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
-  # thinking gets written where the owner can read it. A Stop or a saved owner
-  # card owns the turn's end, so neither is ever reopened here.
+  # The visible-answer check (see `_answer_check_reason`) speaks at most once
+  # per turn, at whichever hand-back comes first: just before the root agent
+  # saves an owner card, or when it ends its turn. Before a card it declines
+  # that one tool call, so the agent can write what is missing and call the
+  # card again; at the end it returns the turn. A Stop or a saved owner card
+  # owns the turn's end, so neither is ever reopened here.
   answer_check_sent = False
+  answer_check_media_dir = os.path.normpath(
+    str(chat_media_dir(get_settings().data_dir, chat_id))
+  )
+
+  def _answer_check_once(
+    *, before_card: bool, last_assistant_message: object = None,
+  ) -> str | None:
+    nonlocal answer_check_sent
+    if (
+      answer_check_sent
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return None
+    reason = _answer_check_reason(
+      getattr(bc, "assistant_blocks", None),
+      chat_id=chat_id,
+      media_dir=answer_check_media_dir,
+      before_card=before_card,
+      last_assistant_message=last_assistant_message,
+    )
+    if reason is None:
+      return None
+    answer_check_sent = True
+    log.info(
+      "Claude visible-answer check spoke chat_id=%s before_card=%s",
+      chat_id, before_card,
+    )
+    return reason
 
   async def visible_answer_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    nonlocal answer_check_sent
     del tool_use_id, context
+    if hook_input.get("stop_hook_active"):
+      return {"continue_": True}
+    reason = _answer_check_once(
+      before_card=False,
+      last_assistant_message=hook_input.get("last_assistant_message"),
+    )
+    if reason is None:
+      return {"continue_": True}
+    return {"decision": "block", "reason": reason}
+
+  async def visible_answer_before_card_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    # A delegated child's card goes to its parent agent, not the owner.
     if (
-      answer_check_sent
-      or hook_input.get("stop_hook_active")
-      or active_client is None
-      or not active_client.accepts_native_prompt
+      hook_input.get("tool_name") not in _ANSWER_CHECK_CARD_TOOLS
+      or hook_input.get("agent_id")
     ):
       return {"continue_": True}
-    if not _answer_may_be_only_in_thinking(
-      getattr(bc, "assistant_blocks", None),
-      hook_input.get("last_assistant_message"),
-    ):
+    reason = _answer_check_once(before_card=True)
+    if reason is None:
       return {"continue_": True}
-    answer_check_sent = True
-    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
-    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": reason,
+    }}
 
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
@@ -1507,6 +1673,9 @@ async def run_claude_sdk_turn(
       "stderr": _capture_stderr,
       "hooks": {
         "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        "PreToolUse": [
+          HookMatcher(matcher=None, hooks=[visible_answer_before_card_hook]),
+        ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),

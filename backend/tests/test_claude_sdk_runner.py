@@ -3751,9 +3751,8 @@ async def test_answer_check_returns_the_turn_once_when_the_answer_is_hidden(monk
   result = await _run_turn("answer-check-chat", bc=bus)
 
   assert result["error"] is None
-  assert decisions[0] == {
-    "decision": "block", "reason": claude_sdk_runner._ANSWER_CHECK_REASON,
-  }
+  assert decisions[0]["decision"] == "block"
+  assert decisions[0]["reason"].startswith("Möbius end-of-turn check.")
   assert "only in your thinking" in decisions[0]["reason"]
   assert decisions[1:] == [{"continue_": True}, {"continue_": True}]
 
@@ -3772,5 +3771,142 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
 
   _install_fake_client(monkeypatch, _Client)
   await _run_turn("answer-check-card-chat", bc=bus)
+
+  assert decisions == [{"continue_": True}]
+
+
+def _media_dir(chat_id: str) -> str:
+  from app.config import get_settings
+  from app.viewed_images import chat_media_dir
+
+  return os.path.normpath(str(chat_media_dir(get_settings().data_dir, chat_id)))
+
+
+def _viewed_before_after(chat_id: str) -> list[dict]:
+  """A reply that promises a comparison, views it, and never embeds it."""
+  return [
+    {"type": "text", "content": "I'll put the two versions side by side."},
+    {"type": "tool", "tool": "Bash", "status": "done"},
+    {"type": "tool", "tool": "Read", "status": "done",
+     "input": f"{_media_dir(chat_id)}/before-after.png"},
+  ]
+
+
+def test_answer_check_flags_a_viewed_chat_image_the_reply_never_shows():
+  from app.claude_sdk_runner import _answer_check_reason
+
+  chat_id = "image-check-chat"
+  blocks = _viewed_before_after(chat_id)
+  reason = _answer_check_reason(
+    blocks, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=True,
+  )
+  assert reason is not None
+  assert reason.startswith("Möbius check before your card is saved. The card was NOT saved.")
+  assert "before-after.png" in reason
+  assert f"/api/chats/{chat_id}/media/" in reason
+  assert "only in your thinking" not in reason
+  assert "call the same card tool again" in reason
+
+  # A screenshot step names its saved picture instead of a path.
+  shot = [
+    {"type": "text", "content": "Here is how it looks now."},
+    {"type": "tool", "tool": "mcp__mobius_control__screenshot",
+     "status": "done", "saved_image": "shot-1.png"},
+  ]
+  reason = _answer_check_reason(
+    shot, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=False,
+  )
+  assert reason is not None and "shot-1.png" in reason
+  assert reason.startswith("Möbius end-of-turn check.")
+
+
+def test_answer_check_leaves_shown_and_private_images_alone():
+  from app.claude_sdk_runner import _answer_check_reason
+
+  chat_id = "image-check-chat"
+  media = _media_dir(chat_id)
+
+  def reason_for(blocks, last=None):
+    return _answer_check_reason(
+      blocks, chat_id=chat_id, media_dir=media, before_card=True,
+      last_assistant_message=last,
+    )
+
+  embed = f"![Before and after](/api/chats/{chat_id}/media/before-after.png)"
+  shown = [*_viewed_before_after(chat_id), {"type": "text", "content": embed}]
+  assert reason_for(shown) is None
+  # An embed the stream reader has not dispatched yet still counts.
+  assert reason_for(_viewed_before_after(chat_id), embed) is None
+  # Verification frames outside chat media, the owner's uploads, another
+  # chat's media, and non-image reads are not something the owner awaits.
+  for path in (
+    "/tmp/check.png",
+    f"{os.path.dirname(media)}/uploads/image.png",
+    f"{_media_dir('another-chat')}/before-after.png",
+    f"{media}/notes.md",
+  ):
+    assert reason_for([
+      {"type": "text", "content": "Checked it."},
+      {"type": "tool", "tool": "Read", "status": "done", "input": path},
+    ]) is None, path
+
+
+async def _fire_pre_card_hook(options, **overrides) -> dict:
+  hook_input = {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "mcp__mobius_control__request_question",
+    "tool_input": {"questions": [{"question": "How does it look?"}]},
+    "tool_use_id": "toolu_q",
+  }
+  hook_input.update(overrides)
+  return await options.hooks["PreToolUse"][0].hooks[0](hook_input, "toolu_q", {})
+
+
+@pytest.mark.asyncio
+async def test_answer_check_declines_one_card_save_when_something_is_unshown(monkeypatch):
+  chat_id = "answer-check-before-card-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _viewed_before_after(chat_id)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      # Ordinary tools and a delegated child's card pass untouched.
+      decisions.append(await _fire_pre_card_hook(self.options, tool_name="Bash"))
+      decisions.append(await _fire_pre_card_hook(self.options, agent_id="child-1"))
+      decisions.append(await _fire_pre_card_hook(self.options))
+      # The agent's retried card, and the turn's end, are not stopped again.
+      decisions.append(await _fire_pre_card_hook(self.options))
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn(chat_id, bc=bus)
+
+  assert result["error"] is None
+  assert decisions[:2] == [{"continue_": True}, {"continue_": True}]
+  denied = decisions[2]["hookSpecificOutput"]
+  assert denied["hookEventName"] == "PreToolUse"
+  assert denied["permissionDecision"] == "deny"
+  assert "before-after.png" in denied["permissionDecisionReason"]
+  assert decisions[3:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = [
+    {"type": "thinking", "content": "Two options to offer."},
+    {"type": "text", "content": "Two ways to go; pick one below."},
+  ]
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn("answer-check-card-ok-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
