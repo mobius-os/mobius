@@ -49,6 +49,36 @@ PM_COMMIT_ROOT=/data/platform pm-commit --from "$START" 'what and why' -- <paths
 The `chown` matters twice: `pm-commit` runs as the owner, so it cannot read a
 root-only file, and a file left root-owned makes the next agent edit fail.
 
+### Free space from Recovery
+
+When Möbius still loads, the owner frees space in **Settings → Storage and
+Memory** without an agent. Use Recovery only when the interface does not
+load. Stop agent work first, or work while Möbius is down; then restart it
+from the deployment.
+
+| Path | What it is | Delete? |
+|---|---|---|
+| `/data/agent-scratch/*` | Chat work files | Safe. Agents make them again. |
+| `/data/agent-browser-profiles/chat-*/` | Agent browsers | Safe. Agents sign in to sites again. Keep the `.lock` files. |
+| `/data/cli-auth/claude/projects/*/*.jsonl` older than 2 days | Old Claude sessions | Safe. A chat reseeds a fresh session from its own history. Settings also removes each session's same-named folder; this command leaves those. |
+| `/data/cli-auth/codex/sessions/**/rollout-*.jsonl` older than 2 days | Old Codex sessions | Safe, same as above. |
+| `/data/.cache` | Tool downloads | Safe. Downloaded again when needed. |
+| `/data/backups` | Local backups | Only with a copy elsewhere. |
+| `/data/contrib/*`, `/data/worktrees/*` | Contribution and work copies | Only after the work is pushed or its PR is closed. |
+| `/data/db`, `/data/.secret-key`, `/data/app-secrets`, other `/data/cli-auth` files, `/data/chats`, `/data/apps`, `/data/shared`, `/data/platform`, `/data/.git`, `/data/logs` | The owner's data, keys, sign-ins, Möbius itself, and the storage history | Never. |
+
+```bash
+du -xh -d1 /data | sort -h | tail -12                     # what uses space
+rm -rf /data/agent-scratch/*
+find /data/agent-browser-profiles -mindepth 1 -maxdepth 1 -type d -name 'chat-*' -exec rm -rf {} +
+find /data/cli-auth/claude/projects -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mmin +2880 -delete
+find /data/cli-auth/codex/sessions -type f -name 'rollout-*.jsonl' -mmin +2880 -delete
+df -h /data
+```
+
+Use `-mmin +2880` for "older than 2 days": `-mtime +2` matches only files at
+least 3 whole days old.
+
 ## Host-owned container replacement
 
 A container recreation is not an ordinary server restart. Use the Settings

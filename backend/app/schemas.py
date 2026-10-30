@@ -728,6 +728,9 @@ class ChatRequest(BaseModel):
 
 class ChatStopRequest(BaseModel):
   chat_id: str = ""
+  # A caller that cannot resend cleared messages (Settings) asks Stop to refuse
+  # instead of clearing what the owner typed and queued.
+  refuse_if_queued: bool = False
 
 
 # One effort vocabulary for owner and app-attributed chat configuration.

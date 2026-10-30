@@ -44,6 +44,9 @@ import WaitHistoryCard from './WaitHistoryCard.jsx'
 import { waitWokeItsAnswer } from './waitHistory.js'
 import HelperResultCard from './HelperResultCard.jsx'
 
+// Settings → Storage and Memory frees space without an agent, which a turn
+// waiting on storage or memory cannot start.
+const STORAGE_SETTINGS_HREF = '/shell/?settings=storage'
 
 // Answerability is a function of the block + its position + live hint, except
 // for a durable Restart offer: once shown, that exact button stays actionable
@@ -641,6 +644,15 @@ function MsgContentInner({
                   </span>
                 )}
               </div>
+            )}
+            {recoveryOwner && resourceWait && onInternalNav && (
+              <button
+                type="button"
+                className="chat__recovery-action"
+                onClick={() => onInternalNav(new URL(STORAGE_SETTINGS_HREF, window.location.href))}
+              >
+                {block.pause?.kind === 'storage' ? 'Free up space' : 'See memory use'}
+              </button>
             )}
             {manualResumeAvailable && (
               <button

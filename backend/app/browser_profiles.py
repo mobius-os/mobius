@@ -8,6 +8,7 @@ import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from sqlalchemy.orm import Session
 
@@ -187,6 +188,146 @@ def _remove_profile(path: Path) -> bool:
   return not path.exists()
 
 
+def _profile_chat_id(path: Path, chats: dict[str, dict]) -> str | None:
+  match = _CHAT_PROFILE.fullmatch(path.name)
+  if match:
+    return match.group(1)
+  embedded = _EMBEDDED_CHAT_ID.fullmatch(path.name)
+  # Only a known chat claims an ad-hoc profile; an unrecognised id may
+  # be anything, so that profile keeps the named-session grace.
+  if embedded and embedded.group(1) in chats:
+    return embedded.group(1)
+  return None
+
+
+def _profile_activity(path: Path, chat: dict | None, now: datetime) -> datetime:
+  activity = chat.get("activity_at") if chat else None
+  if activity is not None and activity.tzinfo is not None:
+    activity = activity.astimezone(UTC).replace(tzinfo=None)
+  if activity is not None:
+    return activity
+  try:
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).replace(tzinfo=None)
+  except OSError:
+    return now
+
+
+def _profile_entry(
+  path: Path,
+  chats: dict[str, dict],
+  active_chat_ids: set[str],
+  *,
+  now: datetime,
+  cutoff_seconds: int,
+  active_profile_names: set[str],
+) -> dict:
+  chat_id = _profile_chat_id(path, chats)
+  chat = chats.get(chat_id) if chat_id else None
+  activity = _profile_activity(path, chat, now)
+  age_seconds = max(0.0, (now - activity).total_seconds())
+  active = (
+    path.name in active_profile_names
+    or (chat_id is not None and chat_id in active_chat_ids)
+    or bool(chat and chat.get("running"))
+  )
+  if chat_id is None:
+    # Named/legacy profiles are included in the byte budget and cache
+    # pruning, but their durable state receives the full inactivity grace.
+    # Named sessions are deliberately long-lived; unlike ordinary chat
+    # profiles, a recent one never joins the pressure fallback.
+    retire_first = not active and age_seconds >= _NAMED_PROFILE_GRACE_DAYS * 86400
+  else:
+    # A profile with no chat row ages by its own mtime, so one minted just
+    # before its chat becomes visible is never mistaken for an orphan.
+    retire_first = not active and (
+      bool(chat and chat.get("deleted_at") is not None)
+      or age_seconds >= cutoff_seconds
+    )
+  return {
+    "path": path,
+    "chat_id": chat_id,
+    "activity": activity,
+    "retire_first": retire_first,
+    "active": active,
+    "size": _tree_bytes(path),
+  }
+
+
+def _profile_inventory(
+  root: Path,
+  chats: dict[str, dict],
+  active_chat_ids: set[str],
+  *,
+  now: datetime,
+  cutoff_seconds: int,
+  active_profile_names: set[str],
+) -> list[dict]:
+  """Every profile directory with its owner, activity, size and retirement."""
+  if not root.is_dir():
+    return []
+  return [
+    _profile_entry(
+      path, chats, active_chat_ids, now=now, cutoff_seconds=cutoff_seconds,
+      active_profile_names=active_profile_names,
+    )
+    for path in root.iterdir()
+    if not path.is_symlink() and path.is_dir()
+  ]
+
+
+# The owner's Clear keeps a chat's browser for this long after the chat was last
+# active, the same grace as Chat work files, so a chat that just finished or is
+# about to continue keeps its sign-ins.
+OWNER_CLEAR_GRACE_SECONDS = 15 * 60
+
+
+def _owner_clearable_profiles(
+  root: Path, chats: dict[str, dict], active_chat_ids: set[str],
+) -> list[dict]:
+  profiles = _profile_inventory(
+    root, chats, active_chat_ids, now=datetime.now(UTC).replace(tzinfo=None),
+    cutoff_seconds=OWNER_CLEAR_GRACE_SECONDS,
+    active_profile_names=_active_profile_names(root),
+  )
+  return [p for p in profiles if p["chat_id"] is not None and p["retire_first"]]
+
+
+def closed_chat_profile_usage(
+  data_dir: str | Path, chats: dict[str, dict], active_chat_ids: set[str],
+) -> dict:
+  """What the owner's "Clear agent browser data" deletes, for the confirm step."""
+  retired = _owner_clearable_profiles(
+    Path(data_dir) / "agent-browser-profiles", chats, active_chat_ids,
+  )
+  return {"bytes": sum(p["size"] for p in retired), "profiles": len(retired)}
+
+
+def clear_closed_chat_profiles(
+  data_dir: str | Path,
+  chats: dict[str, dict],
+  active_chat_ids: set[str],
+  *,
+  still_in_use: Callable[[str], bool],
+) -> dict:
+  """Delete exactly the profiles the preview counts, never a cache or named one.
+
+  Measuring sizes takes seconds, so each profile is checked again just before
+  it is removed: against a fresh scan of open browsers and ``still_in_use``
+  (a chat that started meanwhile).
+  """
+  root = Path(data_dir) / "agent-browser-profiles"
+  candidates = _owner_clearable_profiles(root, chats, active_chat_ids)
+  open_now = _active_profile_names(root)
+  removed = reclaimed = 0
+  for profile in candidates:
+    if profile["path"].name in open_now or still_in_use(profile["chat_id"]):
+      continue
+    if _remove_profile(profile["path"]):
+      removed += 1
+      reclaimed += profile["size"]
+  return {"bytes": reclaimed, "profiles": removed}
+
+
 def enforce_browser_profile_quota(
   data_dir: str | Path,
   chats: dict[str, dict],
@@ -227,63 +368,15 @@ def enforce_browser_profile_quota(
     "AGENT_BROWSER_PROFILE_INACTIVE_DAYS", _DEFAULT_INACTIVE_DAYS,
   )
   cutoff_seconds = inactive_days * 86400
-  named_cutoff_seconds = _NAMED_PROFILE_GRACE_DAYS * 86400
   active_profile_names = (
     _active_profile_names(root)
     if active_profile_names is None else active_profile_names
   )
 
-  profiles = []
-  if root.is_dir():
-    for path in root.iterdir():
-      match = _CHAT_PROFILE.fullmatch(path.name)
-      if path.is_symlink() or not path.is_dir():
-        continue
-      chat_id = match.group(1) if match else None
-      if chat_id is None:
-        embedded = _EMBEDDED_CHAT_ID.fullmatch(path.name)
-        # Only a known chat claims an ad-hoc profile; an unrecognised id may
-        # be anything, so that profile keeps the named-session grace.
-        if embedded and embedded.group(1) in chats:
-          chat_id = embedded.group(1)
-      chat = chats.get(chat_id) if chat_id else None
-      activity = chat.get("activity_at") if chat else None
-      if activity is not None and activity.tzinfo is not None:
-        activity = activity.astimezone(UTC).replace(tzinfo=None)
-      try:
-        fallback_activity = datetime.fromtimestamp(
-          path.stat().st_mtime, UTC,
-        ).replace(tzinfo=None)
-      except OSError:
-        fallback_activity = now
-      activity = activity or fallback_activity
-      age_seconds = max(0.0, (now - activity).total_seconds())
-      active = (
-        path.name in active_profile_names
-        or (chat_id is not None and chat_id in active_chat_ids)
-        or bool(chat and chat.get("running"))
-      )
-      if chat_id is None:
-        # Named/legacy profiles are included in the byte budget and cache
-        # pruning, but their durable state receives the full inactivity grace.
-        # Named sessions are deliberately long-lived; unlike ordinary chat
-        # profiles, a recent one never joins the pressure fallback.
-        retire_first = not active and age_seconds >= named_cutoff_seconds
-      else:
-        # A profile with no chat row ages by its own mtime, so one minted just
-        # before its chat becomes visible is never mistaken for an orphan.
-        retire_first = not active and (
-          bool(chat and chat.get("deleted_at") is not None)
-          or age_seconds >= cutoff_seconds
-        )
-      profiles.append({
-        "path": path,
-        "chat_id": chat_id,
-        "activity": activity,
-        "retire_first": retire_first,
-        "active": active,
-        "size": _tree_bytes(path),
-      })
+  profiles = _profile_inventory(
+    root, chats, active_chat_ids, now=now, cutoff_seconds=cutoff_seconds,
+    active_profile_names=active_profile_names,
+  )
 
   bytes_before = sum(profile["size"] for profile in profiles)
   total = bytes_before

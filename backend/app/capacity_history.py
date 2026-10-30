@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.capacity import TIER_RANK
+from app.capacity import TIER_RANK, domain_label
 
 _HISTORY_HIGH_WATER = 2200
 _HISTORY_TRIM_TARGET = 2000
@@ -226,17 +226,17 @@ def alert_body(snapshot: dict[str, Any], forecast_result: dict[str, Any] | None)
   )
   if sized and not incomplete:
     name, size = max(sized, key=lambda kv: kv[1])
-    parts.append(f"The largest use is {name} ({_size(size)}).")
+    parts.append(f"The largest use is {domain_label(name).lower()} ({_size(size)}).")
   elif incomplete:
     # Partial totals must not be used to name a largest owner.
     parts.append(
       "Sizes were only partly measured (scan-limited: "
-      + ", ".join(incomplete) + ")."
+      + ", ".join(domain_label(name).lower() for name in incomplete) + ")."
     )
   tte = (forecast_result or {}).get("time_to_exhaustion_seconds")
   if isinstance(tte, (int, float)) and tte > 0:
     parts.append(f"At the current rate it fills in about {tte / 3600:.1f}h.")
-  parts.append("Ask Möbius in a chat to free up space, or grow the volume.")
+  parts.append("Open Storage and Memory in Settings to free up space, or grow the volume.")
   return " ".join(parts)
 
 

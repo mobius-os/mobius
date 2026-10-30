@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.storage_io import atomic_write
+from app.storage_io import app_dir_usage, atomic_write, newest_change
 
 
 DEFAULT_RETENTION_DAYS = {
@@ -37,6 +39,10 @@ MAX_FILES_PER_SWEEP = 10_000
 # Codex turns wait on the sweep lock, so store work stops at this wall-clock
 # bound; a backlog resumes on the next pass.
 STORE_COMPACTION_BUDGET_SECONDS = 5.0
+
+
+def _is_rollout_name(name: str) -> bool:
+  return name.startswith("rollout-") and name.endswith(".jsonl")
 
 
 def sweep_stale_provider_sessions(
@@ -93,7 +99,7 @@ def sweep_stale_provider_sessions(
         files.sort()
         empty_dir_candidates.append(base)
         for name in files:
-          if not (name.startswith("rollout-") and name.endswith(".jsonl")):
+          if not _is_rollout_name(name):
             continue
           if scanned >= max_files:
             truncated = True
@@ -181,3 +187,140 @@ def ensure_claude_settings_defaults(data_dir: str | Path) -> list[str]:
       json.dumps(decoded, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     )
   return added
+
+
+# Owner-run cleanup ("Agent working copies" in Settings). Deleting an old provider
+# session only costs a warm resume: Möbius keeps every chat's transcript and
+# reseeds a fresh session from it when the provider's copy is gone.
+
+def _stale_claude_session(transcript: Path, cutoff: float) -> tuple[Path, Path | None, int] | None:
+  """A Claude transcript and its side folder, when neither changed since ``cutoff``."""
+  info = transcript.lstat()
+  if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+    return None
+  side = transcript.with_suffix("")
+  if side.is_symlink() or not side.is_dir():
+    return transcript, None, info.st_size
+  if newest_change(side) >= cutoff:
+    return None
+  return transcript, side, info.st_size + app_dir_usage(side)
+
+
+def _stale_claude_sessions(
+  data_dir: str | Path, cutoff: float, in_use: frozenset[str],
+) -> list[tuple[Path, Path | None, int]]:
+  root = Path(data_dir) / "cli-auth" / "claude" / "projects"
+  if root.is_symlink() or not root.is_dir():
+    return []
+  transcripts = [
+    transcript
+    for project in root.iterdir() if project.is_dir() and not project.is_symlink()
+    for transcript in project.glob("*.jsonl")
+  ]
+  stale = []
+  for transcript in transcripts:
+    if transcript.stem in in_use:
+      continue
+    try:
+      session = _stale_claude_session(transcript, cutoff)
+    except OSError:
+      continue
+    if session is not None:
+      stale.append(session)
+  return stale
+
+
+def _codex_rollouts(data_dir: str | Path):
+  root = Path(data_dir) / "cli-auth" / "codex" / "sessions"
+  if root.is_symlink() or not root.is_dir():
+    return
+  for directory, _names, files in os.walk(root, followlinks=False):
+    yield from (Path(directory) / name for name in files if _is_rollout_name(name))
+
+
+def _stale_codex_usage(data_dir: str | Path, cutoff: float) -> tuple[int, int]:
+  sizes = []
+  for rollout in _codex_rollouts(data_dir):
+    try:
+      info = rollout.lstat()
+    except OSError:
+      continue
+    if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+      sizes.append(info.st_size)
+  return sum(sizes), len(sizes)
+
+
+def stale_session_usage(
+  data_dir: str | Path, *, max_age_days: int, in_use: frozenset[str] = frozenset(),
+  now: float | None = None,
+) -> dict:
+  """Bytes and count of Claude and Codex sessions older than ``max_age_days``.
+
+  ``in_use`` holds Claude session ids of chats that are running or starting;
+  an old session about to be resumed is never counted or deleted.
+  """
+  cutoff = (time.time() if now is None else now) - max_age_days * 86400
+  claude = _stale_claude_sessions(data_dir, cutoff, in_use)
+  codex_bytes, codex_count = _stale_codex_usage(data_dir, cutoff)
+  return {
+    "bytes": sum(size for _transcript, _side, size in claude) + codex_bytes,
+    "sessions": len(claude) + codex_count,
+  }
+
+
+def stale_claude_sessions(
+  data_dir: str | Path, *, max_age_days: int, now: float | None = None,
+) -> list[tuple[Path, Path | None, int]]:
+  """Claude transcripts (with their side folders) untouched for ``max_age_days``."""
+  cutoff = (time.time() if now is None else now) - max_age_days * 86400
+  return _stale_claude_sessions(data_dir, cutoff, frozenset())
+
+
+_RELEASED = ".released-"
+
+
+def detach_claude_session(transcript: Path, side: Path | None) -> list[Path] | None:
+  """Move one session aside under hidden names, so Claude can no longer resume it.
+
+  Renames are instant, so the caller can do this inside the same uninterrupted
+  step as its "is this chat idle" check; the slow delete happens later through
+  ``reclaim_released_claude_sessions``. ``None`` means the session stayed.
+  """
+  def released(path: Path) -> Path:
+    return path.with_name(f".{path.name}{_RELEASED}{uuid.uuid4().hex}")
+
+  try:
+    moved = [transcript.rename(released(transcript))]
+  except OSError:
+    return None
+  if side is not None:
+    try:
+      moved.append(side.rename(released(side)))
+    except OSError:
+      pass  # The transcript is gone, so nothing can resume this folder.
+  return moved
+
+
+def reclaim_released_claude_sessions(data_dir: str | Path) -> int:
+  """Delete every session moved aside, including leftovers of an interrupted clear."""
+  root = Path(data_dir) / "cli-auth" / "claude" / "projects"
+  if root.is_symlink() or not root.is_dir():
+    return 0
+  freed = 0
+  for project in root.iterdir():
+    if project.is_symlink() or not project.is_dir():
+      continue
+    for entry in project.iterdir():
+      if not (entry.name.startswith(".") and _RELEASED in entry.name):
+        continue
+      try:
+        if entry.is_dir() and not entry.is_symlink():
+          size = app_dir_usage(entry)
+          shutil.rmtree(entry)
+        else:
+          size = entry.lstat().st_size
+          entry.unlink()
+      except OSError:
+        continue
+      freed += size
+  return freed

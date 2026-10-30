@@ -249,6 +249,17 @@ def app_dir_usage(app_dir: Path) -> int:
   return total
 
 
+def newest_change(path: Path) -> float:
+  """Newest modification time of ``path`` or anything beneath it, links unfollowed."""
+  newest = path.lstat().st_mtime
+  for candidate in path.rglob("*"):
+    try:
+      newest = max(newest, candidate.lstat().st_mtime)
+    except OSError:
+      pass
+  return newest
+
+
 # Content-Type sidecars live in a meta tree PARALLEL to the storage tree, never
 # inside it — so a `<path>.json` of stored MIME can't leak into an app's own
 # listing or be edited/served as if it were app data. The layout mirrors the

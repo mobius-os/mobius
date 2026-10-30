@@ -572,6 +572,7 @@ class RuntimeSupervisors:
                   title="Möbius storage is running low",
                   body=result["body"],
                   source_type="capacity",
+                  target="/shell/?settings=storage",
                   notification_id=notification_id,
                 )
             # notify_owner_async deliberately fails open. Suppress this tier

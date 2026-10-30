@@ -1,0 +1,166 @@
+/* Storage and Memory: a quiet box with two bars; details open below on request. */
+/* Bands reach the box edges; these mirror .settings__section padding. */
+.storage-memory { display: grid; gap: 14px; --storage-memory-inset: 17px; --storage-memory-bottom: 17px; }
+.storage-memory:focus { outline: none; }
+.storage-memory__heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 22px; }
+.storage-memory__title { margin: 0; font-size: 14px; font-weight: 600; }
+.storage-memory__status { flex: none; font-size: 12px; font-weight: 600; line-height: 1.4; padding: 2px 9px; border-radius: 999px; }
+.storage-memory__status--warning { color: var(--color-text-warning, #b45309); background: var(--color-background-warning-soft-alpha, rgba(245, 158, 11, 0.14)); }
+.storage-memory__status--danger { color: var(--color-text-danger, var(--danger)); background: var(--color-background-danger-soft-alpha, rgba(248, 113, 113, 0.14)); }
+
+.storage-memory__meter { display: grid; gap: 6px; }
+.storage-memory__meter-top { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+.storage-memory__meter-value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: end; }
+.storage-memory__meter-bottom { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.storage-memory__meter-bottom > :last-child { text-align: end; }
+.storage-memory__bar { position: relative; height: 8px; border-radius: 4px; background: var(--surface-2); }
+.storage-memory__fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--accent); transition: width 0.4s ease; }
+.storage-memory__meter--getting_low .storage-memory__fill,
+.storage-memory__meter--low .storage-memory__fill { background: var(--color-text-warning, #d97706); }
+.storage-memory__meter--paused .storage-memory__fill { background: var(--color-text-danger, var(--danger)); }
+.storage-memory__mark { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--muted); }
+.storage-memory__meter--paused .storage-memory__mark { background: var(--danger); }
+.storage-memory__note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+.storage-memory__toggle {
+  display: inline-flex; align-items: center; gap: 6px; justify-self: start;
+  min-height: 44px; padding: 0 2px; border: 0; background: none; cursor: pointer;
+  color: var(--text); font: inherit; font-size: 13px; font-weight: 500;
+}
+.storage-memory__toggle svg { color: var(--muted); transition: transform 0.2s ease; }
+.storage-memory__toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.storage-memory__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* Details toggle and sync share one row that stays put when details open.
+   The refresh icon's right edge lines up with the meters above. */
+.storage-memory__controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.storage-memory__sync { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.storage-memory__sync-label { color: var(--muted); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.storage-memory__refresh {
+  position: relative; display: inline-grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--muted); cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+/* 44px touch target around the 32px visible button. */
+.storage-memory__refresh::before { content: ""; position: absolute; inset: -6px; }
+.storage-memory__refresh:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.storage-memory__refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.storage-memory__refresh:disabled { cursor: default; }
+.storage-memory__refresh[aria-busy="true"] svg { animation: storage-memory-spin 0.9s linear infinite; }
+@keyframes storage-memory-spin { to { transform: rotate(360deg); } }
+
+/* Details: three bands split by edge-to-edge rules, so each group reads as
+   its own part of the box without nesting cards. */
+.storage-memory__details { display: grid; margin-top: -2px; }
+.storage-memory__group { margin-inline: calc(-1 * var(--storage-memory-inset)); padding: 16px var(--storage-memory-inset); border-top: 1px solid var(--border); }
+.storage-memory__group-head { display: flex; align-items: flex-start; gap: 12px; }
+/* Settings buttons pin to the top (align-self: flex-start); the size shares
+   their 32px line so both stay level beside a wrapping helper. */
+.storage-memory__group-head > .storage-memory__size { line-height: 44px; }
+.storage-memory__group-text { flex: 1; min-width: 0; }
+.storage-memory__group-title { margin: 0; font-size: 14px; font-weight: 600; }
+.storage-memory__group-helper { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+
+/* Rows share one column plan: name | size | action. Sizes and buttons sit on
+   the name's line, so they align across rows whatever the description length. */
+.storage-memory__items { margin: 12px 0 0; padding: 0 14px; list-style: none; border-radius: 10px; background: var(--surface-2); }
+.storage-memory__item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: "name size action" "sub sub ." "drawer drawer drawer";
+  align-items: center; column-gap: 12px; row-gap: 2px;
+  padding: 12px 0; border-top: 1px solid var(--border-light, var(--border));
+}
+.storage-memory__item:first-child { border-top: 0; }
+.storage-memory__item-name { grid-area: name; min-width: 0; font-size: 13.5px; font-weight: 500; overflow-wrap: anywhere; }
+.storage-memory__item-sub { grid-area: sub; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.storage-memory__item-sub--done { color: var(--green); }
+.storage-memory__item-sub--failed { color: var(--danger); }
+.storage-memory__item-action { grid-area: action; display: flex; justify-content: flex-end; gap: 8px; }
+.storage-memory__size { flex: none; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: end; white-space: nowrap; }
+.storage-memory__stored small { font-size: 12px; font-weight: 400; }
+.storage-memory__item > .storage-memory__size { grid-area: size; }
+.storage-memory .settings__btn { margin: 0; white-space: nowrap; min-height: 44px; min-width: 64px; }
+/* Keep the compact visible button's touch target at 44px. */
+.storage-memory__item-action .settings__btn { position: relative; min-height: 32px; min-width: 56px; }
+.storage-memory__item-action .settings__btn::before { content: ""; position: absolute; inset: -6px 0; }
+.storage-memory .storage-memory__stop { color: var(--danger); }
+
+/* The confirm step slides open under its row and back; its fixed words are
+   there at once, only the size fills in, so the row never jumps. */
+.storage-memory__drawer {
+  grid-area: drawer; display: grid; grid-template-rows: 0fr; opacity: 0;
+  transition: grid-template-rows 0.24s cubic-bezier(0.2, 0, 0, 1), opacity 0.18s ease;
+}
+.storage-memory__drawer[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.storage-memory__drawer-inner { min-height: 0; overflow: hidden; visibility: hidden; transition: visibility 0s linear 0.24s; }
+.storage-memory__drawer[data-open="true"] .storage-memory__drawer-inner { visibility: visible; transition-delay: 0s; }
+.storage-memory__confirm { display: grid; gap: 10px; margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.storage-memory__confirm-lead { margin: 0; font-size: 13.5px; font-weight: 500; }
+.storage-memory__confirm-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 12.5px; line-height: 1.5; }
+.storage-memory__confirm-facts dt { color: var(--muted); }
+.storage-memory__confirm-facts dd { margin: 0; }
+.storage-memory__confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.storage-memory .storage-memory__confirm-clear { min-width: 124px; }
+
+/* Running work owns the controls; process estimates are secondary detail. */
+.storage-memory__count { flex: none; color: var(--muted); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.storage-memory__turns { list-style: none; padding: 0; margin: 8px 0 0; }
+.storage-memory__turn { padding: 12px 0; border-top: 1px solid var(--border-light, var(--border)); }
+.storage-memory__turn:first-child { border-top: 0; }
+.storage-memory__turn-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; align-items: start; }
+.storage-memory__turn-name { font-size: 14px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.storage-memory__turn-main > .settings__btn { grid-column: 2; grid-row: 1 / 3; }
+.storage-memory__turn-queued { grid-column: 1 / -1; margin: 2px 0 0; }
+.storage-memory__turn-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.storage-memory__turn-meta .status-dot { font-size: inherit; font-weight: 400; color: var(--muted); }
+.storage-memory__chat-link { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 4px 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 12.5px; cursor: pointer; }
+.storage-memory__chat-link:focus-visible, .storage-memory__memory-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.storage-memory__empty { margin: 0; padding: 14px 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.storage-memory__memory-details.storage-memory__group { padding-block: 4px; }
+.storage-memory__memory-details[open] { padding-bottom: 14px; }
+.storage-memory__memory-details summary { color: var(--accent); font-size: 12.5px; cursor: pointer; min-height: 44px; padding-block: 12px; }
+.storage-memory__memory-use { display: grid; margin: 8px 0 4px; font-size: 13px; }
+.storage-memory__memory-use div {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px;
+  padding: 6px 0; border-top: 1px solid var(--border-light, var(--border));
+}
+.storage-memory__memory-use div:first-child { border-top: 0; }
+.storage-memory__memory-use dt { color: var(--muted); }
+.storage-memory__memory-use dd { margin: 0; }
+
+/* The last band sits flush on the box's bottom edge, like the rules above it. */
+.storage-memory__details > :last-child { margin-bottom: calc(-1 * var(--storage-memory-bottom)); }
+.storage-memory__notice { padding: 12px 14px; border-radius: 8px; border-left: 3px solid var(--color-text-warning, #b45309); font-size: 13px; background: var(--color-background-warning-soft-alpha, rgba(245, 158, 11, .12)); }
+.storage-memory__notice p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.5; }
+.storage-memory__notice--danger { border-left-color: var(--danger); background: var(--color-background-danger-soft-alpha, rgba(248, 113, 113, .12)); }
+.storage-memory__notice-actions { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.storage-memory__notice .storage-memory__chat-link { font-weight: 500; }
+
+/* Kept to run Möbius pop-up rows. */
+.storage-memory-kept__intro { color: var(--muted); }
+.storage-memory-kept__list { margin: 4px 0 16px; padding: 0; list-style: none; }
+.storage-memory-kept__row { display: flex; align-items: flex-start; gap: 16px; padding: 10px 0; border-top: 1px solid var(--border); }
+.storage-memory-kept__row:first-child { border-top: 0; }
+.storage-memory-kept__text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.storage-memory-kept__name { font-size: 14px; font-weight: 500; }
+.storage-memory-kept__sub { color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.storage-memory-kept__contribute { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 8px; background: var(--surface-2); margin-bottom: 14px; }
+.storage-memory-kept__contribute p { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--muted); font-size: 13px; }
+.storage-memory-kept__contribute .settings__btn { flex: none; }
+.storage-memory-kept__note { color: var(--muted); font-size: 12.5px; margin: 0; }
+
+@container settings (max-width: 400px) {
+  .storage-memory { --storage-memory-inset: 14px; --storage-memory-bottom: 16px; }
+}
+
+@container settings (max-width: 420px) {
+  .storage-memory__item { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .storage-memory__memory-use div { grid-template-columns: minmax(0, 1fr) auto; }
+  .storage-memory-kept__contribute { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .storage-memory__fill, .storage-memory__toggle svg,
+  .storage-memory__drawer, .storage-memory__drawer-inner { transition: none; }
+  .storage-memory__refresh[aria-busy="true"] svg { animation: none; }
+}

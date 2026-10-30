@@ -32,6 +32,7 @@ from app.config import agent_scratch_root
 from app.database import SessionLocal
 from app.run_state import has_running_run
 from app.runner_registry import registry
+from app.storage_io import app_dir_usage, newest_change
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,25 @@ def scratch_for_chat(chat_id: str) -> Path:
   return path
 
 
+def _chat_is_idle(chat_id: str, alive_chat_ids: set[str] | None = None) -> bool:
+  """No live runner, running turn, or open browser still uses this chat.
+
+  A worker thread passes a registry snapshot taken on the event loop, because
+  the registry itself is only safe to read there.
+  """
+  if not chat_id:
+    return False
+  alive = (
+    registry.is_alive(chat_id) if alive_chat_ids is None else chat_id in alive_chat_ids
+  )
+  if alive:
+    return False
+  with SessionLocal() as db:
+    if has_running_run(db, chat_id):
+      return False
+  return browser_session_targets_for_chat(chat_id).idle
+
+
 def _detach_if_idle(chat_id: str) -> Path | None:
   """Atomically release one canonical scratch name if no run owns it.
 
@@ -71,13 +91,7 @@ def _detach_if_idle(chat_id: str) -> Path | None:
   starts claim the registry before their ChatRun row exists and rely on that
   uninterrupted sequence rather than taking the queue lock themselves.
   """
-  if not chat_id or registry.is_alive(chat_id):
-    return None
-  with SessionLocal() as db:
-    if has_running_run(db, chat_id):
-      return None
-  browser_scan = browser_session_targets_for_chat(chat_id)
-  if not browser_scan.idle:
+  if not _chat_is_idle(chat_id):
     return None
 
   path = agent_scratch_root() / _dir_name(chat_id)
@@ -130,17 +144,6 @@ async def release_if_idle(chat_id: str) -> int | None:
     # owns physical recovery of a detached directory that could not be removed.
     log.warning("detached agent scratch cleanup skipped %s: %s", detached, exc)
     return None
-
-
-def _last_change(path: Path) -> float:
-  """Newest modification time anywhere under ``path`` (scratch is small)."""
-  newest = path.lstat().st_mtime
-  for candidate in path.rglob("*"):
-    try:
-      newest = max(newest, candidate.lstat().st_mtime)
-    except OSError:
-      pass
-  return newest
 
 
 def _viewed_copies(root: Path) -> list[Path]:
@@ -222,7 +225,7 @@ async def sweep_idle_scratch(
       removed += 1
       continue
     try:
-      if await asyncio.to_thread(_last_change, entry) > cutoff:
+      if await asyncio.to_thread(newest_change, entry) > cutoff:
         kept_recent += 1
         continue
     except OSError as exc:
@@ -244,3 +247,36 @@ async def sweep_idle_scratch(
     "bytes": reclaimed,
     "kept_recent": kept_recent,
   }
+
+
+def idle_scratch_usage(
+  *, idle_seconds: float, alive_chat_ids: set[str], now: float | None = None,
+) -> dict:
+  """What ``sweep_idle_scratch(idle_seconds=...)`` would release right now.
+
+  Uses the sweep's own idleness rules so the owner's confirm step states the
+  same chats and size the sweep then deletes. The sweep re-checks each chat
+  under its lock, so a chat that starts in between still keeps its files.
+  """
+  root = agent_scratch_root()
+  usage = {"bytes": 0, "chats": 0, "kept_chats": 0}
+  if not root.is_dir():
+    return usage
+  cutoff = (time.time() if now is None else now) - idle_seconds
+  for entry in root.iterdir():
+    if not entry.is_dir() or entry.is_symlink():
+      continue
+    try:
+      released = bool(_RELEASED_DIR.fullmatch(entry.name))
+      if not released and (
+        newest_change(entry) > cutoff
+        or not _chat_is_idle(entry.name, alive_chat_ids)
+      ):
+        usage["kept_chats"] += 1
+        continue
+      size = app_dir_usage(entry)
+    except OSError:
+      continue
+    usage["bytes"] += size
+    usage["chats"] += 0 if released else 1
+  return usage

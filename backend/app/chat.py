@@ -3044,9 +3044,24 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
   )
 
 
+class StopRefusedQueued(Exception):
+  """Stop was asked to keep typed queued messages, and the chat has some."""
+
+
+def _typed_pending_count(chat_id: str) -> int:
+  from app.database import SessionLocal
+
+  with SessionLocal() as state_db:
+    pending = state_db.query(models.Chat.pending_messages).filter(
+      models.Chat.id == chat_id,
+    ).scalar()
+  return sum(1 for entry in pending or [] if not entry.get("hidden"))
+
+
 async def stop_chat(
   chat_id: str | None = None, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
+  refuse_if_queued: bool = False,
 ) -> tuple[bool, list[str]]:
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
@@ -3059,7 +3074,10 @@ async def stop_chat(
   isn't double-sent. The global sweep (`chat_id=None`) returns `[]` for it —
   that path doesn't resend."""
   if chat_id is not None:
-    return await stop_chat_for(chat_id, db=db, actor=actor, actor_id=actor_id)
+    return await stop_chat_for(
+      chat_id, db=db, actor=actor, actor_id=actor_id,
+      refuse_if_queued=refuse_if_queued,
+    )
   from app.broadcast import _broadcasts
   # Snapshot `_broadcasts` via `list()` first — iterating the live
   # mapping can raise RuntimeError if a concurrent task creates a
@@ -3152,6 +3170,7 @@ async def stop_browser_grant_runs(grant_id: str, db: Session = None) -> dict:
 async def stop_chat_for(
   chat_id: str, db: Session = None, *,
   actor: str | None = None, actor_id: str | None = None,
+  refuse_if_queued: bool = False,
 ) -> tuple[bool, list[str]]:
   """Kills the agent subprocess for a specific chat.
 
@@ -3176,8 +3195,14 @@ async def stop_chat_for(
   the same per-chat transition gate as sends, settings changes, and provider
   handoffs: once Stop wins that gate, a racing send cannot observe the old
   handle, queue behind it, and then be stranded when Stop releases ownership.
+
+  ``refuse_if_queued`` raises ``StopRefusedQueued`` before anything stops when
+  the owner has typed messages queued. Owner sends queue only while holding
+  this same gate, so none can arrive between that check and the clear.
   """
   async with chat_queue.get_transition_lock(chat_id):
+    if refuse_if_queued and _typed_pending_count(chat_id):
+      raise StopRefusedQueued(chat_id)
     return await _stop_chat_for_locked(chat_id, db=db, actor=actor, actor_id=actor_id)
 
 

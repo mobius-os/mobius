@@ -12,6 +12,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'background-agents',
   'github',
   'models',
+  'storage',
 ])
 
 const KNOWN = new Set(SETTINGS_SECTIONS)

@@ -195,19 +195,34 @@ def _du_domain_sizes(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
   }
 
 
-def data_domains(
-  data_dir: str | Path,
-  *,
-  dir_sizer: Callable[[Path], dict[str, Any]] | None = None,
-) -> dict[str, dict[str, Any]]:
-  """Size-only per-domain attribution under ``data_dir``.
+# The owner-facing name of each domain. The storage alert and the Settings
+# Storage and Memory box both say these words, so the owner never has to
+# translate an internal key such as ``agent_scratch``.
+DOMAIN_LABELS: dict[str, str] = {
+  "database": "Database",
+  "provider_telemetry_codex": "Codex sessions",
+  "provider_telemetry_claude": "Claude sessions",
+  "chats": "Chats and uploads",
+  "agent_scratch": "Chat work files",
+  "browser_profiles": "Agent browsers",
+  "contributions": "Contribution copies",
+  "work": "Work folders",
+  "worktrees": "Work copies",
+  "compiled": "Compiled apps",
+  "apps": "Apps",
+  "shared": "Shared files",
+  "platform": "Möbius code",
+  "logs": "Logs",
+  "app_secrets": "App secrets",
+}
 
-  Provider telemetry (cli-auth/codex, cli-auth/claude) is byte totals ONLY — no
-  filename or content is read or returned — honoring the cli-auth boundary while
-  still making the incident's culprit class attributable.
-  """
-  data = Path(data_dir)
-  paths = {
+
+def domain_label(name: str) -> str:
+  return DOMAIN_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+def _domain_paths(data: Path) -> dict[str, Path]:
+  return {
     "provider_telemetry_codex": data / "cli-auth" / "codex",
     "provider_telemetry_claude": data / "cli-auth" / "claude",
     "chats": data / "chats",
@@ -223,24 +238,43 @@ def data_domains(
     "logs": data / "logs",
     "app_secrets": data / "app-secrets",
   }
+
+
+def data_domains(
+  data_dir: str | Path,
+  *,
+  dir_sizer: Callable[[Path], dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+  """Size-only per-domain attribution under ``data_dir``.
+
+  Provider telemetry (cli-auth/codex, cli-auth/claude) is byte totals ONLY — no
+  filename or content is read or returned — honoring the cli-auth boundary while
+  still making the incident's culprit class attributable.
+  """
+  paths = _domain_paths(Path(data_dir))
   domains: dict[str, dict[str, Any]] = {"database": _files_size(_db_paths())}
   if dir_sizer is not None:
     domains.update({name: dir_sizer(path) for name, path in paths.items()})
     return domains
+  domains.update(_size_domains(paths))
+  return domains
 
+
+def _size_domains(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
   try:
-    domains.update(_du_domain_sizes(paths))
+    return _du_domain_sizes(paths)
   except (OSError, subprocess.SubprocessError):
     # Minimal/dev images may lack GNU du. Keep the safe Python fallback, but
     # divide the aggregate wall-clock budget so every domain is attempted.
     slice_seconds = _DU_TIME_BUDGET_S / max(1, len(paths))
-    for name, path in paths.items():
-      domains[name] = _dir_size(
+    return {
+      name: _dir_size(
         path,
         deadline=time.monotonic() + slice_seconds,
         entry_cap=_DU_PER_DOMAIN_ENTRY_CAP,
       )
-  return domains
+      for name, path in paths.items()
+    }
 
 
 def _mount_facts(
@@ -302,6 +336,7 @@ def capacity_snapshot(
   if include_domains:
     domain_fn = domains_reader or data_domains
     snapshot["domains"] = domain_fn(data_dir)
+    snapshot["domains_captured_at"] = snapshot["captured_at"]
   return snapshot
 
 
@@ -314,11 +349,63 @@ _LATEST_SNAPSHOT: dict[str, Any] | None = None
 
 
 def set_latest_snapshot(snapshot: dict[str, Any] | None) -> None:
+  """Cache a copy of ``snapshot``, keeping the last domain sizes when it has none.
+
+  The monitor walks domains only every few ticks; the cheap ticks in between
+  must not erase the last known sizes. ``domains_captured_at`` keeps saying
+  when those sizes were actually measured. The caller's dict is not changed,
+  so a cheap tick's own alert never names a largest use from older sizes.
+  """
   global _LATEST_SNAPSHOT
   with _LATEST_LOCK:
-    _LATEST_SNAPSHOT = snapshot
+    _LATEST_SNAPSHOT = _carry_known_domains(snapshot, _LATEST_SNAPSHOT)
+
+
+def _carry_known_domains(
+  snapshot: dict[str, Any] | None, previous: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+  if snapshot is None:
+    return None
+  cached = dict(snapshot)
+  previous = previous or {}
+  if "domains" not in cached and "domains" in previous:
+    cached["domains"] = previous["domains"]
+    cached["domains_captured_at"] = previous.get("domains_captured_at")
+  if "forecast" not in cached and "forecast" in previous:
+    cached["forecast"] = previous["forecast"]
+  return cached
 
 
 def latest_snapshot() -> dict[str, Any] | None:
   with _LATEST_LOCK:
     return _LATEST_SNAPSHOT
+
+
+def measure_capacity_now(data_dir: str | Path) -> dict[str, Any]:
+  """Take a fresh domain-aware snapshot and make it the cached one.
+
+  The bounded ``du`` pass takes seconds, so only an explicit owner or operator
+  request calls this; ordinary reads use the cached snapshot.
+  """
+  snapshot = capacity_snapshot(data_dir, include_domains=True)
+  set_latest_snapshot(snapshot)
+  return snapshot
+
+
+def remeasure_domains(data_dir: str | Path, names: list[str]) -> dict[str, Any]:
+  """Re-size only ``names`` after a cleanup and fold them into the cache.
+
+  A cleanup changes one or two domains; re-walking all of /data for them
+  would make the owner wait for unrelated trees. Mount facts are re-read too,
+  because they are what the free-space bar shows.
+  """
+  global _LATEST_SNAPSHOT
+  paths = _domain_paths(Path(data_dir))
+  fresh = _size_domains({name: paths[name] for name in names if name in paths})
+  snapshot = capacity_snapshot(data_dir, include_domains=False)
+  with _LATEST_LOCK:
+    cached = _carry_known_domains(snapshot, _LATEST_SNAPSHOT)
+    if "domains" in cached:
+      cached["domains"] = {**cached["domains"], **fresh}
+    _LATEST_SNAPSHOT = cached
+  return cached

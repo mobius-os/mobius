@@ -2741,21 +2741,23 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     [...deletedChatIdsRef.current].map(confirmChatIdentityIsLive),
   ), [confirmChatIdentityIsLive])
 
+  // The one way the shell opens Settings for someone else (a mini-app, the
+  // agent's open_item, a notification tap, a chat link): navigate there and
+  // focus a known section. Navigation only; every action inside Settings stays
+  // the owner's.
+  const openSettingsSection = useCallback((section) => {
+    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+    if (activeViewRef.current !== 'settings') navToRef.current('settings')
+  }, [activeViewRef])
+
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
     refreshApps,
     notifyShell,
     setAppIntents,
     navToRef,
+    openSettingsSection,
   })
-
-  // The one way the shell opens Settings for someone else (a mini-app, the
-  // agent's open_item, a notification tap): navigate there and focus a known
-  // section. Navigation only; every action inside Settings stays the owner's.
-  const openSettingsSection = useCallback((section) => {
-    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
-    if (activeViewRef.current !== 'settings') navToRef.current('settings')
-  }, [activeViewRef])
 
   const openShellTarget = useCallback((target) => {
     if (target?.view === 'settings') {

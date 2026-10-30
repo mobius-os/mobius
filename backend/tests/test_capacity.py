@@ -60,7 +60,8 @@ def test_alert_body_names_the_pause_floor_in_plain_words():
   body = capacity_history.alert_body(snap, None)
   assert body == (
     "Möbius has 600 MB of 8.0 GB storage left. Chats pause automatically "
-    "below 410 MB. Ask Möbius in a chat to free up space, or grow the volume."
+    "below 410 MB. Open Storage and Memory in Settings to free up space, or "
+    "grow the volume."
   )
 
 
@@ -299,7 +300,7 @@ def test_alert_body_includes_top_domain_and_forecast():
   body = capacity_history.alert_body(snap, {"time_to_exhaustion_seconds": 3600})
   assert body.startswith("Möbius has 1.5 GB of storage left.")
   assert "free up space" in body
-  assert "provider_telemetry_codex" in body  # the largest domain
+  assert "The largest use is codex sessions (3.2 GB)." in body  # plain name
   assert "1.0h" in body
 
 
@@ -317,7 +318,7 @@ def test_alert_body_does_not_rank_partial_domain_totals():
 
   assert "Largest domain" not in body
   assert "scan-limited" in body
-  assert "contributions" in body
+  assert "contribution copies" in body
 
 
 def test_alert_state_roundtrip(tmp_path):
@@ -358,7 +359,7 @@ def test_run_capacity_tick_alerts_on_escalation_only(tmp_path):
   r1 = tick(int(1.5 * GIB))          # first critical -> alert
   assert r1["tier"] == "critical" and r1["alerted"] is True
   assert calls[-1]["notification_id"] == "capacity-critical-20260901"
-  assert "provider_telemetry_codex" in calls[-1]["body"]
+  assert "codex sessions" in calls[-1]["body"]
 
   r2 = tick(int(1.4 * GIB))          # still critical -> suppressed
   assert r2["alerted"] is False

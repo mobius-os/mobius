@@ -258,14 +258,13 @@ def debug_capacity(
   (no synchronous subtree walk). ``refresh=1`` forces a fresh domain-aware
   sample on demand (an explicit, bounded operator opt-in).
   """
-  from app.capacity import capacity_snapshot, latest_snapshot, set_latest_snapshot
+  from app.capacity import capacity_snapshot, latest_snapshot, measure_capacity_now
   from app.capacity_history import forecast, load_samples
 
   data_dir = get_settings().data_dir
   if refresh:
-    snapshot = capacity_snapshot(data_dir, include_domains=True)
+    snapshot = measure_capacity_now(data_dir)
     snapshot["forecast"] = forecast(load_samples(data_dir, limit=1000))
-    set_latest_snapshot(snapshot)
     return snapshot
   cached = latest_snapshot()
   if cached is not None:

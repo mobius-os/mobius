@@ -89,7 +89,7 @@ test('shell resolves raw deep-link app targets through the intent rail', () => {
   assert.match(intentNavigation, /findAppForOpenTarget\(updatedApps, target\)/)
   assert.match(intentNavigation, /navToRef\.current\('canvas'/)
   assert.match(intentNavigation, /\}, \[refreshApps, notifyShell\]\)/)
-  assert.match(intentNavigation, /\}, \[openAppWithIntent\]\)/)
+  assert.match(intentNavigation, /\}, \[openAppWithIntent, openSettingsSection\]\)/)
   assert.match(shell, /if \(Number\.isFinite\(deepLink\.appId\)\)/)
   assert.match(shell, /navigationEpochRef\.current === startedAtEpoch/)
   const numericBoot = shell.slice(

@@ -93,6 +93,7 @@ from app.routes import (
   contribution_reviews_router,
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
+  resources_router,
   github_access_router,
   reviewer_router,
   identity_router,
@@ -1083,6 +1084,7 @@ app.include_router(identity_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
+app.include_router(resources_router)
 app.include_router(theme_router)
 app.include_router(admin_router)
 app.include_router(self_reminders_router)

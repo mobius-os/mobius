@@ -1047,10 +1047,12 @@ export const api = {
       `/chats/${encodeURIComponent(chatId)}/goal-plan`,
       options,
     ),
-    stop: (chatId, options = {}) => apiFetch('/chat/stop', {
+    // refuseIfQueued: the server refuses instead of clearing typed queued
+    // messages, for callers that cannot resend them.
+    stop: (chatId, { refuseIfQueued = false, ...options } = {}) => apiFetch('/chat/stop', {
       ...options,
       method: 'POST',
-      body: JSON.stringify({ chat_id: chatId }),
+      body: JSON.stringify(refuseIfQueued ? { chat_id: chatId, refuse_if_queued: true } : { chat_id: chatId }),
     }),
     detail: (chatId, { limit, compact, anchor, signal, timeoutMs } = {}) => {
       const params = new URLSearchParams()
@@ -1742,6 +1744,19 @@ export const api = {
     rebuildStatus: () => apiFetch('/admin/rebuild'),
     // Drop an unclaimed host request so a stalled self-hosted update can retry.
     withdrawRebuildRequest: () => apiFetch('/admin/rebuild/request', { method: 'DELETE' }),
+  },
+  // Settings Storage and Memory box. Works without an agent by design.
+  resources: {
+    overview: async ({ refresh = false } = {}) => jsonOrThrow(
+      await apiFetch(`/resources${refresh ? '?refresh=true' : ''}`), 'Storage and memory are unavailable',
+    ),
+    previewCleanup: async (target) => jsonOrThrow(
+      await apiFetch(`/resources/cleanup/${encodeURIComponent(target)}`), 'Could not measure this now',
+    ),
+    runCleanup: async (target) => jsonOrThrow(
+      await apiFetch(`/resources/cleanup/${encodeURIComponent(target)}`, { method: 'POST' }),
+      'The cleanup did not finish',
+    ),
   },
   platform: {
     status: () => apiFetch('/platform/status'),

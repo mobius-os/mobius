@@ -88,7 +88,7 @@ def test_delegated_execution_bearer_cannot_stop_child_parent_foreign_or_all(
 
   calls = []
 
-  async def record_stop(chat_id, *, db=None, actor=None, actor_id=None):
+  async def record_stop(chat_id, *, db=None, actor=None, actor_id=None, refuse_if_queued=False):
     del db
     calls.append(chat_id)
     return False, []
@@ -118,3 +118,41 @@ def test_delegated_execution_bearer_cannot_stop_child_parent_foreign_or_all(
   assert owner_specific.status_code == 200, owner_specific.text
   assert owner_global.status_code == 200, owner_global.text
   assert calls == [chat_ids["owner-control"], None]
+
+
+def test_settings_stop_refuses_before_stopping_when_typed_messages_are_queued(
+  client, auth, chat, monkeypatch,
+):
+  """A caller that cannot resend cleared messages gets a refusal, not a clear."""
+  stopped = []
+
+  async def locked_stop(chat_id, **_kwargs):
+    stopped.append(chat_id)
+    return True, []
+
+  monkeypatch.setattr(chat_mod, "_stop_chat_for_locked", locked_stop)
+  monkeypatch.setattr(chat_mod, "_typed_pending_count", lambda _chat_id: 1)
+
+  refused = client.post(
+    "/api/chat/stop", json={"chat_id": chat.id, "refuse_if_queued": True}, headers=auth,
+  )
+  assert refused.status_code == 409
+  assert "queued messages" in refused.json()["detail"]
+  assert stopped == []
+
+  # The chat screen's own Stop is unchanged: it clears and resends the queue.
+  ordinary = client.post("/api/chat/stop", json={"chat_id": chat.id}, headers=auth)
+  assert ordinary.status_code == 200
+  assert stopped == [chat.id]
+
+
+def test_typed_queue_count_ignores_hidden_machine_entries(db, chat):
+  db.query(models.Chat).filter(models.Chat.id == chat.id).update({
+    "pending_messages": [
+      {"cid": "a", "content": "typed by the owner"},
+      {"cid": "b", "content": "helper result", "hidden": True},
+    ],
+  })
+  db.commit()
+
+  assert chat_mod._typed_pending_count(chat.id) == 1

@@ -92,6 +92,7 @@ identity_router = _load("identity")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
+resources_router = _load("resources")
 delegations_router = _load("delegations")
 chat_waits_router = _load("chat_waits")
 goal_plans_router = _load("goal_plans")
@@ -152,6 +153,7 @@ __all__ = [
   "push_router",
   "notifications_router",
   "debug_router",
+  "resources_router",
   "delegations_router",
   "chat_waits_router",
   "goal_plans_router",
