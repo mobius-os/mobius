@@ -1627,8 +1627,10 @@ async def patch_chat(
       chat.auto_resume_on_limit = body.auto_resume_on_limit
       # Existing chats keep their own stored policy. This only seeds the next
       # chat, matching other "last picked" defaults without making the setting
-      # global at runtime.
-      principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
+      # global at runtime. Only the owner's own input records that choice: an
+      # agent adjusting one chat must not rewrite the default for later chats.
+      if is_owner_input_principal(principal):
+        principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose

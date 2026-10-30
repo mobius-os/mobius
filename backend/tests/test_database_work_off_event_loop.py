@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 from app import delegations
+from app.routes import apps as apps_routes
 
 
 def _running_on_event_loop() -> bool:
@@ -153,6 +154,26 @@ def test_parent_wake_skips_the_history_scan_without_a_running_run(
 
   assert delegations._plan_parent_wake(chat.id, "source-run") is None
   assert read == [chat.id]
+
+
+def test_app_list_reads_run_off_the_event_loop(client, auth, monkeypatch):
+  seen = []
+  real_list = apps_routes._live_apps_for_drawer
+  real_tombstones = apps_routes._has_expired_app_tombstone
+
+  def live_apps(db):
+    seen.append(("list", _running_on_event_loop()))
+    return real_list(db)
+
+  def tombstones(db, cutoff):
+    seen.append(("tombstones", _running_on_event_loop()))
+    return real_tombstones(db, cutoff)
+
+  monkeypatch.setattr(apps_routes, "_live_apps_for_drawer", live_apps)
+  monkeypatch.setattr(apps_routes, "_has_expired_app_tombstone", tombstones)
+
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+  assert seen == [("tombstones", False), ("list", False)]
 
 
 def _freeze_provider_clock(monkeypatch, start=1_000_000.0):

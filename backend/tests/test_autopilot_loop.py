@@ -1053,7 +1053,12 @@ def test_stale_lease_then_second_failure_escalates(
   db = SessionLocal()
   try:
     notes = db.query(models.Notification).all()
-    assert any("needs you" in (n.title or "").lower() for n in notes)
+    escalations = [n for n in notes if "needs you" in (n.title or "").lower()]
+    assert escalations
+    # Tapping the push opens the escalated contribution, not the app's home.
+    assert escalations[-1].target == (
+      f"/shell/?app={app_id}&intent=review:{record_id}"
+    )
   finally:
     db.close()
 
