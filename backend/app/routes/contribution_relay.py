@@ -879,6 +879,15 @@ def _reviewed_public_metadata(record: dict) -> tuple[str, str]:
       "published.",
       code="relay_review_text_invalid",
     )
+  if plan.get("screenshots"):
+    # The bot cannot host images in the owner's fork; Send from the owner's
+    # own GitHub account carries them.
+    raise ContributionSubmitError(
+      "Screenshots can be sent only from your own GitHub account, not "
+      "through the Möbius bot. Connect GitHub, or ask the agent to prepare "
+      "this without screenshots. Nothing was published.",
+      code="relay_screenshots_unsupported",
+    )
   return (
     _validated_reviewed_title(plan.get("title")),
     _validated_reviewed_body(plan.get("body_draft")),

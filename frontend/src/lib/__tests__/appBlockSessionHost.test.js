@@ -29,8 +29,10 @@ test('every frame load is a new, never-reused document generation', () => {
 
 test('the init envelope carries the session and its document generation, nothing else', () => {
   const session = { sessionId: 's', actions: [{ key: 'a' }], retain: true, checkpoint: { id: 'c', data: 'd' }, extra: 'x' }
-  assert.deepEqual(blockSessionEnvelope(session, 4), { sessionId: 's', generation: 4, actions: [{ key: 'a' }],
+  assert.deepEqual(blockSessionEnvelope(session, 4), { sessionId: 's', generation: 4, actions: [{ key: 'a' }], items: [],
     checkpoint: { id: 'c', data: 'd' }, retain: true, recoveryError: null })
+  assert.deepEqual(blockSessionEnvelope({ ...session, items: [{ intent: 'review:a' }] }, 4).items, [{ intent: 'review:a' }],
+    'the init a document receives carries the listed item intents')
   assert.equal(blockSessionEnvelope(null, 4), null)
   assert.equal(blockSessionEnvelope(session, undefined), null)
 })

@@ -1,13 +1,147 @@
-/* Shared folders reuse the Settings card, provider rows and buttons; only their own pieces live here. */
-.shared-folders__intro {
-  margin: -4px 0 12px;
+/* Shared folders reuse Settings rows, provider rows and buttons; only their own pieces live here. */
+
+/* The Settings row: titled like AI providers, one › row that opens the page. */
+.settings__section.shared-folders-summary {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
-.shared-folders__list {
+.shared-folders-summary > .settings__section-title { margin: 0 0 5px; }
+.shared-folders-summary .shared-folders-summary__row {
+  margin-top: 12px;
+  /* The loaded row is two text lines plus padding; the placeholder is held to the same height so nothing below moves. */
+  box-sizing: border-box;
+  min-height: 70px;
+}
+
+.shared-folders-summary__icon {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.shared-folders-summary__attention {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.shared-folders__intro {
+  margin: 0 0 12px;
+}
+
+/* The page: one card per browser, its folders listed inside it. */
+.shared-folders__device {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.shared-folders__devices {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.shared-folders__device-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 10px 14px;
+}
+
+.shared-folders__device-icon {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.shared-folders__device--offline .shared-folders__device-icon {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.shared-folders__device-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.shared-folders__device-name {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.shared-folders__device-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-folders__device-chip {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.shared-folders__device-detail {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* Folder rows sit flat inside their browser's card instead of as cards of their own. */
+.shared-folders .shared-folders__device-folders > .provider-row {
+  border: 0;
+  border-top: 1px solid var(--border-light);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  /* Lined up under the device name: icon 34px + gap 12px + head padding 14px. */
+  padding: 10px 14px 10px 60px;
+}
+
+.shared-folders__device--offline .shared-folders__device-folders {
+  opacity: 0.6;
+}
+
+.shared-folders__device-note {
+  margin: 0;
+  padding: 10px 14px 12px 60px;
+  border-top: 1px solid var(--border-light);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.shared-folders__adder {
+  margin-top: 10px;
 }
 
 /* Scoped under the section so it wins over the generic .settings__btn--outline
@@ -220,24 +354,6 @@
   margin: 0 0 8px;
 }
 
-.shared-folders__others {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-light);
-}
-
-.shared-folders__others-title {
-  font-size: 12.5px;
-  color: var(--muted);
-  margin: 0 0 6px;
-}
-
-.shared-folders__others-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 /* The activity pill reuses the screen-control pill; keep long folder names on one line. */
 .shared-folder-activity__label {
   display: flex;
@@ -266,6 +382,11 @@
   justify-content: space-between;
 }
 
+/* Its Pause sits inside the row, so no empty action column pushes it in from the edge. */
+.shared-folders__other {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .shared-folders__other .shared-folders__other-pause {
   flex-shrink: 0;
   align-self: center;
@@ -289,4 +410,46 @@
   .shared-folders__prompt .settings__btn--sm {
     align-self: flex-start;
   }
+}
+
+/* Loading placeholders: the same boxes as the loaded rows, softly pulsing, so
+   the text appears once and nothing below it moves. */
+.shared-folders-skeleton__block {
+  /* --surface-2 vanishes on the card's own --surface, so lift it a little with the text colour. */
+  background: color-mix(in srgb, var(--text) 9%, var(--surface));
+  animation: shared-folders-pulse 1.6s ease-in-out infinite;
+}
+
+.shared-folders-skeleton__lines {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+}
+
+.shared-folders-skeleton__line {
+  display: block;
+  height: 10px;
+  border-radius: 5px;
+}
+
+.shared-folders__devices + .shared-folders-skeleton,
+.shared-folders__adder + .shared-folders-skeleton {
+  margin-top: 16px;
+}
+
+.shared-folders-skeleton__folder {
+  display: grid;
+  gap: 9px;
+  padding: 14px 14px 16px 60px;
+  border-top: 1px solid var(--border-light);
+}
+
+@keyframes shared-folders-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shared-folders-skeleton__block { animation: none; opacity: 0.7; }
 }

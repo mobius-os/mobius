@@ -6,7 +6,7 @@ import themeDefinitionSource from '../../theme.js?raw'
 
 export default function ProjectThemeResource({ onOpen }) {
   return <button type="button" className="project-theme-resource" onClick={onOpen}>
-    <span>Inherited Möbius theme <small>Read-only</small></span>
+    <span>Möbius theme reference <small>Read-only source</small></span>
     <ChevronRight width={16} height={16} aria-hidden="true" />
   </button>
 }

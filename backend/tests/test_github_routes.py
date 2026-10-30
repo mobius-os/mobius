@@ -4843,6 +4843,91 @@ def test_submit_route_resumes_signed_public_phase_without_republishing(
   ).exists()
 
 
+def test_submit_route_resumes_a_receipt_recorded_before_the_chat_card_retired(
+  client, owner_token, monkeypatch,
+):
+  """A pre-#1741 claim named the chat review card; its exact action still resumes."""
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "route-restart-retired-submitter"
+  head = "a" * 40
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  record = {
+    "id": record_id, "type": "pr", "status": "submitting",
+    "repo": "mobius-os/app-demo", "branch": "fix/restart",
+    "submitter": "chat-review-card",
+    "quality_review": _all_clear_review(head),
+    "plan": {
+      "action": "pr", "repo": "mobius-os/app-demo",
+      "repo_path": str(repo), "branch": "fix/restart",
+      "base_sha": "b" * 40, "head_sha": head,
+      "diff_sha256": "c" * 64, "title": "Restart safe",
+      "body_draft": "Exact body",
+    },
+  }
+  record["personal_submit_input_sha256"] = (
+    github_contributions._personal_publication_input_sha256(record)
+  )
+  _write_contribution(app_id, record_id, record, "reviewed")
+  record_path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  owner = github_routes._PersonalAttemptOwner(
+    app_id=app_id, record_id=record_id, record_path=record_path,
+    claimed=record, action_input={
+      "action": "submit", "publication_stage": "draft", "autopilot": False,
+      "submitter": "chat-review-card",
+    },
+  )
+  patch = {
+    "last_submit_stage": "pushed", "last_submit_push_sha": head,
+    "head_repository": "octocat/app-demo",
+  }
+  owner.event("branch_published", {
+    "action": "reconcile_pr", "head_sha": head,
+    "head_repository": "octocat/app-demo", "branch": "fix/restart",
+  }, patch)
+
+  monkeypatch.setattr(
+    github_routes, "_assert_personal_publication_source", lambda *_args: "exact",
+  )
+  monkeypatch.setattr(github_routes, "_equivalence_source_repo", lambda _r: None)
+  monkeypatch.setattr(
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: None,
+  )
+  seen = []
+
+  def reconcile(recovered, _diff, **kwargs):
+    seen.append(kwargs["prior_attempt_phase"])
+    return (
+      "https://github.com/mobius-os/app-demo/pull/92", 92,
+      {**patch, "url": "https://github.com/mobius-os/app-demo/pull/92",
+       "number": 92},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", reconcile)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200, response.text
+  assert seen == ["branch_published"]
+  assert response.json()["record"]["number"] == 92
+
+
+def test_retired_submitter_migration_never_matches_a_different_action():
+  legacy = {"action": "update_existing", "submitter": "chat-review-card"}
+  assert github_routes._personal_action_identity_matches(
+    legacy, {"action": "update_existing"},
+  )
+  assert not github_routes._personal_action_identity_matches(
+    legacy, {"action": "submit", "publication_stage": "draft", "autopilot": False},
+  )
+
+
 def test_submit_route_armed_receipt_does_not_bypass_reverted_source(
   client, owner_token, monkeypatch,
 ):

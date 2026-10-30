@@ -10,7 +10,7 @@
    again. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import useConfirmArming from './useConfirmArming.js'
-import { blockActions } from '../markdown/appBlock.js'
+import { blockActions, blockItems } from '../markdown/appBlock.js'
 import {
   sessionDocumentReset, sessionRetained, sessionState, sessionStateUpdate,
 } from '../markdown/appBlockSession.js'
@@ -28,6 +28,7 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   // Callbacks read the latest negotiation synchronously, before React commits.
   const negotiationRef = useRef(UNNEGOTIATED)
   const actions = useMemo(() => blockActions(block), [block])
+  const items = useMemo(() => blockItems(block), [block])
   const keys = useMemo(() => new Set(actions.map(action => action.key)), [actions])
   const arming = useConfirmArming({ state, generation: negotiation.generation, supported: negotiation.supported,
     confirmView, listEndView })
@@ -112,9 +113,9 @@ export default function useAppBlockSession({ block, near, revision = null, confi
   const checkpointData = state?.checkpoint?.data ?? null
   const recoveryError = state?.recoveryError ?? null
   const blockSession = useMemo(() => ({
-    sessionId, actions, retain: retained, recoveryError,
+    sessionId, actions, items, retain: retained, recoveryError,
     checkpoint: checkpointId ? { id: checkpointId, data: checkpointData } : null,
-  }), [sessionId, actions, retained, recoveryError, checkpointId, checkpointData])
+  }), [sessionId, actions, items, retained, recoveryError, checkpointId, checkpointData])
 
   return {
     sessionId, state, event, awaitingAck: event !== null, supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,

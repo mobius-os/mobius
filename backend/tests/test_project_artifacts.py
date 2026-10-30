@@ -357,3 +357,51 @@ def test_malformed_artifacts_json_never_500s(client, auth, db):
   ).json()["artifacts"]
   assert [a["id"] for a in artifacts] == ["ok-one"]
   assert artifacts[0]["source_missing"] is True
+
+
+def test_a_source_edit_after_a_build_marks_the_result_out_of_date(
+  client, auth, monkeypatch,
+):
+  async def copy_builder(*, root, source, output_dir, log_path):
+    (output_dir / source).write_text((root / source).read_text())
+
+  monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>One</h1>")
+  _write_file(client, auth, project, "style.css", "h1 {}")
+  created = client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+  asyncio.run(project_builders.run_build(project["id"], "site"))
+  built = _artifact(client, auth, project["id"], "site")
+  assert (built["status"], built["out_of_date"]) == ("ok", False)
+
+  # A dependency, not just the entry file, makes the built output stale.
+  current = client.get(
+    f"/api/projects/{project['id']}/file?path=style.css", headers=auth,
+  ).json()["revision"]
+  edited = client.put(
+    f"/api/projects/{project['id']}/file?path=style.css", headers=auth,
+    json={"content": "h1 { color: red }", "expected_revision": current},
+  )
+  assert edited.status_code == 200, edited.text
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is True
+
+  asyncio.run(project_builders.run_build(project["id"], "site"))
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+
+def test_source_fingerprint_ignores_build_outputs_and_git(tmp_path):
+  (tmp_path / "main.tex").write_text("x")
+  before = project_builders.source_fingerprint(tmp_path)
+  (tmp_path / "artifacts" / "doc" / "output").mkdir(parents=True)
+  (tmp_path / "artifacts" / "doc" / "output" / "main.pdf").write_text("pdf")
+  (tmp_path / ".git").mkdir()
+  (tmp_path / ".git" / "HEAD").write_text("ref")
+  assert project_builders.source_fingerprint(tmp_path) == before
+  (tmp_path / "chapter.tex").write_text("y")
+  assert project_builders.source_fingerprint(tmp_path) != before

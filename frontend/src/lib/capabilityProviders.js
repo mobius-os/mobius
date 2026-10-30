@@ -13,6 +13,10 @@ import {
   createDeviceStorageProvider,
   DEVICE_STORAGE,
 } from './deviceStorage.js'
+import {
+  createLocationTrackingProvider,
+  LOCATION_TRACKING,
+} from './locationTrackingProvider.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 export const CAMERA_CAPTURE = 'media.camera.capture'
@@ -195,6 +199,7 @@ export function builtInCapabilityProviders(options = {}) {
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [DEVICE_STORAGE]: createDeviceStorageProvider(options.deviceStorage),
     [CAMERA_CAPTURE]: createCameraProvider(options.camera),
+    [LOCATION_TRACKING]: createLocationTrackingProvider(options.locationTracking),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
     [SPEECH]: createSpeechProvider(options.speech),
     [SPEECH_MODELS]: createSpeechModelsProvider({

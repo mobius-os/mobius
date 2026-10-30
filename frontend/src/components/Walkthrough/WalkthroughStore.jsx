@@ -1,5 +1,5 @@
 /* The shared catalog hook, the app card used by every app screen, and the App Store explainer
-   screen. Installing goes through useAppInstall and its access confirmation. */
+   screen. Installing goes through useAppInstall. */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import AppIcon from '../AppIcon.jsx'
@@ -86,7 +86,8 @@ export function useStoreCatalog(apps, wantedIds) {
           if ((manifest.id !== item.id && manifest.previous_id !== item.id) || typeof manifest.icon !== 'string') return
           const icon = new URL(manifest.icon, item.raw_base)
           if (icon.origin !== new URL(item.raw_base).origin || !icon.pathname.startsWith(new URL(item.raw_base).pathname)) return
-          const iconResponse = await apiFetch(`/proxy?url=${encodeURIComponent(icon.href)}`, { signal: controller.signal, timeoutMs: 10_000 })
+          // Icons render at most 44 CSS px; w asks the proxy for a small WebP instead of the full-size original.
+          const iconResponse = await apiFetch(`/proxy?url=${encodeURIComponent(icon.href)}&w=96`, { signal: controller.signal, timeoutMs: 10_000 })
           if (!iconResponse.ok) return
           const image = await iconResponse.blob()
           if (!image.type.startsWith('image/')) return
@@ -101,7 +102,7 @@ export function useStoreCatalog(apps, wantedIds) {
   return useMemo(() => ({ apps, storeApp, catalog, catalogError, icons }), [apps, storeApp, catalog, catalogError, icons])
 }
 
-export function StoreAppCard({ app, store, status, locked = false, onInstall }) {
+export function StoreAppCard({ app, store, status, onInstall }) {
   const { id, name, blurb } = app
   const stateRef = useRef(null)
   // When Installed replaces the button the focus was on, it follows, so keyboard users keep their place.
@@ -110,8 +111,8 @@ export function StoreAppCard({ app, store, status, locked = false, onInstall }) 
   }, [status?.state])
   const installed = installedApp(store.apps, id) || (status?.state === 'installed' ? { slug: id } : null)
   const listed = store.catalog?.has(id)
-  const busy = status?.state === 'checking' || status?.state === 'installing'
-  const label = status?.state === 'checking' ? 'Checking…' : status?.state === 'installing' ? 'Installing…' : status?.state === 'error' ? 'Try again' : listed || !store.catalog ? 'Install' : 'Not listed yet'
+  const busy = status?.state === 'installing'
+  const label = busy ? 'Installing…' : status?.state === 'error' ? 'Try again' : listed || !store.catalog ? 'Install' : 'Not listed yet'
   return <article className={`wt-store-card${installed ? ' is-installed' : ''}`}>
     {/* One stable icon identity (the slug) before and after install, so the artwork never flips back to initials. */}
     <AppIcon className="wt-store-card__icon" item={{ slug: id, icon_url: installed?.icon_url || store.icons[id] }} label={name} size={null} />
@@ -119,8 +120,8 @@ export function StoreAppCard({ app, store, status, locked = false, onInstall }) 
     <p>{blurb}</p>
     {installed
       ? <span className="wt-store-card__state" role="status" tabIndex={-1} ref={stateRef}><CheckIcon /> Installed</span>
-      : /* aria-disabled, not disabled: the button keeps focus while the access is checked, so focus can come back to it. */
-      <button type="button" className="wt-store-card__get" aria-label={`Install ${name}`} aria-disabled={!listed || busy || locked} onClick={() => { if (listed && !busy && !locked) onInstall(id) }}>{label}</button>}
+      : /* aria-disabled, not disabled: the button keeps focus while the app installs, so focus can come back to it. */
+      <button type="button" className="wt-store-card__get" aria-label={`Install ${name}`} aria-disabled={!listed || busy} onClick={() => { if (listed && !busy) onInstall(id) }}>{label}</button>}
   </article>
 }
 

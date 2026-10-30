@@ -110,7 +110,10 @@ export function sessionRetained(state, event) {
 
 /** A new document cannot own the previous document's controls or frozen
  *  confirmation. Unresolved ownership is held, disabled, until the new
- *  document acknowledges the exact checkpoint; anything else is discarded. */
+ *  document acknowledges the exact checkpoint; anything else is discarded.
+ *  Only `confirm` may cause an effect (building-apps.md "Passive block
+ *  sessions"), so an unacknowledged `confirm` is held, while an
+ *  unacknowledged `activate` or `cancel`, which change nothing, is not. */
 export function sessionDocumentReset(state, event = null) {
   const pendingConfirm = event?.event === 'confirm' && state?.ackNonce !== event.nonce
   const busy = state?.actions.some(action => action.busy)

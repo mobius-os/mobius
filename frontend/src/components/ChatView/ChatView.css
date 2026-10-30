@@ -453,11 +453,37 @@
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
+/* A reply's row is its own line under the reply, not an overlay in the
+   conversation gap: it keeps its space while hidden and while the reply is
+   still streaming, so settling, revealing or pinning it never moves the
+   transcript, and it always sits the same distance below the reply's last
+   line (its fixed height comes from .chat__msg-meta). Pulled left by the
+   copy button's padding so the glyph lines up with the reply's text. */
+.chat__msg-meta--start {
+  display: flex;
+  width: fit-content;
+  align-self: flex-start;
+  margin: 6px 0 0 -5px;
+  padding-top: 0;
+}
+/* Actions first, then the quiet time, reading from the reply's edge. */
+.chat__msg-meta--start .chat__ts { order: 1; margin-left: 4px; }
 .chat__msg-meta--visible {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
+}
+/* With a mouse, hovering a reply reveals its row; touch keeps the tap reveal
+   above, and owner messages keep tap only. Only the latest reply keeps its
+   row visible (ChatView). */
+@media (hover: hover) and (pointer: fine) {
+  .chat__reply:hover > .chat__msg-meta {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
 }
 .chat__ts {
   font-size: 11px;
@@ -470,7 +496,8 @@
    available (this is a plain tap target — never a press/hold interception,
    see chatUiPolish.test), but a single tap reveals a quiet ghost button
    beside the timestamp when one is present. */
-.chat__msg-copy {
+.chat__msg-copy,
+.chat__msg-retry {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -487,15 +514,20 @@
   opacity: 0.7;
   transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
 }
-.chat__msg-copy:active { transform: scale(0.94); }
+.chat__msg-copy:active,
+.chat__msg-retry:active { transform: scale(0.94); }
+.chat__msg-retry:disabled { cursor: default; opacity: 0.4; transform: none; }
 .chat__msg-copy--copied { color: var(--accent); opacity: 1; }
-.chat__msg-copy:focus-visible {
+.chat__msg-copy--failed { color: var(--danger); opacity: 1; }
+.chat__msg-copy:focus-visible,
+.chat__msg-retry:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
   opacity: 1;
 }
 @media (hover: hover) and (pointer: fine) {
-  .chat__msg-copy:hover {
+  .chat__msg-copy:hover,
+  .chat__msg-retry:hover:not(:disabled) {
     background: var(--surface-2); /* CONTRACT: secondary opaque fill */
     color: var(--text);
   }

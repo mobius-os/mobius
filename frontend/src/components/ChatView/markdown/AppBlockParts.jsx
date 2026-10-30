@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appFrameVersion } from '../../../lib/appVersion.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { openInternalLink } from '../internalLink.js'
-import { transcriptHostRequest } from './appBlock.js'
+import { appBlockHref, transcriptHostRequest } from './appBlock.js'
 import './AppBlock.css'
 
 export const AppCanvas = lazy(() => import('../../AppCanvas/AppCanvas.jsx'))
@@ -107,12 +107,19 @@ export function StaticAppBlock({ block, app, appsLoading, onInternalNav, section
   useEffect(() => { onOpenChange?.(open) }, [onOpenChange, open])
   const navigate = useTranscriptNavigation(onInternalNav)
   const onHostRequest = useCallback((_, request) => transcriptHostRequest(request, { navigate }), [navigate])
-  const openable = block.inline && app
+  const actionable = block.inline && app
+  // `expand: false`: no inline view at all; an action is a link into the app.
+  const openable = actionable && block.expand
   const toggleView = intent => setViewIntent(current => current === intent ? null : intent)
-  const actionFor = target => openable && target
-    ? <button type="button" className="md-app-block__action" aria-pressed={viewIntent === target.intent}
+  const actionFor = target => {
+    if (!actionable || !target) return null
+    if (!openable) {
+      return <AppLink className="md-app-block__action" href={appBlockHref(block.app, target.intent)}
+        onInternalNav={onInternalNav}>{target.label}</AppLink>
+    }
+    return <button type="button" className="md-app-block__action" aria-pressed={viewIntent === target.intent}
       onClick={() => toggleView(target.intent)}>{target.label}</button>
-    : null
+  }
   const toggle = openable
     ? <button type="button" className="md-app-block__toggle" aria-expanded={viewIntent !== null}
       onClick={() => setViewIntent(current => current === null ? block.intent : null)}>

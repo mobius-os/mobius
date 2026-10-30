@@ -43,24 +43,41 @@ test('messageCopyText falls back to plain content; system rows copy nothing', ()
 })
 
 test('the copy button is a plain tap target on the shared clipboard helper', () => {
-  assert.match(copyButton, /copyPlainText/,
-    'reuse the shared clipboard helper (API + textarea fallback), not a bespoke path')
+  assert.match(copyButton, /writeClipboard\(payload\)/,
+    'reuse the shared clipboard writer (API + textarea fallback), not a bespoke path')
   assert.match(copyButton, /stopPropagation/,
     'a copy tap must not double as the user-row timestamp toggle')
   assert.doesNotMatch(copyButton, /onPointerDown|onTouchStart|onContextMenu/,
     'the copy affordance must never intercept press/hold — native selection stays intact')
 })
 
-test('only owner messages offer copy actions', () => {
+test('owner rows copy their own text; a reply copies only from its one end row', () => {
+  // Per-row assistant copy (#1290) scattered buttons through every turn and
+  // was reverted (#1342). Replies own a single action row instead
+  // (replyFooter.test), so the transcript loop never derives assistant copy.
   assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(renderedMsg\) : ''/)
+  const reply = readFileSync(new URL('../AssistantReply.jsx', import.meta.url), 'utf8')
+  assert.equal(reply.split('<MessageMetaRow').length - 1, 1)
   assert.doesNotMatch(chatView, /speechText=|speechKey=|speechChatId=/)
   assert.doesNotMatch(chatView, /stopChatSpeech/)
+})
+
+test('a mouse hover reveals a reply’s row; only the latest reply keeps its row in view', () => {
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  const hover = css.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__reply:hover > \.chat__msg-meta \{[^}]*visibility: visible;/)
+  assert.ok(hover, 'hover reveal is limited to fine pointers so touch keeps tap-to-reveal')
+  assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
+    'owner messages keep their tap-only reveal')
+  assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
+    'the row only renders the visibility its owner decides')
+  assert.match(chatView, /metaVisible=\{last \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'the latest reply keeps its actions in view; owner rows never pin their timestamp')
 })
 
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {
   assert.ok(
     metaRow.indexOf('<time className="chat__ts">')
-      < metaRow.indexOf('<MessageCopyButton text={copyText} />'),
+      < metaRow.indexOf('<MessageCopyButton read={copy} />'),
     'copy must render immediately after the timestamp',
   )
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
@@ -85,4 +102,11 @@ test('the revealed action uses the shared shell copy icon without visible text',
   assert.match(copyButton, /import \{ Check, Copy \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
   assert.match(copyButton, /<Copy width=\{14\} height=\{14\} aria-hidden="true" \/>/)
   assert.doesNotMatch(copyButton, />Copy<\/span>/)
+})
+
+test('a copy that fails says so instead of silently doing nothing', () => {
+  assert.match(copyButton, /failed: 'Couldn’t copy'/)
+  assert.match(copyButton, /setCopyState\(copied \? 'copied' : 'failed'\)/)
+  assert.match(copyButton, /role="status" aria-live="polite"/,
+    'the outcome is announced, like tool-output copy')
 })

@@ -8,6 +8,7 @@ owner or an app-scoped token.
 """
 
 import asyncio
+import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from math import ceil, floor
 from time import monotonic
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from urllib.request import parse_http_list
 
 import httpx
@@ -25,6 +26,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.deps import authorize_current_owner_or_app_detached, reject_cross_site
+from app.image_previews import downscaled_webp
 from app.net_utils import (
   MAX_REDIRECTS as _MAX_REDIRECTS, pinned_client, validate_url_safe,
 )
@@ -67,6 +69,18 @@ _PROXY_MAX_BROWSER_AGE = 24 * 60 * 60
 # (now + 60) - now can come out as 59.99999999999999, which would otherwise
 # lose a whole second of freshness. Real hop time is far larger than this.
 _FRESHNESS_FLOAT_SLACK = 1e-6
+# A raw.githubusercontent.com path naming a full commit can never change.
+# COMMIT_PINNED_RAW_PATH in frontend/src/sw-cache-policy.js must stay the same
+# pattern, or the service worker caches cache-first what this never pins.
+_COMMIT_PINNED_RAW_PATH = re.compile(r"/[^/]+/[^/]+/([0-9a-f]{40})/")
+_IMMUTABLE_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+# `w` asks for an image no wider than this many pixels. Decoding is bounded
+# twice: image_previews shares its decode slots with chat previews, and this
+# gate keeps waiting requests on the event loop instead of in worker threads.
+_DOWNSCALE_MIN_WIDTH = 16
+_DOWNSCALE_MAX_WIDTH = 1600
+_downscale_gate = asyncio.Semaphore(2)
 
 ResponseCacheHeaders = Callable[[httpx.Response, float], dict[str, str]]
 
@@ -216,6 +230,18 @@ class _PrivateBrowserCacheHeaders:
       "cache-control": cache_control,
       "vary": "*" if "*" in self.vary else ", ".join(self.vary.values()),
     }
+
+
+def _pinned_commit(url: str) -> str | None:
+  parsed = urlparse(url)
+  if parsed.scheme != "https" or parsed.netloc != "raw.githubusercontent.com":
+    return None
+  # A dot segment, literal or percent-encoded, can resolve past the commit
+  # to a mutable branch path, so such a URL is never pinned.
+  if any(unquote(segment) in {".", ".."} for segment in parsed.path.split("/")):
+    return None
+  match = _COMMIT_PINNED_RAW_PATH.match(parsed.path)
+  return match[1] if match else None
 
 
 async def close_proxy_clients() -> None:
@@ -573,6 +599,7 @@ async def proxy_favicon(
 async def proxy_get(
   url: str,
   request: Request,
+  w: int | None = None,
   _: None = Depends(authorize_current_owner_or_app_detached),
 ):
   """Fetches a URL via GET and returns the raw response body.
@@ -586,7 +613,12 @@ async def proxy_get(
   Redirects are independently validated and pinned like app install. Each
   hop leases its own Host/SNI client; freshness and Vary restrictions apply
   across the whole chain. Browser validators are never forwarded: a cached
-  proxy URL cannot establish which origin will serve its next read.
+  proxy URL cannot establish which origin will serve its next read. The one
+  exception is a commit-pinned raw.githubusercontent.com read that stays on
+  the same commit: its bytes can never change, so it may be cached for a year.
+
+  `w` downscales a complete PNG, JPEG, WebP or GIF response wider than `w`
+  pixels to a WebP; anything else is returned unchanged.
   """
   headers = {"User-Agent": _PROXY_USER_AGENT}
   try:
@@ -599,14 +631,34 @@ async def proxy_get(
     raise HTTPException(
       504, f"Upstream did not finish within {_EXCHANGE_DEADLINE} seconds.",
     ) from None
+  response_headers = read.forwarded_headers
+  complete = read.status_code == 200 and len(read.body) < _MAX_BYTES
+  commit = _pinned_commit(url)
+  if (
+    complete
+    and commit is not None
+    and _pinned_commit(read.final_url) == commit
+    and response_headers.get("cache-control") != "no-store"
+  ):
+    response_headers = {
+      **response_headers, "cache-control": _IMMUTABLE_CACHE_CONTROL,
+    }
+  body = read.body
+  media_type = (
+    read.content_type if read.status_code == 304
+    else read.content_type or "application/octet-stream"
+  )
+  if w is not None and complete:
+    width = min(max(w, _DOWNSCALE_MIN_WIDTH), _DOWNSCALE_MAX_WIDTH)
+    async with _downscale_gate:
+      downscaled = await asyncio.to_thread(downscaled_webp, body, width)
+    if downscaled is not None:
+      body, media_type = downscaled, "image/webp"
   return Response(
-    content=read.body,
+    content=body,
     status_code=read.status_code,
-    headers=read.forwarded_headers,
-    media_type=(
-      read.content_type if read.status_code == 304
-      else read.content_type or "application/octet-stream"
-    ),
+    headers=response_headers,
+    media_type=media_type,
   )
 
 

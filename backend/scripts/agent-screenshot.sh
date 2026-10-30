@@ -638,6 +638,79 @@ PY
 fi
 read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT VIEWPORT_PIXEL_RATIO <<<"$NORMALIZED_VIEWPORT"
 
+# Fail fast when the container lacks the headroom a Chromium launch and render
+# need, instead of dying mid-capture with a generic failure (observed: capture
+# death at ~57 MiB free of the cgroup cap). memory.current counts reclaimable
+# page cache, so inactive_file is added back before comparing.
+MIN_FREE_MEMORY_MB="${MOBIUS_SCREENSHOT_MIN_FREE_MB:-150}"
+AVAILABLE_MEMORY_MB="$(python3 - <<'PY'
+from pathlib import Path
+
+def read_int(path: str) -> int | None:
+  try:
+    text = Path(path).read_text().strip()
+  except OSError:
+    return None
+  return None if text == "max" else int(text)
+
+limit = read_int("/sys/fs/cgroup/memory.max")
+current = read_int("/sys/fs/cgroup/memory.current")
+if limit is not None and current is not None:
+  reclaimable = 0
+  try:
+    for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines():
+      if line.startswith("inactive_file "):
+        reclaimable = int(line.split()[1])
+        break
+  except OSError:
+    pass
+  print((limit - current + reclaimable) // 1048576)
+else:
+  for line in Path("/proc/meminfo").read_text().splitlines():
+    if line.startswith("MemAvailable:"):
+      print(int(line.split()[1]) // 1024)
+      break
+PY
+)" || AVAILABLE_MEMORY_MB=""
+if [ -n "$AVAILABLE_MEMORY_MB" ] \
+    && [ "$AVAILABLE_MEMORY_MB" -lt "$MIN_FREE_MEMORY_MB" ]; then
+  die "only ${AVAILABLE_MEMORY_MB} MiB of memory headroom remains (need ${MIN_FREE_MEMORY_MB} MiB to render a capture safely); finish or stop the memory-heavy work first, or lower MOBIUS_SCREENSHOT_MIN_FREE_MB deliberately"
+fi
+OUTPUT_DISK_FREE_MB="$(df -Pm "$(dirname "$OUT")" 2>/dev/null | awk 'NR==2 {print $4}')"
+if [ -n "$OUTPUT_DISK_FREE_MB" ] && [ "$OUTPUT_DISK_FREE_MB" -lt 20 ]; then
+  die "only ${OUTPUT_DISK_FREE_MB} MB free on the output volume; free disk space before capturing"
+fi
+
+# Headless Chromium has no pointing device, so it reports `hover: none` /
+# `pointer: none` and silently drops every `@media (hover: hover)` desktop
+# style from captures. At desktop widths, launch the session's browser through
+# the Blink-settings wrapper that restores desktop pointer capabilities. An
+# already-running session keeps its launch flags, so verify its capabilities
+# after startup and recycle it when they do not match the requested width.
+# The daemon resolves the executable from its own working directory, so the
+# wrapper path must be absolute.
+WRAPPER_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/chrome-desktop-pointer.sh"
+if [ "$VIEWPORT_WIDTH" -lt 1024 ] && [ "${AGENT_BROWSER_EXECUTABLE_PATH:-}" = "$WRAPPER_PATH" ]; then
+  export AGENT_BROWSER_EXECUTABLE_PATH="${MOBIUS_SCREENSHOT_REAL_BROWSER:-}"
+  unset MOBIUS_SCREENSHOT_REAL_BROWSER
+fi
+if [ "$VIEWPORT_WIDTH" -ge 1024 ] && [ -x "$WRAPPER_PATH" ] \
+    && [ "${AGENT_BROWSER_EXECUTABLE_PATH:-}" != "$WRAPPER_PATH" ]; then
+  REAL_BROWSER="${AGENT_BROWSER_EXECUTABLE_PATH:-}"
+  if [ -z "$REAL_BROWSER" ]; then
+    CONFIG_PATH="${AGENT_BROWSER_CONFIG:-/app/agent-browser-config.json}"
+    if [ -f "$CONFIG_PATH" ]; then
+      REAL_BROWSER="$(python3 -c \
+        'import json, sys; print(json.load(open(sys.argv[1])).get("executablePath", ""))' \
+        "$CONFIG_PATH" 2>/dev/null)" || REAL_BROWSER=""
+    fi
+  fi
+  if [ -n "$REAL_BROWSER" ] && [ -x "$REAL_BROWSER" ]; then
+    export MOBIUS_SCREENSHOT_REAL_BROWSER="$REAL_BROWSER"
+    export AGENT_BROWSER_EXECUTABLE_PATH="$WRAPPER_PATH"
+  fi
+fi
+
 # One chat can host parallel agents, but its browser commands target one
 # persistent profile. Serialize the complete navigation/capture transaction so
 # two helpers cannot interleave routes, viewport changes, or output ownership.
@@ -759,6 +832,12 @@ else
   if ! browser_set_viewport_retry; then
     die "no open browser page was available for current-page capture"
   fi
+  # A blank page never records a first paint, so the paint gate below would
+  # spend the whole capture budget on a page that has nothing to capture.
+  BROWSER_PHASE="current page presence"
+  if [ "$(browser_eval_retry "location.href" || true)" = '"about:blank"' ]; then
+    die "the browser has no prepared page (about:blank); open and prepare the page in this chat's browser session again before capturing"
+  fi
 fi
 
 # The URL can canonicalize before the replacement document has committed.
@@ -816,9 +895,39 @@ esac
 # public app hosts have their own entry shapes, but still receive controller
 # detachment + cache-busted navigation.
 SHELL_SETTLED_EXPR=""
-PUBLIC_APP_PAGE="$(browser_eval_retry \
-  "document.querySelector('body > iframe#app') !== null && document.querySelector('body > #status') !== null" \
+# Check pointer capabilities with the existing page-shape probe to keep the
+# capture within its command budget on slow servers.
+BROWSER_PHASE="page and pointer capabilities"
+PAGE_STATE="$(browser_eval_retry \
+  "[document.querySelector('body > iframe#app') !== null && document.querySelector('body > #status') !== null, matchMedia('(hover: hover)').matches]" \
   || true)"
+read -r PUBLIC_APP_PAGE HOVER_STATE <<<"$(printf '%s' "$PAGE_STATE" | python3 -c '
+import json, sys
+try:
+  values = json.load(sys.stdin)
+  assert isinstance(values, list) and len(values) == 2
+  assert all(isinstance(value, bool) for value in values)
+  print(*(str(value).lower() for value in values))
+except (ValueError, AssertionError):
+  print("unknown unknown")
+')"
+if [ "$PUBLIC_APP_PAGE" = unknown ]; then
+  die "browser could not verify page and pointer capabilities"
+fi
+EXPECTED_HOVER=false
+if [ "$VIEWPORT_WIDTH" -ge 1024 ] && [ -n "${MOBIUS_SCREENSHOT_REAL_BROWSER:-}" ]; then
+  EXPECTED_HOVER=true
+fi
+if { [ "$VIEWPORT_WIDTH" -lt 1024 ] && [ "$HOVER_STATE" = true ]; } || \
+   { [ "$EXPECTED_HOVER" = true ] && [ "$HOVER_STATE" = false ]; }; then
+  if [ "$CURRENT_PAGE" -eq 1 ]; then
+    die "current page uses pointer capabilities for a different viewport; open the page again before capturing"
+  elif [ "$SCREENSHOT_RECOVERY_COUNT" -eq 0 ]; then
+    restart_capture_once || die "browser pointer capabilities could not be reset"
+  else
+    die "browser pointer capabilities do not match the requested viewport"
+  fi
+fi
 case "$ROUTE" in
   /apps/*) : ;;
   *)

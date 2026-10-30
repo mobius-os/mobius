@@ -42,11 +42,11 @@ function renderWorkspace(props = {}, status) {
   )
 }
 
-test('Artifacts, Chats, and Files form one ordered project workspace without tabs', () => {
+test('Results, Chats, and Files form one ordered project workspace without tabs', () => {
   const markup = renderWorkspace()
   assert.doesNotMatch(markup, /role="tablist"|role="tab"|role="tabpanel"/)
   assert.match(markup, /aria-label="Project overview"/)
-  const artifacts = markup.indexOf('>Artifacts</h2>')
+  const artifacts = markup.indexOf('>Results</h2>')
   const chats = markup.indexOf('>Chats</h2>')
   const files = markup.indexOf('aria-label="Folder location"')
   assert.ok(artifacts >= 0 && artifacts < chats)
@@ -76,7 +76,7 @@ test('the first build shows progress instead of requesting a nonexistent Creatio
   }])
   const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, {client},
     React.createElement(ArtifactWorkspace, { projectId: 'building-project', artifactId: 'game' })))
-  assert.match(markup, /Building your Creation/)
+  assert.match(markup, /Building your Result/)
   assert.doesNotMatch(markup, /<iframe/)
   assert.match(markup, /disabled=""/)
 })
@@ -88,7 +88,7 @@ test('a failed rebuild keeps the previous Creation and explains what is shown', 
   }])
   const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, {client},
     React.createElement(ArtifactWorkspace, { projectId: 'failed-project', artifactId: 'game' })))
-  assert.match(markup, /Showing the last successful Creation/)
+  assert.match(markup, /Showing the last successful Result/)
   assert.doesNotMatch(markup, /Nothing built yet/)
 })
 
@@ -98,10 +98,10 @@ test('linked app Projects open and explicitly build the real app without a dupli
   assert.match(markup, />Build &amp; update app<\/button>/)
   assert.match(markup, /Save your files first/)
   assert.match(markup, />Open app<\/span>/)
-  assert.match(markup, />Artifacts<\/h2>/)
+  assert.match(markup, />Results<\/h2>/)
   assert.match(markup, /Open running Clock/)
   assert.doesNotMatch(markup, /draft preview/)
-  assert.match(markup, /Inherited Möbius theme/)
+  assert.match(markup, /Möbius theme reference/)
   assert.doesNotMatch(markup, /Editing the app’s linked source|class="project-source-notice"/)
   assert.doesNotMatch(renderWorkspace(), />Build &amp; update app<\/button>/)
 })
@@ -123,7 +123,7 @@ test('ordinary preserved copies use the normal Project workspace', () => {
   } })
   assert.match(markup, /aria-label="Preserved copy project"/)
   assert.match(markup, /aria-label="Project overview"/)
-  assert.match(markup, />Artifacts<\/h2>/)
+  assert.match(markup, />Results<\/h2>/)
   assert.match(markup, />(Collaborate|Share)<\/span>/)
   assert.doesNotMatch(markup, /app-source-workspace|>Build &amp; update app<\/button>/)
 })
@@ -154,7 +154,7 @@ test('old duplicate preview links lead to the installed app rather than an inert
 
 test('theme belongs beside Files, and collaboration and activity remain distinct actions', () => {
   const markup = renderWorkspace()
-  assert.ok(markup.indexOf('Inherited Möbius theme') > markup.indexOf('aria-label="Folder location"'))
+  assert.ok(markup.indexOf('Möbius theme reference') > markup.indexOf('aria-label="Folder location"'))
   assert.match(markup, /aria-label="(?:Collaborate|Share project)"/)
   assert.match(markup, /aria-label="Project activity"/)
   assert.doesNotMatch(markup, /No uncommitted changes|Checking local changes/)
@@ -213,4 +213,37 @@ test('main-pane diff failures and binary changes have honest states', async () =
   assert.match(render({ query: {}, changed: false }), /No saved changes against HEAD/)
   assert.match(render({ query: { isError: true }, changed: true }), /Retry diff/)
   assert.match(render({ query: { data: { binary: true } }, changed: true }), /Binary file changed/)
+})
+
+test('a shared repository of new files explains the summary while retaining expanded counts and versioning', () => {
+  const markup = renderWorkspace({}, {
+    available: true, repository_scope: 'shared', branch: 'main', truncated: false,
+    line_stats: { available: true, additions: 121, deletions: 0 },
+    changes: [{ path: 'index.html', status: 'untracked', additions: 121, deletions: 0 }],
+    counts: { untracked: 1 },
+  })
+  const changes = markup.slice(markup.indexOf('project-finder__changes'), markup.indexOf('project-finder__search'))
+  const summary = changes.slice(0, changes.indexOf('</summary>'))
+  assert.match(summary, /> New files<|>New files</)
+  assert.match(summary, />1 file</)
+  assert.doesNotMatch(summary, /121 additions/)
+  assert.match(changes, /Start versioning/)
+  assert.match(changes, /121 additions and 0 deletions/)
+  assert.match(changes, /View changes in index.html/)
+})
+
+test('tracked changes and project-owned repositories retain their ordinary line summary', () => {
+  for (const status of [
+    { repository_scope: 'shared', counts: { untracked: 1, modified: 1 } },
+    { repository_scope: 'project', counts: { untracked: 1 } },
+    { repository_scope: 'shared', counts: { untracked: 1 }, truncated: true },
+  ]) {
+    const markup = renderWorkspace({}, {
+      available: true, changes: [], line_stats: { available: true, additions: 121, deletions: 2 }, ...status,
+    })
+    const summary = markup.slice(markup.indexOf('project-finder__changes'), markup.indexOf('</summary>', markup.indexOf('project-finder__changes')))
+    assert.match(summary, /Changes/)
+    assert.match(summary, /121 additions and 2 deletions/)
+    assert.doesNotMatch(summary, /New files/)
+  }
 })

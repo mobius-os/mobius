@@ -139,7 +139,7 @@ test('retained sends move into the tray while authoritative failures restore the
   const freshSend = chatView.slice(freshStart, silentStart)
   assert.match(
     freshSend,
-    /const keepQueued = shouldKeepQueuedAfterSendFailure[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedUserMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?clearFailedAttempt\(\)/,
+    /const keepQueued = shouldKeepQueuedAfterSendFailure[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedUserMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?clearComposerFailedAttempt\(\)/,
     'a retained fresh send must leave the composer empty and own one queued cid row',
   )
   assert.match(

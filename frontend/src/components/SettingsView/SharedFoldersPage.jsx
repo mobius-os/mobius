@@ -1,13 +1,16 @@
-/* Settings → Shared folders: folders on this device that your agents can work in, without uploading. */
+/* Settings → Shared folders page: one card per browser, this one first, so it is clear which device must be open. */
 import { useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { FolderPlus } from '@openai/apps-sdk-ui/components/Icon'
-import { isSharedBrowserAuth } from '../../api/client.js'
 import useSharedFolders from '../../hooks/useSharedFolders.js'
 import { addRememberedFolder, addVisitFolder } from '../../lib/sharedFolders/folderActions.js'
+import { deviceLabel } from '../../lib/sharedFolders/folderStore.js'
 import SharedFolderRow from './SharedFolderRow.jsx'
+import SharedFolderDeviceCard from './SharedFolderDeviceCard.jsx'
 import OtherDeviceFolders from './OtherDeviceFolders.jsx'
 import ReadOnlyBrowserNote from './ReadOnlyBrowserNote.jsx'
+import useOtherDeviceFolders from './useOtherDeviceFolders.js'
+import { folderCount } from './sharedFolderLabels.js'
 import './SharedFoldersSection.css'
 
 const MODES = [
@@ -19,12 +22,12 @@ const MODES = [
   },
 ]
 
-export default function SharedFoldersSection() {
+export default function SharedFoldersPage() {
   const state = useSharedFolders()
+  const others = useOtherDeviceFolders(state.folders)
   const [notice, setNotice] = useState(null)
   const visitInput = useRef(null)
   const repickId = useRef(null)
-  if (isSharedBrowserAuth()) return null
 
   // A failure is shown as one; a done action may still say something (say, a folder shared Read only).
   const report = (outcome) => {
@@ -42,11 +45,18 @@ export default function SharedFoldersSection() {
   }
 
   return (
-    <section className="settings__section shared-folders" aria-labelledby="settings-shared-folders-title">
-      <h2 className="settings__section-title" id="settings-shared-folders-title">Shared folders</h2>
-      <p className="settings__subtext shared-folders__intro">Agents use files without uploading.</p>
-      <SectionBody state={state} report={report} pickForVisit={pickForVisit} />
+    <section className="shared-folders" aria-label="Shared folders">
+      <p className="settings__subtext shared-folders__intro">
+        Each browser shares its own folders. Agents reach a folder only while Möbius is open there.
+      </p>
+      <ThisBrowser state={state} report={report} pickForVisit={pickForVisit} />
       {notice && <Alert className="shared-folders__alert" color={notice.color} variant="soft" description={notice.text} />}
+      {!others.loaded && <DeviceSkeleton />}
+      {others.devices.length > 0 && (
+        <div className="shared-folders__devices">
+          <OtherDeviceFolders devices={others.devices} onPause={others.pause} />
+        </div>
+      )}
       <input
         ref={visitInput}
         className="shared-folders__visit-input"
@@ -61,38 +71,69 @@ export default function SharedFoldersSection() {
   )
 }
 
-function SectionBody({ state, report, pickForVisit }) {
-  if (state.status === 'loading') return <p className="settings__subtext">Loading…</p>
+function ThisBrowser({ state, report, pickForVisit }) {
+  if (state.status === 'loading') return <DeviceSkeleton />
   if (state.status === 'restart') {
-    return <p className="settings__notice">Restart Möbius to turn on shared folders. Use Restart under Updates below.</p>
+    return <p className="settings__notice">Restart Möbius to turn on shared folders. Use Restart under Updates in Settings.</p>
   }
   if (state.status === 'unavailable') {
     return <p className="settings__notice">This browser cannot share folders. Use Chrome, Edge, Safari or Firefox.</p>
   }
   return (
     <>
-      {state.folders.length > 0 && (
-        <div className="settings__providers shared-folders__list">
-          {state.folders.map(folder => (
-            <SharedFolderRow
-              key={folder.id}
-              folder={folder}
-              report={report}
-              onPickAgain={() => pickForVisit(folder.id)}
-            />
-          ))}
-        </div>
-      )}
-      {state.canPickNative
-        ? state.canEditNative
-          ? <RememberedFolderPicker report={report} hint="The Möbius app remembers the folder until you remove it." />
-          : <NativeFolderPicker report={report} />
-        : state.canRemember
-          ? <RememberedFolderPicker report={report} />
-          : <VisitFolderPicker onPick={() => pickForVisit()} />}
-      <OtherDeviceFolders localFolders={state.folders} />
+      <SharedFolderDeviceCard label={deviceLabel()} current detail={`${folderCount(state.folders.length)} · ${thisBrowserRights(state)}`}>
+        {state.folders.length > 0 ? (
+          <div className="shared-folders__device-folders">
+            {state.folders.map(folder => (
+              <SharedFolderRow
+                key={folder.id}
+                folder={folder}
+                report={report}
+                onPickAgain={() => pickForVisit(folder.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="shared-folders__device-note">No folders shared from this browser yet.</p>
+        )}
+      </SharedFolderDeviceCard>
+      <div className="shared-folders__adder">
+        <FolderAdder state={state} report={report} pickForVisit={pickForVisit} />
+      </div>
     </>
   )
+}
+
+/** A browser card's shape, empty: the page keeps its size while the folders load. */
+function DeviceSkeleton() {
+  return (
+    <div className="shared-folders__device shared-folders-skeleton" role="status" aria-busy="true" aria-label="Loading folders">
+      <div className="shared-folders__device-head" aria-hidden="true">
+        <span className="shared-folders__device-icon shared-folders-skeleton__block" />
+        <span className="shared-folders-skeleton__lines">
+          <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '40%' }} />
+          <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '58%' }} />
+        </span>
+      </div>
+      <div className="shared-folders-skeleton__folder" aria-hidden="true">
+        <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '34%' }} />
+        <span className="shared-folders-skeleton__block shared-folders-skeleton__line" style={{ width: '22%' }} />
+      </div>
+    </div>
+  )
+}
+
+function thisBrowserRights(state) {
+  if (state.canPickNative) return state.canEditNative ? 'Read & edit allowed' : 'Read only'
+  return state.canRemember ? 'Read & edit allowed' : 'Read only, for this visit'
+}
+
+/** How this browser adds a folder: the phone app's picker, Chrome or Edge's remembered one, or a one-visit pick. */
+function FolderAdder({ state, report, pickForVisit }) {
+  if (state.canPickNative && !state.canEditNative) return <NativeFolderPicker report={report} />
+  if (state.canPickNative) return <RememberedFolderPicker report={report} hint={NATIVE_HINT} />
+  if (state.canRemember) return <RememberedFolderPicker report={report} />
+  return <VisitFolderPicker onPick={() => pickForVisit()} />
 }
 
 /** Inside an older Möbius phone app: its own folder picker, read only (that app offers no writes). */
@@ -111,6 +152,7 @@ function NativeFolderPicker({ report }) {
   )
 }
 
+const NATIVE_HINT = 'The Möbius app remembers the folder until you remove it.'
 const BROWSER_HINT = 'Pick a folder inside Downloads, Desktop or Documents. Browsers do not share those whole folders.'
 
 function RememberedFolderPicker({ report, hint = BROWSER_HINT }) {

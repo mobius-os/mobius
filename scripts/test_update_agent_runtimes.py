@@ -5,6 +5,7 @@ from pathlib import Path
 import runpy
 import tempfile
 import unittest
+from urllib.error import HTTPError
 
 UPDATER = runpy.run_path(str(Path(__file__).with_name("update-agent-runtimes.py")))
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,8 +27,13 @@ class RuntimeUpdateTests(unittest.TestCase):
             "pip install \"openai-codex-cli-bin==${CODEX_SDK_VERSION}\"\n"
         )
         (self.root / "backend/requirements.txt").write_text("claude-agent-sdk==1.2.3\n")
+        # npm and PyPI latest tags, every version each publishes, and the CLI
+        # each SDK release declares.
         self.codex = "1.2.4"
         self.codex_sdk = "1.2.4"
+        self.npm_versions = {"1.2.3", "1.2.4"}
+        self.sdk_releases = {"1.2.3": "1.2.3", "1.2.4": "1.2.4"}
+        self.yanked = set()
         self.claude = "1.2.4"
         self.chrome = "1.0.0.1"
         self.urls = []
@@ -35,13 +41,21 @@ class RuntimeUpdateTests(unittest.TestCase):
 
     def fetch(self, url):
         self.urls.append(url)
-        if "registry.npmjs.org" in url:
+        if url == f"{UPDATER['NPM_CODEX']}/latest":
             return json.dumps({"version": self.codex})
-        if "pypi.org/pypi/openai-codex/" in url:
-            return json.dumps({"info": {
-                "version": self.codex_sdk,
-                "requires_dist": [f"openai-codex-cli-bin=={self.codex_sdk}"],
-            }})
+        if url.startswith(f"{UPDATER['NPM_CODEX']}/"):
+            version = url.rsplit("/", 1)[1]
+            if version not in self.npm_versions:
+                raise HTTPError(url, 404, "Not Found", {}, None)
+            return json.dumps({"version": version})
+        if url == f"{UPDATER['PYPI_CODEX']}/json":
+            return json.dumps({
+                "info": self.sdk_info(self.codex_sdk),
+                "releases": {version: [{"yanked": version in self.yanked}]
+                             for version in self.sdk_releases},
+            })
+        if url.startswith(f"{UPDATER['PYPI_CODEX']}/"):
+            return json.dumps({"info": self.sdk_info(url.split("/")[-2])})
         if "pypi.org/pypi/claude-agent-sdk/" in url:
             return json.dumps({"info": {"version": self.claude}})
         if url == UPDATER["CHROME_FEED"]:
@@ -53,6 +67,10 @@ class RuntimeUpdateTests(unittest.TestCase):
                 ] for name in ("chrome", "chrome-headless-shell")},
             }}})
         self.fail(f"Unexpected registry URL: {url}")
+
+    def sdk_info(self, version):
+        return {"version": version, "requires_dist": [
+            "pydantic>=2", f"openai-codex-cli-bin=={self.sdk_releases.get(version, version)}"]}
 
     def chrome_url(self, name):
         return (f"https://storage.googleapis.com/chrome-for-testing-public/"
@@ -127,14 +145,50 @@ class RuntimeUpdateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.propose()
 
-    def test_newer_cli_and_sdk_releases_must_match_before_writing(self):
-        before = (self.root / "Dockerfile").read_bytes()
-        for cli, sdk in (("1.2.4", "1.2.5"), ("1.2.5", "1.2.4")):
-            with self.subTest(cli=cli, sdk=sdk):
+    def test_newest_release_on_both_registries_is_paired_when_latest_tags_differ(self):
+        cases = {
+            "npm ahead": ("1.2.5", "1.2.4", {"1.2.4", "1.2.5"}, {}, set()),
+            "PyPI ahead": ("1.2.4", "1.2.5", {"1.2.4"}, {"1.2.5": "1.2.5"}, set()),
+            "newer SDK missing on npm": ("1.2.6", "1.2.5", {"1.2.4", "1.2.6"},
+                                         {"1.2.5": "1.2.5"}, set()),
+            "newer SDK yanked": ("1.2.5", "1.2.5", {"1.2.4", "1.2.5"},
+                                 {"1.2.5": "1.2.5"}, {"1.2.5"}),
+        }
+        for case, (cli, sdk, npm, extra_sdk, yanked) in cases.items():
+            with self.subTest(case):
+                self.codex, self.codex_sdk, self.yanked = cli, sdk, yanked
+                self.npm_versions = {"1.2.3"} | npm
+                self.sdk_releases = {"1.2.3": "1.2.3", "1.2.4": "1.2.4", **extra_sdk}
+                files, changes = self.propose()
+                self.assertIn("ARG CODEX_VERSION=1.2.4\n", files["Dockerfile"])
+                self.assertIn("ARG CODEX_SDK_VERSION=1.2.4\n", files["Dockerfile"])
+                self.assertEqual(changes, ["Codex: 1.2.3 → 1.2.4",
+                                           "Codex Python SDK: 1.2.3 → 1.2.4",
+                                           "Claude SDK + bundled CLI: 1.2.3 → 1.2.4"])
+
+    def test_no_newer_matching_codex_pair_skips_only_codex(self):
+        cases = {
+            "PyPI behind": ("1.2.4", "1.2.3", {"1.2.4"}, {}),
+            "npm skipped the SDK release": ("1.2.5", "1.2.4", {"1.2.5"}, {"1.2.4": "1.2.4"}),
+        }
+        for case, (cli, sdk, npm, sdk_releases) in cases.items():
+            with self.subTest(case):
                 self.codex, self.codex_sdk = cli, sdk
-                with self.assertRaisesRegex(ValueError, "releases differ"):
-                    self.propose()
-                self.assertEqual(before, (self.root / "Dockerfile").read_bytes())
+                self.npm_versions = {"1.2.3"} | npm
+                self.sdk_releases = {"1.2.3": "1.2.3", **sdk_releases}
+                files, changes = self.propose()
+                self.assertEqual(files, {"backend/requirements.txt": "claude-agent-sdk==1.2.4\n"})
+                self.assertEqual(changes, [
+                    f"Codex: kept 1.2.3; no newer release is on both npm ({cli}) and PyPI ({sdk})",
+                    "Claude SDK + bundled CLI: 1.2.3 → 1.2.4",
+                ])
+
+    def test_mismatched_codex_pins_are_refused(self):
+        dockerfile = self.root / "Dockerfile"
+        dockerfile.write_text(dockerfile.read_text().replace(
+            "CODEX_SDK_VERSION=1.2.3", "CODEX_SDK_VERSION=1.2.2"))
+        with self.assertRaisesRegex(ValueError, "pins differ"):
+            self.propose()
 
     def test_missing_release_or_network_error_writes_nothing(self):
         def unavailable(url):
@@ -150,13 +204,9 @@ class RuntimeUpdateTests(unittest.TestCase):
                 UPDATER["replace_pin"](text, pattern, "new")
 
     def test_sdk_runtime_mismatch_requires_review(self):
-        self.codex_sdk = "1.2.4"
-        with self.assertRaises(ValueError):
-            UPDATER["propose"](self.root, lambda url: json.dumps(
-                {"version": self.codex} if "registry.npmjs.org" in url else
-                {"info": {"version": self.codex_sdk, "requires_dist": ["openai-codex-cli-bin==1.1.0"]}}
-                if "openai-codex/" in url else {"info": {"version": self.claude}}
-            ))
+        self.sdk_releases["1.2.4"] = "1.1.0"
+        with self.assertRaisesRegex(ValueError, "does not declare its matching CLI"):
+            self.propose()
 
     def test_workflow_is_upstream_only_review_gated_and_dispatches_real_suite(self):
         workflow = (ROOT / ".github/workflows/agent-runtime-updates.yml").read_text()

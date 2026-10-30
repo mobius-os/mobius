@@ -6,8 +6,15 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
+NPM_CODEX = "https://registry.npmjs.org/@openai/codex"
+PYPI_CODEX = "https://pypi.org/pypi/openai-codex"
+PYPI_CLAUDE = "https://pypi.org/pypi/claude-agent-sdk/json"
+CODEX_PIN = r"(?m)^(ARG CODEX_VERSION=)[^\s]+$"
+CODEX_SDK_PIN = r"(?m)^(ARG CODEX_SDK_VERSION=)[^\s]+$"
+CLAUDE_PIN = r"(?m)^(claude-agent-sdk==)[^\s]+$"
 CHROME_FEED = ("https://googlechromelabs.github.io/chrome-for-testing/"
                "last-known-good-versions-with-downloads.json")
 CHROME_DOWNLOADS = "https://storage.googleapis.com/chrome-for-testing-public"
@@ -72,45 +79,80 @@ def replace_pin(text, pattern, value):
     return updated
 
 
+def pinned(text, pattern, name):
+    match = re.search(pattern, text)
+    if not match:
+        raise ValueError(f"Missing {name} pin")
+    return match[0][len(match[1]):]
+
+
+def declared_cli(sdk_info):
+    return [requirement.removeprefix("openai-codex-cli-bin==")
+            for requirement in (sdk_info["requires_dist"] or [])
+            if requirement.startswith("openai-codex-cli-bin==")]
+
+
+def on_npm(fetch, version):
+    try:
+        return json.loads(fetch(f"{NPM_CODEX}/{version}"))["version"] == version
+    except HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+
+
+def propose_codex(fetch, current):
+    """Pick the newest stable release both npm and PyPI publish, or keep the current pair.
+
+    The registries' latest tags often differ for days; an older release that both
+    publish is still a matched pair, and a lagging side only delays Codex.
+    """
+    npm_latest = json.loads(fetch(f"{NPM_CODEX}/latest"))["version"]
+    sdk = json.loads(fetch(f"{PYPI_CODEX}/json"))
+    sdk_latest = sdk["info"]["version"]
+    for name, latest in (("Codex", npm_latest), ("Codex Python SDK", sdk_latest)):
+        if stable(latest) < stable(current):
+            raise ValueError(f"Refusing {name} downgrade: {current} -> {latest}")
+    ceiling = min(stable(npm_latest), stable(sdk_latest))
+    candidates = sorted(
+        (version for version, files in sdk["releases"].items()
+         if re.fullmatch(r"\d+\.\d+\.\d+", version)
+         and stable(current) < stable(version) <= ceiling
+         and any(not file.get("yanked") for file in files)),
+        key=stable, reverse=True)
+    for version in candidates:
+        info = (sdk["info"] if version == sdk_latest
+                else json.loads(fetch(f"{PYPI_CODEX}/{version}/json"))["info"])
+        if declared_cli(info) != [version]:
+            raise ValueError(f"Codex SDK {version} does not declare its matching CLI runtime")
+        if on_npm(fetch, version):
+            return version, [f"Codex: {current} → {version}",
+                             f"Codex Python SDK: {current} → {version}"]
+    if npm_latest == sdk_latest == current:
+        return current, []
+    return current, [f"Codex: kept {current}; no newer release is on both npm "
+                     f"({npm_latest}) and PyPI ({sdk_latest})"]
+
+
 def propose(root, fetch=read_url, digest=sha256_of_url):
     dockerfile = (root / "Dockerfile").read_text()
     requirements = (root / "backend/requirements.txt").read_text()
-    codex_pin = r"(?m)^(ARG CODEX_VERSION=)[^\s]+$"
-    codex_sdk_pin = r"(?m)^(ARG CODEX_SDK_VERSION=)[^\s]+$"
-    claude_pin = r"(?m)^(claude-agent-sdk==)[^\s]+$"
-    codex = json.loads(fetch("https://registry.npmjs.org/@openai/codex/latest"))["version"]
-    sdk_info = json.loads(fetch("https://pypi.org/pypi/openai-codex/json"))["info"]
-    codex_sdk = sdk_info["version"]
-    sdk_bins = [requirement.removeprefix("openai-codex-cli-bin==")
-                for requirement in (sdk_info["requires_dist"] or [])
-                if requirement.startswith("openai-codex-cli-bin==")]
-    if sdk_bins != [codex_sdk]:
-        raise ValueError("Codex SDK release does not declare its matching CLI runtime")
-    if codex != codex_sdk:
-        raise ValueError("Codex npm CLI and Python SDK releases differ; wait for matching versions")
-    claude = json.loads(fetch("https://pypi.org/pypi/claude-agent-sdk/json"))["info"]["version"]
-    changes = []
-    for name, text, pattern, latest in [
-        ("Codex", dockerfile, codex_pin, codex),
-        ("Codex Python SDK", dockerfile, codex_sdk_pin, codex_sdk),
-        ("Claude SDK + bundled CLI", requirements, claude_pin, claude),
-    ]:
-        match = re.search(pattern, text)
-        if not match:
-            raise ValueError(f"Missing {name} pin")
-        current = match[0][len(match[1]):]
-        if stable(latest) < stable(current):
-            raise ValueError(f"Refusing {name} downgrade: {current} -> {latest}")
-        if latest != current:
-            changes.append(f"{name}: {current} → {latest}")
+    codex_current = pinned(dockerfile, CODEX_PIN, "Codex")
+    if pinned(dockerfile, CODEX_SDK_PIN, "Codex Python SDK") != codex_current:
+        raise ValueError("Codex CLI and Python SDK pins differ")
+    codex, changes = propose_codex(fetch, codex_current)
+    claude_current = pinned(requirements, CLAUDE_PIN, "Claude SDK + bundled CLI")
+    claude = json.loads(fetch(PYPI_CLAUDE))["info"]["version"]
+    if stable(claude) < stable(claude_current):
+        raise ValueError(f"Refusing Claude SDK + bundled CLI downgrade: {claude_current} -> {claude}")
+    if claude != claude_current:
+        changes.append(f"Claude SDK + bundled CLI: {claude_current} → {claude}")
     dockerfile, chrome_changes = propose_chrome(dockerfile, fetch, digest)
     changes += chrome_changes
-    if not changes:
-        return {}, []
 
-    dockerfile = replace_pin(dockerfile, codex_pin, codex)
-    dockerfile = replace_pin(dockerfile, codex_sdk_pin, codex_sdk)
-    requirements = replace_pin(requirements, claude_pin, claude)
+    dockerfile = replace_pin(dockerfile, CODEX_PIN, codex)
+    dockerfile = replace_pin(dockerfile, CODEX_SDK_PIN, codex)
+    requirements = replace_pin(requirements, CLAUDE_PIN, claude)
     files = {"Dockerfile": dockerfile, "backend/requirements.txt": requirements}
     return {path: content for path, content in files.items()
             if content != (root / path).read_text()}, changes

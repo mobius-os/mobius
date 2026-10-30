@@ -1,6 +1,7 @@
 """Bounded previews and intrinsic layout metadata for stored raster images."""
 
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -19,6 +20,17 @@ PREVIEW_MAX_EDGE = 1024
 PREVIEW_WEBP_QUALITY = 72
 PREVIEW_DIR = ".previews"
 _EXIF_ORIENTATION = 274
+
+# Remote bytes are untrusted and already in memory, so they get a tighter
+# decode budget than stored images. A 16 MP image is 64 MiB of RGBA pixels;
+# decoding, converting and resampling one peaks at about 150 MB, and the shared
+# generation slots below cap how many run at once.
+DOWNSCALE_MAX_PIXELS = 4096 * 4096
+_DOWNSCALE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
+# Commit-pinned downscales are cached by browsers as immutable. Changing this
+# or the encoding in downscaled_webp changes those bytes, so bump
+# PROXY_PINNED_CACHE in frontend/src/sw-cache-policy.js with it.
+DOWNSCALE_WEBP_QUALITY = 72
 
 # Pillow expands compressed images in memory. Two concurrent generators keep a
 # transcript moving without letting a screenshot-heavy chat occupy the entire
@@ -54,6 +66,13 @@ def dimensions_cache_path(file_path: Path, base: Path) -> Path:
   return preview_cache_path(file_path, base).with_suffix(".json")
 
 
+def _exif_orientation(source: Image.Image) -> int:
+  try:
+    return source.getexif().get(_EXIF_ORIENTATION, 1)
+  except (AttributeError, OSError, ValueError):
+    return 1
+
+
 def _oriented_dimensions(source: Image.Image) -> tuple[int, int] | None:
   """Read display dimensions from headers, including EXIF rotation.
 
@@ -62,11 +81,7 @@ def _oriented_dimensions(source: Image.Image) -> tuple[int, int] | None:
   cold-read cost out of repeated chat-detail responses.
   """
   width, height = source.size
-  try:
-    orientation = source.getexif().get(_EXIF_ORIENTATION, 1)
-  except (AttributeError, OSError, ValueError):
-    orientation = 1
-  if orientation in {5, 6, 7, 8}:
+  if _exif_orientation(source) in {5, 6, 7, 8}:
     width, height = height, width
   if width <= 0 or height <= 0:
     return None
@@ -220,6 +235,56 @@ def display_image_preview(file_path: Path, base: Path) -> Path | None:
           temp_path.unlink(missing_ok=True)
         except OSError:
           pass
+
+
+def downscaled_webp(data: bytes, max_width: int) -> bytes | None:
+  """Return a WebP of `data` at most `max_width` display pixels wide.
+
+  None means the caller should serve the original bytes: they are not a
+  supported raster image, cannot be decoded, exceed the pixel budget, are
+  already narrow enough, or would not get smaller. Never upscales; aspect
+  ratio, alpha, EXIF rotation and the colour profile are kept. Animated
+  sources keep their first frame.
+  """
+  with _GENERATION_SLOTS:
+    try:
+      with Image.open(io.BytesIO(data), formats=_DOWNSCALE_FORMATS) as source:
+        # Check the header size first: reading PNG EXIF may decode the image.
+        if source.width * source.height > DOWNSCALE_MAX_PIXELS:
+          return None
+        # 16-bit and float pixels clip to white in an 8-bit conversion.
+        if source.mode.startswith(("I", "F")):
+          return None
+        dimensions = _oriented_dimensions(source)
+        if dimensions is None or dimensions[0] <= max_width:
+          return None
+        # exif_transpose returns a full copy even for an upright image.
+        image = (
+          ImageOps.exif_transpose(source)
+          if _exif_orientation(source) in range(2, 9) else source
+        )
+        # Includes RGB with a tRNS colour key, which stays transparent only
+        # once expanded to an alpha channel.
+        target_mode = "RGBA" if image.has_transparency_data else "RGB"
+        if image.mode != target_mode:
+          image = image.convert(target_mode)
+        image.thumbnail((max_width, image.height), Image.Resampling.LANCZOS)
+        # A CMYK or grey profile would misdescribe the converted RGB pixels.
+        rgb_source = source.mode in {"RGB", "RGBA", "P", "PA"}
+        encoded = io.BytesIO()
+        image.save(
+          encoded,
+          format="WEBP",
+          quality=DOWNSCALE_WEBP_QUALITY,
+          method=4,
+          icc_profile=source.info.get("icc_profile") if rgb_source else None,
+        )
+    except Exception:
+      # Arbitrary network bytes can fail inside any decoder; the original
+      # response is always a correct answer.
+      return None
+  result = encoded.getvalue()
+  return result if len(result) < len(data) else None
 
 
 def discard_image_preview(file_path: Path, base: Path) -> None:

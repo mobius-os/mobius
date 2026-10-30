@@ -24,7 +24,8 @@ import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
 import ProjectChangeDiff, { ChangeLineCounts, ProjectFileDiff } from './ProjectChangeDiff.jsx'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { assembleProjectHtmlPreview } from '../../lib/projectPreview.js'
-import { artifactTypeForFile } from '../../lib/projectArtifacts.js'
+import { artifactTypeForFile, refreshSourceViews } from '../../lib/projectArtifacts.js'
+import { projectQueries } from '../../hooks/queries.js'
 import { lineNumbersFor, windowedCode } from '../../lib/codeWindow.js'
 import {
   addProjectCsvColumn,
@@ -39,6 +40,7 @@ import {
   gitChangeCount,
   gitIdentityLabel,
   gitStatusPresentation,
+  onlyUntrackedSharedFiles,
 } from '../../lib/projectGit.js'
 import { useHistoryDismissControls } from '../../hooks/useHistoryDismiss.jsx'
 import {
@@ -61,6 +63,7 @@ import ProjectPreviewFrame from './ProjectPreviewFrame.jsx'
 import { highlightCode } from '../ChatView/markdown/highlight.js'
 import { saveBlobAs } from '../../lib/saveFile.js'
 import './Projects.css'
+import './ProjectSourceEditor.css'
 
 // A scan that settles inside this window swaps content with no spinner at all —
 // only a genuinely slow read surfaces the indicator (deepseek-harness pattern).
@@ -95,6 +98,10 @@ function entryIcon(entry, size) {
   return <File size={size} />
 }
 
+// Matches the `project-finder (min-width: 680px)` container query that shows
+// the side pane beside the file list.
+const FINDER_WIDE_MIN_PX = 680
+
 function formatSize(bytes) {
   if (!Number.isFinite(bytes)) return ''
   if (bytes < 1024) return `${bytes} B`
@@ -118,6 +125,8 @@ export default function ProjectFinder({
   resources,
   fileSource,
   requestedFile,
+  entryFile,
+  onEntryFileHandled,
   onOpenGit,
 }) {
   const history = useHistoryDismissControls()
@@ -222,22 +231,6 @@ export default function ProjectFinder({
     }
   }, [source.id, history])
 
-  // A project artifact's edit-source control can return directly to its editable
-  // source. This is a mount-time destination rather than another browsing
-  // step, so it does not manufacture a Back-stack sentinel.
-  useEffect(() => {
-    const requestedPath = typeof requestedFile === 'string'
-      ? requestedFile
-      : requestedFile?.path
-    if (!requestedPath) return
-    const parent = parentPath(requestedPath)
-    let next = initFinder()
-    if (parent) next = finderOpenFolder(next, parent).state
-    next = finderOpenFile(next, requestedPath).state
-    navRef.current = next
-    setNav(next)
-  }, [requestedFile, source.id])
-
   // ── Folder listing: keep the stale view while the next folder loads, and only
   // reveal a spinner if the scan stays silent past SLOW_SCAN_DELAY_MS.
   const filesQuery = useQuery({
@@ -263,6 +256,7 @@ export default function ProjectFinder({
   const gitStatus = gitQuery.data
   const gitChanges = useMemo(() => gitStatus?.changes || [], [gitStatus?.changes])
   const gitTotal = gitChangeCount(gitStatus)
+  const onlyNewSharedFiles = onlyUntrackedSharedFiles(gitStatus)
   const [commitOpen, setCommitOpen] = useState(false)
   const [commitMessage, setCommitMessage] = useState('')
   const [versionBusy, setVersionBusy] = useState(false)
@@ -309,6 +303,53 @@ export default function ProjectFinder({
   const dirty = fileKind === 'text' && editing && content !== baseline
   const liveFileRef = useRef(null)
   liveFileRef.current = { selected, dirty, editing, revision }
+
+  const pendingEditRef = useRef(null)
+  const loadedFileRef = useRef(null)
+
+  // An artifact request enters the existing editor, without replacing a draft.
+  useEffect(() => {
+    const requestedPath = typeof requestedFile === 'string' ? requestedFile : requestedFile?.path
+    if (!requestedPath) return
+    if (liveFileRef.current?.dirty && selected !== requestedPath
+      && !window.confirm('Discard your unsaved changes and open another file?')) return
+    pendingEditRef.current = requestedPath
+    setViewSelection({ sourceId: source.id, path: requestedPath, mode: 'code' })
+    if (selected === requestedPath && loadedFileRef.current === requestedPath) {
+      if (!readOnly && fileKind === 'text' && !windowed) setEditing(true)
+      pendingEditRef.current = null
+      return
+    }
+    revealFile(requestedPath)
+  // This is a one-shot request, not a reaction to subsequent file changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedFile, source.id])
+
+  function revealFile(filePath) {
+    const parent = parentPath(filePath)
+    let next = initFinder()
+    if (parent) next = finderOpenFolder(next, parent).state
+    next = finderOpenFile(next, filePath).state
+    navRef.current = next
+    setNav(next)
+  }
+
+  // A fresh project entry fills the empty side pane with the main file, read
+  // only. It never replaces a selection or a draft, and the narrow layout keeps
+  // its file list because it has no empty pane to fill.
+  const finderRef = useRef(null)
+  useEffect(() => {
+    if (!entryFile?.path) return undefined
+    const frame = requestAnimationFrame(() => {
+      onEntryFileHandled?.()
+      const wide = (finderRef.current?.clientWidth || 0) >= FINDER_WIDE_MIN_PX
+      if (!wide || liveFileRef.current?.selected || liveFileRef.current?.dirty) return
+      revealFile(entryFile.path)
+    })
+    return () => cancelAnimationFrame(frame)
+  // One request per entry key; later file changes must not re-trigger it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entryFile?.key, source.id])
 
   const objectUrlRef = useRef(null)
   const replaceObjectUrl = useCallback((next) => {
@@ -376,6 +417,7 @@ export default function ProjectFinder({
     }
     const controller = new AbortController()
     let active = true
+    loadedFileRef.current = null
     setFileError('')
     setEditing(false)
     const spinner = setTimeout(() => { if (active) setFileLoading(true) }, SLOW_SCAN_DELAY_MS)
@@ -393,6 +435,11 @@ export default function ProjectFinder({
           const data = await jsonOrThrow(res, 'File open failed:')
           if (!active) return
           setContent(data.content); setBaseline(data.content); setFileKind('text')
+          loadedFileRef.current = selected
+          if (pendingEditRef.current === selected) {
+            if (!readOnly && !windowedCode(data.content, WINDOW_CHARS).windowed) setEditing(true)
+            pendingEditRef.current = null
+          }
           setRevision(data.revision || null); setRemoteChange(null)
           setPdfData(null); replaceObjectUrl(null)
         } else if (res.ok) {
@@ -418,11 +465,14 @@ export default function ProjectFinder({
         setFileError(cause?.message || 'Could not open that file.')
         setFileKind('error')
       } finally {
-        if (active) setFileLoading(false)
+        if (active) {
+          if (pendingEditRef.current === selected) pendingEditRef.current = null
+          setFileLoading(false)
+        }
       }
     })()
     return () => { active = false; controller.abort(); clearTimeout(spinner) }
-  }, [source, selected, replaceObjectUrl])
+  }, [source, selected, replaceObjectUrl, readOnly])
 
   const refreshSelectedFromRemote = useCallback(async ({ force = false, change = null } = {}) => {
     const snapshot = liveFileRef.current
@@ -497,7 +547,7 @@ export default function ProjectFinder({
     let delay = PROJECT_CHANGES_ACTIVE_MS
     const handleChanges = async (changes, truncated = false) => {
       if (!active || (!truncated && (!changes || changes.length === 0))) return false
-      await source.invalidate(queryClient)
+      await refreshSourceViews(queryClient, source, projectQueries.keys.artifacts(projectId))
       const selectedNow = liveFileRef.current?.selected
       if (
         selectedNow
@@ -641,8 +691,8 @@ export default function ProjectFinder({
 
   // ── File mutations ──────────────────────────────────────────────────────────
   const refetchWorkspace = useCallback(async () => {
-    await source.invalidate(queryClient)
-  }, [source, queryClient])
+    await refreshSourceViews(queryClient, source, projectQueries.keys.artifacts(projectId))
+  }, [source, queryClient, projectId])
 
   async function refreshOutputAfterSourceChange(changedPath) {
     if (!onSourceChanged) return
@@ -701,6 +751,12 @@ export default function ProjectFinder({
         setError(cause?.message || 'Could not save that file.')
       }
     } finally { setBusy(false) }
+  }
+
+  function cancelEditing() {
+    if (dirty && !window.confirm('Discard your unsaved changes?')) return
+    setContent(baseline)
+    setEditing(false)
   }
 
   async function saveConflictCopy() {
@@ -836,7 +892,7 @@ export default function ProjectFinder({
   const selectedName = selected ? selected.split('/').pop() : ''
 
   return (
-    <section className="project-finder" aria-label={`${projectName} workspace`} data-inspecting={inspecting || undefined}>
+    <section ref={finderRef} className="project-finder" aria-label={`${projectName} workspace`} data-inspecting={inspecting || undefined}>
       <div className="project-finder__body">
         <div className="project-finder__explorer">
           <div className="project-finder__explorer-scroll">
@@ -885,8 +941,10 @@ export default function ProjectFinder({
             {(gitStatus?.available || (!readOnly && gitQuery.isSuccess && canInitializeProjectGit(gitStatus))) && (
               <details className="project-finder__changes">
                 <summary>
-                  <span><GitBranch size={14} aria-hidden="true" /> Changes</span>
-                  <ChangeLineCounts {...(gitStatus.line_stats?.available ? gitStatus.line_stats : gitTotal === 0 ? { additions: 0, deletions: 0 } : {})} />
+                  <span><GitBranch size={14} aria-hidden="true" /> {onlyNewSharedFiles ? 'New files' : 'Changes'}</span>
+                  {onlyNewSharedFiles
+                    ? <span>{gitTotal} {gitTotal === 1 ? 'file' : 'files'}</span>
+                    : <ChangeLineCounts {...(gitStatus.line_stats?.available ? gitStatus.line_stats : gitTotal === 0 ? { additions: 0, deletions: 0 } : {})} />}
                 </summary>
                 <div className="project-finder__git-controls">
                   {gitStatus?.available && !canInitializeProjectGit(gitStatus) && (
@@ -921,6 +979,7 @@ export default function ProjectFinder({
                   <div><input id={`project-commit-${projectId}`} autoFocus value={commitMessage} maxLength={500} placeholder="What changed?" disabled={versionBusy} onChange={event => setCommitMessage(event.target.value)} /><button type="submit" disabled={versionBusy || !commitMessage.trim()}>{versionBusy ? 'Committing…' : 'Commit locally'}</button></div>
                   <small>The owner controls publishing separately.</small>
                 </form>}
+                {onlyNewSharedFiles && <ChangeLineCounts {...gitStatus.line_stats} />}
                 <div className="project-finder__change-list">
                   {gitChanges.map(change => <ProjectChangeDiff key={change.path} change={change} onOpenFile={openChange} />)}
                   {gitStatus.truncated && <small>Showing a partial change list.</small>}
@@ -1010,7 +1069,7 @@ export default function ProjectFinder({
           {!inspecting ? (
             <div className="project-finder__placeholder" role="status">
               <File size={38} strokeWidth={1.3} aria-hidden="true" />
-              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />{sourceDescription || 'Open a Creation to see the built result, or start a project chat to make changes.'}</p>
+              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />{sourceDescription || 'Open a result, or start a project chat to make changes.'}</p>
             </div>
           ) : (
             <>
@@ -1033,7 +1092,11 @@ export default function ProjectFinder({
                     <button type="button" onClick={() => { setEditing(true); selectView('code') }}><Pencil size={14} aria-hidden="true" /> Edit</button>
                   )}
                   {fileKind === 'text' && editing && (
-                    <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>
+                    <>
+                      <span className="project-source-editor__state" role="status">{dirty ? 'Editing · unsaved changes' : 'Editing · no changes'}</span>
+                      <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>
+                      <button type="button" disabled={busy} onClick={cancelEditing}>Cancel</button>
+                    </>
                   )}
                 </div>
               </header>
@@ -1141,7 +1204,7 @@ export default function ProjectFinder({
                     </div>
                   ) : htmlLike && fileView === 'preview' ? (
                     <div className="project-preview">
-                      <p>Isolated preview</p>
+                      <p>Live preview of your files. Results update when you build.</p>
                       {htmlPreviewError
                         ? <div className="project-document__empty" role="alert"><p>{htmlPreviewError}</p></div>
                         : <ProjectPreviewFrame projectId={projectId} sourcePath={selected} title={`${selected} preview`} srcDoc={htmlPreview} />}
@@ -1156,6 +1219,7 @@ export default function ProjectFinder({
                     />
                   ) : (
                     <div className="project-finder__code">
+                      <p className="project-source-editor__scroll-hint">Scroll sideways to see long lines</p>
                       {windowed && (
                         <p className="project-finder__notice" role="status">
                           Large file — showing lines 1–{codeWindow.shownLines.toLocaleString()} of {codeWindow.totalLines.toLocaleString()}. Download to see all of it.

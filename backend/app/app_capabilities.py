@@ -373,6 +373,25 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "default_limits": {"max_text_chars": 50_000},
     "hard_limits": {"max_text_chars": (1, 250_000)},
   },
+  # Controls tracking in the M\u00f6bius phone app. The app can ask only while
+  # it is visible; once started, the phone keeps recording in the background
+  # (under the OS location indicator) until stopped from a visible app again.
+  # Reading the recorded history is the separate `location_history_read`
+  # server permission.
+  "location.tracking": {
+    "version": 1,
+    "kind": "invoke",
+    "title": "Track your phone's location",
+    "description": (
+      "See, start, stop, or change location tracking in the M\u00f6bius phone app. "
+      "Once started, the phone keeps recording in the background until you "
+      "stop it."
+    ),
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "media.microphone.capture": {
     "version": 1,
     "kind": "session",
@@ -579,6 +598,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "location_history_read": bool(perms.get("location_history_read", False)),
     },
     "background": (
       {
@@ -720,6 +740,9 @@ def contract_from_app_state(
       ),
       "railway_manage": bool(
         (contract_permissions or {}).get("railway_manage", False)
+      ),
+      "location_history_read": bool(
+        (contract_permissions or {}).get("location_history_read", False)
       ),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
@@ -951,7 +974,7 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.railway_manage", "public.storage.read",
+  "data.railway_manage", "data.location_history_read", "public.storage.read",
 }
 
 _LIST_GRANTS = {

@@ -18,6 +18,13 @@ export function gitChangeCount(status) {
   )
 }
 
+export function onlyUntrackedSharedFiles(status) {
+  if (!status?.available || status.repository_scope !== 'shared' || status.truncated) return false
+  const counts = Object.entries(status.counts || {})
+  return Number.isInteger(status.counts?.untracked) && status.counts.untracked > 0
+    && counts.every(([kind, count]) => Number.isInteger(count) && count >= 0 && (kind === 'untracked' || count === 0))
+}
+
 export function gitIdentityLabel(status) {
   if (!status?.available) return ''
   return status.branch || status.head || 'Git'

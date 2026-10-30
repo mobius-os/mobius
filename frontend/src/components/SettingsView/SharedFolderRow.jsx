@@ -5,6 +5,7 @@ import StatusDot from '../ui/StatusDot.jsx'
 import {
   reconnectFolder, removeFolder, setFolderPaused,
 } from '../../lib/sharedFolders/folderActions.js'
+import { rightsLabel } from './sharedFolderLabels.js'
 
 const STATUS = {
   ready: { color: '--green', label: 'Ready' },
@@ -13,12 +14,11 @@ const STATUS = {
   needs_pick: { color: '--accent', label: 'Pick again to share' },
 }
 
+// A folder this browser remembers is the normal case and needs no note.
 function subtitle(folder) {
-  const rights = folder.mode === 'edit' && folder.access === 'remembered' ? 'Read & edit' : 'Read only'
-  const kept = folder.native
-    ? 'Remembered in the Möbius app'
-    : folder.access === 'remembered' ? 'Remembered on this browser' : 'Until you leave Möbius'
-  return `${rights} · ${kept}`
+  const rights = rightsLabel(folder)
+  if (folder.native) return `${rights} · Remembered in the Möbius app`
+  return folder.access === 'visit' ? `${rights} · Until you leave Möbius` : rights
 }
 
 export default function SharedFolderRow({ folder, report, onPickAgain }) {

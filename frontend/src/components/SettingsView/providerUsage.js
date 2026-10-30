@@ -160,9 +160,30 @@ export function providerExtraUsage(snapshot) {
   }
 }
 
-export function providerAllowance(provider, snapshot) {
-  const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
-  const fallbackLabel = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
+const ALLOWANCE_LABELS = {
+  api_credits: 'API credits usage',
+  five_hour: '5-hour usage',
+  weekly: 'Weekly usage',
+}
+
+function hasWindowKind(snapshot, kind) {
+  return snapshot?.state === 'ready'
+    && Array.isArray(snapshot.windows)
+    && snapshot.windows.some(candidate => candidate?.kind === kind)
+}
+
+// Plan providers gauge the 5-hour window: it usually blocks first. Weekly is
+// gauged only when the provider reports no 5-hour window at all.
+function gaugeKind(provider, snapshot) {
+  if (provider === 'mobius') return 'api_credits'
+  if (!hasWindowKind(snapshot, 'five_hour') && hasWindowKind(snapshot, 'weekly')) {
+    return 'weekly'
+  }
+  return 'five_hour'
+}
+
+function allowanceForKind(provider, snapshot, kind) {
+  const fallbackLabel = ALLOWANCE_LABELS[kind]
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
     return {
       kind,
@@ -173,7 +194,7 @@ export function providerAllowance(provider, snapshot) {
   }
   const window = snapshot.windows.find(candidate => candidate?.kind === kind)
   const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)
-  const label = provider === 'codex' && window?.label === '7-day'
+  const label = provider === 'codex' && kind === 'weekly' && window?.label === '7-day'
     ? '7-day usage'
     : fallbackLabel
   return {
@@ -183,6 +204,19 @@ export function providerAllowance(provider, snapshot) {
     expiresAt: typeof window?.expires_at === 'string' ? window.expires_at : null,
     ...(snapshot.stale === true ? { stale: true } : {}),
   }
+}
+
+/** The allowance the brain's left lobe fills with. */
+export function providerAllowance(provider, snapshot) {
+  return allowanceForKind(provider, snapshot, gaugeKind(provider, snapshot))
+}
+
+/** The weekly allowance listed beside a 5-hour gauge, when one is reported. */
+export function providerWeeklyAllowance(provider, snapshot) {
+  if (gaugeKind(provider, snapshot) !== 'five_hour') return null
+  if (!hasWindowKind(snapshot, 'weekly')) return null
+  const weekly = allowanceForKind(provider, snapshot, 'weekly')
+  return weekly.usedPercent === null ? null : weekly
 }
 
 export function providerAllowanceSummary(provider, allowance, now = new Date()) {

@@ -6,6 +6,7 @@ import {
   gitChangeCount,
   gitIdentityLabel,
   gitStatusPresentation,
+  onlyUntrackedSharedFiles,
   remoteSyncActions,
   remoteSyncPresentation,
 } from '../projectGit.js'
@@ -64,4 +65,15 @@ test('remote synchronization exposes only safe fast-forward actions', () => {
   )
   assert.equal(remoteSyncActions({ ...ready, dirty: true }).push, false)
   assert.equal(remoteSyncActions({ ...ready, github_connected: false }).fetch, false)
+})
+
+test('only a complete shared status of untracked files is described as new files', () => {
+  const shared = { available: true, repository_scope: 'shared', counts: { untracked: 3 }, truncated: false }
+  assert.equal(onlyUntrackedSharedFiles(shared), true)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, counts: { untracked: 1, modified: 1 } }), false)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, counts: { untracked: 1, added: 1 } }), false)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, repository_scope: 'project' }), false)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, truncated: true }), false)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, counts: {} }), false)
+  assert.equal(onlyUntrackedSharedFiles({ ...shared, available: false }), false)
 })

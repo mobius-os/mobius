@@ -92,6 +92,9 @@ export function appBlockFromToken(token) {
     // `"interaction": "inline"` asks for a passive session (see appBlockSession.js);
     // the host grants it only to an admitted app, otherwise the block is static.
     session: inline && value.interaction === 'inline',
+    // `"expand": false` (only the JSON boolean) offers no inline app view:
+    // actions open the app at their intent instead. Sessions are unaffected.
+    expand: value.expand !== false,
     facts: blockFacts(value.facts, APP_BLOCK_LIMITS.facts),
     badges: blockBadges(value.badges),
     // Invalid items and actions are dropped; they never widen another field.
@@ -110,6 +113,13 @@ export function appBlockFromToken(token) {
 export function blockActions(block) {
   return [block.action, ...block.items.map(item => item.action)].filter(Boolean)
     .map(action => ({ key: action.intent, intent: action.intent, label: action.label }))
+}
+
+/** The block's listed items, as the session init carries them: the parsed
+ *  (validated, deduplicated) item intents in card order, nothing else. They
+ *  are agent-printed and untrusted; the app re-verifies them. */
+export function blockItems(block) {
+  return block.items.map(item => ({ intent: item.intent }))
 }
 
 /** A transcript is not a workspace navigation owner or a chat-control

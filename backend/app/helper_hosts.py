@@ -74,6 +74,8 @@ PER_TURN_ENV = frozenset({
   "TMPDIR", "TMP", "TEMP",
   "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_SESSION", "AGENT_BROWSER_NAMESPACE",
   "AGENT_BROWSER_SOCKET_DIR",
+  # Derived from the turn's viewport width (chat.desktop_pointer_browser_env).
+  "AGENT_BROWSER_EXECUTABLE_PATH", "MOBIUS_SCREENSHOT_REAL_BROWSER",
 })
 # Per-turn entries safe to hand to a provider verbatim (it may persist them).
 PUBLIC_TURN_ENV = frozenset({

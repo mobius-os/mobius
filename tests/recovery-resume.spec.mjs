@@ -102,6 +102,13 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
       return route.fulfill({ status: 202, json: { status: 'started', message, run_id: 'resumed-a' } })
     }
     if (req.method() !== 'GET' && req.method() !== 'HEAD') {
+      // The shell reports this fresh browser's empty folder inventory when its
+      // system stream connects. Keep presence local without allowing folder
+      // changes, command responses, or any other unrelated mutation.
+      if (req.method() === 'PUT' && /^\/api\/shared-folders\/devices\/[^/]+$/.test(url.pathname)) {
+        expect(req.postDataJSON().folders).toEqual([])
+        return route.fulfill({ status: 204, body: '' })
+      }
       // Restored panes announce their presence and request ephemeral frame
       // capabilities. Mock these too; they are not chat/draft mutations.
       if (url.pathname === '/api/auth/app-token'

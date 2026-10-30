@@ -1658,13 +1658,13 @@ const DrawerArtifactRow = memo(function DrawerArtifactRow({ item, active, action
         type="button"
         className={`drawer__item${active ? ' drawer__item--active' : ''}`}
         aria-current={active ? 'page' : undefined}
-        aria-label={`Open artifact ${item.name || item.artifact_id}`}
+        aria-label={`Open ${item.display_name || item.name || item.artifact_id}`}
         onClick={() => actions.select('artifact', item.id)}
       >
         <span className="drawer__item-icon drawer__artifact-icon" aria-hidden="true">
           <ProjectArtifactIcon artifact={item} size={19} strokeWidth={1.8} />
         </span>
-        <span className="drawer__item-text">{item.name || item.artifact_id}</span>
+        <span className="drawer__item-text">{item.display_name || item.name || item.artifact_id}</span>
       </button>
     </div>
   )

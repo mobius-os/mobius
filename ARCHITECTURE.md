@@ -282,6 +282,27 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `push.py` | VAPID key management and Web Push delivery |
 | `push_relay.py` | Native push to the mobile app via the mobius.you relay (through the identity broker) |
 
+### Identity app Railway read extensions
+
+Installed Identity apps may use additive read opt-ins; without them the existing
+response shapes remain unchanged for independently deployed strict clients.
+`GET /api/identity/railway?dashboard=1` adds `dashboard_url` in available,
+signed-out, reconnect, and unavailable states. It is the validated configured
+account origin (the SSO issuer on managed installations) plus `/dashboard`, not
+an upstream or request-supplied destination. Reading it never probes a protected
+mutation. Deployment creation, deletion, resizing, recovery and Railway
+disconnection remain account-dashboard actions, behind the owner's sign-in.
+
+`GET /api/identity/railway/deployments/<id>/metrics?cost=1` forwards `cost=1`
+through both the managed broker and linked-account bridge. Its optional `cost`
+contains only display strings: `heading` (at most 200 characters), `note` (360),
+and `percent` (40). The bridge validates those fields and projects away any
+other cost fields; it never exposes raw billing data. Runtime, CPU, memory,
+volume and network keep their existing exact contracts. An older account
+service may omit cost even when requested; absence is unknown, not zero. The
+managed broker admits only the canonical GET metrics query `cost=1` and rejects
+other, duplicate or noncanonical query forms (route epoch 11).
+
 ### Recovery boundary
 
 Managed recovery lives entirely outside this repository and process. The

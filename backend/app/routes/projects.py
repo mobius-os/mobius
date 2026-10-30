@@ -666,6 +666,7 @@ def _within_artifacts(root: Path, path: Path) -> bool:
 
 def _artifact_view(
   project: models.Project, root: Path, entry: dict[str, Any],
+  source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
   """Owner-facing artifact row: registry fields plus reconciled/derived state.
 
@@ -698,6 +699,7 @@ def _artifact_view(
       has_output = True
   except (OSError, ValueError):
     has_output = False
+  status = project_builders.effective_status(project.id, entry)
   return {
     "id": artifact_id,
     "name": entry.get("name") or artifact_id,
@@ -707,12 +709,18 @@ def _artifact_view(
     "source": source,
     "output_rel": output_rel,
     "log_rel": log_rel,
-    "status": project_builders.effective_status(project.id, entry),
+    "status": status,
     "updated_at": entry.get("updated_at"),
     "last_opened_at": getattr(project, "artifact_last_opened_at", {}).get(str(artifact_id)),
     "duration_ms": entry.get("duration_ms"),
     "has_output": has_output,
     "source_missing": not source_exists,
+    # Only the per-project results listing fingerprints the tree; project
+    # lists leave this false rather than walk every project.
+    "out_of_date": bool(
+      has_output and status == "ok"
+      and project_builders.is_out_of_date(entry, source_fingerprint)
+    ),
   }
 
 
@@ -2714,10 +2722,15 @@ def list_project_artifacts(
   if principal.is_owner:
     project_drawer.annotate_projects(db, [project])
   root = _project_root(project)
+  entries = project_builders.read_artifacts(project)
+  fingerprint = (
+    project_builders.source_fingerprint(root)
+    if any(entry.get("built_fingerprint") for entry in entries) else None
+  )
   return {
     "artifacts": [
-      _artifact_view(project, root, entry)
-      for entry in project_builders.read_artifacts(project)
+      _artifact_view(project, root, entry, fingerprint)
+      for entry in entries
     ],
   }
 

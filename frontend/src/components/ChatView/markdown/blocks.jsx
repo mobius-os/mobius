@@ -159,10 +159,13 @@ export function BlockQuote({ token, onInternalNav, mediaDimensions, allowAppBloc
 
 export function ListBlock({ token, onInternalNav, mediaDimensions, allowAppBlocks = false }) {
   const Tag = token.ordered ? 'ol' : 'ul'
+  const start = typeof token.start === 'number' ? token.start : 1
   return (
     <Tag className="md-list" start={token.ordered ? token.start : undefined}>
       {token.items.map((item, i) => (
-        <li key={i} className="md-list-item">
+        // An explicit `value` keeps each item's number on the element itself,
+        // so a copied selection that starts mid-list still reads "3. 4. …".
+        <li key={i} className="md-list-item" value={token.ordered ? start + i : undefined}>
           {item.tokens?.map((child, j) => {
             if (child.type === 'text' && child.tokens) {
               return (

@@ -27,14 +27,16 @@ export function shouldKeepQueuedAfterSendFailure(error) {
   return error?.outboxRetained === true
 }
 
+// The send attempt's own reachability verdict outranks a later snapshot.
+function sendWasOnline(error, online) {
+  if (error?.sendReachability === 'offline') return false
+  if (error?.sendReachability === 'online') return true
+  return online
+}
+
 export function sendFailureMessage(error, { online = true } = {}) {
   const retained = error?.outboxRetained === true
-  const sendOnline = error?.sendReachability === 'offline'
-    ? false
-    : error?.sendReachability === 'online'
-      ? true
-      : online
-  if (!sendOnline) {
+  if (!sendWasOnline(error, online)) {
     return retained
       ? 'You’re offline. Your message is queued and will send when you reconnect.'
       : 'You’re offline. Your message is back in the composer—send it when you reconnect.'
@@ -76,4 +78,16 @@ export function sendFailureMessage(error, { online = true } = {}) {
     return 'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.'
   }
   return 'Möbius couldn’t send the message. It’s back in the composer—try again.'
+}
+
+// A send that never took the composer draft (a reply's Try again) put nothing
+// back in the composer, so its failure must not point there. Tapping it again
+// reuses the unconfirmed send's identity, so a retry cannot send it twice.
+export function detachedSendFailureMessage(error, { online = true } = {}) {
+  if (error?.outboxRetained === true) return sendFailureMessage(error, { online })
+  if (!sendWasOnline(error, online)) return 'You’re offline. Try again when you reconnect.'
+  if (isAmbiguousSendFailure(error)) {
+    return 'Möbius couldn’t confirm the send. It’s safe to try again.'
+  }
+  return 'Möbius couldn’t send the message. Try again in a moment.'
 }

@@ -14,6 +14,7 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
+import { refreshUninstalledForSystemEvent } from '../Drawer/uninstalledAppsEvents.js'
 import {
   copyChatSettings as copyNewChatSettings,
   withCopiedSettings,
@@ -50,6 +51,7 @@ import {
 import useRestartPending from '../../hooks/useRestartPending.js'
 import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
+import { useLocationBoot } from '../../hooks/useLocationTracking.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
   authQueries,
@@ -71,7 +73,8 @@ import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
 import AppSourceWorkspace from '../Projects/AppSourceWorkspace.jsx'
 import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
-import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
+import { buildEventProjectId, isArtifactBuildEvent, projectEntryTarget, resultDisplayName } from '../../lib/projectArtifacts.js'
+import { projectChatTabLabel } from '../../lib/projectChats.js'
 import {
   appSourceProjectId,
   linkedProjectAppId,
@@ -970,6 +973,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // regardless of which view is open. Single-flight, so it composes with a
   // mounted chat's own reconnect reconcile without double-posting.
   useOutboxDrain()
+  // Re-arm native (mobile-app) location tracking after a reload in the same
+  // app session, and flush any positions queued while the page was gone.
+  useLocationBoot()
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale
@@ -1486,6 +1492,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     return map
   }, [projects])
   const [projectRenameId, setProjectRenameId] = useState(null)
+  const [projectEntryFile, setProjectEntryFile] = useState(null)
   const [projectChatMeta, setProjectChatMeta] = useState({})
   const projectChatLookup = useMemo(() => {
     const next = { ...projectChatMeta }
@@ -1509,9 +1516,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') {
       const projectChat = projectChatLookup[tab.id]
+      const liveTitle = chatById.get(tab.id)?.title
       return projectChat
-        ? `${projectChat.projectName} · ${projectChat.title || 'Chat'}`
-        : chatById.get(tab.id)?.title || 'Chat'
+        ? projectChatTabLabel({ title: liveTitle || projectChat.title, projectName: projectChat.projectName })
+        : liveTitle || 'Chat'
     }
     if (tab.kind === 'project') {
       const project = projectById.get(tab.id)
@@ -1519,12 +1527,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       return sourceApp ? `${sourceApp.name} · Source` : project?.name || 'Project'
     }
     if (tab.kind === 'artifact') {
-      // An artifact tab is its own destination: it is named for the artifact,
-      // not prefixed with the project that built it.
+      // A result tab stands alone, so it is named for its project and result.
       const parsed = tabModel.parseArtifactTabId(tab.id)
       const sourceApp = parsed ? sourceAppByWorkspaceId.get(parsed.projectId) : null
       if (sourceApp) return `${sourceApp.name} · Source`
-      return projectArtifactByRef.get(tab.id)?.name || parsed?.artifactId || 'Artifact'
+      const artifact = projectArtifactByRef.get(tab.id)
+      if (!artifact) return parsed?.artifactId || 'Result'
+      return resultDisplayName(projectById.get(parsed.projectId), artifact)
     }
     return appById.get(tab.id)?.name || 'App'
   }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup, sourceAppByWorkspaceId])
@@ -1567,6 +1576,22 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         return paneModel.focusPane(next, projectPane.id)
       },
     })
+  }
+
+  // An ordinary entry (the list, Recents, a launcher, a new project) that opens
+  // a project's tab fresh shows its main result, or else its main file, rather
+  // than an empty pane. Re-entering an open tab, Back to project, chips, and
+  // restored tabs keep whatever the project already shows.
+  function enterProject(project) {
+    if (!project?.id) return
+    const projectId = String(project.id)
+    const alreadyOpen = openTabs.some(tab => tab.kind === 'project' && String(tab.id) === projectId)
+    openProject(project)
+    const row = projectById.get(projectId) || project
+    if (alreadyOpen || linkedProjectAppId(row) || sourceAppByWorkspaceId.has(projectId)) return
+    const target = projectEntryTarget(row)
+    if (target?.kind === 'result') openArtifact(row, target.artifactId)
+    else if (target?.kind === 'file') setProjectEntryFile({ projectId, path: target.path, key: Date.now() })
   }
 
   function openAppSource(app) {
@@ -1763,7 +1788,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     ]
     queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
     setProjectRenameId(String(project.id))
-    openProject(project)
+    enterProject(project)
     return project
   }
 
@@ -1854,6 +1879,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
+  const enterProjectRef = useRef(enterProject)
+  enterProjectRef.current = enterProject
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -2837,7 +2864,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           client: api.projects,
           readJson: jsonOrThrow,
           browseProjects: () => navToRef.current('projects'),
-          openProject: project => openProjectRef.current(project),
+          openProject: project => enterProjectRef.current(project),
           publishProjects: rows => {
             projectsRef.current = rows
             queryClient.setQueryData(projectQueries.keys.all, rows)
@@ -3183,10 +3210,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       }
       void chatAppArtifactQueries.invalidateAll(queryClient)
       void invalidateShellListCache('apps')
+      void refreshUninstalledForSystemEvent(queryClient, ev)
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void chatAppArtifactQueries.invalidateAll(queryClient)
       void invalidateShellListCache('apps').then(refreshApps)
+      void refreshUninstalledForSystemEvent(queryClient, ev)
     } else if (
       ev.type === 'app_updated'
       || ev.type === 'app_created'
@@ -4773,7 +4802,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeProjectChatProjectId={activeProjectChatProjectId}
         activeArtifactRef={activeArtifactRef}
         projectTemplates={projectTemplates}
-        onProject={openProject}
+        onProject={enterProject}
         onProjectRename={(project, name) => {
           if (typeof name === 'string') return renameProject(project, name)
           setProjectRenameId(String(project.id))
@@ -5244,7 +5273,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   projectsQuery.refetch(),
                   projectTemplatesQuery.refetch(),
                 ])}
-                onOpen={openProject}
+                onOpen={enterProject}
                 onCreate={createProjectFromTemplate}
                 onImportGithub={importProjectFromGithub}
                 onImportSource={importProjectSource}
@@ -5305,8 +5334,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   linkedApp={appById.get(linkedProjectAppId(project))}
                   onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
                   onOpenChat={chat => openProjectChat(project, chat)}
+                  liveChatById={chatById}
                   onCreateChat={options => createProjectChat(project, options)}
                   onOpenArtifact={artifactId => openArtifact(project, artifactId)}
+                  entryFile={projectEntryFile?.projectId === String(project.id) ? projectEntryFile : null}
+                  onEntryFileHandled={() => setProjectEntryFile(current => (current?.projectId === String(project.id) ? null : current))}
                   startRenaming={String(projectRenameId) === String(project.id)}
                   onRename={name => renameProject(project, name)}
                   onRenameEnd={() => setProjectRenameId(null)}
@@ -5365,6 +5397,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   project={projectById.get(parsed.projectId)}
                   onOpenApp={appId => navTo('canvas', { appId })}
                   artifactId={parsed.artifactId}
+                  onOpenProject={() => navTo('project', { projectId: parsed.projectId })}
+                  allowOpenInNewTab={!sharedBrowserAccess}
                 />
               )}
             </div>

@@ -99,6 +99,7 @@ from app.routes import (
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
+  location_router,
   screen_control_router,
   shared_folders_router,
   public_apps_router,
@@ -1065,6 +1066,7 @@ app.include_router(proxy_router)
 app.include_router(public_storage_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
+app.include_router(location_router)
 app.include_router(connect_router)
 app.include_router(keys_router)
 app.include_router(app_secrets_compat_router)

@@ -230,3 +230,26 @@ test('a held session tells the reader to check the result and offers no control'
   assert.match(html, /Example can no longer run in this chat\. Open Example to check the result of the last action/)
   assert.doesNotMatch(html, /class="md-app-block__action">/, 'no enabled control')
 })
+
+const noExpand = { ...base, expand: false, action: { label: 'Publish', intent: 'send:all' },
+  items: [{ title: 'First change', intent: 'open:a', facts: [{ label: 'Project', value: 'example/project' }, { label: 'Lines', value: '+12 −3' }] }] }
+
+test('expand:false offers no inline view; the action opens the app at its intent like a link', () => {
+  const html = render(noExpand)
+  assert.doesNotMatch(html, /md-app-block__toggle|Show details here|aria-pressed|md-app-block__view/)
+  assert.match(html, /<a class="md-app-block__action" href="\/shell\/\?app=example&amp;intent=send%3Aall">Publish<\/a>/)
+  assert.match(html, /intent=open%3Aitem-42"[^>]*>Open in Example/)
+  assert.match(html, /intent=open%3Aa"[^>]*>First change</)
+  // The default keeps the expand control and the in-place view action.
+  const expandable = render({ ...noExpand, expand: true })
+  assert.match(expandable, /Show details here/)
+  assert.match(expandable, /<button type="button" class="md-app-block__action" aria-pressed="false">Publish<\/button>/)
+})
+
+test('a passive block that falls back to static (settled or withdrawn) keeps expand:false', async () => {
+  const PassiveAppBlock = (await import('../markdown/PassiveAppBlock.jsx')).default
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...noExpand, interaction: 'inline' }) })
+  const html = renderToStaticMarkup(createElement(PassiveAppBlock, { block, app: admitted[0], admitted: false }))
+  assert.match(html, /<a class="md-app-block__action" href="[^"]*intent=send%3Aall">Publish<\/a>/)
+  assert.doesNotMatch(html, /md-app-block__toggle|Show details here|aria-pressed/)
+})

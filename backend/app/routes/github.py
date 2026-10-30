@@ -36,7 +36,7 @@ from typing import Literal
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -47,6 +47,7 @@ from app import (
   app_git,
   contribution_assignments,
   contribution_runtime,
+  contribution_screenshots,
   contribution_staging,
   fs_locks,
   github_auth,
@@ -119,6 +120,7 @@ from app.github_contribution_git import (
 from app.storage_io import atomic_write
 from app.github_contributions import (
   ContributionSubmitError,
+  RETIRED_CHAT_REVIEW_SUBMITTER,
   _CONTRIBUTION_ID,
   _require_github_access_principal,
   _validate_submit_app,
@@ -278,12 +280,20 @@ def _cleanup_durable_complete_attempt(
 
 
 def _personal_action_identity_matches(prior: object, current: dict) -> bool:
-  """Match v11 actions and narrowly migrate v10 Autopilot run identities."""
+  """Match v11 actions and narrowly migrate older recorded identities.
+
+  v10 Autopilot actions carried a run id, and actions recorded before #1741
+  named the retired chat review card as submitter. Neither changes what the
+  action publishes.
+  """
   if prior == current:
     return True
+  if not isinstance(prior, dict):
+    return False
+  if prior.get("submitter") == RETIRED_CHAT_REVIEW_SUBMITTER:
+    return {key: value for key, value in prior.items() if key != "submitter"} == current
   if (
     current.get("action") != "autopilot_update"
-    or not isinstance(prior, dict)
     or prior.get("action") != "autopilot_update"
     or not str(prior.get("run_id") or "")
   ):
@@ -701,7 +711,7 @@ def _personal_resume_allowed(
     return False
   current = _read_record(record_path)
   patch = receipt.get("record_patch")
-  if receipt.get("action_input") != action_input:
+  if not _personal_action_identity_matches(receipt.get("action_input"), action_input):
     raise HTTPException(
       status_code=409,
       detail="Another exact publication attempt still needs reconciliation.",
@@ -833,6 +843,14 @@ def _assert_confirmed_publication(
   )
 
 
+class ContributionScreenshotItem(BaseModel):
+  """One PNG the description shows as ``![alt](screenshot:NAME)``."""
+
+  name: str
+  path: str
+  alt: str
+
+
 class ContributionStageBody(BaseModel):
   """What an agent supplies to stage a review branch; Git supplies the rest.
 
@@ -860,6 +878,8 @@ class ContributionStageBody(BaseModel):
   labels: list[str] | None = None
   prior_work: dict | None = None
   coauthor_trailer: Literal[False] | None = None
+  # Replaces the attached screenshots; [] removes them, None keeps them.
+  screenshots: list[ContributionScreenshotItem] | None = None
 
 
 class ContributionReviewBody(BaseModel):
@@ -1805,6 +1825,7 @@ def _stage_inputs(
     action = "pr_update"
   if action == "pr_update" and (
     body.title is not None or body.body_draft is not None
+    or body.screenshots
   ):
     raise ContributionSubmitError(
       "An open pull request's title and description are edited on GitHub "
@@ -1868,12 +1889,17 @@ def _stage_record(
   body: ContributionStageBody,
   inputs: dict,
   principal: Principal,
-) -> tuple[dict, contribution_staging.StagedCandidate]:
-  """Build the staged record from Git; the caller holds every lock."""
+) -> tuple[dict, contribution_staging.StagedCandidate, list[bytes]]:
+  """Build the staged record from Git; the caller holds every lock.
+
+  Also returns the checked bytes of newly attached screenshots, which the
+  caller stores only once the whole record has passed its checks.
+  """
   repo_path = inputs["repo_path"]
   candidate = contribution_staging.derive_candidate(
     repo_path, inputs["branch"], inputs["base_ref"],
   )
+  screenshot_bytes: list[bytes] = []
   live = inputs["live"]
   if live is not None:
     _assert_reviewed_update_contains_live_head(
@@ -1894,6 +1920,18 @@ def _stage_record(
   if live is not None:
     plan["title"], plan["body_draft"] = live["title"], live["body"]
     plan["pr_metadata"] = {"old_title": live["title"], "old_body": live["body"]}
+    plan.pop("screenshots", None)
+  elif body.screenshots is not None:
+    plan["screenshots"], screenshot_bytes = contribution_screenshots.read(
+      [item.model_dump() for item in body.screenshots],
+      str(plan.get("body_draft") or ""),
+    )
+  else:
+    contribution_screenshots.check_references(
+      contribution_screenshots.plan_entries(plan), str(plan.get("body_draft") or ""),
+    )
+  if not contribution_screenshots.plan_entries(plan):
+    plan.pop("screenshots", None)
   source_repo = inputs["source_repo"]
   plan.update({
     "action": inputs["action"],
@@ -1947,7 +1985,7 @@ def _stage_record(
       code="record_too_large",
     )
   record["source_sync"] = _track_live_source(previous, record, source_repo)
-  return record, candidate
+  return record, candidate, screenshot_bytes
 
 
 def _track_live_source(previous: dict | None, record: dict, source: Path) -> dict:
@@ -2067,14 +2105,57 @@ async def stage_contribution(
       for lock_path in sorted({str(inputs["repo_path"]), str(inputs["source_repo"])}):
         await source_locks.enter_async_context(fs_locks.source_dir_lock(lock_path))
       try:
-        record, candidate = await settled.run_settled(
+        record, candidate, screenshot_bytes = await settled.run_settled(
           _stage_record, record_id, previous, body, inputs, principal,
         )
       except ContributionSubmitError as exc:
         raise _stage_error(exc) from exc
+      contribution_screenshots.store(record_path, screenshot_bytes)
       atomic_write(diff_path, candidate.diff)
       _write_record(record_path, record)
+      contribution_screenshots.prune(
+        record_path, contribution_screenshots.plan_entries(record["plan"]),
+      )
   return {"record": record, "source_sync": record["source_sync"]}
+
+
+@router.get("/contributions/{app_id}/{record_id}/screenshots/{name}")
+@_limiter.limit("120/minute")
+async def contribution_screenshot(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  name: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """One attached screenshot of a prepared PR, exactly as it was approved."""
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  if not _CONTRIBUTION_ID.fullmatch(record_id):
+    raise HTTPException(status_code=422, detail="Invalid contribution id.")
+  record_path, _ = _record_paths(app_id, record_id)
+  async with fs_locks.app_storage_lock(app_id):
+    plan = _read_record(record_path).get("plan")
+    entries = contribution_screenshots.plan_entries(
+      plan if isinstance(plan, dict) else {},
+    )
+    entry = next(
+      (item for item in entries if isinstance(item, dict) and item.get("name") == name),
+      None,
+    )
+    if entry is None:
+      raise HTTPException(status_code=404, detail="Screenshot not found.")
+    try:
+      data = contribution_screenshots.approved_bytes(record_path, entry)
+    except ContributionSubmitError as exc:
+      raise HTTPException(status_code=404, detail=exc.message) from exc
+  return Response(
+    content=data, media_type="image/png",
+    # Keyed by name, which a restage can point at new bytes: never let a
+    # cached copy stand in for the image the owner is approving.
+    headers={"Cache-Control": "no-store"},
+  )
 
 
 @router.post(

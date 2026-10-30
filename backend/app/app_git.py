@@ -182,8 +182,8 @@ class ReconciliationReceipt:
   kept_local_paths: tuple[str, ...] = ()
   # Local copies of merged pull requests the release replaced (see
   # ``without_retired_units``). The Review preview API returns them as
-  # ``retired_paths`` before the owner applies; the Settings update review
-  # does not list them yet.
+  # ``retired_paths`` before the owner applies, and the Settings update review
+  # lists them.
   retired_paths: tuple["RetiredPath", ...] = ()
 
   def as_dict(self) -> dict[str, list]:

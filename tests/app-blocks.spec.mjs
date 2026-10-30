@@ -39,7 +39,6 @@ async function installFixtures(page, request) {
 }
 
 async function openTranscript(page, { assistant, user = 'Show me' }) {
-  await page.addInitScript(chatId => localStorage.setItem('moebius_active_chat', chatId), CHAT_ID)
   await page.route(/\/api\/chats(?:\?.*)?$/, route => route.request().method() !== 'GET' ? route.fallback()
     : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
       id: CHAT_ID, title: 'App block fixture', created_at: '2026-10-23T00:00:00Z', updated_at: '2026-10-23T00:00:00Z',
@@ -55,7 +54,9 @@ async function openTranscript(page, { assistant, user = 'Show me' }) {
       total: 2, offset: 0, ...runtimeSnapshot(),
     }) }))
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => route.fulfill({ status: 204, body: '' }))
-  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  // Fixture installation has already persisted a workspace. An explicit chat
+  // destination overrides that workspace; the legacy active-chat key does not.
+  await page.goto(`${BASE}/shell/?chat=${CHAT_ID}`, { waitUntil: 'domcontentloaded' })
   return page.locator('[data-chat-surface="painted"]')
 }
 
@@ -69,6 +70,24 @@ async function sessionFrame(page) {
     return false
   }).toBe(true)
   return found
+}
+
+/** A scroll command can be reversed before the host observes the list end.
+ * Keep it intersecting through a render opportunity before returning to Confirm. */
+async function seeConfirmationEnd(block) {
+  const end = block.locator('.md-app-block__list-end')
+  await end.scrollIntoViewIfNeeded()
+  await expect(end).toBeInViewport()
+  await end.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+}
+
+/** Include container reflow in failures of the action's same-slot contract. */
+async function actionLayout(action) {
+  return action.evaluate(button => Object.fromEntries([
+    ['action', button], ['footer', button.closest('footer')],
+    ['block', button.closest('.md-app-block')],
+    ['text', button.closest('.chat__text--assistant')],
+  ].map(([name, element]) => [name, element?.getBoundingClientRect().toJSON() ?? null])))
 }
 
 test('a static block renders only in the reply and opens the app view on request', async ({ page, request }) => {
@@ -96,7 +115,8 @@ test('a passive session drives an in-place Confirm through the real frame protoc
   const block = chat.locator('.md-app-block')
   const action = block.locator('footer .md-app-block__action')
   await expect(action).toHaveText('Send all')
-  const box = await action.boundingBox()
+  const before = await actionLayout(action)
+  const box = before.action
   const frame = await sessionFrame(page)
   const log = frame.locator('#block-log')
   const sessionId = await log.getAttribute('data-session')
@@ -118,21 +138,29 @@ test('a passive session drives an in-place Confirm through the real frame protoc
     })
     observer.observe(section, { subtree: true, childList: true, characterData: true })
   }))
+  const beforeClick = await actionLayout(action)
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
   expect(await drawn).toBe(true)
   await expect(confirm).toHaveText('Confirm')
   await expect(block.getByRole('button', { name: 'Not now' })).toBeVisible()
   expect((await log.textContent()).split('\n').filter(line => line.endsWith(' confirm'))).toHaveLength(0)
-  await expect(confirm).toBeEnabled()
   // Same size, same place: Confirm replaces the action in its slot.
-  const confirmBox = await confirm.boundingBox()
+  const after = await actionLayout(confirm)
+  const confirmBox = after.action
   expect(Math.round(confirmBox.width)).toBe(Math.round(box.width))
   expect(Math.round(confirmBox.height)).toBe(Math.round(box.height))
-  expect(Math.abs(confirmBox.x + confirmBox.width - (box.x + box.width))).toBeLessThan(2)
+  expect(Math.abs(confirmBox.x + confirmBox.width - (box.x + box.width)),
+    `Action slot layout: ${JSON.stringify({ before, beforeClick, after })}`).toBeLessThan(2)
   await expect(block.locator('.md-app-block__confirmation')).toContainText('fixture/repo: Change one')
   await expect(block.locator('.md-app-block__confirmation')).toContainText('The list below comes from Block Session')
   await expect(block.locator('.md-app-block__badge')).toHaveCount(0)
+
+  // The twelve-item list may extend below the viewport even on desktop.
+  // Check the in-place geometry above before scrolling through that list.
+  await seeConfirmationEnd(block)
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeEnabled()
 
   // Foreign or stale-generation messages never reach the app's own listener.
   await page.evaluate(({ sessionId, generation }) => {
@@ -176,7 +204,7 @@ test('with the action at the bottom edge, Confirm arms only after the list end h
   await page.waitForTimeout(1200)
   await expect(confirm).toBeDisabled()
   // Scroll through the list to its end, then back up to Confirm.
-  await listEnd.scrollIntoViewIfNeeded()
+  await seeConfirmationEnd(block)
   await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
   await expect(confirm).toBeEnabled()
   await confirm.click()
@@ -194,6 +222,7 @@ test('a list replaced after Confirm armed must have its own end seen (no borrowe
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
   // One target: its end is on screen, so Confirm arms.
+  await expect(confirm).toHaveText('Confirm')
   await expect(confirm).toBeEnabled()
   // The app replaces it with 256 targets while the old end was visible.
   await expect(block.locator('.md-app-block__confirmation li')).toHaveCount(256)
@@ -205,7 +234,7 @@ test('a list replaced after Confirm armed must have its own end seen (no borrowe
   await page.waitForTimeout(200)
   expect((await frame.locator('#block-log').textContent()).split('\n').filter(line => line.endsWith(' confirm'))).toHaveLength(0)
   // Scrolling to the new end and back arms it.
-  await block.locator('.md-app-block__list-end').scrollIntoViewIfNeeded()
+  await seeConfirmationEnd(block)
   await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
   await expect(confirm).toBeEnabled()
 })

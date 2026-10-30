@@ -4,6 +4,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
   providerExtraUsage,
+  providerWeeklyAllowance,
 } from '../SettingsView/providerUsage.js'
 import {
   contextUsedPercent,
@@ -43,6 +44,12 @@ export default function BrainUsageButton({
     ? providerAllowance(provider, null)
     : providerAllowance(provider, providerUsageQuery.data)
   const allowanceSummary = providerAllowanceSummary(provider, allowance)
+  const weeklyAllowance = providerUsageQuery.isLoading
+    ? null
+    : providerWeeklyAllowance(provider, providerUsageQuery.data)
+  const weeklySummary = weeklyAllowance
+    ? providerAllowanceSummary(provider, weeklyAllowance)
+    : null
   const extraUsage = providerExtraUsage(providerUsageQuery.data)
   const leftPercent = allowance.usedPercent
   const rightPercent = contextTokens === null
@@ -57,6 +64,7 @@ export default function BrainUsageButton({
     leftPercent === null
       ? `${providerLabel} usage: unknown`
       : (provider === 'mobius' ? allowanceSummary : `${providerLabel} ${allowanceSummary}`),
+    weeklySummary ? `${providerLabel} ${weeklySummary}` : null,
     extraUsage?.summary ? `${providerLabel} ${extraUsage.summary}` : null,
     contextTokens === null || rightPercent === null
       ? 'Context used: unknown'
@@ -76,6 +84,7 @@ export default function BrainUsageButton({
       allowanceLabel: allowance.label,
       allowanceUsedPercent: leftPercent,
       allowanceSummary,
+      weeklyAllowanceSummary: weeklySummary,
       contextTokensUsed: contextTokens?.used ?? null,
       contextTokensMaximum: contextTokens?.maximum ?? null,
     },

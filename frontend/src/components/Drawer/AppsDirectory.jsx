@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Search } from '@openai/apps-sdk-ui/components/Icon'
+import UninstalledApps from './UninstalledApps.jsx'
 import './AppsDirectory.css'
 
 export default function AppsDirectory({
@@ -86,6 +87,7 @@ export default function AppsDirectory({
             ) : (
               <div className="apps-directory__grid">{children}</div>
             )}
+            <UninstalledApps />
           </>
         )}
       </div>

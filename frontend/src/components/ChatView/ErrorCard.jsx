@@ -194,7 +194,7 @@ export default function ErrorCard({
                 content once the message scrolls partly off-screen. */}
             <div className="chat__error-head">
               <span className="chat__error-label">{vm.label}</span>
-              {block.message && <MessageCopyButton text={block.message} />}
+              {block.message && <MessageCopyButton read={() => ({ plainText: block.message })} />}
             </div>
             <StandardMarkdown
               text={block.message || 'The agent ran into an issue.'}

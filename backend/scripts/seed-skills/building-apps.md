@@ -444,7 +444,11 @@ most 16384.
   `badges` `{label (40), tone}` with tone `success|attention|danger|accent|neutral`;
   up to 12 `items` `{title, intent, facts? (up to 4), badges?, action?}`;
   `action` `{label (40), intent}`; `inline` (default `true`; `false` is a
-  link-only snapshot without actions); `expand_label` (40); `height` (240-640,
+  link-only snapshot without actions); `expand` (default `true`; only the
+  JSON boolean `false` turns it off: no "Show details here" and no inline
+  app view ever, and an action opens the app at its intent like a link;
+  passive sessions and their Confirm are unaffected. Use it when every item
+  already links to its own entry in the app); `expand_label` (40); `height` (240-640,
   default 480; a non-number is ignored). `href` is kept only for an
   uncredentialed `https:` URL. Text is validated, never truncated: a field
   over its limit (in parentheses) is invalid, so its fact, badge, item or
@@ -497,20 +501,34 @@ reports state.
 the agent read can steer them, and a hidden instance mounts just because the
 block scrolled into view. Use an intent only to look up your own data for
 display. Never act, publish, or change state because of an intent at startup
-or on `app-block-init`; act only on an owner `app-block-action`, and check
-that request against your own data first.
+or on `app-block-init`; act only on an owner `confirm`, and check that
+request against your own data first.
 
-`props.blockSession` is `{sessionId, generation, actions, checkpoint, retain,
-recoveryError, subscribe(cb), setState(state)}`, where `actions` is
-`[{key, intent, label}]` and `key` is the action's intent. The host also posts
+`props.blockSession` is `{sessionId, generation, actions, items, checkpoint,
+retain, recoveryError, subscribe(cb), setState(state)}`, where `actions` is
+`[{key, intent, label}]` and `key` is the action's intent, and `items` is
+`[{intent}]`: the block's item intents in card order, after the host's
+validation and deduplication (an empty array when the block lists no items).
+Like `actions[].intent`, `items` is agent-printed and untrusted: it tells a
+single block-level action which records the card shows, but re-verify every
+intent against your own data before you build a confirmation, and build that
+confirmation list from your data, never from the block. The host also posts
 window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
-- `{type:'moebius:app-block-init', sessionId, generation, actions, checkpoint,
-  retain, recoveryError}` when the session envelope changes.
+- `{type:'moebius:app-block-init', sessionId, generation, actions, items,
+  checkpoint, retain, recoveryError}` when the session envelope changes.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
+  **Only `confirm` may cause an effect** (publish, write, send, spend).
+  `activate` asks you to prepare: read, then report `confirming` with the
+  exact list, or say why nothing can be done. `cancel` withdraws a
+  confirmation. Neither may change anything outside your document. The host
+  relies on this: a `confirm` still unacknowledged when the document reloads
+  is held for recovery, while an unacknowledged `activate` or `cancel` is
+  simply discarded and the controls come back. An action that needs no list
+  still goes through `confirming`.
 
 A message for another session or document `generation`, or for a module without
 the export, is stopped before any app listener sees it. A reload or app update
@@ -850,7 +868,10 @@ The proxy is GET-only, requires the bearer in the header (never a query
 parameter), and truncates bodies at 2,097,152 bytes. GET follows up to five
 redirect hops, validating each destination against SSRF rules rather than
 returning upstream 3xx responses as-is. Request small renditions,
-not full-resolution media. A cross-origin `<img src>` cannot attach the bearer,
+not full-resolution media: add `&w=<pixels>` (16–1600; about twice the
+displayed CSS width) and a PNG, JPEG, WebP or GIF wider than that comes back as
+a smaller WebP, while anything else is returned unchanged. A cross-origin
+`<img src>` cannot attach the bearer,
 so fetch through the proxy and convert the result to a `data:` URL before
 rendering it; the bundled CSP allows `data:` images but not blob object URLs.
 Use `Promise.allSettled` for multi-provider searches and always keep a static
@@ -886,9 +907,51 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Phone location tracking
+
+The Möbius phone app can record the device's location, including in the
+background. An app controls that recording with the `location.tracking`
+capability and reads what was recorded with the `location_history_read`
+server permission:
+
+```json
+"permissions": { "location_history_read": true },
+"capabilities": {
+  "location.tracking": { "version": 1, "reason": "Record your walks." }
+}
+```
+
+```js
+const caps = window.mobius.capabilities
+const state = await caps.invoke('location.tracking', { operation: 'get' })
+// state: { available, enabled, status, options: { interval, distance, background } }
+if (state.available) {
+  await caps.invoke('location.tracking', { operation: 'start' })
+  await caps.invoke('location.tracking', {
+    operation: 'set-options', options: { interval: 60000 }, // ms between fixes
+  })
+}
+const res = await fetch('/api/location/positions?limit=1000', {
+  headers: { Authorization: `Bearer ${token}` },
+})
+const { positions } = await res.json() // newest first, at most 5000
+```
+
+`available` is `true` only inside the phone app, where `enabled` and
+`options` describe that phone. Elsewhere `get` reports what the owner's phones
+last told the server (`enabled` when any phone is tracking, with that phone's
+`options`, and `status: null`), and `start`, `stop`, and `set-options` reject
+with code `unavailable`, so show the state read-only there. `status` is the phone's
+answer: `started`, `denied`, `disabled`, `unavailable`, or `stopped`; explain
+`denied` and `disabled` to the owner. If the phone cannot confirm that it
+stopped, `stop` rejects with code `stop_failed` and tracking stays on; say so
+rather than showing it off. Tracking keeps running after the owner
+leaves your app, until it is stopped, the phone app is closed, or the owner
+signs out; signing out also erases positions the phone had not uploaded yet.
+
 ## Managed-app update events
 
-Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
+Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update, uninstall or permanent erase, and recovery synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.
 Events are not replayed, and standalone app pages do not receive them, so retain the ordinary initial load and refresh fallback.
 
 ## Host capabilities (microphone and future device/browser access)
@@ -1069,10 +1132,21 @@ useEffect(() => {
 ## Pausing work while the app is hidden
 
 The shell keeps recently used apps loaded but hidden so switching back is
-instant. A hidden app frame's `document.hidden` stays `false` unless the whole
-browser tab is hidden, so a timer gated only on `document.hidden` keeps
-polling, animating, or playing audio for an app nobody can see. Gate that work
-on the runtime's combined signal instead:
+instant. While an app is hidden, its frame reads as a hidden page the standard
+way (`document.hidden`, `document.visibilityState`, and `visibilitychange` on
+the way out and back), so engines and libraries that follow the Page Visibility
+API pause themselves. The frame also pauses the app's sound: it suspends every
+Web Audio context and pauses playing `<audio>`/`<video>` elements — including
+media that begins on its own while hidden, such as autoplay or a clip that was
+still loading — holds any `resume()` or `play()` the app calls while hidden, and
+on return resumes exactly what it paused, never what the app paused itself (nor
+an element the app removed from the page while hidden). A held `resume()` or
+`play()` resolves right away: it reports that the request was accepted, not that
+audio is playing, and a later failure when it actually starts on return is not
+surfaced — so don't treat that resolution as proof sound is audible.
+
+Timers keep running, so pause polling, animation, and game clocks yourself and
+catch up on return:
 
 ```jsx
 useEffect(() => {
@@ -1091,7 +1165,32 @@ useEffect(() => {
 tab is visible. `onVisibilityChange(cb)` calls `cb(visible)` immediately and on
 every change, and returns an unsubscribe function. A Store app that may run on
 an older Möbius checks `window.mobius.runtimeFeatures?.frameVisibility` and
-otherwise falls back to `document.hidden` with `visibilitychange`.
+otherwise falls back to `document.hidden` with `visibilitychange`; on those
+hosts, pause the app's own sound as well.
+
+Playback the owner starts deliberately and expects to keep hearing (a podcast,
+read-aloud, music) keeps playing while the app is hidden if the app opens a
+shell media session for it. The drawer then shows a now-playing control:
+
+```js
+const send = (message) => window.parent.postMessage(
+  { type: 'moebius:media-session', sessionId: 'episode-42', ...message },
+  window.location.origin,
+)
+send({ event: 'open', title: 'Episode 42', playbackState: 'playing' })
+send({ event: 'update', playbackState: 'paused' }) // 'loading' | 'playing' | 'paused'
+send({ event: 'close' })                            // playback ended
+// The drawer's controls arrive as
+// { type: 'moebius:media-control', sessionId, action: 'play' | 'pause' | 'stop' }.
+```
+
+The page still reads as hidden while such playback continues. Documents the
+app embeds in its own child iframes are separate pages: forward the visibility
+to them yourself. For the same reason, `<audio>`/`<video>` inside an open
+shadow root isn't reached — the frame's scan doesn't cross shadow boundaries
+and `play` events don't escape them — so pause shadow-DOM media yourself from
+`onVisibilityChange` as well. Plain (light-DOM) elements and `new Audio()` are
+handled for you.
 
 ---
 

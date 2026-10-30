@@ -220,7 +220,7 @@ const CATEGORY_ONLY = new Set([
 ])
 
 // The bare control name (`update_goal`) for either provider's spelling.
-function bareControlName(name) {
+export function bareControlName(name) {
   if (typeof name !== 'string') return null
   const prefix = CONTROL_PREFIXES.find(p => name.startsWith(p))
   return prefix ? name.slice(prefix.length) : null

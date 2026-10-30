@@ -130,3 +130,16 @@ test('passive admission needs the accepted grant and a server digest, never bloc
     assert.equal(passiveAppBlockAllowed(value), false)
   }
 })
+
+test('across a reload only an unacknowledged confirm, the one event that may cause an effect, is held', () => {
+  const idle = { retain: false, ackNonce: null, actions: [{ key: 'send:a', confirming: false, busy: false }] }
+  for (const kind of ['activate', 'cancel']) {
+    assert.equal(sessionDocumentReset(idle, { event: kind, nonce: 'n1' }), null, `${kind} is effect-free and discarded`)
+  }
+  const held = sessionDocumentReset(idle, { event: 'confirm', nonce: 'n1' })
+  assert.equal(held.recoveryPending, true)
+  assert.equal(held.retain, true)
+  assert.ok(held.actions.every(action => action.disabled))
+  assert.equal(sessionDocumentReset({ ...idle, ackNonce: 'n1' }, { event: 'confirm', nonce: 'n1' }), null,
+    'an acknowledged confirm is the app\'s to report (busy, checkpoint) and is not held by the host')
+})

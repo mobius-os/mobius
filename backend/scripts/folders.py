@@ -20,6 +20,10 @@ from agent_api import agent_credentials, agent_request
 
 SHOW_LIMIT_BYTES = 4 * 1024 * 1024
 WRITE_LIMIT_BYTES = 4 * 1024 * 1024
+# Agent shells show about 30,000 characters of a command's output and save the
+# rest to a file on Möbius: a bigger default read pulls bytes off the owner's
+# device that the agent never sees, and leaves a copy of their file behind.
+DEFAULT_READ_BYTES = 24 * 1024
 # Temporary copies are for one look each: keep only the newest few, briefly,
 # so even a 100-photo job never holds more than a few MB on Möbius. The hourly
 # scratch sweep expires the last ones on the same clock; keep the two values
@@ -257,9 +261,9 @@ def _parser() -> argparse.ArgumentParser:
   ls.add_argument("--cursor", type=int, default=0)
   ls.add_argument("--limit", type=int)
   target("info", show_info, "size, type and dates")
-  read = target("read", read_file, "read a piece of a file (default 256 KB)")
+  read = target("read", read_file, "read a piece of a file (default 24 KB)")
   read.add_argument("--offset", type=int, default=0)
-  read.add_argument("--length", type=int, default=256 * 1024)
+  read.add_argument("--length", type=int, default=DEFAULT_READ_BYTES)
   read.add_argument("--tail", type=int, help="read this many bytes from the end")
   read.add_argument("--base64", action="store_true")
   target("show", show_file, "a temporary copy of an image (shrunk on the device) or PDF, to look at")

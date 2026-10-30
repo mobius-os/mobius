@@ -14,7 +14,6 @@ import WalkthroughAppGroup from './WalkthroughAppGroup.jsx'
 import WalkthroughInstall from './WalkthroughInstall.jsx'
 import { Reveal, Typewriter, WordReveal } from './WalkthroughMotion.jsx'
 import WalkthroughProfile, { useAccountProfile } from './WalkthroughProfile.jsx'
-import WalkthroughAccessConfirm from './WalkthroughAccessConfirm.jsx'
 import WalkthroughStore, { STORE_WINDOW_APPS, useStoreCatalog } from './WalkthroughStore.jsx'
 import { useAppInstall } from './useAppInstall.js'
 import { APP_GROUPS } from './walkthroughGroups.js'
@@ -92,8 +91,6 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
   const wantedIconIds = screen.group ? screen.group.apps.map(app => app.id) : screen.content === 'store' ? STORE_WINDOW_APPS.map(app => app.id) : []
   const store = useStoreCatalog(apps, wantedIconIds)
   const installer = useAppInstall(store.catalog)
-  const confirming = installer.confirmation
-  const confirmingApp = confirming ? APP_GROUPS.flatMap(group => group.apps).find(app => app.id === confirming.id) : null
   const identityApp = apps.find(app => app.slug === 'identity') || null
   // One profile for the whole guide, so Back to the welcome screen never refetches it or loses who claimed what.
   const account = useAccountProfile(() => { if (identityApp) openApp(identityApp.id) })
@@ -119,7 +116,7 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
 
   // A modal dialog: focus starts on the title, Tab stays inside the card, the page behind is inert,
   // and focus returns to where it was when the guide goes away. Escape dismisses it exactly like the
-  // close button, except while typing in a field. (While an access confirmation is open, Escape belongs to that popup and only cancels it.)
+  // close button, except while typing in a field.
   useDialogFocus({ open: !suspended, containerRef: cardRef, initialFocusRef: titleRef, onClose: finish, shouldCloseOnEscape: escapeShouldDismissGuide })
   // Each screen announces itself by moving focus to its title.
   useEffect(() => { titleRef.current?.focus({ preventScroll: true }) }, [stepIndex])
@@ -135,7 +132,6 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
   function goTo(index) {
     const next = Math.max(0, Math.min(LAST, index))
     setDirection(next >= stepIndex ? 1 : -1)
-    installer.dismiss()
     setStepIndex(next)
   }
 
@@ -165,7 +161,7 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
         {screen.content === 'theme' && <ThemeChangeDemo />}
         {screen.content === 'brain' && <AgentBrainFlow />}
         {screen.content === 'store' && <WalkthroughStore store={store} />}
-        {screen.content === 'group' && <WalkthroughAppGroup group={screen.group} store={store} statusOf={installer.statusOf} locked={installer.busy} onInstall={installer.begin} />}
+        {screen.content === 'group' && <WalkthroughAppGroup group={screen.group} store={store} statusOf={installer.statusOf} onInstall={installer.install} />}
         {screen.content === 'connect' && <WalkthroughSetup />}
         {screen.content === 'finish' && <>
           <WalkthroughInstall />
@@ -176,7 +172,6 @@ export default function WalkthroughOverlay({ apps, activeAppId = null, onOpenApp
           </ul>
         </>}
       </div>
-      {confirming && confirmingApp && <WalkthroughAccessConfirm confirmation={confirming} app={confirmingApp} icon={store.icons[confirmingApp.id]} onApprove={installer.approve} onCancel={installer.dismiss} />}
       <div className="wt__footer">
         {stepIndex > 0 && <button type="button" className="wt__back" onClick={() => goTo(stepIndex - 1)}>Back</button>}
         {screen.content === 'profile' && account.returning && <button type="button" className="wt__back" onClick={() => goTo(CONNECT_INDEX)}>Skip to agent setup</button>}

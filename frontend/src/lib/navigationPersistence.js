@@ -38,6 +38,7 @@ export function parseShellDeepLink(location = globalThis.location) {
       const chat = params.get('chat')
       const project = params.get('project')
       const projects = params.get('projects')
+      const result = params.get('result')
       const intent = params.get('intent')
       const focusQuestion = params.get('focus') === 'question'
       if (app) {
@@ -46,6 +47,10 @@ export function parseShellDeepLink(location = globalThis.location) {
       }
       if (chat) return { view: 'chat', chatId: chat, intent, focusQuestion,
         ...(focusQuestion && params.get('question') ? { questionId: params.get('question') } : {}) }
+      if (project && result && /^[A-Za-z0-9_-]{1,128}$/.test(project)
+        && /^[A-Za-z0-9_-]{1,64}$/.test(result)) {
+        return { view: 'artifact', projectId: project, artifactId: result }
+      }
       if (project) return { view: 'project', projectId: project }
       if (projects === '1') return { view: 'projects' }
       if (params.has('settings')) {

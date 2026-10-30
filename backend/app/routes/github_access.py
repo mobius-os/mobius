@@ -275,7 +275,8 @@ async def github_status(
   app paired with an older backend hides that UI. ``frozen_publication_binding``
   advertises that publication accepts the confirmed frozen record(s) and names
   the record fields its server-owned approval digest covers; an older backend
-  omits it.
+  omits it. ``screenshot_upload`` advertises that staging accepts screenshots
+  and Send hosts them in the owner's fork.
   """
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
@@ -303,6 +304,7 @@ async def github_status(
     "gh_version": github_auth.gh_version(),
     "active_attempt": active_attempt,
     "autopilot_available": True,
+    "screenshot_upload": True,
     "frozen_publication_binding": {
       "record_fields": list(PUBLICATION_APPROVAL_FIELDS),
     },

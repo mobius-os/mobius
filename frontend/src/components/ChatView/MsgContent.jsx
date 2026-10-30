@@ -28,8 +28,8 @@ import { questionKey } from './questionKey.js'
 import {
   legacyRestartActivityOwners,
   repairInterleavedQuestionText,
+  renderedBlockEntries,
   restartCardActivityEntries,
-  suppressedQuestionToolIndices,
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
@@ -316,17 +316,11 @@ function MsgContentInner({
       displayBlocks,
       msg.interaction_tool_projection_version,
     )
-    // The persisted transcript keeps the raw AskUserQuestion tool block
-    // AND the question card (backend events.process_event appends both);
-    // the live stream absorbs the tool twin into the card. Skip the twin
-    // here so a reopened chat matches the live view — render-time, so it
-    // also cleans up already-persisted old chats with no backend migration.
-    const skipToolIdx = suppressedQuestionToolIndices(displayBlocks)
-
     // Entry idx is the POST-suppression position, not the raw msg.blocks
     // ordinal. The two surfaces of the active answer disagree about the twin:
     // the live reducer absorbs the AskUserQuestion tool into the question card,
-    // while the DB partial keeps both and relies on the render-time skip above.
+    // while the DB partial keeps both and relies on the render-time skip in
+    // renderedBlockEntries, which also numbers a reply's Copy parts.
     // Raw ordinals therefore differ by one for every block after a mid-turn
     // question, and an ordinal-keyed entry (thinking, a tokenless tool, the
     // question itself) would change key across the live↔DB surface switch —
@@ -335,14 +329,7 @@ function MsgContentInner({
     // surfaces produce identical positions for identical visible content, so
     // keys survive the switch. (Appends only ever extend the tail, so earlier
     // positions — and their keys — are stable mid-run too.)
-    const entries = displayBlocks
-      .map((block, i) => ({ item: block, rawIdx: i }))
-      // Deliverables are positioned separately below, so they do not change
-      // the visible tail used by Resume/Try-now ownership.
-      .filter(({ item, rawIdx }) => (
-        item.type !== 'generated_files' && !skipToolIdx.has(rawIdx)
-      ))
-      .map(({ item }, pos) => ({ item, idx: pos }))
+    const entries = renderedBlockEntries(displayBlocks)
     // Repair already-persisted transcripts where a continuous reasoning pass was
     // fragmented into many thinking blocks: coalesce runs of adjacent thinking
     // AFTER idx assignment (each survivor keeps its first fragment's position)

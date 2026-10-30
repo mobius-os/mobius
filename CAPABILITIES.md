@@ -708,7 +708,7 @@ Add primitives only after a real app needs them. Likely families are:
 - `device.storage`, `device.asset-cache`
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
-- `location.current`, `location.watch`
+- `location.tracking` (phone app), `location.current`, `location.watch`
 - `notifications.request`, `share.open`
 - `device.midi`, `device.serial`, `device.bluetooth`
 - `display.fullscreen`, `display.wake_lock`
@@ -786,6 +786,28 @@ licensing of the bytes. A `read` consumer sends `control('next')` after taking
 ownership of every `chunk` event, so neither message port accumulates a whole
 large package in memory.
 
+### Phone location tracking
+
+`location.tracking` controls the location recorder of the Möbius phone app,
+which exposes it only to the shell's top frame. The provider wraps the shell's
+single controller, so every app sees the same tracking state:
+
+```js
+await window.mobius.capabilities.invoke('location.tracking', { operation: 'start' })
+```
+
+Operations are `get`, `start`, `stop`, and `set-options` (`options.interval`
+in milliseconds, clamped to 1 second–1 hour, and `options.distance` in
+metres). Each returns `{available, enabled, status, options}`. In the phone
+app these describe that phone. Outside it, `get` reports `available: false`
+with the state the owner's phones last reported (each phone reports only its
+own record; `enabled` when any phone is tracking), read-only, and the other
+operations reject with `unavailable`. Requests are `active_frame`: only a visible app can change
+tracking. Once started, recording continues in the background under the
+operating system's location indicator; the phone uploads fixes to the owner's
+server, and an app reads them from `/api/location/positions` only with the
+reviewed `location_history_read` permission.
+
 ### Passive transcript sessions
 
 `chat.blocks.passive` v1 lets an app's `"interaction": "inline"` chat blocks
@@ -793,9 +815,12 @@ run its accepted code in a hidden, inert frame while the block is near the
 viewport, so the block can show current status and an in-place Confirm. It is
 an execution capability, not an HTTP permission: the app keeps its ordinary
 app token and server grants, so this is not a read-only sandbox. Its contract
-requires read-only module startup and session hydration; the app may act only
-after an explicit owner event (`activate`, `confirm`, `cancel`) and must check
-it again itself. The review copy says so: after the owner presses Confirm the
+requires read-only module startup and session hydration, and the app may cause
+an effect only after the owner's explicit `confirm`, which it must check again
+itself. `activate` and `cancel` are effect-free requests to prepare or
+withdraw a confirmation; that is why an unacknowledged `confirm` survives a
+document reload as a recovery hold while an unacknowledged `activate` or
+`cancel` does not. The review copy says so: after the owner presses Confirm the
 app can act, for example publish a change. Omission is no grant; existing
 owners are never auto-granted it, and declaring it is a reviewable widening.
 

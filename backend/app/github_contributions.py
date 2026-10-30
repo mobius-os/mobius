@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app import (
   app_git,
+  contribution_screenshots,
   contribution_staging,
   fs_locks,
   github_auth,
@@ -71,6 +72,12 @@ _PERSONAL_PUBLIC_INPUT_FIELDS = (
 log = logging.getLogger(__name__)
 
 _PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
+# GitHub counts description characters, not UTF-8 bytes.
+GITHUB_BODY_MAX_CHARS = 65_536
+# The chat review card stopped being a publication surface in #1741. Claims
+# and signed receipts written before that still name it; their exact action
+# resumes under the Contribute control that remains.
+RETIRED_CHAT_REVIEW_SUBMITTER = "chat-review-card"
 
 
 def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
@@ -101,11 +108,7 @@ def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
     not isinstance(body, str)
     or not body.strip()
     or "\x00" in body
-    # GitHub's limit is 65,536 CHARACTERS, not UTF-8 bytes. Counting bytes
-    # rejected real publishable bodies: Dependabot truncates to exactly 65,536
-    # characters, so any non-ASCII character pushed the byte count over and
-    # permanently blocked updates to large Dependabot PRs.
-    or len(body) > 65_536
+    or len(body) > GITHUB_BODY_MAX_CHARS
   ):
     raise ContributionSubmitError(
       "This prepared PR has a body GitHub cannot publish exactly. Ask the "
@@ -1433,7 +1436,7 @@ def _claim_record(
     allow_personal_resume
     and record.get("status") == "submitting"
     and expected_action in _PREPARED_PR_ACTIONS
-    and record.get("submitter") == submitter
+    and record.get("submitter") in (submitter, RETIRED_CHAT_REVIEW_SUBMITTER)
   )
   if (
     record.get("status") != "prepared"
@@ -3411,6 +3414,114 @@ def _recover_normalized_attribution(
   return _git_ops._head_sha_patch(record, old_head, current_head)
 
 
+def _check_screenshot_body(
+  body: str,
+  screenshots: list[dict],
+  *,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  record_patch: dict,
+) -> None:
+  """Refuse, before any upload, a description its pinned links make too big."""
+  owner, name = upstream_repo.split("/", 1)
+  # A fork normally shares the target's name, and the placeholder is the
+  # longest commit id.
+  likely_repo = (
+    upstream_repo if owner.casefold() == login.casefold() else f"{login}/{name}"
+  )
+  longest = contribution_screenshots.resolve_body(
+    body, screenshots, assets_repo=likely_repo, commit="0" * 64, branch=branch,
+  )
+  if len(longest) > GITHUB_BODY_MAX_CHARS:
+    raise ContributionSubmitError(
+      "With its screenshot links, this description exceeds GitHub's size "
+      "limit. Ask the agent to shorten it. Nothing was sent.",
+      code="screenshot_body_too_large", record_patch=record_patch,
+    )
+
+
+def _publish_reviewed_screenshots(
+  record: dict,
+  diff_path: Path,
+  repo: Path,
+  screenshots: list[dict],
+  body: str,
+  *,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  author: tuple[str, str],
+  is_update: bool,
+  record_patch: dict,
+) -> tuple[str, dict, str]:
+  """Upload a new PR's approved screenshots and pin its description to them.
+
+  Runs before the branch push, so a failed upload leaves nothing public but
+  the images. The images go to the owner's own repository: the target when
+  the owner owns it, otherwise the owner's fork, never a shared repository
+  the owner can merely push to. Returns the pinned body, the record patch and
+  the repository that hosts the images.
+  """
+  if is_update:
+    raise ContributionSubmitError(
+      "An open pull request's description is edited on GitHub, so its "
+      "screenshots cannot be sent from here. Nothing was sent.",
+      code="screenshot_update_unsupported", record_patch=record_patch,
+    )
+  try:
+    # The entries come from the app-writable record: check their shape and
+    # bytes before anything reads them.
+    contribution_screenshots.verify(diff_path.with_suffix(".json"), screenshots)
+  except ContributionSubmitError as exc:
+    raise _git_ops._merge_error_patch(exc, record_patch) from exc
+  _check_screenshot_body(
+    body, screenshots, upstream_repo=upstream_repo, login=login,
+    branch=branch, record_patch=record_patch,
+  )
+  owns_target = upstream_repo.split("/", 1)[0].casefold() == login.casefold()
+  try:
+    try:
+      assets_repo = (
+        upstream_repo if owns_target
+        else _ensure_owner_fork_remote(repo, upstream_repo, login)
+      )
+    except ContributionSubmitError as exc:
+      raise ContributionSubmitError(
+        "Screenshots are hosted in your own fork, and it could not be "
+        "prepared (the repository may not allow forks). Ask the agent to "
+        "prepare this PR without screenshots. Nothing was sent.",
+        code="screenshot_upload_failed", detail=exc.message[:400],
+      ) from exc
+    prior = record.get("last_submit_screenshots")
+    prior = prior if isinstance(prior, dict) else {}
+    commit = contribution_screenshots.publish(
+      diff_path.with_suffix(".json"), screenshots,
+      assets_repo=assets_repo, branch=branch, author=author,
+      reuse_commit=(
+        str(prior.get("commit") or "") or None
+        if prior.get("repo") == assets_repo else None
+      ),
+    )
+    resolved = contribution_screenshots.resolve_body(
+      body, screenshots, assets_repo=assets_repo, commit=commit, branch=branch,
+    )
+    # The early check guessed the fork's name; a renamed fork links longer.
+    if len(resolved) > GITHUB_BODY_MAX_CHARS:
+      raise ContributionSubmitError(
+        f"The screenshots were uploaded to {assets_repo}, but with their "
+        "links this description exceeds GitHub's size limit. Ask the agent "
+        "to shorten it. The code was not sent.",
+        code="screenshot_body_too_large",
+      )
+  except ContributionSubmitError as exc:
+    raise _git_ops._merge_error_patch(exc, record_patch) from exc
+  record_patch = _git_ops._record_patch_with(record_patch, {
+    "last_submit_screenshots": {"repo": assets_repo, "commit": commit},
+  })
+  return resolved, record_patch, assets_repo
+
+
 def _submit_prepared_pr(
   record: dict,
   diff_path: Path,
@@ -3843,10 +3954,24 @@ def _submit_prepared_pr(
         return None
 
     if same_repo_submission:
+      # Before anything is uploaded, including screenshots.
       try:
         _git_ops._assert_upstream_push_permission(repo, upstream_repo)
       except ContributionSubmitError as exc:
         raise _git_ops._merge_error_patch(exc, record_patch) from exc
+
+    screenshot_repo = None
+    screenshots = contribution_screenshots.plan_entries(plan)
+    if screenshots:
+      body, record_patch, screenshot_repo = _publish_reviewed_screenshots(
+        record, diff_path, repo, screenshots, body,
+        upstream_repo=upstream_repo, login=login, branch=branch,
+        author=(author_name, author_email),
+        is_update=expected_existing_pr_number is not None,
+        record_patch=record_patch,
+      )
+
+    if same_repo_submission:
       push_remote = f"https://github.com/{upstream_repo}.git"
       published_repo = upstream_repo
       record_patch = _git_ops._record_patch_with(record_patch, {
@@ -3947,6 +4072,10 @@ def _submit_prepared_pr(
     else:
       if public_branch_recovery:
         fork_slug = recovery.head_repository
+      elif screenshot_repo is not None:
+        # This is not the owner's repository, so the screenshot upload just
+        # resolved the same fork remote.
+        fork_slug = screenshot_repo
       else:
         try:
           fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
@@ -4433,6 +4562,16 @@ def _preflight_prepared_stack(
       _git_ops._git(repo, "checkout", "-q", branch)
       _git_ops._assert_clean_worktree(repo)
       _git_ops._assert_fresh(record, row["diff_path"], repo, branch)
+      screenshots = contribution_screenshots.plan_entries(plan)
+      contribution_screenshots.verify(
+        Path(row["diff_path"]).with_suffix(".json"), screenshots,
+      )
+      if screenshots:
+        _check_screenshot_body(
+          _exact_reviewed_pr_text(record)[1], screenshots,
+          upstream_repo=upstream_repo, login=login, branch=branch,
+          record_patch={},
+        )
       _git_ops._assert_coauthor_trailer(repo, branch, record)
       # This runs under the complete review/source lock set acquired by the
       # route. It is the last local-source boundary before any stack layer can
@@ -4452,6 +4591,23 @@ def _preflight_prepared_stack(
     finally:
       if checkout_back:
         _git_ops._git(repo, "checkout", "-q", checkout_back, check=False)
+
+  # Every layer passed its local proof. Host every layer's screenshots now, so
+  # an unforkable or private repository stops the stack before any branch is
+  # public; each layer's own Send then finds its images already there.
+  for row in sendable:
+    record = row["record"]
+    plan = record.get("plan") or {}
+    screenshots = contribution_screenshots.plan_entries(plan)
+    if screenshots:
+      _publish_reviewed_screenshots(
+        record, Path(row["diff_path"]), _safe_repo_path(plan.get("repo_path")),
+        screenshots, _exact_reviewed_pr_text(record)[1],
+        upstream_repo=upstream_repo, login=login,
+        branch=_git_ops._validate_branch(plan.get("branch") or record.get("branch")),
+        author=(author_name, author_email),
+        is_update=plan.get("action") == "pr_update", record_patch={},
+      )
 
 
 def _push_stack_tip_with_lease(

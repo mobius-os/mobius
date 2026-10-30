@@ -23,6 +23,7 @@ import pytest
 
 from app import models, schemas, transcript_rows
 from app.chat_writer import (
+  _PersistFailed,
   _stamp_provider_batch,
   apply_answers_to_last_question,
   AnswerQuestion,
@@ -501,8 +502,10 @@ def test_question_commit_missing_chat_raises(actor):
       chat_id="ghost", run_token="rt1", snapshot=_question_msg("q1")
     )
   )
-  with pytest.raises(Exception):
+  with pytest.raises(_PersistFailed, match=r"^QuestionCommit did not persist \(noop\)$"):
     _await(fut)
+  assert fut.done() and not fut.cancelled()
+  assert _await(actor.submit(Barrier())) is None
 
 
 def test_question_commit_empty_transcript_raises(actor):
@@ -513,8 +516,10 @@ def test_question_commit_empty_transcript_raises(actor):
   fut = actor.submit(
     QuestionCommit(chat_id="c1", run_token="rt1", snapshot=_question_msg("q1"))
   )
-  with pytest.raises(Exception):
+  with pytest.raises(_PersistFailed, match=r"^QuestionCommit did not persist \(noop\)$"):
     _await(fut)
+  assert fut.done() and not fut.cancelled()
+  assert _await(actor.submit(Barrier())) is None
 
 
 def test_finalize_missing_chat_raises(actor):
@@ -527,8 +532,10 @@ def test_finalize_missing_chat_raises(actor):
       snapshot=_assistant_msg([{"type": "text", "content": "done"}]),
     )
   )
-  with pytest.raises(Exception):
+  with pytest.raises(_PersistFailed, match=r"^Finalize did not persist \(noop\)$"):
     _await(fut)
+  assert fut.done() and not fut.cancelled()
+  assert _await(actor.submit(Barrier())) is None
 
 
 def test_finalize_empty_transcript_on_existing_chat_is_benign(actor):
@@ -1559,8 +1566,10 @@ def test_answer_question_no_block_raises(actor):
       chat_id="c1", run_token="rt1", question_id="missing", answers={"a": "b"}
     )
   )
-  with pytest.raises(Exception):
+  with pytest.raises(_PersistFailed, match="^AnswerQuestion: no matching question block$"):
     _await(fut)
+  assert fut.done() and not fut.cancelled()
+  assert _await(actor.submit(Barrier())) is None
 
 
 def test_competing_exact_card_answers_cannot_overwrite_winner(actor):

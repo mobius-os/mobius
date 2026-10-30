@@ -35,6 +35,7 @@ export function createBlockDocuments() {
 export function blockSessionEnvelope(session, generation) {
   if (!session || !Number.isSafeInteger(generation)) return null
   return { sessionId: session.sessionId, generation, actions: session.actions,
+    items: Array.isArray(session.items) ? session.items : [],
     checkpoint: session.checkpoint ?? null, retain: session.retain === true,
     recoveryError: session.recoveryError ?? null }
 }

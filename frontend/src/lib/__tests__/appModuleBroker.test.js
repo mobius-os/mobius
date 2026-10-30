@@ -250,6 +250,8 @@ test('the app block-session handle mirrors the init envelope and stamps its own 
   assert.equal(on.api.sessionId, 's')
   assert.equal(on.api.generation, 4)
   assert.deepEqual(on.api.checkpoint, { id: 'c1', data: 'opaque' })
+  assert.deepEqual(on.api.items, [], 'no listed items: an empty array')
+  assert.deepEqual(on.makeApi({ sessionId: 's', generation: 1, items: [{ intent: 'review:a' }] }).items, [{ intent: 'review:a' }])
   assert.equal(on.api.retain, true)
   assert.ok(Object.isFrozen(on.api))
   on.api.setState({ actions: [{ key: 'run:1', busy: true }], type: 'forged', sessionId: 'other' })

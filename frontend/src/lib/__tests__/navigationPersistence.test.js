@@ -177,3 +177,14 @@ test('decision link retains the exact question identity, not just current input 
   assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?chat=source&focus=question&question=saved-card' }),
     { view: 'chat', chatId: 'source', intent: null, focusQuestion: true, questionId: 'saved-card' })
 })
+
+test('result deep links identify only a project and artifact, without changing project links', () => {
+  assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?project=project-7&result=website_2' }),
+    { view: 'artifact', projectId: 'project-7', artifactId: 'website_2' })
+  for (const search of ['?project=p&result=', '?project=p&result=a%3Ab', '?project=p&result=..%2Fsecret', '?project=p&result=' + 'a'.repeat(65)]) {
+    assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search }), { view: 'project', projectId: 'p' })
+  }
+  assert.equal(parseShellDeepLink({ pathname: '/shell/', search: '?result=site' }), null)
+  assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?project=p%3Aother&result=site' }),
+    { view: 'project', projectId: 'p:other' })
+})

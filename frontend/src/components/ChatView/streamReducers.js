@@ -443,6 +443,27 @@ export function suppressedQuestionToolIndices(blocks) {
 }
 
 /**
+ * The blocks MsgContent renders in place, each with its rendered position
+ * `idx` — the number its text carries as `data-markdown-block`. Deliverables
+ * (`generated_files`) are positioned separately, so they do not change the
+ * visible tail used by Resume/Try-now ownership, and the persisted transcript
+ * keeps the raw AskUserQuestion tool block AND its question card (backend
+ * events.process_event appends both) while the live stream absorbs that twin
+ * into the card; skipping it here makes a reopened chat match the live view
+ * and cleans up already-persisted chats with no backend migration. Anything
+ * that locates a rendered block (a reply's Copy) must number blocks this way.
+ */
+export function renderedBlockEntries(blocks) {
+  const skipToolIdx = suppressedQuestionToolIndices(blocks)
+  return blocks
+    .map((item, rawIdx) => ({ item, rawIdx }))
+    .filter(({ item, rawIdx }) => (
+      item?.type !== 'generated_files' && !skipToolIdx.has(rawIdx)
+    ))
+    .map(({ item }, idx) => ({ item, idx }))
+}
+
+/**
  * Applies a `question` event to the stream items.
  *
  * Merge policy, in priority order:

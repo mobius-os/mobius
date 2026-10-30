@@ -65,8 +65,10 @@ jobs:
             - Chrome for Testing follows its Stable channel. It publishes no
               checksums, so each archive's sha256 is computed from the same
               download URL the image build verifies against.
-            - Codex's npm CLI and Python SDK follow the same release. Its SDK
-              CLI package shares the image's executable rather than duplicating it.
+            - Codex's npm CLI and Python SDK are pinned together to the newest
+              release both registries publish; until one exists, Codex keeps its
+              pins and the other runtimes still update. Its SDK CLI package
+              shares the image's executable rather than duplicating it.
             - A Codex change fails `test_codex_tools_off.py` until the tools-off
               list in `backend/app/providers.py` is re-traced on the new version
               and its `CODEX_TOOLS_OFF_VERIFIED_FOR` updated on the default branch.

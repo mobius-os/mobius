@@ -1,0 +1,33 @@
+.uninstalled-apps { margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--border-light); }
+.uninstalled-apps__head h2 { margin: 0; display: flex; align-items: center; gap: 9px; color: var(--text); font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+.uninstalled-apps__count {
+  min-width: 22px; padding: 1px 7px; border-radius: 999px; text-align: center;
+  background: transparent; border: 1px solid var(--border-light); color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0;
+}
+.uninstalled-apps__head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.uninstalled-apps__list { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); }
+.uninstalled-apps__tile {
+  display: flex; flex-direction: column; align-items: center; min-width: 0;
+  padding: 14px; border: 1px solid var(--border-light); border-radius: 16px; background: transparent; text-align: center;
+}
+.uninstalled-apps__name { margin-top: 9px; }
+.uninstalled-apps__removed { margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+.uninstalled-apps__expiry {
+  flex: 0 0 auto; margin: 8px 0 12px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 650; white-space: nowrap;
+  border: 1px solid var(--border-light); color: var(--muted); background: transparent;
+}
+.uninstalled-apps__expiry.is-soon { color: #f5b942; border-color: color-mix(in srgb, #f5b942 45%, transparent); }
+.uninstalled-apps__expiry.is-urgent { color: #f87171; border-color: color-mix(in srgb, #f87171 45%, transparent); }
+.uninstalled-apps__actions { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: auto; }
+.uninstalled-apps__btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 100%; min-height: 38px; padding: 7px 14px;
+  border: 1px solid var(--border-light); border-radius: 11px; background: transparent; color: var(--text);
+  font: inherit; font-size: 13px; font-weight: 650; white-space: nowrap; cursor: pointer;
+}
+.uninstalled-apps__btn--primary { border-color: var(--accent); background: var(--accent); color: var(--accent-fg, #fff); }
+.uninstalled-apps__btn--primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, black); }
+.uninstalled-apps__btn--danger { border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent); color: var(--danger, #f87171); }
+.uninstalled-apps__btn--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #f87171) 12%, transparent); }
+.uninstalled-apps__btn:disabled { opacity: .55; cursor: not-allowed; }
+.uninstalled-apps__btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.uninstalled-apps__error { margin: 12px 0 0; color: var(--danger, #f87171); font-size: 13px; }

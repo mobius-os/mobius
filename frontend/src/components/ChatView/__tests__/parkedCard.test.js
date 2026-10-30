@@ -15,6 +15,9 @@ const { default: ErrorCard } = await vite.ssrLoadModule(
 const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
 )
+const { default: MessageCopyButton } = await vite.ssrLoadModule(
+  '/src/components/ChatView/MessageCopyButton.jsx',
+)
 
 after(() => vite.close())
 
@@ -638,3 +641,19 @@ for (const kind of ['memory', 'storage', 'model_capacity', 'restart']) {
     })
   }
 }
+
+test('an error card’s Copy hands its button the raw error message', () => {
+  // MessageCopyButton reads its payload at tap time through `read(button)`;
+  // a card still passing the old `text` prop threw on tap and copied nothing.
+  const message = 'Provider returned 500: upstream reset'
+  const found = []
+  const walk = node => {
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (!node || typeof node !== 'object') return
+    if (node.type === MessageCopyButton) found.push(node.props)
+    walk(node.props?.children)
+  }
+  walk(ErrorCard({ block: { type: 'error', message } }))
+  assert.equal(found.length, 1)
+  assert.deepEqual(found[0].read({}), { plainText: message })
+})

@@ -91,7 +91,6 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    clearTimeout(this.stableTimer)
     this.props.onError?.(error)
     // Record through the shared client-error log (console + owner-readable ring
     // buffer), same sink the global window handlers use.

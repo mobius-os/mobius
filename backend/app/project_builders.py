@@ -25,11 +25,13 @@ Concurrency model (single uvicorn worker, single event loop):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import json
 import os
 import re
 import shutil
+import stat
 import time
 import tempfile
 from pathlib import Path
@@ -212,6 +214,52 @@ def new_artifact_entry(
   }
 
 
+# A source fingerprint walks the project tree on demand. Past this many files
+# it reports "unknown" rather than slow every results listing.
+_FINGERPRINT_MAX_FILES = 5000
+
+
+def source_fingerprint(root: Path) -> str | None:
+  """Digest of every source file's path, size, and modification time.
+
+  A successful build records the fingerprint taken before it read the tree;
+  a later mismatch means some source changed since that build, so the result
+  is out of date. It covers the whole tree, not one entry file, because a
+  build also reads styles, images, and included files. The reserved
+  ``artifacts/`` area and Git metadata are not source. ``None`` means the
+  tree could not be fingerprinted cheaply, and callers then report nothing.
+  """
+  digest = hashlib.sha256()
+  count = 0
+  for dirpath, dirnames, filenames in os.walk(root):
+    base = Path(dirpath)
+    dirnames[:] = sorted(
+      name for name in dirnames
+      if name not in workspace_files.GIT_METADATA_NAMES
+      and not (base == root and name == "artifacts")
+    )
+    for name in sorted(filenames):
+      path = base / name
+      try:
+        info = path.lstat()
+      except OSError:
+        continue
+      if not stat.S_ISREG(info.st_mode):
+        continue
+      count += 1
+      if count > _FINGERPRINT_MAX_FILES:
+        return None
+      rel = path.relative_to(root).as_posix()
+      digest.update(f"{rel}\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
+  return digest.hexdigest()
+
+
+def is_out_of_date(entry: dict[str, Any], current: str | None) -> bool:
+  """Whether a built result predates the current source tree."""
+  built = entry.get("built_fingerprint")
+  return isinstance(built, str) and current is not None and built != current
+
+
 def read_artifacts(project) -> list[dict[str, Any]]:
   """Tolerantly read the artifact registry; never raise on agent-authored data.
 
@@ -295,6 +343,7 @@ def start_build(project_id: str, artifact_id: str) -> asyncio.Task:
 
 def _write_status(
   project_id: str, artifact_id: str, *, status: str, duration_ms: int | None,
+  built_fingerprint: str | None = None,
 ) -> None:
   """Read-update-commit one artifact's status on ``Project.artifacts_json``.
 
@@ -323,6 +372,12 @@ def _write_status(
         entry["updated_at"] = _now_iso()
         if duration_ms is not None:
           entry["duration_ms"] = duration_ms
+        if status == "ok":
+          # Only a successful build says what its output was made from.
+          if built_fingerprint is None:
+            entry.pop("built_fingerprint", None)
+          else:
+            entry["built_fingerprint"] = built_fingerprint
         changed = True
         break
     if not changed:
@@ -628,6 +683,9 @@ async def run_build(project_id: str, artifact_id: str) -> None:
       log.warning("Could not create artifact dir %s", artifact_dir)
 
     started = time.monotonic()
+    # Taken before the builder reads the tree, so an edit made during the
+    # build leaves the new output marked out of date.
+    built_fingerprint = await asyncio.to_thread(source_fingerprint, root)  # unsettled: read-only (source file metadata)
     _write_status(project_id, artifact_id, status="building", duration_ms=None)
     _publish_build_event(project_id, artifact_id, "building")
 
@@ -689,7 +747,10 @@ async def run_build(project_id: str, artifact_id: str) -> None:
         shutil.rmtree(staged)
 
     duration_ms = int((time.monotonic() - started) * 1000)
-    _write_status(project_id, artifact_id, status=status, duration_ms=duration_ms)
+    _write_status(
+      project_id, artifact_id, status=status, duration_ms=duration_ms,
+      built_fingerprint=built_fingerprint,
+    )
   _publish_build_event(project_id, artifact_id, status)
 
 
