@@ -1,4 +1,5 @@
-// Settings › Keys gives each pending app request its own answer form.
+// Settings › Keys: each pending app request gets its own answer form, and keys
+// an app saved name that app.
 //
 // A request id is the app id and key name, so a request that replaces another
 // (an app that reused a removed app's id) arrives under the same id with a new
@@ -16,7 +17,7 @@ import assert from 'node:assert/strict'
 import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
-const { requestFormKey } = await vite.ssrLoadModule('/src/components/SettingsView/KeysSection.jsx')
+const { requestFormKey, savedByApp, replaceWarning } = await vite.ssrLoadModule('/src/components/SettingsView/KeysSection.jsx')
 after(() => vite.close())
 
 const request = ticket => ({ id: '5-weather_api', app: 5, key: 'weather_api', status: 'pending', ticket })
@@ -34,4 +35,26 @@ test('requests for different keys never share a form', () => {
     requestFormKey({ ...request('t'), id: '5-weather_api' }),
     requestFormKey({ ...request('t'), id: '5-maps_api' }),
   )
+})
+
+// An app's own saved secret loses that app's grant when anyone else replaces
+// its value (keyvault put_key), so Settings names the app before a Replace.
+const names = { 7: 'Weather' }
+const appSaved = { name: 'api_key', origin: { app: 7, name: 'api_key' }, grants: { apps: [7] } }
+const ownerKey = { name: 'api_key', grants: { apps: [7] } }
+
+test('a key an app saved names that app', () => {
+  assert.equal(savedByApp(appSaved, names), 'Weather')
+  assert.equal(savedByApp({ ...appSaved, origin: { app: 9, name: 'x' } }, names), 'App 9')
+})
+
+test("the owner's own key names no app", () => {
+  assert.equal(savedByApp(ownerKey, names), null)
+  assert.equal(replaceWarning(ownerKey, names), null)
+})
+
+test('replacing an app-saved key warns that the app loses access', () => {
+  const warning = replaceWarning(appSaved, names)
+  assert.match(warning, /^Weather saved this key\./)
+  assert.match(warning, /Weather stops using it/)
 })

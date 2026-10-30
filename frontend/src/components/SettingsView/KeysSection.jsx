@@ -45,6 +45,22 @@ function relativeTime(iso) {
   return `${Math.round(seconds / 86400)} d ago`
 }
 
+/**
+ * The app that saved this key as its own secret, or null for the owner's key.
+ * A new value from anyone else makes the key the owner's and withdraws that
+ * app's access, so Settings names the app before a Replace.
+ */
+export function savedByApp(key, names) {
+  return key.origin ? appLabel(names, key.origin.app) : null
+}
+
+export function replaceWarning(key, names) {
+  const app = savedByApp(key, names)
+  return app
+    ? `${app} saved this key. A new value makes it yours, and ${app} stops using it until you let it again under Who can use it.`
+    : null
+}
+
 function usersLine(key, names) {
   const users = (key.grants?.apps || []).map(id => appLabel(names, id))
   if (key.grants?.agents) users.push('agents')
@@ -134,6 +150,7 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
               <span className="settings-keys__row-copy">
                 <strong>{key.name}</strong>
                 <small>
+                  {savedByApp(key, names) ? `Saved by ${savedByApp(key, names)} · ` : ''}
                   {usersLine(key, names)}
                   {key.last_used ? ` · used ${relativeTime(key.last_used)}` : ''}
                 </small>
@@ -326,7 +343,7 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
       {error && <Alert color="danger" variant="soft" description={error} />}
 
       <section className="settings__section settings-keys-card" aria-label="Value">
-        <ValueRow keyRecord={key} save={save} busy={busy} />
+        <ValueRow keyRecord={key} names={names} save={save} busy={busy} />
       </section>
 
       <h2 className="settings__section-title settings-keys-page__heading">Who can use it</h2>
@@ -398,7 +415,9 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
   )
 }
 
-function ValueRow({ keyRecord: key, save, busy }) {
+function ValueRow({ keyRecord: key, names, save, busy }) {
+  const savedBy = savedByApp(key, names)
+  const warning = replaceWarning(key, names)
   const [shown, setShown] = useState(null)
   const [replacing, setReplacing] = useState(false)
   const [next, setNext] = useState('')
@@ -430,6 +449,7 @@ function ValueRow({ keyRecord: key, save, busy }) {
           {shown === null
             ? <small aria-label="Hidden">••••••••••••</small>
             : <code className="settings-keys__value">{shown}</code>}
+          {savedBy && <small>Saved by {savedBy}</small>}
         </span>
         <span className="settings-keys-card__end">
           <button type="button" className="settings-keys__link" onClick={() => (shown === null ? show() : setShown(null))}>
@@ -454,6 +474,7 @@ function ValueRow({ keyRecord: key, save, busy }) {
             spellCheck={false}
             autoFocus
           />
+          {warning && <small className="settings-keys__muted" role="note">{warning}</small>}
           <div className="settings-keys__actions">
             <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => { setReplacing(false); setNext('') }}>Cancel</button>
             <button type="submit" className="settings__btn settings__btn--sm" disabled={busy || !next}>Save</button>
