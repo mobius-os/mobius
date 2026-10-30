@@ -1,6 +1,8 @@
 """Location-batch ingest, history, and per-phone tracking state."""
 from __future__ import annotations
 
+import pytest
+
 
 def _pos(ts, lat=10.5, lon=20.25, **extra):
   base = {"latitude": lat, "longitude": lon, "timestamp": ts}
@@ -135,6 +137,59 @@ def test_an_older_report_cannot_overwrite_a_newer_one(client, auth):
 
   got = client.get("/api/location/tracking", headers=auth).json()
   assert got["options"] == {"interval": 60000}
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_overlapping_reports_cannot_replace_a_newer_stop(client, auth, db, existing):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Event
+  from sqlalchemy import event
+  from app import models
+  from app.database import engine
+
+  if existing:
+    assert _report(client, auth, "phone-a", True, 1_000).status_code == 200
+  paused = Event()
+  release = Event()
+
+  def delay_first_write(_conn, _cursor, statement, _parameters, _context, _many):
+    sql = statement.lstrip().lower()
+    if (sql.startswith("insert into location_tracking_devices")
+        or sql.startswith("update location_tracking_devices")) and not paused.is_set():
+      # Delay the older request's write until the newer request has committed.
+      paused.set()
+      assert release.wait(10), "The older report was not released"
+
+  event.listen(engine, "before_cursor_execute", delay_first_write)
+  try:
+    with ThreadPoolExecutor(max_workers=1) as worker:
+      older = worker.submit(_report, client, auth, "phone-a", True, 2_000, interval=30000)
+      try:
+        assert paused.wait(10), "The older report never reached its write"
+        newer = _report(client, auth, "phone-a", False, 3_000)
+        assert newer.status_code == 200, newer.text
+      finally:
+        release.set()
+      result = older.result(timeout=10)
+      assert result.status_code == 200, result.text
+  finally:
+    event.remove(engine, "before_cursor_execute", delay_first_write)
+
+  got = client.get("/api/location/tracking", headers=auth).json()
+  assert got == {
+    "enabled": False, "options": {},
+    "devices": [{"device_id": "phone-a", "enabled": False, "options": {}}],
+  }
+  stored = db.query(models.LocationTrackingDevice).one()
+  assert stored.reported_at_ms == 3_000
+
+
+def test_an_equal_timestamp_report_can_replace_the_previous_state(client, auth):
+  assert _report(client, auth, "phone-a", True, 2_000, interval=60000).status_code == 200
+  assert _report(client, auth, "phone-a", False, 2_000).status_code == 200
+  got = client.get("/api/location/tracking", headers=auth).json()
+  assert got["enabled"] is False
+  assert got["devices"] == [{"device_id": "phone-a", "enabled": False, "options": {}}]
 
 
 def test_tracking_report_requires_a_device(client, auth):

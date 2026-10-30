@@ -490,6 +490,14 @@ def _drop_cron_only(resolved: Path) -> None:
   _disable_init_cron_replay(resolved)
 
 
+class AppPurgeBlocked(RuntimeError):
+  """The app still has live work or project files, so it cannot be erased yet.
+
+  A RuntimeError so the TTL sweep keeps treating it as "leave the tombstone for
+  the next pass"; the owner-triggered purge reports it to the owner instead.
+  """
+
+
 async def _hard_delete_app(db: Session, app: models.App) -> None:
   """Permanently remove an app's DB row, compiled bundle, source tree, and
   id-keyed storage tree — the pre-110 destructive uninstall, now reached only by
@@ -507,16 +515,16 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
 
   from app.delegations import active_delegation_ids_for_app
   if active_delegation_ids_for_app(db, deleted_app_id):
-    raise RuntimeError(
-      "active delegated work must quiesce before permanent app deletion"
+    raise AppPurgeBlocked(
+      "Agents are still working for this app. Try again when they finish."
     )
   # Project recovery includes linked source, not only legacy imports. Provider
   # metadata alone is not ownership: native projects can detach safely.
   from app.project_retention import projects_using_app_files
   dependent_projects = projects_using_app_files(db, app)
   if dependent_projects:
-    raise RuntimeError(
-      f"app {deleted_app_id} still owns project {dependent_projects[0].id} files"
+    raise AppPurgeBlocked(
+      "This app still owns the files of a project. Delete that project first."
     )
 
   # Registry state is the revocation boundary; physical cleanup may fail.
@@ -723,7 +731,8 @@ def list_uninstalled_apps(
   Recover one with ``POST /{app_id}/recover``. A tombstone past the window is
   not listed even before the purge that removes it permanently.
   """
-  cutoff = now_naive_utc() - APP_SOFT_DELETE_TTL
+  now = now_naive_utc()
+  cutoff = now - APP_SOFT_DELETE_TTL
   rows = (
     db.query(models.App)
     .options(defer(models.App.jsx_source), defer(models.App.project_templates_json))
@@ -736,6 +745,7 @@ def list_uninstalled_apps(
       id=row.id, name=row.name, slug=row.slug, version=row.version,
       deleted_at=row.deleted_at.replace(tzinfo=UTC),
       expires_at=(row.deleted_at + APP_SOFT_DELETE_TTL).replace(tzinfo=UTC),
+      seconds_left=(row.deleted_at + APP_SOFT_DELETE_TTL - now).total_seconds(),
       icon_data_url=_icon_data_url(row.effective_icon_png),
       background_color=row.background_color, theme_color=row.theme_color,
       manifest_url=row.manifest_url, package_id=row.package_id,
@@ -3304,6 +3314,42 @@ async def get_icon(
   else:
     content = icon_png
   return Response(content=content, media_type="image/png", headers=headers)
+
+
+@router.delete(
+  "/{app_id}/permanent",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def delete_uninstalled_app_permanently(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Erases an uninstalled app now instead of waiting out its 7-day window.
+
+  The same routine and locks as the TTL purge, so it cannot race a recover or a
+  reinstall. Only the owner (never an app or a helper agent) can do it: the
+  recovery window is the undo, and this gives it up.
+  """
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    db.rollback()
+    app = (
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
+      .first()
+    )
+    if app is None:
+      raise HTTPException(404, "App not found in Recently uninstalled.")
+    try:
+      await settled.settle(
+        _hard_delete_app(db, app), what="App permanent deletion",
+      )
+    except AppPurgeBlocked as exc:
+      raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.delete(

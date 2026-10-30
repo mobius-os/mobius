@@ -1784,6 +1784,35 @@ def test_broker_forwards_every_railway_inventory_option_identity_sends(
   assert broker_module.BROKER_ROUTE_EPOCH >= 9
 
 
+def test_broker_forwards_only_the_display_cost_metrics_read_opt_in():
+  path = "/api/instance/v1/railway/instances/mob_example/metrics?cost=1"
+  assert broker_module._managed_upstream_path("GET", "/managed" + path) == path
+  assert broker_module.BROKER_ROUTE_EPOCH >= 11
+
+
+@pytest.mark.parametrize("suffix", [
+  "?", "?cost", "?cost=", "?cost=0", "?cost=true", "?cost=%31",
+  "?%63ost=1", "?cost=1&", "?cost=1&cost=1", "?cost=1&next=evil",
+  "?cost=1&region_options=1", "?cost=1#fragment", "/?cost=1",
+])
+def test_broker_rejects_noncanonical_or_extra_metrics_queries(suffix):
+  path = "/managed/api/instance/v1/railway/instances/mob_example/metrics" + suffix
+  assert broker_module._managed_upstream_path("GET", path) is None
+
+
+@pytest.mark.parametrize("method, path", [
+  ("POST", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("PATCH", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("DELETE", "/api/instance/v1/railway/instances/mob_example/metrics"),
+  ("GET", "/api/instance/v1/railway/instances/not_an_instance/metrics"),
+  ("GET", "/api/instance/v1/railway/instances/mob_example/recovery/status"),
+  ("GET", "/api/instance/v1/railway"),
+  ("GET", "/api/instance/v1/identity"),
+])
+def test_broker_cost_opt_in_cannot_escape_the_metrics_read(method, path):
+  assert broker_module._managed_upstream_path(method, "/managed" + path + "?cost=1") is None
+
+
 @pytest.mark.parametrize("method, path", [
   ("GET", "/api/instance/v1/railway?"),
   ("GET", "/api/instance/v1/railway?next=evil"),

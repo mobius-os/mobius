@@ -86,7 +86,8 @@ export function useStoreCatalog(apps, wantedIds) {
           if ((manifest.id !== item.id && manifest.previous_id !== item.id) || typeof manifest.icon !== 'string') return
           const icon = new URL(manifest.icon, item.raw_base)
           if (icon.origin !== new URL(item.raw_base).origin || !icon.pathname.startsWith(new URL(item.raw_base).pathname)) return
-          const iconResponse = await apiFetch(`/proxy?url=${encodeURIComponent(icon.href)}`, { signal: controller.signal, timeoutMs: 10_000 })
+          // Icons render at most 44 CSS px; w asks the proxy for a small WebP instead of the full-size original.
+          const iconResponse = await apiFetch(`/proxy?url=${encodeURIComponent(icon.href)}&w=96`, { signal: controller.signal, timeoutMs: 10_000 })
           if (!iconResponse.ok) return
           const image = await iconResponse.blob()
           if (!image.type.startsWith('image/')) return

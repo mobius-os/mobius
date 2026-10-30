@@ -216,6 +216,9 @@ class UninstalledAppOut(BaseModel):
   version: str | None = None
   deleted_at: datetime
   expires_at: datetime
+  # Time left in the window, measured on the server. A countdown runs from this
+  # rather than from expires_at so a device clock that is off cannot end it early.
+  seconds_left: float
   # A small copy of the app's icon, sent here because the public icon route
   # hides uninstalled apps on purpose.
   icon_data_url: str | None = None

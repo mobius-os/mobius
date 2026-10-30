@@ -50,7 +50,7 @@ async function loadPage({
   batch = () => new Response('{}', { status: 200 }),
   storage = null,
 } = {}) {
-  const calls = { start: [], stop: 0, puts: [], reports: [], batches: [] }
+  const calls = { start: [], stop: 0, puts: [], reports: [], batches: [], batchDeviceIds: [] }
   // The server keeps one tracking report per phone, newest decision wins, and
   // is "on" when any phone is.
   const server = {
@@ -105,7 +105,8 @@ async function loadPage({
     if (path === '/location/batch') {
       const body = JSON.parse(init.body)
       calls.batches.push(body.positions)
-      return batch(body.positions)
+      calls.batchDeviceIds.push(body.device_id)
+      return batch(body.positions, body.device_id)
     }
     if (path === '/location/tracking') {
       return Response.json({ enabled: server.enabled, options: server.options })
@@ -267,6 +268,65 @@ const settle = async () => { for (let i = 0; i < 20; i += 1) await flush() }
 // localStorage that reads fine but refuses every write (quota full, or denied).
 class FullStorage extends MemoryStorage {
   setItem() { throw new Error('QuotaExceededError') }
+}
+
+class BlockedStorage extends FullStorage {
+  getItem() { throw new Error('SecurityError') }
+}
+
+for (const [label, storage, persistedId] of [
+  ['writes fail', () => new FullStorage()],
+  ['reads and writes fail', () => new BlockedStorage()],
+  ['writes fail with an existing id', () => new FullStorage({ [DEVICE_KEY]: THIS_PHONE }), THIS_PHONE],
+]) {
+  test(`one device id covers tracking, upload retries and sign-out when storage ${label}`, async (t) => {
+    // Model the server's (device_id, timestamp) dedupe. The first request is
+    // stored but its acknowledgement is lost, so the controller must retry it.
+    const stored = new Map()
+    let attempts = 0
+    const page = await loadPage({
+      storage: storage(),
+      batch: (positions, deviceId) => {
+        for (const position of positions) stored.set(`${deviceId}:${position.timestamp}`, position)
+        if (++attempts === 1) throw new Error('Acknowledgement lost')
+        return new Response('{}', { status: 200 })
+      },
+    })
+    t.after(() => page.mod.endLocationSession())
+    await page.mod.initLocationTracking()
+    assert.equal(await page.mod.startTracking(), 'started')
+    await settle()
+    const deviceId = page.calls.reports.at(-1).device_id
+    assert.ok(deviceId)
+    if (persistedId) assert.equal(deviceId, persistedId)
+    assert.equal(page.server.devices[deviceId].enabled, true)
+
+    deliver([fix(1)])
+    await settle()
+    assert.equal(page.mod.getLocationState().queueLength, 1)
+    // Regaining connectivity retries immediately, without waiting for backoff.
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    assert.equal(attempts, 2)
+    assert.equal(page.mod.getLocationState().queueLength, 0)
+    assert.deepEqual(page.calls.batchDeviceIds, [deviceId, deviceId])
+    assert.equal(stored.size, 1, 'the retry must not create a second server fix')
+
+    assert.equal(await page.mod.stopTracking(), 'stopped')
+    await settle()
+    assert.equal(page.server.devices[deviceId].enabled, false)
+    assert.equal(page.server.enabled, false, 'Stop must clear the original tracking report')
+
+    // Clearing an owner's data must not reset this document's opaque phone id.
+    await page.mod.startTracking()
+    await page.mod.stopLocationForSignOut()
+    await page.mod.endLocationSession()
+    await page.mod.startTracking()
+    await page.mod.stopTracking()
+    await settle()
+    assert.deepEqual([...new Set(page.calls.reports.map((r) => r.device_id))], [deviceId])
+    assert.equal(page.server.enabled, false)
+  })
 }
 
 test('fixes still upload once each when the device cannot save the queue', async () => {

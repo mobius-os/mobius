@@ -104,15 +104,19 @@ function setSessionActive(active) {
   }
 }
 
+// Keep one identity for this document even when storage is denied or full.
+// Persistence across documents is best-effort; sign-out does not reset it.
+let deviceId = null
+
 function getDeviceId() {
-  let id = null
-  try { id = localStorage.getItem(DEVICE_KEY) } catch { /* ignore */ }
-  if (!id) {
-    id = globalThis.crypto?.randomUUID?.()
+  if (deviceId) return deviceId
+  try { deviceId = localStorage.getItem(DEVICE_KEY) } catch { /* ignore */ }
+  if (!deviceId) {
+    deviceId = globalThis.crypto?.randomUUID?.()
       || `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    try { localStorage.setItem(DEVICE_KEY, id) } catch { /* ignore */ }
+    try { localStorage.setItem(DEVICE_KEY, deviceId) } catch { /* ignore */ }
   }
-  return id
+  return deviceId
 }
 
 // ---- feature detection ------------------------------------------------------

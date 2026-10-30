@@ -300,15 +300,25 @@ def report_tracking_state(
   A report older than the one already stored for that phone is ignored, so a
   delayed request cannot undo a newer start, stop, or pace change.
   """
-  row = db.get(models.LocationTrackingDevice, (owner.id, body.device_id))
-  if row is None:
-    row = models.LocationTrackingDevice(owner_id=owner.id, device_id=body.device_id)
-    db.add(row)
-  elif body.reported_at < row.reported_at_ms:
-    return _tracking_state(db, owner.id)
-  row.enabled = body.enabled
-  row.options_json = dict(body.options or {})
-  row.reported_at_ms = body.reported_at
-  row.updated_at = now_naive_utc()
+  devices = models.LocationTrackingDevice.__table__
+  report = insert(devices).values(
+    owner_id=owner.id,
+    device_id=body.device_id,
+    enabled=body.enabled,
+    options_json=dict(body.options or {}),
+    reported_at_ms=body.reported_at,
+    updated_at=now_naive_utc(),
+  )
+  # Compare timestamps in the write so overlapping reports cannot undo a stop.
+  db.execute(report.on_conflict_do_update(
+    index_elements=["owner_id", "device_id"],
+    set_={
+      "enabled": report.excluded.enabled,
+      "options_json": report.excluded.options_json,
+      "reported_at_ms": report.excluded.reported_at_ms,
+      "updated_at": report.excluded.updated_at,
+    },
+    where=report.excluded.reported_at_ms >= devices.c.reported_at_ms,
+  ))
   db.commit()
   return _tracking_state(db, owner.id)

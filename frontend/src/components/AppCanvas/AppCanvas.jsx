@@ -130,9 +130,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      the iframe sits at its 10s loading-timeout.
 //
 //   Managed app lifecycle: {type: 'moebius:managed-app-event',
-//       event: {type: 'app_updated', appId}}       parent → frame
-//      Every completion is sent to frames with reviewed manage_apps.
-//      appId is always the updated app's id as a string. Apps listen directly
+//       event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}   parent → frame
+//      Every such event is sent to frames with reviewed manage_apps.
+//      appId is always the affected app's id as a string. Apps listen directly
 //      on window; the frame host does not handle or replay this message.
 //
 //   Module broker: {type:'moebius:module-request', requestId, appId, retry}
