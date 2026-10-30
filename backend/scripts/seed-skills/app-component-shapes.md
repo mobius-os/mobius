@@ -21,6 +21,19 @@ Copy only the blocks the app actually needs and replace the `ma-` placeholder
 with a short app prefix.
 Fence comments such as `/* mobius-ui:Card */` are labels, not a sync contract.
 
+The blocks share one quiet default so the app's own composition can lead:
+
+- one continuous background (`--bg`), no tonal header band;
+- borderless rows separated by hairlines; a perimeter border, resting shadow
+  or accent rail is a deliberate exception that carries meaning;
+- generic controls (chevron, close, empty-state mark) use Apps SDK icons:
+  `import { ChevronRight, Moon, X } from '@openai/apps-sdk-ui/components/Icon'`;
+- coloured text uses a text role and a labelled fill uses a fill role, each
+  with today's base colour as its fallback (`var(--accent-text, var(--accent))`,
+  `var(--accent-fill, var(--accent))`), so the block reads on any theme;
+- every `:hover` sits inside `@media (hover: hover)`, so a tap never leaves a
+  stuck hover state on touch.
+
 ---
 
 ## 1. Root layout — default `Root`, or `AppShell` when you need it
@@ -129,7 +142,8 @@ the scroller strands its scrollbar in mid-screen.
 Pick the cap to match the app's own content: 680px reads well for text; a card list
 that already caps its detail / reader view (640–720px) should reuse THAT number so list
 and detail agree — mismatched caps are the same edge-to-edge complaint one zoom level
-down. A pinned `ma-header` stays full-bleed (its divider still reaches both edges); only
+down. A pinned `ma-header` keeps the continuous full-bleed background while its divider
+is inset to the same column (§2); only
 the scrolling content gets the column, and a sticky child (a search bar) keeps working
 inside the wrapper. On a flow Root the same wrapper caps prose — drop the breakpoint for
 pure prose that should never go full-bleed.
@@ -141,18 +155,16 @@ letterbox them. `ma-chat-embed` and `ChatSplit` panes size themselves too. If th
 a single column of content that reads, cap it; if it's a canvas or a multi-pane
 workspace, leave it full-bleed.
 
-**Safe area:** a full-bleed root (one that paints to the device edges — a
-`position: fixed; inset: 0` canvas, or a root with no edge-pinned header/sheet
-chrome of its own) must inset its content for the notch and home indicator:
-`padding: env(safe-area-inset-top) env(safe-area-inset-right)
-env(safe-area-inset-bottom) env(safe-area-inset-left)`. A normal root whose
-header and bottom sheet already handle their own edges (below) does NOT need
-this — only add safe-area on the surface that actually touches an edge.
-`env(safe-area-inset-*)` resolves correctly both in-shell and standalone (the
-iframe ships `viewport-fit=cover`). For an app that goes **immersive** (hides
-shell chrome — see building-apps.md), the background already bleeds full-screen;
-pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
-0 while windowed, so use them when you want inset padding only while immersive).
+**Safe area:** pad edge-touching controls with the host-forwarded
+`--mobius-safe-top/right/bottom/left` variables, as `building-apps.md`
+(Immersive mode) documents. Inside the app frame a direct
+`env(safe-area-inset-*)` may read 0, so it is not the portable contract. The
+host forwards real values while the app is immersive and zeros while it is
+windowed, where the shell chrome already owns the inset, so one rule such as
+`padding-bottom: max(24px, var(--mobius-safe-bottom, 0px))` stays compact
+windowed and clears the cutout or home indicator immersive. Only the surface
+that actually touches an edge needs it: a full-bleed canvas root pads its
+controls, a pinned header its top (§2), a bottom sheet its bottom (§3).
 
 ---
 
@@ -161,10 +173,11 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
 ```jsx
 <header className="ma-header">
   <div className="ma-brand">
-    <span className="ma-mark" aria-hidden="true">{/* glyph, letter, or dot */}</span>
+    <span className="ma-mark" aria-hidden="true">{/* app icon, SDK icon, or letter */}</span>
     <div className="ma-brand-text">
-      <h1 className="ma-title">Atlas</h1>
-      <span className="ma-subtitle">12 of 195 countries visited</span>
+      <h1 className="ma-title">Reflection</h1>
+      {/* Optional, for live status only — never a tagline or a count the screen already shows. */}
+      <span className="ma-subtitle">5 waiting · next run 06:00</span>
     </div>
   </div>
   <div className="ma-header-right">{/* tabs / segmented / badge */}</div>
@@ -177,17 +190,26 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
    .ma-scroll scrolls under it); in a flow Root use "position: sticky; top: 0" instead,
    or drop both for a header that scrolls away. */
 .ma-header {
-  flex: 0 0 auto;
+  --ma-inset: 16px;          /* the content column's edge; the divider aligns to it */
+  position: relative; flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  min-height: 48px; padding: 12px 16px;
-  background: var(--surface); border-bottom: 1px solid var(--border);
+  min-height: 48px; padding: 12px var(--ma-inset);
+  padding-top: max(12px, var(--mobius-safe-top, 0px));
+  background: var(--bg);     /* the shell tone: one continuous background, no band */
+}
+.ma-header::after {          /* hairline divider inset to the content column, not edge-to-edge */
+  content: ""; position: absolute; left: var(--ma-inset); right: var(--ma-inset); bottom: 0;
+  border-bottom: 1px solid var(--border);
+}
+@media (min-width: 760px) {  /* match the mobius-ui:Page cap; drop this if the app has none */
+  .ma-header { --ma-inset: max(16px, calc((100% - 680px) / 2)); }
 }
 .ma-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .ma-mark {
   flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px;  /* 50% circle is an allowed variant */
   display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent); font-size: 16px; font-weight: 700; line-height: 1;
+  background: var(--accent-dim);
+  color: var(--accent-text, var(--accent)); font-size: 16px; font-weight: 700; line-height: 1;
 }
 .ma-brand-text { min-width: 0; line-height: 1.15; }
 .ma-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.015em; }
@@ -201,49 +223,83 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
 
 The right side is a SLOT — drop your tabs / toggle / badge in. Never a sync
 or save-status indicator here (see the SyncPill rule in §10 — silent when
-healthy). The mark may be omitted entirely (title + subtitle alone is valid).
-Don't diverge on the flex/space-between skeleton or the 48px min-height.
+healthy). The mark may be omitted entirely (a title alone is valid). The
+subtitle is optional, for live status only: omit it when the only candidate is
+a tagline or a count the list below already shows. Keep the header one compact
+row (48px minimum); tabs may share that row instead of stacking a second bar
+under the shell's own top bar.
 
-**Safe area:** a top-pinned header (one the root does NOT inset for you) keeps
-its content clear of the notch by folding the inset into its top padding:
-`padding-top: max(12px, env(safe-area-inset-top))` (keep the existing `12px`
-as the floor). Only the header that actually sits at the top edge needs this.
+**Safe area:** the `padding-top` line above folds the forwarded top inset into
+the 12px floor, so a top-pinned header clears the cutout while immersive and
+stays compact windowed. Drop it from a header that does not touch the top edge.
 
 ---
 
-## 3. Bottom-sheet modal + scrim (`ma-sheet` / `ma-scrim`) — the dialog
+## 3. Bottom sheet (`ma-sheet`) — the modal dialog
+
+A modal owes four behaviours whatever its shape: focus moves into it and stays
+there, Escape and the shell's Back close it, and focus returns to the control
+that opened it. A native `<dialog>` opened with `showModal()` provides the
+containment, the inert page behind it and the Escape (`cancel`) event; the
+effect below adds focus return and a shell Back target.
 
 ```jsx
-{open && (
-  <div className="ma-scrim" onClick={busy ? null : onCancel}
-       role="dialog" aria-modal="true" aria-label="Confirm">
-    <div className="ma-sheet" onClick={(e) => e.stopPropagation()}>
-      <h3 className="ma-sheet-title">Uninstall {app.name}?</h3>
-      <p className="ma-sheet-body">This removes the app and its stored data.</p>
-      {/* optional <input className="ma-input" …/> for a prompt-style sheet */}
-      <div className="ma-sheet-actions">
-        <button className="ma-btn ma-btn-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
-        <button className="ma-btn ma-btn-danger" onClick={onConfirm} disabled={busy}>
-          {busy ? 'Removing…' : 'Uninstall'}
-        </button>
+function ConfirmSheet({ open, busy, onCancel, onConfirm, appName }) {
+  const ref = useRef(null)
+  const cancelRef = useRef(onCancel)
+  cancelRef.current = busy ? () => {} : onCancel
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!open || !dialog) return
+    const opener = document.activeElement
+    dialog.showModal()
+    // Back closes the sheet (building-apps.md, Back-gesture support).
+    let back = window.mobius?.nav?.open('ma-sheet', {
+      onBack: () => { back = null; cancelRef.current() },
+    })
+    return () => {
+      back?.close()
+      if (dialog.open) dialog.close()
+      opener?.focus?.()
+    }
+  }, [open])
+
+  if (!open) return null
+  return (
+    <dialog ref={ref} className="ma-sheet" aria-labelledby="ma-sheet-title"
+            onCancel={(e) => { e.preventDefault(); cancelRef.current() }}
+            onClick={(e) => { if (e.target === e.currentTarget) cancelRef.current() }}>
+      <div className="ma-sheet-inner">
+        <h3 id="ma-sheet-title" className="ma-sheet-title">Uninstall {appName}?</h3>
+        <p className="ma-sheet-body">This removes the app and its stored data.</p>
+        {/* optional <input className="ma-input" …/> for a prompt-style sheet */}
+        <div className="ma-sheet-actions">
+          <button className="ma-btn ma-btn-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="ma-btn ma-btn-danger" onClick={onConfirm} disabled={busy}>
+            {busy ? 'Removing…' : 'Uninstall'}
+          </button>
+        </div>
       </div>
-    </div>
-  </div>
-)}
+    </dialog>
+  )
+}
 ```
 
 ```css
-/* mobius-ui:Sheet — app-owned (no sync owed). */
-.ma-scrim {
-  position: absolute; inset: 0; z-index: 100;   /* absolute → stays inside the app, never over shell chrome */
-  display: flex; align-items: flex-end; justify-content: center;  /* bottom sheet; center is a variant */
-  padding: 16px; background: rgba(0, 0, 0, 0.5);
-}
+/* mobius-ui:Sheet — app-owned (no sync owed).
+   A modal <dialog> sits in the frame's own top layer, so it never covers shell chrome. */
 .ma-sheet {
-  width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto;
-  padding: 24px; background: var(--surface); border: 1px solid var(--border);
-  border-radius: 16px 16px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.3);
+  box-sizing: border-box; width: 100%; max-width: min(480px, 100%);
+  max-height: 85dvh; margin: auto auto 0;   /* flush to the bottom edge */
+  padding: 0; border: 0; border-radius: 16px 16px 0 0;
+  background: var(--surface); color: var(--text);
+  overflow-y: auto; overscroll-behavior: contain;   /* scrolling never chains to the page */
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.3);
 }
+.ma-sheet::backdrop { background: rgba(0, 0, 0, 0.5); }
+.ma-sheet-inner { padding: 24px 24px max(24px, var(--mobius-safe-bottom, 0px)); }
+.ma-sheet.is-centered { margin: auto; border-radius: 16px; }   /* small confirm variant */
 .ma-sheet-title { margin: 0 0 12px; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
 .ma-sheet-body { margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: var(--muted); }
 .ma-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
@@ -251,15 +307,17 @@ as the floor). Only the header that actually sits at the top edge needs this.
 /* /mobius-ui:Sheet */
 ```
 
-The one allowed structural divergence is `align-items: center` + all-corner
-radius for a tiny centered confirm. Keep the scrim, `stopPropagation`,
-`aria-modal`, and the flex:1 action row.
+The padding lives on the inner wrapper so a click that lands on the dialog
+element itself is a backdrop click. Prefer the bottom sheet for pickers and
+multi-step touch tasks; `.is-centered` suits a small confirmation. Add a drag
+handle only if dragging actually resizes or dismisses the sheet; a handle
+with no gesture behind it is misleading. If you keep a hand-built `div` scrim
+instead of `<dialog>`, it still owes focus containment, Escape, Back and focus
+return.
 
-**Safe area:** a bottom-pinned sheet (and any other bottom-pinned surface — a
-floating pill, a docked composer) keeps its controls above the home indicator
-with `padding-bottom: max(24px, env(safe-area-inset-bottom))` (keep the
-shape's base padding as the floor). Only bottom-edge surfaces need it; the
-scrim itself, being full-bleed, does not.
+**Safe area:** the inner bottom padding folds the forwarded bottom inset into
+the 24px floor. Any other bottom-pinned surface (a floating pill, a docked
+composer) does the same with its own base padding.
 
 ---
 
@@ -267,7 +325,7 @@ scrim itself, being full-bleed, does not.
 
 ```jsx
 <div className="ma-empty">
-  <div className="ma-empty-mark" aria-hidden="true">🌙</div>
+  <div className="ma-empty-mark" aria-hidden="true"><Moon width={28} height={28} /></div>
   <div className="ma-empty-title">No briefs yet</div>
   <p className="ma-empty-text">Reflection runs overnight. Your first morning brief will be waiting here.</p>
 </div>
@@ -284,9 +342,8 @@ scrim itself, being full-bleed, does not.
 }
 .ma-empty-mark {
   width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px;
-  display: flex; align-items: center; justify-content: center; font-size: 30px; line-height: 1;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim); color: var(--accent-text, var(--accent));
 }
 .ma-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
 .ma-empty-text { margin: 0; font-size: 14px; line-height: 1.6; }
@@ -294,48 +351,65 @@ scrim itself, being full-bleed, does not.
 ```
 
 Every list / feed / graph gets one — never a bare "Nothing here." The mark
-tile is optional (drop it for a text-only empty). Keep the centered column +
-the title/text scale.
+tile is optional (drop it for a text-only empty); when present it holds an
+Apps SDK icon (`Moon` here) or real domain imagery, never an emoji. Keep the
+centered column + the title/text scale.
 
 ---
 
-## 5. Card / list item (`ma-card`)
+## 5. Card / list row (`ma-card`) — borderless rows with hairlines
 
 ```jsx
-<button className={`ma-card${isLatest ? ' is-featured' : ''}`} onClick={() => onOpen(d)}>
-  <div className="ma-card-main">
-    <div className="ma-card-title">{title}</div>
-    <div className="ma-card-sub">{sub}</div>
-  </div>
-  <span className="ma-card-chevron" aria-hidden="true">›</span>
-</button>
+<div className="ma-list">
+  {items.map((d) => (
+    <button key={d.id} className={`ma-card${d.id === selectedId ? ' is-selected' : ''}`}
+            onClick={() => onOpen(d)}>
+      <div className="ma-card-main">
+        <div className="ma-card-title">{d.title}</div>
+        <div className="ma-card-sub">{d.sub}</div>
+      </div>
+      <ChevronRight className="ma-card-chevron" width={18} height={18} aria-hidden="true" />
+    </button>
+  ))}
+</div>
 ```
 
 ```css
 /* mobius-ui:Card — app-owned (no sync owed). */
+.ma-list { display: flex; flex-direction: column; }
+.ma-list.is-grouped { background: var(--surface); border-radius: 12px; }   /* optional tonal group, still no border */
 .ma-card {
-  display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px;
-  padding: 15px 16px; text-align: left;
-  background: var(--surface); color: var(--text);
-  border: 1px solid var(--border); border-radius: 12px; font-family: var(--font);
-  transition: border-color 0.16s ease, transform 0.12s ease, background 0.16s ease;
+  position: relative; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px;
+  padding: 14px 16px; text-align: left;
+  background: transparent; color: var(--text);
+  border: 0; border-radius: 10px; font-family: var(--font);
+  transition: background 0.16s ease;
+}
+.ma-card + .ma-card::before {   /* hairline between rows, inset to the text */
+  content: ""; position: absolute; top: 0; left: 16px; right: 16px;
+  border-top: 1px solid var(--border);
 }
 button.ma-card { cursor: pointer; }
-button.ma-card:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
-button.ma-card:active { transform: scale(0.992); }
-button.ma-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.ma-card.is-featured { border-left: 3px solid var(--accent); }       /* app-driven state = modifier class */
-.ma-card.is-selected { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+@media (hover: hover) {
+  button.ma-card:hover { background: var(--surface); }
+  .ma-list.is-grouped button.ma-card:hover { background: var(--surface-2); }
+}
+button.ma-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ma-card.is-selected { background: var(--accent-dim); }   /* app-driven state = modifier class */
 .ma-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.ma-card-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
-.ma-card-sub { font-size: 12px; font-weight: 500; color: var(--muted); }
-.ma-card-chevron { flex: 0 0 auto; font-size: 20px; line-height: 1; color: var(--muted); opacity: 0.7; }
+.ma-card-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.ma-card-sub { font-size: 13px; color: var(--muted); }
+.ma-card-chevron { flex: 0 0 auto; color: var(--muted); }
 /* /mobius-ui:Card */
 ```
 
-Static container cards drop the `button` pseudo-states + chevron. State
-(featured/selected/error) rides `is-`/`has-` modifier classes — never a
-`card(variant)` JS helper.
+The default is quiet: no perimeter border, no resting shadow, no accent
+stripe. Static rows drop the `button` states and the chevron. State
+(selected/error) rides `is-`/`has-` modifier classes — never a
+`card(variant)` JS helper. A bordered card or a leading accent rail is a
+deliberate exception the app adds only where it carries meaning (a decision
+rail, an ownership edge), with a comment saying what it marks; never as a
+generic "featured" or "latest" decoration.
 
 ---
 
@@ -346,7 +420,9 @@ Static container cards drop the `button` pseudo-states + chevron. State
 <button className="ma-btn ma-btn-secondary" onClick={cancel}>Cancel</button>
 <button className="ma-btn ma-btn-ghost" onClick={skip}>Skip</button>
 <button className="ma-btn ma-btn-danger" onClick={remove}>Delete</button>
-<button className="ma-btn ma-btn-icon" aria-label="Close" onClick={close}>×</button>
+<button className="ma-btn ma-btn-icon" aria-label="Close" onClick={close}>
+  <X width={20} height={20} aria-hidden="true" />
+</button>
 ```
 
 ```css
@@ -354,28 +430,36 @@ Static container cards drop the `button` pseudo-states + chevron. State
 .ma-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 44px; padding: 10px 16px; border-radius: 10px;
-  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border: 0; background: var(--surface-2, var(--surface)); color: var(--text);
   font-family: var(--font); font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
-  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;
+  transition: background 0.14s ease, transform 0.1s ease;
 }
 .ma-btn:active { transform: scale(0.97); }
 .ma-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ma-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
-.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.ma-btn-primary:hover { filter: brightness(1.06); }
+.ma-btn-primary { background: var(--accent-fill, var(--accent)); color: var(--accent-fg); }
 .ma-btn-secondary { background: var(--surface-2, var(--surface)); }
-.ma-btn-secondary:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.ma-btn-ghost { background: transparent; border-color: transparent; color: var(--accent); }
-.ma-btn-ghost:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.ma-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--accent-fg); }
-.ma-btn-icon { width: 44px; padding: 0; border-radius: 8px; font-size: 18px; }   /* icon-only → needs aria-label */
+.ma-btn-ghost { background: transparent; color: var(--accent-text, var(--accent)); }
+.ma-btn-danger { background: var(--danger-fill, var(--danger)); color: var(--accent-fg); }
+.ma-btn-success { background: var(--green-fill, var(--green)); color: var(--accent-fg); }
+.ma-btn-icon { width: 44px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); }   /* icon-only → needs aria-label */
+@media (hover: hover) {
+  .ma-btn-primary:hover:not(:disabled) { background: var(--accent-fill-hover, var(--accent-hover)); }
+  .ma-btn-secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 8%, var(--surface-2, var(--surface))); }
+  .ma-btn-ghost:hover:not(:disabled), .ma-btn-icon:hover:not(:disabled) { background: var(--accent-dim); }
+}
 /* /mobius-ui:Button */
 ```
 
-The highest-value shared shape. The fill foreground is `var(--accent-fg)` —
-the shell sets it to white for the default purple accent, and a custom theme
-that goes light should set `--accent-fg` to a dark value (this replaces the
-old per-app `color: <dark>` override; theme it once at the token, not per app).
+The highest-value shared shape. A labelled fill uses a fill role —
+`--accent-fill`, `--danger-fill` or `--green-fill` — with `--accent-fg` as its
+label, and ghost or link text uses `--accent-text`. These roles keep labels and
+coloured text readable in both modes; each example falls back to the base
+colour (`--accent`, `--danger`, `--green`) on a theme that does not define the
+role. Outside that fallback, never put `--accent-fg` on a base colour or use a
+base colour as small text. Theme the pair once at the token, not per app.
+Where a view has one clear main task, give that action the filled primary and
+keep repeated row actions tonal or ghost.
 A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 
 ---
@@ -383,9 +467,14 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ## 7. Input / textarea (`ma-input` / `ma-textarea`)
 
 ```jsx
-<input className="ma-input" value={v} onChange={(e) => set(e.target.value)} placeholder="…" />
+<input className="ma-input" type="search" inputMode="search" enterKeyHint="search"
+       autoComplete="off" value={v} onChange={(e) => set(e.target.value)} placeholder="Search" />
 <textarea className="ma-textarea" value={t} onChange={(e) => set(e.target.value)} />
 ```
+
+Match `type`, `inputMode`, `enterKeyHint` and `autoComplete` to what each
+field means (the quickstart's input-semantics line); the search values above
+are an example, not a default.
 
 ```css
 /* mobius-ui:Input — app-owned (no sync owed). */
@@ -430,16 +519,18 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
   background: transparent; color: var(--muted); font-family: var(--font);
   font-size: 13px; font-weight: 650; cursor: pointer; transition: background 0.15s, color 0.15s;
 }
-.ma-seg-btn:hover { color: var(--text); }
+@media (hover: hover) { .ma-seg-btn:hover { color: var(--text); } }
 .ma-seg-btn.is-active { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); }
-.ma-seg.is-accent .ma-seg-btn.is-active { background: var(--accent); color: var(--accent-fg); box-shadow: none; }
+.ma-seg.is-tinted .ma-seg-btn.is-active { background: var(--accent-dim); color: var(--accent-text, var(--accent)); box-shadow: none; }
 /* /mobius-ui:Segmented */
 ```
 
-Default active is the subtle raised chip (theme-safe on any accent). Opt into
-`.ma-seg.is-accent` for the bold accent fill. Add `role="tablist"` +
-`aria-selected` when it switches views; `flex: 1` per button for a full-width
-tab bar.
+Default active is the subtle raised chip (theme-safe on any accent); opt into
+`.ma-seg.is-tinted` for a tonal accent selection. Selection is a tone, action
+is a fill: never paint the selected segment with the primary button's
+`--accent-fill`, or the current view reads as a button to press. Add
+`role="tablist"` + `aria-selected` when it switches views; `flex: 1` per
+button for a full-width tab bar.
 
 ### Image rail (`mobius-ui:ImageRail`)
 
@@ -580,8 +671,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
    44px tap-target + focus-ring, not a child button). This is the flex-crush-safe
    accordion the AppShell crush note points to — a native <details> needs no
    flex-shrink workaround in flow, and gets flex-shrink:0 inside .ma-scroll. */
-.ma-disc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-.ma-disc[open] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.ma-disc + .ma-disc { border-top: 1px solid var(--border); }   /* hairline rows, like Card */
 .ma-disc > summary { list-style: none; cursor: pointer; min-height: 44px; display: flex;
   align-items: center; gap: 12px; padding: 12px 16px; font-size: 15px; font-weight: 650; color: var(--text); }
 .ma-disc > summary::-webkit-details-marker { display: none; }
@@ -593,7 +683,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-section-icon {
   width: 30px; height: 30px; flex: 0 0 auto; border-radius: 9px;
   display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--accent) 14%, transparent); font-size: 15px;
+  background: var(--accent-dim); color: var(--accent-text, var(--accent));   /* holds an SDK icon at 16px */
 }
 .ma-section-label { margin: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -0.01em; }
 /* /mobius-ui:SectionHead */
@@ -601,7 +691,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 /* mobius-ui:Scrollskin — app-owned (no sync owed). Add the ma-scroll class to a scroller. */
 .ma-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .ma-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
-.ma-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+@media (hover: hover) { .ma-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; } }
 .ma-scroll::-webkit-scrollbar-track { background: transparent; }
 /* /mobius-ui:Scrollskin */
 ```
@@ -626,12 +716,12 @@ error/conflict the owner must act on (`.is-error`), plainly worded
    not mounted while online (never "Saving" / pending counts); plain "Offline"
    when offline; .is-error only for a failure the owner can act on. */
 .ma-sync-pill {
-  position: absolute; right: 12px; bottom: 12px; z-index: 40;
+  position: absolute; right: 12px; bottom: max(12px, var(--mobius-safe-bottom, 0px)); z-index: 40;
   display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 999px;
   background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-  font-size: 11px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  font-size: 12px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
 }
-.ma-sync-pill.is-error { border-color: var(--danger); color: var(--danger); }
+.ma-sync-pill.is-error { border-color: var(--danger); color: var(--danger-text, var(--danger)); }
 /* /mobius-ui:SyncPill */
 ```
 

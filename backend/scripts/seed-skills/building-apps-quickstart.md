@@ -121,6 +121,23 @@ bright decision wheel, a tactile stack of cards—then support it with restraine
 chrome. Visual richness should come from hierarchy, composition, motion, and
 state feedback, not extra screens.
 
+A few defaults keep every app readable and operable:
+
+- **Type floor:** meaning-bearing text (labels, status, metadata, controls) is
+  at least 12px. Dense domain UI such as instrument scales, map labels or
+  chart ticks may go smaller; name that exception in a CSS comment and check
+  it at rendered size.
+- **Input semantics:** give each field the `type`, `inputMode`,
+  `enterKeyHint` and `autoComplete` its meaning implies (for example
+  `inputMode="decimal"` for an amount, `autoComplete="off"` for a search box),
+  and keep focusable fields at 16px.
+- **Reduced motion:** under `prefers-reduced-motion: reduce`, replace movement
+  with an instant or opacity change, including JS-driven animation.
+- **Modals:** focus moves in and stays, Escape and Back close, and focus
+  returns to the opener (catalog Sheet).
+- **Dates and times:** format with `Intl` in the viewer's locale and time zone
+  rather than a hardcoded locale.
+
 The manifest should truthfully describe the local app. A typical private app
 uses:
 
@@ -284,8 +301,13 @@ isolated browser session; it does not mark onboarding complete.
 
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
-changes on small screens. Keep only screenshots that show a useful distinct
-state—never a loader, drawer transition, or redundant verification frame.
+changes on small screens. For a height-sensitive app (an instrument, game,
+canvas or fixed-height workspace), also check a short landscape viewport such
+as 844×390 and confirm the core controls stay reachable. Make sure the app
+reads in both light and dark themes; `visual-testing.md` says how to check the
+other theme without changing the owner's. Keep only screenshots that show a
+useful distinct state—never a loader, drawer transition, or redundant
+verification frame.
 
 The default visual-test budget for an ordinary one-screen app is:
 

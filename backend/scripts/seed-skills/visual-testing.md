@@ -199,6 +199,23 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 
 **When the partner reported the bug, reproduce THEIR exact conditions — a proxy that passes is not "fixed."** A headless screenshot settles the DOM but can't exercise a device/PWA-only failure (mobile keyboard, OS gesture bar, scroll-pin, a stale service-worker bundle across a rebuild); `agent-browser` scrolls programmatically, not like a thumb. A happy-path render also doesn't prove a data-driven app is fine — the defect usually lives on the empty/partial/error path (an all-or-nothing fetch that blanks the view). Most *data*-state failures you CAN reproduce headlessly, by seeding that empty/partial/error state first and then screenshotting; only the genuinely device-only classes need their device. When it is one of those, say what you verified and what still needs their device — and don't write "fixed" (a local "tests green" is not "validated").
 
+## Light and dark
+
+An app must read in both themes, but captures render the owner's current
+theme only, and there is no ephemeral theme switch yet. Do not flip the
+owner's theme to check the other mode: the toggle is a saved owner setting
+that reaches their other sessions. Browser colour-scheme emulation
+(`--color-scheme`, `set media`) is not a substitute either: the shell and app
+frames follow the owner's saved mode, not the OS preference.
+
+Check the other theme from source instead: every UI colour comes from a theme
+token, coloured text and labelled fills use the colour roles the component
+catalog shows (`var(--accent-text, var(--accent))`,
+`var(--accent-fill, var(--accent))`), and no hardcoded chrome colour assumes
+one mode (derive a custom domain palette from the tokens, for example with
+`color-mix()` against `--bg` or `--text`). In the closeout, say which theme
+was rendered and that the other was checked in source only.
+
 ## Efficient inspection with agent-browser 0.38+
 
 Use `snapshot --delta` for repeated structural inspection: the first response
