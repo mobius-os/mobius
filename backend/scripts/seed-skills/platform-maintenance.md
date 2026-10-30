@@ -95,6 +95,10 @@ Review the exact changed paths and use the smallest matching action:
    partner request may still create a Restart card without pending changes.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
+   A restart loads the whole working tree, not only your commits: check
+   `git -C /data/platform status` for uncommitted backend edits you do not own
+   and, before asking, tell the partner which chat's unfinished work would go
+   live with it.
 4. For activation, name the exact change that remains inactive and why only a
    restart can activate it. If no change is pending, say so. For a
    constitution-only change, default to leaving it pending unless the partner

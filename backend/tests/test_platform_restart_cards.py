@@ -1098,6 +1098,77 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
     return block["questions"][0]["question"]
 
 
+def test_restart_card_names_uncommitted_edits_the_restart_would_also_load(
+  client, chat, db, monkeypatch,
+):
+  # A restart serves the whole tree, so another chat's unfinished edit goes
+  # live with it; the owner must see that on the card, not only the commits.
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-disclosure")
+  monkeypatch.setattr(
+    "app.platform_restart.pending_restart_paths",
+    lambda: ["backend/app/routes/identity.py"],
+  )
+  monkeypatch.setattr(
+    "app.platform_restart.uncommitted_restart_paths",
+    lambda: ["backend/app/models.py", "backend/app/system_prompts.py"],
+  )
+
+  question = _save_restart_card(client, chat, db)
+
+  assert "tested platform changes in backend/app/routes/identity.py" in question
+  assert (
+    "also load uncommitted edits in backend/app/models.py, "
+    "backend/app/system_prompts.py" in question
+  )
+  assert question.endswith("unavailable for tens of seconds.")
+
+
+def test_restart_card_stays_plain_when_the_tree_is_clean(
+  client, chat, db, monkeypatch,
+):
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-clean")
+  monkeypatch.setattr("app.platform_restart.pending_restart_paths", lambda: [])
+  monkeypatch.setattr(
+    "app.platform_restart.uncommitted_restart_paths", lambda: [],
+  )
+
+  question = _save_restart_card(client, chat, db)
+
+  assert question.startswith("Restart Möbius now?")
+  assert "uncommitted" not in question
+
+
+def test_uncommitted_restart_paths_lists_only_restart_loaded_working_edits(
+  tmp_path, monkeypatch,
+):
+  import subprocess
+
+  from app import platform_restart, platform_update
+
+  def git(*args):
+    subprocess.run(
+      ["git", "-C", str(tmp_path), *args], check=True, capture_output=True,
+    )
+
+  git("init", "-q")
+  git("config", "user.email", "t@example.com")
+  git("config", "user.name", "t")
+  (tmp_path / "backend/app").mkdir(parents=True)
+  (tmp_path / "backend/tests").mkdir(parents=True)
+  (tmp_path / "backend/app/models.py").write_text("a = 1\n")
+  (tmp_path / "backend/app/settled.py").write_text("b = 1\n")
+  git("add", "-A")
+  git("commit", "-qm", "base")
+  (tmp_path / "backend/app/models.py").write_text("a = 2\n")
+  (tmp_path / "backend/app/new_module.py").write_text("c = 1\n")
+  (tmp_path / "backend/tests/test_new.py").write_text("def test(): pass\n")
+  monkeypatch.setattr(platform_update, "PLATFORM_REPO", tmp_path)
+
+  assert platform_restart.uncommitted_restart_paths() == [
+    "backend/app/models.py", "backend/app/new_module.py",
+  ]
+
+
 def test_each_chat_saves_its_own_restart_decision_without_a_shared_claim(
   client, auth, db, monkeypatch,
 ):
