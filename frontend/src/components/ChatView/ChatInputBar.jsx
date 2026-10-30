@@ -922,16 +922,16 @@ export default function ChatInputBar({
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               onKeyUp={() => { pasteAsPlainTextRef.current = false }}
-              onFocus={(event) => {
-                placeCaretAtTextEnd(event.currentTarget)
-                setSlashInputFocused(true)
-              }}
+              // Native editing owns selection; explicit app-driven focus
+              // still places the caret through focusComposerElement.
+              onFocus={() => setSlashInputFocused(true)}
               onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
               aria-describedby={historyKeyHint ? historyKeyHintId : undefined}
               name="message"
               autoComplete="off"
+              spellCheck={false}
               rows={1}
               // Combobox semantics apply only while the menu is open. Left on
               // permanently they would announce this plain prose textarea as a

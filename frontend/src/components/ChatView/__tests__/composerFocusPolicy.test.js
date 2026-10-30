@@ -1,5 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import ChatInputBar from '../ChatInputBar.jsx'
 
 import {
   focusComposerElement,
@@ -38,7 +42,7 @@ test('draft-only and embedded requests do not focus the composer', () => {
   }), false)
 })
 
-test('focusComposerElement preserves scroll and the current selection', () => {
+test('app-driven composer focus preserves scroll and places the caret at the end', () => {
   const calls = []
   const selections = []
   const el = {
@@ -63,7 +67,7 @@ test('focusComposerElement falls back for older focus implementations', () => {
   assert.deepEqual(calls, [[{ preventScroll: true }], []])
 })
 
-test('text controls land at the end whenever their focus surface activates', () => {
+test('explicit caret placement still lands at the end for restored text controls', () => {
   const selections = []
   const el = {
     value: 'custom answer',
@@ -73,4 +77,23 @@ test('text controls land at the end whenever their focus surface activates', () 
   assert.equal(placeCaretAtTextEnd(el), true)
   assert.deepEqual(selections, [[13, 13]])
   assert.equal(placeCaretAtTextEnd({ value: 'unsupported' }), false)
+})
+
+test('the composer opts out of browser spelling popups without disabling keyboard autocorrection', () => {
+  const client = new QueryClient()
+  try {
+    const html = renderToStaticMarkup(React.createElement(
+      QueryClientProvider, { client },
+      React.createElement(ChatInputBar, {
+        chatId: 'correction-test', input: 'Review lesssons carefully',
+        inputRef: { current: null }, onInputChange() {},
+      }),
+    ))
+    const textarea = html.match(/<textarea\b[^>]*>/)?.[0]
+    assert.ok(textarea)
+    assert.match(textarea, /spellCheck="false"/i)
+    assert.doesNotMatch(textarea, /autoCorrect="off"/i)
+  } finally {
+    client.clear()
+  }
 })
