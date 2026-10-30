@@ -461,6 +461,44 @@ def test_goal_completion_releases_a_declined_action_it_did_not_name(db):
   assert (taken["state"], taken["owner_chat_id"]) == ("claimed", second.id)
 
 
+def _claim_before_the_goal(db, owner, chat, work_key):
+  """Claim from a Goal-less run, as an approval answered before promotion is."""
+  db.add(models.ChatRun(
+    id=f"plain-run-{work_key}", root_run_id=f"plain-run-{work_key}",
+    chat_id=chat.id, status="running", provider="claude",
+  ))
+  db.commit()
+  claim_work(db, owner_id=owner.id, chat_id=chat.id,
+             run_id=f"plain-run-{work_key}", work_key=work_key,
+             summary="Approved before the Goal existed")
+
+
+def test_goal_completion_finishes_a_named_claim_taken_before_the_goal(db):
+  from app.goals import update_goal_record
+
+  owner, first, _second = _owned_goal_claim(db)
+  _claim_before_the_goal(db, owner, first, "local:approved-before-goal")
+  _claim_before_the_goal(db, owner, first, "local:unnamed-before-goal")
+  run = db.get(models.ChatRun, "claim-run-first")
+  goal = db.get(models.ChatGoal, "claim-goal-first")
+
+  update_goal_record(db, run, goal, 1, complete="Done",
+                     finished_claims=[KEY, "local:approved-before-goal"])
+
+  db.expire_all()
+  named = db.query(models.AgentWorkClaim).filter_by(
+    work_key="local:approved-before-goal").one()
+  unnamed = db.query(models.AgentWorkClaim).filter_by(
+    work_key="local:unnamed-before-goal").one()
+  assert named.completed_at is not None and named.outcome == "Owning Goal completed: Done"
+  # A Goal-less claim the Goal does not name stays the chat's open claim.
+  assert unnamed.completed_at is None and unnamed.released_at is None
+  # A lost receipt may replay the same completion verbatim.
+  update_goal_record(db, run, db.get(models.ChatGoal, "claim-goal-first"), 1,
+                     complete="Done",
+                     finished_claims=[KEY, "local:approved-before-goal"])
+
+
 def test_goal_completion_refuses_to_name_a_claim_it_does_not_own(db):
   from app.goal_plans import GoalPlanError
   from app.goals import update_goal_record
