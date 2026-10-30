@@ -74,9 +74,21 @@ workspace presentation; this guide is the single core review execution guide.
 ## Optional public review
 
 Only an explicit owner opt-in may set `post_review:true` in the preview's
-options JSON, and only for `review` mode. Confirm the public audience before
-including private evidence. The server posts one COMMENT review on the exact
-head, never APPROVE or REQUEST_CHANGES. Once posting is armed the recorded
+options JSON, for `review` or `review_merge` mode. Confirm the public audience
+before including private evidence. The server posts one COMMENT review on the
+exact head. In `review_merge`, an all-clear outcome must send `publish:true`:
+the server posts first and attempts the guarded merge only after GitHub
+confirms that review; an unknown or refused post never merges.
+
+A further opt-in, `propose_verdict:true` (requires `post_review`), turns
+`publish:true` into a saved *proposal* instead of a post: APPROVE for
+`all_clear`, REQUEST_CHANGES for `needs_you`, worded from the summary. Only the
+owner submits or discards it, through `POST <run>/verdict` from their own
+session; an agent bearer is refused. A pending, discarded, unconfirmed or
+REQUEST_CHANGES verdict never merges. After the owner submits an APPROVE in a
+merge grant, the server resumes the review chat, which re-sends the identical
+outcome once to run the usual merge gates. GitHub refuses verdicts on the
+connected account's own PR, so those fall back to a COMMENT. Once posting is armed the recorded
 verdict and evidence are immutable; identical replay only reads the saved
 receipt. Transport uncertainty never permits another post. Call `/observe` to
 find the exact review by its server-generated marker, connected actor and head.

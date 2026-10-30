@@ -54,11 +54,18 @@ POST_REVIEW_INSTRUCTIONS = (
   "Use publish:false (the default) for private owner questions, missing access or blocked verification. "
   "Keep secrets and owner-only questions out of public verdict evidence. "
   "Once the server arms posting, evidence is immutable and retries are read-only. "
-  "The guarded merge endpoint alone may merge when separately authorized; an unknown public receipt must never be replayed."
+  "The guarded merge endpoint alone may merge when separately authorized; an unknown public receipt must never be replayed. "
+  "When the grant merges too, an all-clear result must publish first: the server merges only after GitHub confirms the posted review."
+)
+
+VERDICT_INSTRUCTIONS = (
+  " With the verdict opt-in, publish:true never posts by itself: the server saves a proposed APPROVE (all_clear) "
+  "or REQUEST_CHANGES (needs_you) with its exact wording. Only the owner can submit or discard it, outside this "
+  "conversation. Never ask the owner to type approval in chat instead, and never merge before a submitted APPROVE."
 )
 
 PROMPT_KEYS = ("review_prompt", "merge_prompt")
-OPTION_KEYS = frozenset((*PROMPT_KEYS, "fix_prompt", "max_rounds", "autopilot", "post_review"))
+OPTION_KEYS = frozenset((*PROMPT_KEYS, "fix_prompt", "max_rounds", "autopilot", "post_review", "propose_verdict"))
 MAX_PROMPT_BYTES = 16_384
 
 
@@ -112,12 +119,22 @@ def resolve_options(db, options: dict | None = None, *, choice: dict | None = No
   post_review = options.get("post_review", False)
   if type(post_review) is not bool:
     raise ValueError("post_review must be a boolean")
+  if post_review and mode == "review_fix_merge":
+    raise ValueError("Posting a review on GitHub is available for Review only and Review and merge.")
+  propose_verdict = options.get("propose_verdict", False)
+  if type(propose_verdict) is not bool:
+    raise ValueError("propose_verdict must be a boolean")
+  if propose_verdict and not post_review:
+    raise ValueError("Proposing an approve or request-changes verdict requires post_review.")
   choice = dict(choice) if choice is not None else contribution_autopilot.resolve_round_choice(db)
-  mandatory = POST_REVIEW_INSTRUCTIONS if post_review else MANDATORY_INSTRUCTIONS
+  mandatory = MANDATORY_INSTRUCTIONS
+  if post_review:
+    mandatory = POST_REVIEW_INSTRUCTIONS + (VERDICT_INSTRUCTIONS if propose_verdict else "")
   return {
     **resolved,
     **({"max_rounds": max_rounds} if mode == "review_fix_merge" else {}),
     **({"post_review": True} if post_review else {}),
+    **({"propose_verdict": True} if propose_verdict else {}),
     "mandatory_instructions": mandatory,
     "choice": choice,
     "provider": choice["provider"],

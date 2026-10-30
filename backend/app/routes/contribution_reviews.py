@@ -25,6 +25,7 @@ from app.contribution_review_public import EVIDENCE_MAX_CHARS
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched, classify_dispatch_error
 from app import contribution_review_merge_actions as merge_actions
+from app import contribution_review_verdicts as verdicts
 from app.chat_start import start_programmatic_chat_turn
 from app.chat_visibility import coerce_agent_settings
 from app.config import get_settings
@@ -40,7 +41,9 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
-REVIEW_CAPABILITIES = {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
+REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
+                       "review_fix_merge": True, "draft_takeover": True}
+PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPES = {"named_pr_repairs_and_reviewed_successors", "named_pr_repairs_ready_and_reviewed_successors"}
 REVIEW_STOP_KEY = "_review_stop"
 READY_HEAD_MOVED = "The head changed; GitHub's ready event cannot identify the reviewed head. No action was repeated."
@@ -80,6 +83,7 @@ class ReviewOptions(BaseModel):
   max_rounds: int | None = Field(default=None, ge=1, strict=True)
   autopilot: bool = False
   post_review: bool | None = None
+  propose_verdict: bool | None = None
 
 
 class ReviewAgentChoice(BaseModel):
@@ -181,8 +185,9 @@ def _options_input(body):
       selected["fix_prompt"] = options["fix_prompt"]
     if "max_rounds" in body.options.model_fields_set:
       selected["max_rounds"] = body.options.max_rounds
-  if options.get("post_review") is True:
-    selected["post_review"] = True
+  for flag in ("post_review", "propose_verdict"):
+    if options.get(flag) is True:
+      selected[flag] = True
   return selected
 
 
@@ -269,8 +274,10 @@ async def start_reviews(app_id: int | None, body: StartReviews,
   _assert_app_current(db, app_id, app_nonce)
   if body.mode == "review_fix_merge" and body.confirmation_scope not in TAKEOVER_SCOPES:
     raise HTTPException(422, "Confirm scoped repairs to the named PR and freshly reviewed successors before takeover.")
-  if body.options is not None and body.options.post_review and body.mode != "review":
-    raise HTTPException(422, "Posting a review on GitHub is available for Review only.")
+  if body.options is not None and body.options.post_review and body.mode not in PUBLISHING_MODES:
+    raise HTTPException(422, "Posting a review on GitHub is available for Review only and Review and merge.")
+  if body.options is not None and body.options.propose_verdict and not body.options.post_review:
+    raise HTTPException(422, "Proposing an approve or request-changes verdict needs posting allowed.")
   selection = sorted([{**i.model_dump(), "repo": i.repo.lower()} for i in body.items], key=reviews.key)
   if len({reviews.key(i) for i in selection}) != len(selection):
     raise HTTPException(422, "Select each pull request only once.")
@@ -410,7 +417,7 @@ async def _record_failed_live_read(db, row, item_key, body, principal, error):
     if ((current.get("public_review") or {}).get("state") in {"posting", "posted", "unknown"}
         or _merge_attempted(current)):
       return
-    posting = body.publish and row.mode == "review" and (row.options_json or {}).get("post_review") is True
+    posting = body.publish and _posts_review(row) and not _proposes_verdict(row)
     outcome = _reported_outcome(current, body, row, principal)
     outcome.update(state=body.state if posting else "needs_you", live_blocker=str(error.detail))
     if posting:
@@ -443,6 +450,25 @@ def _frozen_model_matches(frozen, chat) -> bool:
               and actual.get("effort") == frozen.get("reasoning_effort"))
 
 
+def _posts_review(row) -> bool:
+  return row.mode in PUBLISHING_MODES and (row.options_json or {}).get("post_review") is True
+
+
+def _proposes_verdict(row) -> bool:
+  return _posts_review(row) and (row.options_json or {}).get("propose_verdict") is True
+
+
+def _merge_continues(row, item) -> bool:
+  """Frozen evidence may still reach the merge once its public step is posted.
+
+  Only a merge grant whose comment or owner-submitted APPROVE is confirmed,
+  and whose merge never started, continues; every other retry is read-only.
+  """
+  return (row.mode == "review_merge" and (item.get("frozen_evidence") or item).get("state") == "all_clear"
+          and not _merge_attempted(item) and (item.get("public_review") or item.get("verdict_proposal"))
+          and reviews.public_merge_blocker(row, item) is None)
+
+
 def _merge_attempted(outcome) -> bool:
   return reviews.merge_pending(outcome)
 
@@ -467,7 +493,7 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
     if target is None or target["head_sha"] != body.head_sha:
       raise HTTPException(409, "This head was not in the approved selection.")
     previous = row.outcomes_json.get(item_key, {})
-    if public.require_same_evidence(previous, body.model_dump()):
+    if public.require_same_evidence(previous, body.model_dump()) and not _merge_continues(row, previous):
       return {"run": _run_view(db, row)}
     attempted = _merge_attempted(previous)
     if previous.get("state") == "merged":
@@ -481,8 +507,10 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
         raise HTTPException(409, "Retry the public review with its recorded evidence unchanged.")
     if body.state == "all_clear" and (set(body.scope) != SCOPE or not body.tests.strip() or body.tests_passed is False):
       raise HTTPException(422, "Record the complete review scope and test evidence before all clear.")
-    if body.publish and not (row.mode == "review" and (row.options_json or {}).get("post_review") is True):
+    if body.publish and not _posts_review(row):
       raise HTTPException(403, "This grant does not authorize a public review.")
+    if row.mode == "review_merge" and _posts_review(row) and body.state == "all_clear" and not body.publish:
+      raise HTTPException(422, "This grant posts its review before merging. Send the all-clear outcome with publish:true.")
     if row.mode == "review" and not attempted and not body.publish:
       # Private findings are facts about the selected head, not the live PR.
       # A moved or temporarily unreadable PR must not replace their evidence.
@@ -525,18 +553,35 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
         return {"run": _run_view(db, row)}
       _parent(db, row, principal)
       reviews.require_independent_clear(row, target, body)
+    if body.publish and _proposes_verdict(row) and not verdicts.own_pull(row, pull):
+      if not previous.get("verdict_proposal"):
+        # Proposing posts nothing and freezes the evidence the owner will read.
+        async with chat_queue.get_transition_lock(f"review-admission:{run_id}"):
+          _parent(db, row, principal)
+          reviews.save_outcome(db, row, item_key, {**outcome, "frozen_evidence": public.evidence(outcome),
+            "verdict_proposal": verdicts.propose(outcome, target)}, expected=previous)
+        return {"run": _run_view(db, row)}
+    elif (body.publish and _posts_review(row)
+        and (previous.get("public_review") or {}).get("state") not in {"posting", "posted", "unknown"}):
+      outcome = await post_public_review(db, row, item_key, target, outcome, principal, cwd,
+        gh=_gh, authorize=lambda: _parent(db, row, principal))
+      if row.mode == "review_merge" and body.state == "all_clear":
+        reviews.save_effect_outcome(db, row, item_key, outcome)
+        db.refresh(row)
+        outcome = {**outcome, **{k: v for k, v in row.outcomes_json.get(item_key, {}).items()
+                                 if k in ("public_review", "verdict_proposal")}}
     # A private review remains true of its pinned base after that base moves.
     # Only an actual merge candidate requires current-base proof.
     if body.state == "all_clear" and row.mode in {"review_merge", "review_fix_merge"}:
+      blocker = reviews.public_merge_blocker(row, outcome)
+      if blocker:
+        if not outcome.get("public_review") and not outcome.get("verdict_proposal"):
+          raise HTTPException(409, blocker)
+        return {"run": _run_view(db, row)}
       _require_ready_attempt_resolved(previous, target)
       await merge_actions.merge_reviewed_target(db, row, target, outcome, repo, pull, principal,
         gh=_gh, cwd=cwd, authorize=lambda: _parent(db, row, principal))
       return {"run": _run_view(db, row)}
-    if (body.publish and row.mode == "review" and (row.options_json or {}).get("post_review") is True
-        and outcome.get("state") in {"all_clear", "needs_you"}
-        and (previous.get("public_review") or {}).get("state") not in {"posting", "posted", "unknown"}):
-      outcome = await post_public_review(db, row, item_key, target, outcome, principal, cwd,
-        gh=_gh, authorize=lambda: _parent(db, row, principal))
     if outcome.get("merge_attempted") or outcome.get("public_review"):
       reviews.save_effect_outcome(db, row, item_key, outcome)
     else:
@@ -737,6 +782,70 @@ async def stop_review(app_id: int | None, run_id: str, db: Session = Depends(get
       _log.exception("repair checkout GC failed after Stop for review run %s", run_id)
   db.refresh(row)
   return {"stopped": parent_stopped and children_stopped, "run": _run_view(db, row)}
+
+
+class VerdictDecision(PullIdentity):
+  proposal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+  decision: Literal["submit", "discard"]
+
+
+def _owner_verdict_authority(db, row):
+  """Re-prove the run is live for an owner decision; the agent is not involved."""
+  db.refresh(row)
+  if _review_stop_requested(row):
+    raise HTTPException(409, "This review was stopped. Nothing was posted.")
+  _assert_app_current(db, row.app_id, row.app_nonce)
+
+
+async def _resume_for_merge(db, row, item):
+  """Wake the review conversation so its own run attempts the guarded merge."""
+  chat = db.get(models.Chat, row.chat_id)
+  if not chat or not _frozen_model_matches(row.options_json or {}, chat):
+    return False
+  return await start_programmatic_chat_turn(chat_id=chat.id, title=chat.title, provider=chat.provider,
+    initiated_by_app_id=row.app_id, content=(
+      f"The owner submitted the APPROVE verdict for {item['repo']}#{item['number']} at {item['head_sha'][:12]}. "
+      "Re-send that item's identical all_clear outcome once so the guarded merge can run. "
+      "Do not change its evidence or post anything else."))
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/verdict",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
+                         db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
+  """The owner's own submit or discard of one exact proposed verdict."""
+  if principal.chat_id is not None or principal.run_id is not None or principal.delegation_id is not None:
+    raise HTTPException(403, "Only you can submit or discard a verdict. An agent cannot confirm its own proposal.")
+  row = _row(db, app_id, run_id, principal)
+  item_key = reviews.key(body.model_dump())
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    _owner_verdict_authority(db, row)
+    original = next((t for t in row.targets_json if reviews.key(t) == item_key), None)
+    target = reviews.effective_target(row, original) if original else None
+    item = (row.outcomes_json or {}).get(item_key) or {}
+    proposal = item.get("verdict_proposal") or {}
+    if (target is None or target["head_sha"] != body.head_sha or proposal.get("id") != body.proposal_id
+        or proposal.get("head_sha") != body.head_sha):
+      raise HTTPException(409, "This verdict no longer matches the reviewed version. Refresh before deciding.")
+    if body.decision == "discard":
+      verdicts.discard(db, row, item_key, body.proposal_id)
+      return {"run": _run_view(db, row)}
+    cwd = Path(get_settings().data_dir) / "platform"
+    receipt = await verdicts.submit(db, row, item_key, target, body.proposal_id, gh=_gh, cwd=cwd,
+                                    authorize=lambda: _owner_verdict_authority(db, row))
+    resumed = None
+    if (receipt.get("state") == "posted" and receipt.get("event") == "APPROVE"
+        and row.mode == "review_merge" and not _merge_attempted(row.outcomes_json[item_key])):
+      resumed = await _resume_for_merge(db, row, {**original, "head_sha": target["head_sha"]})
+    db.refresh(row)
+    return {"run": _run_view(db, row), "verdict": receipt, "merge_resumed": resumed}
+
+
+@router.post("/api/github/review-runs/{run_id}/verdict",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def core_decide_verdict(run_id: str, body: VerdictDecision, db: Session = Depends(get_db),
+                              principal: Principal = Depends(get_principal)):
+  return await decide_verdict(None, run_id, body, db, principal)
 
 
 @router.post("/api/github/review-runs/{run_id}/stop",

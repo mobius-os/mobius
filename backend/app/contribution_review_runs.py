@@ -593,7 +593,7 @@ def keeps_public_receipts(current, outcome) -> bool:
     saved = current.get(history) or []
     if (outcome.get(history) or [])[:len(saved)] != saved:
       return False
-  for receipt in ("successor", "ready_attempt"):
+  for receipt in ("successor", "ready_attempt", "verdict_proposal"):
     if receipt in current and outcome.get(receipt) != current[receipt]:
       return False
   fields = ("merge_attempted", "queue_entry_id", "queue_enqueued_at", "queue_receipt_unconfirmed",
@@ -637,10 +637,12 @@ def view(row):
       return {**outcome, "state": "ready_unattributable"}
     if attempt.get("state") == "attempting":
       return {**outcome, "state": "marking_ready"}
-    return outcome
+    verdict = verdict_overlay(row, outcome)
+    return {**outcome, "state": verdict} if verdict else outcome
   projected_items = [projected(t) for t in row.targets_json]
   states = [item.get("state", "reviewing") for item in projected_items]
-  state = ("needs_you" if any(s in {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable"} for s in states)
+  state = ("needs_you" if any(s in {"needs_you", "merge_unknown", "ready_unknown", "ready_unattributable",
+                                     "verdict_pending", "verdict_posting", "verdict_unknown"} for s in states)
            else "complete" if all(s in {"all_clear", "merged"} for s in states)
            else "queued" if all(s in {"queued", "merged", "all_clear"} for s in states)
            else "marking_ready" if any(s == "marking_ready" for s in states)
@@ -665,6 +667,52 @@ def view(row):
           "created_at": row.created_at.isoformat() + "Z", "items": views}
 
 
+def verdict_overlay(row, outcome):
+  """The item state a verdict proposal adds on top of its private review.
+
+  A pending, uncertain or refused verdict always needs the owner. A discarded
+  one ends a merge grant without merging; a plain review keeps its findings.
+  """
+  proposal = outcome.get("verdict_proposal") or {}
+  state = proposal.get("state")
+  if state == "proposed":
+    return "verdict_pending"
+  if state == "posting":
+    return "verdict_posting"
+  if state == "unknown":
+    return "verdict_unknown"
+  if state == "not_dispatched" or (state == "discarded" and row.mode == "review_merge"
+                                   and not merge_attempted(outcome)):
+    return "needs_you"
+  return None
+
+
+def public_merge_blocker(row, item) -> str | None:
+  """What a merge grant that also publishes still needs before it may merge.
+
+  A requested public action is part of the owner's consent: merging past a
+  missing, uncertain or refused one would silently drop it.
+  """
+  frozen = row.options_json or {}
+  if row.mode != "review_merge" or frozen.get("post_review") is not True:
+    return None
+  if frozen.get("propose_verdict") is True and item.get("verdict_proposal"):
+    proposal = item["verdict_proposal"]
+    if proposal.get("event") != "APPROVE":
+      return "The proposed verdict requests changes, so this PR will not be merged."
+    if proposal.get("state") == "proposed":
+      return "Submit or discard the proposed approval in Contribute. Nothing merges before you submit it."
+    if proposal.get("state") == "discarded":
+      return "You discarded the proposed approval, so nothing was posted or merged."
+    if proposal.get("state") != "posted":
+      return "The approval was not confirmed on GitHub, so this PR was not merged. Check GitHub; nothing was repeated."
+    return None
+  receipt = item.get("public_review") or {}
+  if receipt.get("state") != "posted":
+    return "The review comment was not confirmed on GitHub, so this PR was not merged. Nothing was repeated."
+  return None
+
+
 def brief(row):
   endpoint = run_endpoint(row) + "/outcomes"
   if row.mode == "review_fix_merge":
@@ -679,14 +727,23 @@ def brief(row):
     "exact-head private review/merge endpoints remain compatible; a fresh "
     "preview/approval is needed for the new programmatic reviewer workflow."
   )
-  public_note = (
+  verdict = frozen.get("propose_verdict") is True
+  public_note = ((
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) and stay private. "
     "Evidence freezes once dispatch is armed; identical retry is read-only. "
     "Keep owner-only questions and private data out of public evidence.\n"
-    if frozen.get("post_review") is True else ""
-  )
+    + ("This grant also merges: an all_clear result must use publish:true. The server posts the review first "
+       "and attempts the guarded merge only after GitHub confirms it.\n" if row.mode == "review_merge" else "")
+    + ("Verdict opt-in: publish:true saves a PROPOSED formal verdict instead of a comment (APPROVE for all_clear, "
+       "REQUEST_CHANGES for needs_you; your summary is its wording). Your own PRs fall back to a COMMENT, since "
+       "GitHub refuses self-review verdicts. Only the owner submits or discards a proposal, in Contribute; tell "
+       "them it is waiting there and end your turn. Do not ask for approval in chat or retry. "
+       + ("If the owner submits an APPROVE, this chat is resumed: re-send the identical outcome once to run "
+          "the guarded merge. " if row.mode == "review_merge" else "")
+       + "\n" if verdict else "")
+  ) if frozen.get("post_review") is True else "")
   opener = ("Review this exact selected public PR batch and report privately unless you publish a verdict."
     if frozen.get("post_review") is True else "Review this exact selected public PR batch privately.")
   publish_field = ' "publish": false,\n' if frozen.get("post_review") is True else ""
@@ -1098,12 +1155,16 @@ def save_effect_outcome(db, row, item_key, outcome):
     if current.get("state") == "merged" and outcome.get("state") != "merged":
       return
     public_receipt = current.get("public_review") or {}
-    if public_receipt.get("state") == "posted":
+    if public_receipt.get("state") == "posted" and outcome.get("public_review") != public_receipt:
       # A stale read-only observer cannot downgrade a confirmed public fact.
+      # A later effect (the merge after a posted review) carries it unchanged.
       return
     if (public_receipt.get("state") in {"posting", "unknown"}
         and public_receipt.get("marker") != (outcome.get("public_review") or {}).get("marker")):
       # Only the dispatcher/observer of this exact attempt can settle it.
+      return
+    outcome = _keep_verdict(current, outcome)
+    if outcome is None:
       return
     current_ready = current.get("ready_attempt")
     incoming_ready = outcome.get("ready_attempt")
@@ -1130,6 +1191,26 @@ def save_effect_outcome(db, row, item_key, outcome):
     if _cas_outcome(db, row, item_key, outcome):
       return
   raise HTTPException(409, "The remote result could not be recorded after concurrent changes; observe this run.")
+
+
+VERDICT_SETTLED = {"posted", "unknown", "not_dispatched", "discarded"}
+
+
+def _keep_verdict(current, outcome):
+  """A writer that never saw the verdict proposal cannot drop or rewind it.
+
+  Only that proposal's own settlement may move it forward; a settled fact is
+  never replaced. Returns None when the incoming write must not land.
+  """
+  saved = current.get("verdict_proposal")
+  incoming = outcome.get("verdict_proposal")
+  if not saved:
+    return outcome
+  if not incoming or incoming.get("id") != saved.get("id"):
+    return {**outcome, "verdict_proposal": saved}
+  if saved.get("state") in VERDICT_SETTLED and incoming != saved:
+    return None
+  return outcome
 
 
 def settle_merge_observation(db, row, item_key, observed, fact):

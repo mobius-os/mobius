@@ -879,8 +879,13 @@ def test_reviews_are_private_without_the_opt_in_or_outside_review_only(setup, mo
   row.options_json = {"post_review": True}
   row.outcomes_json = {}
   db.commit()
-  monkeypatch.setattr(domain, "perform_merge", lambda *a: {"merged": True, "sha": "landed"})
-  assert "public_review" not in report(setup)["run"]["items"][0]
+  monkeypatch.setattr(domain, "perform_merge", lambda *a: pytest.fail("merged without the requested post"))
+  # A merge grant that also posts cannot merge an unpublished all clear.
+  with pytest.raises(HTTPException) as refused:
+    report(setup)
+  assert refused.value.status_code == 422
+  db.refresh(row)
+  assert row.outcomes_json == {}
 
 
 def test_changed_github_account_skips_the_public_review(setup, monkeypatch):

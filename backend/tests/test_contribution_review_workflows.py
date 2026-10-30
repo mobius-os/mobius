@@ -19,6 +19,9 @@ from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, 
 NEW = "c" * 40
 
 
+CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
+                "review_fix_merge": True, "draft_takeover": True}
+
 def takeover(setup, monkeypatch):
   db, row, principal = setup
   row.mode = "review_fix_merge"
@@ -73,8 +76,8 @@ def test_review_presets_advertises_capabilities_outside_preview_hash(setup, monk
   owner = Principal(owner=principal.owner, app_id=None)
   monkeypatch.setattr(routes, "resolve_round_choice", lambda *a: {"provider": "codex", "model": "gpt-5", "effort": "xhigh"})
   before = routes.review_preview(1, routes.ReviewPreview(), db, owner)
-  assert routes.review_presets(1, db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
-  assert routes.core_review_presets(db, owner)["capabilities"] == {"post_review": True, "review_fix_merge": True, "draft_takeover": True}
+  assert routes.review_presets(1, db, owner)["capabilities"] == CAPABILITIES
+  assert routes.core_review_presets(db, owner)["capabilities"] == CAPABILITIES
   assert routes.review_preview(1, routes.ReviewPreview(), db, owner) == before
   assert "capabilities" not in before["options"]
 
@@ -1318,8 +1321,8 @@ def test_app_read_projection_stays_owner_scoped_and_excludes_other_app_grants(se
     assert error.value.status_code == 404
 
 
-@pytest.mark.parametrize("mode", ["review_merge", "review_fix_merge"])
-def test_public_review_option_is_refused_outside_review_only(setup, mode):
+@pytest.mark.parametrize("mode", ["review_fix_merge"])
+def test_public_review_option_is_refused_for_takeover(setup, mode):
   db, _, principal = setup
   owner = Principal(owner=principal.owner, app_id=None)
   body = routes.StartReviews(request_id=f"public-{mode}", mode=mode, items=[ITEM],
@@ -1328,6 +1331,16 @@ def test_public_review_option_is_refused_outside_review_only(setup, mode):
   with pytest.raises(HTTPException) as error:
     asyncio.run(routes.start_reviews(1, body, db, owner))
   assert error.value.status_code == 422
+
+
+def test_verdict_option_needs_posting_allowed(setup):
+  db, _, principal = setup
+  owner = Principal(owner=principal.owner, app_id=None)
+  body = routes.StartReviews(request_id="verdict-without-post", mode="review", items=[ITEM],
+    options=routes.ReviewOptions(propose_verdict=True))
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, body, db, owner))
+  assert error.value.status_code == 422 and "posting" in error.value.detail
 
 
 def overlapping_grant(db, row, *, number=None):
