@@ -37,6 +37,9 @@ const mdOwnerText = configuredMarked({
   breaks: true,
   tokenizer: { html: () => undefined, tag: () => undefined },
 })
+// Agent-written chat notes are plain Markdown: a `$` there is a shell variable
+// or a price, never TeX, so they lex without math tokens.
+const plainMd = new Marked()
 
 
 export function markdownImageHrefs(text) {
@@ -47,7 +50,8 @@ export function markdownImageHrefs(text) {
   return hrefs
 }
 
-function tokenize(text, { writtenByOwner = false } = {}) {
+function tokenize(text, { writtenByOwner = false, math = true } = {}) {
+  if (!math) return plainMd.lexer(text || '')
   return (writtenByOwner ? mdOwnerText : md).lexer(text || '')
 }
 
@@ -128,6 +132,7 @@ export function ProgressiveMarkdown({
  * prepare one long block over several hidden frames; `renderFraction` reveals
  * token prefixes while one memoized token tree keeps already-prepared DOM.
  * `writtenByOwner` selects the owner-text rules described at `configuredMarked`.
+ * `math={false}` renders plain Markdown with no TeX (agent-written notes).
  */
 export function StandardMarkdown({
   text,
@@ -137,6 +142,7 @@ export function StandardMarkdown({
   onInternalNav,
   mediaDimensions,
   allowAppBlocks = false,
+  math = true,
 }) {
   // The settled-transcript renderer, so this is the one that matters for "a
   // stopped chat still feels slow". `useMemo` only holds while the component
@@ -146,8 +152,8 @@ export function StandardMarkdown({
   const tokens = useMemo(
     () => groupMarkdownImages(markdownRange
       ? markdownRangeTokens(markdownRange)
-      : tokenize(text, { writtenByOwner })),
-    [text, markdownRange, writtenByOwner],
+      : tokenize(text, { writtenByOwner, math })),
+    [text, markdownRange, writtenByOwner, math],
   )
   const fraction = Number(renderFraction)
   const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1
