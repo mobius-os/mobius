@@ -1240,6 +1240,11 @@ export const api = {
         body: payload ? JSON.stringify(payload) : undefined,
       },
     ),
+    // Erases an uninstalled app now instead of at the end of its 7-day window.
+    // Final: there is no recover afterwards.
+    deletePermanently: (appId) => apiFetch(
+      `/apps/${appId}/permanent`, { method: 'DELETE' },
+    ),
     // Wipes the app's runtime storage back to empty while KEEPING it
     // installed — distinct from `remove` (which tombstones the whole app).
     deleteData: (appId) => apiFetch(`/apps/${appId}/data`, { method: 'DELETE' }),

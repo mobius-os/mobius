@@ -43,13 +43,13 @@ export function removedLabel(deletedAt, now = new Date()) {
   return `Uninstalled on ${when.toLocaleDateString(undefined, options)}`
 }
 
-/** The server's reason for a failed recover, in its own words when it gave one. */
-export async function recoverErrorMessage(response) {
+/** Why a recover or permanent delete failed: the server's reason when it gave one, else `fallback`. */
+export async function failureMessage(response, fallback) {
   try {
     const body = await response.json()
     if (typeof body?.detail === 'string' && body.detail) return body.detail
   } catch {
     // fall through to the generic text
   }
-  return 'Could not recover this app. Try again.'
+  return fallback
 }

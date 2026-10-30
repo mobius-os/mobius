@@ -55,7 +55,9 @@ mapi -X POST /api/apps/{app_id}/recover
 Reinstalling a store app with the same `manifest_url` is equivalent: it
 reattaches to the tombstoned row with the same id and data. Use the exact app id
 from the deletion receipt, never list position. After seven days the tombstone
-is purged. Confirm before deleting even though the short retention window makes
+is purged. The owner can also erase one sooner with **Delete permanently** under Recently
+uninstalled on the Apps screen; that is the owner's action, so do not call
+`DELETE /api/apps/{id}/permanent` yourself. Confirm before deleting even though the short retention window makes
 uninstall reversible.
 
 ## Full owner-data restore is separate
