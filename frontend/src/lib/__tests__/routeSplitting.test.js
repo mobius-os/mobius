@@ -9,6 +9,11 @@ const LOGIN_CSS = readFileSync(
   new URL('../../components/LoginForm/LoginForm.css', import.meta.url),
   'utf8',
 )
+const SHELL = readFileSync(new URL('../../components/Shell/Shell.jsx', import.meta.url), 'utf8')
+const CHAT_VIEW = readFileSync(
+  new URL('../../components/ChatView/ChatView.jsx', import.meta.url),
+  'utf8',
+)
 const INDEX_HTML = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8')
 const STATIC_INDEX_STYLES = [...INDEX_HTML.matchAll(/<style(?:\s[^>]*)?>([\s\S]*?)<\/style>/g)]
   .map(match => match[1])
@@ -49,6 +54,35 @@ test('mutually exclusive top-level flows remain lazy route boundaries', () => {
       new RegExp(`\\.${className.replaceAll('-', '\\-')}(?:[\\s.:,{]|$)`),
       `${className} must keep a stylesheet rule`,
     )
+  }
+})
+
+// tests/app-canvas.spec.mjs finds these chunks by the name Vite gives a lazily
+// imported module (AppCanvas-<hash>.js), so keep each a module of its own.
+test('surfaces a chat-only launch never paints stay out of the shell startup code', () => {
+  const deferred = [
+    [SHELL, [
+      'AppCanvas', 'ProjectsDirectory', 'ProjectWorkspace', 'AppSourceWorkspace',
+      'ArtifactWorkspace', 'ProjectCopyImport',
+    ]],
+    [CHAT_VIEW, [
+      'AgentContextInspector', 'ContextPanel', 'ChatSummaryViewer', 'ChatDiffViewer',
+      'ChatUsageInspector', 'ChatNetworkInspector',
+    ]],
+  ]
+  for (const [source, components] of deferred) {
+    for (const component of components) {
+      assert.match(
+        source,
+        new RegExp(`const ${component} = lazy\\(\\(\\) => import\\('[^']*/${component}\\.jsx'\\)\\)`),
+        `${component} must load on demand`,
+      )
+      assert.doesNotMatch(
+        source,
+        new RegExp(`^import ${component}\\b`, 'm'),
+        `${component} must not return to the shared startup bundle`,
+      )
+    }
   }
 })
 
@@ -103,6 +137,37 @@ test('mobius.you sign-in stays on the viewed origin and owns a centered action',
   const buttonRule = LOGIN_CSS.match(/\.login__btn\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(buttonRule, /width:\s*100%/)
   assert.match(buttonRule, /justify-content:\s*center/)
+})
+
+test('the launch cover stays up while any visible surface is still downloading', async () => {
+  const { createLaunchCoverHold } = await import('../../components/ErrorBoundary/LazySurface.jsx')
+  const frames = []
+  let published = 0
+  const cover = createLaunchCoverHold(() => { published += 1 }, callback => frames.push(callback))
+
+  const release = cover.hold()
+  cover.request()
+  assert.equal(published, 0, 'a pending surface holds the cover')
+
+  // An effect re-run releases and re-acquires before the next frame.
+  release()
+  const reacquired = cover.hold()
+  frames.splice(0).forEach(frame => frame())
+  assert.equal(published, 0, 'the queued frame must not lift the cover over a pending surface')
+
+  reacquired()
+  frames.splice(0).forEach(frame => frame())
+  assert.equal(published, 1, 'the cover lifts a frame after the last surface is ready')
+})
+
+test('the launch cover lifts at once when no surface is pending', async () => {
+  const { createLaunchCoverHold } = await import('../../components/ErrorBoundary/LazySurface.jsx')
+  let published = 0
+  const cover = createLaunchCoverHold(() => { published += 1 }, () => {
+    throw new Error('no frame is needed without a pending surface')
+  })
+  cover.request()
+  assert.equal(published, 1)
 })
 
 // The static boot document runs before React exists. Its inline scripts are

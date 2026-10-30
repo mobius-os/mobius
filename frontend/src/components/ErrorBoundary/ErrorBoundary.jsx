@@ -8,7 +8,7 @@ import {
   readErrorRecoveryAttempt,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
-import { reloadIfGenerationStale } from '../../lib/shellUpdate.js'
+import { reloadIfGenerationStale, safeServiceWorker } from '../../lib/shellUpdate.js'
 import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
 
@@ -66,17 +66,6 @@ function CrashRecovery({ context, canAskAgent, diagnostic, headingRef, onRefresh
   )
 }
 
-// A sandboxed frame without allow-same-origin keeps navigator.serviceWorker
-// PRESENT while making its getter throw, so a bare read turns a crash this
-// boundary is handling into a second, uncatchable page error. Recovery simply
-// has no worker to consult there.
-function safeServiceWorker() {
-  try {
-    return typeof navigator !== 'undefined' ? navigator.serviceWorker : null
-  } catch {
-    return null
-  }
-}
 export default class ErrorBoundary extends Component {
   state = {
     error: null,

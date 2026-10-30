@@ -690,24 +690,6 @@
   min-height: 0;
 }
 
-.shell__settings-loading {
-  height: 100%;
-  display: grid;
-  place-items: center;
-}
-
-.shell__settings-loading-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-  animation: shell-settings-pulse 800ms ease-in-out infinite alternate;
-}
-
-@keyframes shell-settings-pulse {
-  to { opacity: 0.35; transform: scale(0.75); }
-}
-
 /* ── Builder-mode logo gesture + indicator ──────────────────────────────────
    There is deliberately no standalone header mode icon. The brand opens the drawer
    on a single tap; a HOLD (~450ms), touch swipe-right, or Shift+Enter toggles mode.
@@ -838,7 +820,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .shell__settings-loading-dot { animation: none; }
   .shell__connection-status-icon { animation: none !important; }
   .shell__connection-status-label { transition: none; }
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped

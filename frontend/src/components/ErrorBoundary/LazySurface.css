@@ -1,0 +1,56 @@
+/* A pane whose content is not ready yet: one quiet pulsing dot, centred. */
+.surface-loading {
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.surface-loading__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: surface-loading-pulse 800ms ease-in-out infinite alternate;
+}
+
+@keyframes surface-loading-pulse {
+  to { opacity: 0.35; transform: scale(0.75); }
+}
+
+/* An on-request panel that is still downloading, or failed to: a small line at
+   the top of the view it opens over, leaving that view usable. */
+.lazy-panel-status {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 1000;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  background: var(--surface, #171717);
+  color: var(--text, #ececec);
+  font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+.lazy-panel-status__action {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface-loading__dot { animation: none; }
+}
