@@ -191,7 +191,7 @@ import {
   shouldFocusComposerAfterPanePointer,
   supportsDesktopPaneComposerFocus,
 } from './paneChatFocus.js'
-import LazySurface, { SurfaceLoading } from '../ErrorBoundary/LazySurface.jsx'
+import LazySurface, { SurfaceLoading, createLaunchCoverHold } from '../ErrorBoundary/LazySurface.jsx'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan,
   MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
@@ -860,31 +860,24 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // cannot reveal a chat while its scroll restoration is still deliberately
   // hidden.
   const initialVisualReadyRef = useRef(false)
-  const initialVisualRequestedRef = useRef(false)
-  const launchCodePendingRef = useRef(0)
-  const publishInitialVisualReady = useCallback(() => {
-    if (initialVisualReadyRef.current) return
-    initialVisualReadyRef.current = true
-    onInitialVisualReady?.()
+  const onInitialVisualReadyRef = useRef(onInitialVisualReady)
+  useLayoutEffect(() => {
+    onInitialVisualReadyRef.current = onInitialVisualReady
   }, [onInitialVisualReady])
-  const markInitialVisualReady = useCallback(() => {
-    initialVisualRequestedRef.current = true
-    if (launchCodePendingRef.current === 0) publishInitialVisualReady()
-  }, [publishInitialVisualReady])
   // A visible surface whose code is still downloading (LazySurface onPending)
   // holds the cover, whichever view or pane shows it: lifting it earlier would
   // expose an empty pane. A failed download also releases the hold, so the
-  // pane's own recovery panel shows instead of a cover that never lifts.
-  const holdLaunchCover = useCallback(() => {
-    if (initialVisualReadyRef.current) return undefined
-    launchCodePendingRef.current += 1
-    return () => {
-      launchCodePendingRef.current -= 1
-      if (launchCodePendingRef.current === 0 && initialVisualRequestedRef.current) {
-        requestAnimationFrame(publishInitialVisualReady)
-      }
-    }
-  }, [publishInitialVisualReady])
+  // pane's own recovery panel shows instead of a cover that never lifts. The
+  // hold is created once so its callbacks keep one identity across renders.
+  const [launchCover] = useState(() => createLaunchCoverHold(() => {
+    if (initialVisualReadyRef.current) return
+    initialVisualReadyRef.current = true
+    onInitialVisualReadyRef.current?.()
+  }))
+  const markInitialVisualReady = launchCover.request
+  const holdLaunchCover = useCallback(() => (
+    initialVisualReadyRef.current ? undefined : launchCover.hold()
+  ), [launchCover])
   const requestComposer = useCallback((chatId, {
     draft,
     focus = false,

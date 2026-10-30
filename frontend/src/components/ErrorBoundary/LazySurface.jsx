@@ -13,6 +13,38 @@ export function SurfaceLoading({ label = 'Loading' }) {
   )
 }
 
+/**
+ * Counts visible surfaces whose code is still downloading (`hold`, wired to
+ * LazySurface `onPending`) so the launch cover lifts only once the first
+ * workspace paint was requested and none is pending. The last release waits
+ * a frame for the pane to paint and re-checks then: an effect that releases
+ * and re-acquires within that frame must keep the cover. `publish` must be
+ * idempotent.
+ */
+export function createLaunchCoverHold(
+  publish,
+  scheduleFrame = callback => requestAnimationFrame(callback),
+) {
+  let pending = 0
+  let requested = false
+  const publishIfIdle = () => {
+    if (requested && pending === 0) publish()
+  }
+  return {
+    hold() {
+      pending += 1
+      return () => {
+        pending -= 1
+        if (pending === 0 && requested) scheduleFrame(publishIfIdle)
+      }
+    },
+    request() {
+      requested = true
+      publishIfIdle()
+    },
+  }
+}
+
 function PendingSurface({ panel, onPending }) {
   useLayoutEffect(() => onPending?.(), [onPending])
   return panel

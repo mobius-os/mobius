@@ -137,3 +137,34 @@ test('mobius.you sign-in stays on the viewed origin and owns a centered action',
   assert.match(buttonRule, /width:\s*100%/)
   assert.match(buttonRule, /justify-content:\s*center/)
 })
+
+test('the launch cover stays up while any visible surface is still downloading', async () => {
+  const { createLaunchCoverHold } = await import('../../components/ErrorBoundary/LazySurface.jsx')
+  const frames = []
+  let published = 0
+  const cover = createLaunchCoverHold(() => { published += 1 }, callback => frames.push(callback))
+
+  const release = cover.hold()
+  cover.request()
+  assert.equal(published, 0, 'a pending surface holds the cover')
+
+  // An effect re-run releases and re-acquires before the next frame.
+  release()
+  const reacquired = cover.hold()
+  frames.splice(0).forEach(frame => frame())
+  assert.equal(published, 0, 'the queued frame must not lift the cover over a pending surface')
+
+  reacquired()
+  frames.splice(0).forEach(frame => frame())
+  assert.equal(published, 1, 'the cover lifts a frame after the last surface is ready')
+})
+
+test('the launch cover lifts at once when no surface is pending', async () => {
+  const { createLaunchCoverHold } = await import('../../components/ErrorBoundary/LazySurface.jsx')
+  let published = 0
+  const cover = createLaunchCoverHold(() => { published += 1 }, () => {
+    throw new Error('no frame is needed without a pending surface')
+  })
+  cover.request()
+  assert.equal(published, 1)
+})
