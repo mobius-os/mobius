@@ -480,13 +480,15 @@ def test_create_only_refuses_an_occupied_name_and_an_update_never_moves_origin(v
   with pytest.raises(kv.VaultError, match="already exists"):
     vault.put_key("echo", {"value": "other", "inject": HEADER_SLOT, "create_only": True})
   assert vault.reveal("echo", ("owner", "")) == DUMMY
-  vault.put_key("mine", {"value": DUMMY, "inject": HEADER_SLOT, "create_only": True,
+  # An app's own key is granted to it, as save_owned creates it.
+  own = {"apps": [7], "agents": True, "sites": []}
+  vault.put_key("mine", {"value": DUMMY, "inject": HEADER_SLOT, "grants": own, "create_only": True,
                          "origin": {"app": 7, "name": "api.key"}})
   # Changing how the key is sent keeps it the app's own.
-  vault.put_key("mine", {"inject": HEADER_SLOT, "origin": {"app": 8, "name": "stolen"}})
+  vault.put_key("mine", {"inject": HEADER_SLOT, "grants": own, "origin": {"app": 8, "name": "stolen"}})
   assert {k["name"]: k["origin"] for k in vault.list_keys()}["mine"] == {"app": 7, "name": "api.key"}
   # A value written under another origin never hands the key to that app.
-  vault.put_key("mine", {"value": "next", "inject": HEADER_SLOT,
+  vault.put_key("mine", {"value": "next", "inject": HEADER_SLOT, "grants": own,
                          "origin": {"app": 8, "name": "stolen"}})
   assert {k["name"]: k["origin"] for k in vault.list_keys()}["mine"] is None
 
@@ -573,6 +575,41 @@ def test_a_purge_erases_the_apps_own_keys(vault):
   own = vault.save_owned(WEATHER, "token", DUMMY)["name"]
   assert vault.forget_app(WEATHER) == {"keys": ["echo"], "deleted": [own], "requests": 0}
   assert [k["name"] for k in vault.list_keys()] == ["echo"]
+
+
+def _origin(vault, name):
+  return next(k for k in vault.list_keys() if k["name"] == name).get("origin")
+
+
+def test_a_purged_creator_leaves_no_ownership_for_an_app_that_reuses_its_id(vault):
+  # App 5 saves its own key; the owner shares it with Weather on a site.
+  name = vault.save_owned(5, "api_key", DUMMY)["name"]
+  vault.put_key(name, {"inject": HEADER_SLOT,
+                       "grants": {"apps": [5, WEATHER], "agents": True, "sites": [ECHO_SITE]}})
+  assert _origin(vault, name) == {"app": 5, "name": "api_key"}
+  vault.forget_app(5)
+  assert _origin(vault, name) is None
+  # A new app that reuses id 5 asks, and the owner approves it as usual.
+  asked = vault.request_access(5, {**ASK, "key": name, "sites": [ECHO_SITE]})
+  vault.approve_request(asked["id"], {"ticket": _ticket(vault, asked["id"])})
+  assert 5 in next(k for k in vault.list_keys() if k["name"] == name)["grants"]["apps"]
+  # It borrows the key; it does not own it, so saving its own secret makes a new key.
+  assert _origin(vault, name) is None
+  assert vault.save_owned(5, "api_key", "other-dummy-key")["name"] != name
+  _, value = vault.authorize(name, ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
+  assert value == DUMMY
+
+
+def test_an_origin_lasts_only_while_its_app_holds_a_grant(vault):
+  # Released while shared: the key stays for the other app, without an owner.
+  shared = vault.save_owned(5, "token", DUMMY)["name"]
+  vault.put_key(shared, {"inject": HEADER_SLOT, "grants": {"apps": [5, WEATHER], "agents": True, "sites": []}})
+  vault.release_owned(5, "token")
+  assert _origin(vault, shared) is None
+  # The owner removing the creating app from the grants also ends its ownership.
+  kept = vault.save_owned(6, "token", DUMMY)["name"]
+  vault.put_key(kept, {"inject": HEADER_SLOT, "grants": {"apps": [WEATHER], "agents": True, "sites": []}})
+  assert _origin(vault, kept) is None
 
 
 def test_only_one_vault_runs_on_a_folder(tmp_path):

@@ -28,6 +28,7 @@ from app.deps import (
   require_nondelegated_owner_or_app_control,
 )
 from app.resource_access import authorized_app_nonce
+from app.routes import keys as keys_routes
 
 router = APIRouter(prefix="/api/apps", tags=["app-secrets (deprecated)"])
 
@@ -112,9 +113,11 @@ async def get_secret(
       detail="Apps never read key values. Borrow the key through /api/keys/use "
       "(see 'Keys' in the building-apps guide).",
     )
+  # The same caller rule as /api/keys/{name}/value: a shared-browser guest
+  # never reads a key, and the read is logged as the agent or owner it is.
+  caller = keys_routes._caller(principal)
   _authorize_app(db, principal, app_id)
   key = await _owned(app_id, name)
-  caller = f"agent:{principal.chat_id}" if principal.chat_id else "owner"
   try:
     value = (await key_vault.vault_call("GET", f"/keys/{key['name']}/value", caller=caller))["value"]
   except key_vault.VaultUnavailable as exc:

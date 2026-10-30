@@ -239,6 +239,24 @@ def test_guest_lineage_cannot_read_or_use_keys(client, auth, db, vault):
   assert response.status_code in (401, 403) and DUMMY not in response.text
 
 
+def test_guest_lineage_cannot_read_an_apps_secret_through_the_old_route(client, auth, db, vault):
+  # An authenticated shared-browser guest (a live lineage), not a token the
+  # browser-access check would already refuse, so the route's own rule decides.
+  from app.browser_access import BrowserLineage
+  from app.deps import Principal, get_principal
+  from app.main import app as server
+  weather = _app(db, "weather")
+  vault.save_owned(weather.id, "token", DUMMY)
+  owner = db.query(models.Owner).first()
+  server.dependency_overrides[get_principal] = lambda: Principal(
+    owner=owner, app_id=None, browser=BrowserLineage("g" * 32, "s" * 32))
+  try:
+    response = client.get(f"/api/apps/{weather.id}/secrets/token")
+  finally:
+    server.dependency_overrides.pop(get_principal, None)
+  assert response.status_code == 403 and DUMMY not in response.text
+
+
 def test_forgetting_an_app_needs_no_vault_when_nothing_was_ever_stored(monkeypatch, tmp_path):
   import asyncio
   monkeypatch.setattr(key_vault, "vault_dir", lambda: tmp_path / "never-used")

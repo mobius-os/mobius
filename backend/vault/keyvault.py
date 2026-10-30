@@ -645,6 +645,7 @@ class Vault:
       }
       if kept_origin:
         self._records[name]["origin"] = kept_origin
+        self._drop_orphaned_origin(self._records[name])
       self._save()
       granted = [rid for rid, item in self._requests.items()
                  if item["key"] == name and item["app"] in grants["apps"]]
@@ -722,6 +723,19 @@ class Vault:
     record["updated_at"] = _now()
     record["revision"] = record.get("revision", 0) + 1
 
+  @staticmethod
+  def _drop_orphaned_origin(record: dict) -> None:
+    """Forget the creating app once it no longer holds a grant on the key.
+
+    ``origin`` makes its app the key's owner (it may replace and release the
+    key, and use it for its own model provider without the key's sites). App
+    ids are reused after a purge, so an origin that outlived its app's grant
+    would hand that ownership to an unrelated app the owner later grants.
+    """
+    origin = record.get("origin")
+    if origin and origin["app"] not in record["grants"]["apps"]:
+      del record["origin"]
+
   def _release_locked(self, name: str, app_id: int) -> bool:
     """Withdraw ``app_id`` from its own key; delete the key unless shared.
 
@@ -731,6 +745,7 @@ class Vault:
     others = [a for a in record["grants"]["apps"] if a != app_id]
     if others:
       record["grants"]["apps"] = others
+      self._drop_orphaned_origin(record)
       self._touch(record)
     else:
       del self._records[name]
@@ -905,6 +920,7 @@ class Vault:
       for name in keys:
         grants = self._records[name]["grants"]
         grants["apps"] = [a for a in grants["apps"] if a != app_id]
+        self._drop_orphaned_origin(self._records[name])
         self._touch(self._records[name])
       requests = [rid for rid, item in self._requests.items() if item["app"] == app_id]
       for rid in requests:
