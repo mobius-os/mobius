@@ -612,6 +612,7 @@ export default function Drawer({
     },
   }), [])
 
+  const [dismissPointerId, setDismissPointerId] = useState(null)
   function handleOverlayPointerDown(e) {
     // Pointerdown is the canonical dismiss event. Waiting for `click` is
     // unreliable on touchscreens: even a tiny pan can suppress the synthetic
@@ -631,8 +632,34 @@ export default function Drawer({
     outsideDismissClickRef.current = true
     e.preventDefault()
     e.stopPropagation()
+    // The scrim keeps owning this touch until it lifts. Releasing hit testing
+    // mid-gesture lets the rest of a dismissing drag fall through and scroll
+    // the content beneath, which can cost the next tap its click.
+    setDismissPointerId(e.pointerId)
     onClose?.()
   }
+
+  useEffect(() => {
+    if (dismissPointerId == null) return undefined
+    function release(e) {
+      if (e && e.pointerId != null && e.pointerId !== dismissPointerId) return
+      setDismissPointerId(null)
+    }
+    // pointerup/pointercancel is the real end. A lost end event (the page was
+    // hidden mid-gesture) must never leave an invisible full-screen blocker.
+    const watchdog = setTimeout(release, 3000)
+    window.addEventListener('pointerup', release, true)
+    window.addEventListener('pointercancel', release, true)
+    window.addEventListener('blur', release)
+    document.addEventListener('visibilitychange', release)
+    return () => {
+      clearTimeout(watchdog)
+      window.removeEventListener('pointerup', release, true)
+      window.removeEventListener('pointercancel', release, true)
+      window.removeEventListener('blur', release)
+      document.removeEventListener('visibilitychange', release)
+    }
+  }, [dismissPointerId])
 
   useEffect(() => {
     function releaseStaleDismissClaim() {
@@ -990,11 +1017,13 @@ export default function Drawer({
   }, [open, persistent])
 
   // Keep only the panel's still-visible footprint hit-testable while it slides
-  // away. The full-screen visual scrim stops owning input as soon as close is
-  // acknowledged; a geometry-matched shield follows the panel until its
-  // transition ends. This keeps uncovered controls live without allowing taps
-  // through visible drawer pixels. transitionend and animationend release on
-  // the real end of the slide; the watchdog bounds a dropped end event.
+  // away. The full-screen visual scrim stops owning new input as soon as close
+  // is acknowledged (only the touch that dismissed it stays owned until it
+  // lifts; see handleOverlayPointerDown); a geometry-matched shield follows
+  // the panel until its transition ends. This keeps uncovered controls live
+  // without allowing taps through visible drawer pixels. transitionend and
+  // animationend release on the real end of the slide; the watchdog bounds a
+  // dropped end event.
   const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
     if (open && !persistent) {
@@ -1224,7 +1253,7 @@ export default function Drawer({
       {!persistent && (
         <>
           <div
-            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
+            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}${!open && dismissPointerId != null ? ' drawer-overlay--dismissing' : ''}`}
             onPointerDown={handleOverlayPointerDown}
           />
           <div

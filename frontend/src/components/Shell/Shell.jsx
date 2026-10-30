@@ -506,6 +506,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
+  // Immersive hides the drawer panel (Shell.css), so a modal drawer cannot stay
+  // logically open underneath it: its dimming, tap-blocking scrim would cover
+  // the app with nothing visible to dismiss. This happens when an app claims
+  // immersive while the owner has the drawer open (e.g. during a game's load).
+  useLayoutEffect(() => {
+    if (immersiveActive && modalDrawerOpen) closeDrawerRef.current()
+  }, [immersiveActive, modalDrawerOpen])
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
   // branches are unit-tested in workspaceView.test.js, and so one commit flips
