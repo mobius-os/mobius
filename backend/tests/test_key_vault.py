@@ -254,6 +254,17 @@ def test_header_slot_replaces_any_caller_supplied_copy():
   assert request.target == "/anything/x?a=1"
 
 
+def test_a_ranged_request_cannot_slice_an_echoed_key_past_redaction():
+  request = kv.build_upstream_request(
+    method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
+    caller_headers=[("Range", "bytes=10-13"), ("If-Range", '"etag"'), ("X-Trace", "1")],
+    inject={"type": "query", "name": "api_key"}, value=DUMMY,
+  )
+  names = {k.lower() for k, _ in request.headers}
+  assert "range" not in names and "if-range" not in names
+  assert "x-trace" in names
+
+
 def test_query_slot_replaces_any_caller_supplied_parameter():
   request = kv.build_upstream_request(
     method="GET", host="echo.example.com", raw_path="/anything/x",

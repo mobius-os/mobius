@@ -361,6 +361,23 @@ def test_permanent_delete_asks_to_retry_while_a_key_borrow_is_in_flight(
   assert client.delete(f"/api/apps/{app_id}/permanent", headers=auth).status_code == 204
 
 
+def test_permanent_delete_keeps_the_apps_data_while_the_vault_is_down(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  from app import key_vault
+  async def vault_down(app_id):
+    raise key_vault.VaultUnavailable("vault is down")
+  monkeypatch.setattr(key_vault, "forget_app", vault_down)
+  app_id = _install(client, auth)["id"]
+  data_file = _seed_data(app_id)
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  response = client.delete(f"/api/apps/{app_id}/permanent", headers=auth)
+  assert response.status_code == 503
+  db.expire_all()
+  assert db.query(models.App).filter(models.App.id == app_id).first() is not None
+  assert data_file.exists(), "nothing is removed before the vault forgets the app"
+
+
 async def _noop():
   return None
 

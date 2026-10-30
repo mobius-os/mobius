@@ -458,7 +458,9 @@ def build_upstream_request(
   for name, header_value in caller_headers:
     lowered = name.lower()
     if (
-      lowered in HOP_BY_HOP or lowered in ("host", "content-length", "accept-encoding")
+      # A ranged answer could carry an echoed key in slices that redaction,
+      # which matches the whole value, would never recognise.
+      lowered in HOP_BY_HOP or lowered in ("host", "content-length", "accept-encoding", "range", "if-range")
       or lowered.startswith("x-vault-") or lowered.startswith("proxy-")
       or lowered == slot
     ):

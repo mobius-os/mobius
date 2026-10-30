@@ -548,10 +548,12 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   storage_dir = apps_root / str(deleted_app_id)
   from app.compiler import purge_app_bundles
+  # The id can be reused after the purge, so no key grant may outlive it. The
+  # vault goes first: if it is unavailable, nothing is removed yet and the
+  # tombstone stays for the next attempt.
+  await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
-  # The id can be reused after the purge, so no key grant may outlive it.
-  await key_vault.forget_app(deleted_app_id)
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent
@@ -3364,6 +3366,11 @@ async def delete_uninstalled_app_permanently(
       raise HTTPException(
         status_code=503,
         detail="The key vault isn't answering, so the app's keys can't be removed yet. Try again shortly.",
+      ) from None
+    except key_vault.VaultRefused as exc:
+      raise HTTPException(
+        status_code=502,
+        detail=f"The key vault refused to remove this app's keys: {exc.reason}",
       ) from None
 
 
