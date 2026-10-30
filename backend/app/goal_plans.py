@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, defer, load_only
 
 from app import models
@@ -421,13 +421,20 @@ def goal_assignment(db: Session, chat_id: str) -> GoalAssignment | None:
   )
 
 
-def _presented_goal_attempts(db: Session, chat_ids):
+def _presented_goal_attempts(db: Session, chat_ids, *, among_chats=None):
   """Shared exact retained-Goal selection, independent of execution liveness.
 
   Rank before applying visibility: clearing the latest identity (or a latest
   attempt without an objective) must not uncover an older Goal. Ordinary
   non-Goal turns do not displace the retained Goal.
+
+  ``among_chats`` is an optional SQL selection of chat ids that narrows the
+  ranked set in the same statement. It removes whole chats, never attempts
+  within one, so each remaining chat's ranking is unchanged.
   """
+  ranked_scope = [models.ChatRun.chat_id.in_(list(chat_ids))]
+  if among_chats is not None:
+    ranked_scope.append(models.ChatRun.chat_id.in_(among_chats))
   ranked = db.query(
     models.ChatRun.id.label("run_id"),
     func.row_number().over(
@@ -435,7 +442,7 @@ def _presented_goal_attempts(db: Session, chat_ids):
       order_by=(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()),
     ).label("position"),
   ).filter(
-    models.ChatRun.chat_id.in_(list(chat_ids)),
+    *ranked_scope,
     or_(models.ChatRun.goal_id.isnot(None), models.ChatRun.goal_objective.isnot(None)),
   ).subquery()
   return db.query(models.ChatRun).join(
@@ -466,7 +473,12 @@ def presented_deferred_goals(db: Session, chat_ids) -> dict[str, dict]:
   ids = list(chat_ids)
   if not ids:
     return {}
-  rows = _presented_goal_attempts(db, ids).join(
+  # Only a chat owning a stopped Goal can present one, and the drawer asks for
+  # every chat: rank just those few chats' attempts instead of all of them.
+  stopped_chats = select(models.ChatGoal.chat_id).where(
+    models.ChatGoal.status == "stopped",
+  )
+  rows = _presented_goal_attempts(db, ids, among_chats=stopped_chats).join(
     models.ChatGoal,
     (models.ChatGoal.id == models.ChatRun.goal_id)
     & (models.ChatGoal.chat_id == models.ChatRun.chat_id),
