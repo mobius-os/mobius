@@ -59,7 +59,7 @@ export default function useNotificationCenter(queryClient) {
     await api.notifications.clearAll()
     session.clearAll(noticeIds)
     await Promise.all([
-      queryClient.resetQueries({ queryKey: notificationQueries.list.key }),
+      notificationQueries.list.invalidate(queryClient),
       notificationQueries.unreadCount.invalidate(queryClient),
       notificationQueries.newCount.invalidate(queryClient),
     ])
@@ -71,7 +71,8 @@ export default function useNotificationCenter(queryClient) {
       return
     }
     await api.notifications.dismiss(notificationId)
-    await queryClient.resetQueries({ queryKey: notificationQueries.list.key })
+    // Refresh in place: resetting discards every page and flashes the loader.
+    await notificationQueries.list.invalidate(queryClient)
     notificationQueries.unreadCount.invalidate(queryClient)
     notificationQueries.newCount.invalidate(queryClient)
   }, [session.dismiss, queryClient, session.rows])
