@@ -639,6 +639,9 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
     # that never start a helper are otherwise lost with the process output.
     ("app.helper_hosts", logging.INFO),
     ("app.claude_helper_host", logging.INFO),
+    # Update phases, durations, local-test verdicts and client disconnects:
+    # the progress file keeps only the latest phase.
+    ("app.platform_update", logging.INFO),
   ):
     logger = logging.getLogger(name)
     if handler not in logger.handlers:

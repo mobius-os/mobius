@@ -231,6 +231,9 @@ class PlatformUpdatePhase(str, Enum):
   PREPARING = "preparing"
   FETCHING = "fetching"
   RECONCILING = "reconciling"
+  # Local-change tests can run for many minutes; a phase of their own keeps a
+  # healthy update from looking stuck on the merge step.
+  TESTING = "testing"
   VALIDATING = "validating"
   BUILDING = "building"
   FINALIZING = "finalizing"
@@ -587,6 +590,7 @@ def _set_update_progress(
 ) -> None:
   """Publish one phase transition from either the event loop or worker thread."""
   with _PROGRESS_LOCK:
+    _log_progress_transition(phase, plan_id=plan_id, target_sha=target_sha, error=error)
     _UPDATE_PROGRESS.update(
       plan_id=plan_id,
       target_sha=target_sha,
@@ -600,6 +604,47 @@ def _set_update_progress(
       UPDATE_PROGRESS_PATH,
       json.dumps(_UPDATE_PROGRESS, sort_keys=True),
     )
+
+
+def _log_progress_transition(
+  phase: PlatformUpdatePhase,
+  *,
+  plan_id: str | None,
+  target_sha: str | None,
+  error: str | None,
+) -> None:
+  """Leave a traceable history of each update; the progress file keeps only the latest phase.
+
+  Caller holds ``_PROGRESS_LOCK``, so the previous phase is the one this replaces.
+  """
+  previous = _UPDATE_PROGRESS.get("phase")
+  started = float(_UPDATE_PROGRESS.get("updated_at") or 0.0)
+  same_plan = _UPDATE_PROGRESS.get("plan_id") == plan_id and started
+  took = f" after {time.time() - started:.1f}s in {previous}" if same_plan else ""
+  level = logging.WARNING if error else logging.INFO
+  log.log(
+    level, "platform update %s -> %s: phase %s%s%s",
+    (plan_id or "-")[:12], (target_sha or "-")[:12], phase.value, took,
+    f"; error: {error}" if error else "",
+  )
+
+
+def current_update_progress() -> PlatformUpdateProgress:
+  """Progress as readers should see it: a record a dead process left active is retired.
+
+  Most boots never take the reconcile lock, so without this an Apply cut off
+  by a restart would read as active until the next update, and a client
+  following that update would wait for an outcome that can no longer arrive.
+  """
+  progress = platform_update_progress()
+  if not progress["active"]:
+    return progress
+  try:
+    with _reconcile_flock(blocking=False):
+      pass
+  except PlatformUpdateError:
+    return progress  # A live reconcile holds the lock: the record is current.
+  return platform_update_progress()
 
 
 def _finish_interrupted_update_progress() -> None:
@@ -2897,6 +2942,8 @@ def _finalize_update(
   touched_frontend = any(path.startswith("frontend/") for path in changed)
 
   backend_probe = platform_activation.backend_import_probe_required(changed)
+  if progress:
+    progress(PlatformUpdatePhase.TESTING)
   local_report = _check_local_tests(
     repo, snapshot=pre, prepared=tip, target=target,
     requires_image=(platform_activation.ActivationLevel.IMAGE_REBUILD.value
@@ -3371,6 +3418,7 @@ def _check_local_tests(
   """
   # Static and image-independent, so it runs first: when it already rejects
   # the candidate, running the tests could not change that verdict.
+  started = time.monotonic()
   removed = removed_references.find(repo, target, prepared, snapshot)
   tests = local_change_tests.select(repo, target, prepared, snapshot)
   unavailable = (
@@ -3391,11 +3439,19 @@ def _check_local_tests(
           runs.append(local_change_tests.run(checkout, tests))
         finally:
           app_git.remove_overlay_worktree(repo, checkout)
-  return {
+  report = {
     **local_change_tests.compare(tests, *runs),
     "removed_references": removed,
     "baseline_sha": snapshot, "candidate_sha": prepared, "target_sha": target,
   }
+  log.info(
+    "platform update local tests for %s: %s, %d selected file(s), "
+    "%d regression(s), %.1fs%s",
+    target[:12], report["status"], len(tests), len(report["regressions"]),
+    time.monotonic() - started,
+    f"; incomplete: {'; '.join(report['incomplete'])}" if report["incomplete"] else "",
+  )
+  return report
 
 
 def _local_change_rejection(report: dict) -> str | None:
@@ -6006,6 +6062,11 @@ async def apply_platform_update(
   except asyncio.CancelledError:
     if not started.is_set():
       task.cancel()
+    else:
+      log.warning(
+        "platform Apply %s: client disconnected; the update continues and "
+        "reports through update progress", plan_id[:12],
+      )
     while not task.done():
       try:
         await asyncio.shield(task)

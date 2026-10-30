@@ -23,6 +23,7 @@ left untouched with an explicit normalization error.
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import select
 import signal
@@ -4175,6 +4176,42 @@ def test_next_reconcile_retires_progress_from_dead_process(clone_env):
     pu._UPDATE_PROGRESS.update(original)
 
 
+def test_progress_read_retires_an_apply_cut_off_by_restart(clone_env):
+  _, platform = clone_env
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.TESTING,
+      plan_id="b" * 64, target_sha=_served_sha(platform), active=True,
+    )
+
+    # No reconcile holds the lock, so no process can still own this record.
+    recovered = pu.current_update_progress()
+
+    assert recovered["active"] is False
+    assert recovered["phase"] == pu.PlatformUpdatePhase.FAILED.value
+    assert recovered["error"].startswith("Möbius restarted before this update finished")
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
+def test_progress_read_keeps_a_running_apply_active(clone_env):
+  _, platform = clone_env
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    with pu._reconcile_flock():
+      pu._set_update_progress(
+        pu.PlatformUpdatePhase.TESTING,
+        plan_id="c" * 64, target_sha=_served_sha(platform), active=True,
+      )
+      current = pu.current_update_progress()
+
+    assert current["active"] is True
+    assert current["phase"] == pu.PlatformUpdatePhase.TESTING.value
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
 @pytest.mark.asyncio
 async def test_live_apply_progress_survives_its_own_reconcile_lock(clone_env):
   _, platform = clone_env
@@ -4780,7 +4817,7 @@ async def test_apply_installs_exact_preview_target_without_refetching_moving_ori
 
 @pytest.mark.asyncio
 async def test_cancelled_apply_finishes_its_admitted_transaction(
-  monkeypatch, clone_env,
+  monkeypatch, clone_env, caplog,
 ):
   origin, platform = clone_env
   reviewed = _advance_origin(
@@ -4820,6 +4857,52 @@ async def test_cancelled_apply_finishes_its_admitted_transaction(
   progress = pu.platform_update_progress()
   assert progress["active"] is False
   assert progress["phase"] == pu.PlatformUpdatePhase.COMPLETE.value
+  # The lost client is the one fact progress cannot show afterwards.
+  assert "client disconnected" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_apply_reports_local_tests_as_their_own_logged_phase(
+  monkeypatch, clone_env, caplog,
+):
+  origin, platform = clone_env
+  _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 403")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  phases = []
+  set_progress = pu._set_update_progress
+
+  def recorded_progress(phase, **kwargs):
+    phases.append(phase)
+    set_progress(phase, **kwargs)
+
+  monkeypatch.setattr(pu, "_set_update_progress", recorded_progress)
+  caplog.set_level(logging.INFO, logger="app.platform_update")
+
+  await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert phases[-1] == pu.PlatformUpdatePhase.COMPLETE
+  testing = phases.index(pu.PlatformUpdatePhase.TESTING)
+  assert phases.index(pu.PlatformUpdatePhase.FINALIZING) > testing
+  # Every transition leaves a durable line naming how long the previous phase took.
+  plan = preview["plan_id"][:12]
+  transitions = [
+    record.getMessage() for record in caplog.records
+    if f"platform update {plan}" in record.getMessage()
+  ]
+  assert len(transitions) == len(phases)
+  assert "phase testing after" in "\n".join(transitions)
+  assert "platform update local tests for" in caplog.text
 
 
 @pytest.mark.asyncio
