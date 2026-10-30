@@ -640,33 +640,37 @@ await window.mobius.storage.pendingCount()  // unsynced writes — for sync logi
 
 Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). In the default opaque shell frame, use `window.mobius.storage`: raw IndexedDB/OPFS cannot open under an opaque origin. A future reviewed high-capability/per-app-origin architecture may add those APIs without weakening the shell-origin default; do not restore `allow-same-origin` to get them today.
 
-### Secrets — use the app-scoped encrypted store
+### Keys — ask once, then borrow through the vault
 
-Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs. The platform has a deliberately small encrypted secret surface: at most 16 named values per app and no listing endpoint. An app can store, replace, delete, or check its own values, but only the owner or owner-scoped chat agent can decrypt them.
+Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs, and never build a field that asks the owner to paste a key into the app. Keys live in the owner's key vault (**Settings › Keys**). The owner and the owner's agents may read them; **an app never receives a value**, not in its frame, service or job. An app borrows a key: it names the key and the destination, and Möbius sends the request with the key added.
+
+1. **Ask once.** `POST /api/keys/requests` with the app's own token. It answers `granted`, `pending` or `denied`, and asking again is how the app checks; the owner is notified only the first time. Describe exactly what the app needs: the sites, methods and paths, and how the key is sent (a header, with an optional prefix, or a query parameter). The owner sees the app's name and your reason, adds the key if it is new, and approves. Approving never changes a key the owner already has: the app may use it only on that key's existing sites, and the owner adds any other site on the key's page.
+2. **Borrow.** Send the ordinary HTTPS request to `/api/keys/use/<key>/<host>/<path>?<query>` with the app's token. Möbius identifies the app from that token, the vault checks the owner's grant and the key's allowed sites, adds the key, and returns the site's answer. HTTPS on port 443 only; redirects come back unfollowed; an echoed key is redacted.
 
 ```jsx
-await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'PUT',
-  headers: {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ value: key }),
-})
+const auth = { Authorization: `Bearer ${token}` }
+const asked = await (await fetch('/api/keys/requests', {
+  method: 'POST',
+  headers: { ...auth, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    key: 'openweather',
+    reason: 'Shows the forecast for your saved cities.',
+    sites: [{ host: 'api.openweathermap.org', methods: ['GET'], paths: ['/data/2.5/*'] }],
+    inject: { type: 'query', name: 'appid' },
+  }),
+})).json()
+if (asked.status !== 'granted') { /* show "Waiting for approval in Settings › Keys" */ }
 
-const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'HEAD',
-  headers: { Authorization: `Bearer ${token}` },
-})).ok
+const res = await fetch('/api/keys/use/openweather/api.openweathermap.org/data/2.5/weather?q=Paris', { headers: auth })
+if (res.headers.get('X-Vault-Denied')) { /* not approved, wrong site/path, or no such key */ }
+const forecast = await res.json()
 ```
 
-`DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
+A service or job does the same with its `APP_TOKEN` against `$API_BASE_URL`. The app's Möbius token never travels to the third party; send any other headers the site needs, and choose a key slot other than `Authorization` only when the site authenticates that way. Answers are served with a sandboxing policy, so treat them as data, never as a page. Keep request bodies under 10 MiB and responses under 20 MiB.
 
-```bash
-KEY=$(mapi -f /api/apps/<app-id>/secrets/provider-key)
-```
+An agent setting an app up saves a key the owner provides through a sealed card (`python3 /data/platform/backend/scripts/store-key.py NAME --site HOST:METHODS:PATHS` as the consumer) and tests it by borrowing it the same way (`mapi /api/keys/use/NAME/<host>/<path>`). Read the value (`GET /api/keys/<name>/value`) only when a tool needs the raw key, and never print it: command output stays in the chat log. Approving an app's request stays the owner's decision in Settings; an agent replacing an existing key notifies the owner.
 
-Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
+The old `/api/apps/{id}/secrets/{name}` routes still answer for one release, deprecated, on top of the vault: an app can save, check and delete its own values there, but nothing reads one back with an app token. Move to the handshake above.
 
 ### Concurrent writers — compare-and-swap, not last-write-wins
 

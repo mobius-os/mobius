@@ -1664,7 +1664,7 @@ _TOOL_DEFINITIONS = {
       "the owner just asked to open that exact item. kind settings is always "
       "foreground and instead takes the owner to Settings, focused on section "
       "id ai-providers, "
-      "background-agents, github or models (omit id for Settings itself); use "
+      "background-agents, github, keys or models (omit id for Settings itself); use "
       "it when they asked to see it or accepted your offer to open it. It only "
       "navigates: signing in, entering credentials and every other change "
       "there stay their own taps. It is live-only and never stored, so pair "

@@ -837,11 +837,9 @@ def test_unrecognized_access_values_and_paths_fail_closed(field, old, new):
   assert diff_contracts(before, after)["widens"] is True
 
 
-def test_revoking_chat_logs_and_job_secrets_does_not_widen_access():
-  before = _contract(permissions={"chat_log_access": "summary_with_deleted",
-                                  "job_secret_read": ["one", "two"]})
-  after = _contract(permissions={"chat_log_access": "none",
-                                 "job_secret_read": ["one"]})
+def test_revoking_chat_logs_does_not_widen_access():
+  before = _contract(permissions={"chat_log_access": "summary_with_deleted"})
+  after = _contract(permissions={"chat_log_access": "none"})
   report = diff_contracts(before, after)
   assert report["widens"] is False
   assert "data.chat_logs.redaction" not in report["changed"]
@@ -853,31 +851,12 @@ def test_provider_destination_change_requires_review():
   assert diff_contracts(before, after)["widens"] is True
 
 
-@pytest.mark.parametrize('names', [True, 'bot-token', ['../secret'], ['a', 'a'],
-                                  ['a'] * 17, [None], ['a b'], ['a' * 65]])
-def test_job_secret_permission_rejects_invalid_names(names):
-  with pytest.raises(ManifestContractError, match='job_secret_read'):
+@pytest.mark.parametrize('names', [[], ['tg-1']])
+def test_retired_job_secret_permission_points_apps_to_the_key_vault(names):
+  # Apps never read key values; a manifest still asking to is refused with
+  # the route that replaced it rather than silently granted nothing.
+  with pytest.raises(ManifestContractError, match='has been removed.*/api/keys/requests'):
     validate_manifest_contract(_manifest(permissions={'job_secret_read': names}))
-
-
-def test_job_secret_permission_is_reviewed_normalized_and_omission_revokes():
-  from types import SimpleNamespace
-  from app.app_capabilities import contract_from_app_state
-  base, base_hash = contract_and_digest(_manifest(permissions={}))
-  empty, empty_hash = contract_and_digest(_manifest(permissions={'job_secret_read': []}))
-  assert base == empty and base_hash == empty_hash
-  manifest = _manifest(permissions={'job_secret_read': ['tg-2', 'tg-1']})
-  validate_manifest_contract(manifest)
-  granted, digest = contract_and_digest(manifest)
-  assert digest != base_hash
-  assert granted['data']['job_secret_read'] == ['tg-1', 'tg-2']
-  assert 'data.job_secret_read' in diff_contracts(base, granted)['added']
-  app = SimpleNamespace(capability_contract=granted)
-  accepted = contract_from_app_state(app, contract_permissions=manifest['permissions'])
-  assert accepted['data']['job_secret_read'] == ['tg-1', 'tg-2']
-  assert contract_from_app_state(app)['data']['job_secret_read'] == ['tg-1', 'tg-2']
-  revoked = contract_from_app_state(app, contract_permissions={})
-  assert 'job_secret_read' not in revoked['data']
 
 
 MIB = 1024 * 1024

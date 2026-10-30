@@ -59,6 +59,21 @@ or other turn-only credentials. Prepare a self-contained narrow local operation;
 if it needs additional authority, resolve that before opening the card rather
 than saving credentials in its execution specification.
 
+## API keys and service tokens: save to the key vault, then borrow
+
+For an API key or token a service call needs, use the vault's consumer
+instead of writing your own: `["python3",
+"/data/platform/backend/scripts/store-key.py", "NAME", "--site",
+"api.example.com:GET,POST:/v1/*"]` (add `--header NAME [--prefix TEXT]` or
+`--query NAME` when the service does not take `Authorization: Bearer`). The
+owner then sees and manages it in Settings › Keys.
+
+Use the key by borrowing it, not reading it: send the request through
+`mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and
+body; the vault adds the key and redacts it from the answer. Read the value
+(`mapi /api/keys/NAME/value`) only when a tool genuinely needs the raw key,
+and never print it: anything a command prints stays in the chat log.
+
 Consumer execution has a two-minute safety limit. Stop cancels the operation
 without resuming the chat. A crash or restart during execution leaves its
 outcome explicitly unknown and **never automatically repeats** the operation:

@@ -62,8 +62,9 @@ back to manual Resume after boot.
 
 - Uploaded files: `/data/chats/{chat_id}/uploads/`
 - Chat media: `/data/chats/{chat_id}/media/`
-- Encrypted app credentials: `/data/app-secrets/{app_id}/` — use the app-secret
-  API, never edit ciphertext files.
+- Key vault: `/data/.vault/` (encrypted keys, grants, app requests, usage log),
+  reached only through its socket via `/api/keys`; never edit its files.
+  `/data/app-secrets/` holds only data from the retired per-app secret store.
 - Per-app storage (numeric id): `/data/apps/{app_id}/<path>`
 - Per-app source (slug): `/data/apps/{slug}/`
 - Shared storage: `/data/shared/<path>`

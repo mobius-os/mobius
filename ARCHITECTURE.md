@@ -625,7 +625,7 @@ App and Skills-owned basenames are excluded from platform reconciliation.
 ├── compiled/app-*-<sha256>.js  immutable Rolldown output selected by each App row
 ├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app slug)
 ├── apps/<slug>/...          per-app runtime data + per-app git repo
-├── app-secrets/<id>/       encrypted app-scoped credentials (outside app repos)
+├── .vault/                 key vault: encrypted keys, grants, app requests (socket-only)
 ├── shared/                 cross-app shared files (theme.css, skills/, memory/)
 ├── shell/                  agent's editable shell copy (src/ + dist/)
 ├── cli-auth/claude/        CLI credentials
@@ -648,7 +648,7 @@ rather than relying on those old conditional statements.
 **Layers + where they live:** core platform = `/data/platform`, a git repo whose
 backend is served from `backend/` and frontend from `frontend/dist`; mini-apps
 (`/data/apps/<slug>`, each a git repo); baked boot infrastructure in the image;
-Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
+Runtime trees are gitignored (db, compiled, .vault, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update

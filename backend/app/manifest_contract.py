@@ -678,7 +678,7 @@ def validate_manifest_contract(manifest) -> None:
         _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
       secret_name = model_provider["secret_name"]
       if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
-        _fail("Manifest `model_provider.secret_name` must name one app secret.")
+        _fail("Manifest `model_provider.secret_name` must name the key the app asks for.")
     entries = model_provider["models"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
       _fail("Manifest `model_provider.models` must contain 1–32 models.")
@@ -803,15 +803,12 @@ def validate_manifest_contract(manifest) -> None:
       f"Manifest permission {names} has been removed; server-side app jobs "
       "run as ordinary Möbius processes."
     )
-  job_secrets = permissions.get("job_secret_read", [])
-  if (
-    not isinstance(job_secrets, list) or len(job_secrets) > 16
-    or any(not isinstance(name, str) or not re.fullmatch(
-      r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name,
-    ) for name in job_secrets)
-    or len(set(job_secrets)) != len(job_secrets)
-  ):
-    _fail("Manifest `permissions.job_secret_read` must list up to 16 unique secret names.")
+  if "job_secret_read" in permissions:
+    _fail(
+      "Manifest permission `permissions.job_secret_read` has been removed; apps "
+      "never read key values. Ask for a key with POST /api/keys/requests and "
+      "use it through /api/keys/use (see 'Keys' in the building-apps guide)."
+    )
   for field in RECOGNIZED_CAPABILITIES:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")

@@ -59,6 +59,16 @@ def test_invite_session_and_descendant_app_credentials_revoke_together(https, au
   assert https.get("/api/chats", headers=auth).status_code == 200
 
 
+def test_guest_can_never_read_use_or_change_keys(https, auth, db):
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  assert https.get("/api/keys/key/value", headers=guest).status_code == 403
+  assert https.get("/api/keys/use/key/api.example.com/v1", headers=guest).status_code == 403
+  assert https.put("/api/keys/key", headers=guest, json={"value": "guest-value"}).status_code in (401, 403)
+  assert https.post("/api/keys/requests/x/approve", headers=guest, json={}).status_code in (401, 403)
+  assert https.post("/api/auth/shell-install-pass", headers=guest).status_code == 403
+
+
 def test_guest_cannot_create_grants_or_launder_install_or_job_credentials(https, auth):
   _, token, _ = invite(https)
   guest = {"Authorization": "Bearer " + token}

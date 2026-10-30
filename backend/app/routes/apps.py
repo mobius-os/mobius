@@ -518,6 +518,10 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     raise AppPurgeBlocked(
       "Agents are still working for this app. Try again when they finish."
     )
+  # A key borrow on its way to the vault must have its answer before the id
+  # is freed; refuse now rather than after storage is already gone.
+  from app import key_vault
+  key_vault.refuse_purge_while_borrowing(deleted_app_id)
   # Project recovery includes linked source, not only legacy imports. Provider
   # metadata alone is not ownership: native projects can detach safely.
   from app.project_retention import projects_using_app_files
@@ -534,7 +538,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
 
   # Remove the ID-KEYED trees, and fail loudly if any survives, BEFORE the row
   # is deleted. App.id has no AUTOINCREMENT, so SQLite can hand a freed id to
-  # the next install; a silently-orphaned /data/apps/<id>/ tree (or its secrets)
+  # the next install; a silently-orphaned /data/apps/<id>/ tree (or a key grant)
   # would then be readable by that unrelated replacement app under its own valid
   # credentials. Keeping the row — hence the id — claimed until the storage is
   # gone closes that window: a persistent failure leaves the tombstone for the
@@ -543,11 +547,13 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # compiled_path can never turn this into an arbitrary unlink.
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   storage_dir = apps_root / str(deleted_app_id)
-  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
   from app.compiler import purge_app_bundles
+  # The id can be reused after the purge, so no key grant may outlive it. The
+  # vault goes first: if it is unavailable, nothing is removed yet and the
+  # tombstone stays for the next attempt.
+  await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
-  await asyncio.to_thread(_rmtree_strict, secrets_dir)
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent
@@ -3332,6 +3338,7 @@ async def delete_uninstalled_app_permanently(
   reinstall. Only the owner (never an app or a helper agent) can do it: the
   recovery window is the undo, and this gives it up.
   """
+  from app import key_vault
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -3350,6 +3357,21 @@ async def delete_uninstalled_app_permanently(
       )
     except AppPurgeBlocked as exc:
       raise HTTPException(status_code=409, detail=str(exc))
+    except key_vault.BorrowInFlight:
+      raise HTTPException(
+        status_code=409,
+        detail="This app is still waiting on a key. Try again in a moment.",
+      ) from None
+    except key_vault.VaultUnavailable:
+      raise HTTPException(
+        status_code=503,
+        detail="The key vault isn't answering, so the app's keys can't be removed yet. Try again shortly.",
+      ) from None
+    except key_vault.VaultRefused as exc:
+      raise HTTPException(
+        status_code=502,
+        detail=f"The key vault refused to remove this app's keys: {exc.reason}",
+      ) from None
 
 
 @router.delete(
@@ -3597,16 +3619,17 @@ async def delete_app_data(
       settings, app.id, app.token_nonce,
     )
     storage_dir = apps_root / str(app.id)
-    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
     # next write (atomic_write mkdirs its parent). Wipe LOUDLY: a swallowed
     # failure would rotate the nonce and answer 204 while artifact values the
     # owner asked to erase are still on disk and readable by the still-live app.
+    from app import key_vault
     try:
       await settled.run_settled(_rmtree_strict, storage_dir)
-      await settled.run_settled(_rmtree_strict, secrets_dir)
-    except OSError as exc:
+      # The app's own secrets are its data too (keys it only borrows are not).
+      await settled.settle(key_vault.erase_app_keys(app.id), what="App key erase")
+    except (OSError, key_vault.VaultUnavailable, key_vault.VaultRefused) as exc:
       log.error("app %s data wipe failed: %s", app.id, exc)
       raise HTTPException(
         500,
