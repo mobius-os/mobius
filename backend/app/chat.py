@@ -2997,7 +2997,7 @@ def _selected_result_context(db, chat_id: str, run_token: str, raw_message: str)
   wait_text, wait_ids = owed_wait_results(
     db, chat_id, raw_message, run_id=run_token,
   )
-  active_text = build_active_waits_context(db, chat_id)
+  active_text = build_active_waits_context(db, chat_id, run_token)
   return "\n\n".join(part for part in (active_text, wait_text, dependency_text) if part), wait_ids, dependency_ids
 
 
