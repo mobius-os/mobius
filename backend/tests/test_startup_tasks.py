@@ -79,6 +79,9 @@ def test_production_startup_plan_has_explicit_unique_order():
 
   assert len(names) == len(set(names))
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
+  assert names.index("validate Codex SDK contract") < names.index(
+    "sweep Codex provider sessions"
+  )
   assert names.index("sweep Codex provider sessions") < names.index(
     "configure Claude settings defaults"
   ) < names.index("initialize database")

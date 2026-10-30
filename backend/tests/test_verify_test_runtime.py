@@ -887,3 +887,23 @@ def test_hosted_concurrency_is_scoped_to_the_pull_request():
   assert "merge_group:" in workflow
   assert "github.event.pull_request.head.ref" not in workflow
   assert "cancel-in-progress: true" in workflow
+
+
+def test_installed_codex_sdk_matches_the_release_pin():
+  """A stale shared venv must not run SDK-shape tests against another pin.
+
+  Slim host CI installs no Codex SDK (its contract runs in the image), so
+  there is nothing to compare there.
+  """
+  import importlib.metadata
+
+  import pytest
+
+  try:
+    installed = importlib.metadata.version("openai-codex")
+  except importlib.metadata.PackageNotFoundError:
+    pytest.skip("openai-codex is installed only in the production image")
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  match = re.search(r"(?m)^ARG CODEX_SDK_VERSION=(\S+)$", dockerfile)
+  assert match, "Dockerfile must pin CODEX_SDK_VERSION"
+  assert installed == match.group(1)

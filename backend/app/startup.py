@@ -177,6 +177,17 @@ def _validate_provider_defaults(context: StartupContext) -> None:
   context.assert_provider_defaults(PROVIDER_NAMES)
 
 
+def _validate_codex_sdk_contract(_context: StartupContext) -> None:
+  """Import the pinned Codex SDK surface before provider recovery.
+
+  An SDK or image mismatch then surfaces as one named startup task failure
+  instead of an ImportError on the first Codex turn.
+  """
+  from app.codex_sdk_runner import _sdk_imports
+
+  _sdk_imports()
+
+
 def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
   from app.providers import remove_legacy_global_auto_resume_setting
 
@@ -662,6 +673,7 @@ def _capture_platform_activation_snapshot(context: StartupContext) -> None:
 PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
+  StartupTask("validate Codex SDK contract", _validate_codex_sdk_contract),
   StartupTask(
     "remove legacy global auto-resume setting",
     _remove_legacy_auto_resume_setting,
