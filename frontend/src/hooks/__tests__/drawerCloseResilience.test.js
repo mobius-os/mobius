@@ -110,10 +110,18 @@ test('a recovered close settles only after its delayed traversal commits', () =>
     'a late close rebases the already-painted selection above the committed cursor')
 
   assert.match(onNavigate,
-    /if \(!userInitiated && recoveredDrawerCloseFor\(recoveredSource\)\) \{[\s\S]*e\.intercept\(\{ handler: consumeRecoveredClose \}\)/,
+    /if \(!userInitiated && recoveredDrawerCloseFor\(recoveredSource\)\) \{[\s\S]*e\.intercept\(\{ handler: consumeRecoveredClose, focusReset: 'manual' \}\)/,
     'programmatic recovery is intercepted while an owner Back remains owner-initiated')
   const recoveredGate = onNavigate.indexOf('recoveredDrawerCloseFor(recoveredSource)')
   const pendingClose = onNavigate.indexOf('const pendingDrawerClose')
   assert.ok(recoveredGate > -1 && recoveredGate < pendingClose,
     'late-close recovery runs before ordinary drawer and phantom traversal handling')
+})
+
+test('drawer-close traversals keep focus where the close put it', () => {
+  // closeDrawer hands focus back before history.back() starts the traversal;
+  // the default Navigation API focusReset would then blur it to <body>.
+  const pendingClose = onNavigate.slice(onNavigate.indexOf('const pendingDrawerClose'))
+  assert.match(pendingClose,
+    /if \(e\.canIntercept\) e\.intercept\(\{ handler: consume, focusReset: 'manual' \}\)/)
 })

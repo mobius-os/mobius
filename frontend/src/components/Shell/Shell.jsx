@@ -172,6 +172,8 @@ import {
   composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
+import { shouldRestoreDrawerFocus, suspendDrawerComposer } from '../../lib/drawerLifecycle.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -314,6 +316,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // outgoing surface becomes inert. The callback is filled after the shared
   // composer handoff exists below.
   const beforeRestoreRouteRef = useRef(null)
+  const beforeDrawerOpenRef = useRef(null)
   const walkthroughHandoffRef = useRef(false)
   const onWalkthroughHandoffChange = useCallback((suspended) => {
     walkthroughHandoffRef.current = suspended
@@ -344,6 +347,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     replaceImplicitBootTab,
     dragActiveRef,
     beforeRestoreRouteRef,
+    beforeDrawerOpenRef,
     navigationStorage: workspaceStorage,
     routePath: sharedBrowserAccess ? sharedBrowserRoutePath() : '/shell/',
   })
@@ -885,21 +889,21 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     requestComposer(chatId, { focus: true })
   }
 
+  const reserveTouchComposer = useCallback((chatId, saved = readComposerDraft(chatId)) => {
+    const leased = beginTouchComposerFocusLease(composerFocusLeaseRef.current, {
+      initialValue: saved?.input,
+    })
+    if (!leased) return false
+    composerFocusLeaseDraftIdRef.current = String(chatId)
+    composerFocusLeaseDirtyRef.current = false
+    requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    return true
+  }, [requestComposer])
+
   function reserveTouchDraftComposer(chatId) {
     if (chatId == null) return false
     const saved = readComposerDraft(chatId)
-    if (composerDraftWantsKeyboard(saved)) {
-      const leased = beginTouchComposerFocusLease(composerFocusLeaseRef.current, {
-        initialValue: saved.input,
-      })
-      if (leased) {
-        composerFocusLeaseDraftIdRef.current = String(chatId)
-        composerFocusLeaseDirtyRef.current = false
-        requestComposer(chatId, { focus: true, restoreExistingDraft: true })
-        return true
-      }
-    }
-    return false
+    return composerDraftWantsKeyboard(saved) && reserveTouchComposer(chatId, saved)
   }
 
   function focusSelectedChatComposer(chatId) {
@@ -908,6 +912,40 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     focusDesktopChatPaneComposer(chatId)
     return true
   }
+
+  // Navigation captures before the workspace becomes inert, regardless of
+  // whether the drawer opens from the brand, an edge gesture, or Forward.
+  // Only a previously focused composer asks to reopen the touch keyboard.
+  const drawerComposerReturnRef = useRef(null)
+  beforeDrawerOpenRef.current = () => {
+    drawerComposerReturnRef.current = suspendDrawerComposer({
+      activeElement: document.activeElement,
+      touchPrimary: isTouchPrimary(),
+      leaseElement: composerFocusLeaseRef.current,
+      leaseChatId: composerFocusLeaseDraftIdRef.current,
+    })
+  }
+  const restoreDrawerComposer = useCallback(() => {
+    const chatId = drawerComposerReturnRef.current
+    if (chatId == null || activeViewRef.current !== 'chat'
+        || String(activeChatIdRef.current ?? '') !== chatId) return
+    const active = document.activeElement
+    if (active !== brandButtonRef.current && !shouldRestoreDrawerFocus({
+      drawer: document.getElementById('navigation-drawer'),
+      activeElement: active,
+      body: document.body,
+    })) return
+    // Reserve within the close gesture while the real composer is still inert.
+    // New Chat and destination selection keep their own existing focus policy.
+    if (!reserveTouchComposer(chatId)) {
+      requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    }
+  }, [activeViewRef, activeChatIdRef, requestComposer, reserveTouchComposer])
+  useLayoutEffect(() => {
+    if (modalDrawerOpen) return
+    restoreDrawerComposer()
+    drawerComposerReturnRef.current = null
+  }, [modalDrawerOpen, restoreDrawerComposer])
 
   // Browser traversal bypasses the drawer and tab selection handlers. Use the
   // same destination-composer handoff as direct chat selection at
@@ -919,6 +957,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // The guide owns focus when Back returns from an app it handed the owner
     // to. A chat restore still restores the chat; only its composer-focus request yields.
     if (walkthroughHandoffRef.current) return
+    // Dismissing navigation restores the prior keyboard state, not merely a
+    // saved draft. A draft whose keyboard was down must stay down.
+    if (drawerOpenRef.current && isTouchPrimary()) {
+      if (String(route.chatId) === drawerComposerReturnRef.current) restoreDrawerComposer()
+      return
+    }
     focusSelectedChatComposer(route.chatId)
   }
 

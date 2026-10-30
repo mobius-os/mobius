@@ -42,6 +42,28 @@ export function shouldRestoreDrawerFocus({
     || drawer.contains(activeElement)
 }
 
+/**
+ * Suspend a touch composer's keyboard before the modal makes its workspace inert.
+ * Remember identity, not draft text: the real composer remains the draft owner.
+ * A rapid reopen may catch the temporary chat-handoff field instead.
+ */
+export function suspendDrawerComposer({
+  activeElement,
+  touchPrimary,
+  leaseElement,
+  leaseChatId,
+} = {}) {
+  if (!touchPrimary || !activeElement) return null
+  const chatId = activeElement === leaseElement
+    ? leaseChatId
+    : activeElement.matches?.('textarea.chat__input')
+      ? activeElement.closest('[data-chat-id]')?.getAttribute('data-chat-id')
+      : null
+  if (chatId == null) return null
+  activeElement.blur()
+  return String(chatId)
+}
+
 function cssTimeMs(value) {
   const text = String(value || '').trim()
   const numeric = Number.parseFloat(text)
