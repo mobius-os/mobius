@@ -105,3 +105,45 @@ def test_the_list_says_where_each_app_came_from_so_the_store_can_match_its_pages
   assert listed["source_manifest"] == {
     "id": "demo", "url": "https://raw.githubusercontent.com/mobius-os/app-demo/main/mobius.json",
   }
+
+
+def _purge(client, auth, app_id):
+  return client.delete(f"/api/apps/{app_id}/permanent", headers=auth)
+
+
+def test_an_uninstalled_app_can_be_erased_before_its_window_ends(client, auth, db):
+  keep = create_local_app(client, auth, name="Keep")
+  gone = create_local_app(client, auth, name="Erase me")
+  assert client.delete(f"/api/apps/{gone['id']}", headers=auth).status_code == 204
+
+  assert _purge(client, auth, gone["id"]).status_code == 204
+
+  db.expire_all()
+  assert db.get(models.App, gone["id"]) is None
+  assert _listed(client, auth) == []
+  # Recovering it is no longer possible, and the other app is untouched.
+  assert client.post(f"/api/apps/{gone['id']}/recover", headers=auth).status_code == 404
+  assert [a["id"] for a in client.get("/api/apps/", headers=auth).json()] == [keep["id"]]
+
+
+def test_a_live_or_unknown_app_cannot_be_erased_this_way(client, auth, db):
+  live = create_local_app(client, auth, name="Still installed")
+  assert _purge(client, auth, live["id"]).status_code == 404
+  assert _purge(client, auth, 987654).status_code == 404
+  db.expire_all()
+  assert db.get(models.App, live["id"]) is not None
+
+
+def test_erasing_needs_the_owner_and_is_refused_while_agent_work_is_running(client, auth, db, monkeypatch):
+  app = create_local_app(client, auth, name="Busy")
+  assert client.delete(f"/api/apps/{app['id']}", headers=auth).status_code == 204
+  assert client.delete(f"/api/apps/{app['id']}/permanent").status_code in (401, 403)
+
+  import app.delegations as delegations
+  monkeypatch.setattr(delegations, "active_delegation_ids_for_app", lambda _db, _id: [1])
+  refused = _purge(client, auth, app["id"])
+  assert refused.status_code == 409
+  assert refused.json()["detail"] == "Agents are still working for this app. Try again when they finish."
+  db.expire_all()
+  # Nothing was lost: it is still in the recovery window.
+  assert [row["id"] for row in _listed(client, auth)] == [app["id"]]

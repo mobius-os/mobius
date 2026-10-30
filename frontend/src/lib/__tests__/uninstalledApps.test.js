@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { appQueries } from '../../hooks/queries.js'
 import UninstalledApps from '../../components/Drawer/UninstalledApps.jsx'
-import { expiryCountdown, recoverErrorMessage, removedLabel } from '../../components/Drawer/uninstalledApps.js'
+import { expiryCountdown, failureMessage, removedLabel } from '../../components/Drawer/uninstalledApps.js'
 
 const NOW = Date.parse('2026-10-27T12:00:00Z')
 
@@ -57,11 +57,11 @@ test('the removal date is a full phrase with the month written out and the year 
   assert.equal(removedLabel('nonsense', now), '')
 })
 
-test('a failed recover shows the server reason, or a generic line', async () => {
-  const reason = await recoverErrorMessage(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }))
+test('a failed recover or delete shows the server reason, or the given fallback', async () => {
+  const reason = await failureMessage(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }), 'Could not recover this app. Try again.')
   assert.equal(reason, 'Recovery window has expired.')
-  const generic = await recoverErrorMessage(new Response('boom', { status: 500 }))
-  assert.equal(generic, 'Could not recover this app. Try again.')
+  const generic = await failureMessage(new Response('boom', { status: 500 }), 'Could not delete this app. Try again.')
+  assert.equal(generic, 'Could not delete this app. Try again.')
 })
 
 function render(rows) {
@@ -83,10 +83,9 @@ test('the section lists each uninstalled app with a Recover button, and is absen
   assert.match(html, /Kanban/)
   assert.match(html, /aria-label="Recover News"/)
   assert.match(html, /aria-label="Recover Kanban"/)
+  assert.match(html, /aria-label="Delete News permanently"/)
   assert.match(html, /recover an uninstalled app, with its data, for 7 days/)
   assert.match(html, /Uninstalled on /)
-  assert.doesNotMatch(html, /permission/)
-  assert.doesNotMatch(html, /for good/)
 })
 
 test('an app the server says has no time left is not listed', () => {
