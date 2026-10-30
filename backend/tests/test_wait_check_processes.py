@@ -144,7 +144,8 @@ def test_timeout_reaps_children_after_the_shell_has_exited(tmp_path, monkeypatch
     try:
       with open(f"/proc/{child_pid}/stat") as stat:
         return stat.read().split()[2]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+      # Reaping can remove the process after open() but before stat.read().
       return "gone"
 
   # An adopted zombie may await the container's init; it must not be running.

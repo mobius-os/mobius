@@ -51,8 +51,13 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  // Wait for an idle composer: a send before the chat settles would queue
-  // instead of starting the turn these cases expect.
+  // An editable composer is visible before activation finishes, and Send
+  // remains enabled after a failed activation so it can retry the load.
+  // Wait for this newly created chat's successful empty state instead.
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-title'))
+    .toHaveText("What's on your mind?", { timeout: 10000 })
+  // A send before the chat settles would queue instead of starting the turn
+  // these cases expect.
   await page.waitForFunction(
     () => {
       const surface = document.querySelector('[data-chat-surface="painted"]')
@@ -727,6 +732,12 @@ test.describe('Stream reconnection', () => {
         : route.fallback()
     ))
     await send(page, 'retry button layout')
+
+    // Prove this reached the stream-recovery path, rather than mistaking a
+    // failed initial chat load (whose Send only retries activation) for it.
+    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user'))
+      .toContainText('retry button layout')
+    await page.waitForFunction(() => window.__failedStreamFetches > 0)
 
     // The chat shows only the actionable notice, once retries are exhausted.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({

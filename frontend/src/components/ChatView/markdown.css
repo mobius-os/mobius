@@ -318,6 +318,13 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   width: 100%;
 }
 
+/* A confirmation adds app-owned details after the action is drawn. Give its
+   reply a stable width so that new content cannot move Confirm's slot. */
+.chat__text--assistant:has(.md-app-block) {
+  align-self: stretch;
+  width: 100%;
+}
+
 .md-image-gallery__rail {
   display: grid;
   grid-auto-flow: column;
