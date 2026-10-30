@@ -58,6 +58,7 @@ import { sendWithAmbiguityRecovery } from './sendTransportRecovery.js'
 import {
   TEXT_REVEAL_MIN_COMMIT_MS,
   textRevealBudget,
+  TextRevealPacer,
 } from './streamCadence.js'
 import {
   QUICK_WAKE_HIDDEN_MS,
@@ -187,8 +188,8 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
  * @param {string} chatId
  * @param {object} callbacks
  * @param {(info?: {continues: boolean, promotedTs: number|null}) => void} [callbacks.onStreamEnd]
- *   Fired one rAF after the `done` event so React commits before the
- *   caller promotes streamItems to messages.
+ *   Fired after pending text has finished revealing; promotion and stream
+ *   shutdown share the same commit so the final row never flashes.
  * @param {() => void} [callbacks.onConnectionLost]
  *   Fired when this browser exhausts its reconnect attempts but the backend
  *   turn may still be running. Callers may preserve the last-good payload,
@@ -510,6 +511,9 @@ export default function useStreamConnection(chatId, {
   const drainingRef = useRef(false)
   const lastDrainAtRef = useRef(null)
   const drainCarryRef = useRef(0)
+  const revealPacerRef = useRef(null)
+  if (revealPacerRef.current === null) revealPacerRef.current = new TextRevealPacer()
+  const finishRevealRef = useRef(null)
   // Set by `text_boundary`: the next text chunk must create a new text item
   // instead of appending to the previous text item. This preserves provider
   // assistant-message boundaries even when the separator was hidden/internal
@@ -549,6 +553,8 @@ export default function useStreamConnection(chatId, {
         drainingRef.current = false
         lastDrainAtRef.current = null
         drainCarryRef.current = 0
+        rafRef.current = null
+        finishRevealRef.current?.()
         return
       }
 
@@ -564,14 +570,17 @@ export default function useStreamConnection(chatId, {
         elapsedMs,
         carry: drainCarryRef.current,
         bufferLength: buf.length,
+        charsPerSecond: revealPacerRef.current.rate(buf.length, elapsedMs, frameAt),
       })
+      // Fractional credit must advance even when a slow stream has not earned
+      // a full character yet; otherwise a fresh sub-60 chars/sec burst can stall.
+      lastDrainAtRef.current = frameAt
+      drainCarryRef.current = budget.carry
       if (budget.count === 0) {
         rafRef.current = requestAnimationFrame(drain)
         return
       }
 
-      lastDrainAtRef.current = frameAt
-      drainCarryRef.current = budget.carry
       const chunk = buf.slice(0, budget.count)
       const textItemId = textBufferItemIdRef.current
       textBufferRef.current = buf.slice(budget.count)
@@ -601,7 +610,10 @@ export default function useStreamConnection(chatId, {
     drainCarryRef.current = 0
 
     const remaining = textBufferRef.current
-    if (!remaining) return
+    if (!remaining) {
+      finishRevealRef.current?.()
+      return
+    }
     const textItemId = textBufferItemIdRef.current
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
@@ -609,7 +621,30 @@ export default function useStreamConnection(chatId, {
     commitRenderableStreamItems(
       prev => appendTextChunk(prev, remaining, textItemId),
     )
+    finishRevealRef.current?.()
   }, [commitRenderableStreamItems])
+
+  // Normal completion drains at the same pace as live text. A hidden document
+  // cannot run rAF reliably; Stop/chat replacement also settle through flushBuffer.
+  const finishTextReveal = useCallback(() => {
+    if (!textBufferRef.current) return Promise.resolve()
+    if (document.visibilityState === 'hidden') {
+      flushBuffer()
+      return Promise.resolve()
+    }
+    return new Promise(resolve => {
+      const onVisibility = () => {
+        if (document.visibilityState === 'hidden') flushBuffer()
+      }
+      finishRevealRef.current = () => {
+        document.removeEventListener('visibilitychange', onVisibility)
+        finishRevealRef.current = null
+        resolve()
+      }
+      document.addEventListener('visibilitychange', onVisibility)
+      startDraining()
+    })
+  }, [flushBuffer, startDraining])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
     connectionGenerationRef.current += 1
@@ -621,11 +656,10 @@ export default function useStreamConnection(chatId, {
     // gets to push them. promoteStreamToMessages reads latestItemsRef
     // — if the buffer didn't land, those chars are gone forever.
     //
-    // flushBuffer is also called by the `done` event handler before
-    // teardown, so this is redundant on the happy path but
-    // load-bearing on abort/Stop. Idempotent — does nothing if the
-    // buffer is empty.
+    // Normal completion waits for the drain instead. Abort/Stop must salvage
+    // immediately and release any pending completion before replacing its owner.
     flushBuffer()
+    revealPacerRef.current = new TextRevealPacer()
     if (abortRef.current) {
       abortRef.current.abort()
       abortRef.current = null
@@ -1089,20 +1123,44 @@ export default function useStreamConnection(chatId, {
                 textBufferItemIdRef.current = textItemId
               }
               textBufferRef.current += content
-              startDraining()
+              revealPacerRef.current.receive(content.length, performance.now())
+              if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) flushBuffer()
+              else startDraining()
             }
           } else if (event.type === 'text_final') {
-            // Authoritative full text of a completed assistant item. Apply it
-            // live as well as during catch-up: Codex can interleave a question
-            // between this item's deltas, and the final is what repairs that
-            // legacy prefix/question/suffix ordering immediately.
-            flushBuffer()
             const content = event.content || ''
-            if (content) {
-              applyStreamItems(
-                prev => replaceLastText(
-                  prev, content, event.text_item_id || null,
-                ),
+            const textItemId = event.text_item_id || null
+            const items = latestItemsRef.current
+            const trailing = items[items.length - 1]
+            const target = forceNewTextBlockRef.current ? null
+              : (textItemId && items.findLast(item =>
+                item.type === 'text' && item.text_item_id === textItemId))
+                || (trailing?.type === 'text'
+                  && (!textItemId || !trailing.text_item_id) ? trailing : null)
+            const visible = target?.content || ''
+            const pending = textBufferRef.current
+            const sameBuffer = !pending || textBufferItemIdRef.current === textItemId
+            const newItem = forceNewTextBlockRef.current || !items.length
+              || (trailing?.type !== 'text' && trailing?.type !== 'question')
+              || (textItemId && trailing?.type === 'text'
+                && trailing.text_item_id && trailing.text_item_id !== textItemId)
+            if (!isCatchUp && content && sameBuffer && (target || newItem)
+                && content.startsWith(visible + pending)) {
+              // A normal final confirms the prefix already received; reveal its
+              // remaining suffix, including providers that deliver only a final.
+              textBufferItemIdRef.current = textItemId
+              textBufferRef.current = content.slice(visible.length)
+              revealPacerRef.current.receive(
+                textBufferRef.current.length - pending.length, performance.now(),
+              )
+              if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) flushBuffer()
+              else startDraining()
+            } else {
+              // Corrections and legacy question interleaves remain authoritative;
+              // do not mistake them for append-only text or duplicate a prefix.
+              flushBuffer()
+              if (content) applyStreamItems(
+                prev => replaceLastText(prev, content, textItemId),
               )
             }
           } else if (event.type === 'thinking') {
@@ -1400,8 +1458,10 @@ export default function useStreamConnection(chatId, {
                 : [],
             })
           } else if (event.type === 'done') {
-            flushBuffer()
             commitCatchUp()
+            clearKeptSocketDeadman()
+            await finishTextReveal()
+            if (!isCurrent()) return
             // Null the controller so visibility/online handlers know the
             // connection is closed and can trigger a reconnect if the user
             // backgrounds and returns.  Without this, abortRef stays
@@ -1428,7 +1488,7 @@ export default function useStreamConnection(chatId, {
             // must not inherit a stale answer for a re-used question key).
             answerReceiptsByQuestionKeyRef.current.clear()
             clearQuestionResponseTracking()
-            // Promote before flipping `isStreaming` false. `flushBuffer()`,
+            // Promote before flipping `isStreaming` false. The reveal drain,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
             // synchronous, so the old rAF delay was unnecessary and created a
             // visible terminal flash: React could paint the stream shutdown
@@ -1527,6 +1587,7 @@ export default function useStreamConnection(chatId, {
     clearQuestionResponseTracking,
     commitRenderableStreamItems,
     disconnect,
+    finishTextReveal,
     flushBuffer,
     setStreamAssistantMessageId,
     setStreamItems,

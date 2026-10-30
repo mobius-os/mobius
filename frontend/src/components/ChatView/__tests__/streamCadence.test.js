@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   TEXT_REVEAL_MIN_COMMIT_MS,
   textRevealBudget,
+  TextRevealPacer,
 } from '../streamCadence.js'
 
 test('text reveal keeps the existing three-character nominal 60Hz cadence', () => {
@@ -65,4 +66,32 @@ test('text reveal never spends beyond the buffer and clears stale credit', () =>
     }),
     { count: 0, carry: 0 },
   )
+})
+
+test('reveal follows sustained incoming speed without jumping to each arrival batch', () => {
+  const slow = new TextRevealPacer()
+  const fast = new TextRevealPacer()
+  slow.receive(0, 0)
+  fast.receive(0, 0)
+  for (let now = 120; now <= 2400; now += 120) {
+    slow.receive(6, now)
+    fast.receive(72, now)
+    slow.rate(8, 120, now)
+    fast.rate(85, 120, now)
+  }
+  assert.ok(slow.speed < 100)
+  assert.ok(fast.speed > 500)
+  const before = fast.speed
+  fast.receive(1000, 2401)
+  fast.rate(1000, 16, 2401)
+  assert.ok(fast.speed > before)
+  assert.ok(fast.speed < before + 200, 'a burst changes speed gradually')
+})
+
+test('a large backlog catches up without capping delayed frame credit', () => {
+  const pacer = new TextRevealPacer()
+  pacer.receive(10000, 0)
+  const charsPerSecond = pacer.rate(10000, 5000, 5000)
+  const budget = textRevealBudget({ elapsedMs: 5000, bufferLength: 10000, charsPerSecond })
+  assert.equal(budget.count, 10000)
 })
