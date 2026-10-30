@@ -539,6 +539,50 @@ def test_record_run_metrics_updates_exact_run_without_touching_transcript():
     db.close()
 
 
+def test_partial_helper_task_usage_persists_without_inventing_field_coverage():
+  """A hosted Claude helper reports only a task total. The durable run keeps
+  that total, its partial label, and every unreported counter as unknown, so
+  exported coverage never mistakes a missing split for zero."""
+  from app.usage_metrics import (
+    normalize_claude_helper_task_usage, summarize_chat_run_tokens,
+  )
+
+  _seed_chat("r-helper-usage")
+  _seed_run("rt-helper-partial", "r-helper-usage")
+  _seed_run("rt-helper-none", "r-helper-usage")
+  usage = normalize_claude_helper_task_usage(
+    final=None, progress={"total_tokens": 0, "tool_uses": 1, "duration_ms": 9},
+    attributable=True, turn_duration_ms=20,
+  )
+  get_writer().submit(RecordRunMetrics(
+    chat_id="r-helper-usage", run_token="rt-helper-partial",
+    provider_session_id="claude-host:s:agent-1:toolu_1", cost_usd=None,
+    usage=usage,
+  )).result(timeout=5)
+
+  db = SessionLocal()
+  try:
+    runs = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == "r-helper-usage",
+    ).all()
+    partial = next(run for run in runs if run.id == "rt-helper-partial")
+    assert partial.total_tokens == 0
+    assert partial.input_tokens is None and partial.output_tokens is None
+    assert partial.cache_read_input_tokens is None
+    assert partial.usage_json["coverage"] == "partial"
+    summary = summarize_chat_run_tokens(runs)
+  finally:
+    db.close()
+  assert summary["coverage"]["runs"] == 2
+  assert summary["coverage"]["runs_with_usage"] == 1
+  assert summary["coverage"]["runs_by_quality"]["partial"] == 1
+  assert summary["coverage"]["runs_by_quality"]["missing"] == 1
+  assert summary["totals"]["total_tokens"] == 0
+  assert summary["totals"]["input_tokens"] is None
+  # A partial zero is an observed lower bound, not a complete zero.
+  assert summary["coverage"]["runs_by_quality"]["final"] == 0
+
+
 def test_record_run_metrics_keeps_session_identity_and_explicit_zero_cost(
   monkeypatch,
 ):

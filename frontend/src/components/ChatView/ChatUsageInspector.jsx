@@ -14,8 +14,10 @@ import {
   formatCostUsd,
   formatTimestamp,
   formatTokenCount,
+  incompleteUsageNote,
   nonCachedInputTokens,
   usageModelName,
+  usageQualityLabel,
 } from './chatUsageFormat.js'
 import './ChatUsageInspector.css'
 
@@ -87,6 +89,7 @@ function RunSummary({ run, expandable }) {
 
 function RunRow({ run, registry }) {
   const expandable = hasRecordedUsage(run)
+  const coverage = usageQualityLabel(run.usage_quality)
   if (!expandable) {
     return (
       <div className="cui-run">
@@ -107,6 +110,7 @@ function RunRow({ run, registry }) {
         <RunField label="Output" value={formatTokenCount(run.output_tokens)} />
         <RunField label="Reasoning within output" value={formatTokenCount(run.reasoning_output_tokens)} />
         <RunField label="Turn total" value={formatTokenCount(run.total_tokens)} />
+        {coverage && <RunField label="Coverage" value={coverage} />}
         <RunField
           label="Model"
           value={usageModelName(run.usage, registry, run.provider)}
@@ -128,6 +132,7 @@ function UsageData({ data, registry }) {
   }
 
   const missingUsage = coverage && coverage.runs_with_usage < coverage.runs
+  const incompleteNote = incompleteUsageNote(coverage)
   return (
     <>
       <div className="cui-totals">
@@ -155,6 +160,12 @@ function UsageData({ data, registry }) {
           <InfoCircle width={14} height={14} aria-hidden="true" />
           {coverage.runs_with_usage} of {coverage.runs} turns include usage.
           Active turns update when they finish; older turns may predate tracking.
+        </p>
+      )}
+      {incompleteNote && (
+        <p className="cui__note">
+          <InfoCircle width={14} height={14} aria-hidden="true" />
+          {incompleteNote}
         </p>
       )}
       <div className="cui-runs">

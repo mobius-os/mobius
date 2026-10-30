@@ -1692,6 +1692,8 @@ def test_run_codex_sdk_turn_reports_all_model_calls_in_turn(monkeypatch):
 
   assert result["usage"]["total"]["total_tokens"] == 1_900
   assert result["usage_metrics"]["calculation"] == "thread_delta"
+  # Codex completed the turn, so every call's usage was reported.
+  assert result["usage_metrics"]["coverage"] == "final"
   assert result["usage_metrics"]["input_tokens"] == 900
   assert result["usage_metrics"]["total_tokens"] == 1_100
 
@@ -2836,6 +2838,11 @@ def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
   assert result["usage"]["total"]["total_tokens"] == 1_100
   assert "usage_metrics" in result
   assert len(result["usage_metrics"]["model_calls"]) == 1
+  # Stopped mid-turn: an in-flight call's usage may never have arrived, so the
+  # recorded thread delta is a lower bound, never a complete aggregate.
+  from app.usage_metrics import run_usage_quality
+  assert result["usage_metrics"]["calculation"] == "thread_delta"
+  assert run_usage_quality(result["usage_metrics"]) == "partial"
 
 
 def test_codex_turn_model_call_publishes_live_context_occupancy(monkeypatch):
@@ -2995,6 +3002,7 @@ def test_run_codex_sdk_turn_failed_turn_still_reports_what_it_spent(
   # normalize_codex_usage's business; what this test owns is that the error
   # exit carries the metrics at all.
   assert "usage_metrics" in result
+  assert result["usage_metrics"]["coverage"] == "partial"
 
 
 def test_run_codex_sdk_turn_superseded_generation_kill_is_interrupted(

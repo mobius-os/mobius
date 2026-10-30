@@ -136,7 +136,7 @@ export default function ComposerPopover({
   const usageQuery = chatQueries.usage.useQuery(chatId, {
     enabled: Boolean(open && !embedded && chatReady && chatId && onOpenUsage),
   })
-  const usageSummary = formatUsageMenuText(usageQuery.data?.totals)
+  const usageSummary = formatUsageMenuText(usageQuery.data?.totals, usageQuery.data?.coverage)
   const artifactsQuery = useQuery({
     queryKey: [
       'chat-work-artifacts',
@@ -538,7 +538,7 @@ export default function ComposerPopover({
                   <span className="composer-popover__row-sub">
                     {usageQuery.isLoading
                       ? 'Checking this chat’s usage…'
-                      : (usageSummary || '0 in · 0 out · 0 cache · $0.00')}
+                      : (usageSummary || 'Usage not reported')}
                   </span>
                 </span>
               </button>

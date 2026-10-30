@@ -1969,14 +1969,19 @@ async def _run_codex_sdk_turn(
       or abort_requested()
     )
 
-  def with_usage(result: RunnerResult) -> RunnerResult:
-    """Attaches whatever the turn spent before it ended, however it ended."""
+  def with_usage(result: RunnerResult, *, completed: bool = False) -> RunnerResult:
+    """Attaches whatever the turn spent before it ended, however it ended.
+
+    Only a turn Codex reported as completed has reported every model call;
+    any other end may have cut a call short before its usage arrived.
+    """
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
       metrics = normalize_codex_usage(
         first_token_usage,
         final_token_usage,
         call_token_usages,
+        completed=completed,
       )
       result["usage_metrics"] = metrics
       # Codex reports tokens but no dollar cost; derive it from the rate card so
@@ -2661,7 +2666,9 @@ async def _run_codex_sdk_turn(
         "session_id": current_session_id,
         "cost_usd": None,
         "error": _codex_user_error(error_text),
-      })
+      }, completed=completed_turn is not None and terminal_status in (
+        None, _enum_wire_value(sdk["TurnStatus"].completed),
+      ))
       if terminal_status is not None:
         result["terminal_status"] = terminal_status
       if error_text:

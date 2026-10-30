@@ -48,7 +48,7 @@ export function formatCacheHitRate(totals, fractionDigits = 0) {
   return `${rate.toFixed(digits).replace(/\.0$/, '')}%`
 }
 
-export function formatUsageMenuText(totals) {
+export function formatUsageMenuText(totals, coverage) {
   if (!totals) return null
   const input = formatTokenCount(nonCachedInputTokens(totals))
   const output = formatTokenCount(totals.output_tokens)
@@ -59,8 +59,18 @@ export function formatUsageMenuText(totals) {
   if (output) parts.push(`${output} out`)
   if (cache) parts.push(`${cache} cache`)
   if (cost !== null) parts.push(cost)
-  if (!parts.length) return null
-  return parts.join(' · ')
+  if (!parts.length) {
+    const total = formatTokenCount(totals.total_tokens)
+    if (total !== null) parts.push(`${total} tokens`)
+  }
+  if (!parts.length) {
+    return coverage?.runs_by_quality?.unknown > 0 ? 'Usage unknown' : null
+  }
+  // A server without quality labels makes no completeness claim either way.
+  const byQuality = coverage?.runs_by_quality
+  const incomplete = !!byQuality && coverage.runs > 0
+    && (byQuality.final ?? 0) < coverage.runs
+  return `${incomplete ? 'Reported: ' : ''}${parts.join(' · ')}`
 }
 
 export function modelDisplayName(modelId, registry, provider) {
@@ -100,3 +110,25 @@ export function formatTimestamp(value) {
   return formatDateTime(date)
 }
 import { formatDateTime } from '../../lib/dateTimeFormat.js'
+
+// Per-turn usage coverage (backend usage_metrics.USAGE_QUALITIES). A complete
+// aggregate needs no label; every other kind says what its numbers mean.
+const USAGE_QUALITY_LABELS = {
+  partial: 'Partial (at least this much)',
+  unknown: 'Not known for this turn',
+}
+
+export function usageQualityLabel(quality) {
+  return USAGE_QUALITY_LABELS[quality] || null
+}
+
+/** Why chat totals are reported sums rather than a complete aggregate. */
+export function incompleteUsageNote(coverage) {
+  const byQuality = coverage?.runs_by_quality
+  if (!byQuality || typeof byQuality !== 'object') return null
+  const count = Object.keys(USAGE_QUALITY_LABELS)
+    .reduce((sum, quality) => sum + (Number(byQuality[quality]) || 0), 0)
+  if (count <= 0) return null
+  const turns = count === 1 ? '1 turn has' : `${count} turns have`
+  return `${turns} partial or unknown usage. Totals add only what was reported.`
+}

@@ -34,6 +34,29 @@ test('Brain usage summary remains useful when cost is unavailable', () => {
   assert.equal(formatUsageMenuText({}), null)
 })
 
+test('compact usage distinguishes observed values from complete coverage', () => {
+  const totals = { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 5 }
+  assert.match(formatUsageMenuText(totals, {
+    runs: 2, runs_by_quality: { final: 1, partial: 1 },
+  }), /Reported/)
+  assert.match(formatUsageMenuText(totals, {
+    runs: 2, runs_by_quality: { final: 1, missing: 1 },
+  }), /Reported/)
+  assert.doesNotMatch(formatUsageMenuText(totals, {
+    runs: 1, runs_by_quality: { final: 1 },
+  }), /Reported/)
+  assert.equal(formatUsageMenuText({}, {
+    runs: 1, runs_by_quality: { unknown: 1 },
+  }), 'Usage unknown')
+  assert.equal(formatUsageMenuText({ total_tokens: 0 }, {
+    runs: 1, runs_by_quality: { partial: 1 },
+  }), 'Reported: 0 tokens')
+  // A server that predates quality labels makes no completeness claim.
+  assert.doesNotMatch(formatUsageMenuText(totals, {
+    runs: 2, runs_with_usage: 2,
+  }), /Reported/)
+})
+
 test('usage helpers distinguish non-cached input from cumulative input', () => {
   const totals = {
     input_tokens: 15_508_736,
@@ -78,4 +101,19 @@ test('token counts move to the next unit when rounding reaches it', () => {
   assert.equal(formatTokenCount(999_400), '999k')
   assert.equal(formatTokenCount(999_600), '1.0M')
   assert.equal(formatTokenCount(9_960_000), '10M')
+})
+
+test('usage coverage labels never present partial numbers as complete', async () => {
+  const { incompleteUsageNote, usageQualityLabel } = await import('../chatUsageFormat.js')
+  assert.equal(usageQualityLabel('final'), null)
+  assert.equal(usageQualityLabel('missing'), null)
+  assert.match(usageQualityLabel('partial'), /at least/)
+  assert.match(usageQualityLabel('unknown'), /Not known/)
+  assert.equal(incompleteUsageNote(undefined), null)
+  assert.equal(incompleteUsageNote({ runs_by_quality: { final: 3, missing: 2 } }), null)
+  assert.equal(
+    incompleteUsageNote({ runs_by_quality: { final: 1, partial: 1, unknown: 1 } }),
+    '2 turns have partial or unknown usage. Totals add only what was reported.',
+  )
+  assert.match(incompleteUsageNote({ runs_by_quality: { unknown: 1 } }), /^1 turn has/)
 })

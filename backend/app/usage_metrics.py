@@ -10,6 +10,9 @@ For Codex, the first update implies the pre-turn baseline
 (``first.total - first.last``). Subtracting that baseline from the final total
 produces the sum of every model call in this Möbius turn — the quantity needed
 to compare harness context efficiency.
+
+A Claude helper hosted inside a shared Claude Code process reports only task
+counters; see ``normalize_claude_helper_task_usage``.
 """
 
 from __future__ import annotations
@@ -27,8 +30,46 @@ CHAT_TOKEN_FIELDS = (
 )
 
 
+# How much of a run's usage the stored counters describe:
+# - final: the provider's complete aggregate for exactly this run;
+# - partial: a lower bound (a progress snapshot, a turn that ended before
+#   the provider reported every call, or Codex's latest-call fallback);
+# - unknown: usage recorded, but none of it is claimable as this run's total
+#   (not attributable, no token total reported, or an unrecognized shape);
+# - missing: no usage recorded (in flight, failed early, or before tracking).
+# Only final counters are a complete aggregate; neither unknown nor missing
+# ever reads as a zero.
+USAGE_QUALITIES = ("final", "partial", "unknown", "missing")
+# Normalized aggregates written before explicit coverage labels existed.
+_FINAL_CALCULATIONS = ("result_aggregate", "thread_delta")
+_PARTIAL_CALCULATIONS = ("last_call_fallback",)
+
+
+def run_usage_quality(usage: Any) -> str:
+  """Classify one durable run's ``usage_json``; see ``USAGE_QUALITIES``."""
+  if usage is None:
+    return "missing"
+  if not isinstance(usage, dict):
+    return "unknown"
+  coverage = usage.get("coverage")
+  if coverage in ("final", "partial"):
+    return coverage
+  calculation = usage.get("calculation")
+  if coverage is None and calculation in _FINAL_CALCULATIONS:
+    return "final"
+  if coverage is None and calculation in _PARTIAL_CALCULATIONS:
+    return "partial"
+  return "unknown"
+
+
 def summarize_chat_run_tokens(runs: Any) -> dict:
-  """Small provider-neutral token totals for one chat's durable runs."""
+  """Small provider-neutral token totals for one chat's durable runs.
+
+  ``totals`` are observed sums: each field adds every reported value and is
+  None when no run reported it. ``coverage.runs_by_quality`` says whether
+  those sums are a complete aggregate (every run ``final``) or only what was
+  reported.
+  """
   rows = list(runs or [])
   totals = {}
   for field in CHAT_TOKEN_FIELDS:
@@ -38,12 +79,12 @@ def summarize_chat_run_tokens(runs: Any) -> dict:
       if getattr(run, field, None) is not None
     ]
     totals[field] = sum(values) if values else None
+  qualities = [run_usage_quality(getattr(run, "usage_json", None)) for run in rows]
   return {
     "coverage": {
       "runs": len(rows),
-      "runs_with_usage": sum(
-        getattr(run, "usage_json", None) is not None for run in rows
-      ),
+      "runs_with_usage": len(rows) - qualities.count("missing"),
+      "runs_by_quality": {q: qualities.count(q) for q in USAGE_QUALITIES},
     },
     "totals": totals,
   }
@@ -160,6 +201,89 @@ def normalize_claude_usage(
   }
 
 
+HELPER_TASK_COUNTERS = ("total_tokens", "tool_uses", "duration_ms")
+
+
+def reported_counter(value: Any) -> int | None:
+  """A provider counter as reported, or None when it is absent or malformed.
+
+  Unlike ``_count``, an unusable value stays unknown instead of becoming a
+  false zero; a reported zero is kept.
+  """
+  if isinstance(value, bool):
+    return None
+  if isinstance(value, float) and value.is_integer():
+    value = int(value)
+  return value if isinstance(value, int) and value >= 0 else None
+
+
+def normalize_claude_helper_task_usage(
+  *,
+  final: Any,
+  progress: Any,
+  attributable: bool,
+  turn_duration_ms: int,
+) -> dict | None:
+  """Usage of one Claude helper turn hosted as a Claude Code background task.
+
+  The host sees only Claude's task counters (``TaskUsage``): the optional
+  ``usage`` of the terminal task notification (``final``) and the latest
+  valid per-counter task-so-far observations (``progress``). A terminal
+  task update can be the only end event, so a progress snapshot is the best
+  remaining evidence; it is a lower bound, labelled ``partial``, and never
+  added to the final counters. Each counter falls back on its own, so a
+  missing or malformed one stays unknown rather than zero. Claude reports no
+  input/output/cache split for a task, so those fields are always unknown.
+
+  ``attributable`` is False when the task's counters may include an earlier
+  turn (a follow-up resumes the same task); the provider evidence is kept but
+  no counter is claimed for this turn. Returns None when Claude reported
+  nothing usable, so the run stays without usage.
+  """
+  final = final if isinstance(final, dict) else {}
+  progress = progress if isinstance(progress, dict) else {}
+  counters: dict[str, int | None] = {}
+  sources: dict[str, str | None] = {}
+  for field in HELPER_TASK_COUNTERS:
+    for source, values in (("task_notification", final), ("task_progress", progress)):
+      value = reported_counter(values.get(field))
+      if value is not None:
+        counters[field], sources[field] = value, source
+        break
+    else:
+      counters[field], sources[field] = None, None
+  if all(value is None for value in counters.values()):
+    return None
+  total_source = sources["total_tokens"]
+  coverage = {"task_notification": "final", "task_progress": "partial"}.get(
+    total_source, "unknown",
+  ) if attributable else "unknown"
+  claimed = coverage != "unknown"
+  return {
+    "provider": "claude",
+    "scope": "helper_task",
+    "calculation": total_source if claimed else None,
+    "coverage": coverage,
+    "input_tokens": None,
+    "uncached_input_tokens": None,
+    "output_tokens": None,
+    "cache_read_input_tokens": None,
+    "cache_creation_input_tokens": None,
+    "reasoning_output_tokens": None,
+    "total_tokens": counters["total_tokens"] if claimed else None,
+    "tool_uses": counters["tool_uses"] if attributable else None,
+    "duration_ms": (
+      counters["duration_ms"] if attributable and counters["duration_ms"] is not None
+      else turn_duration_ms
+    ),
+    "counter_sources": sources if attributable else None,
+    "provider_task_usage": {
+      "notification": _plain(final) or None,
+      "progress": _plain(progress) or None,
+    },
+  }
+
+
 _CODEX_FIELDS = (
   "input_tokens",
   "cached_input_tokens",
@@ -220,8 +344,15 @@ def normalize_codex_usage(
   first_usage: Any | None,
   final_usage: Any | None,
   call_usages: list[Any] | None = None,
+  *,
+  completed: bool = True,
 ) -> dict | None:
-  """Derive one turn aggregate plus exact per-model-call billing inputs."""
+  """Derive one turn aggregate plus exact per-model-call billing inputs.
+
+  ``completed`` is False when the turn ended before Codex completed it
+  (stopped, interrupted, failed): a call cut short may never have reported
+  its usage, so the aggregate is only a lower bound.
+  """
   if final_usage is None:
     return None
   first_usage = first_usage or final_usage
@@ -263,6 +394,9 @@ def normalize_codex_usage(
     "provider": "codex",
     "scope": "turn",
     "calculation": calculation,
+    "coverage": (
+      "final" if completed and calculation == "thread_delta" else "partial"
+    ),
     "input_tokens": input_total,
     "uncached_input_tokens": max(0, input_total - cached - cache_write),
     "output_tokens": turn["output_tokens"],

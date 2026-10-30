@@ -398,6 +398,20 @@ def test_app_chat_list_can_filter_by_scope(client, owner_token, db):
     total_tokens=1_000,
     usage_json={"provider": "codex"},
   ))
+  # A partial zero and an unmeasured run must not change the observed sums.
+  from app.usage_metrics import normalize_claude_helper_task_usage
+  db.add(models.ChatRun(
+    id="session-a-partial-run", chat_id=session_a_2, status="stopped",
+    provider="claude", total_tokens=0,
+    usage_json=normalize_claude_helper_task_usage(
+      final=None, progress={"total_tokens": 0}, attributable=True,
+      turn_duration_ms=1,
+    ),
+  ))
+  db.add(models.ChatRun(
+    id="session-a-missing-run", chat_id=session_a_2, status="failed",
+    provider="claude",
+  ))
   db.commit()
 
   owner_list = client.get(
@@ -419,10 +433,7 @@ def test_app_chat_list_can_filter_by_scope(client, owner_token, db):
   assert all(row["scope"] == "workout-session:session-a" for row in rows)
   assert all(row["scope_label"] == "Session A" for row in rows)
   measured = next(row for row in rows if row["id"] == session_a_2)
-  assert measured["usage"]["coverage"] == {
-    "runs": 1,
-    "runs_with_usage": 1,
-  }
+  assert measured["usage"]["coverage"] == {"runs": 3, "runs_with_usage": 2}
   assert measured["usage"]["totals"]["total_tokens"] == 1_000
   assert "cost_usd" not in measured["usage"]["totals"]
 
