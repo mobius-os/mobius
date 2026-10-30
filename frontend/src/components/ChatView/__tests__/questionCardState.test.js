@@ -187,7 +187,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
+  assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /let submitLabel = writtenRestartAction \? 'Continue' : 'Submit'[\s\S]*if \(answered\) submitLabel = 'Submitted'[\s\S]*if \(submitting\) submitLabel = 'Submitting…'/,
     'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
@@ -370,4 +370,29 @@ test('terminal restart actions show upstream status detail without dead submissi
     assert.match(html, /qcard__action-detail/)
     assert.doesNotMatch(html, /qcard__submit|qcard__opts/)
   }
+})
+
+test('incomplete cards omit progress counts but still guide a Submit attempt', async () => {
+  const { unansweredQuestions } = await import('../questionSubmission.js')
+  const pending = [{ question: 'A?' }, { question: 'B?' }, { question: 'C?' }]
+  assert.deepEqual(
+    unansweredQuestions(pending, { 'B?': 'Yes' }, {}, [{ name: 'c.txt', group: 'C?' }])
+      .map(q => q.question),
+    ['A?'],
+    'a choice or a file of its own answers a question; the rest stay in card order',
+  )
+
+  const questions = ['First?', 'Second?', 'Third?'].map(question => ({
+    question, options: [{ label: 'Yes' }, { label: 'No' }],
+  }))
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'hint-chat', questionId: 'hint-q', questions, onAnswer: () => {},
+  }))
+  assert.doesNotMatch(html, /qcard__submit-hint|questions still need|questions to submit/)
+  const submit = html.match(/<button[^>]*class="qcard__submit[^"]*"[^>]*>/)?.[0] || ''
+  assert.match(submit, /qcard__submit--incomplete/)
+  assert.match(submit, /aria-disabled="true"/)
+  assert.doesNotMatch(submit, /\sdisabled=""/, 'a native disabled button could not lead to the missing question')
+  assert.match(html, /data-question-index="2"/)
+  assert.match(component, /if \(needsAnswers\) \{\s*showFirstUnanswered/)
 })

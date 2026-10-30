@@ -39,7 +39,7 @@ function find(tree, predicate) {
   assert.ok(element, 'expected rendered control')
   return element
 }
-const submit = tree => find(tree, node => node.props?.className === 'qcard__submit')
+const submit = tree => find(tree, node => node.props?.className?.split(' ').includes('qcard__submit'))
 const editor = (tree, question) => find(tree, node => node.props?.question === question)
 const chipSets = tree => elements(tree).filter(node => Array.isArray(node.props?.files))
 const chips = (tree, index = 0) => chipSets(tree)[index]
@@ -66,7 +66,15 @@ test('pasting into question two keeps the file with that answer, upload gates su
     onAnswer: (...args) => { posted = args; return new Promise(resolve => { finishAnswer = resolve }) },
   })
   try {
-    assert.equal(submit(card.result.current).props.disabled, true)
+    // Incomplete: tappable to find the missing answer, never submittable.
+    assert.equal(submit(card.result.current).props.disabled, false)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
+    const hint = tree => elements(tree).find(node => node.props?.className === 'qcard__submit-hint')
+    assert.equal(hint(card.result.current), undefined, 'no hint before a Submit attempt')
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted, undefined, 'an incomplete click guides; it never submits')
+    assert.equal(hint(card.result.current)?.props.children, 'Answer each question before submitting')
+    assert.equal(submit(card.result.current).props['aria-describedby'], hint(card.result.current).props.id)
     const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
     const uploading = editor(card.result.current, 'Second?').props.onPasteFiles([file])
     await tick()
@@ -81,7 +89,9 @@ test('pasting into question two keeps the file with that answer, upload gates su
     finishUpload({ ok: true, json: async () => [{ name: 'notes.txt', size: 5, mime_type: 'text/plain' }] })
     await uploading
     // The file answers question two only; question one still needs its own.
-    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted, undefined)
     editor(card.result.current, 'First?').props.onChange('first answer')
     assert.equal(submit(card.result.current).props.disabled, false)
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
@@ -306,7 +316,7 @@ test('a restored draft file for a replaced sole question never answers the new q
     const trays = () => elements(card.result.current).filter(node => node.props?.role === 'group')
       .map(tray => [tray.props['aria-label'], chips({ props: { children: tray.props.children } }).props.files.map(f => f.name)])
     assert.deepEqual(trays(), [['Files for this answer', []], ['Files for all answers', ['gone.txt']]])
-    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
     editor(card.result.current, 'New question?').props.onChange('typed answer')
     assert.equal(submit(card.result.current).props.disabled, false)
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })

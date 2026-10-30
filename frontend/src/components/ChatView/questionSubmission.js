@@ -39,7 +39,12 @@ export function restoredQuestionFiles(files, questions) {
  * that question. Untagged legacy files count only when there is one question.
  */
 export function questionAnswersReady(questions, answers, otherTexts, files) {
-  return questions.every(question => (
+  return unansweredQuestions(questions, answers, otherTexts, files).length === 0
+}
+
+/** The questions that still need an answer, in card order. */
+export function unansweredQuestions(questions, answers, otherTexts, files) {
+  return questions.filter(question => !(
     Boolean(resolveQuestionAnswer(answers[question.question], otherTexts[question.question]))
     || files.some(file => fileBelongsToQuestion(file.group, question.question, questions.length))
   ))
