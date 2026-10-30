@@ -396,6 +396,34 @@ test('idle invalidation reads runtime and its embedded plan without a turn or re
   assert.equal(displayed.plan.tasks[0].status, 'completed')
 })
 
+test('idle invalidation re-downloads the transcript only when the runtime read could not prove it current', async () => {
+  // Every reconnect and wait/Goal change signals each visible chat. The
+  // runtime read owns the durable-version check (and its own detail reread
+  // when that version moved); only its proof lets the drain skip the page.
+  const owner = invalidationHarness()
+  let detailReads = 0
+  owner.state.readDetail = async () => { detailReads++ }
+  const drainWith = async runtime => {
+    owner.state.readRuntime = async () => runtime
+    owner.invalidate()
+    await owner.drain()
+  }
+  await drainWith({ running: false, transcriptCurrent: true })
+  assert.equal(detailReads, 0, 'a proven-current transcript is not fetched again')
+  await drainWith({ running: false, transcriptCurrent: false })
+  assert.equal(detailReads, 1, 'an adopted read without proof still falls back')
+  await drainWith(null)
+  assert.equal(detailReads, 2, 'a failed, superseded, or unadopted read still falls back')
+})
+
+test('runtime refresh claims a current transcript only for an idle, locally unowned match', () => {
+  const start = chatView.indexOf('const refreshRuntimeState = useCallback')
+  const body = chatView.slice(start, chatView.indexOf('\n  }, [', start))
+  assert.match(body, /return \{ \.\.\.runtime, transcriptCurrent: settled != null \}/)
+  assert.match(body, /const refreshed = await fetchMessages\(\{ force: true, authoritative: true \}\)\s*return \{ \.\.\.runtime, transcriptCurrent: refreshed != null \}/)
+  assert.match(body, /return \{ \.\.\.runtime, transcriptCurrent: !data\.running && !localAuthoritative \}/)
+})
+
 test('nested live invalidations arriving during a read drain again and keep the same Goal attached', async () => {
   const owner = invalidationHarness({ running: true })
   const snapshot = { running: true, goal: structuredClone(goal) }

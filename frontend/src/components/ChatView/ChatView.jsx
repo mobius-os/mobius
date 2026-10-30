@@ -1675,7 +1675,7 @@ export default function ChatView({
         if (settled?.running === false) {
           retireSettledStreamRef.current?.()
         }
-        return runtime
+        return { ...runtime, transcriptCurrent: settled != null }
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
@@ -1689,8 +1689,8 @@ export default function ChatView({
         data,
         localAuthoritative,
       )) {
-        await fetchMessages({ force: true, authoritative: true })
-        return runtime
+        const refreshed = await fetchMessages({ force: true, authoritative: true })
+        return { ...runtime, transcriptCurrent: refreshed != null }
       }
       if (data.running) {
         setSending(true)
@@ -1759,7 +1759,9 @@ export default function ChatView({
           }
         })
       }
-      return runtime
+      // Reaching here idle and without a local owner means the retained
+      // transcript matched the durable version (otherwise it was re-read above).
+      return { ...runtime, transcriptCurrent: !data.running && !localAuthoritative }
     } catch { /* background reconciliation is best-effort */ }
     return null
   }, [
@@ -2183,9 +2185,11 @@ export default function ChatView({
           fetchGenRef.current += 1
           invalidateSharedRuntimeRead(chatId)
           // Read fresh rather than joining a poll that predates the change.
-          await refreshRuntimeState()
+          const runtime = await refreshRuntimeState()
           // Idle lifecycle changes also add finished records to the transcript.
-          if (!sendingRef.current && !isStreamingRef.current) {
+          // Skip the detail page only when the runtime read proved the retained
+          // transcript current: every reconnect raises this signal per visible chat.
+          if (!runtime?.transcriptCurrent && !sendingRef.current && !isStreamingRef.current) {
             await fetchMessages({ force: true, authoritative: true })
           }
           continue
