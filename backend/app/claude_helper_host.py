@@ -267,6 +267,9 @@ class HelperTurn:
   dispatch_cancelled: bool = False
   # The helper's last API error from its provider, as (kind, message text).
   api_error: tuple[str, str] | None = None
+  # The helper's last provider call ended in a safety refusal (its own
+  # stop reason); a later successful call clears it.
+  refused: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   # goals.CompactionBriefRefresh for a helper with a Goal assignment.
@@ -633,6 +636,7 @@ class ClaudeHelperHost(Host):
         if turn is None or turn.done.is_set():
           continue
         if isinstance(message, AssistantMessage):
+          turn.refused = message.stop_reason == "refusal"
           if error:
             turn.api_error = (str(error), _message_text(message))
           else:
@@ -1225,6 +1229,8 @@ async def run_claude_host_turn(
         )
         if kind == "rate_limit":
           result["api_error_status"] = 429
+        if turn.refused:
+          result["provider_refusal"] = True
       if turn.usage:
         result["usage_metrics"] = {
           "total_tokens": turn.usage.get("total_tokens"),
