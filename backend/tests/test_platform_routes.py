@@ -39,7 +39,7 @@ def test_update_progress_requires_owner(client):
 
 def test_update_progress_returns_observable_phase(client, auth, monkeypatch):
   monkeypatch.setattr(
-    "app.routes.platform.platform_update.platform_update_progress",
+    "app.routes.platform.platform_update.current_update_progress",
     lambda: {
       "plan_id": "a" * 64,
       "target_sha": "2" * 40,

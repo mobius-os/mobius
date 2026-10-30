@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { platformStatusQueries, versionQueries } from '../../hooks/queries.js'
 import { rebuildIsActive, rebuildRequestOutcome } from '../../lib/containerRebuild.js'
+import { waitForApplyOutcome } from '../../lib/platformApplyObservation.js'
 import { platformStatusFromApply, platformStatusUnavailable } from '../../lib/platformUpdateState.js'
 import { restartCanReload, restartPollDecision } from '../../lib/restartReadiness.js'
 import { inspectShellUpdate, releaseWaitingShellUpdate } from '../../lib/shellUpdate.js'
@@ -19,6 +20,14 @@ async function responseBody(response) {
     throw error
   }
   return body
+}
+
+async function readUpdateProgress() {
+  return responseBody(await api.platform.updateProgress())
+}
+
+function delay(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
 }
 
 async function health() {
@@ -115,8 +124,9 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [active, rebuild?.state, reconnect, refreshPlatform, refreshRebuild])
 
-  // This single observation loop also owns ambiguous responses. It only reads:
-  // a lost response must never turn into an automatic second mutation.
+  // Rebuild and restart replies can be lost to the cutover itself; this loop
+  // owns them (a lost Apply reply follows its progress in settleObservedApply).
+  // It only reads: a lost response must never turn into an automatic second mutation.
   useEffect(() => {
     if (!reconnect) return
     let cancelled = false
@@ -128,41 +138,28 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     function settled() { setReconnect(null); setPhase('idle'); refreshPlatform() }
     const poll = async () => {
       attempts += 1
-      if (reconnect.kind === 'apply') {
-        try {
-          const result = await responseBody(await api.platform.updateProgress())
-          if (cancelled) return
-          setProgress(result)
-          if (result?.plan_id === reconnect.plan.plan_id && !result.active) {
-            setError(result.error || (result.phase === 'blocked' ? 'The update needs attention. Review its current status.' : ''))
-            settled()
-            return
-          }
-        } catch { /* The exact operation may still be running. Keep observing. */ }
-      } else {
-        if (reconnect.kind === 'rebuild') {
-          const result = await refreshRebuild()
-          if (cancelled) return
-          const currentOperation = result && result.expected_sha === reconnect.plan.target_sha && (
-            (result.operation_id && result.operation_id !== reconnect.previousOperationId)
-            || Date.parse(result.updated_at || '') >= reconnect.requestedAt
-          )
-          if (currentOperation && ['failed', 'rolled_back', 'needs_recovery', 'no_change'].includes(result.state)) {
-            setError(result.error || result.message || '')
-            settled()
-            return
-          }
-        }
-        const current = await health()
+      if (reconnect.kind === 'rebuild') {
+        const result = await refreshRebuild()
         if (cancelled) return
-        if (!current.ok) sawUnavailable = true
-        else if (restartCanReload({
-          previousBootId: reconnect.bootId, currentBootId: current.bootId,
-          sawUnavailable, elapsedMs: Date.now() - started,
-        })) {
-          freshServerSeen = true
-          if (await reloadShell()) return
+        const currentOperation = result && result.expected_sha === reconnect.plan.target_sha && (
+          (result.operation_id && result.operation_id !== reconnect.previousOperationId)
+          || Date.parse(result.updated_at || '') >= reconnect.requestedAt
+        )
+        if (currentOperation && ['failed', 'rolled_back', 'needs_recovery', 'no_change'].includes(result.state)) {
+          setError(result.error || result.message || '')
+          settled()
+          return
         }
+      }
+      const current = await health()
+      if (cancelled) return
+      if (!current.ok) sawUnavailable = true
+      else if (restartCanReload({
+        previousBootId: reconnect.bootId, currentBootId: current.bootId,
+        sawUnavailable, elapsedMs: Date.now() - started,
+      })) {
+        freshServerSeen = true
+        if (await reloadShell()) return
       }
       if (cancelled) return
       const next = restartPollDecision(attempts)
@@ -185,7 +182,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     let timer
     const poll = async () => {
       try {
-        const body = await responseBody(await api.platform.updateProgress())
+        const body = await readUpdateProgress()
         if (!cancelled) setProgress(body)
       } catch { /* Explanatory progress never replaces the mutation's outcome. */ }
       if (!cancelled) timer = window.setTimeout(poll, 500)
@@ -229,6 +226,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     const requestedAt = Date.now()
     const previousOperationId = rebuild?.operation_id
     const before = kind === 'rebuild' ? await health() : null
+    const progressBefore = kind === 'apply' ? await readUpdateProgress().catch(() => null) : null
     try {
       const body = await responseBody(await (kind === 'rebuild'
         ? api.platform.rebuild(plan) : api.platform.apply(plan)))
@@ -255,6 +253,9 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     } catch (cause) {
       setError(cause.message || 'The update could not be confirmed.')
       setErrorCode(cause.code || '')
+      if (!cause.definitive && kind === 'apply') {
+        return await settleObservedApply(plan, progressBefore?.updated_at || 0)
+      }
       if (!cause.definitive) {
         setReconnect({ kind, plan, bootId: before?.bootId || '', requestedAt, previousOperationId })
         setError('The connection was interrupted. Checking whether your update started; no second request will be sent.')
@@ -267,6 +268,25 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
       pending.current = false
       setPhase('idle')
     }
+  }
+
+  // The Apply reply was lost, but the server finishes an admitted update anyway:
+  // follow its progress record and return the same outcome the reply would have.
+  async function settleObservedApply(plan, after) {
+    setError('The connection was interrupted. Following the update on the server; no second request will be sent.')
+    setErrorCode('')
+    const outcome = await waitForApplyOutcome({
+      planId: plan.plan_id, after, readProgress: readUpdateProgress, sleep: delay,
+    })
+    const status = await refreshPlatform({ preserveCurrentOnFailure: true })
+    if (!outcome.settled) {
+      setError('The update could not be confirmed. Check the current status and review again before retrying.')
+      setErrorCode('update_plan_stale')
+      return { ok: false }
+    }
+    const { phase: finalPhase, error: finalError } = outcome.progress
+    setError(finalError || (finalPhase === 'failed' ? 'The update could not finish. Review its current status.' : ''))
+    return { ok: finalPhase === 'complete', state: status?.state }
   }
 
   async function restart() {
@@ -357,7 +377,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
 
   return {
     platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
-    progress, reconnecting: !!reconnect, observingKind: reconnect?.kind, slow, check, execute, restart, resolve, resume, cancel,
+    progress, reconnecting: !!reconnect, slow, check, execute, restart, resolve, resume, cancel,
     withdrawHostRequest, keepSettling, clearError,
   }
 }

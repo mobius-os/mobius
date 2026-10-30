@@ -4,6 +4,8 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import useElapsedWhile from '../../hooks/useElapsedWhile.js'
+import { elapsedLabel } from '../ChatView/toolTasks.js'
 import { retiredLocalCopies, shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
 import { deploymentKindLabel, platformActivationLabel, reviewedUpdateUsesContainerRebuild } from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
@@ -14,6 +16,7 @@ import './UpdateReviewModal.css'
 const UPDATE_PHASE_LABELS = {
   preparing: 'Preparing the update…', fetching: 'Getting the reviewed version…',
   reconciling: 'Combining the update with your local changes…',
+  testing: 'Checking that your local changes still work on this version. This can take several minutes…',
   validating: 'Checking the update…', building: 'Getting everything ready…',
   finalizing: 'Finishing the update…',
 }
@@ -57,6 +60,7 @@ export default function UpdateReviewModal({
   const applyAttemptedRef = useRef(false)
   const inFlight = applying || rebuilding || resolving
   const busy = inFlight || observing
+  const applyElapsed = useElapsedWhile(applying)
 
   const loadPreview = useCallback(async () => {
     setLoading(true); setLoadError(''); setPreview(null); onRefreshReview?.()
@@ -126,8 +130,9 @@ export default function UpdateReviewModal({
   // must not turn this into a "needs repair" offer — that is the contradictory
   // "already complete + agent repair" state. Show a single Done instead.
   const nothingToApply = !!preview && actionable === false && !hasResult
+  const phaseLabel = (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
   const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed system update…'
-    : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
+    : `${phaseLabel} ${elapsedLabel(applyElapsed)}`
   const needsRestart = activation?.level === 'server_restart'
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
