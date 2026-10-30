@@ -2889,6 +2889,119 @@ def test_platform_conflict_resolver_message_points_at_the_parked_worktree():
   assert "A plain restart never swaps in an update that needs a new image" in content
 
 
+@pytest.fixture
+def parked_resolution():
+  return {
+    "mode": "net",
+    "worktree": "/data/platform/.git/mobius-overlay-candidate",
+    "served": "c" * 40, "pre": "d" * 40, "stage": "committed",
+    "base": "b" * 40, "right": "a" * 40,
+    "paths": ["backend/app/main.py"],
+  }
+
+
+def test_resolver_omits_two_sided_review_for_a_flag_without_snapshots(
+  parked_resolution,
+):
+  parked = {
+    key: value for key, value in parked_resolution.items()
+    if key not in {"base", "right", "pre"}
+  }
+  content = pu._platform_conflict_resolver_message("e" * 40, [], parked)
+
+  assert "continue_platform_overlay_update" in content
+  assert "git diff --cached" not in content
+  # Without the fixed snapshots the original single-candidate guidance stays.
+  assert "tests belong with the side" in content
+  assert "Stage the resolved files" in content
+
+
+@pytest.mark.parametrize("stage", ["committed", "working"])
+@pytest.mark.parametrize("replay", [False, True])
+def test_resolver_reviews_both_exact_inputs_including_saved_working_edits(
+  parked_resolution, stage, replay,
+):
+  parked = {**parked_resolution, "stage": stage, "replay": replay}
+  source = parked["pre"] if stage == "working" else parked["served"]
+  content = pu._platform_conflict_resolver_message("e" * 40, [], parked)
+
+  assert f"git diff {parked['base']} {source} --" in content
+  assert f"git diff {parked['base']} {parked['right']} --" in content
+  assert f"git diff --cached {source} --" in content
+  assert f"git diff --cached {parked['right']} --" in content
+  assert "PR status is not evidence" in content
+  assert "tests from both input snapshots" in content
+  assert "ask the owner about genuinely incompatible behavior" in content
+  assert "tests belong with the side" not in content
+
+
+def test_two_sided_review_exposes_lost_local_or_incoming_contracts(clone_env):
+  """Selecting a whole side (including its tests) looks green in that side's
+  diff. The other frozen input reveals the lost contract even after fetching
+  a newer release which contains the local feature."""
+  origin, platform = clone_env
+  code = "backend/app/foo.py"
+  local_test = "backend/tests/test_native_steering.py"
+  incoming_test = "backend/tests/test_incoming_guard.py"
+  local_contract = "from app.foo import VALUE\nassert VALUE[0] == 'native'\n"
+  incoming_contract = "from app.foo import VALUE\nassert VALUE[1] is True\n"
+  source = _local_commit(platform, edits={
+    code: "VALUE = ('native', False)\n", local_test: local_contract,
+  })
+  target = _advance_origin(origin, edits={
+    code: "VALUE = ('interrupt', True)\n", incoming_test: incoming_contract,
+  })
+  result = pu.reconcile_clone(platform)
+  assert result.status == "conflict"
+  candidate = Path(result.overlay["worktree"])
+  message = pu._platform_conflict_resolver_message(
+    target, result.conflict_paths, result.overlay,
+  )
+  commands = [part.split() for part in message.split("`")
+              if part.startswith("git diff ")]
+  assert len(commands) == 4
+
+  # The next release is now published; it must not replace either review input.
+  newer = _advance_origin(origin, edits={
+    code: "VALUE = ('native', True)\n", local_test: local_contract,
+  })
+  pu._fetch(platform)
+  assert newer not in message
+  for command, contract in zip(commands[:2], (local_contract, incoming_contract)):
+    diff = _git(candidate, *command[1:]).stdout
+    assert contract.strip() in diff.replace("+", "")
+
+  # Choosing upstream loses native steering AND the test that would catch it.
+  _git(candidate, "read-tree", "--reset", "-u", target)
+  local_diff = _git(candidate, *commands[2][1:]).stdout
+  assert "-assert VALUE[0] == 'native'" in local_diff
+  assert "deleted file mode" in local_diff
+  assert _git(candidate, *commands[3][1:]).stdout == ""
+
+  # Choosing local instead loses the incoming protection and its test.
+  _git(candidate, "read-tree", "--reset", "-u", source)
+  incoming_diff = _git(candidate, *commands[3][1:]).stdout
+  assert "-assert VALUE[1] is True" in incoming_diff
+  assert "deleted file mode" in incoming_diff
+  assert _git(candidate, *commands[2][1:]).stdout == ""
+
+  # One implementation can satisfy both contracts, without chasing newer.
+  (candidate / code).write_text("VALUE = ('native', True)\n")
+  (candidate / incoming_test).write_text(incoming_contract)
+  _git(candidate, "add", code, incoming_test)
+  for command in commands[2:]:
+    assert "deleted file mode" not in _git(candidate, *command[1:]).stdout
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert pu.read_prepared_update()["target"] == target
+  assert _served_sha(platform) == source
+  assert _finish_prepared(platform) == "replayed"
+  namespace = {}
+  exec((platform / code).read_text(), namespace)
+  for path in (local_test, incoming_test):
+    contract = (platform / path).read_text().split("\n", 1)[1]
+    exec(contract, namespace)
+
+
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
   origin, platform = clone_env
   served = _served_sha(platform)
@@ -4641,6 +4754,61 @@ def test_update_preview_excludes_local_edits(clone_env):
   assert "LINE_C = 333" in preview["diff"]  # upstream change is shown
   assert "LINE_A = 111" not in preview["diff"]  # local edit is excluded
   assert preview["conflict_paths"] == []
+
+
+def test_update_preview_files_use_proven_equivalence_base_not_old_git_base(clone_env):
+  """A reviewed contribution already present locally is not a new file change."""
+  origin, platform = clone_env
+  base = _served_sha(platform)
+  shared = _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'SHARED REVIEW'")
+  reviewed = _local_commit(platform, edits={"backend/app/main.py": shared})
+  diff = app_git._canonical_diff(platform, base, reviewed)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  assert app_git.record_pending_equivalent_change(
+    platform, base_sha=base, head_sha=reviewed, source_sha=reviewed,
+    diff_sha256=digest, contribution_id="preview-equivalent-change",
+  )
+  landed_target = _advance_origin(
+    origin, edits={"backend/app/main.py": shared}, msg="squash reviewed change",
+  )
+  target = _advance_origin(
+    origin, edits={"backend/app/foo.py": "VALUE = 'new release'\n"},
+    msg="new release file",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    platform, digest, upstream_sha=landed_target,
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["target_sha"] == target
+  assert preview["plan_id"] == pu._update_plan_id(reviewed, target)
+  assert preview["total_commits"] == 2  # History still starts at Git's base.
+  assert [file["path"] for file in preview["files"]] == ["backend/app/foo.py"]
+  assert "new release" in preview["diff"]
+  assert "SHARED REVIEW" not in preview["diff"]
+  assert preview["conflict_paths"] == []
+
+
+def test_update_preview_without_equivalence_keeps_plain_base_diff(clone_env):
+  origin, platform = clone_env
+  base = _served_sha(platform)
+  target = _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300"),
+    "backend/app/foo.py": "VALUE = 'new release'\n",
+  })
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["target_sha"] == target
+  assert {file["path"] for file in preview["files"]} == {
+    "backend/app/main.py", "backend/app/foo.py",
+  }
+  assert preview["diff"] == _git(platform, "diff", f"{base}..{target}").stdout
+  assert preview["total_commits"] == 1
 
 
 def test_update_preview_predicts_the_apply_conflict_without_touching_the_checkout(
