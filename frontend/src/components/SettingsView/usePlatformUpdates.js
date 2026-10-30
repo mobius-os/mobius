@@ -291,8 +291,11 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     setPhase('resolving'); setError('')
     try {
       const body = await responseBody(await api.platform.conflictResolverChat())
-      await refreshPlatform()
+      // The confirmed chat is the result of this request. A secondary status
+      // read must not hold navigation hostage (or turn its failure into a gap).
       if (body?.chat_id) onOpenChat(body.chat_id)
+      else setError('Möbius did not return a repair chat. Check the update status before trying again.')
+      void refreshPlatform({ preserveCurrentOnFailure: true })
     } catch (cause) { setError(cause.message || 'Could not open the repair chat.') }
     finally { pending.current = false; setPhase('idle') }
   }

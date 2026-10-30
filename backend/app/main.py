@@ -1302,12 +1302,11 @@ def _served_platform_identity(
         value = upstream.stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", value):
           out["applied_upstream_sha"] = value
-          normalized_build = str(image_build_sha or "").strip().lower()
-          if re.fullmatch(r"[0-9a-f]{40}", normalized_build):
-            contains_build = _git(
-              "merge-base", "--is-ancestor", normalized_build, value,
-            )
-            out["image_build_applied"] = contains_build.returncode == 0
+      from app.platform_update import source_contains_image_release
+
+      out["image_build_applied"] = source_contains_image_release(
+        repo, out["served_sha"], str(image_build_sha or "").strip().lower(),
+      )
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:

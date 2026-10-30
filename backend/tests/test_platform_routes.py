@@ -292,6 +292,8 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "needs_restart": False,
       "activation": classify_activation([]),
       "current_build_sha": None,
+      "served_sha": "3" * 40,
+      "image_build_applied": None,
       "checked_target_sha": target,
       "installed_release_sha": "1" * 40,
       "recorded_upstream_sha": "1" * 40,
@@ -332,6 +334,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
   check_response = client.post("/api/platform/check", headers=auth)
 
   assert status_response.status_code == 200
+  assert status_response.json()["served_sha"] == "3" * 40
   assert check_response.status_code == 200
   assert check_response.json()["available"] is True
   assert check_response.json()["checked_target_sha"] == target

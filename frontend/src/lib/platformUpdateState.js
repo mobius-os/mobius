@@ -66,6 +66,7 @@ export function platformUpdateStatusLabel(platform) {
   }
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
+  if (platform?.unfinished_update?.action === 'restart') return 'Restart to finish the update'
   if (requiresAgentActivation(platform?.activation)) return 'Update needs help'
   if (activationLevel !== 'live' && available) return 'More updates available'
   if (activationLevel === 'server_restart') return 'Ready to restart'
@@ -73,7 +74,9 @@ export function platformUpdateStatusLabel(platform) {
   if (activationLevel === 'container_recreate') return 'Update needs help'
   if (activationLevel === 'image_rebuild') return 'Ready to finish'
   if (activationLevel === 'host_maintenance') return 'Finish this update on your server'
+  if (available && platform?.image_build_applied === false) return 'Code update required'
   if (available) return 'New update available'
+  if (state === 'source_unconfirmed' || platform?.image_build_applied === false) return 'Running code not confirmed'
   return 'Up to date'
 }
 

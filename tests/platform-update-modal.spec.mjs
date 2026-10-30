@@ -9,7 +9,7 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
-import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
+import { emptyChatPage, installMockProviderUsage, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -438,6 +438,100 @@ test('a predicted overlap goes straight to an agent without applying', async ({ 
   await expect.poll(() => opened).toBe(true)
   expect(parked).toMatchObject({ plan_id: preview.plan_id, current_sha: preview.current_sha,
     target_sha: preview.target_sha })
+  expect(state.unexpectedMutations).toEqual([])
+})
+
+test('agent handoff immediately shows pending state and sends only one reviewed plan', async ({ page }) => {
+  const state = { current: 'available', preview: { ...preview, conflict_paths: ['frontend/src/example.js'] } }
+  await mockPlatform(page, state)
+  // This response represents a real newly created chat. Without its matching
+  // read boundary, the shell's 404 recovery correctly discards the fake id.
+  await page.route(/\/api\/chats\/resolver-chat(?:[/?]|$)/, route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify(new URL(route.request().url()).pathname.endsWith('/activity')
+      ? { events: [], next_before: null }
+      : new URL(route.request().url()).pathname.endsWith('/runtime')
+      ? runtimeSnapshot()
+      : emptyChatPage({ id: 'resolver-chat', title: 'Update repair', provider: 'claude',
+        ...testChatAgentSettings() })),
+  }))
+  const park = deferred()
+  const status = deferred()
+  let parkCount = 0
+  let resolverCount = 0
+  await page.route('**/api/platform/park-for-agent', async route => {
+    parkCount += 1
+    expect(route.request().postDataJSON()).toMatchObject({
+      plan_id: preview.plan_id, current_sha: preview.current_sha, target_sha: preview.target_sha,
+    })
+    await park.promise
+    state.current = 'conflict'
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      target_sha: preview.target_sha, stage: 'resolve', action: 'restart', cancellable: true,
+    }) })
+  })
+  await page.route('**/api/platform/conflict-resolver-chat', route => {
+    resolverCount += 1
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ chat_id: 'resolver-chat', created: true, started: true }) })
+  })
+
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  const fix = dialog.getByRole('button', { name: 'Fix with an agent' })
+  await expect(fix).toBeEnabled()
+  // Both events run before React has a chance to commit the disabled button.
+  await fix.evaluate(button => { button.click(); button.click() })
+  await expect(dialog.getByRole('status')).toContainText('Preparing the reviewed update for an agent')
+  await expect(dialog.getByRole('button', { name: 'Preparing…' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeVisible()
+  expect(parkCount).toBe(1)
+
+  // The resolver's confirmed chat must open even if the follow-up status read stalls.
+  await page.route('**/api/platform/status', async route => {
+    await status.promise
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify(platformStatus('conflict')) })
+  })
+  park.resolve()
+  await expect.poll(() => resolverCount).toBe(1)
+  // Internal shell navigation is workspace-owned, not a URL change.
+  await expect(page.locator('[data-chat-id="resolver-chat"]')).toBeVisible()
+  status.resolve()
+  expect(state.unexpectedMutations).toEqual([])
+})
+
+for (const failure of ['http', 'network']) test(`agent handoff reports ${failure} park failure without opening a chat`, async ({ page }) => {
+  const state = { current: 'available', preview: { ...preview, conflict_paths: ['frontend/src/example.js'] } }
+  await mockPlatform(page, state)
+  let parkCount = 0
+  let resolverCount = 0
+  await page.route('**/api/platform/park-for-agent', route => {
+    parkCount += 1
+    return failure === 'network' ? route.abort('failed') : route.fulfill({
+      status: 409, contentType: 'application/json',
+      body: JSON.stringify({ detail: { message: 'The reviewed plan is stale.' } }),
+    })
+  })
+  await page.route('**/api/platform/conflict-resolver-chat', route => {
+    resolverCount += 1
+    return route.fulfill({ status: 501 })
+  })
+
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  await dialog.getByRole('button', { name: 'Fix with an agent' }).click()
+  await expect(dialog.getByRole('alert')).toContainText(failure === 'network'
+    ? 'Couldn’t reach Möbius. Check the update status before trying again.'
+    : 'The reviewed plan is stale.')
+  await expect(dialog.getByRole('button', { name: 'Fix with an agent' })).toBeEnabled()
+  expect(parkCount).toBe(1)
+  expect(resolverCount).toBe(0)
   expect(state.unexpectedMutations).toEqual([])
 })
 

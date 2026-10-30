@@ -51,11 +51,18 @@ export default function UpdateReviewModal({
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [resultState, setResultState] = useState('')
+  const [parking, setParking] = useState(false)
+  const parkingRef = useRef(false)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const resultActionRef = useRef(null)
   const applyAttemptedRef = useRef(false)
-  const inFlight = applying || rebuilding || resolving
+  const inFlight = applying || rebuilding || resolving || parking
   const busy = inFlight || observing
 
   const loadPreview = useCallback(async () => {
@@ -85,15 +92,33 @@ export default function UpdateReviewModal({
   // never on the live checkout: park the update, then open its resolver chat.
   const [fixError, setFixError] = useState('')
   async function handleFixWithAgent() {
+    // A ref closes the same-tick double-click gap before React paints disabled.
+    if (parkingRef.current || busy || !preview?.plan_id) return
+    parkingRef.current = true
+    setParking(true)
     setFixError('')
-    const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
-      current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
-    if (!response.ok) {
-      const body = await response.json().catch(() => null)
-      setFixError(body?.detail?.message || 'Couldn’t prepare this update for an agent. Try again.')
-      return
+    try {
+      const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
+        current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
+      if (!response.ok) {
+        const body = await response.json().catch(() => null)
+        const detail = body?.detail
+        throw new Error(detail?.message || (typeof detail === 'string' && detail)
+          || 'Couldn’t prepare this update for an agent. Check its status before trying again.')
+      }
+      if (mountedRef.current) {
+        const resolution = onResolve()
+        setParking(false)
+        await resolution
+      }
+    } catch (error) {
+      if (mountedRef.current) setFixError(error instanceof TypeError
+        ? 'Couldn’t reach Möbius. Check the update status before trying again.'
+        : error.message || 'Couldn’t confirm whether this update was prepared. Check its status before trying again.')
+    } finally {
+      parkingRef.current = false
+      if (mountedRef.current) setParking(false)
     }
-    onResolve()
   }
 
   async function handleApply() {
@@ -211,7 +236,7 @@ export default function UpdateReviewModal({
                     {files.length > 0 && <UnifiedDiff diff={preview?.diff} summaryOverrides={files} diffTruncated={!!preview?.diff_truncated} />}
                   </details>
                 </>}
-          {busy && <p className="urm__notice" role="status">{progressLabel}</p>}
+          {busy && <p className="urm__notice" role="status">{parking ? 'Preparing the reviewed update for an agent…' : progressLabel}</p>}
         </div>
         {fixError && <div className="urm__error"><Alert color="danger" variant="soft" description={fixError} /></div>}
         {applyError && <div className="urm__error">{repairReason
@@ -221,7 +246,7 @@ export default function UpdateReviewModal({
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
           : needsAgent && hasPlan ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
-            onClick={handleFixWithAgent} disabled={busy || loading}>{resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
+            onClick={handleFixWithAgent} disabled={busy || loading}>{parking ? 'Preparing…' : resolving ? 'Opening chat…' : 'Fix with an agent'}</button>
           : repairReason ? <>
             <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" label="Fix with an agent" />
           </>

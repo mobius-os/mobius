@@ -275,7 +275,7 @@ def test_served_platform_identity_exposes_applied_upstream_sha(
   assert identity["image_build_applied"] is True
 
 
-def test_image_build_applied_accepts_descendant_applied_upstream(
+def test_image_build_applied_accepts_descendant_served_source(
   tmp_path, monkeypatch,
 ):
   from app.main import _served_platform_identity
@@ -309,6 +309,9 @@ def test_image_build_applied_accepts_descendant_applied_upstream(
   source = tmp_path / "serving-source"
   source.write_text("platform\n", encoding="utf-8")
   monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+  served = tmp_path / "serving-sha"
+  served.write_text(applied_sha + "\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(served))
 
   identity = _served_platform_identity(str(tmp_path), image_sha)
 
@@ -350,6 +353,9 @@ def test_image_build_applied_rejects_newer_unapplied_image(
   source = tmp_path / "serving-source"
   source.write_text("platform\n", encoding="utf-8")
   monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+  served = tmp_path / "serving-sha"
+  served.write_text(applied_sha + "\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(served))
 
   identity = _served_platform_identity(str(tmp_path), image_sha)
 

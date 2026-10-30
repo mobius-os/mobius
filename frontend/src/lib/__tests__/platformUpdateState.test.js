@@ -12,6 +12,32 @@ import {
   reviewedUpdateUsesContainerRebuild,
 } from '../platformUpdateState.js'
 
+test('image-only recovery does not announce a completed full update', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'available', available: true, image_build_applied: false,
+  }), 'Code update required')
+  assert.equal(platformUpdateStatusLabel({
+    state: 'source_unconfirmed', available: false, image_build_applied: false,
+  }), 'Running code not confirmed')
+})
+
+test('optimistic apply does not borrow image pairing from checkout progress', () => {
+  const projected = platformStatusFromApply({ image_build_applied: false }, {
+    state: 'up_to_date', upstream_commit: 'a'.repeat(40),
+  })
+  assert.equal(platformUpdateStatusLabel(projected), 'Running code not confirmed')
+})
+
+test('paired local merge and separately owed image activation stay independent', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'up_to_date', available: false, image_build_applied: true,
+  }), 'Up to date')
+  assert.equal(platformUpdateStatusLabel({
+    state: 'activation_needed', image_build_applied: true,
+    activation: { level: 'image_rebuild' },
+  }), 'Ready to finish')
+})
+
 test('an unavailable release check cannot inherit a cached current claim', () => {
   const unavailable = platformStatusUnavailable({
     state: 'up_to_date',
@@ -32,6 +58,13 @@ test('host maintenance tells the owner where to finish the update', () => {
     state: 'activation_needed',
     activation: { level: 'host_maintenance' },
   }), 'Finish this update on your server')
+})
+
+test('the existing update restart takes precedence over newer releases', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'restart_needed', available: true, needs_restart: true,
+    unfinished_update: { stage: 'finish', action: 'restart' },
+  }), 'Restart to finish the update')
 })
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {
