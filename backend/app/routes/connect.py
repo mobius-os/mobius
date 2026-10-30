@@ -2,7 +2,7 @@
 
 A small runner on the target machine dials out to this owner-trusted Möbius
 instance and holds an HTTPS event stream open. Each machine authenticates with
-a per-host bearer token minted through a short-lived, one-time pairing code. A
+a per-host bearer token minted through a one-time pairing code. A
 command belongs to the paired host, not to one stream or HTTP caller, so a
 reconnect can resume control without repeating work.
 
@@ -27,7 +27,8 @@ Owner/app surface:
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
   PATCH  /api/connect/hosts/{id}          rename a host
-  GET    /api/connect/hosts/{id}/pairing  re-show/refresh the install command
+  GET    /api/connect/hosts/{id}/pairing  re-show the install command
+  POST   /api/connect/hosts/{id}/pairing  replace the code (old link stops)
   DELETE /api/connect/hosts/{id}          remove a host
   POST   /api/connect/hosts/{id}/exec     run a command on that host
   GET    /api/connect/hosts/{id}/commands running + recently finished commands
@@ -94,8 +95,11 @@ router = APIRouter(
 )
 _pair_limiter = Limiter(key_func=get_remote_address)
 
-# How long a freshly minted pairing code stays redeemable.
-_PAIRING_TTL_SECONDS = 15 * 60
+# A pairing code has no time limit: the owner may send the command to someone
+# who runs it days later. It stays redeemable until it is used once, replaced
+# with a new code, or its host entry is removed. A paired host's credential only
+# reaches the runner endpoints below, so a leaked unused code can at worst pair
+# the wrong machine into that visible, removable entry.
 # SSE heartbeat cadence; also the granularity at which we notice a dropped
 # runner connection.
 _HEARTBEAT_SECONDS = 15
@@ -923,18 +927,36 @@ async def _await_command_result(
   return command.result
 
 
-def _issue_pairing(host: dict) -> dict:
-  """Give an unpaired host a fresh one-time code and its install command."""
-  code = _new_code()
-  host["pairing_code"] = code
-  host["pairing_expires_at"] = _now() + _PAIRING_TTL_SECONDS
-  _save_host(host)
+def _pairing_code(host: dict) -> str | None:
+  """The host's redeemable code, if any.
+
+  Records written before codes became time-unlimited carry
+  `pairing_expires_at`; a code that had already lapsed then stays lapsed rather
+  than reviving a link the owner believed was dead.
+  """
+  code = host.get("pairing_code")
+  legacy_deadline = host.get("pairing_expires_at")
+  if code and legacy_deadline is not None and _now() > float(legacy_deadline):
+    return None
+  return code
+
+
+def _issue_pairing(host: dict, *, replace: bool = False) -> dict:
+  """Show an unpaired host's one-time install command.
+
+  The existing code is kept so re-opening the command never breaks a link the
+  owner already sent; `replace` mints a new code and the old link stops working.
+  """
+  code = (None if replace else _pairing_code(host)) or _new_code()
+  if host.get("pairing_code") != code or "pairing_expires_at" in host:
+    host["pairing_code"] = code
+    host.pop("pairing_expires_at", None)
+    _save_host(host)
   return {
     "id": host["id"],
     "name": host["name"],
     "pairing_code": code,
     "install_command": _install_command(_base_url(), code),
-    "expires_at": host["pairing_expires_at"],
   }
 
 
@@ -994,14 +1016,30 @@ async def host_pairing(
   host_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
 ) -> dict:
-  """Re-show the install command for an unpaired host (refreshes the code so it
-  is always valid), so the owner never has to remove + re-add just to copy it."""
+  """Re-show an unpaired host's install command; a link already sent keeps
+  working, so the owner never has to remove + re-add just to copy it."""
+  return _issue_pairing(_unpaired_host(host_id))
+
+
+@router.post(
+  "/hosts/{host_id}/pairing",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def replace_host_pairing(
+  host_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  """Replace an unpaired host's code; the previously shared link stops working."""
+  return _issue_pairing(_unpaired_host(host_id), replace=True)
+
+
+def _unpaired_host(host_id: str) -> dict:
   host = _load_host(host_id)
   if host is None:
     raise HTTPException(status_code=404, detail="No such host.")
   if host.get("token_sha256"):
     raise HTTPException(status_code=409, detail="This machine is already paired.")
-  return _issue_pairing(host)
+  return host
 
 
 @router.delete(
@@ -1347,15 +1385,13 @@ async def pair(request: Request, body: PairBody) -> dict:
   if code is None:
     raise HTTPException(status_code=400, detail="Invalid pairing code.")
   for host in _list_hosts():
-    stored = host.get("pairing_code")
+    stored = _pairing_code(host)
     if not stored or not secrets.compare_digest(stored, code):
       continue
-    if _now() > float(host.get("pairing_expires_at") or 0):
-      raise HTTPException(status_code=400, detail="That pairing code has expired.")
     token = secrets.token_urlsafe(32)
     host["token_sha256"] = _hash(token)
     host["pairing_code"] = None
-    host["pairing_expires_at"] = None
+    host.pop("pairing_expires_at", None)
     host["paired_at"] = _now()
     _save_host(host)
     return {"host_id": host["id"], "token": token, "name": host["name"]}
@@ -1564,7 +1600,7 @@ async def install_script(code: str) -> PlainTextResponse:
   Collapsing the fetch, pipe, and flags into one URL removes the quotes and
   arguments that get mangled when the command is copied and pasted. The code is
   normalized to its shell-safe canonical form before it is interpolated; an
-  unredeemed or expired code still fails clearly at the runner's pairing step.
+  unknown or already-used code still fails clearly at the runner's pairing step.
   """
   normalized = _normalize_code(code)
   if normalized is None:

@@ -1020,6 +1020,51 @@ def test_pairing_accepts_the_code_without_its_hyphen(client, auth):
   assert paired.json()["host_id"] == pairing["id"]
 
 
+def test_shared_pairing_link_lasts_until_used_replaced_or_removed(
+  client, auth, monkeypatch,
+):
+  created = client.post("/api/connect/hosts", headers=auth, json={}).json()
+  sent = created["pairing_code"]
+  assert "expires_at" not in created
+  # Days later, re-opening the command shows the same link instead of
+  # silently breaking the one already sent.
+  monkeypatch.setattr(connect_routes, "_now", lambda: time.time() + 7 * 86400)
+  shown = client.get(f"/api/connect/hosts/{created['id']}/pairing", headers=auth)
+  assert shown.json()["pairing_code"] == sent
+
+  replaced = client.post(
+    f"/api/connect/hosts/{created['id']}/pairing", headers=auth,
+  ).json()["pairing_code"]
+  assert replaced != sent
+  assert client.post("/api/connect/pair", json={"code": sent}).status_code == 400
+
+  removed = client.post("/api/connect/hosts", headers=auth, json={}).json()
+  assert client.delete(
+    f"/api/connect/hosts/{removed['id']}", headers=auth,
+  ).status_code in (200, 204)
+  assert client.post(
+    "/api/connect/pair", json={"code": removed["pairing_code"]},
+  ).status_code == 400
+
+  paired = client.post("/api/connect/pair", json={"code": replaced})
+  assert paired.status_code == 200, paired.text
+  assert client.post("/api/connect/pair", json={"code": replaced}).status_code == 400
+
+
+def test_code_that_lapsed_under_the_old_time_limit_stays_dead(client, auth):
+  host = client.post("/api/connect/hosts", headers=auth, json={}).json()
+  record = connect_routes._load_host(host["id"])
+  record["pairing_expires_at"] = time.time() - 60
+  connect_routes._save_host(record)
+
+  assert client.post(
+    "/api/connect/pair", json={"code": host["pairing_code"]},
+  ).status_code == 400
+  reshown = client.get(f"/api/connect/hosts/{host['id']}/pairing", headers=auth)
+  assert reshown.json()["pairing_code"] != host["pairing_code"]
+  assert "pairing_expires_at" not in connect_routes._load_host(host["id"])
+
+
 def test_pairing_is_one_time_and_delete_revokes_runner(client, auth):
   runner = client.get("/api/connect/runner")
   assert runner.status_code == 200
