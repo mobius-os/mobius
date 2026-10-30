@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { renderHook, __setRerender } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
 import useWorkspaceSession from '../useWorkspaceSession.js'
 import * as paneModel from '../paneModel.js'
 
@@ -21,19 +21,33 @@ function memoryStorage(seed = {}) {
 
 test('workspace owner composes transitions through one synchronous dispatch boundary', () => {
   const storage = memoryStorage()
-  const { result } = renderHook(useWorkspaceSession, { storage })
+  const { result, rerender } = renderHook(useWorkspaceSession, { storage })
   const paneId = result.current.workspace.focusedPaneId
-
-  result.current.dispatchWorkspace({
-    type: 'OPEN_TAB',
-    paneId,
-    tab: { kind: 'chat', id: 'first' },
-  })
-  result.current.dispatchWorkspace({
-    type: 'OPEN_TAB',
-    paneId,
-    tab: { kind: 'chat', id: 'second' },
-  })
+  const committed = result.current.workspace
+  const transitions = []
+  result.current.onWorkspaceTransitionRef.current = (prev, next) => {
+    transitions.push([prev, next])
+  }
+  __setRerender(() => {})
+  try {
+    for (const id of ['first', 'second']) {
+      result.current.dispatchWorkspace({
+        type: 'OPEN_TAB', paneId, tab: { kind: 'chat', id },
+      })
+    }
+    assert.equal(result.current.workspace, committed,
+      'no render may repair the ref between the two dispatches')
+    assert.deepEqual(
+      paneModel.flatten(result.current.workspaceStateRef.current.ws).map(tab => tab.id),
+      ['first', 'second'],
+    )
+    assert.equal(transitions.length, 2)
+    assert.equal(transitions[1][0], transitions[0][1],
+      'the second transition starts at the first synchronous preview')
+  } finally {
+    __setRerender(rerender)
+  }
+  rerender()
 
   assert.deepEqual(
     paneModel.flatten(result.current.workspace).map(tab => tab.id),
@@ -62,14 +76,20 @@ test('workspace owner publishes transition policy hooks without owning their pol
 
 test('reload snapshot persists the ref-current workspace, not a stale render closure', () => {
   const storage = memoryStorage()
-  const { result } = renderHook(useWorkspaceSession, { storage })
-
-  result.current.dispatchWorkspace({
-    type: 'OPEN_TAB',
-    paneId: result.current.workspace.focusedPaneId,
-    tab: { kind: 'chat', id: 'durable' },
-  })
-  result.current.persistWorkspaceSnapshot()
+  const { result, rerender } = renderHook(useWorkspaceSession, { storage })
+  const committed = result.current.workspace
+  __setRerender(() => {})
+  try {
+    result.current.dispatchWorkspace({
+      type: 'OPEN_TAB',
+      paneId: committed.focusedPaneId,
+      tab: { kind: 'chat', id: 'durable' },
+    })
+    assert.equal(result.current.workspace, committed)
+    result.current.persistWorkspaceSnapshot()
+  } finally {
+    __setRerender(rerender)
+  }
 
   const restored = paneModel.parseWorkspace(
     storage.getItem(paneModel.STORAGE_KEY),

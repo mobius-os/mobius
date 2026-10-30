@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.config import get_settings
+from tests.frame_entrypoint_probe import run_frame_entrypoint
 
 
 def _find_app_frame() -> Path | None:
@@ -107,3 +108,56 @@ def test_owned_fonts_settle_before_commit_without_moving_the_commit_signal():
   )
   assert "msg.type === 'moebius:frame-font-check'" in html
   assert "type: 'moebius:frame-font-check-result'" in html
+
+
+def test_real_loader_mounts_signal_only_when_rendered_tree_commits():
+  observed = run_frame_entrypoint(_frame_html())
+  scheduled = observed["beforeCommit"]
+  assert scheduled["imports"] == [0]
+  assert scheduled["renderCount"] == 1
+  assert scheduled["appRenderCount"] == 0
+  assert not scheduled["mounted"]
+  assert scheduled["messages"] == []
+  assert not scheduled["panel"]
+  assert not scheduled["configPresent"]
+
+  committed = observed["afterCommit"]
+  assert committed["appRenderCount"] == 1
+  assert committed["mounted"]
+  assert committed["messages"] == ["moebius:frame-mounted"]
+  assert committed["origins"] == ["https://frame.test"]
+  assert not committed["panel"]
+  assert not committed["rootHidden"]
+  assert observed["afterReattach"]["messages"] == ["moebius:frame-mounted"]
+  assert observed["afterReattach"]["mounted"]
+
+
+def test_initial_render_failure_never_commits_the_rendered_mount_signal():
+  observed = run_frame_entrypoint(_frame_html(), renderThrows=True)
+  assert not observed["beforeCommit"]["mounted"]
+  assert observed["beforeCommit"]["messages"] == []
+  failed = observed["final"]
+  assert failed["appRenderCount"] == 1
+  assert not failed["mounted"]
+  assert failed["messages"] == ["moebius:frame-error"]
+  assert failed["panel"] and failed["rootHidden"]
+  assert failed["title"] == "Runtime error"
+  assert "initial app render failed" in failed["detail"]
+
+
+@pytest.mark.parametrize("commit", [False, True], ids=["scheduled-only", "committed"])
+def test_global_error_surface_follows_actual_commit_not_render_scheduling(commit):
+  observed = run_frame_entrypoint(
+    _frame_html(), commit=commit, globalError="offline save failed",
+  )
+  final = observed["final"]
+  assert final["mounted"] is commit
+  assert final["panel"] is not commit
+  assert final["rootHidden"] is not commit
+  if commit:
+    assert final["messages"] == ["moebius:frame-mounted"]
+    assert any("post-mount Unhandled error" in log for log in observed["logs"])
+  else:
+    assert final["messages"] == ["moebius:frame-error"]
+    assert final["title"] == "Unhandled error"
+    assert final["detail"] == "offline save failed"

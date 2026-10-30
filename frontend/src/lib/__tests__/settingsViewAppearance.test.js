@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { button, click, renderHook } from './confirmationHarness.mjs'
+
+const { PlatformUpdatesView } = await import('../../components/SettingsView/PlatformUpdates.jsx')
 
 const view = readFileSync(
   new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
@@ -59,13 +62,7 @@ test('update versions paint from the persisted status cache without an Unknown f
   assert.match(updates, /versionPlatform \? 'Unavailable' : 'Checking…'/)
 })
 
-test('restart confirms on the same button for four seconds without a cancel button', () => {
-  assert.match(updates, /setTimeout\(\(\) => setConfirmRestart\(null\), 4000\)/)
-  assert.match(updates, /if \(confirmRestart !== source\) \{[\s\S]*?return setConfirmRestart\(source\)[\s\S]*?update\.restart\(\)/)
-  // A double-click must not arm and confirm in one gesture.
-  assert.match(updates, /if \(performance\.now\(\) - armedAt\.current < RESTART_CONFIRM_MIN_MS\) return[\s\S]*?update\.restart\(\)/)
-  assert.match(updates, /act: \(\) => pressRestart\('primary'\)/)
-  assert.match(updates, /onClick=\{\(\) => pressRestart\('dedicated'\)\}/)
+test('restart keeps interruption guidance without a cancel or unreviewed rebuild action', () => {
   assert.doesNotMatch(updates, /Not now|Restart server/)
   assert.match(updates, /briefly pauses active chats/)
   assert.match(updates, /page will reconnect automatically/)
@@ -74,6 +71,81 @@ test('restart confirms on the same button for four seconds without a cancel butt
   // second unreviewed maintenance action beside the server restart.
   assert.doesNotMatch(updates, /Rebuild now|Rebuild container|Replace now/)
 })
+
+function mountUpdates(t) {
+  let now = 0
+  let restarts = 0
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(performance, 'now', () => now)
+  const update = {
+    platform: {
+      state: 'restart_needed', needs_restart: true, available: false,
+      activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    },
+    rebuild: null, version: null, phase: 'idle', busy: false,
+    clearError() {}, restart() { restarts++ },
+  }
+  const view = renderHook(() => PlatformUpdatesView({ update }))
+  t.after(() => view.unmount())
+  return {
+    view,
+    restarts: () => restarts,
+    advance(ms) { now += ms; t.mock.timers.tick(ms) },
+  }
+}
+
+for (const label of ['Restart to finish', 'Restart']) {
+  test(`${label}: first click arms, a double-click cannot restart, later confirmation restarts once`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, label)
+    assert.equal(restarts(), 0)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'an immediate second click is the same gesture')
+    advance(499)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'confirmation must wait the full 500ms')
+    advance(1)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+    assert.ok(button(view, label), 'successful confirmation disarms the button')
+    click(view, label)
+    assert.equal(restarts(), 1, 'another click must arm a new confirmation, not replay restart')
+  })
+
+  test(`${label}: confirmation expires at four seconds and a later click only re-arms`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, label)
+    advance(3999)
+    assert.ok(button(view, 'Confirm restart'))
+    assert.equal(restarts(), 0)
+    advance(1)
+    assert.ok(button(view, label), 'the four-second timeout must disarm')
+    click(view, label)
+    assert.equal(restarts(), 0, 'an expired confirmation must never restart')
+    advance(500)
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+  })
+}
+
+for (const [first, other] of [['Restart to finish', 'Restart'], ['Restart', 'Restart to finish']]) {
+  test(`arming ${first} cannot be confirmed by ${other}`, t => {
+    const { view, advance, restarts } = mountUpdates(t)
+    click(view, first)
+    advance(600)
+    click(view, other)
+    assert.equal(restarts(), 0, 'a different button must arm itself, never confirm its neighbour')
+    assert.ok(button(view, first), 'only the newly armed button may show confirmation')
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 0, 'switching buttons must reset the double-click guard')
+    advance(3400)
+    assert.ok(button(view, 'Confirm restart'), 'the old button’s expiry must not disarm the new prompt')
+    click(view, 'Confirm restart')
+    assert.equal(restarts(), 1)
+    assert.ok(button(view, first))
+    assert.ok(button(view, other))
+  })
+}
 
 test('Settings omits historical container diagnostics but keeps current action errors', () => {
   assert.doesNotMatch(updates, /Last container update|Update details|rebuild\.expected_sha|rebuild\.updated_at/)

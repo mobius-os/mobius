@@ -11,7 +11,8 @@
 //   node --loader=./src/lib/__tests__/vite-env-loader.mjs --test ...
 
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { transformWithOxc } from 'vite'
 
 const REACT_SHIM = new URL(
@@ -47,7 +48,12 @@ export async function resolve(specifier, context, nextResolve) {
     context.parentURL?.includes('/@openai/apps-sdk-ui/')
     && specifier.startsWith('.')
     && !/\.[a-z]+$/i.test(specifier)
-  ) return nextResolve(`${specifier}.js`, context)
+  ) {
+    // The published build uses both extensionless files and directory indexes.
+    // Node's file-only ESM resolver cannot follow either bundler-style form.
+    const resolved = createRequire(context.parentURL).resolve(specifier)
+    return nextResolve(pathToFileURL(resolved).href, context)
+  }
 
   if (specifier.endsWith('.css')) {
     return { url: 'data:text/javascript,export default {}', shortCircuit: true }
