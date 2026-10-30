@@ -57,7 +57,7 @@ def pending_restart_paths() -> list[str]:
   tree, missing HEAD, baked process) yields an empty list and a generic card.
   """
   try:
-    from app import platform_activation, platform_update
+    from app import platform_update
 
     repo = platform_update.PLATFORM_REPO
     served = platform_update._served_platform_sha()
@@ -71,18 +71,23 @@ def pending_restart_paths() -> list[str]:
     if not head_sha:
       return []
     changed = platform_update._activation_paths_between(repo, served, head_sha)
-    pending = platform_update._pending_activation_paths(
+    pending, served_restart = platform_update._pending_activation_work(
       repo, served_to_head=changed,
     )
-    restart_level = platform_activation.ActivationLevel.SERVER_RESTART.value
-    result = {
-      path for path in pending
-      if platform_activation.classify_activation([path])["level"]
-      == restart_level
-    }
-    return sorted(result)
+    return sorted({*_restart_loaded(pending), *served_restart})
   except Exception:
     return []
+
+
+def _restart_loaded(paths) -> list[str]:
+  from app import platform_activation
+
+  restart_level = platform_activation.ActivationLevel.SERVER_RESTART.value
+  return sorted({
+    path for path in paths
+    if platform_activation.classify_activation([path])["level"]
+    == restart_level
+  })
 
 
 def activation_wait_verdict(

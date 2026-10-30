@@ -173,6 +173,10 @@ DEPENDENCY_RECEIPT_PATH = Path("/tmp/mobius-dependency-inputs.json")
 # intentionally root-owned.  Dependency-changing updates therefore detach
 # this one known bootstrap link lazily, just before the first mutable install.
 BAKED_FRONTEND_NODE_MODULES = Path("/app/shell-src/node_modules")
+# Actual boot source, independent of the mutable served checkout. Older image
+# input records omitted its modules; _image_runs verifies those missing keys
+# against both these protected bytes and the frozen image commit.
+BAKED_PLATFORM_REPO = Path("/app/platform-baked")
 
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
@@ -2015,11 +2019,14 @@ def _owed_activation(
   still-pending activation plus the changes from ``before``. Image work is
   judged against the official ``release`` ``target`` carries (``target``
   itself unless it is a prepared local revision on top of one)."""
+  paths, served_restart = _pending_activation_work(
+    repo, release=release or target,
+    additional_served_paths=_activation_paths_between(repo, before, target),
+  )
+  owed_paths = _without_python_inputs_installed_for(repo, paths, target)
   return platform_activation.classify_activation(
-    _without_python_inputs_installed_for(repo, [
-      *_pending_activation_paths(repo, release=release or target),
-      *_activation_paths_between(repo, before, target),
-    ], target),
+    owed_paths,
+    served_restart_paths=served_restart,
   )
 
 
@@ -2078,6 +2085,21 @@ def _image_runs(
   installs."""
   if path in _PYTHON_DEPENDENCY_INPUTS:
     return image_installs_python_input(repo, path, content)
+  if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES and path not in baked:
+    image = frozen_image_sha()
+    if not image:
+      return False
+    image_content = _git_blob(repo, image, path)
+    if image_content is None:
+      return False
+    try:
+      baked_content = (BAKED_PLATFORM_REPO / path).read_bytes()
+    except OSError:
+      return False
+    # Only the newly declared boot keys need compatibility with existing image
+    # records. Never borrow served bytes, override a recorded hash, or accept
+    # an absent source blob as proof of what this image executes.
+    return baked_content == image_content and content == baked_content
   expected = baked.get(path)
   if content is None:
     return expected is None
@@ -2087,19 +2109,19 @@ def _image_runs(
   )
 
 
-def _pending_activation_paths(
+def _pending_activation_work(
   repo: Path = PLATFORM_REPO,
   *,
   served_to_head: list[str] | None = None,
   release: str | None = None,
-) -> list[str]:
-  """Every path whose activation is still owed by the running process.
+  additional_served_paths: list[str] | tuple[str, ...] = (),
+) -> tuple[list[str], list[str]]:
+  """Return owed paths and independently owed served boot-module restarts.
 
-  ``served_to_head`` lets a caller that has just diffed the served revision
-  against the local head (to write the activation marker) hand that result
-  over instead of having the same pair diffed again. Image work is judged
-  against ``release`` (an update's exact target), by default the newest
-  official release the checkout contains.
+  ``served_to_head`` avoids a repeated diff when the caller has it already;
+  ``additional_served_paths`` projects an update's before-to-target diff into
+  the same provenance check. Image work is judged against the exact official
+  ``release``, never the prepared local commit.
   """
   marker = _read_activation_marker()
   paths = list(marker["paths"]) if marker else []
@@ -2118,13 +2140,20 @@ def _pending_activation_paths(
       except Exception:
         head = None
       served_to_head = _activation_paths_between(repo, served, head)
+  served_paths = set(paths) | set(served_to_head or []) | set(additional_served_paths)
   paths.extend(served_to_head or [])
+  paths.extend(additional_served_paths)
   paths.extend(image_input_drift(repo) or [])
   owed = _image_work_owed(
     repo, [str(path) for path in paths if str(path)],
     release or _contained_official_source(repo),
   )
-  return sorted({*owed, *damaged})
+  restart = sorted(
+    path for path in served_paths
+    if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
+    and path not in owed
+  )
+  return sorted({*owed, *damaged}), restart
 
 
 def _deployed_runtime_is_image_own(path: str) -> bool:
@@ -2265,10 +2294,11 @@ def _platform_activation_impact(
   served_to_head: list[str] | None = None,
   release: str | None = None,
 ) -> PlatformActivationImpact:
+  paths, served_restart = _pending_activation_work(
+    repo, served_to_head=served_to_head, release=release,
+  )
   return platform_activation.classify_activation(
-    _pending_activation_paths(
-      repo, served_to_head=served_to_head, release=release,
-    ),
+    paths, served_restart_paths=served_restart,
   )
 
 
@@ -4720,11 +4750,19 @@ def _record_update_activation(
   served = _served_platform_sha()
   changed_paths = _activation_paths_between(repo, served, head)
   release = target or _contained_official_source(repo)
-  changed_paths = _image_work_owed(repo, changed_paths, release)
-  incoming_impact = platform_activation.classify_activation(changed_paths)
+  image_owed = _image_work_owed(repo, changed_paths, release)
+  served_restart = [
+    path for path in changed_paths
+    if path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
+    and path not in image_owed
+  ]
+  incoming_impact = platform_activation.classify_activation(
+    image_owed, served_restart_paths=served_restart,
+  )
   if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
     mark_activation_needed(
-      head or "", changed_paths, upstream_sha=target, repo=repo,
+      head or "", sorted({*image_owed, *served_restart}),
+      upstream_sha=target, repo=repo,
     )
   return _platform_activation_impact(
     repo, served_to_head=changed_paths, release=release,

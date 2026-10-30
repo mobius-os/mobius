@@ -1,9 +1,89 @@
 """Activation classification is one ordered contract across deployments."""
 
+import ast
 import re
 from pathlib import Path
 
+import pytest
+
 from app import platform_activation as activation
+
+
+_BAKED_BOOT_INPUTS = (
+  "backend/app/__init__.py",
+  "backend/app/memory_observability.py",
+  "backend/app/platform_boot.py",
+  "backend/app/platform_update.py",
+  "backend/app/local_change_tests.py",
+  "backend/app/removed_references.py",
+  "backend/app/platform_activation.py",
+  "backend/app/app_git.py",
+  "backend/app/runtime_provenance.py",
+  "backend/app/managed_paths.py",
+  "backend/app/config.py",
+  "backend/app/restart_util.py",
+)
+
+
+@pytest.mark.parametrize("deployment", ["self_hosted", "railway"])
+@pytest.mark.parametrize("path", _BAKED_BOOT_INPUTS)
+def test_baked_platform_boot_inputs_cannot_be_activated_by_server_restart(path, deployment):
+  impact = activation.classify_activation([path], deployment=deployment)
+  assert impact["required_actions"] == ["image_rebuild"]
+  assert activation.path_is_image_owned(path)
+  assert activation.backend_import_probe_required([path])
+
+
+def test_proved_served_boot_debt_is_an_independent_action():
+  path = "backend/app/config.py"
+  impact = activation.classify_activation(
+    ["Dockerfile"], served_restart_paths=[path],
+  )
+  assert impact["required_actions"] == ["server_restart", "image_rebuild"]
+  assert any(reason["code"] == "served_boot_module" and reason["paths"] == [path]
+             for reason in impact["reasons"])
+
+
+def test_baked_boot_inventory_covers_package_initialization_and_static_imports():
+  root = Path(__file__).resolve().parents[2]
+  pending = {"__init__", "platform_boot", "platform_update"}
+  visited = set()
+  while pending:
+    name = pending.pop()
+    visited.add(name)
+    module = ast.parse((root / f"backend/app/{name}.py").read_text())
+    for node in module.body:
+      if isinstance(node, ast.ImportFrom):
+        if node.module == "app":
+          imported = {alias.name for alias in node.names}
+        elif node.module and node.module.startswith("app."):
+          imported = {node.module.split(".")[1]}
+        else:
+          continue
+        pending.update(imported - visited)
+  assert {f"backend/app/{name}.py" for name in visited} == set(_BAKED_BOOT_INPUTS)
+  assert set(activation.IMAGE_PLATFORM_BOOT_MODULES) == set(_BAKED_BOOT_INPUTS)
+  entrypoint = (root / "backend/scripts/entrypoint.sh").read_text()
+  assert "cd /app/platform-baked/backend" in entrypoint
+  assert "python3 -m app.platform_boot" in entrypoint
+
+
+def test_baked_boot_inputs_share_image_hashes_without_becoming_package_fingerprints(tmp_path):
+  for path in (*_BAKED_BOOT_INPUTS, "backend/app/main.py", "backend/app/routes/chats.py"):
+    source = tmp_path / path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("VALUE = 1\n")
+  assert set(activation.image_input_paths(tmp_path)) == set(_BAKED_BOOT_INPUTS)
+  assert set(activation.image_input_hashes(tmp_path)) == set(_BAKED_BOOT_INPUTS)
+  assert not set(_BAKED_BOOT_INPUTS) & set(activation.dependency_fingerprint_paths(tmp_path))
+  for path in ("backend/app/main.py", "backend/app/routes/chats.py", "backend/app/new_server.py"):
+    assert activation.classify_activation([path])["required_actions"] == ["server_restart"]
+    assert activation.backend_import_probe_required([path])
+  assert set(activation.classify_activation([
+    "backend/app/platform_boot.py", "backend/app/main.py", "Caddyfile",
+  ], deployment="self_hosted")["required_actions"]) == {
+    "image_rebuild", "server_restart", "proxy_reload",
+  }
 
 
 def test_ordered_levels_choose_the_highest_effective_action():

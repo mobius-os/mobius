@@ -1098,6 +1098,32 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
     return block["questions"][0]["question"]
 
 
+def test_restart_card_names_proved_served_boot_debt(
+  client, chat, db, monkeypatch, tmp_path,
+):
+  import subprocess
+  from app import platform_restart, platform_update
+
+  path = "backend/app/config.py"
+  subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+  subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@example.com"], check=True)
+  subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True)
+  (tmp_path / "test.txt").write_text("base\n")
+  subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+  subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-served-debt")
+  monkeypatch.setattr(platform_update, "PLATFORM_REPO", tmp_path)
+  monkeypatch.setattr(platform_update, "_served_platform_sha", lambda: "a" * 40)
+  monkeypatch.setattr(platform_update, "_activation_paths_between", lambda *_: [path])
+  monkeypatch.setattr(
+    platform_update, "_pending_activation_work",
+    lambda *_, **__: ([], [path]),
+  )
+
+  assert platform_restart.pending_restart_paths() == [path]
+  assert path in _save_restart_card(client, chat, db)
+
+
 def test_each_chat_saves_its_own_restart_decision_without_a_shared_claim(
   client, auth, db, monkeypatch,
 ):

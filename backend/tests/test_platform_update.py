@@ -20,6 +20,7 @@ reconcile is cleaned up on the next pass; and a merge-shaped legacy history is
 left untouched with an explicit normalization error.
 """
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -34,11 +35,11 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from app import app_git, platform_activation, platform_boot, restart_util
+from app import app_git, platform_activation, platform_boot, platform_restart, restart_util
 from app import platform_update as pu
 from tests.test_app_git import bump_ctime_without_changing_bytes
 
@@ -156,6 +157,15 @@ def _local_commit(platform: Path, *, edits: dict, msg: str = "local edit") -> st
   _git(platform, "add", "-A")
   _git(platform, "commit", "-q", "-m", msg)
   return _git(platform, "rev-parse", "main").stdout.strip()
+
+
+def _image_boot_input_hashes(platform: Path, rev: str = "HEAD") -> dict[str, str]:
+  """Complete boot provenance for test images, unlike explicit legacy cases."""
+  return {
+    path: hashlib.sha256(content).hexdigest()
+    for path in platform_activation.IMAGE_PLATFORM_BOOT_MODULES
+    if (content := pu._git_blob(platform, rev, path)) is not None
+  }
 
 
 def _served_sha(platform: Path) -> str:
@@ -3567,7 +3577,10 @@ def test_status_owes_no_image_for_a_local_edit_to_an_image_input(
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   pu.SERVING_SHA_FILE.write_text(official + "\n")
   monkeypatch.setattr(pu, "_build_info", lambda: {
-    "image_inputs": {path: hashlib.sha256(baked.encode()).hexdigest()},
+    "image_inputs": {
+      **_image_boot_input_hashes(platform, official),
+      path: hashlib.sha256(baked.encode()).hexdigest(),
+    },
   })
 
   _local_commit(platform, edits={path: "local customization\n"})
@@ -3599,7 +3612,10 @@ def test_status_owes_the_image_of_a_contained_release_past_a_stale_marker(
   _git(platform, "merge", "-q", "--ff-only", release_a)
   _git(platform, "branch", "-f", "upstream", release_a)
   monkeypatch.setattr(pu, "_build_info", lambda: {
-    "image_inputs": {path: hashlib.sha256(b"release a\n").hexdigest()},
+    "image_inputs": {
+      **_image_boot_input_hashes(platform, release_a),
+      path: hashlib.sha256(b"release a\n").hexdigest(),
+    },
   })
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   pu.SERVING_SHA_FILE.write_text(release_a + "\n")
@@ -3638,7 +3654,10 @@ def test_damaged_deployed_runtime_stays_owed_even_when_the_release_matches(
   official = _local_commit(platform, edits={path: "image\n"})
   _git(platform, "branch", "-f", "upstream", official)
   monkeypatch.setattr(pu, "_build_info", lambda: {
-    "image_inputs": {path: hashlib.sha256(b"image\n").hexdigest()},
+    "image_inputs": {
+      **_image_boot_input_hashes(platform, official),
+      path: hashlib.sha256(b"image\n").hexdigest(),
+    },
   })
   deployed = tmp_path / "deployed-runtime"
   deployed.mkdir()
@@ -3692,7 +3711,10 @@ def test_source_only_update_keeping_a_local_dockerfile_needs_no_image(
   _git(platform, "merge", "-q", "--ff-only", official)
   _git(platform, "branch", "-f", "upstream", official)
   monkeypatch.setattr(pu, "_build_info", lambda: {
-    "image_inputs": {"Dockerfile": hashlib.sha256(b"FROM official\n").hexdigest()},
+    "image_inputs": {
+      **_image_boot_input_hashes(platform, official),
+      "Dockerfile": hashlib.sha256(b"FROM official\n").hexdigest(),
+    },
   })
   _local_commit(platform, edits={"Dockerfile": "FROM official\nRUN local\n"})
   current = _served_sha(platform)
@@ -4308,6 +4330,7 @@ def test_update_preview_accepts_target_dependencies_already_in_running_image(
     ).hexdigest()
     for path in pu._PYTHON_DEPENDENCY_INPUTS
   }
+  image_inputs.update(_image_boot_input_hashes(platform, target))
   monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
 
   preview = pu.platform_update_preview(platform, target_sha=target)
@@ -4344,6 +4367,7 @@ def test_target_dependency_proof_fails_closed_for_incomplete_provenance(
     ).hexdigest()
     for path in pu._PYTHON_DEPENDENCY_INPUTS
   }
+  image_inputs.update(_image_boot_input_hashes(platform, target))
   if provenance == "missing":
     image_inputs.pop("backend/requirements.txt")
   elif provenance == "malformed":
@@ -4392,6 +4416,7 @@ def _lock_only_update(clone_env, target_lock: str):
     ).hexdigest()
     for path in pu._PYTHON_DEPENDENCY_INPUTS
   }
+  image_inputs.update(_image_boot_input_hashes(platform, base))
   return platform, base, target, image_inputs
 
 
@@ -4583,6 +4608,7 @@ async def test_source_apply_uses_target_dependency_proof_from_running_image(
     ).hexdigest()
     for path in pu._PYTHON_DEPENDENCY_INPUTS
   }
+  image_inputs.update(_image_boot_input_hashes(platform, target))
   monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
 
   preview = pu.platform_update_preview(platform, target_sha=target)
@@ -5113,6 +5139,218 @@ def test_frontend_touching_update_invalidates_the_build_stamp(clone_env, monkeyp
 
 
 # --- the running image compared with the served source -----------------------
+
+_LEGACY_BOOT_INPUTS = (
+  "backend/app/__init__.py", "backend/app/memory_observability.py",
+  "backend/app/platform_boot.py", "backend/app/platform_update.py",
+  "backend/app/platform_activation.py", "backend/app/app_git.py",
+  "backend/app/runtime_provenance.py", "backend/app/managed_paths.py",
+  "backend/app/config.py",
+)
+
+
+@pytest.fixture
+def legacy_baked_boot(clone_env, monkeypatch, tmp_path):
+  origin, platform = clone_env
+  inputs = {path: "BOOT_VERSION = 1\n" for path in _LEGACY_BOOT_INPUTS}
+  inputs["Dockerfile"] = "FROM python:3.12\n"
+  frozen = _advance_origin(origin, edits=inputs)
+  pu._fetch(platform)
+  _git(platform, "merge", "--ff-only", "origin/main")
+  _git(platform, "branch", "-f", "upstream", frozen)
+  baked_root = tmp_path / "platform-baked"
+  for path, content in inputs.items():
+    baked_path = baked_root / path
+    baked_path.parent.mkdir(parents=True, exist_ok=True)
+    baked_path.write_text(content)
+  # Existing images have a real input map, but these boot keys were not yet
+  # classified. Test actual frozen Git blobs, not matching checkout guesses.
+  info = {"sha": frozen, "image_inputs": {
+    "Dockerfile": hashlib.sha256(inputs["Dockerfile"].encode()).hexdigest(),
+  }}
+  monkeypatch.setattr(pu, "_build_info", lambda: info)
+  monkeypatch.setattr(pu, "BAKED_PLATFORM_REPO", baked_root, raising=False)
+  return origin, platform, baked_root, info
+
+
+@pytest.mark.parametrize("path", _LEGACY_BOOT_INPUTS)
+def test_legacy_baked_boot_hash_is_proved_from_frozen_image_bytes(legacy_baked_boot, path):
+  _, platform, baked_root, info = legacy_baked_boot
+  content = (baked_root / path).read_bytes()
+  assert pu._image_runs(platform, path, info["image_inputs"], content)
+  assert not pu._image_runs(platform, path, info["image_inputs"], b"BOOT_VERSION = 2\n")
+
+
+def test_legacy_boot_proof_is_shared_by_drift_and_activation_retirement(legacy_baked_boot):
+  _, platform, _, info = legacy_baked_boot
+  frozen = info["sha"]
+  path = "backend/app/platform_update.py"
+  assert pu.image_input_drift(platform) == []
+  assert pu._image_work_owed(platform, [path], frozen) == []
+  _local_commit(platform, edits={path: "BOOT_VERSION = 2\n"})
+  assert pu.image_input_drift(platform) == [path]
+  # An official image can retire the release input, not claim to run a local edit.
+  assert pu._image_work_owed(platform, [path], frozen) == []
+  assert pu._image_work_owed(platform, [path], _served_sha(platform)) == [path]
+
+
+def test_satisfied_boot_image_still_owes_served_restart(legacy_baked_boot, monkeypatch):
+  origin, platform, _, info = legacy_baked_boot
+  path = "backend/app/config.py"
+  frozen = info["sha"]
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(frozen + "\n")
+  head = _local_commit(platform, edits={path: "BOOT_VERSION = 2\n"})
+  assert pu._platform_activation_impact(platform)["required_actions"] == ["server_restart"]
+  assert pu._record_update_activation(platform, head, frozen)["required_actions"] == ["server_restart"]
+  assert path in pu._read_activation_marker()["paths"]
+  assert pu._owed_activation(platform, frozen, head, release=frozen)["required_actions"] == ["server_restart"]
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  assert platform_restart.pending_restart_paths() == [path]
+  release = _advance_origin(origin, edits={"release.txt": "next\n"})
+  pu._fetch(platform)
+  plan = pu.reviewed_container_rebuild_plan(
+    plan_id=pu._update_plan_id(head, release), current_sha=head,
+    target_sha=release, image_digest=None, repo=platform,
+  )
+  assert plan["activation"]["required_actions"] == ["server_restart"]
+
+
+def test_boot_image_drift_alone_does_not_owe_restart(legacy_baked_boot):
+  _, platform, _, _ = legacy_baked_boot
+  _local_commit(platform, edits={"backend/app/config.py": "BOOT_VERSION = 2\n"})
+  assert pu._platform_activation_impact(platform)["required_actions"] == []
+
+
+def test_unknown_boot_image_proof_does_not_claim_served_only_restart(
+  legacy_baked_boot, monkeypatch,
+):
+  _, platform, _, info = legacy_baked_boot
+  frozen = info.pop("sha")
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(frozen + "\n")
+  head = _local_commit(platform, edits={"backend/app/config.py": "BOOT_VERSION = 2\n"})
+  assert pu._platform_activation_impact(platform)["required_actions"] == ["image_rebuild"]
+  assert pu._owed_activation(platform, frozen, head, release=frozen)["required_actions"] == ["image_rebuild"]
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  assert platform_restart.pending_restart_paths() == []
+
+
+def test_official_boot_change_still_owes_image(legacy_baked_boot):
+  origin, platform, _, info = legacy_baked_boot
+  path = "backend/app/config.py"
+  target = _advance_origin(origin, edits={path: "BOOT_VERSION = 3\n"})
+  pu._fetch(platform)
+  assert pu._platform_activation_impact(
+    platform, served_to_head=[path], release=target,
+  )["required_actions"] == ["image_rebuild"]
+
+
+def test_pre_rule_release_boot_retires_served_boot_debt(legacy_baked_boot):
+  """Run a released image's actual classifier and retirement body (the #1660
+  release, from before baked boot modules were image work), then inspect
+  status through the served candidate. Candidate boot code is not the code
+  that the installed image executes."""
+  _, platform, _, info = legacy_baked_boot
+  path = "backend/app/config.py"
+  frozen = info["sha"]
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(frozen + "\n")
+  head = _local_commit(platform, edits={path: "BOOT_VERSION = 2\n"})
+  pu._record_update_activation(platform, head, frozen)
+  assert path in pu._read_activation_marker()["paths"]
+
+  exact = "2e3ffb264a6badf37de0315dd7e5a8b72802af1a"  # #1660
+  source_repo = Path(__file__).resolve().parents[2]
+  for relative in ("backend/app/platform_activation.py", "backend/app/platform_update.py"):
+    present = subprocess.run(
+      ["git", "cat-file", "-e", f"{exact}:{relative}"], cwd=source_repo,
+      capture_output=True, check=False,
+    )
+    if present.returncode != 0:
+      pytest.skip("the released image's source objects are absent from this checkout")
+  def frozen_source(relative):
+    return subprocess.run(
+      ["git", "show", f"{exact}:{relative}"], cwd=source_repo,
+      check=True, capture_output=True, text=True,
+    ).stdout
+
+  frozen_activation = ModuleType("_released_platform_activation")
+  sys.modules[frozen_activation.__name__] = frozen_activation
+  try:
+    exec(frozen_source("backend/app/platform_activation.py"), frozen_activation.__dict__)
+    assert frozen_activation.classify_activation([path])["required_actions"] == ["server_restart"]
+    source = frozen_source("backend/app/platform_update.py")
+    function = next(
+      node for node in ast.parse(source).body
+      if isinstance(node, ast.FunctionDef) and node.name == "_complete_boot_activation"
+    )
+    namespace = {
+      "Path": Path, "platform_activation": frozen_activation,
+      "_read_activation_marker": pu._read_activation_marker,
+      "_write_activation_marker": pu._write_activation_marker,
+      "RESTART_NEEDED_FLAG": pu.RESTART_NEEDED_FLAG,
+      "current_build_sha": lambda: frozen,
+      "_rev": pu._rev, "_is_ancestor": pu._is_ancestor,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "released-boot", "exec"), namespace)
+    namespace["_complete_boot_activation"](platform)
+  finally:
+    sys.modules.pop(frozen_activation.__name__, None)
+  pu.SERVING_SHA_FILE.write_text(head + "\n")
+  assert pu._read_activation_marker() is None
+  assert pu.platform_status(platform)["activation"]["required_actions"] == []
+
+
+@pytest.mark.parametrize("missing", ["sha", "commit", "baked_file", "baked_matches_blob", "blob"])
+def test_legacy_boot_proof_refuses_missing_or_disagreeing_image_evidence(legacy_baked_boot, missing):
+  _, platform, baked_root, info = legacy_baked_boot
+  path = "backend/app/platform_boot.py"
+  content = (baked_root / path).read_bytes()
+  if missing == "sha":
+    info.pop("sha")
+  elif missing == "commit":
+    info["sha"] = "0" * 40
+  elif missing == "baked_file":
+    (baked_root / path).unlink()
+  elif missing == "baked_matches_blob":
+    (baked_root / path).write_bytes(b"unverified image bytes")
+  else:
+    info["sha"] = _git(platform, "rev-parse", "HEAD~1").stdout.strip()
+  assert not pu._image_runs(platform, path, info["image_inputs"], content)
+  assert not pu._image_runs(platform, path, info["image_inputs"], None)
+  assert pu._image_work_owed(platform, [path], _served_sha(platform)) == [path]
+
+
+@pytest.mark.parametrize("recorded", [None, "malformed", "0" * 64])
+def test_legacy_boot_proof_never_overrides_an_existing_recorded_input(legacy_baked_boot, recorded):
+  _, platform, baked_root, info = legacy_baked_boot
+  path = "backend/app/platform_boot.py"
+  info["image_inputs"][path] = recorded
+  assert not pu._image_runs(platform, path, info["image_inputs"], (baked_root / path).read_bytes())
+
+
+def test_legacy_boot_proof_does_not_infer_other_missing_image_inputs(legacy_baked_boot):
+  _, platform, baked_root, info = legacy_baked_boot
+  path = "Dockerfile"
+  info["image_inputs"].pop(path)
+  assert not pu._image_runs(platform, path, info["image_inputs"], (baked_root / path).read_bytes())
+  assert pu.image_input_drift(platform) is None  # No usable legacy input record.
+
+
+def test_reviewed_baked_boot_update_uses_existing_image_replacement_gate(legacy_baked_boot):
+  origin, platform, _, _ = legacy_baked_boot
+  current = _served_sha(platform)
+  target = _advance_origin(origin, edits={"backend/app/platform_update.py": "BOOT_VERSION = 2\n"})
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  assert preview["activation"]["required_actions"] == ["image_rebuild"]
+  reviewed = pu.reviewed_container_rebuild_plan(
+    repo=platform, current_sha=current, target_sha=target,
+    image_digest=None, plan_id=preview["plan_id"],
+  )
+  assert reviewed["activation"]["required_actions"] == ["image_rebuild"]
+
 
 def test_image_input_drift_feeds_the_activation_state(clone_env, monkeypatch, tmp_path):
   _origin, platform = clone_env
