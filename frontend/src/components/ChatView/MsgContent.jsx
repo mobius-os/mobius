@@ -23,7 +23,8 @@ import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Att
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
 import SideQuestionNote from './SideQuestionNote.jsx'
-import { isContinuationMessage, isSideQuestionMessage } from './chatRuntimeState.js'
+import PauseRecordCard from './PauseRecordCard.jsx'
+import { isContinuationMessage, isSideQuestionMessage, PAUSE_RECORD_BLOCK } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
   legacyRestartActivityOwners,
@@ -568,6 +569,9 @@ function MsgContentInner({
             interactive={isActiveAnswer && isStreaming}
           />
         )
+      }
+      if (block.type === PAUSE_RECORD_BLOCK) {
+        return <PauseRecordCard key={assistantBlockKey(block, i)} block={block} />
       }
       if (block.type === 'error') {
         // Errors persist as their own block (backend's

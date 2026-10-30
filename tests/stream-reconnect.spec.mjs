@@ -145,7 +145,7 @@ async function pillOverlapDiagnostics(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Stream reconnection', () => {
-  test('confirmed live restart recovery supersedes its stale card before detail hydration', async ({ page }) => {
+  test('confirmed live restart recovery settles its stale card into a record before detail hydration', async ({ page }) => {
     const chat = await setupChat(page)
     const pausedId = 'restart-paused-answer'
     const successorId = 'restart-resumed-answer'
@@ -206,6 +206,8 @@ test.describe('Stream reconnection', () => {
     await expect(surface).toContainText('A later live chunk also arrives.')
     await expect(surface.locator('.chat__text--error')).toHaveCount(0)
     await expect(surface).toContainText('Progress saved before the restart.')
+    await expect(surface.locator('.chat__marker', { hasText: 'Paused for a platform update' }),
+      'the update stays visible in history as a settled record').toBeVisible()
   })
 
   test('1. Completed stream stays idle after visibility change', async ({ page }) => {
