@@ -92,7 +92,14 @@ The app container has no Docker (see `platform-reference`), which is not a
 reason to hide or skip validation. Inside Möbius:
 
 - run `scripts/test.sh --fast` for the cheap hermetic contracts and
-  `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
+  `scripts/wt-pytest.sh <focused tests>` for the changed behavior. Run
+  frontend suites, coverage included, through `scripts/wt-npm.sh` too; it
+  keeps their bulky scratch off the small data volume. To re-check one
+  frontend file, use `scripts/wt-npm.sh run -s test:lib:file -- <path>` (or
+  `test:hooks:file` for hook tests) rather than the whole suite. That
+  scratch lives on the container's own disk, which Railway's Free and Trial
+  plans cap at about 1 GB (exceeding it redeploys the service): on those
+  plans run only focused tests, never a full suite or coverage;
 - keep resources bounded: the container shares one cgroup quota — about 4
   CPUs, 1000 process ids, and one ~4 GB memory limit, whatever `nproc`
   reports — with every running chat and helper, so aggregate concurrency

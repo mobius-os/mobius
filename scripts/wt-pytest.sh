@@ -25,11 +25,17 @@ set -uo pipefail
 # backend/tests is collected before that directory's conftest.py, so relying on
 # conftest to replace an inherited production DATABASE_URL is too late: a
 # module-level `from app.database import ...` has already bound the engine.
-TEST_RUNTIME_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mobius-wt-pytest.XXXXXX")" \
+# The runtime lives on /tmp, not $TMPDIR: an agent chat's $TMPDIR is durable
+# scratch on the small data volume, and a suite's databases, tmp_path trees
+# and browser temp have filled that volume and broken the agent's own tool
+# output. TMPDIR is pointed inside the runtime below, so everything a test
+# creates through tempfile is removed with it.
+TEST_SCRATCH_PARENT=/tmp
+TEST_RUNTIME_ROOT="$(mktemp -d "$TEST_SCRATCH_PARENT/mobius-wt-pytest.XXXXXX")" \
   || { echo "wt-pytest: could not create isolated runtime" >&2; exit 1; }
 cleanup_test_runtime() {
   case "$TEST_RUNTIME_ROOT" in
-    "${TMPDIR:-/tmp}"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
+    "$TEST_SCRATCH_PARENT"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
     *) echo "wt-pytest: refusing unsafe cleanup target: $TEST_RUNTIME_ROOT" >&2 ;;
   esac
 }
@@ -166,7 +172,7 @@ NODE_BIN_DIR="$NODE_MODULES/.bin"
 PYTEST_ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
+    backend/tests | backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
     *) PYTEST_ARGS+=("$arg") ;;
   esac
 done
@@ -215,6 +221,7 @@ if [ "${MOBIUS_PYTEST_SERIALIZE:-0}" = "1" ] \
   fi
 fi
 
+mkdir -p "$TEST_RUNTIME_ROOT/tmp" || exit 1
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
@@ -237,6 +244,7 @@ TEST_ENV=(env \
   MOBIUS_SSO_INSTANCE_ID= \
   MOBIUS_IDENTITY_BROKER_SOCKET="$TEST_RUNTIME_ROOT/no-identity-broker.sock" \
   RAILWAY_PUBLIC_DOMAIN= \
+  TMPDIR="$TEST_RUNTIME_ROOT/tmp" \
   MOBIUS_TEST_RUNTIME=1 \
   MOBIUS_TEST_DATABASE_ISOLATED=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \

@@ -191,7 +191,12 @@ POLLUTION="$(git log --format='%an <%ae>' "$BASE"..HEAD 2>/dev/null \
 if [ "${POLLUTION:-0}" -gt 0 ]; then
   err "detected $POLLUTION Mobius-authored commit(s) on this branch — likely app-git test pollution:"
   git log --format='%h %an %s' "$BASE"..HEAD | grep 'Mobius' | sed 's/^/    /' >&2
-  err "recover: git reset --hard origin/main  (drops the pollution); see scripts/git-doctor.sh"
+  # Möbius also authors legitimate local platform commits under this identity,
+  # so the hint must never discard history: a hard reset of a live checkout
+  # once dropped real, unpushed work.
+  err "test pollution has the subject 'Initialize app repo'; other Mobius commits may be real local work"
+  err "recover: push from a branch built on origin/main with only the intended commits cherry-picked;"
+  err "         never reset a live branch to drop them. See scripts/git-doctor.sh"
   fail_check polluted-history
 fi
 
