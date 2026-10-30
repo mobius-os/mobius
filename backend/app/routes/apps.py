@@ -3336,6 +3336,7 @@ async def delete_uninstalled_app_permanently(
   reinstall. Only the owner (never an app or a helper agent) can do it: the
   recovery window is the undo, and this gives it up.
   """
+  from app import key_vault
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -3354,6 +3355,16 @@ async def delete_uninstalled_app_permanently(
       )
     except AppPurgeBlocked as exc:
       raise HTTPException(status_code=409, detail=str(exc))
+    except key_vault.BorrowInFlight:
+      raise HTTPException(
+        status_code=409,
+        detail="This app is still waiting on a key. Try again in a moment.",
+      ) from None
+    except key_vault.VaultUnavailable:
+      raise HTTPException(
+        status_code=503,
+        detail="The key vault isn't answering, so the app's keys can't be removed yet. Try again shortly.",
+      ) from None
 
 
 @router.delete(

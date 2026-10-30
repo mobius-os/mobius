@@ -345,6 +345,22 @@ def test_purge_waits_for_a_key_borrow_before_removing_anything(
   assert not data_file.exists()
 
 
+def test_permanent_delete_asks_to_retry_while_a_key_borrow_is_in_flight(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  from app import key_vault
+  monkeypatch.setattr(key_vault, "forget_app", lambda app_id: _noop())
+  app_id = _install(client, auth)["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  monkeypatch.setitem(key_vault._borrows_in_flight, app_id, 1)
+  response = client.delete(f"/api/apps/{app_id}/permanent", headers=auth)
+  assert response.status_code == 409 and "Try again" in response.json()["detail"]
+  db.expire_all()
+  assert db.query(models.App).filter(models.App.id == app_id).first() is not None
+  monkeypatch.delitem(key_vault._borrows_in_flight, app_id)
+  assert client.delete(f"/api/apps/{app_id}/permanent", headers=auth).status_code == 204
+
+
 async def _noop():
   return None
 

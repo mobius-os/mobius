@@ -127,6 +127,11 @@ def validate_value(value) -> str:
   return value
 
 
+# How a key is sent when nobody chose otherwise: an app's own save, or an
+# approved request for a new key whose app did not say.
+DEFAULT_INJECT = {"type": "header", "name": "Authorization", "prefix": "Bearer "}
+
+
 def validate_inject(raw) -> dict:
   if not isinstance(raw, dict):
     raise VaultError(400, "Choose where the key is sent: a header or a query parameter.")
@@ -515,6 +520,14 @@ class Vault:
     self._aead = AESGCM(self._load_master_key())
     self._records = self._load_records()
     self._requests = self._load_requests()
+    # Earlier builds kept an origin after its app lost the grant; never let
+    # one stored that way confer ownership.
+    orphaned = [name for name, record in self._records.items()
+                if record.get("origin") and record["origin"]["app"] not in record["grants"]["apps"]]
+    for name in orphaned:
+      self._drop_orphaned_origin(self._records[name])
+    if orphaned:
+      self._save()
 
   def _prepare_folder(self) -> None:
     # The modes are what keep app code running as another user out, so the
@@ -683,7 +696,7 @@ class Vault:
         if name not in self._records:
           self.put_key(name, {
             "value": value,
-            "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
+            "inject": dict(DEFAULT_INJECT),
             "grants": {"apps": [app_id], "agents": True, "sites": []},
             "origin": origin,
             "create_only": True,
@@ -889,7 +902,8 @@ class Vault:
         if not isinstance(sites, list) or len(sites) > MAX_SITES:
           raise VaultError(400, f"Choose at most {MAX_SITES} sites.")
         grants = {"apps": [request["app"]], "agents": False, "sites": [validate_site(s) for s in sites]}
-        put = {"grants": grants, "inject": body.get("inject") or request["inject"], "value": body.get("value")}
+        inject = body.get("inject") or request["inject"] or dict(DEFAULT_INJECT)
+        put = {"grants": grants, "inject": inject, "value": body.get("value")}
         outside = []
       result = self.put_key(name, put)
       self._requests.pop(request_id, None)

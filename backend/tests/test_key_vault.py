@@ -612,6 +612,22 @@ def test_an_origin_lasts_only_while_its_app_holds_a_grant(vault):
   assert _origin(vault, kept) is None
 
 
+def test_a_new_key_request_without_a_slot_is_sent_as_a_bearer_token(vault):
+  asked = vault.request_access(9, {k: v for k, v in ASK.items() if k != "inject"})
+  vault.approve_request(asked["id"], {"value": DUMMY, "ticket": _ticket(vault, asked["id"])})
+  assert next(k for k in vault.list_keys() if k["name"] == ASK["key"])["inject"] == HEADER_SLOT
+
+
+def test_an_origin_stored_without_its_apps_grant_is_dropped_on_load(tmp_path, vault):
+  name = vault.save_owned(5, "token", DUMMY)["name"]
+  # As an earlier build left it: the app's grant gone, its origin kept.
+  vault._records[name]["grants"]["apps"] = []
+  vault._save()
+  reloaded = kv.Vault(tmp_path / "vault")
+  assert next(k for k in reloaded.list_keys() if k["name"] == name).get("origin") is None
+  assert "origin" not in json.loads(reloaded.store_path.read_text())["keys"][name]
+
+
 def test_only_one_vault_runs_on_a_folder(tmp_path):
   fd = kv.hold_single_instance_lock(tmp_path / "store")
   try:

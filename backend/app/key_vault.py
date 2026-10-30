@@ -345,6 +345,14 @@ async def borrow(
       )
 
 
+class BorrowInFlight(RuntimeError):
+  """A purge must wait: a key borrow the app started has no answer yet.
+
+  A RuntimeError, so the TTL sweep leaves the tombstone for its next pass;
+  the owner's permanent delete answers 409 and asks them to try again.
+  """
+
+
 def refuse_purge_while_borrowing(app_id: int) -> None:
   """Raise while a borrow ``app_id`` started has not had its answer yet.
 
@@ -352,7 +360,7 @@ def refuse_purge_while_borrowing(app_id: int) -> None:
   before removing anything, and ``forget_app`` checks it again.
   """
   if _borrows_in_flight.get(int(app_id)):
-    raise RuntimeError(f"app {app_id} has a key borrow in flight; purge it later")
+    raise BorrowInFlight(f"app {app_id} has a key borrow in flight; purge it later")
 
 
 @contextlib.asynccontextmanager
