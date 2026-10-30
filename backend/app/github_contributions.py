@@ -2957,7 +2957,6 @@ def _inspect_personal_pr_ready_target(target: PersonalReadyTarget) -> dict:
       or live.get("html_url") != target.url
       or head_repo.get("full_name") != target.head_repository
       or head.get("ref") != target.head_branch
-      or str(head.get("sha") or "").lower() != target.head_sha
       or base_repo.get("full_name") != target.repo
       or base.get("ref") != target.base_branch
       or not node_id
@@ -2965,6 +2964,14 @@ def _inspect_personal_pr_ready_target(target: PersonalReadyTarget) -> dict:
     ):
       raise ContributionSubmitError(
         "The live pull request no longer matches the exact reviewed Ready action. Nothing was changed.",
+        code="ready_target_changed",
+      )
+    if str(head.get("sha") or "").lower() != target.head_sha:
+      raise ContributionSubmitError(
+        "This pull request changed on GitHub after it was reviewed. Its latest "
+        "commit is no longer the one you approved, for example because Update "
+        "branch added a merge commit. Nothing was changed. Ask your agent to "
+        "prepare it again so the new commit is reviewed.",
         code="ready_target_changed",
       )
     return {
