@@ -2,9 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationObserver, QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import AppsDirectory from '../../components/Drawer/AppsDirectory.jsx'
+import {
+  latestActionState,
+  runUninstalledAction,
+  selectActionState,
+  uninstalledActionKey,
+} from '../../components/Drawer/uninstalledAppActions.js'
 import { expiryCountdown, failureMessage, removedLabel } from '../../components/Drawer/uninstalledApps.js'
 
 const NOW = Date.parse('2026-10-27T12:00:00Z')
@@ -104,4 +111,26 @@ test('a device clock that runs ahead does not hide an app the server would still
     { id: 5, name: 'Skewed', slug: 'skewed', deleted_at: new Date(Date.now() - 7 * DAY - HOUR).toISOString(), expires_at: new Date(Date.now() - HOUR).toISOString(), seconds_left: 3 * HOUR / SEC },
   ])
   assert.match(html, /Skewed, uninstalled, ~6 hrs left/)
+})
+
+test('a request outlives its tile: a tile mounted later sees it running, and keeps its failure', async () => {
+  const client = new QueryClient()
+  const key = uninstalledActionKey(7)
+  const original = api.apps.recover
+  let finish
+  api.apps.recover = () => new Promise(resolve => { finish = resolve })
+  try {
+    // The tile that started it is gone (a search filtered it out); only the query client remembers.
+    const done = new MutationObserver(client, { mutationKey: key, mutationFn: kind => runUninstalledAction(client, 7, kind) })
+      .mutate('recover').catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const shown = () => latestActionState(client.getMutationCache().findAll({ mutationKey: key }).map(selectActionState))
+    assert.deepEqual(shown(), { working: 'recover', error: '' })
+
+    finish(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }))
+    await done
+    assert.deepEqual(shown(), { working: null, error: 'Recovery window has expired.' })
+  } finally {
+    api.apps.recover = original
+  }
 })

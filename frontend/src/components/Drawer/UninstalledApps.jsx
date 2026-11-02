@@ -1,19 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query'
 import { Clock } from '@openai/apps-sdk-ui/components/Icon'
-import { api } from '../../api/client.js'
-import { appQueries } from '../../hooks/queries.js'
 import { placeUnderAnchor } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import AppIcon from '../AppIcon.jsx'
-import { failureMessage, removedLabel } from './uninstalledApps.js'
+import {
+  ACTIONS,
+  latestActionState,
+  runUninstalledAction,
+  selectActionState,
+  uninstalledActionKey,
+} from './uninstalledAppActions.js'
+import { removedLabel } from './uninstalledApps.js'
 import './UninstalledApps.css'
-
-const ACTIONS = {
-  recover: { call: id => api.apps.recover(id), working: 'Recovering…', failed: 'Could not recover this app. Try again.' },
-  delete: { call: id => api.apps.deletePermanently(id), working: 'Deleting…', failed: 'Could not delete this app. Try again.' },
-}
 
 function iconItem(row) {
   return {
@@ -143,33 +143,25 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, working, er
 function UninstalledTile({ row, countdown, open, onToggle, onShow, onHide }) {
   const queryClient = useQueryClient()
   const buttonRef = useRef(null)
-  // The request belongs to the tile, not the card: dismissing the card must not forget a request in flight,
-  // lose its failure, or hand back fresh buttons that could start a second one.
-  const [working, setWorking] = useState(null)
-  const [error, setError] = useState('')
+  // The request and its result live in the mutation cache, not here: this tile unmounts when a search filters it
+  // out, and the card unmounts when it is dismissed, yet the request carries on and its result must survive both.
+  const mutationKey = uninstalledActionKey(row.id)
+  const { mutate } = useMutation({
+    mutationKey,
+    mutationFn: kind => runUninstalledAction(queryClient, row.id, kind),
+  })
+  const { working, error } = latestActionState(useMutationState({ filters: { mutationKey }, select: selectActionState }))
 
-  async function run(kind) {
-    setWorking(kind)
-    setError('')
-    try {
-      const response = await ACTIONS[kind].call(row.id)
-      if (!response.ok) {
-        setError(await failureMessage(response, ACTIONS[kind].failed))
-        onShow(row.id)
-        return
-      }
-      onHide(row.id)
-      await Promise.all([
-        appQueries.list.invalidate(queryClient),
-        appQueries.uninstalled.invalidate(queryClient),
-      ])
-    } catch {
-      setError('Could not reach Möbius. Try again.')
-      onShow(row.id)
-    } finally {
-      setWorking(null)
-    }
-  }
+  // When a request ends while this tile is shown: a failure brings its card back with the reason, a success
+  // closes it.
+  const wasWorking = useRef(false)
+  useEffect(() => {
+    const finished = wasWorking.current && working === null
+    wasWorking.current = working !== null
+    if (!finished) return
+    if (error) onShow(row.id)
+    else onHide(row.id)
+  }, [working, error, row.id, onShow, onHide])
 
   return (
     <div className="apps-directory__card apps-directory__card--uninstalled">
@@ -199,7 +191,7 @@ function UninstalledTile({ row, countdown, open, onToggle, onShow, onHide }) {
           focusFirst={open.focusFirst}
           working={working}
           error={error}
-          onRun={run}
+          onRun={mutate}
           onClose={() => onHide(row.id)}
         />
       )}
@@ -211,6 +203,11 @@ function UninstalledTile({ row, countdown, open, onToggle, onShow, onHide }) {
 // what can be done with it.
 export default function UninstalledTiles({ entries }) {
   const [open, setOpen] = useState(null)
+
+  // A card whose tile is gone (recovered, deleted, expired or filtered out by a search) is closed.
+  useEffect(() => {
+    if (open && !entries.some(({ row }) => row.id === open.id)) setOpen(null)
+  }, [entries, open])
 
   function toggle(id, focusFirst = false) {
     setOpen(current => (current?.id === id ? null : { id, focusFirst }))
