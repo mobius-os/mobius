@@ -1,6 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Search } from '@openai/apps-sdk-ui/components/Icon'
-import UninstalledApps from './UninstalledApps.jsx'
+import { appQueries } from '../../hooks/queries.js'
+import useExpiryCountdowns from '../../hooks/useExpiryCountdowns.js'
+import UninstalledTiles from './UninstalledApps.jsx'
+import { filterInstalledApps } from './drawerInformationArchitecture.js'
 import './AppsDirectory.css'
 
 export default function AppsDirectory({
@@ -26,7 +29,12 @@ export default function AppsDirectory({
     }
   }, [])
 
-  const noMatches = status === 'success' && !empty && resultCount === 0
+  // Uninstalled apps still in their recovery window join the grid, grayed out, and follow the same search.
+  const { data: removed = [], dataUpdatedAt } = appQueries.uninstalled.useQuery()
+  const removedMatches = useMemo(() => filterInstalledApps(removed, query), [removed, query])
+  const removedTiles = useExpiryCountdowns(removedMatches, dataUpdatedAt)
+  const nothingInstalled = empty && removed.length === 0
+  const noMatches = status === 'success' && !nothingInstalled && resultCount + removedTiles.length === 0
 
   return (
     <section className="apps-directory" aria-label="Installed apps">
@@ -67,14 +75,14 @@ export default function AppsDirectory({
                 <h2>Your apps</h2>
                 <p>Everything installed in this Möbius workspace.</p>
               </div>
-              {query && !empty && (
+              {query && !nothingInstalled && (
                 <span aria-live="polite">
-                  {resultCount} {resultCount === 1 ? 'match' : 'matches'}
+                  {resultCount + removedTiles.length} {resultCount + removedTiles.length === 1 ? 'match' : 'matches'}
                 </span>
               )}
             </div>
 
-            {empty ? (
+            {nothingInstalled ? (
               <div className="apps-directory__empty">
                 <h2>No installed apps yet</h2>
                 <p>Installed apps will appear here as soon as you add one.</p>
@@ -85,9 +93,11 @@ export default function AppsDirectory({
                 <p>Try a different name or keyword.</p>
               </div>
             ) : (
-              <div className="apps-directory__grid">{children}</div>
+              <div className="apps-directory__grid">
+                {children}
+                <UninstalledTiles entries={removedTiles} />
+              </div>
             )}
-            <UninstalledApps />
           </>
         )}
       </div>
