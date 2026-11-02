@@ -241,29 +241,36 @@ def continuation_actor_label(message: Mapping[str, Any] | None) -> str:
 
 
 def undelivered_input(db, chat, superseded_run) -> list[str]:
-  """Transcript input a parked run was carrying when it never reached the provider.
+  """Owner input a parked turn was carrying when it never reached the provider.
 
   A turn deferred at admission (low memory or storage) is parked before the
   provider starts, so the provider session never received the owner rows that
   turn was answering. A control-only continuation would otherwise deliver just
   "resume the interrupted work", and the agent answers the pause instead of the
-  request. Walk back from the transcript tail over pause rows of runs that
-  never started and collect the input rows between them and the last row of a
-  run that did reach the provider. Empty when the superseded run had started.
+  request. Walk back from the transcript tail over pause rows of this turn's
+  own never-started attempts (same logical root) and collect the owner rows
+  between them. Stop at any other run's row, so a stopped or unrelated turn's
+  input is never resumed. Product-written user-slot rows (a kept side answer,
+  a continuation marker) are context with their own delivery, not requests.
+  Empty when the superseded run had started.
   """
   from app import models, transcript_rows
 
   if superseded_run is None or superseded_run.provider_execution_admitted is not False:
     return []
+  root = superseded_run.root_run_id or superseded_run.id
   carried: list[str] = []
   for _seq, row in transcript_rows.reverse_iter(db, chat):
     if row.get("role") == "user":
-      if row.get("content"):
+      if row.get("content") and not_owner_speech_label(row) is None:
         carried.append(row["content"])
       continue
     run_id = assistant_message_run_id(row.get("id"))
     run = db.get(models.ChatRun, run_id) if run_id else None
-    if run is None or run.provider_execution_admitted is not False:
+    if (
+      run is None or run.provider_execution_admitted is not False
+      or (run.root_run_id or run.id) != root
+    ):
       break
   carried.reverse()
   return carried
