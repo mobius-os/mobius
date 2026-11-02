@@ -103,6 +103,7 @@ def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public
     (("data", "connect_manage"), True),
     (("data", "identity_manage"), True),
     (("data", "railway_manage"), True),
+    (("data", "spend_credits"), True),
     (("public", "storage", "read"), True),
     (("public", "storage", "write_prefix"), "public/submissions/"),
   ],

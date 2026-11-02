@@ -26,6 +26,7 @@ RECOGNIZED_CAPABILITIES = (
   "identity_manage",
   "railway_manage",
   "location_history_read",
+  "spend_credits",
 )
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024

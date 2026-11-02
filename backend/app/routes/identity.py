@@ -21,15 +21,16 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import models
+from app import credits_client, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
+  get_credits_spender,
   get_identity_reader,
   get_owner_or_app_with_identity_manage,
   get_owner_or_app_with_railway_manage,
@@ -1671,3 +1672,166 @@ async def _delete_link(owner: models.Owner, db: Session):
   db.delete(link)
   db.commit()
   return Response(status_code=204)
+
+
+# --- Credits at the paired credits service ----------------------------------
+#
+# The owner, or an app holding the reviewed identity-management grant (the
+# Möbius · You app), as for the rest of this router. Anything that pairs,
+# buys, spends, publishes a price or moves earnings also refuses a delegated
+# helper and a shared-browser guest. Paying for an app call has its own gate,
+# ``get_credits_spender``.
+
+
+class _CreditsPairRequest(BaseModel):
+  operator_url: str = Field(max_length=2000)
+  key: str = Field(max_length=500)
+
+
+class _CreditsTopupRequest(BaseModel):
+  amount_cents: int = Field(gt=0)
+  waiver_accepted: bool = False
+  return_url: str | None = Field(default=None, max_length=2000)
+
+
+class _CreditsFundingRequest(BaseModel):
+  amount_micro: int = Field(gt=0)
+  idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class _CreditsPriceRequest(BaseModel):
+  price_micro: int = Field(ge=0)
+  description: str | None = Field(default=None, max_length=300)
+  enabled: bool = True
+
+
+class _CreditsChargeRequest(BaseModel):
+  seller: str = Field(min_length=1, max_length=40)
+  app: str = Field(min_length=1, max_length=80)
+  action: str = Field(min_length=1, max_length=80)
+  idempotency_key: str = Field(min_length=8, max_length=200)
+  # The price the app showed the owner; a higher current price refuses.
+  max_price_micro: int = Field(ge=0)
+
+
+class _CreditsConnectRequest(BaseModel):
+  return_url: str | None = Field(default=None, max_length=2000)
+
+
+def _credits(action, *args):
+  try:
+    return action(*args)
+  except credits_client.CreditsUnavailable as error:
+    raise credits_client.as_http(error) from error
+
+
+_credits_control = [Depends(require_nondelegated_owner_or_app_control)]
+
+
+@router.get("/credits")
+def read_credits(_owner: models.Owner = Depends(get_owner_or_app_with_identity_manage)):
+  """Balance and earnings from the paired credits service, never stored here."""
+  return credits_client.summary()
+
+
+@router.post("/credits/pair", dependencies=_credits_control)
+def pair_credits(
+  body: _CreditsPairRequest,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  return _credits(credits_client.pair, body.operator_url, body.key)
+
+
+@router.post("/credits/unpair", dependencies=_credits_control)
+def unpair_credits(_owner: models.Owner = Depends(get_owner_or_app_with_identity_manage)):
+  return credits_client.unpair()
+
+
+@router.post("/credits/topup", dependencies=_credits_control)
+def start_credits_topup(
+  body: _CreditsTopupRequest,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  return _credits(
+    credits_client.start_topup, body.amount_cents, body.waiver_accepted, body.return_url)
+
+
+@router.get("/credits/topups/{topup_id}")
+def read_credits_topup(
+  topup_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """A purchase's state. Reading it after Stripe's page confirms payment."""
+  return _credits(credits_client.read_topup, topup_id)
+
+
+@router.get("/credits/transactions")
+def read_credits_transactions(
+  limit: int = 50,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  return _credits(credits_client.transactions, limit)
+
+
+@router.post("/credits/model-funding", dependencies=_credits_control)
+def fund_model_balance(
+  body: _CreditsFundingRequest,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Spend credits on Möbius-hosted model usage."""
+  return _credits(credits_client.fund_models, body.amount_micro, body.idempotency_key)
+
+
+@router.get("/credits/prices/{seller}")
+def read_credits_prices(
+  seller: str,
+  app_slug: str | None = None,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  return _credits(credits_client.prices, seller, app_slug)
+
+
+@router.put("/credits/prices/{app_slug}/{action}", dependencies=_credits_control)
+def publish_credits_price(
+  app_slug: str,
+  action: str,
+  body: _CreditsPriceRequest,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Set what one action of the owner's app costs other people."""
+  return _credits(
+    credits_client.publish_price,
+    app_slug, action, body.price_micro, body.description, body.enabled)
+
+
+@router.post("/credits/charges")
+def charge_credits_for_call(
+  body: _CreditsChargeRequest,
+  _owner: models.Owner = Depends(get_credits_spender),
+):
+  """An app's own service pays for one priced call from the owner's credits.
+
+  The price is the seller's, read at the credits service, so the app cannot
+  choose what a call costs; it can only refuse to pay more than it showed.
+  """
+  return _credits(
+    credits_client.charge,
+    body.seller, body.app, body.action, body.idempotency_key, body.max_price_micro)
+
+
+@router.post("/credits/connect", dependencies=_credits_control)
+def start_credits_connect(
+  body: _CreditsConnectRequest | None = None,
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Stripe's page for connecting the account that receives withdrawals."""
+  return _credits(credits_client.start_connect, body.return_url if body else None)
+
+
+@router.post("/credits/{action}", dependencies=_credits_control)
+def move_credits_earnings(
+  action: Literal["convert", "withdraw", "disconnect"],
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  """Keep cleared earnings as credits, withdraw them, or unlink Stripe."""
+  return _credits(credits_client.payout_action, action)

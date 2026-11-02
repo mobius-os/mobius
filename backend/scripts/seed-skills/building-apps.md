@@ -945,6 +945,30 @@ rather than showing it off. Tracking keeps running after the owner
 leaves your app, until it is stopped, the phone app is closed, or the owner
 signs out; signing out also erases positions the phone had not uploaded yet.
 
+## Priced calls paid with credits
+
+An app can charge for one of its actions. The creator publishes the price
+once from their own Möbius (Möbius · You, or
+`PUT /api/identity/credits/prices/<app>/<action>` `{price_micro}`; 1 credit =
+1,000,000 micro). Another owner's copy pays for each call from its **own
+service**, never its frame, with `"permissions": { "spend_credits": true }`:
+
+```js
+const res = await fetch(`${process.env.API_BASE_URL}/api/identity/credits/charges`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${process.env.APP_TOKEN}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ seller: 'ana', app: 'prompts', action: 'run',
+    idempotency_key: runId, max_price_micro: shownPrice }),
+})
+```
+
+Read the price first (`GET /api/identity/credits/prices/<seller>?app_slug=<app>`),
+show it to the owner, and send it as `max_price_micro`; a higher current price
+refuses with `price_changed`. Reuse one `idempotency_key` per call so a retry
+never pays twice. Do the paid work only after a 200, and explain each refusal
+by its `detail.code`: `not_paired` (connect credits in Möbius · You),
+`insufficient_credits`, `price_changed`, or `price_not_found`.
+
 ## Managed-app update events
 
 Shell-mounted apps whose reviewed contract grants `data.manage_apps === true` receive each completed update, uninstall or permanent erase, and recovery synchronously as `{type: 'moebius:managed-app-event', event: {type: 'app_updated' | 'app_deleted' | 'app_recovered', appId}}` through `window`'s `message` event, with a string `appId`; check `event.source === window.parent` before consuming it.

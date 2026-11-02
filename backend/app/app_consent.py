@@ -33,8 +33,8 @@ BASELINE = (
 # cannot mark itself harmless because it never supplies this.
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
-  "connect_manage", "identity_manage", "railway_manage", "agent_start",
-  "project_builders", "workspace.screen-control",
+  "connect_manage", "identity_manage", "railway_manage", "spend_credits",
+  "agent_start", "project_builders", "workspace.screen-control",
 })
 
 _CHAT_TEXT = {
@@ -81,6 +81,9 @@ _FLAGS = (
    "Can manage deployments on your Railway account."),
   ("location_history_read", "location_history_read", "See your location history",
    "Can read the locations your phone recorded."),
+  ("spend_credits", "spend_credits", "Spend your credits on paid features",
+   "Its service can pay for priced calls from your Möbius credits, at the "
+   "price each creator sets."),
   ("helper_activity_read", "helper_activity_read", "Read helper activity",
    "Can see every helper agent's chat, status, open questions, working folder "
    "and full final report."),

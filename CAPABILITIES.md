@@ -79,6 +79,23 @@ retract a key already read. Keep provider transport and secret handling in the
 app, not in new platform proxy routes. No grant implies permission to activate
 bots, send messages or make paid calls.
 
+### Paying for priced calls with credits
+
+An installation paired with a credits service (mobius.you's, through
+Möbius · You) keeps the owner's credits there, never in its own database. A
+creator publishes the price of one action of their app under their handle at
+that service; another owner's copy of the app pays for a call with
+`POST /api/identity/credits/charges`
+`{seller, app, action, idempotency_key, max_price_micro}`. Only the app's own
+service may call it, with the reviewed `permissions.spend_credits` grant (a
+critical consent row): never the browser frame, a public invocation, or a
+service a shared-browser guest invoked. The service reads the published price;
+the app cannot choose it, only refuse to pay more than `max_price_micro`, the
+price it showed the owner. Retrying the same idempotency key charges once.
+Refusals keep the service's `detail.code` and fields (`not_paired`,
+`insufficient_credits`, `price_changed` with the current `price_micro`,
+`key_spend_cap`).
+
 ## Manifest contract
 
 Runtime capabilities live in the root `capabilities` object:

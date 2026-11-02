@@ -1348,6 +1348,41 @@ def get_owner_or_app_with_location_history_read(
   )
 
 
+def get_credits_spender(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """An app's own service with the reviewed ``spend_credits`` grant.
+
+  A charge spends the owner's money, so only the app's reviewed backend may
+  make one: never its browser frame, which untrusted page content can drive,
+  and never a public invocation (``get_principal`` refuses that scope), whose
+  caller is a visitor. A service a shared-browser guest invoked is refused
+  too: the guest must not spend the installation owner's credits.
+  """
+  if principal.app_id is None or not principal.app_is_service:
+    raise HTTPException(
+      status_code=403,
+      detail="Only an app's own service can spend credits for the owner.",
+    )
+  if principal.browser is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner's own use of an app can spend their credits.",
+    )
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("spend_credits") is not True:
+    raise HTTPException(
+      status_code=403,
+      detail="This app needs permissions.spend_credits=true in its manifest to spend credits.",
+    )
+  return principal.owner
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

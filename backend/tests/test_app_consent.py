@@ -169,7 +169,8 @@ def test_every_contract_permission_has_a_row():
       "shared_memory": "write", "manage_apps": True, "manage_skills": True,
       "github_access": True, "github_connect": True, "connections_manage": True,
       "connect_manage": True, "identity_manage": True, "railway_manage": True,
-      "location_history_read": True, "job_secret_read": ["TOKEN"],
+      "location_history_read": True, "spend_credits": True,
+      "job_secret_read": ["TOKEN"],
     },
   }
   contract = contract_from_manifest(manifest)
@@ -180,7 +181,7 @@ def test_every_contract_permission_has_a_row():
           "filesystem_access", "manage_apps", "manage_skills", "github_access",
           "github_connect", "connections_manage", "connect_manage",
           "identity_manage", "railway_manage", "location_history_read",
-          "job_secret_read"} <= ids
+          "spend_credits", "job_secret_read"} <= ids
 
 
 def test_helper_activity_read_has_a_non_critical_row():
@@ -189,6 +190,13 @@ def test_helper_activity_read_has_a_non_critical_row():
     ("helper_activity_read", "Read helper activity", False),
   ]
   assert "helper_activity_read" in app_consent.HANDLED_DATA_KEYS
+
+
+def test_spending_credits_is_a_critical_row():
+  rows = app_consent.rows_from_contract(_contract(spend_credits=True))
+  assert [(r["id"], r["title"], r["critical"]) for r in rows] == [
+    ("spend_credits", "Spend your credits on paid features", True),
+  ]
 
 
 def test_acceptance_stores_rows_and_survives_a_rewording(db, monkeypatch):
