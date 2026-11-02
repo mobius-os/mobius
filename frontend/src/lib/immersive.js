@@ -69,15 +69,22 @@ export function isImmersiveActive(request, activeView, activeAppId) {
  * Real-time frame messages are forwarded directly and do not pass through
  * this helper. Lifecycle replay is narrower:
  *   - becoming inactive releases the holder;
- *   - returning to the same cached frame does nothing (no sticky re-entry);
+ *   - returning to the same cached frame does not resurrect a request made
+ *     on an earlier visit (no sticky re-entry);
+ *   - a request the frame made on THIS return, while it was already shown but
+ *     before it became the active canvas (`requestedOnReturn`), is honoured on
+ *     activation: the shell tells a frame it is visible before it marks the
+ *     pane active, so an app that asks as soon as it reappears would otherwise
+ *     lose that fresh request to ordering alone;
  *   - promoting a newly loaded frame while continuously active replays that
  *     new frame's recorded intent, so an in-place app update stays seamless.
  *
  * `null` means no callback. A boolean is the value to send to Shell.
  */
-export function immersiveLifecycleValue(previous, current, recordedIntent) {
+export function immersiveLifecycleValue(previous, current, recordedIntent, requestedOnReturn = false) {
   if (!current?.appId) return null
   if (!current.active) return false
+  if (requestedOnReturn) return recordedIntent === true ? true : null
 
   const sameCanvas = previous?.appId != null
     && String(previous.appId) === String(current.appId)

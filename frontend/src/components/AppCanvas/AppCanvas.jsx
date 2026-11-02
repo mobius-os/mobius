@@ -1084,6 +1084,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         frameImmersiveRef.current.set(srcVersion, { value, mode })
         if (srcVersion === liveVersionRef.current && activeRef.current) {
           onImmersive?.(appId, value, mode)
+        } else if (srcVersion === liveVersionRef.current && frameVisibleRef.current) {
+          // Shown but not yet the active canvas (a return handoff): a fresh
+          // request the lifecycle effect honours once this pane activates.
+          immersiveOnReturnRef.current = srcVersion
         }
         return
       }
@@ -1481,6 +1485,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // Exit choice survive app switches while preserving seamless in-place app
   // updates. The pure helper keeps that policy regression-testable.
   const immersiveLifecycleRef = useRef(null)
+  // Live version that requested immersive while shown but not yet active;
+  // consumed (or discarded) by the next lifecycle transition.
+  const immersiveOnReturnRef = useRef(null)
   useEffect(() => {
     if (!appId) return
     const current = { appId, liveVersion: swap.liveVersion, active }
@@ -1489,7 +1496,9 @@ const AppCanvas = forwardRef(function AppCanvas({
       immersiveLifecycleRef.current,
       current,
       intent?.value,
+      immersiveOnReturnRef.current === swap.liveVersion,
     )
+    immersiveOnReturnRef.current = null
     immersiveLifecycleRef.current = current
     if (value !== null) onImmersive?.(appId, value, intent?.mode)
   }, [appId, swap.liveVersion, active, onImmersive])

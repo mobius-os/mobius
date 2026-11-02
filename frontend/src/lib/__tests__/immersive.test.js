@@ -90,6 +90,17 @@ test('returning to a cached app never resurrects its old immersive request', () 
   ), null)
 })
 
+test('a request made on this return, before the pane activated, is honoured', () => {
+  // The shell shows the frame before it marks the pane active; an app that
+  // asks as soon as it reappears must not lose that fresh request.
+  const previous = { appId: 7, liveVersion: 'a', active: false }
+  const current = { appId: 7, liveVersion: 'a', active: true }
+  assert.equal(immersiveLifecycleValue(previous, current, true, true), true)
+  assert.equal(immersiveLifecycleValue(previous, current, false, true), null)
+  // Leaving still releases even if a request was recorded.
+  assert.equal(immersiveLifecycleValue(current, previous, true, true), false)
+})
+
 test('a live frame promotion replays only the promoted frame intent', () => {
   const previous = { appId: 7, liveVersion: 'a', active: true }
   const current = { appId: 7, liveVersion: 'b', active: true }
