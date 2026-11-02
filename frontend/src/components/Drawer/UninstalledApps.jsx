@@ -26,12 +26,9 @@ function iconItem(row) {
 }
 
 // What can be done with an uninstalled app, anchored under its tile.
-function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) {
-  const queryClient = useQueryClient()
+function UninstalledPopover({ row, countdown, anchorRef, focusFirst, working, error, onRun, onClose }) {
   const popoverRef = useRef(null)
   const [position, setPosition] = useState(null)
-  const [working, setWorking] = useState(null)
-  const [error, setError] = useState('')
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current
@@ -87,27 +84,6 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
     }
   }, [anchorRef])
 
-  async function run(kind) {
-    setWorking(kind)
-    setError('')
-    try {
-      const response = await ACTIONS[kind].call(row.id)
-      if (!response.ok) {
-        setError(await failureMessage(response, ACTIONS[kind].failed))
-        return
-      }
-      onClose()
-      await Promise.all([
-        appQueries.list.invalidate(queryClient),
-        appQueries.uninstalled.invalidate(queryClient),
-      ])
-    } catch {
-      setError('Could not reach Möbius. Try again.')
-    } finally {
-      setWorking(null)
-    }
-  }
-
   return createPortal(
     <div className="uninstalled-popover-layer">
       <div
@@ -142,7 +118,7 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
             type="button"
             className="uninstalled-popover__btn uninstalled-popover__btn--primary"
             disabled={working !== null}
-            onClick={() => run('recover')}
+            onClick={() => onRun('recover')}
           >
             {working === 'recover' ? ACTIONS.recover.working : 'Recover'}
           </button>
@@ -150,7 +126,7 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
             type="button"
             className="uninstalled-popover__btn uninstalled-popover__btn--danger"
             disabled={working !== null}
-            onClick={() => run('delete')}
+            onClick={() => onRun('delete')}
           >
             {working === 'delete' ? ACTIONS.delete.working : 'Delete permanently'}
           </button>
@@ -164,8 +140,37 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
   )
 }
 
-function UninstalledTile({ row, countdown, open, onToggle }) {
+function UninstalledTile({ row, countdown, open, onToggle, onShow, onHide }) {
+  const queryClient = useQueryClient()
   const buttonRef = useRef(null)
+  // The request belongs to the tile, not the card: dismissing the card must not forget a request in flight,
+  // lose its failure, or hand back fresh buttons that could start a second one.
+  const [working, setWorking] = useState(null)
+  const [error, setError] = useState('')
+
+  async function run(kind) {
+    setWorking(kind)
+    setError('')
+    try {
+      const response = await ACTIONS[kind].call(row.id)
+      if (!response.ok) {
+        setError(await failureMessage(response, ACTIONS[kind].failed))
+        onShow(row.id)
+        return
+      }
+      onHide(row.id)
+      await Promise.all([
+        appQueries.list.invalidate(queryClient),
+        appQueries.uninstalled.invalidate(queryClient),
+      ])
+    } catch {
+      setError('Could not reach Möbius. Try again.')
+      onShow(row.id)
+    } finally {
+      setWorking(null)
+    }
+  }
+
   return (
     <div className="apps-directory__card apps-directory__card--uninstalled">
       <button
@@ -192,7 +197,10 @@ function UninstalledTile({ row, countdown, open, onToggle }) {
           countdown={countdown}
           anchorRef={buttonRef}
           focusFirst={open.focusFirst}
-          onClose={() => onToggle(null)}
+          working={working}
+          error={error}
+          onRun={run}
+          onClose={() => onHide(row.id)}
         />
       )}
     </div>
@@ -205,7 +213,15 @@ export default function UninstalledTiles({ entries }) {
   const [open, setOpen] = useState(null)
 
   function toggle(id, focusFirst = false) {
-    setOpen(current => (id === null || current?.id === id ? null : { id, focusFirst }))
+    setOpen(current => (current?.id === id ? null : { id, focusFirst }))
+  }
+  // Only the card that asked is closed, so a late result cannot close a different tile's card.
+  function hide(id) {
+    setOpen(current => (current?.id === id ? null : current))
+  }
+  // Bring a card back to the front, e.g. to show a failure that arrived after it was dismissed.
+  function show(id) {
+    setOpen(current => (current?.id === id ? current : { id, focusFirst: false }))
   }
 
   return entries.map(({ row, countdown }) => (
@@ -215,6 +231,8 @@ export default function UninstalledTiles({ entries }) {
       countdown={countdown}
       open={open?.id === row.id ? open : null}
       onToggle={toggle}
+      onShow={show}
+      onHide={hide}
     />
   ))
 }
