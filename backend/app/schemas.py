@@ -22,6 +22,8 @@ class SetupRequest(BaseModel):
   # setup payloads before password hashing work. bcrypt receives a fixed-width
   # digest, so every character remains significant.
   password: str = Field(min_length=1, max_length=1024)
+  # One-time code from the server log / <data_dir>/setup-code (setup_code.py).
+  setup_code: str = Field(default="", max_length=64)
 
   @field_validator("username", mode="before")
   @classmethod
