@@ -2013,9 +2013,13 @@ const AppCanvas = forwardRef(function AppCanvas({
             // reaches only this frame and what it nests. An explicit
             // `fullscreen` entry overrides `allowFullScreen`, so it needs `*`
             // too. `clipboard-write` stays bare because apps copy through the
-            // host clipboard broker. Pointer lock is a sandbox flag in the
-            // frame's response CSP (backend `app_frame_csp`), not a feature.
-            allow="clipboard-write; fullscreen *; gamepad *"
+            // host clipboard broker. The motion sensors (accelerometer,
+            // gyroscope, magnetometer) let `devicemotion` and
+            // `deviceorientation` events reach the app; unlike camera and
+            // location they carry no shell-owned permission grant. Pointer
+            // lock is a sandbox flag in the frame's response CSP (backend
+            // `app_frame_csp`), not a feature.
+            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />
