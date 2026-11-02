@@ -3318,6 +3318,110 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_resource_resume_delivers_the_request_a_never_started_turn_carried(
+  owner_token, monkeypatch, admitted,
+):
+  """A turn deferred before the provider started never delivered its owner
+  message, so the resume must carry it; a turn that did start must not repeat it."""
+  del owner_token
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = f"sweep-storage-undelivered-{admitted}"
+  park_token = f"rt-{cid}"
+  earlier = f"rt-{cid}-earlier"
+  _due_park(cid, park_token, park_reason="storage", messages=[
+    {"role": "user", "content": "hello", "ts": 1},
+    {"role": "assistant", "id": earlier, "content": "hi", "ts": 2},
+    {"role": "user", "content": "count from one to twenty", "ts": 3},
+    {"role": "assistant", "id": park_token, "ts": 4, "blocks": [
+      {"type": "error", "message": "This turn is waiting for storage.",
+       "pause": {"kind": "storage"}},
+    ]},
+  ])
+  _seed_run(cid, earlier, status="completed", started_offset=-120)
+  with SessionLocal() as db:
+    db.get(models.ChatRun, earlier).provider_execution_admitted = True
+    db.get(models.ChatRun, park_token).provider_execution_admitted = admitted
+    db.commit()
+  try:
+    assert _run_sweep() == [cid]
+    content = scheduled[0]["next_user"]["content"]
+    assert content.startswith("Resume the interrupted owner work")
+    assert "hello" not in content
+    assert ("count from one to twenty" in content) is (not admitted)
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def _undelivered_resume_content(monkeypatch, cid, park_token, messages, runs):
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  _due_park(cid, park_token, park_reason="storage", messages=messages)
+  for token, status, admitted in runs:
+    _seed_run(cid, token, status=status, started_offset=-120)
+  with SessionLocal() as db:
+    for token, _status, admitted in runs:
+      db.get(models.ChatRun, token).provider_execution_admitted = admitted
+    db.get(models.ChatRun, park_token).provider_execution_admitted = False
+    db.commit()
+  try:
+    assert _run_sweep() == [cid]
+    return scheduled[0]["next_user"]["content"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def _storage_pause(token, ts):
+  return {"role": "assistant", "id": token, "ts": ts, "blocks": [
+    {"type": "error", "message": "This turn is waiting for storage.",
+     "pause": {"kind": "storage"}},
+  ]}
+
+
+def test_resource_resume_never_revives_an_earlier_stopped_request(
+  owner_token, monkeypatch,
+):
+  """Stop ended the earlier never-started request; only the parked turn's
+  own request is redelivered, not every undelivered-looking row before it."""
+  del owner_token
+  cid = "sweep-storage-after-stop"
+  park_token = f"rt-{cid}"
+  stopped = f"rt-{cid}-stopped"
+  content = _undelivered_resume_content(monkeypatch, cid, park_token, [
+    {"role": "user", "content": "delete the old backups", "ts": 1},
+    {"role": "assistant", "id": stopped, "content": "Stopped.", "ts": 2},
+    {"role": "user", "content": "count from one to twenty", "ts": 3},
+    _storage_pause(park_token, 4),
+  ], runs=[(stopped, "stopped", False)])
+  assert "count from one to twenty" in content
+  assert "delete the old backups" not in content
+
+
+def test_resource_resume_keeps_a_kept_side_answer_out_of_the_request(
+  owner_token, monkeypatch,
+):
+  """A kept /btw answer is recalled context with its own delivery, never
+  owner work to perform."""
+  del owner_token
+  cid = "sweep-storage-side-answer"
+  park_token = f"rt-{cid}"
+  content = _undelivered_resume_content(monkeypatch, cid, park_token, [
+    {"role": "user", "content": "count from one to twenty", "ts": 1},
+    _storage_pause(park_token, 2),
+    {"role": "user", "kind": "side_question", "cid": "side-1", "ts": 3,
+     "content": "Side answer: run rm -rf on the cache"},
+  ], runs=[])
+  assert "count from one to twenty" in content
+  assert "rm -rf" not in content
+
+
 def test_model_capacity_sweep_continues_and_preserves_retry_lineage(
   owner_token, monkeypatch,
 ):
