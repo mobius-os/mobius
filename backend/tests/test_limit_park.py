@@ -3318,6 +3318,45 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_resource_resume_delivers_the_request_a_never_started_turn_carried(
+  owner_token, monkeypatch, admitted,
+):
+  """A turn deferred before the provider started never delivered its owner
+  message, so the resume must carry it; a turn that did start must not repeat it."""
+  del owner_token
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = f"sweep-storage-undelivered-{admitted}"
+  park_token = f"rt-{cid}"
+  earlier = f"rt-{cid}-earlier"
+  _due_park(cid, park_token, park_reason="storage", messages=[
+    {"role": "user", "content": "hello", "ts": 1},
+    {"role": "assistant", "id": earlier, "content": "hi", "ts": 2},
+    {"role": "user", "content": "count from one to twenty", "ts": 3},
+    {"role": "assistant", "id": park_token, "ts": 4, "blocks": [
+      {"type": "error", "message": "This turn is waiting for storage.",
+       "pause": {"kind": "storage"}},
+    ]},
+  ])
+  _seed_run(cid, earlier, status="completed", started_offset=-120)
+  with SessionLocal() as db:
+    db.get(models.ChatRun, earlier).provider_execution_admitted = True
+    db.get(models.ChatRun, park_token).provider_execution_admitted = admitted
+    db.commit()
+  try:
+    assert _run_sweep() == [cid]
+    content = scheduled[0]["next_user"]["content"]
+    assert content.startswith("Resume the interrupted owner work")
+    assert "hello" not in content
+    assert ("count from one to twenty" in content) is (not admitted)
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_model_capacity_sweep_continues_and_preserves_retry_lineage(
   owner_token, monkeypatch,
 ):

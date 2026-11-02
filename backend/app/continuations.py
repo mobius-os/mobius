@@ -240,9 +240,46 @@ def continuation_actor_label(message: Mapping[str, Any] | None) -> str:
   return f"Automatic continuation ({reason})"
 
 
+def undelivered_input(db, chat, superseded_run) -> list[str]:
+  """Transcript input a parked run was carrying when it never reached the provider.
+
+  A turn deferred at admission (low memory or storage) is parked before the
+  provider starts, so the provider session never received the owner rows that
+  turn was answering. A control-only continuation would otherwise deliver just
+  "resume the interrupted work", and the agent answers the pause instead of the
+  request. Walk back from the transcript tail over pause rows of runs that
+  never started and collect the input rows between them and the last row of a
+  run that did reach the provider. Empty when the superseded run had started.
+  """
+  from app import models, transcript_rows
+
+  if superseded_run is None or superseded_run.provider_execution_admitted is not False:
+    return []
+  carried: list[str] = []
+  for _seq, row in transcript_rows.reverse_iter(db, chat):
+    if row.get("role") == "user":
+      content = row.get("content")
+      if isinstance(content, str) and content.strip():
+        carried.append(content)
+      continue
+    run_id = assistant_message_run_id(row.get("id"))
+    run = db.get(models.ChatRun, run_id) if run_id else None
+    if run is None or run.chat_id != chat.id or run.provider_execution_admitted is not False:
+      break
+  carried.reverse()
+  return carried
+
+
+UNDELIVERED_INPUT_PREFACE = (
+  "That turn paused before it reached you, so you have not seen the input it "
+  "was carrying. Respond to it now as the work to resume:"
+)
+
+
 def continuation_protocol_source(
   *, reason: str, control_id: str, run_token: str,
   source_work_id: str | None = None, goal_id: str | None = None,
+  undelivered: list[str] | None = None,
 ) -> dict:
   """Build provider-only input for a typed continuation control.
 
@@ -274,11 +311,14 @@ def continuation_protocol_source(
       "This recovery will not automatically repeat."
     ),
   }
+  content = prompts.get(
+    reason, "Resume the interrupted owner work from its saved state."
+  )
+  if undelivered:
+    content = "\n\n".join([content, UNDELIVERED_INPUT_PREFACE, *undelivered])
   source = {
     "role": "user",
-    "content": prompts.get(
-      reason, "Resume the interrupted owner work from its saved state."
-    ),
+    "content": content,
     "kind": "continuation",
     "continuation_reason": reason,
     "hidden": True,
