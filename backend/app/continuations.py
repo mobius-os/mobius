@@ -258,22 +258,15 @@ def undelivered_input(db, chat, superseded_run) -> list[str]:
   carried: list[str] = []
   for _seq, row in transcript_rows.reverse_iter(db, chat):
     if row.get("role") == "user":
-      content = row.get("content")
-      if isinstance(content, str) and content.strip():
-        carried.append(content)
+      if row.get("content"):
+        carried.append(row["content"])
       continue
     run_id = assistant_message_run_id(row.get("id"))
     run = db.get(models.ChatRun, run_id) if run_id else None
-    if run is None or run.chat_id != chat.id or run.provider_execution_admitted is not False:
+    if run is None or run.provider_execution_admitted is not False:
       break
   carried.reverse()
   return carried
-
-
-UNDELIVERED_INPUT_PREFACE = (
-  "That turn paused before it reached you, so you have not seen the input it "
-  "was carrying. Respond to it now as the work to resume:"
-)
 
 
 def continuation_protocol_source(
@@ -315,7 +308,12 @@ def continuation_protocol_source(
     reason, "Resume the interrupted owner work from its saved state."
   )
   if undelivered:
-    content = "\n\n".join([content, UNDELIVERED_INPUT_PREFACE, *undelivered])
+    content = "\n\n".join([
+      content,
+      "That turn paused before it reached you, so you have not seen the input "
+      "it was carrying. Respond to it now as the work to resume:",
+      *undelivered,
+    ])
   source = {
     "role": "user",
     "content": content,

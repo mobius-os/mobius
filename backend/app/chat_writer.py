@@ -814,8 +814,7 @@ def recover_start_continuation(
       source_work_id=control.get("source_work_id"),
       goal_id=control.get("goal_id"),
       undelivered=undelivered_input(
-        db, chat, db.get(models.ChatRun, supersedes_run_token)
-        if supersedes_run_token else None,
+        db, chat, db.get(models.ChatRun, supersedes_run_token),
       ),
     )
     messages = transcript_rows.read_all(db, chat)
