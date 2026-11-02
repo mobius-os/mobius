@@ -2,6 +2,7 @@
 .apps-directory__card--uninstalled .uninstalled-apps__icon { position: relative; display: grid; }
 .apps-directory__card--uninstalled .apps-directory__card-icon { filter: grayscale(1); opacity: 0.4; transition: opacity 0.15s; }
 .apps-directory__card--uninstalled .apps-directory__card-name { color: var(--muted); }
+.apps-directory__card--uninstalled .apps-directory__card-main[aria-expanded="true"] { background: color-mix(in srgb, var(--surface) 72%, transparent); }
 .apps-directory__card--uninstalled .apps-directory__card-main[aria-expanded="true"] .apps-directory__card-icon { opacity: 0.62; }
 @media (hover: hover) and (pointer: fine) {
   .apps-directory__card--uninstalled .apps-directory__card-main:hover .apps-directory__card-icon { opacity: 0.62; }
@@ -21,6 +22,11 @@
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.38); animation: uninstalled-popover-in 120ms ease-out;
 }
 .uninstalled-popover[data-positioned="true"] { visibility: visible; }
+.uninstalled-popover::before {
+  content: ''; position: absolute; left: var(--popover-arrow); top: -6px; width: 10px; height: 10px; margin-left: -5px;
+  border-left: 1px solid var(--border-light); border-top: 1px solid var(--border-light); background: var(--surface); transform: rotate(45deg);
+}
+.uninstalled-popover[data-above="true"]::before { top: auto; bottom: -6px; transform: rotate(225deg); }
 .uninstalled-popover__who { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .uninstalled-popover__who > div { display: grid; min-width: 0; }
 .uninstalled-popover__who strong { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -49,7 +49,7 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
     const pane = box(anchor.closest('.apps-directory'))
     setPosition(placeUnderAnchor({
       anchor: box(anchor),
-      // Clear of the tile's focus ring.
+      // Clear of the tile's focus ring and of the pointer that aims at it.
       gap: 14,
       padding: 0,
       bounds: { left: grid.left, right: grid.right, top: pane.top + 12, bottom: pane.bottom - 12 },
@@ -116,9 +116,11 @@ function UninstalledPopover({ row, countdown, anchorRef, focusFirst, onClose }) 
         role="dialog"
         aria-label={`${row.name} actions`}
         data-positioned={position ? 'true' : 'false'}
+        data-above={position?.above ? 'true' : 'false'}
         style={{
           '--popover-x': `${position?.x || 0}px`,
           '--popover-y': `${position?.y || 0}px`,
+          '--popover-arrow': `${position?.arrow || 0}px`,
         }}
       >
         <div className="uninstalled-popover__who">

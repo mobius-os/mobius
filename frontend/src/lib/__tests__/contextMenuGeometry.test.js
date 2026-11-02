@@ -36,9 +36,10 @@ test('a popover opens centred under its anchor and moves above it when the botto
   const anchor = { left: 300, right: 400, top: 200, bottom: 320 }
   const bounds = { left: 0, top: 0, right: 1200, bottom: 800 }
   const size = { width: 300, height: 160 }
-  assert.deepEqual(placeUnderAnchor({ anchor, bounds, size }), { x: 200, y: 328 })
+  assert.deepEqual(placeUnderAnchor({ anchor, bounds, size }), { x: 200, y: 328, arrow: 150, above: false })
   const low = placeUnderAnchor({ anchor: { ...anchor, top: 640, bottom: 760 }, bounds, size })
   assert.equal(low.y, 472)
+  assert.equal(low.above, true)
 })
 
 test('a popover stays inside its pane: at either end of a row it lines up with the pane edge, not the window', () => {
@@ -46,6 +47,8 @@ test('a popover stays inside its pane: at either end of a row it lines up with t
   const size = { width: 300, height: 160 }
   const first = placeUnderAnchor({ anchor: { left: 300, right: 400, top: 200, bottom: 320 }, bounds, size })
   assert.equal(first.x, 268)
+  assert.equal(first.arrow, 82)
   const last = placeUnderAnchor({ anchor: { left: 1100, right: 1190, top: 200, bottom: 320 }, bounds, size })
   assert.equal(last.x, 888)
+  assert.equal(last.arrow, 257)
 })
