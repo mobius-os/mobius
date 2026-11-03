@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { platformStatusQueries, versionQueries } from '../../hooks/queries.js'
 import { rebuildIsActive, rebuildRequestOutcome } from '../../lib/containerRebuild.js'
-import { waitForApplyOutcome } from '../../lib/platformApplyObservation.js'
+import { observedApplyResult, waitForApplyOutcome } from '../../lib/platformApplyObservation.js'
 import { platformStatusFromApply, platformStatusUnavailable } from '../../lib/platformUpdateState.js'
 import { restartCanReload, restartPollDecision } from '../../lib/restartReadiness.js'
 import { inspectShellUpdate, releaseWaitingShellUpdate } from '../../lib/shellUpdate.js'
@@ -254,7 +254,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
       setError(cause.message || 'The update could not be confirmed.')
       setErrorCode(cause.code || '')
       if (!cause.definitive && kind === 'apply') {
-        return await settleObservedApply(plan, progressBefore?.updated_at || 0)
+        return await settleObservedApply(plan, progressBefore?.updated_at ?? null)
       }
       if (!cause.definitive) {
         setReconnect({ kind, plan, bootId: before?.bootId || '', requestedAt, previousOperationId })
@@ -278,15 +278,14 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     const outcome = await waitForApplyOutcome({
       planId: plan.plan_id, after, readProgress: readUpdateProgress, sleep: delay,
     })
-    const status = await refreshPlatform({ preserveCurrentOnFailure: true })
-    if (!outcome.settled) {
-      setError('The update could not be confirmed. Check the current status and review again before retrying.')
-      setErrorCode('update_plan_stale')
-      return { ok: false }
-    }
-    const { phase: finalPhase, error: finalError } = outcome.progress
-    setError(finalError || (finalPhase === 'failed' ? 'The update could not finish. Review its current status.' : ''))
-    return { ok: finalPhase === 'complete', state: status?.state }
+    // Without the reply nothing projects this outcome onto Settings, so a failed
+    // read must not leave the pre-Apply status (and its update action) in place.
+    const status = await refreshPlatform()
+    const result = observedApplyResult(outcome, status)
+    setError(result.error)
+    setErrorCode(result.errorCode)
+    setCheckResult(result.notice)
+    return { ok: result.ok, state: result.state }
   }
 
   async function restart() {
