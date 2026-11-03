@@ -90,9 +90,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # discovery never selects it implicitly. Both live in /opt/agent-browser so
 # root and the mobius user share one copy via the symlinks below. A separate
 # layer after apt/npm, so a Chrome bump does not reinstall system packages.
-ARG CHROME_VERSION=155.0.8059.84
-ARG CHROME_SHA256=cf0f049892dea22e6a6db26d47ed0d7776b7158edcbec4634086633df8bafcbc
-ARG CHROME_HEADLESS_SHELL_SHA256=a5d71b91aa996fef00517cd212b2dfb816b43055edefbe727e6fd562d4ae1f9c
+ARG CHROME_VERSION=156.0.8078.80
+ARG CHROME_SHA256=b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7
+ARG CHROME_HEADLESS_SHELL_SHA256=547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4
 RUN set -eu; \
     browsers=/opt/agent-browser/browsers; \
     mkdir -p "$browsers"; \
