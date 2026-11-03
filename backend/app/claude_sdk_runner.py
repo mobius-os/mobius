@@ -58,7 +58,7 @@ import signal
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
@@ -1129,8 +1129,10 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 # All are checked where a turn hands control back: when the agent ends its
 # turn, and just before it saves an owner card (a saved card ends the turn, so
 # a later check could never reopen it). A long progress update can still omit
-# the final conclusion. The check speaks at most once per turn, and the agent
-# itself judges whether its reply is complete.
+# the final conclusion. The check speaks again only about evidence newer than
+# its last reminder, a few times per turn at most, and the agent itself judges
+# whether its reply is complete. After each work step, a narrower check notes
+# words written as an extra thinking part (see `_extra_thinking_part`).
 _ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
 _ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS = 700
 _ANSWER_CHECK_THINKING_MIN_CHARS = 600
@@ -1188,8 +1190,22 @@ _ANSWER_CHECK_END_OF_TURN_NEXT = (
 )
 _ANSWER_CHECK_BEFORE_CARD_NEXT = (
   "Do not mention this check. Then call the same card tool again with the "
-  "same arguments; this check will not stop it a second time."
+  "same arguments; this check speaks again only about something new."
 )
+# Attached to a work step's result (never blocking it), so a note the model
+# wrote as thinking mid-reply is caught without costing an extra model step.
+_ANSWER_CHECK_AFTER_STEP = (
+  "Möbius check after this step. The owner sees only your visible reply; your "
+  "thinking and tool activity are hidden from them. Before this step you may "
+  "have meant to tell the owner something, but no visible text reached them. "
+  "{seen} If the owner should know something from that step, write a brief "
+  "visible note now, then continue. Otherwise just continue. Do not mention "
+  "this check."
+)
+# A model that writes its answer into thinking often does it again after the
+# reminder, so the check re-arms on new evidence instead of speaking once per
+# turn. The cap bounds the extra model steps if a reply keeps tripping it.
+_ANSWER_CHECK_MAX_REMINDERS = 3
 
 
 def _visible_reply_chars(
@@ -1285,6 +1301,48 @@ def _tool_output_link_hosts_the_reply_points_to(
   return hosts[:3]
 
 
+def _unreviewed_answer_evidence(blocks: object, reviewed_through: int) -> object:
+  """This segment as a check after an earlier reminder should see it.
+
+  Every text block stays, because all of it is on the owner's screen; thinking
+  and tool blocks before ``reviewed_through`` were already covered by that
+  reminder and are dropped, so the check speaks again only about something new.
+  """
+  if not isinstance(blocks, list) or reviewed_through <= 0:
+    return blocks
+  return [
+    block for index, block in enumerate(blocks)
+    if index >= reviewed_through
+    or (isinstance(block, dict) and block.get("type") == "text")
+  ]
+
+
+def _answer_check_seen(blocks: list, last_assistant_message: object = None) -> str:
+  """What the owner can read of this reply, quoted (bounded) for a reminder."""
+  visible = " ".join(_visible_reply_chars(blocks, last_assistant_message)[0].split())
+  if not visible:
+    return _ANSWER_CHECK_SEEN_NOTHING
+  template = (
+    _ANSWER_CHECK_SEEN_EXCERPT
+    if len(visible) > _ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS else _ANSWER_CHECK_SEEN
+  )
+  return template.format(visible=visible[-_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS:])
+
+
+def _answer_check_after_step_reason(blocks: object) -> str | None:
+  """A note for the agent when the step it just took swallowed its words.
+
+  Mid-reply only the narrow two-thinking-parts signal counts: long reasoning,
+  unshown images, and unmentioned links are normal before a reply is done.
+  ``blocks`` should already be narrowed to this step's new evidence.
+  """
+  if not isinstance(blocks, list) or not _has_unshown_closing_draft(
+    blocks, drafts_in=_extra_thinking_part,
+  ):
+    return None
+  return _ANSWER_CHECK_AFTER_STEP.format(seen=_answer_check_seen(blocks))
+
+
 def _answer_check_reason(
   blocks: object,
   *,
@@ -1303,15 +1361,9 @@ def _answer_check_reason(
     _has_unshown_closing_draft(blocks, last_assistant_message)
     or _answer_may_be_only_in_thinking(blocks, last_assistant_message)
   ):
-    visible = " ".join(_visible_reply_chars(blocks, last_assistant_message)[0].split())
-    seen = _ANSWER_CHECK_SEEN_NOTHING
-    if visible:
-      template = (
-        _ANSWER_CHECK_SEEN_EXCERPT
-        if len(visible) > _ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS else _ANSWER_CHECK_SEEN
-      )
-      seen = template.format(visible=visible[-_ANSWER_CHECK_VISIBLE_QUOTE_MAX_CHARS:])
-    parts.append(_ANSWER_CHECK_MISSING_ANSWER.format(seen=seen))
+    parts.append(_ANSWER_CHECK_MISSING_ANSWER.format(
+      seen=_answer_check_seen(blocks, last_assistant_message),
+    ))
   images = _unshown_viewed_images(blocks, media_dir, last_assistant_message)
   if images:
     one = len(images) == 1
@@ -1334,16 +1386,22 @@ def _answer_check_reason(
 
 
 def _has_unshown_closing_draft(
-  blocks: object, last_assistant_message: object = None,
+  blocks: object,
+  last_assistant_message: object = None,
+  *,
+  drafts_in: Callable[[dict], list[str]] | None = None,
 ) -> bool:
   """Whether a closing draft in thinking has not reached the visible reply.
 
   Only thinking after the last visible text counts: a draft followed by more
   visible text was superseded by what the agent went on to say. A draft
   counts as said when any run of a few words from it appears in the visible
-  reply, whitespace aside. Return only the signal, never thinking excerpts
-  that a reminder could inadvertently send back to the model.
+  reply, whitespace aside. ``drafts_in`` picks the candidate drafts in one
+  thinking block (default ``_closing_draft_candidates``). Return only the
+  signal, never thinking excerpts that a reminder could inadvertently send
+  back to the model.
   """
+  drafts_in = drafts_in or _closing_draft_candidates
   if not isinstance(blocks, list):
     return False
   visible_text, _ = _visible_reply_chars(blocks, last_assistant_message)
@@ -1368,21 +1426,49 @@ def _has_unshown_closing_draft(
       and isinstance(block.get("content"), str)
     ):
       continue
-    paragraphs = _ANSWER_CHECK_DRAFT_BREAK.split(block["content"].strip())
-    if len(paragraphs) < 2:
-      continue
-    draft = " ".join(paragraphs[-1].split())
-    if len(draft) < _ANSWER_CHECK_DRAFT_MIN_CHARS:
-      continue
-    words = draft.split()
-    runs = (
-      " ".join(words[start:start + _ANSWER_CHECK_SHARED_WORDS])
-      for start in range(max(1, len(words) - _ANSWER_CHECK_SHARED_WORDS + 1))
-    )
-    if any(run in visible for run in runs):
-      continue
-    return True
+    for draft in drafts_in(block):
+      if len(draft) < _ANSWER_CHECK_DRAFT_MIN_CHARS:
+        continue
+      words = draft.split()
+      runs = (
+        " ".join(words[start:start + _ANSWER_CHECK_SHARED_WORDS])
+        for start in range(max(1, len(words) - _ANSWER_CHECK_SHARED_WORDS + 1))
+      )
+      if any(run in visible for run in runs):
+        continue
+      return True
   return False
+
+
+def _closing_draft_candidates(block: dict) -> list[str]:
+  """Words in one thinking block that may have been meant for the owner.
+
+  The closing paragraph set apart by blank lines, plus the answer written as
+  an extra thinking part (`_extra_thinking_part`).
+  """
+  candidates: list[str] = []
+  paragraphs = _ANSWER_CHECK_DRAFT_BREAK.split(block["content"].strip())
+  if len(paragraphs) >= 2:
+    candidates.append(" ".join(paragraphs[-1].split()))
+  return candidates + _extra_thinking_part(block)
+
+
+def _extra_thinking_part(block: dict) -> list[str]:
+  """The last thinking part of a response that thought twice without replying.
+
+  The narrowest swallowed-answer signal: in the raw Claude sessions examined,
+  every response with two thinking parts back to back and no reply text was an
+  answer the owner never saw, which makes it precise enough to check after
+  every work step. The live block keeps those parts in ``_thinking_segments``
+  (stripped before persistence).
+  """
+  segments = block.get("_thinking_segments")
+  if not isinstance(segments, list) or len(segments) < 2:
+    return []
+  last = segments[-1]
+  if isinstance(last, (list, tuple)) and len(last) == 2 and isinstance(last[1], str):
+    return [" ".join(last[1].split())]
+  return []
 
 
 def _answer_may_be_only_in_thinking(
@@ -1651,29 +1737,37 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-  # The visible-answer check (see `_answer_check_reason`) speaks at most once
-  # per turn, at whichever hand-back comes first: just before the root agent
-  # saves an owner card, or when it ends its turn. Before a card it declines
-  # that one tool call, so the agent can write what is missing and call the
-  # card again; at the end it returns the turn. A Stop or a saved owner card
-  # owns the turn's end, so neither is ever reopened here.
-  answer_check_sent = False
+  # The visible-answer check (see `_answer_check_reason`) runs at each
+  # hand-back: just before the root agent saves an owner card, and when it
+  # ends its turn. Before a card it declines that one tool call, so the agent
+  # can write what is missing and call the card again; at the end it returns
+  # the turn. After it speaks, it considers only blocks that arrived since (plus
+  # all visible text), so an unchanged retry passes and a second swallowed
+  # answer is caught, up to _ANSWER_CHECK_MAX_REMINDERS per turn. A steer
+  # starts a fresh block list, which the identity check below treats as new.
+  # A Stop or a saved owner card owns the turn's end, so neither is reopened.
+  answer_check_reminders = 0
+  answer_check_reviewed: tuple[object, int] = (None, 0)
   answer_check_media_dir = os.path.normpath(
     str(chat_media_dir(get_settings().data_dir, chat_id))
   )
 
-  def _answer_check_once(
+  def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
   ) -> str | None:
-    nonlocal answer_check_sent
+    nonlocal answer_check_reminders, answer_check_reviewed
     if (
-      answer_check_sent
+      answer_check_reminders >= _ANSWER_CHECK_MAX_REMINDERS
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
       return None
+    blocks = getattr(bc, "assistant_blocks", None)
+    reviewed_list, reviewed_through = answer_check_reviewed
     reason = _answer_check_reason(
-      getattr(bc, "assistant_blocks", None),
+      _unreviewed_answer_evidence(
+        blocks, reviewed_through if blocks is reviewed_list else 0,
+      ),
       chat_id=chat_id,
       media_dir=answer_check_media_dir,
       before_card=before_card,
@@ -1681,10 +1775,13 @@ async def run_claude_sdk_turn(
     )
     if reason is None:
       return None
-    answer_check_sent = True
+    answer_check_reminders += 1
+    answer_check_reviewed = (
+      blocks, len(blocks) if isinstance(blocks, list) else 0,
+    )
     log.info(
-      "Claude visible-answer check spoke chat_id=%s before_card=%s",
-      chat_id, before_card,
+      "Claude visible-answer check spoke chat_id=%s before_card=%s reminder=%d",
+      chat_id, before_card, answer_check_reminders,
     )
     return reason
 
@@ -1696,7 +1793,7 @@ async def run_claude_sdk_turn(
     del tool_use_id, context
     if hook_input.get("stop_hook_active"):
       return {"continue_": True}
-    reason = _answer_check_once(
+    reason = _answer_check_since_last_reminder(
       before_card=False,
       last_assistant_message=hook_input.get("last_assistant_message"),
     )
@@ -1716,13 +1813,44 @@ async def run_claude_sdk_turn(
       or hook_input.get("agent_id")
     ):
       return {"continue_": True}
-    reason = _answer_check_once(before_card=True)
+    reason = _answer_check_since_last_reminder(before_card=True)
     if reason is None:
       return {"continue_": True}
     return {"continue_": True, "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
       "permissionDecisionReason": reason,
+    }}
+
+  # Each work step is checked once, for words the model wrote as thinking just
+  # before it; the note rides on the step's result instead of blocking it.
+  answer_check_stepped: tuple[object, int] = (None, 0)
+
+  async def visible_answer_after_step_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    nonlocal answer_check_stepped
+    del tool_use_id, context
+    if (
+      hook_input.get("agent_id")
+      or hook_input.get("tool_name") in _ANSWER_CHECK_CARD_TOOLS
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return {"continue_": True}
+    blocks = getattr(bc, "assistant_blocks", None)
+    stepped_list, stepped_through = answer_check_stepped
+    answer_check_stepped = (blocks, len(blocks) if isinstance(blocks, list) else 0)
+    note = _answer_check_after_step_reason(_unreviewed_answer_evidence(
+      blocks, stepped_through if blocks is stepped_list else 0,
+    ))
+    if note is None:
+      return {"continue_": True}
+    log.info("Claude visible-answer check spoke after a step chat_id=%s", chat_id)
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PostToolUse", "additionalContext": note,
     }}
 
   async def queued_prompt_hook(hook_input, tool_use_id, context):
@@ -1809,6 +1937,7 @@ async def run_claude_sdk_turn(
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
           HookMatcher(matcher=None, hooks=[turn_end_hook]),
+          HookMatcher(matcher=None, hooks=[visible_answer_after_step_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),

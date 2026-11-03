@@ -660,9 +660,12 @@ async def _fire_card_end_hook(options, **overrides) -> dict:
     "tool_use_id": "toolu_1",
   }
   hook_input.update(overrides)
-  # The hook is registered with matcher=None, so it is the last PostToolUse
-  # callback; the WebSearch one never sees a card tool.
-  return await _post_tool_use_hooks(options)[-1](hook_input, "toolu_1", {})
+  return await _post_tool_use_hook(options, "turn_end_hook")(hook_input, "toolu_1", {})
+
+
+def _post_tool_use_hook(options, name: str):
+  """One PostToolUse callback by its function name (registration order varies)."""
+  return next(hook for hook in _post_tool_use_hooks(options) if hook.__name__ == name)
 
 
 @pytest.mark.asyncio
@@ -4071,3 +4074,151 @@ async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monke
   await _run_turn("answer-check-card-ok-chat", bc=bus)
 
   assert decisions == [{"continue_": True}]
+
+
+def _answer_as_second_thinking_part(answer: str = _DRAFT) -> dict:
+  """One model response that thought, then wrote its answer as more thinking.
+
+  The reducer joins the response's thinking parts with a single paragraph
+  break and keeps each part in ``_thinking_segments``; no reply text follows.
+  """
+  reasoning = "Same failure, so the memory limit is still too low; asking the owner."
+  return {
+    "type": "thinking",
+    "content": f"{reasoning}\n\n{answer}",
+    "_thinking_segments": [["m1:0", reasoning], ["m1:1", answer]],
+  }
+
+
+def test_answer_check_flags_an_answer_written_as_a_second_thinking_part():
+  from app.claude_sdk_runner import _has_unshown_closing_draft
+
+  earlier = _closing_draft_before_card()[:2]
+  assert _has_unshown_closing_draft([*earlier, _answer_as_second_thinking_part()])
+  # Said in the visible reply after all, or a lone thinking part: ordinary.
+  said = [{"type": "text", "content": _DRAFT}, earlier[1], _answer_as_second_thinking_part()]
+  assert not _has_unshown_closing_draft(said)
+  lone = {"type": "thinking", "content": _DRAFT, "_thinking_segments": [["m1:0", _DRAFT]]}
+  assert not _has_unshown_closing_draft([*earlier, lone])
+  assert not _has_unshown_closing_draft([*earlier, _answer_as_second_thinking_part("Ok.")])
+
+
+def test_unreviewed_answer_evidence_keeps_all_visible_text_but_only_new_work():
+  from app.claude_sdk_runner import _unreviewed_answer_evidence
+
+  blocks = [
+    {"type": "text", "content": "Checking."},
+    {"type": "thinking", "content": "reported already"},
+    {"type": "tool", "tool": "mcp__mobius_control__request_question"},
+    {"type": "text", "content": "Here is the answer."},
+    {"type": "thinking", "content": "new"},
+  ]
+  assert _unreviewed_answer_evidence(blocks, 0) is blocks
+  assert _unreviewed_answer_evidence(blocks, 3) == [blocks[0], blocks[3], blocks[4]]
+  assert _unreviewed_answer_evidence(None, 3) is None
+
+
+@pytest.mark.asyncio
+async def test_answer_check_catches_an_answer_swallowed_again_after_its_reminder(monkeypatch):
+  from app.claude_sdk_runner import _ANSWER_CHECK_MAX_REMINDERS
+
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _closing_draft_before_card()
+
+  def swallow_again() -> None:
+    bus.assistant_blocks.append(
+      {"type": "tool", "tool": "mcp__mobius_control__request_question", "status": "done"},
+    )
+    bus.assistant_blocks.append(_answer_as_second_thinking_part(
+      f"Reminder {len(bus.assistant_blocks)}: the preview build memory limit is still "
+      "too low, so the deploy cannot be retried yet.",
+    ))
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_pre_card_hook(self.options))
+      # An unchanged retry is the agent judging its reply complete: it passes.
+      decisions.append(await _fire_pre_card_hook(self.options))
+      for _ in range(_ANSWER_CHECK_MAX_REMINDERS):
+        swallow_again()
+        decisions.append(await _fire_pre_card_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-rearm-chat", bc=bus)
+
+  assert result["error"] is None
+  denied = ["hookSpecificOutput" in d for d in decisions]
+  # First miss caught, unchanged retry passes, each later swallow caught until
+  # the per-turn cap, after which the card goes through.
+  assert denied == [
+    True, False, *[True] * (_ANSWER_CHECK_MAX_REMINDERS - 1), False,
+  ]
+  for decision in decisions:
+    output = decision.get("hookSpecificOutput")
+    if output:
+      assert output["permissionDecision"] == "deny"
+      assert "preview build memory limit" not in output["permissionDecisionReason"]
+
+
+def test_answer_check_after_a_step_flags_only_words_written_as_extra_thinking():
+  from app.claude_sdk_runner import _answer_check_after_step_reason
+
+  progress = {"type": "text", "content": "Checking the preview build."}
+  step = {"type": "tool", "tool": "Bash", "status": "done"}
+  note = _answer_check_after_step_reason([progress, _answer_as_second_thinking_part(), step])
+  assert note is not None
+  assert note.startswith("Möbius check after this step.")
+  assert "verbatim: «Checking the preview build.»" in note
+  assert _DRAFT not in note and "Same failure" not in note
+  # Ordinary mid-reply shapes are left alone: one thinking part, even long or
+  # with a closing paragraph, and an extra part the agent then said.
+  closing_paragraph = {"type": "thinking", "content": f"Same failure.\n\n\n\n{_DRAFT}"}
+  assert _answer_check_after_step_reason([progress, closing_paragraph, step]) is None
+  assert _answer_check_after_step_reason([
+    progress, _answer_as_second_thinking_part(), {"type": "text", "content": _DRAFT}, step,
+  ]) is None
+  assert _answer_check_after_step_reason(None) is None
+
+
+@pytest.mark.asyncio
+async def test_answer_check_after_a_step_notes_once_without_blocking_the_step(monkeypatch):
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = [
+    {"type": "text", "content": "Checking the preview build."},
+    _answer_as_second_thinking_part(),
+    {"type": "tool", "tool": "Bash", "status": "done"},
+  ]
+
+  async def after_step(options, **overrides):
+    hook_input = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                  "tool_input": {}, "tool_response": "ok", "tool_use_id": "toolu_b"}
+    hook_input.update(overrides)
+    hook = _post_tool_use_hook(options, "visible_answer_after_step_hook")
+    return await hook(hook_input, "toolu_b", {})
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      # A delegated child's step and a card tool are not this check's to note.
+      decisions.append(await after_step(self.options, agent_id="child-1"))
+      decisions.append(await after_step(
+        self.options, tool_name="mcp__mobius_control__request_question",
+      ))
+      decisions.append(await after_step(self.options))
+      # The next step with nothing new since is not noted again.
+      decisions.append(await after_step(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("answer-check-after-step-chat", bc=bus)
+
+  assert result["error"] is None
+  assert decisions[:2] == [{"continue_": True}, {"continue_": True}]
+  noted = decisions[2]
+  assert noted["continue_"] is True
+  assert noted["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+  assert noted["hookSpecificOutput"]["additionalContext"].startswith("Möbius check after this step.")
+  assert "permissionDecision" not in noted["hookSpecificOutput"]
+  assert decisions[3] == {"continue_": True}
