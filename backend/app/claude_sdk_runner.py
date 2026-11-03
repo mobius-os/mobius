@@ -1112,15 +1112,17 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 
 
 # The owner reads only a turn's text blocks; thinking and tool activity are
-# folded away. Two shapes leave the owner without what the turn was for:
+# folded away. Three shapes leave the owner without what the turn was for:
 #
 # - a short visible reply after long reasoning: the agent composed its answer
 #   in thinking and closed with a line such as "Nothing has been changed.";
 # - an image the agent saved to this chat's media and viewed (a screenshot or
 #   a Read), then never embedded: viewing is private, so a reply that says
-#   "here's the before and after" shows nothing.
+#   "here's the before and after" shows nothing;
+# - a link the agent fetched into tool output and then pointed to ("pay on the
+#   page linked above") without ever writing it in visible text.
 #
-# Both are checked where a turn hands control back: when the agent ends its
+# All are checked where a turn hands control back: when the agent ends its
 # turn, and just before it saves an owner card (a saved card ends the turn, so
 # a later check could never reopen it). The shapes are rare (the first is
 # under 1% of stored replies on one instance), the check speaks at most once
@@ -1128,6 +1130,13 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 _ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
 _ANSWER_CHECK_THINKING_MIN_CHARS = 600
 _ANSWER_CHECK_IMAGE_PATH = re.compile(r"\.(?:gif|jpe?g|png|webp)$", re.IGNORECASE)
+_ANSWER_CHECK_URL = re.compile(r"https?://([^\s/\"'<>()\[\]\\`]+)[^\s\"'<>()\[\]\\`]*")
+_ANSWER_CHECK_LINK_WORD = re.compile(r"\b(?:links?|linked|urls?)\b", re.IGNORECASE)
+# Loopback addresses in tool output are the agent's own plumbing, never a link
+# the owner could open.
+_ANSWER_CHECK_PRIVATE_HOSTS = re.compile(
+  r"^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(?::\d+)?$", re.IGNORECASE,
+)
 _ANSWER_CHECK_END_OF_TURN = (
   "Möbius end-of-turn check. The owner sees only your visible reply; your "
   "thinking and tool activity are hidden from them."
@@ -1149,6 +1158,13 @@ _ANSWER_CHECK_IMAGES = (
   "{them}, or are asking about {them}), embed each now in visible text as "
   "![short description](/api/chats/{chat_id}/media/<file name>). If {them_was} "
   "only for your own checking, leave {them} out."
+)
+_ANSWER_CHECK_LINKS = (
+  "Your visible reply mentions a link but shows none, while this turn's tool "
+  "output contained one ({hosts}). Tool output is hidden from the owner, so a "
+  "link there is not \"above\" for them. If the owner needs a link, write it "
+  "in visible text as [short label](full address). If you meant something "
+  "else, leave it."
 )
 _ANSWER_CHECK_END_OF_TURN_NEXT = (
   "Do not mention this check. If nothing is missing, end your turn without "
@@ -1225,6 +1241,34 @@ def _unshown_viewed_images(
   return unshown
 
 
+def _tool_output_link_hosts_the_reply_points_to(
+  blocks: object, last_assistant_message: object = None,
+) -> list[str]:
+  """Hosts of links seen only in tool output when the reply refers to a link.
+
+  Fires only when the visible reply talks about a link yet contains no web
+  address at all: tool output routinely holds addresses nobody needs, so their
+  mere presence says nothing; a reply that mentions one and shows none does.
+  """
+  if not isinstance(blocks, list):
+    return []
+  visible, _ = _visible_reply_chars(blocks, last_assistant_message)
+  if not _ANSWER_CHECK_LINK_WORD.search(visible) or _ANSWER_CHECK_URL.search(visible):
+    return []
+  hosts: list[str] = []
+  for block in blocks:
+    if not isinstance(block, dict) or block.get("type") != "tool":
+      continue
+    output = block.get("output")
+    if not isinstance(output, str):
+      continue
+    for match in _ANSWER_CHECK_URL.finditer(output):
+      host = match.group(1).lower()
+      if not _ANSWER_CHECK_PRIVATE_HOSTS.match(host) and host not in hosts:
+        hosts.append(host)
+  return hosts[:3]
+
+
 def _answer_check_reason(
   blocks: object,
   *,
@@ -1235,7 +1279,8 @@ def _answer_check_reason(
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
-  None means the reply shows no sign of a hidden answer or an unshown image.
+  None means the reply shows no sign of a hidden answer, an unshown image,
+  or a link it points to without showing.
   """
   parts: list[str] = []
   if _answer_may_be_only_in_thinking(blocks, last_assistant_message):
@@ -1249,6 +1294,11 @@ def _answer_check_reason(
       them_was="it was" if one else "they were",
       chat_id=chat_id,
     ))
+  link_hosts = _tool_output_link_hosts_the_reply_points_to(
+    blocks, last_assistant_message,
+  )
+  if link_hosts:
+    parts.append(_ANSWER_CHECK_LINKS.format(hosts=", ".join(link_hosts)))
   if not parts:
     return None
   if before_card:

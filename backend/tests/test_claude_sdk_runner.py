@@ -3851,6 +3851,61 @@ def test_answer_check_leaves_shown_and_private_images_alone():
     ]) is None, path
 
 
+_CHECKOUT = "https://checkout.stripe.com/c/pay/cs_test_example#fid"
+
+
+def _link_only_in_tool_output(text: str) -> list[dict]:
+  """A reply that fetched a payment link and pointed to it without showing it."""
+  return [
+    {"type": "text", "content": "Starting the test purchase."},
+    {"type": "tool", "tool": "Bash", "status": "done",
+     "output": f"checkout ready\n{_CHECKOUT}\n"},
+    {"type": "text", "content": text},
+  ]
+
+
+def test_answer_check_flags_a_link_the_reply_points_to_but_never_shows():
+  from app.claude_sdk_runner import _answer_check_reason
+
+  chat_id = "link-check-chat"
+  reason = _answer_check_reason(
+    _link_only_in_tool_output("Pay on the test checkout page linked above."),
+    chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=True,
+  )
+  assert reason is not None
+  assert reason.startswith("Möbius check before your card is saved.")
+  assert "checkout.stripe.com" in reason
+  # The address itself stays out of the reason; the agent already has it.
+  assert "cs_test_" not in reason
+  assert "only in your thinking" not in reason
+
+
+def test_answer_check_leaves_shown_and_unmentioned_links_alone():
+  from app.claude_sdk_runner import _answer_check_reason
+
+  chat_id = "link-check-chat"
+
+  def reason_for(blocks, last=None):
+    return _answer_check_reason(
+      blocks, chat_id=chat_id, media_dir=_media_dir(chat_id), before_card=False,
+      last_assistant_message=last,
+    )
+
+  # The link is shown, or the reply never mentions one.
+  assert reason_for(_link_only_in_tool_output(f"[Open the checkout]({_CHECKOUT})")) is None
+  assert reason_for(_link_only_in_tool_output("Checked the balance: 0.00.")) is None
+  # A link the stream reader has not dispatched yet still counts.
+  assert reason_for(
+    _link_only_in_tool_output("Here is the link:"), f"<{_CHECKOUT}>",
+  ) is None
+  # Loopback addresses are the agent's plumbing, not something to open.
+  assert reason_for([
+    {"type": "tool", "tool": "Bash", "status": "done",
+     "output": "GET http://127.0.0.1:8000/api/apps/ 200\nhttp://localhost:5173/"},
+    {"type": "text", "content": "The broken link in your app is fixed."},
+  ]) is None
+
+
 async def _fire_pre_card_hook(options, **overrides) -> dict:
   hook_input = {
     "hook_event_name": "PreToolUse",
