@@ -31,6 +31,8 @@ import ProviderUsage from './ProviderUsage.jsx'
 import GithubConnection from './GithubConnection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
+import WalletSection from './WalletSection.jsx'
+import { useWallet } from './useWallet.js'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusProviderAccess from './MobiusProviderAccess.jsx'
 import { formatPlanStatus } from './providerUsage.js'
@@ -295,6 +297,8 @@ export default function SettingsView({
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
+  // A Möbius paired with a credits service shows the wallet its apps spend from.
+  const wallet = useWallet({ active })
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -1160,6 +1164,18 @@ export default function SettingsView({
 
         {!detailPage && <>
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
+
+        {wallet.summary?.mode === 'customer' && (
+          <WalletSection
+            summary={wallet.summary}
+            terms={wallet.terms}
+            activity={wallet.activity}
+            busy={wallet.busy}
+            notice={wallet.notice}
+            refusal={wallet.refusal}
+            onBuy={wallet.buy}
+          />
+        )}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

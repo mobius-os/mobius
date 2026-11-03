@@ -1771,6 +1771,13 @@ def start_credits_topup(
     credits_client.start_topup, body.amount_cents, body.waiver_accepted, body.return_url)
 
 
+@router.get("/credits/purchase-terms", dependencies=_credits_private)
+def read_credits_purchase_terms(
+  _owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+):
+  return _credits(credits_client.purchase_terms)
+
+
 @router.get("/credits/topups/{topup_id}", dependencies=_credits_private)
 def read_credits_topup(
   topup_id: str,

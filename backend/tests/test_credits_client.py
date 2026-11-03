@@ -307,3 +307,13 @@ def test_charging_before_pairing_says_so(client, auth, db, service):
                        headers=_as(db, app, "private"))
   assert answer.status_code == 409 and answer.json()["detail"]["code"] == "not_paired"
   assert not service.calls
+
+
+def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
+  credits_client.pair("https://www.mobius.you/credits", "mbc_example_key")
+  terms = {"currency": "usd", "amounts_cents": [500, 1000], "waiver_required": True}
+  service.answers["purchase-terms"] = (200, terms)
+  read = client.get("/api/identity/credits/purchase-terms", headers=auth)
+  assert read.status_code == 200, read.text
+  assert read.json() == terms
+  assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/purchase-terms"

@@ -248,6 +248,11 @@ def read_topup(topup_id: str) -> dict:
   return _call("GET", f"topups/{quote(topup_id, safe='')}", _paired())
 
 
+def purchase_terms() -> dict:
+  """The amounts the credits service sells, its currency, and the waiver rule."""
+  return _call("GET", "purchase-terms", _paired())
+
+
 def transactions(limit: int = 50) -> dict:
   return _call("GET", f"transactions?limit={max(1, min(int(limit), 200))}", _paired())
 

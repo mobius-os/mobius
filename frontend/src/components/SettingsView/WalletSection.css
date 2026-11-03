@@ -1,0 +1,167 @@
+/* Settings → Credits for a paired Möbius: the wallet apps spend from. */
+
+.credits__headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.credits__amount,
+.credits__owed {
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.credits__owed { color: var(--danger, #c0392b); }
+
+.credits__unit {
+  font-size: 0.95rem;
+  opacity: 0.7;
+}
+
+.credits__forever {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+  opacity: 0.55;
+}
+
+.credits__quiet {
+  font-size: 0.9rem;
+  opacity: 0.75;
+  margin: 0.5rem 0 0;
+}
+
+.credits__settling,
+.credits__refusal {
+  font-size: 0.9rem;
+  margin: 0.75rem 0 0;
+}
+
+.credits__refusal { color: var(--danger, #c0392b); }
+
+.credits__buy {
+  margin-top: 1rem;
+  padding: 0.55rem 1.1rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  background: var(--accent, #2d6cdf);
+  color: #fff;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.credits__buy[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.credits__terms {
+  font-size: 0.8rem;
+  opacity: 0.6;
+  margin: 0.5rem 0 0;
+}
+
+.credits__buy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.credits__buy { align-self: flex-start; }
+
+.credits__waiver {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  opacity: 0.85;
+  max-width: 34rem;
+}
+
+.credits__buy { align-self: flex-start; }
+
+/* The preflight reset strips checkboxes to an invisible 0x0 box; restore it. */
+.credits__waiver input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent, #7c5cff);
+  cursor: pointer;
+}
+
+.credits__amounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.credits__amount-choice {
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.credits__amount-choice--on {
+  border-color: var(--accent, #7c5cff);
+  background: color-mix(in srgb, var(--accent, #7c5cff) 18%, transparent);
+}
+
+.credits__activity { margin-top: 1.25rem; }
+
+.credits__activity-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.6;
+  margin: 0 0 0.4rem;
+}
+
+.credits__activity ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.credits__activity li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.4rem 0;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.18));
+  font-size: 0.88rem;
+}
+
+.credits__activity-what {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credits__activity-when {
+  font-size: 0.78rem;
+  opacity: 0.55;
+}
+
+.credits__activity-amount {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 3.5rem;
+}
+
+.credits__activity-amount--in { color: var(--green, #2f9e5b); }
+
+.credits__shop { margin-top: 1rem; }
