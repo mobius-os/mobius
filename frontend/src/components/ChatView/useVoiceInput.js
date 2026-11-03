@@ -100,6 +100,10 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
         setListening(false)
         recognitionRef.current = null
         voiceFinalRef.current = ''
+        // In the Möbius phone app the denial came from the OS permission
+        // prompt the owner just answered, and there are no browser site
+        // settings to point at. Just stop listening.
+        if (window.MobiusNative) return
         const prev = inputRef.current?.value || ''
         onTranscript(
           prev +
